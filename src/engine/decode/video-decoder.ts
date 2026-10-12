@@ -66,6 +66,8 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   private needKey = true;
   private requireIdr = false;
   private lastKeyWasIdr = true;
+  /** PTS of a non-IDR (open-GOP) random access point whose leading pictures must still be skipped. */
+  private leadingKeyPtsUs: number | null = null;
   private consecutiveErrors = 0;
   private readonly discard = new Set<number>();
 
@@ -108,6 +110,12 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       if (!info.key || (this.requireIdr && !info.idr)) return;
       this.needKey = false;
       this.lastKeyWasIdr = info.idr;
+      this.leadingKeyPtsUs = info.idr ? null : unit.ptsUs;
+    } else if (this.leadingKeyPtsUs !== null) {
+      // Open GOP: pictures that follow the I-frame in decode order but precede it in display order
+      // reference frames before the random access point, which we never fed to the decoder.
+      if (unit.ptsUs < this.leadingKeyPtsUs) return;
+      this.leadingKeyPtsUs = null;
     }
     if (unit.discard) this.discard.add(unit.ptsUs);
     try {
@@ -121,6 +129,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     const decoder = this.decoder;
     if (!decoder || decoder.state !== 'configured') return;
     this.needKey = true; // WebCodecs requires a key chunk right after flush() starts
+    this.leadingKeyPtsUs = null;
     try {
       await decoder.flush();
     } catch {
@@ -131,6 +140,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   reset(): void {
     this.discard.clear();
     this.needKey = true;
+    this.leadingKeyPtsUs = null;
     this.requireIdr = false;
     const decoder = this.decoder;
     if (!decoder || !this.config) return;
@@ -158,6 +168,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     });
     this.decoder = decoder;
     this.needKey = true;
+    this.leadingKeyPtsUs = null;
     this.discard.clear();
     try {
       decoder.configure(config);

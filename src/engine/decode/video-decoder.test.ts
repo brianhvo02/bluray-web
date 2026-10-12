@@ -106,6 +106,28 @@ describe('WebCodecsVideoDecoder', () => {
     expect(out.map((f) => f.timestamp)).toEqual([41_708, 83_416]);
   });
 
+  it('skips leading pictures after an open-GOP (recovery-point) start', async () => {
+    const { dec, created } = await configured();
+    // Decode order: I (pts 2000), two leading B (pts 1000, 1500), P (pts 4000), then a B with pts above the I-frame.
+    dec.decode({ data: avcAu({ recovery: true, sps: true }), ptsUs: 2000, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 1000, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 1500, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 4000, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 3000, discard: false });
+    expect(created[0].chunks.map((c) => [c.type, c.timestamp])).toEqual([
+      ['key', 2000],
+      ['delta', 4000],
+      ['delta', 3000],
+    ]);
+  });
+
+  it('does not skip anything after an IDR start', async () => {
+    const { dec, created } = await configured();
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 2000, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 1000, discard: false });
+    expect(created[0].chunks.map((c) => c.timestamp)).toEqual([2000, 1000]);
+  });
+
   it('closes frames of discarded units instead of outputting them', async () => {
     const { dec, created, out } = await configured();
     dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: true });
