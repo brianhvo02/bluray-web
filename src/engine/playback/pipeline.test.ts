@@ -49,6 +49,11 @@ function run(
   return { pipeline, got, done };
 }
 
+/** Lets queued macrotasks and microtasks run, without relying on elapsed time. */
+async function turns(count: number): Promise<void> {
+  for (let i = 0; i < count; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe('PlaybackPipeline', () => {
   it('reads both play items in order on one continuous timeline', async () => {
     const { got, done } = run(await setup(), 0);
@@ -73,17 +78,93 @@ describe('PlaybackPipeline', () => {
   it('waits while the sinks are full and stops cleanly', async () => {
     let blocking = true;
     // Each clip fits in one 2 MB read, so blocking after the first batch pauses between play items.
-    const { pipeline, got } = run(await setup(), 0, (g) => blocking && g.video.length > 0);
-    await new Promise((r) => setTimeout(r, 30));
+    let reachedFull: () => void = () => undefined;
+    const full = new Promise<void>((resolve) => (reachedFull = resolve));
+    const { pipeline, got } = run(await setup(), 0, (g) => {
+      const isFull = blocking && g.video.length > 0;
+      if (isFull) reachedFull();
+      return isFull;
+    });
+    await full;
     const paused = got.video.length;
     expect(paused).toBeGreaterThan(0);
     expect(paused).toBeLessThan(192);
     expect(got.ended).toBe(0);
     pipeline.stop();
     blocking = false;
-    await new Promise((r) => setTimeout(r, 30));
+    await turns(10);
     expect(got.video.length).toBe(paused);
     expect(got.ended).toBe(0);
+  });
+
+  it('stops delivering units when stop() is called from inside a sink', async () => {
+    const config = await setup();
+    const got: Collected = { video: [], audio: [], ended: 0, errors: [] };
+    let audioAtStop = -1;
+    let calls = 0;
+    const pipeline: PlaybackPipeline = new PlaybackPipeline(config, {
+      video: (u) => {
+        calls++;
+        got.video.push(u);
+        if (got.video.length === 1) {
+          audioAtStop = got.audio.length;
+          pipeline.stop();
+        }
+      },
+      audio: (u) => {
+        calls++;
+        got.audio.push(u);
+      },
+      isFull: () => false,
+      ended: () => got.ended++,
+      failed: (err) => got.errors.push(err),
+    });
+    pipeline.start(0);
+    await turns(20);
+    expect(got.video).toHaveLength(1);
+    expect(got.audio).toHaveLength(audioAtStop);
+    expect(calls).toBe(1 + audioAtStop);
+    expect(got.ended).toBe(0);
+    expect(got.errors).toEqual([]);
+  });
+
+  it('abandons the old run when start() is called again mid-batch', async () => {
+    const config = await setup();
+    const got: Collected = { video: [], audio: [], ended: 0, errors: [] };
+    let restarted = false;
+    const afterRestart: PipelineUnit[] = [];
+    let finish: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => (finish = resolve));
+    const pipeline: PlaybackPipeline = new PlaybackPipeline(config, {
+      video: (u) => {
+        got.video.push(u);
+        if (restarted) afterRestart.push(u);
+        else {
+          restarted = true;
+          pipeline.start(5_000_000);
+        }
+      },
+      audio: (u) => {
+        got.audio.push(u);
+      },
+      isFull: () => false,
+      ended: () => {
+        got.ended++;
+        finish();
+      },
+      failed: (err) => {
+        got.errors.push(err);
+        finish();
+      },
+    });
+    pipeline.start(0);
+    await done;
+    await turns(20);
+    expect(got.errors).toEqual([]);
+    expect(got.ended).toBe(1);
+    expect(afterRestart.length).toBeGreaterThan(0);
+    expect(afterRestart.every((u) => u.ptsUs >= 5_000_000)).toBe(true);
+    expect(afterRestart[0].ptsUs).toBe(5_000_000);
   });
 
   it('reports a missing clip through failed()', async () => {
