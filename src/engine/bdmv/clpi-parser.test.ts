@@ -49,6 +49,25 @@ describe('parseClpi', () => {
     expect(clpi.epMaps[0].entries[0]).toEqual({ pts: BASE + 768, spn: 5 });
   });
 
+  it('rejects a coarse EP entry whose fine reference runs past the fine table', () => {
+    // Two coarse groups (different 17-bit SPN carries), so the first group's range ends at the second's ref.
+    const bytes = clipWith([
+      { pts: BASE, spn: 0 },
+      { pts: BASE + 1024, spn: 0x20010 },
+    ]);
+    // Locate the second coarse entry: cpi start -> EP-map header -> first pid's stream address -> coarse table.
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const cpiStart = view.getUint32(16); // header: signature, version, sequence, program, then CPI address
+    const epMapStart = cpiStart + 4 + 2; // length u32, 12+4 bits of cpi header
+    const streamStart = epMapStart + view.getUint32(epMapStart + 2 + 2 + 6);
+    const coarseAt = streamStart + 4 + 8; // skip fine-table address and the first 8-byte coarse entry
+    // The first 18 bits of the coarse entry are ref_ep_fine_id: set them to 0x3FFFF, past the fine table.
+    bytes[coarseAt] = 0xff;
+    bytes[coarseAt + 1] = 0xff;
+    bytes[coarseAt + 2] |= 0xfc;
+    expect(() => parseClpi(bytes)).toThrow(ParseError);
+  });
+
   it('rejects a bad signature', () => {
     const bytes = clipWith([]);
     bytes[0] = 0x00;

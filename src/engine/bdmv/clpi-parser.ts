@@ -184,6 +184,11 @@ function readCpi(r: ByteReader, start: number): EpMap[] {
     const entries: EpEntry[] = [];
     coarse.forEach((c, ci) => {
       const end = ci + 1 < coarse.length ? coarse[ci + 1].ref : fine.length;
+      if (c.ref > end || end > fine.length) {
+        throw new ParseError(
+          `clpi: pid 0x${h.pid.toString(16)} coarse entry ${ci} fine range ${c.ref}..${end} outside ${fine.length} fine entries`,
+        );
+      }
       for (let fi = c.ref; fi < end; fi++) {
         entries.push({
           pts: Math.floor(c.pts / 2) * 2 * 2 ** 18 + fine[fi].pts * 2 ** 8,
