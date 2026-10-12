@@ -1,0 +1,22 @@
+Third-party code notices for src/engine
+=======================================
+
+Parts of this engine are TypeScript ports of, or derive from, the following
+projects. They are modified for bluray-web (2026) and distributed under the
+GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later).
+
+libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-later
+  Copyright (C) 2009-2010  John Stebbins
+  Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
+  Derived files:
+    bdmv/mpls-parser.ts   from src/libbluray/bdnav/mpls_parse.c
+    bdmv/clpi-parser.ts   from src/libbluray/bdnav/clpi_parse.c
+    bdmv/index-parser.ts  from src/libbluray/bdnav/index_parse.c
+    nav/timeline.ts       derived from libbluray navigation time math
+  util/byte-reader.ts is an original implementation modelled on libbluray's
+  bitstream reader; it contains no libbluray code.
+
+FFmpeg (https://ffmpeg.org), LGPL-2.1-or-later
+  Copyright (c) 2009, 2013 Christian Schmidt (libavcodec/pcm-bluray.c)
+  Derived file:
+    decode/lpcm.ts        channel layout table, from libavcodec/pcm-bluray.c

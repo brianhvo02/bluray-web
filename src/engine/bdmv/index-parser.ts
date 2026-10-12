@@ -1,3 +1,12 @@
+/*
+ * Ported from libbluray src/libbluray/bdnav/index_parse.c
+ * Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
+ *
+ * Ported to TypeScript and modified for bluray-web, 2026.
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 import { ByteReader, ParseError } from '../util/byte-reader';
 
 /** Ported from libbluray bdnav/index_parse.c. */

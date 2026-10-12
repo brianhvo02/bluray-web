@@ -1,3 +1,12 @@
+/*
+ * Ported from FFmpeg libavcodec/pcm-bluray.c (channel layout table)
+ * Copyright (c) 2009, 2013 Christian Schmidt
+ *
+ * Ported to TypeScript and modified for bluray-web, 2026.
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 import { CodingType } from '../bdmv/stream-types';
 import { UnsupportedCodecError } from './decoder';
 

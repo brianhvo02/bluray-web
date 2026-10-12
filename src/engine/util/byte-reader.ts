@@ -1,3 +1,10 @@
+/*
+ * Original implementation, modelled on the bitstream reader in libbluray (src/util/bits.c).
+ * No libbluray code is copied.
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 export class ParseError extends Error {
   constructor(message: string) {
     super(message);
