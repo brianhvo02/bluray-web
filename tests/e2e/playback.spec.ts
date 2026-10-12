@@ -9,6 +9,7 @@ interface TelemetrySample {
   avOffsetMeanUs: number | null;
   avOffsetMaxAbsUs: number | null;
   framesInWindow: number;
+  decoderErrors?: number;
 }
 
 async function telemetry(page: Page): Promise<TelemetrySample | null> {
@@ -112,6 +113,34 @@ test('pauses and resumes', async ({ page }) => {
   await page.keyboard.press('Space');
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing');
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5000 }).toBeGreaterThan(paused + 200_000);
+});
+
+test('plays a B-frame, open-GOP disc in sync and seeks without decoder errors', async ({ page }) => {
+  await openDisc(page, 'fixtures/synthetic/disc2');
+  await startPlaylist(page, '00000');
+  const windows = await collectWindows(page, 1_000_000);
+  expect(windows.length).toBeGreaterThan(1);
+  for (const w of windows) expect(w.clockMode).toBe('audio');
+  expectInSync(windows);
+  const plain = await telemetry(page);
+  console.log(`disc2 telemetry (plain playback): ${JSON.stringify(plain)}`);
+  expect(plain?.decoderErrors).toBe(0);
+
+  // Seek to 3 s: the nearest earlier entry point is the 2 s open-GOP I-frame (non-IDR, recovery-point SEI).
+  await page.getByTestId('player').hover();
+  const bar = await page.getByTestId('seek').boundingBox();
+  if (!bar) throw new Error('seek bar not found');
+  const clickedAt = Date.now();
+  await page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
+  const after = await collectWindows(page, 3_500_000);
+  // Playing on from ~1 s would need 2.5 s of wall time to reach 3.5 s, so this proves a jump.
+  expect(Date.now() - clickedAt).toBeLessThan(2200);
+  expect(after.length).toBeGreaterThan(0);
+  expectInSync(after);
+  const seeked = await telemetry(page);
+  console.log(`disc2 telemetry (after seek): ${JSON.stringify(seeked)}`);
+  expect(seeked?.decoderErrors).toBe(0);
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing');
 });
 
 test('stays in sync for ten minutes (nightly)', async ({ page }) => {

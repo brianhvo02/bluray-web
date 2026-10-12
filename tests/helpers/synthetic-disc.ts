@@ -16,12 +16,16 @@ export const CLIP_START_PTS = 900_000;
 
 export interface SyntheticClipSpec {
   clipId: string;
-  /** Video access units in decode order, no B-frames, one per frame at 24 fps. */
+  /** Video access units in decode order, one per frame at 24 fps. */
   videoAus: Uint8Array[];
-  /** Indices of IDR units; they become EP-map entries. */
+  /** Indices of key units (IDR or recovery-point I); they become EP-map entries. */
   keyIndices: number[];
-  /** 90 kHz PTS of the first frame (even). */
+  /** 90 kHz PTS of the first displayed frame (even). */
   startPts: number;
+  /** Per-unit 90 kHz PTS in decode order, for streams with B-frames. Default: startPts + i * frame duration. */
+  pts?: number[];
+  /** Per-unit 90 kHz DTS in decode order. Default: equal to the PTS. */
+  dts?: number[];
   /** Audio coding type: LPCM gets a real 440 Hz tone, other types get dummy payloads. Omit for no audio. */
   audio?: number;
   /** Index of one LPCM PES whose header gets a reserved sample-rate code (a corrupt unit). */
@@ -80,11 +84,12 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
   const clips = new Map<string, { inTime: number; outTime: number; audio?: number }>();
 
   for (const clip of spec.clips) {
-    const endPts = clip.startPts + clip.videoAus.length * FRAME_TICKS_90K;
+    const endPts = (clip.pts ? Math.max(...clip.pts) : clip.startPts + (clip.videoAus.length - 1) * FRAME_TICKS_90K) + FRAME_TICKS_90K;
     const units: Array<MuxUnit & { videoIndex?: number }> = clip.videoAus.map((payload, i) => ({
       pid: VIDEO_PID,
       streamId: 0xe0,
-      pts: clip.startPts + i * FRAME_TICKS_90K,
+      pts: clip.pts?.[i] ?? clip.startPts + i * FRAME_TICKS_90K,
+      dts: clip.dts?.[i],
       payload,
       videoIndex: i,
     }));
@@ -96,7 +101,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         units.push({ pid: AUDIO_PID, streamId: 0xbd, pts: clip.startPts + j * AUDIO_PES_TICKS_90K, payload });
       }
     }
-    units.sort((a, b) => a.pts - b.pts || (a.pid === AUDIO_PID ? -1 : 1));
+    units.sort((a, b) => (a.dts ?? a.pts) - (b.dts ?? b.pts) || (a.pid === AUDIO_PID ? -1 : 1));
     const { bytes, unitSpns } = muxM2ts(units);
     const keySet = new Set(clip.keyIndices);
     const entries = units.flatMap((u, i) =>
