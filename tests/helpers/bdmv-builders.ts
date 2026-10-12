@@ -150,3 +150,89 @@ export function buildMpls(spec: MplsSpec): Uint8Array<ArrayBuffer> {
   for (const m of marks) w.u8(0).u8(m.type ?? 1).u16(m.playItemRef).u32(m.time).u16(0xffff).u32(0);
   return w.toBytes();
 }
+
+export interface ClpiSpec {
+  numSourcePackets: number;
+  streams: Array<{ pid: number; codingType: number }>;
+  /** 45 kHz. */
+  presentationStart: number;
+  /** 45 kHz. */
+  presentationEnd: number;
+  /** Entry pts are 45 kHz; encoding truncates the low 8 bits, as real discs do. */
+  epMaps: Array<{ pid: number; entries: Array<{ pts: number; spn: number }> }>;
+}
+
+interface EpGroups {
+  coarse: Array<{ ref: number; pts: number; spn: number }>;
+  fine: Array<{ pts: number; spn: number }>;
+}
+
+function groupEpEntries(entries: ReadonlyArray<{ pts: number; spn: number }>): EpGroups {
+  const groups: EpGroups = { coarse: [], fine: [] };
+  let lastKey = '';
+  entries.forEach((e, i) => {
+    const pts90 = e.pts * 2;
+    const key = `${Math.floor(pts90 / 2 ** 20)}:${Math.floor(e.spn / 0x20000)}`;
+    if (key !== lastKey) {
+      groups.coarse.push({ ref: i, pts: Math.floor(pts90 / 2 ** 19) % 0x4000, spn: e.spn });
+      lastKey = key;
+    }
+    groups.fine.push({ pts: Math.floor(pts90 / 2 ** 9) % 0x800, spn: e.spn % 0x20000 });
+  });
+  return groups;
+}
+
+export function buildClpi(spec: ClpiSpec): Uint8Array<ArrayBuffer> {
+  const w = new ByteWriter();
+  w.ascii('HDMV').ascii('0200');
+  const addrAt = w.position;
+  w.zeros(20); // sequence, program, cpi, clip mark, extension addresses
+  w.zeros(12);
+
+  const clipInfoAt = w.position;
+  w.u32(0).u16(0).u8(1).u8(1).u32(0).u32(48_000_000).u32(spec.numSourcePackets).zeros(128).u16(0);
+  w.patchU32(clipInfoAt, w.position - clipInfoAt - 4);
+
+  const seqStart = w.position;
+  w.u32(0).u8(0).u8(1);
+  w.u32(0).u8(1).u8(0); // ATC sequence: spn_atc_start, num_stc_seq, offset_stc_id
+  w.u16(0x1001).u32(0).u32(spec.presentationStart).u32(spec.presentationEnd);
+  w.patchU32(seqStart, w.position - seqStart - 4);
+
+  const progStart = w.position;
+  w.u32(0).u8(0).u8(1);
+  w.u32(0).u16(0x0100).u8(spec.streams.length).u8(0);
+  for (const s of spec.streams) {
+    w.u16(s.pid);
+    writeCodingInfo(w, s.codingType);
+  }
+  w.patchU32(progStart, w.position - progStart - 4);
+
+  const cpiStart = w.position;
+  w.u32(0).bits(12, 0).bits(4, 1);
+  const epMapStart = w.position;
+  w.u8(0).u8(spec.epMaps.length);
+  const groups = spec.epMaps.map((m) => groupEpEntries(m.entries));
+  const addrSlots: number[] = [];
+  spec.epMaps.forEach((m, i) => {
+    w.u16(m.pid).bits(10, 0).bits(4, 1).bits(16, groups[i].coarse.length).bits(18, groups[i].fine.length);
+    addrSlots.push(w.position);
+    w.u32(0);
+  });
+  groups.forEach((g, i) => {
+    const streamStart = w.position;
+    w.patchU32(addrSlots[i], streamStart - epMapStart);
+    const fineStartAt = w.position;
+    w.u32(0);
+    for (const c of g.coarse) w.bits(18, c.ref).bits(14, c.pts).u32(c.spn);
+    w.patchU32(fineStartAt, w.position - streamStart);
+    for (const f of g.fine) w.bits(1, 0).bits(3, 0).bits(11, f.pts).bits(17, f.spn);
+  });
+  w.patchU32(cpiStart, w.position - cpiStart - 4);
+
+  const clipMarkStart = w.position;
+  w.u32(0);
+
+  w.patchU32(addrAt, seqStart).patchU32(addrAt + 4, progStart).patchU32(addrAt + 8, cpiStart).patchU32(addrAt + 12, clipMarkStart);
+  return w.toBytes();
+}
