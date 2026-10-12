@@ -13,12 +13,20 @@ export class AudioOutput implements AudioOutputLike {
   private muted = false;
 
   ensureStarted(): Promise<SharedArrayBuffer> {
-    if (!this.started) {
+    let attempt = this.started;
+    if (!attempt) {
       const context = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE, latencyHint: 'playback' });
-      this.started = { context, ready: this.setUp(context) };
+      const created = { context, ready: this.setUp(context) };
+      attempt = created;
+      this.started = created;
+      // A failed start must not stay cached: close the context and let the next user gesture retry.
+      created.ready.catch(() => {
+        void context.close();
+        if (this.started === created) this.started = null;
+      });
     }
-    void this.started.context.resume();
-    return this.started.ready;
+    void attempt.context.resume();
+    return attempt.ready;
   }
 
   setVolume(volume: number): void {
