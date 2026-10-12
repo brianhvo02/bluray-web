@@ -1,0 +1,97 @@
+import { describe, expect, it } from 'vitest';
+import { buildMpls } from '../../../tests/helpers/bdmv-builders';
+import { ParseError } from '../util/byte-reader';
+import { MarkType, parseMpls } from './mpls-parser';
+import { CodingType } from './stream-types';
+
+const VIDEO = { pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1 };
+
+describe('parseMpls', () => {
+  it('parses play items, STN streams and marks', () => {
+    const mpls = parseMpls(
+      buildMpls({
+        playItems: [
+          {
+            clipId: '00001',
+            inTime: 900_000,
+            outTime: 1_800_000,
+            video: [VIDEO],
+            audio: [
+              { pid: 0x1100, codingType: CodingType.LPCM, lang: 'eng' },
+              { pid: 0x1101, codingType: CodingType.AC3, lang: 'fra' },
+            ],
+            pg: [{ pid: 0x1200, codingType: CodingType.PG, lang: 'deu' }],
+            ig: [{ pid: 0x1400, codingType: CodingType.IG, lang: 'eng' }],
+          },
+          { clipId: '00002', inTime: 450_000, outTime: 900_000, connectionCondition: 5, video: [VIDEO] },
+        ],
+        marks: [
+          { playItemRef: 0, time: 900_000 },
+          { playItemRef: 1, time: 450_000 },
+          { playItemRef: 1, time: 500_000, type: MarkType.LINK },
+        ],
+      }),
+    );
+    expect(mpls.version).toBe('0200');
+    expect(mpls.playItems).toHaveLength(2);
+    const [first, second] = mpls.playItems;
+    expect(first.clipId).toBe('00001');
+    expect(first.codecId).toBe('M2TS');
+    expect(first.inTime).toBe(900_000);
+    expect(first.outTime).toBe(1_800_000);
+    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', subPath: false }]);
+    expect(first.stn.audio.map((a) => [a.pid, a.codingType, a.lang])).toEqual([
+      [0x1100, CodingType.LPCM, 'eng'],
+      [0x1101, CodingType.AC3, 'fra'],
+    ]);
+    expect(first.stn.pg[0].lang).toBe('deu');
+    expect(first.stn.ig[0].pid).toBe(0x1400);
+    expect(second.connectionCondition).toBe(5);
+    expect(second.stn.audio).toEqual([]);
+    expect(mpls.marks).toEqual([
+      { type: MarkType.ENTRY, playItemRef: 0, time: 900_000, entryEsPid: 0xffff, duration: 0 },
+      { type: MarkType.ENTRY, playItemRef: 1, time: 450_000, entryEsPid: 0xffff, duration: 0 },
+      { type: MarkType.LINK, playItemRef: 1, time: 500_000, entryEsPid: 0xffff, duration: 0 },
+    ]);
+  });
+
+  it('skips attribute blocks by their length and flags sub-path streams', () => {
+    const mpls = parseMpls(
+      buildMpls({
+        playItems: [
+          {
+            clipId: '00001',
+            inTime: 0,
+            outTime: 100,
+            video: [{ pid: 0x1011, codingType: CodingType.HEVC, extraAttrBytes: 4 }],
+            audio: [
+              { pid: 0x1100, codingType: CodingType.LPCM, streamType: 2 },
+              { pid: 0x1101, codingType: CodingType.LPCM },
+            ],
+          },
+        ],
+      }),
+    );
+    const item = mpls.playItems[0];
+    expect(item.stn.video[0].codingType).toBe(CodingType.HEVC);
+    expect(item.stn.audio.map((a) => [a.pid, a.subPath])).toEqual([
+      [0x1100, true],
+      [0x1101, false],
+    ]);
+  });
+
+  it('parses multi-angle play items', () => {
+    const mpls = parseMpls(
+      buildMpls({ playItems: [{ clipId: '00001', inTime: 0, outTime: 100, angleClipIds: ['00002', '00003'], video: [VIDEO] }] }),
+    );
+    expect(mpls.playItems[0].isMultiAngle).toBe(true);
+    expect(mpls.playItems[0].angleClipIds).toEqual(['00002', '00003']);
+    expect(mpls.playItems[0].stn.video).toHaveLength(1);
+  });
+
+  it('rejects a bad signature', () => {
+    const bytes = buildMpls({ playItems: [] });
+    bytes[1] = 0x41;
+    expect(() => parseMpls(bytes)).toThrow(ParseError);
+  });
+});
