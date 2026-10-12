@@ -5,7 +5,7 @@ import { MasterClock } from './clock/master-clock';
 import { Decimator } from './decode/decimator';
 import { UnsupportedCodecError, type DecoderError } from './decode/decoder';
 import { decodeLpcm, type PcmChunk } from './decode/lpcm';
-import { WebCodecsVideoDecoder, hasSps, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
+import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
 import { DiscError } from './disc/byte-source';
 import { FileSource } from './disc/file-source';
 import { checkStreamReadable, loadClips, openDisc, playlistPath, type DiscModel } from './disc/open-disc';
@@ -75,12 +75,20 @@ export class Player {
   private lastHeartbeatChangeMs = 0;
   private decoderErrors = 0;
   private offsets: number[] = [];
+  private corruptAudioUnits = 0;
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
   }
 
-  async handle(cmd: EngineCommand): Promise<void> {
+  /** Commands run strictly one at a time, in arrival order. */
+  handle(cmd: EngineCommand): Promise<void> {
+    this.queue = this.queue.then(() => this.run(cmd));
+    return this.queue;
+  }
+
+  private async run(cmd: EngineCommand): Promise<void> {
     try {
       switch (cmd.type) {
         case 'open':
@@ -188,6 +196,9 @@ export class Player {
       const codec = [...new Set(choice.unsupportedAudio.map((a) => codingName(a.codingType)))].join(', ');
       this.deps.emit({ type: 'unsupported', kind: 'audio', codec, message: `This playlist's audio (${codec}) can't be played yet, so video will play without sound.` });
     }
+    if (!isSupportedVideoCoding(choice.video.codingType)) {
+      throw new UnsupportedCodecError(choice.video.codingType, `${codingName(choice.video.codingType)} video is not supported.`);
+    }
     const audioActive = choice.audio !== null && this.ring !== null;
     if (choice.audio && !this.ring) this.notice('audio-disabled', 'Audio output is not available, so video will play without sound.');
 
@@ -234,6 +245,7 @@ export class Player {
     };
     decoder.onError = (err) => this.onDecoderError(session, err);
     this.session = session;
+    this.corruptAudioUnits = 0;
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     await this.startAt(0, true);
   }
@@ -330,7 +342,10 @@ export class Player {
         s.pendingVideo.push(unit);
         s.decoder.configure({ codingType: s.videoCodingType, firstUnit: u.data }).then(
           () => {
-            if (this.session !== s) return;
+            if (this.session !== s) {
+              s.decoder.close(); // configure() finished after teardown and opened a fresh decoder
+              return;
+            }
             s.videoState = 'configured';
             const pending = s.pendingVideo;
             s.pendingVideo = [];
@@ -354,8 +369,10 @@ export class Player {
     } catch (err) {
       if (err instanceof UnsupportedCodecError) {
         this.deps.emit({ type: 'unsupported', kind: 'audio', codec: codingName(err.codingType), message: err.message });
+        this.disableAudio(s, err.message, false);
+      } else {
+        this.corruptAudioUnits++;
       }
-      this.disableAudio(s, `Audio could not be decoded (${err instanceof Error ? err.message : String(err)}), so playback continues without sound.`);
       return;
     }
     if (chunk.sampleRate !== OUTPUT_SAMPLE_RATE) {
@@ -387,8 +404,9 @@ export class Player {
       s.flushed = true;
       return;
     }
+    const gen = this.seekGeneration;
     void s.decoder.flush().then(() => {
-      if (this.session === s) s.flushed = true;
+      if (this.session === s && this.seekGeneration === gen) s.flushed = true;
     });
   }
 
@@ -400,6 +418,7 @@ export class Player {
       return;
     }
     s.videoState = 'failed';
+    s.pipeline.stop();
     this.deps.emit({ type: 'error', code: 'decoder-failed', message: err.message, paths: [] });
     this.pause();
     this.setState('error');
@@ -443,13 +462,13 @@ export class Player {
     }
   }
 
-  private disableAudio(s: Session, message: string): void {
+  private disableAudio(s: Session, message: string, notify = true): void {
     if (!s.audioActive) return;
     const now = this.clock.nowUs();
     s.audioActive = false;
     this.ring?.setPlaying(false);
     this.clock.useWall(now, this.state === 'playing');
-    this.notice('audio-disabled', message);
+    if (notify) this.notice('audio-disabled', message);
   }
 
   private emitTime(timeUs: number, force: boolean): void {
@@ -478,7 +497,7 @@ export class Player {
         framesDropped: this.presenter.dropped,
         audioBufferedMs: ring ? (ring.buffered() * 1000) / ring.sampleRate : 0,
         audioUnderruns: ring?.underruns() ?? 0,
-        corruptPackets: stats.corruptPackets,
+        corruptPackets: stats.corruptPackets + this.corruptAudioUnits,
         continuityErrors: stats.continuityErrors,
         decoderErrors: this.decoderErrors,
       },

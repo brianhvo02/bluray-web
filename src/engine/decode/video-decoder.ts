@@ -44,6 +44,10 @@ const CODECS: ReadonlyMap<number, CodecOps> = new Map<number, CodecOps>([
 
 const MAX_CONSECUTIVE_ERRORS = 3;
 
+export function isSupportedVideoCoding(codingType: number): boolean {
+  return CODECS.has(codingType);
+}
+
 export function hasSps(codingType: number, data: Uint8Array): boolean {
   return (CODECS.get(codingType)?.analyze(data).sps ?? null) !== null;
 }

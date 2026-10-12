@@ -24,11 +24,15 @@ export interface SyntheticClipSpec {
   startPts: number;
   /** Audio coding type: LPCM gets a real 440 Hz tone, other types get dummy payloads. Omit for no audio. */
   audio?: number;
+  /** Index of one LPCM PES whose header gets a reserved sample-rate code (a corrupt unit). */
+  corruptAudioPesIndex?: number;
 }
 
 export interface SyntheticPlaylistSpec {
   id: string;
   clipIds: string[];
+  /** Video coding type declared in the STN table (default AVC). */
+  videoCodingType?: number;
   chapterEverySeconds?: number;
 }
 
@@ -57,7 +61,7 @@ export function lpcmPayload(frames: number, startFrame: number): Uint8Array {
 }
 
 /** A clip of fake AVC units (IDR every `keyEvery` frames), optionally with audio. */
-export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number } = {}): SyntheticClipSpec {
+export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number } = {}): SyntheticClipSpec {
   const keyEvery = opts.keyEvery ?? 24;
   const frames = seconds * 24;
   const videoAus: Uint8Array[] = [];
@@ -67,7 +71,7 @@ export function syntheticClip(clipId: string, seconds: number, opts: { audio?: n
     if (idr) keyIndices.push(i);
     videoAus.push(avcAu({ idr, fill: 300 }));
   }
-  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio };
+  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex };
 }
 
 export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Array<ArrayBuffer>> {
@@ -88,6 +92,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
       const count = Math.ceil((endPts - clip.startPts) / AUDIO_PES_TICKS_90K);
       for (let j = 0; j < count; j++) {
         const payload = clip.audio === CodingType.LPCM ? lpcmPayload(AUDIO_FRAMES_PER_PES, j * AUDIO_FRAMES_PER_PES) : new Uint8Array(64).fill(0x0b);
+        if (j === clip.corruptAudioPesIndex && payload.length > 2) payload[2] = 0x30; // reserved sample-rate code
         units.push({ pid: AUDIO_PID, streamId: 0xbd, pts: clip.startPts + j * AUDIO_PES_TICKS_90K, payload });
       }
     }
@@ -119,7 +124,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         inTime: clip.inTime,
         outTime: clip.outTime,
         connectionCondition: index === 0 ? 1 : 5,
-        video: [{ pid: VIDEO_PID, codingType: CodingType.AVC }],
+        video: [{ pid: VIDEO_PID, codingType: playlist.videoCodingType ?? CodingType.AVC }],
         audio: clip.audio === undefined ? [] : [{ pid: AUDIO_PID, codingType: clip.audio }],
       };
     });

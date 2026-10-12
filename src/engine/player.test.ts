@@ -6,10 +6,14 @@ import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
 import { Player } from './player';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
 
+const decoders: FakeDecoder[] = [];
+
 class FakeDecoder implements VideoDecoderLike {
   state: CodecState = 'unconfigured';
   decodeQueueSize = 0;
-  constructor(private readonly init: VideoDecoderInit) {}
+  constructor(private readonly init: VideoDecoderInit) {
+    decoders.push(this);
+  }
   configure(): void {
     this.state = 'configured';
   }
@@ -43,10 +47,11 @@ interface Harness {
   play(ms: number, opts?: { render?: boolean; audio?: boolean }): Promise<void>;
 }
 
-async function harness(audio: number | undefined): Promise<Harness> {
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number } = {}): Promise<Harness> {
+  decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio }), syntheticClip('00002', 4, { audio })],
-    playlists: [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2 }],
+    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex }), syntheticClip('00002', 4, { audio })],
+    playlists: [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
   });
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
@@ -197,5 +202,36 @@ describe('Player', () => {
     await untilPlaying(h);
     await h.play(8500);
     expect(lastState(h)).toBe('ended');
+  });
+
+  it('reports unsupported video instead of hanging in buffering', async () => {
+    const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.VC1 });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video', codec: 'VC-1' }));
+    expect(lastState(h)).toBe('error');
+  });
+
+  it('serializes commands so a double playPlaylist leaves one live session', async () => {
+    const h = await harness(CodingType.LPCM);
+    await Promise.all([h.player.handle({ type: 'playPlaylist', playlistId: '00000' }), h.player.handle({ type: 'playPlaylist', playlistId: '00000' })]);
+    await untilPlaying(h);
+    h.drawn.length = 0;
+    await h.play(1000);
+    expect(h.drawn.length).toBeGreaterThan(15);
+    expect(h.drawn.every((t, i) => i === 0 || t > h.drawn[i - 1])).toBe(true);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    expect(decoders.filter((d) => d.state !== 'closed')).toHaveLength(1);
+    expect(decoders.filter((d) => d.state === 'closed').length).toBe(decoders.length - 1);
+  });
+
+  it('drops a corrupt LPCM unit without disabling audio', async () => {
+    const h = await harness(CodingType.LPCM, { corruptAudioPesIndex: 100 });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(2000);
+    expect(h.events.some((e) => e.type === 'notice' && e.code === 'audio-disabled')).toBe(false);
+    expect(h.events.some((e) => e.type === 'unsupported')).toBe(false);
+    expect(lastTelemetry(h)?.clockMode).toBe('audio');
+    expect(lastTelemetry(h)?.corruptPackets).toBeGreaterThanOrEqual(1);
   });
 });
