@@ -43,7 +43,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       if (target instanceof HTMLTextAreaElement) return;
       if (target instanceof HTMLInputElement) {
         if (target.type !== 'range') return;
-        if (e.key.startsWith('Arrow')) return;
+        // Only the volume slider keeps its native arrow-key stepping; on the seek bar arrows seek by 10 s.
+        if (e.key.startsWith('Arrow') && target.dataset.role === 'volume') return;
       }
       if (target instanceof HTMLButtonElement && (e.key === ' ' || e.key === 'Enter')) return;
       const action = keyToAction(e.key);

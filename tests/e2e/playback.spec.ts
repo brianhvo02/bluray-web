@@ -143,6 +143,18 @@ test('plays a B-frame, open-GOP disc in sync and seeks without decoder errors', 
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing');
 });
 
+test('arrow keys on a focused seek bar seek by 10 s instead of stepping the slider', async ({ page }) => {
+  await openDisc(page);
+  await startPlaylist(page, '00000');
+  await page.getByTestId('player').hover();
+  const bar = await page.getByTestId('seek').boundingBox();
+  if (!bar) throw new Error('seek bar not found');
+  await page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 3000 }).toBeGreaterThanOrEqual(3_900_000);
+  await page.keyboard.press('ArrowLeft'); // a native step would land near 3.8 s; the 10 s seek clamps to the start
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 3000 }).toBeLessThan(1_500_000);
+});
+
 test('stays in sync for ten minutes (nightly)', async ({ page }) => {
   test.skip(!process.env.NIGHTLY, 'Set NIGHTLY=1 after generating fixtures/local/long-disc (see the README "Nightly sync test" section).');
   test.setTimeout(13 * 60_000);

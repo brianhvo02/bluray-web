@@ -89,6 +89,7 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
         <input
           type="range"
           aria-label="Volume"
+          data-role="volume"
           min={0}
           max={1}
           step={0.05}
