@@ -40,7 +40,12 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
     const onKey = (e: KeyboardEvent): void => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target;
-      if (target instanceof HTMLInputElement || target instanceof HTMLButtonElement || target instanceof HTMLTextAreaElement) return;
+      if (target instanceof HTMLTextAreaElement) return;
+      if (target instanceof HTMLInputElement) {
+        if (target.type !== 'range') return;
+        if (e.key.startsWith('Arrow')) return;
+      }
+      if (target instanceof HTMLButtonElement && (e.key === ' ' || e.key === 'Enter')) return;
       const action = keyToAction(e.key);
       if (!action) return;
       e.preventDefault();
