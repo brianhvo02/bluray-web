@@ -60,6 +60,7 @@ export interface PlayItemSpec {
   audio?: StreamSpec[];
   pg?: StreamSpec[];
   ig?: StreamSpec[];
+  pipPg?: StreamSpec[];
   angleClipIds?: string[];
 }
 
@@ -123,9 +124,10 @@ function writePlayItem(w: ByteWriter, item: PlayItemSpec): void {
   const audio = item.audio ?? [];
   const pg = item.pg ?? [];
   const ig = item.ig ?? [];
+  const pipPg = item.pipPg ?? [];
   w.u8(video.length).u8(audio.length).u8(pg.length).u8(ig.length);
-  w.u8(0).u8(0).u8(0).zeros(5);
-  for (const s of [...video, ...audio, ...pg, ...ig]) writeStream(w, s);
+  w.u8(0).u8(0).u8(pipPg.length).zeros(5);
+  for (const s of [...video, ...audio, ...pg, ...pipPg, ...ig]) writeStream(w, s);
   w.patchU16(stnStart, w.position - stnStart - 2);
   w.patchU16(start, w.position - start - 2);
 }

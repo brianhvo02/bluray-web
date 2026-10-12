@@ -89,6 +89,29 @@ describe('parseMpls', () => {
     expect(mpls.playItems[0].stn.video).toHaveLength(1);
   });
 
+  it('consumes PiP PG entries so IG streams are read correctly', () => {
+    const mpls = parseMpls(
+      buildMpls({
+        playItems: [
+          {
+            clipId: '00001',
+            inTime: 0,
+            outTime: 100,
+            video: [VIDEO],
+            pg: [{ pid: 0x1200, codingType: CodingType.PG, lang: 'eng' }],
+            pipPg: [{ pid: 0x1a00, codingType: CodingType.PG, lang: 'eng' }],
+            ig: [{ pid: 0x1400, codingType: CodingType.IG, lang: 'eng' }],
+          },
+        ],
+      }),
+    );
+    const item = mpls.playItems[0];
+    expect(item.stn.pg.map((p) => p.pid)).toEqual([0x1200]);
+    expect(item.stn.ig).toHaveLength(1);
+    expect(item.stn.ig[0].pid).toBe(0x1400);
+    expect(item.stn.ig[0].codingType).toBe(CodingType.IG);
+  });
+
   it('rejects a bad signature', () => {
     const bytes = buildMpls({ playItems: [] });
     bytes[1] = 0x41;

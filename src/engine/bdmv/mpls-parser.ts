@@ -134,11 +134,15 @@ function readStn(r: ByteReader): StnTable {
   const audioCount = r.u8();
   const pgCount = r.u8();
   const igCount = r.u8();
-  r.skip(3 + 5); // secondary audio/video and PiP PG counts, reserved
+  r.u8(); // secondary audio count (not used by M1)
+  r.u8(); // secondary video count (not used by M1)
+  const pipPgCount = r.u8();
+  r.skip(5); // reserved
   const readMany = (n: number): StreamEntry[] => Array.from({ length: n }, () => readStream(r));
   const video = readMany(videoCount);
   const audio = readMany(audioCount);
   const pg = readMany(pgCount);
+  readMany(pipPgCount); // PiP PG entries follow the PG entries and are skipped (PiP is out of scope)
   const ig = readMany(igCount);
   r.seek(start + length);
   return { video, audio, pg, ig };
