@@ -43,11 +43,13 @@ interface Harness {
   player: Player;
   events: EngineEvent[];
   drawn: number[];
+  /** Callbacks the engine registered with requestFrame. */
+  frames: Array<() => void>;
   /** Advance simulated time; the fake worklet consumes audio unless audio: false; ticks unless render: false. */
   play(ms: number, opts?: { render?: boolean; audio?: boolean }): Promise<void>;
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number } = {}): Promise<Harness> {
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean } = {}): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
     clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex }), syntheticClip('00002', 4, { audio })],
@@ -55,15 +57,17 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   });
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
+  const frames: Array<() => void> = [];
   const clock = { ms: 1000 };
   const player = new Player({
     emit: (e) => events.push(e),
     videoCodecApi: fakeApi,
     nowMs: () => clock.ms,
-    requestFrame: () => undefined,
+    requestFrame: (cb) => frames.push(cb),
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
+        if (f && opts.throwOnDraw) throw new Error('draw exploded');
         if (f) drawn.push(f.timestamp);
       },
     }),
@@ -79,6 +83,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     player,
     events,
     drawn,
+    frames,
     async play(ms, opts = {}) {
       for (let elapsed = 0; elapsed < ms; elapsed += STEP_MS) {
         clock.ms += STEP_MS;
@@ -110,6 +115,30 @@ describe('Player', () => {
     expect(h.events).toContainEqual(
       expect.objectContaining({ type: 'titles', usesBdj: false, playlists: [expect.objectContaining({ id: '00000', durationUs: 8_000_000, chapterCount: 4, playable: true })] }),
     );
+  });
+
+  it('reports a render-loop exception once and keeps scheduling frames', async () => {
+    const h = await harness(CodingType.LPCM, { throwOnDraw: true });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await vi.waitFor(
+      async () => {
+        await h.play(20, { render: false });
+        expect(h.events.some((e) => e.type === 'state' && e.state === 'buffering')).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    const scheduled = h.frames.length;
+    await vi.waitFor(
+      () => {
+        h.frames.at(-1)?.();
+        expect(h.events.filter((e) => e.type === 'error' && e.code === 'internal')).toHaveLength(1);
+      },
+      { timeout: 5000 },
+    );
+    h.frames.at(-1)?.();
+    h.frames.at(-1)?.();
+    expect(h.frames.length).toBeGreaterThan(scheduled);
+    expect(h.events.filter((e) => e.type === 'error' && e.code === 'internal')).toHaveLength(1);
   });
 
   it('reports a folder without BDMV', async () => {

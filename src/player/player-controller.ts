@@ -48,7 +48,16 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'titles':
       return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0 };
     case 'chapters':
-      return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
+      // A new playlist starts: drop the previous one's codec and audio notices (not the device-level audio-output one).
+      return {
+        ...s,
+        currentPlaylistId: e.playlistId,
+        durationUs: e.durationUs,
+        chapters: e.chapters,
+        timeUs: 0,
+        error: null,
+        notices: s.notices.filter((n) => !n.code.startsWith('unsupported-') && !n.code.startsWith('audio-')),
+      };
     case 'state':
       return { ...s, engineState: e.state };
     case 'time':
@@ -67,6 +76,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
 export interface WorkerLike {
   postMessage(message: unknown, transfer: Transferable[]): void;
   onmessage: ((event: MessageEvent) => void) | null;
+  onerror?: ((event: ErrorEvent) => void) | null;
+  onmessageerror?: ((event: MessageEvent) => void) | null;
 }
 
 export interface AudioOutputLike {
@@ -87,6 +98,13 @@ export class PlayerController {
     private readonly audio: AudioOutputLike,
   ) {
     worker.onmessage = (event: MessageEvent<EngineEvent>) => this.update(reduceEvent(this.snapshot, event.data));
+    worker.onerror = (event) => this.reportInternalError(`The player engine failed to load: ${event.message || 'unknown error'}`);
+    worker.onmessageerror = () => this.reportInternalError('The player engine sent a message that could not be read.');
+  }
+
+  /** Surfaces a failure of the engine worker itself (it can no longer report through events). */
+  reportInternalError(message: string): void {
+    this.update(reduceEvent(this.snapshot, { type: 'error', code: 'internal', message, paths: [] }));
   }
 
   readonly subscribe = (listener: () => void): (() => void) => {

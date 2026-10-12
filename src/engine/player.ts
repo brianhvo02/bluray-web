@@ -156,8 +156,13 @@ export class Player {
     if (this.renderLoopStarted) return;
     this.renderLoopStarted = true;
     const loop = (): void => {
-      this.tick();
-      this.deps.requestFrame(loop);
+      try {
+        this.tick();
+      } catch (err) {
+        if (this.state !== 'error') this.fail(err); // report once; the loop keeps running so recovery stays possible
+      } finally {
+        this.deps.requestFrame(loop);
+      }
     };
     this.deps.requestFrame(loop);
   }

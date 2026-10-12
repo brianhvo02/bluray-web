@@ -5,6 +5,8 @@ import { INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, 
 class FakeWorker implements WorkerLike {
   readonly posted: unknown[] = [];
   onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  onmessageerror: ((event: MessageEvent) => void) | null = null;
   postMessage(message: unknown): void {
     this.posted.push(message);
   }
@@ -55,7 +57,28 @@ describe('reduceEvent', () => {
   });
 });
 
+describe('reduceEvent notices across playlists', () => {
+  it('clears unsupported-* and audio-* notices when a new playlist starts, keeping the others', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'notice', code: 'audio-disabled', message: 'a' });
+    s = reduceEvent(s, { type: 'unsupported', kind: 'audio', codec: 'DTS', message: 'no DTS' });
+    s = reduceEvent(s, { type: 'unsupported', kind: 'video', codec: 'VC-1', message: 'no VC-1' });
+    s = reduceEvent(s, { type: 'notice', code: 'bdj', message: 'bd-j' });
+    s = reduceEvent(s, { type: 'notice', code: 'decoder-recovered', message: 'recovered' });
+    s = reduceEvent(s, { type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
+    expect(s.notices.map((n) => n.code)).toEqual(['bdj', 'decoder-recovered']);
+  });
+});
+
 describe('PlayerController', () => {
+  it('surfaces worker load and message errors as an internal error', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.onerror?.({ message: 'Failed to fetch module' } as ErrorEvent);
+    expect(c.getSnapshot().error).toEqual({ code: 'internal', message: 'The player engine failed to load: Failed to fetch module', paths: [] });
+    worker.onmessageerror?.({} as MessageEvent);
+    expect(c.getSnapshot().error?.code).toBe('internal');
+  });
+
   it('starts audio and attaches the ring once, then opens the disc', async () => {
     const worker = new FakeWorker();
     const audio = new FakeAudio();
