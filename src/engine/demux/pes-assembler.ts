@@ -34,6 +34,10 @@ export class PesAssembler {
     if (!packet.hasPayload) return; // CC does not advance on adaptation-only packets
     const state = this.states.get(packet.pid);
     if (packet.payloadUnitStart) {
+      if (state && !state.broken && packet.continuityCounter !== state.lastCc && packet.continuityCounter !== ((state.lastCc + 1) & 0x0f)) {
+        state.broken = true; // tail packets of the previous PES were lost
+        this.continuityErrors++;
+      }
       if (state) this.emit(packet.pid, state);
       this.states.set(packet.pid, { chunks: [packet.payload], size: packet.payload.length, lastCc: packet.continuityCounter, broken: false });
       return;
@@ -75,7 +79,8 @@ function parsePes(pid: number, d: Uint8Array): PesPacket | null {
   if (d.length < 6 || d[0] !== 0 || d[1] !== 0 || d[2] !== 1) return null;
   const streamId = d[3];
   const declared = (d[4] << 8) | d[5];
-  const end = declared === 0 ? d.length : Math.min(d.length, 6 + declared);
+  if (declared !== 0 && d.length < 6 + declared) return null; // truncated PES: drop, do not emit short
+  const end = declared === 0 ? d.length : 6 + declared;
   if (NO_HEADER_STREAM_IDS.has(streamId)) return { pid, streamId, payload: d.subarray(6, end) };
   if (d.length < 9) return null;
   const ptsDtsFlags = d[7] >> 6;

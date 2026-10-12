@@ -48,6 +48,12 @@ describe('M2tsReader', () => {
     expect(out.map((p) => p.pts)).toEqual(units.slice(0, 10).map((u) => u.pts));
   });
 
+  it('discards a PES cut short by endSpn instead of emitting it truncated', async () => {
+    const { source, units, unitSpns } = clip(false);
+    const out = await readAll({ source, path: PATH, startSpn: 0, endSpn: unitSpns[10] + 2, pids: new Set([VIDEO]) });
+    expect(out.map((p) => p.pts)).toEqual(units.slice(0, 10).map((u) => u.pts));
+  });
+
   it('counts corrupt packets and keeps going', async () => {
     const { bytes, units } = clip(false);
     bytes[192 * 3 + 4] = 0x00; // break one packet inside the first PES

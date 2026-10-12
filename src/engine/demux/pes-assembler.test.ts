@@ -53,6 +53,22 @@ describe('PesAssembler', () => {
     expect(out.map((p) => p.pts)).toEqual([907_200, 900_000]);
   });
 
+  it('discards a PES whose last packet is lost before the next unit start', () => {
+    const out: PesPacket[] = [];
+    const asm = new PesAssembler((p) => out.push(p));
+    const spanning: MuxUnit[] = [
+      { pid: 0x1011, streamId: 0xe0, pts: 900_000, payload: new Uint8Array(400).fill(1) },
+      { pid: 0x1011, streamId: 0xe0, pts: 903_600, payload: new Uint8Array(10).fill(2) },
+    ];
+    const packets = packetsOf(muxM2ts(spanning).bytes);
+    expect(packets.slice(0, 3).map((p) => p.payloadUnitStart)).toEqual([true, false, false]);
+    for (const p of packets.slice(0, 2)) asm.push(p); // lose the last packet of the first PES
+    for (const p of packets.slice(3)) asm.push(p);
+    asm.flush();
+    expect(asm.continuityErrors).toBe(1);
+    expect(out.map((p) => [p.pts, p.payload.length, p.payload[0]])).toEqual([[903_600, 10, 2]]);
+  });
+
   it('ignores a PES joined mid-way', () => {
     const out: PesPacket[] = [];
     const asm = new PesAssembler((p) => out.push(p));
