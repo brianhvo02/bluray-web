@@ -48,6 +48,10 @@ export function hasSps(codingType: number, data: Uint8Array): boolean {
   return (CODECS.get(codingType)?.analyze(data).sps ?? null) !== null;
 }
 
+function toDomException(err: unknown): DOMException {
+  return err instanceof DOMException ? err : new DOMException(String(err), 'EncodingError');
+}
+
 export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   onOutput: (frame: VideoFrame) => void = () => undefined;
   onError: (err: DecoderError) => void = () => undefined;
@@ -84,6 +88,9 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     }
     this.ops = ops;
     this.config = vdc;
+    this.consecutiveErrors = 0;
+    this.requireIdr = false;
+    this.lastKeyWasIdr = true;
     this.open();
   }
 
@@ -99,23 +106,28 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       this.lastKeyWasIdr = info.idr;
     }
     if (unit.discard) this.discard.add(unit.ptsUs);
-    decoder.decode(this.api.makeChunk({ type: startsSequence || info.idr ? 'key' : 'delta', timestamp: unit.ptsUs, data: info.data }));
+    try {
+      decoder.decode(this.api.makeChunk({ type: startsSequence || info.idr ? 'key' : 'delta', timestamp: unit.ptsUs, data: info.data }));
+    } catch (err) {
+      this.handleError(decoder, toDomException(err));
+    }
   }
 
   async flush(): Promise<void> {
     const decoder = this.decoder;
     if (!decoder || decoder.state !== 'configured') return;
+    this.needKey = true; // WebCodecs requires a key chunk right after flush() starts
     try {
       await decoder.flush();
     } catch {
       return; // a reset() during flush aborts it; nothing to do
     }
-    this.needKey = true;
   }
 
   reset(): void {
     this.discard.clear();
     this.needKey = true;
+    this.requireIdr = false;
     const decoder = this.decoder;
     if (!decoder || !this.config) return;
     if (decoder.state === 'closed') {
@@ -140,10 +152,14 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       output: (frame) => this.handleFrame(decoder, frame),
       error: (err) => this.handleError(decoder, err),
     });
-    decoder.configure(config);
     this.decoder = decoder;
     this.needKey = true;
     this.discard.clear();
+    try {
+      decoder.configure(config);
+    } catch (err) {
+      this.handleError(decoder, toDomException(err));
+    }
   }
 
   private handleFrame(source: VideoDecoderLike, frame: VideoFrame): void {

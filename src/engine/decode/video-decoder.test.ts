@@ -130,16 +130,87 @@ describe('WebCodecsVideoDecoder', () => {
     const { dec, created, errors } = await configured();
     for (let i = 0; i < 4; i++) created[created.length - 1].fail(`boom ${i}`);
     expect(errors.map((e) => e.fatal)).toEqual([false, false, false, true]);
+    const chunkCount = (): number => created.reduce((n, d) => n + d.chunks.length, 0);
+    const before = chunkCount();
     dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false }); // no-op once fatal
+    expect(chunkCount()).toBe(before);
   });
 
   it('reset requires a key unit again and forgets discards', async () => {
     const { dec, created, out } = await configured();
-    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: true });
     dec.reset();
     expect(created[0].state).toBe('configured');
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    expect(out.map((f) => f.timestamp)).toEqual([0]);
+    expect(created[0].frames[0].closed).toBe(true);
+    expect(created[0].frames[1].closed).toBe(false);
+    dec.reset();
     dec.decode({ data: avcAu(), ptsUs: 41_708, discard: false });
     dec.decode({ data: avcAu({ idr: true }), ptsUs: 83_416, discard: false });
     expect(out.map((f) => f.timestamp)).toEqual([0, 83_416]);
+  });
+
+  it('clears the post-error IDR requirement on reset', async () => {
+    const { dec, created } = await configured();
+    dec.decode({ data: avcAu({ recovery: true, sps: true }), ptsUs: 0, discard: false });
+    created[0].fail('bad keyframe');
+    dec.reset();
+    dec.decode({ data: avcAu({ recovery: true, sps: true }), ptsUs: 41_708, discard: false });
+    expect(created[created.length - 1].chunks.map((c) => c.type)).toEqual(['key']);
+  });
+
+  it('requires a key unit immediately after flush starts', async () => {
+    const { dec, created } = await configured();
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    void dec.flush();
+    dec.decode({ data: avcAu(), ptsUs: 41_708, discard: false });
+    expect(created[0].chunks.map((c) => c.type)).toEqual(['key']);
+  });
+
+  it('resets recovery state on configure', async () => {
+    const { dec, created, errors } = await configured();
+    for (let i = 0; i < 4; i++) created[created.length - 1].fail(`boom ${i}`);
+    expect(errors[errors.length - 1]?.fatal).toBe(true);
+    await dec.configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true }) });
+    created[created.length - 1].fail('after reconfigure');
+    expect(errors[errors.length - 1]?.fatal).toBe(false);
+  });
+
+  it('routes a synchronous decode throw into recovery', async () => {
+    const { dec, created, errors } = await configured();
+    const fake = created[0];
+    const realDecode = fake.decode.bind(fake);
+    fake.decode = () => {
+      fake.decode = realDecode;
+      throw new DOMException('bad', 'DataError');
+    };
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    expect(errors.map((e) => e.fatal)).toEqual([false]);
+    expect(created).toHaveLength(2);
+  });
+
+  it('routes a throwing decoder configure into recovery', async () => {
+    const { api, created } = setup();
+    let throwNext = true;
+    const flaky: VideoCodecApi = {
+      ...api,
+      create: (init) => {
+        const d = api.create(init) as FakeDecoder;
+        if (throwNext) {
+          throwNext = false;
+          d.configure = () => {
+            throw new DOMException('no', 'NotSupportedError');
+          };
+        }
+        return d;
+      },
+    };
+    const dec = new WebCodecsVideoDecoder(flaky);
+    const errors: DecoderError[] = [];
+    dec.onError = (e) => errors.push(e);
+    await dec.configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true }) });
+    expect(errors.map((e) => e.fatal)).toEqual([false]);
+    expect(created).toHaveLength(2);
   });
 });
