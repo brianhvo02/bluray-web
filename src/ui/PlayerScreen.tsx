@@ -111,6 +111,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         <PlaylistPicker
           playlists={snapshot.playlists}
           usesBdj={snapshot.usesBdj}
+          messages={[...(snapshot.error ? [snapshot.error.message] : []), ...snapshot.notices.filter((n) => n.code.startsWith('unsupported-')).map((n) => n.message)]}
           onPick={(id) => {
             setPickerOpen(false);
             controller.playPlaylist(id);
