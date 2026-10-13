@@ -1,0 +1,7 @@
+audio.wasm: FFmpeg libavcodec decoders (ac3, eac3, dca) with shim.c, for bluray-web.
+LGPL-2.1-or-later.
+
+FFmpeg (https://ffmpeg.org), LGPL-2.1-or-later. Copyright (c) the FFmpeg developers.
+  Source: https://git.ffmpeg.org/ffmpeg.git, tag n9.0.2 (unmodified).
+  Configure line and link flags: build.sh in this folder.
+  Rebuild: npm run wasm:build (Docker). The output is reproducible; CI checks audio.wasm.sha256.

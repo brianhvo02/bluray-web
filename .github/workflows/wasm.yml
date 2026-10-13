@@ -1,0 +1,18 @@
+name: WASM
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/wasm/**']
+  pull_request:
+    paths: ['src/wasm/**']
+
+jobs:
+  reproducible:
+    name: audio.wasm matches its source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: src/wasm/audio/build.sh
+      - run: git diff --exit-code src/wasm/audio/

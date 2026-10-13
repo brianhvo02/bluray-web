@@ -21,3 +21,7 @@ FFmpeg (https://ffmpeg.org), LGPL-2.1-or-later
   Copyright (c) 2009, 2013 Christian Schmidt (libavcodec/pcm-bluray.c)
   Derived file:
     decode/lpcm.ts        channel layout table, from libavcodec/pcm-bluray.c
+
+FFmpeg decoders (src/wasm/audio/), LGPL-2.1-or-later
+  audio.wasm is built from FFmpeg n9.0.2 (ac3, eac3, dca decoders) and src/wasm/audio/shim.c.
+  See src/wasm/audio/NOTICE for the exact source and build.
