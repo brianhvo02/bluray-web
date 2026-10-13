@@ -21,7 +21,8 @@ export class ByteReader {
     private readonly bytes: Uint8Array,
     start = 0,
   ) {
-    this.pos = start;
+    this.pos = 0;
+    this.seek(start);
   }
 
   get position(): number {
@@ -37,7 +38,7 @@ export class ByteReader {
   }
 
   seek(pos: number): void {
-    if (pos < 0 || pos > this.bytes.length) {
+    if (!Number.isInteger(pos) || pos < 0 || pos > this.bytes.length) {
       throw new ParseError(`seek to ${pos} outside 0..${this.bytes.length}`);
     }
     this.pos = pos;
@@ -46,6 +47,7 @@ export class ByteReader {
 
   skip(n: number): void {
     this.requireAligned();
+    this.requireCount(n);
     this.seek(this.pos + n);
   }
 
@@ -67,6 +69,7 @@ export class ByteReader {
 
   take(n: number): Uint8Array {
     this.requireAligned();
+    this.requireCount(n);
     this.require(n);
     const view = this.bytes.subarray(this.pos, this.pos + n);
     this.pos += n;
@@ -109,6 +112,10 @@ export class ByteReader {
     if (this.pos + n > this.bytes.length) {
       throw new ParseError(`need ${n} bytes at ${this.pos}, have ${this.remaining}`);
     }
+  }
+
+  private requireCount(n: number): void {
+    if (!Number.isInteger(n) || n < 0) throw new ParseError(`invalid byte count ${n} at ${this.pos}`);
   }
 
   private requireAligned(): void {

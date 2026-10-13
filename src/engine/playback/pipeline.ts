@@ -1,4 +1,4 @@
-import { findEpAfter, findEpBefore, type Clpi } from '../bdmv/clpi-parser';
+import { findEpAfter, findEpBefore, stcSpnRange, type Clpi } from '../bdmv/clpi-parser';
 import { DiscError, type ByteSource } from '../disc/byte-source';
 import { clipInfoPath, streamPath } from '../disc/open-disc';
 import { M2tsReader, type DemuxStats } from '../demux/m2ts-reader';
@@ -69,8 +69,11 @@ export class PlaybackPipeline {
       if (!clip) throw new DiscError('missing-file', `Missing clip info for ${item.clipId}`, [clipInfoPath(item.clipId)]);
       const ep = clip.epMaps.find((m) => m.pid === videoPid) ?? clip.epMaps[0];
       const target = i === startPos.item.index ? startPos.clipTime45 : item.inTime;
-      const startSpn = ep ? (findEpBefore(ep, target)?.spn ?? 0) : 0;
-      const endSpn = ep ? findEpAfter(ep, item.outTime)?.spn : undefined;
+      // PTS can restart inside a clip; only this item's STC sequence is meaningful (libbluray clpi_lookup_spn).
+      const range = stcSpnRange(clip, item.stcId);
+      const rangeEnd = Number.isFinite(range.endSpn) ? range.endSpn : undefined;
+      const startSpn = ep ? (findEpBefore(ep, target, range)?.spn ?? range.startSpn) : range.startSpn;
+      const endSpn = ep ? (findEpAfter(ep, item.outTime, range)?.spn ?? rangeEnd) : rangeEnd;
       const reader = new M2tsReader({ source, path: streamPath(item.clipId), startSpn, endSpn, pids });
 
       for (;;) {

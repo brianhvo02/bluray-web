@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AUDIO_PID, VIDEO_PID, buildSyntheticDisc, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
+import { buildClpi, buildIndex, buildMpls } from '../../../tests/helpers/bdmv-builders';
+import { parseClpi } from '../bdmv/clpi-parser';
 import { parseMpls } from '../bdmv/mpls-parser';
 import { CodingType } from '../bdmv/stream-types';
 import { DiscError, readWhole } from '../disc/byte-source';
@@ -174,5 +176,76 @@ describe('PlaybackPipeline', () => {
     const { got, done } = run({ ...config, clips: new Map([['00001', first]]) }, 5_000_000);
     await done;
     expect(got.errors[0]).toBeInstanceOf(DiscError);
+  });
+
+  it('reads each play item from its own STC sequence when PTS restarts inside one clip', async () => {
+    // Clip 00003 = clip A then clip B back to back; B's PTS restart (a second STC sequence at SPN = A's size).
+    // A and B frames differ in size by one byte, so we can tell which half was read.
+    const parts = buildSyntheticDisc({
+      clips: [syntheticClip('00001', 4, { frameBytes: 300 }), syntheticClip('00002', 4, { frameBytes: 301 })],
+      playlists: [],
+    });
+    const part = (path: string): Uint8Array<ArrayBuffer> => {
+      const bytes = parts.get(path);
+      if (!bytes) throw new Error(`fixture is missing ${path}`);
+      return bytes;
+    };
+    const a = part('BDMV/STREAM/00001.m2ts');
+    const b = part('BDMV/STREAM/00002.m2ts');
+    const aPackets = a.length / 192;
+    const merged = new Uint8Array(a.length + b.length);
+    merged.set(a);
+    merged.set(b, a.length);
+    const ca = parseClpi(part('BDMV/CLIPINF/00001.clpi'));
+    const cb = parseClpi(part('BDMV/CLIPINF/00002.clpi'));
+    const { presentationStart, presentationEnd } = ca.atcSequences[0].stc[0];
+    const entries = [...ca.epMaps[0].entries, ...cb.epMaps[0].entries.map((e) => ({ pts: e.pts, spn: e.spn + aPackets }))];
+    const video = [{ pid: VIDEO_PID, codingType: CodingType.AVC }];
+    const files = new Map<string, Uint8Array<ArrayBuffer>>([
+      ['BDMV/index.bdmv', buildIndex({ firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [] })],
+      ['BDMV/STREAM/00003.m2ts', merged],
+      [
+        'BDMV/CLIPINF/00003.clpi',
+        buildClpi({
+          numSourcePackets: merged.length / 192,
+          streams: video,
+          presentationStart,
+          presentationEnd,
+          epMaps: [{ pid: VIDEO_PID, entries }],
+          stcSequences: [
+            { spnStcStart: 0, presentationStart, presentationEnd },
+            { spnStcStart: aPackets, presentationStart, presentationEnd },
+          ],
+        }),
+      ],
+      [
+        'BDMV/PLAYLIST/00000.mpls',
+        buildMpls({
+          playItems: [
+            { clipId: '00003', inTime: presentationStart, outTime: presentationEnd, stcId: 0, video },
+            { clipId: '00003', inTime: presentationStart, outTime: presentationEnd, stcId: 1, video },
+          ],
+        }),
+      ],
+    ]);
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00003']), videoPid: VIDEO_PID, audioPid: null };
+    const frameLength = (u: PipelineUnit): number => u.data.length;
+
+    const all = run(config, 0);
+    await all.done;
+    const lengths = (from: number, to: number): Set<number> => new Set(all.got.video.filter((u) => u.ptsUs >= from && u.ptsUs < to).map(frameLength));
+    const first = lengths(0, 4_000_000);
+    const second = lengths(4_000_000, 8_000_000);
+    expect(all.got.video).toHaveLength(192); // no duplicated or missing frames
+    expect([...first].every((l) => !second.has(l))).toBe(true); // item 1 read only half A, item 2 only half B
+
+    const seek = run(config, 5_000_000);
+    await seek.done;
+    // Reading starts at the aligned unit before item 2's 5 s entry point: inside item 2, from half B.
+    expect(seek.got.video[0].ptsUs).toBeGreaterThanOrEqual(4_000_000);
+    expect(seek.got.video[0].ptsUs).toBeLessThanOrEqual(5_000_000);
+    expect(seek.got.video.every((u) => second.has(frameLength(u)))).toBe(true);
   });
 });

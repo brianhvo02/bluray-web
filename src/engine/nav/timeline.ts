@@ -20,6 +20,8 @@ export interface TimelineItem {
   /** 45 kHz playlist time at which this item starts. */
   readonly start: number;
   readonly connectionCondition: number;
+  /** STC sequence (continuous PTS run) of the clip this item plays from. */
+  readonly stcId: number;
 }
 
 export interface Chapter {
@@ -41,7 +43,7 @@ export class Timeline {
     const items: TimelineItem[] = [];
     let start = 0;
     playItems.forEach((p, index) => {
-      items.push({ index, clipId: p.clipId, inTime: p.inTime, outTime: p.outTime, start, connectionCondition: p.connectionCondition });
+      items.push({ index, clipId: p.clipId, inTime: p.inTime, outTime: p.outTime, start, connectionCondition: p.connectionCondition, stcId: p.stcId });
       start += Math.max(0, p.outTime - p.inTime);
     });
     this.items = items;

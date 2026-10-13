@@ -43,4 +43,8 @@ describe('FileSource', () => {
     const broken = new FileSource(new Map([['A', failing(new Error('boom'))]]));
     await expect(broken.read('A', 0, 4)).rejects.toMatchObject({ code: 'read-failed' });
   });
+
+  it('rejects negative offsets instead of reading from the end of the file', async () => {
+    await expect(source().read('BDMV/INDEX.BDMV', -2, 2)).rejects.toThrow(RangeError);
+  });
 });

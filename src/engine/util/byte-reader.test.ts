@@ -53,4 +53,13 @@ describe('ByteReader', () => {
     r.skipBits(40);
     expect(r.u8()).toBe(0x42);
   });
+
+  it('rejects negative or non-integer lengths and offsets instead of misreading', () => {
+    const r = new ByteReader(new Uint8Array(8));
+    expect(() => r.take(-1)).toThrow(ParseError);
+    expect(() => r.skip(Number.NaN)).toThrow(ParseError);
+    expect(() => r.seek(1.5)).toThrow(ParseError);
+    expect(() => new ByteReader(new Uint8Array(8), -2)).toThrow(ParseError);
+    expect(r.position).toBe(0);
+  });
 });

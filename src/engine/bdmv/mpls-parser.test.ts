@@ -117,4 +117,11 @@ describe('parseMpls', () => {
     bytes[1] = 0x41;
     expect(() => parseMpls(bytes)).toThrow(ParseError);
   });
+
+  it('rejects a play item shorter than 18 bytes (as libbluray does)', () => {
+    const bytes = buildMpls({ playItems: [{ clipId: '00001', inTime: 0, outTime: 100, video: [VIDEO] }] });
+    const listPos = new DataView(bytes.buffer).getUint32(8);
+    new DataView(bytes.buffer).setUint16(listPos + 10, 10); // first play item's length field
+    expect(() => parseMpls(bytes)).toThrow(ParseError);
+  });
 });

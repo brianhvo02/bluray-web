@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildClpi } from '../../../tests/helpers/bdmv-builders';
 import { ParseError } from '../util/byte-reader';
-import { findEpAfter, findEpBefore, parseClpi } from './clpi-parser';
+import { findEpAfter, findEpBefore, parseClpi, stcSpnRange } from './clpi-parser';
 import { CodingType } from './stream-types';
 
 const BASE = 450_048; // multiple of 256
@@ -93,5 +93,36 @@ describe('EP lookup', () => {
     expect(findEpAfter(map, 2000)).toEqual({ pts: 3000, spn: 30 });
     expect(findEpAfter(map, 0)).toEqual({ pts: 1000, spn: 10 });
     expect(findEpAfter(map, 3000)).toBeUndefined();
+  });
+});
+
+describe('STC-aware EP lookup', () => {
+  // One clip, two STC sequences: PTS restarts where the second sequence begins (SPN 1000).
+  const map = { pid: 0x1011, epStreamType: 1, entries: [{ pts: 1000, spn: 0 }, { pts: 2000, spn: 500 }, { pts: 1000, spn: 1000 }, { pts: 2000, spn: 1500 }] };
+
+  it('keeps lookups inside the requested STC sequence', () => {
+    expect(findEpBefore(map, 1500, { startSpn: 1000, endSpn: Infinity })).toEqual({ pts: 1000, spn: 1000 });
+    expect(findEpBefore(map, 1500, { startSpn: 0, endSpn: 1000 })).toEqual({ pts: 1000, spn: 0 });
+    expect(findEpAfter(map, 1500, { startSpn: 0, endSpn: 1000 })).toEqual({ pts: 2000, spn: 500 });
+    expect(findEpAfter(map, 2500, { startSpn: 0, endSpn: 1000 })).toBeUndefined();
+  });
+
+  it("maps a play item's stc_id to that sequence's SPN range", () => {
+    const clpi = parseClpi(
+      buildClpi({
+        numSourcePackets: 2000,
+        streams: [{ pid: 0x1011, codingType: CodingType.AVC }],
+        presentationStart: 0,
+        presentationEnd: 0,
+        epMaps: [{ pid: 0x1011, entries: [] }],
+        stcSequences: [
+          { spnStcStart: 0, presentationStart: 1000, presentationEnd: 3000 },
+          { spnStcStart: 1000, presentationStart: 1000, presentationEnd: 3000 },
+        ],
+      }),
+    );
+    expect(stcSpnRange(clpi, 0)).toEqual({ startSpn: 0, endSpn: 1000 });
+    expect(stcSpnRange(clpi, 1)).toEqual({ startSpn: 1000, endSpn: Infinity });
+    expect(stcSpnRange(clpi, 7)).toEqual({ startSpn: 0, endSpn: Infinity }); // unknown id: whole clip, like libbluray
   });
 });

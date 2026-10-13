@@ -24,6 +24,7 @@ export class FileSource implements ByteSource {
   }
 
   async read(path: string, offset: number, length: number): Promise<Uint8Array> {
+    if (!Number.isInteger(offset) || offset < 0) throw new RangeError(`invalid read offset ${offset} in ${path}`); // Blob.slice would count from the end
     const blob = this.get(path);
     const end = Math.min(offset + length, blob.size);
     if (offset >= end) return new Uint8Array(0);

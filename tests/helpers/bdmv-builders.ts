@@ -56,6 +56,7 @@ export interface PlayItemSpec {
   inTime: number;
   outTime: number;
   connectionCondition?: number;
+  stcId?: number;
   video?: StreamSpec[];
   audio?: StreamSpec[];
   pg?: StreamSpec[];
@@ -110,7 +111,7 @@ function writePlayItem(w: ByteWriter, item: PlayItemSpec): void {
   const angles = item.angleClipIds ?? [];
   w.ascii(item.clipId).ascii('M2TS');
   w.bits(11, 0).bits(1, angles.length > 0 ? 1 : 0).bits(4, item.connectionCondition ?? 1);
-  w.u8(0).u32(item.inTime).u32(item.outTime);
+  w.u8(item.stcId ?? 0).u32(item.inTime).u32(item.outTime);
   w.zeros(8); // UO mask
   w.u8(0); // random_access_flag + reserved
   w.u8(0).u16(0); // still mode, still time
@@ -160,6 +161,8 @@ export interface ClpiSpec {
   presentationEnd: number;
   /** Entry pts are 45 kHz; encoding truncates the low 8 bits, as real discs do. */
   epMaps: Array<{ pid: number; entries: Array<{ pts: number; spn: number }> }>;
+  /** STC sequences (PTS discontinuities) in one ATC sequence. Default: one spanning the clip. */
+  stcSequences?: Array<{ spnStcStart: number; presentationStart: number; presentationEnd: number }>;
 }
 
 interface EpGroups {
@@ -194,9 +197,10 @@ export function buildClpi(spec: ClpiSpec): Uint8Array<ArrayBuffer> {
   w.patchU32(clipInfoAt, w.position - clipInfoAt - 4);
 
   const seqStart = w.position;
+  const stcs = spec.stcSequences ?? [{ spnStcStart: 0, presentationStart: spec.presentationStart, presentationEnd: spec.presentationEnd }];
   w.u32(0).u8(0).u8(1);
-  w.u32(0).u8(1).u8(0); // ATC sequence: spn_atc_start, num_stc_seq, offset_stc_id
-  w.u16(0x1001).u32(0).u32(spec.presentationStart).u32(spec.presentationEnd);
+  w.u32(0).u8(stcs.length).u8(0); // ATC sequence: spn_atc_start, num_stc_seq, offset_stc_id
+  for (const stc of stcs) w.u16(0x1001).u32(stc.spnStcStart).u32(stc.presentationStart).u32(stc.presentationEnd);
   w.patchU32(seqStart, w.position - seqStart - 4);
 
   const progStart = w.position;

@@ -96,6 +96,7 @@ export function parseMpls(bytes: Uint8Array): Mpls {
 
 function readPlayItem(r: ByteReader): PlayItem {
   const length = r.u16();
+  if (length < 18) throw new ParseError(`mpls: play item length ${length} is too short`); // as libbluray
   const start = r.position;
   const clipId = r.ascii(5);
   const codecId = r.ascii(4);

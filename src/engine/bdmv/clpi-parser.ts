@@ -210,9 +210,33 @@ function readCpi(r: ByteReader, start: number): EpMap[] {
   });
 }
 
+/** Source packets [startSpn, endSpn) belonging to one STC sequence (one continuous PTS timeline). */
+export interface SpnRange {
+  readonly startSpn: number;
+  readonly endSpn: number;
+}
+
+const WHOLE_CLIP: SpnRange = { startSpn: 0, endSpn: Infinity };
+
+/** The SPN range of a play item's STC sequence (libbluray clpi_find_stc_spn); the whole clip if unknown. */
+export function stcSpnRange(clip: Clpi, stcId: number): SpnRange {
+  for (const atc of clip.atcSequences) {
+    const k = stcId - atc.offsetStcId;
+    if (k >= 0 && k < atc.stc.length) {
+      const next = atc.stc[k + 1];
+      return { startSpn: atc.stc[k].spnStcStart, endSpn: next ? next.spnStcStart : Infinity };
+    }
+  }
+  return WHOLE_CLIP;
+}
+
+function entriesIn(map: EpMap, range: SpnRange): readonly EpEntry[] {
+  return range === WHOLE_CLIP ? map.entries : map.entries.filter((e) => e.spn >= range.startSpn && e.spn < range.endSpn);
+}
+
 /** Last entry with pts ≤ target; the first entry if the target precedes all entries; undefined if empty. */
-export function findEpBefore(map: EpMap, pts45: number): EpEntry | undefined {
-  const entries = map.entries;
+export function findEpBefore(map: EpMap, pts45: number, range: SpnRange = WHOLE_CLIP): EpEntry | undefined {
+  const entries = entriesIn(map, range);
   let lo = 0;
   let hi = entries.length - 1;
   let found = -1;
@@ -229,6 +253,6 @@ export function findEpBefore(map: EpMap, pts45: number): EpEntry | undefined {
 }
 
 /** First entry with pts > target, or undefined. */
-export function findEpAfter(map: EpMap, pts45: number): EpEntry | undefined {
-  return map.entries.find((e) => e.pts > pts45);
+export function findEpAfter(map: EpMap, pts45: number, range: SpnRange = WHOLE_CLIP): EpEntry | undefined {
+  return entriesIn(map, range).find((e) => e.pts > pts45);
 }
