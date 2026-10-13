@@ -22,9 +22,23 @@ export function avcAu(opts: AvcAuOptions = {}): Uint8Array<ArrayBuffer> {
   if (opts.sps ?? opts.idr) nals.push(Array.from(TEST_SPS), TEST_PPS);
   if (opts.recovery) nals.push(RECOVERY_SEI);
   if (opts.mvc) nals.push(MVC_PREFIX);
-  nals.push([...(opts.idr ? IDR_SLICE : NON_IDR_SLICE), ...new Array<number>(opts.fill ?? 0).fill(0x55)]);
-  if (opts.mvc) nals.push(MVC_SLICE);
-  const bytes: number[] = [];
-  for (const nal of nals) bytes.push(0, 0, 0, 1, ...nal);
-  return new Uint8Array(bytes);
+  const slice = opts.idr ? IDR_SLICE : NON_IDR_SLICE;
+  const fill = opts.fill ?? 0;
+  const tail: number[][] = opts.mvc ? [MVC_SLICE] : [];
+  // Built with typed-array copies (not spreads) so large fills don't overflow the call stack.
+  const sizes = [...nals, ...tail].reduce((sum, n) => sum + 4 + n.length, 0) + 4 + slice.length + fill;
+  const out = new Uint8Array(sizes);
+  let at = 0;
+  const put = (nal: ArrayLike<number>): void => {
+    out.set([0, 0, 0, 1], at);
+    out.set(nal, at + 4);
+    at += 4 + nal.length;
+  };
+  for (const nal of nals) put(nal);
+  out.set([0, 0, 0, 1], at);
+  out.set(slice, at + 4);
+  out.fill(0x55, at + 4 + slice.length, at + 4 + slice.length + fill);
+  at += 4 + slice.length + fill;
+  for (const nal of tail) put(nal);
+  return out;
 }

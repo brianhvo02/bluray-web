@@ -49,10 +49,11 @@ interface Harness {
   play(ms: number, opts?: { render?: boolean; audio?: boolean }): Promise<void>;
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean } = {}): Promise<Harness> {
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number } = {},
+): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex }), syntheticClip('00002', 4, { audio })],
+    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes })],
     playlists: [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
   });
   const events: EngineEvent[] = [];
@@ -147,6 +148,18 @@ describe('Player', () => {
     await player.handle({ type: 'open', entries: [['Stuff/readme.txt', new Blob(['hi'])]] });
     expect(events).toContainEqual(expect.objectContaining({ type: 'error', code: 'not-bdmv' }));
     expect(events.at(-1)).toEqual({ type: 'state', state: 'error' });
+  });
+
+  it('keeps audio fed when the multiplex puts video 600 ms ahead of audio (regression: real-disc boundary underrun)', async () => {
+    // ~200 KB/frame ≈ 38 Mbps, so each ~2 MB read covers ~0.4 s, as on a real disc.
+    const h = await harness(CodingType.LPCM, { audioMuxLag90k: 54_000, frameBytes: 200_000 });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const before = lastTelemetry(h)?.audioUnderruns ?? 0;
+    await h.play(6000); // crosses into the lagged second clip at 4 s
+    const t = lastTelemetry(h);
+    expect(t?.clockUs ?? 0).toBeGreaterThan(5_000_000);
+    expect((t?.audioUnderruns ?? 0) - before).toBe(0);
   });
 
   it('plays on the audio clock, in order, across the play-item boundary', async () => {

@@ -30,6 +30,8 @@ export interface SyntheticClipSpec {
   audio?: number;
   /** Index of one LPCM PES whose header gets a reserved sample-rate code (a corrupt unit). */
   corruptAudioPesIndex?: number;
+  /** Multiplex audio this many 90 kHz ticks later than its PTS (video leads audio in the stream), as some discs do. */
+  audioMuxLag90k?: number;
 }
 
 export interface SyntheticPlaylistSpec {
@@ -65,7 +67,8 @@ export function lpcmPayload(frames: number, startFrame: number): Uint8Array {
 }
 
 /** A clip of fake AVC units (IDR every `keyEvery` frames), optionally with audio. */
-export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number } = {}): SyntheticClipSpec {
+export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number; audioMuxLag90k?: number; frameBytes?: number } = {},
+): SyntheticClipSpec {
   const keyEvery = opts.keyEvery ?? 24;
   const frames = seconds * 24;
   const videoAus: Uint8Array[] = [];
@@ -73,9 +76,9 @@ export function syntheticClip(clipId: string, seconds: number, opts: { audio?: n
   for (let i = 0; i < frames; i++) {
     const idr = i % keyEvery === 0;
     if (idr) keyIndices.push(i);
-    videoAus.push(avcAu({ idr, fill: 300 }));
+    videoAus.push(avcAu({ idr, fill: opts.frameBytes ?? 300 }));
   }
-  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex };
+  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, audioMuxLag90k: opts.audioMuxLag90k };
 }
 
 export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Array<ArrayBuffer>> {
@@ -101,7 +104,9 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         units.push({ pid: AUDIO_PID, streamId: 0xbd, pts: clip.startPts + j * AUDIO_PES_TICKS_90K, payload });
       }
     }
-    units.sort((a, b) => (a.dts ?? a.pts) - (b.dts ?? b.pts) || (a.pid === AUDIO_PID ? -1 : 1));
+    const lag = clip.audioMuxLag90k ?? 0;
+    const muxKey = (u: MuxUnit): number => (u.dts ?? u.pts) + (u.pid === AUDIO_PID ? lag : 0);
+    units.sort((a, b) => muxKey(a) - muxKey(b) || (a.pid === AUDIO_PID ? -1 : 1));
     const { bytes, unitSpns } = muxM2ts(units);
     const keySet = new Set(clip.keyIndices);
     const entries = units.flatMap((u, i) =>

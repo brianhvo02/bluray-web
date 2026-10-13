@@ -27,9 +27,16 @@ export interface PlayerDeps {
 }
 
 const OUTPUT_SAMPLE_RATE = 48_000;
+/** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
 const MAX_QUEUED_FRAMES = 8;
 const MAX_DECODE_QUEUE = 8;
-const MAX_PENDING_VIDEO = 64;
+/**
+ * Read-ahead budget for compressed video waiting to enter the decoder. Discs may multiplex video
+ * well ahead of its audio (≥ 0.5 s seen on real discs), so reading must be able to run this far
+ * ahead in video to reach the audio that is needed now.
+ */
+const MAX_ENCODED_VIDEO_US = 2_000_000;
+const MAX_ENCODED_VIDEO_BYTES = 64 * 1024 * 1024;
 const AUDIO_PREBUFFER_US = 200_000;
 const TIME_EVENT_INTERVAL_US = 250_000;
 const TELEMETRY_INTERVAL_MS = 500;
@@ -53,6 +60,8 @@ interface Session {
   dropBeforeUs: number;
   eof: boolean;
   flushed: boolean;
+  /** Decoder flush issued at end of input (only after the compressed backlog drains). */
+  flushStarted: boolean;
 }
 
 /** Owns one disc and at most one playing playlist. Runs inside the engine worker. */
@@ -141,6 +150,7 @@ export class Player {
       this.compositor?.drawVideo(frame);
       if (this.state === 'playing') this.offsets.push(now - frame.timestamp);
     }
+    this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
     if (this.state === 'playing' && s.flushed && this.presenter.size === 0 && now >= (last?.timestamp ?? 0) + 100_000) {
       this.wantPlaying = false;
@@ -242,6 +252,7 @@ export class Player {
       dropBeforeUs: 0,
       eof: false,
       flushed: false,
+      flushStarted: false,
     };
     ref.current = session;
     decoder.onOutput = (frame) => {
@@ -279,6 +290,7 @@ export class Player {
     s.decimator?.reset();
     s.eof = false;
     s.flushed = false;
+    s.flushStarted = false;
     s.dropBeforeUs = t - SEEK_TOLERANCE_US;
     this.presenter.clear();
     this.offsets = [];
@@ -334,7 +346,8 @@ export class Player {
     const unit: VideoUnit = { data: u.data, ptsUs: u.ptsUs, discard: !u.inRange || u.ptsUs < s.dropBeforeUs };
     switch (s.videoState) {
       case 'configured':
-        s.decoder.decode(unit);
+        s.pendingVideo.push(unit);
+        this.feedDecoder(s);
         return;
       case 'failed':
         return;
@@ -352,9 +365,7 @@ export class Player {
               return;
             }
             s.videoState = 'configured';
-            const pending = s.pendingVideo;
-            s.pendingVideo = [];
-            for (const p of pending) s.decoder.decode(p);
+            this.feedDecoder(s);
           },
           (err: unknown) => {
             if (this.session !== s) return;
@@ -391,16 +402,36 @@ export class Player {
   private isFull(s: Session): boolean {
     // Rendering can be throttled (background tab); drop late frames here so reading never stalls on them.
     if (this.state === 'playing') this.presenter.dropLate(this.clock.nowUs());
+    this.feedDecoder(s);
     this.audioWriter?.drain();
-    return (
-      this.videoBlocked(s) ||
-      s.pendingVideo.length >= MAX_PENDING_VIDEO ||
-      (s.audioActive && (this.audioWriter?.queuedChunks ?? 0) > 0)
-    );
+    return this.readerBlocked(s) || (s.audioActive && (this.audioWriter?.queuedChunks ?? 0) > 0);
   }
 
-  private videoBlocked(s: Session): boolean {
-    return this.presenter.size >= MAX_QUEUED_FRAMES || s.decoder.queueSize >= MAX_DECODE_QUEUE;
+  /** Moves compressed video into the decoder while the decoded-frame and decode-queue caps allow. */
+  private feedDecoder(s: Session): void {
+    if (s.videoState !== 'configured') return;
+    let fed = 0;
+    while (fed < s.pendingVideo.length && this.presenter.size < MAX_QUEUED_FRAMES && s.decoder.queueSize < MAX_DECODE_QUEUE) {
+      s.decoder.decode(s.pendingVideo[fed]);
+      fed++;
+    }
+    if (fed > 0) s.pendingVideo = s.pendingVideo.slice(fed);
+    if (s.eof && s.pendingVideo.length === 0 && !s.flushStarted) this.flushDecoder(s);
+  }
+
+  /** True when the compressed-video backlog has used its read-ahead budget, so reading must wait. */
+  private readerBlocked(s: Session): boolean {
+    const pending = s.pendingVideo;
+    if (pending.length === 0) return false;
+    let min = Infinity;
+    let max = -Infinity;
+    let bytes = 0;
+    for (const u of pending) {
+      if (u.ptsUs < min) min = u.ptsUs;
+      if (u.ptsUs > max) max = u.ptsUs;
+      bytes += u.data.length;
+    }
+    return max - min >= MAX_ENCODED_VIDEO_US || bytes >= MAX_ENCODED_VIDEO_BYTES;
   }
 
   private onPipelineEnded(s: Session): void {
@@ -409,6 +440,11 @@ export class Player {
       s.flushed = true;
       return;
     }
+    this.feedDecoder(s); // flushes once the compressed backlog has drained
+  }
+
+  private flushDecoder(s: Session): void {
+    s.flushStarted = true;
     const gen = this.seekGeneration;
     void s.decoder.flush().then(() => {
       if (this.session === s && this.seekGeneration === gen) s.flushed = true;
@@ -435,7 +471,7 @@ export class Player {
       const audioReady =
         !ring ||
         s.eof ||
-        this.videoBlocked(s) ||
+        this.readerBlocked(s) ||
         (this.audioWriter?.queuedChunks ?? 0) > 0 ||
         (ring.buffered() * 1e6) / ring.sampleRate >= AUDIO_PREBUFFER_US;
       const videoReady = this.presenter.size > 0 || this.presenter.current !== null || s.eof || s.videoState === 'failed';
@@ -461,7 +497,7 @@ export class Player {
       this.disableAudio(s, 'Audio output is not running (the browser may have blocked it), so playback continues without sound.');
       return;
     }
-    if (!s.eof && ring.buffered() === 0 && !this.videoBlocked(s)) {
+    if (!s.eof && ring.buffered() === 0 && !this.readerBlocked(s)) {
       ring.setPlaying(false);
       this.setState('buffering');
     }
