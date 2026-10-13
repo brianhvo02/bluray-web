@@ -51,6 +51,8 @@ Decisions taken during brainstorming:
 
 ### 2.2 `src/engine/decode/wasm-audio.ts`
 
+Deviation: frame splitting is in `src/engine/decode/audio-frames.ts` (`AudioFramer`), not here.
+
 - `loadAudioWasm(url)` compiles the module once per worker with `WebAssembly.instantiateStreaming`. It falls back to `instantiate(bytes)` in Node for tests. Its import object supplies only memory growth and `abort`.
 - `WasmAudioDecoder(module, codec)` has a synchronous `decode(unit: PipelineUnit): PcmChunk[]`, `reset()` and `close()`.
   - It keeps a carry buffer and splits frames on sync words: AC-3 and E-AC-3 `0x0B77` (frame size from the header), DTS core `0x7FFE8001` (frame size from the header).
@@ -85,7 +87,7 @@ Decisions taken during brainstorming:
 - The session stores `audioStream: number | null`, a 1-based STN index.
 - `PipelineConfig.audioPid` is replaced by `audioStream`. At the start of each play item the pipeline resolves the PID from `item.stn.audio[audioStream - 1]` (main path only).
   - Each audio unit reaches the sink tagged with that entry's `codingType`.
-  - A play item without the stream produces no audio for that item, and the writer leaves the gap silent.
+  - A play item without the stream produces no audio for that item, see `docs/known-issues.md`.
 - Initial choice: the first main-path stream in STN order whose coding type is in `PLAYABLE_AUDIO`. This is the existing rule, applied by index.
 
 ### 3.2 Decoders in the session
@@ -112,7 +114,7 @@ interface AudioTrack {
   readonly index: number;      // 1-based STN position
   readonly codec: string;      // codingName(), e.g. "DTS-HD Master Audio"
   readonly language: string;   // ISO 639-2 from the STN, '' if absent
-  readonly channels: string;   // from STN audio_format: "1.0", "2.0", "5.1", "7.1"; '' if unknown
+  readonly channels: "mono" | "stereo" | "multichannel" | '';   // from STN audio_format; '' if unknown
   readonly playable: boolean;
 }
 
@@ -127,6 +129,8 @@ interface AudioTrack {
 - `Telemetry` gains `audioCodec: string | null` (the coding name of the decoder that last produced PCM) and `audioDecodeErrors: number`.
 
 ### 4.2 UI
+
+Deviation: `PlayerController.selectAudio` adds the `audio-track` notice.
 
 - `PlayerController`:
   - The snapshot gains `tracks` and `selectedAudio`, and there is a new `selectAudio(index)` method.

@@ -8,6 +8,21 @@ what would change that decision.
 - **Rejected: demux PID peek.** Skipping unwanted PIDs before parsing measured
   103 ms vs 105 ms per 400 MB, which is no gain, so it was not kept.
 
+## Audio
+
+- **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,
+  so decoding MLP or XLL would not be audible. *Revisit if* multichannel or high-resolution output is added.
+- **A play item without the selected audio stream** gets no audio units. The audio clock then behaves as for any gap
+  in the audio (it can drop to buffering until video read-ahead fills). Blu-ray discs carry every stream in every
+  play item, so nothing fills the gap. *Revisit if* a real disc shows it.
+- **The last E-AC-3 access unit before the end of input is not played** (32 ms), because a group is emitted when
+  the next one starts.
+- **AC-3 at 44.1 or 32 kHz is ignored** (treated as no sync). Blu-ray AC-3 is always 48 kHz.
+- **An unplayable or unloadable codec in a later play item** makes `onAudioUnit` retry the decoder load on every
+  unit, with no notice to the user. *Revisit if* a disc mixes codecs across play items, or after the final review fixes it.
+- **When a decoder fails to load during a seek,** audio buffered before the seek can keep playing, because
+  `audioUnavailable` does not stop the ring. *Revisit if* a decoder load can fail in practice, or after the final review fixes it.
+
 ## Resolved (for reference)
 
 - **File version checks** now match libbluray's `bdmv_parse_header`

@@ -24,7 +24,7 @@ A user on Chromium desktop can:
 - Parsing: `index.bdmv`, `MovieObject.bdmv`, `.mpls`, `.clpi`.
 - HDMV navigation VM, IG menus (always-on and pop-up), and UO masks.
 - M2TS demux; video in H.264 and HEVC via WebCodecs `VideoDecoder`.
-- Audio: LPCM (TypeScript), AC-3 / E-AC-3 (FFmpeg-derived WASM decoder), and the AC-3 core extracted from TrueHD; any other codec WebCodecs reports as supported.
+- Audio: LPCM (TypeScript); AC-3 / E-AC-3, the AC-3 core of TrueHD, and the DTS core of DTS / DTS-HD (FFmpeg-derived WASM decoder); any other codec WebCodecs reports as supported.
 - Audio-master clock via `AudioWorklet` and a `SharedArrayBuffer` ring buffer.
 - PGS subtitles, including forced subtitles; SRT; a native TypeScript ASS renderer.
 - React UI: transport controls, track menus, title list, menu controls, keyboard routing.
@@ -34,7 +34,7 @@ A user on Chromium desktop can:
 | Item | Phase |
 |---|---|
 | ISO input (UDF 2.5 reader as a `ByteSource`) | Later, lower priority |
-| DTS core / DTS-HD, VC-1, MPEG-2 via WASM decoders | Later ("codec gaps") |
+| Lossless TrueHD / DTS-HD decoding, VC-1, MPEG-2 via WASM decoders | Later ("codec gaps") |
 | AACS / BD+ decryption (as a `ByteSource` decrypt stage with a user-supplied key DB and no bundled keys; legal review required before shipping) | Later |
 | JASSUB/libass fallback for ASS | Only if golden-image tests show the native renderer is unacceptable |
 | Safari / Firefox support | After Chromium v1 |
@@ -131,7 +131,7 @@ The engine protocol is a discriminated union.
 2. **Demux.** `M2tsReader` splits aligned units into 192-byte source packets (4-byte TP_extra_header with ATS, then a 188-byte TS packet) and filters by PID: video `0x1011`, primary audio `0x1100–0x111F`, PG `0x1200–0x121F`, IG `0x1400–0x141F`. It reassembles PES (90 kHz PTS/DTS) and emits access units with playlist-time PTS. Unselected PIDs are dropped early. Continuity-counter errors are logged and the affected PES is discarded.
 3. **Decode.**
    - Video: Annex-B `EncodedVideoChunk`. The codec string is derived from the first SPS (`avc1.PPCCLL`, `hvc1.*`). Keyframes are IDR NAL units. Support is checked with `VideoDecoder.isConfigSupported`. MVC NAL units are dropped. VC-1 and MPEG-2 raise `unsupported`.
-   - Audio: LPCM is decoded in TypeScript (Blu-ray LPCM header, big-endian 16/24-bit, channel mapping to Float32). AC-3 and E-AC-3 use the WASM decoder. For TrueHD, the demuxer extracts the interleaved AC-3 core frames for the AC-3 decoder. Other codecs are tried via `AudioDecoder.isConfigSupported`, otherwise `unsupported`. Output is resampled to the `AudioContext` rate when needed.
+   - Audio: LPCM is decoded in TypeScript (Blu-ray LPCM header, big-endian 16/24-bit, channel mapping to Float32). AC-3 and E-AC-3 use the WASM decoder. For TrueHD, the demuxer extracts the interleaved AC-3 core frames for the AC-3 decoder. DTS and DTS-HD use the same decoder on the DTS core only (`core_only`). Other codecs are tried via `AudioDecoder.isConfigSupported`, otherwise `unsupported`. Output is resampled to the `AudioContext` rate when needed.
    - Backpressure: the demuxer pauses when decoder `queueSize` is high or about 8 decoded `VideoFrame`s are pending. Every `VideoFrame` is `close()`d after presentation or drop.
 4. **Sync.** PCM goes into a `SharedArrayBuffer` ring; the `AudioWorklet` plays it and atomically increments `framesPlayed`.
    - `clock = basePts + framesPlayed / sampleRate − outputLatency`.
@@ -241,7 +241,7 @@ Ported from libbluray `bluray.c`, `bdnav/`, `hdmv/`, `decoders/ig_decode.c`, and
 v1 is delivered as four sequential plans. Each one ends in a working, testable app.
 
 1. **Core player:** scaffolding (Vite, COOP/COEP, Vitest, Playwright), `disc/`, `bdmv/` parsers, Navigator and Timeline, demux, WebCodecs video, LPCM audio, MasterClock and AudioWorklet, compositor (video plane only), and a basic UI with a playlist/title list and transport controls. Exit criterion: plays a chosen playlist in sync, with seek and chapters.
-2. **Audio coverage:** the WASM AC-3/E-AC-3 decoder, TrueHD AC-3 core extraction, and audio track switching.
+2. **Audio coverage:** the WASM AC-3/E-AC-3 and DTS core decoder (a reproducible build, with `audio.wasm` committed), TrueHD AC-3 core extraction, and audio track switching.
 3. **Menus:** RegisterFile, HDMV VM, the libbluray VM trace harness, IG decoder, GraphicsController, UO masks, menu input routing, and the remote pad.
 4. **Subtitles:** PGS (including forced subtitles), SRT, the native ASS renderer, subtitle controls, and the ASS golden-image tests.
 
@@ -254,6 +254,6 @@ v1 is delivered as four sequential plans. Each one ends in a working, testable a
 | Input (v1) | Folder only; ISO later |
 | Browsers (v1) | Chromium desktop first |
 | Menus | HDMV only; BD-J falls back to the title list |
-| Audio in v1 | LPCM, plus WASM AC-3 (including the TrueHD AC-3 core); DTS later |
+| Audio in v1 | LPCM, plus WASM AC-3/E-AC-3 (with the TrueHD AC-3 core) and DTS core (all DTS-HD flavours); lossless extensions later |
 | ASS | Native TypeScript renderer; JASSUB only if the fidelity tests fail |
 | Licensing | Engine isolated as LGPL-2.1 |

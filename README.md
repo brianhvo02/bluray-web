@@ -6,6 +6,11 @@ Client-side Blu-ray (BDMV) player for Chromium. Design: `docs/superpowers/specs/
 - `npm run dev`: dev server (cross-origin isolated).
 - `npm test`: unit tests. `npm run test:e2e`: Playwright (requires Google Chrome and a working audio output).
   The A/V sync checks allow 20 ms mean and 50 ms max offset; `SYNC_TOLERANCE_SCALE=2` doubles both on slower machines.
+- `npm run wasm:build` rebuilds `src/wasm/audio/audio.wasm` (FFmpeg n9.0.2 AC-3, E-AC-3 and DTS decoders plus `shim.c`) in Docker.
+  It needs Docker. The build is reproducible, and `.github/workflows/wasm.yml` checks that the committed `audio.wasm` matches.
+- `npm run fixture:synthetic` regenerates `fixtures/synthetic/`. It needs `ffmpeg` on PATH, because the audio fixtures and
+  `disc3` use its ac3, eac3, dca and truehd encoders. Their bytes depend on the host ffmpeg version (currently 9.0.2).
+  `fixtures/synthetic/disc3` is the four-codec audio disc (LPCM, AC-3 5.1, TrueHD with an AC-3 core, DTS).
 - Put your own decrypted discs under `fixtures/local/<name>/BDMV/...` to enable `tests/local`.
   `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome and seeks around it.
 
@@ -35,5 +40,7 @@ The player needs `SharedArrayBuffer` (audio ring buffer), which browsers only ex
     /*
       Cross-Origin-Opener-Policy: same-origin
       Cross-Origin-Embedder-Policy: require-corp
+
+Hosts must serve `.wasm` as `application/wasm`.
 
 Other hosts need the equivalent in their own configuration. Without the headers the app shows an error and cannot play.

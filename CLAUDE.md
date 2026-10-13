@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A client-side Blu-ray (BDMV) player for desktop Chromium: a TypeScript port of libbluray (not WASM), its own M2TS demuxer, and WebCodecs decoding. Nothing is uploaded. The design spec is `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`. Milestone 1 ("core player": parsers, demux, H.264/HEVC video, LPCM audio, clock, seek/chapters, basic UI) is done. Milestones 2–4 (AC-3/TrueHD audio, HDMV VM and IG menus, PGS/SRT/ASS subtitles) are not built yet. The spec describes modules such as `hdmv/`, `graphics/` and `subs/` that don't exist yet. `docs/known-issues.md` lists decisions left open on purpose and resolved items. Read it before changing something it covers.
+A client-side Blu-ray (BDMV) player for desktop Chromium: a TypeScript port of libbluray (not WASM), its own M2TS demuxer, and WebCodecs decoding. Nothing is uploaded. The design spec is `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`. Milestones 1 and 2 are done: parsers, demux, H.264/HEVC video, clock, seek/chapters, basic UI, and audio (LPCM, AC-3/E-AC-3, the AC-3 core of TrueHD, the DTS core of DTS/DTS-HD, with track switching). Milestones 3–4 (HDMV VM and IG menus, PGS/SRT/ASS subtitles) are not built yet. The spec describes modules such as `hdmv/`, `graphics/` and `subs/` that don't exist yet. `docs/known-issues.md` lists decisions left open on purpose and resolved items. Read it before changing something it covers.
 
 ## Commands
 
@@ -15,7 +15,8 @@ A client-side Blu-ray (BDMV) player for desktop Chromium: a TypeScript port of l
   - `SYNC_TOLERANCE_SCALE=2` widens the 20 ms mean / 50 ms max A/V offset bounds. CI uses 1.5. Keep local runs at the default.
   - `LOCAL_DISCS=1 npx playwright test local-discs` plays every disc under `fixtures/local/` and seeks around in it.
   - Nightly drift test: `npx tsx scripts/make-fixture-disc.ts fixtures/local/long-disc --seconds-per-clip 300`, then `NIGHTLY=1 npx playwright test -g "ten minutes"`.
-- `npm run fixture:synthetic`: regenerates the committed discs in `fixtures/synthetic/` from `scripts/` (the scripts build on `tests/helpers/`). Rerun it after changing the builders or muxer, and commit the output.
+- `npm run fixture:synthetic`: regenerates the committed discs in `fixtures/synthetic/` from `scripts/` (the scripts build on `tests/helpers/`). Rerun it after changing the builders or muxer, and commit the output. It needs `ffmpeg` on PATH for the audio fixtures (disc3).
+- `npm run wasm:build`: rebuilds `src/wasm/audio/audio.wasm` in Docker (pinned emsdk). CI (`.github/workflows/wasm.yml`) rebuilds it and fails on any diff.
 - CI (`.github/workflows/ci.yml`) runs Node 24 and needs npm ≥ 11.19 because `package.json` uses `allowScripts`. `scripts/ci-audio.sh` sets up a PulseAudio null sink for the sync tests.
 
 ## Architecture
@@ -33,13 +34,14 @@ Data flow inside the engine:
 - `bdmv/`: `index.bdmv`, `.mpls` and `.clpi` parsers, ported from libbluray.
 - `nav/timeline.ts`: maps play items onto one continuous playlist time, handling the 33-bit PTS wrap and per-item discontinuities. Seeks go through the EP map to an SPN, then to an aligned byte offset.
 - `demux/` (192-byte source packets, then TS, then PES) feeds `playback/pipeline.ts`, which runs read-ahead, backpressure and cancellation of abandoned reads on a seek.
-- `decode/`: `WebCodecsVideoDecoder` (Annex-B; the codec string comes from the SPS in `h264.ts`/`hevc.ts`) and `lpcm.ts`. `render/`: `VideoPresenter` (chooses which frame to show against the clock) and `Compositor`.
+- `decode/`: `WebCodecsVideoDecoder` (Annex-B; the codec string comes from the SPS in `h264.ts`/`hevc.ts`) and `lpcm.ts`. Audio goes PES → `AudioFramer` (`audio-frames.ts`) → `WasmFrameDecoder` (`wasm-audio.ts`, or LPCM) → `PcmChunk` → `AudioWriter`; decoders come from `PlayerDeps.createAudioDecoder`, and TrueHD is reduced to its AC-3 core by `TrueHdCoreFilter` first. `render/`: `VideoPresenter` (chooses which frame to show against the clock) and `Compositor`.
 
 Testability pattern: `Player` takes its side effects through `PlayerDeps`: `emit`, `videoCodecApi`, `nowMs`, `requestFrame` and `createCompositor`. `PlayerController` takes a `WorkerLike` and an `AudioOutputLike`. Unit tests inject fakes, for example a fake `VideoDecoder` that can deliver output late. Keep new browser APIs behind injectable interfaces like these.
 
 ## Constraints
 
 - **Licensing:** `src/engine/` is LGPL-2.1 and keeps its own `LICENSE` and `NOTICE`. It must not import React or anything from `src/ui/` or `src/player/`. When you port or derive code from libbluray or FFmpeg, record the source file in `src/engine/NOTICE`.
+- **`src/wasm/` is LGPL** (FFmpeg-derived decoders plus `shim.c`). `src/wasm/audio/audio.wasm` is committed and must only be rebuilt with `npm run wasm:build`, never by hand, so CI's diff check stays valid.
 - **Cross-origin isolation is required** for `SharedArrayBuffer`. The Vite dev and preview servers set COOP/COEP in `vite.config.ts`. Static deploys rely on `public/_headers`. Don't add resources that would break `require-corp`.
 - **Test fixtures:** `fixtures/synthetic/` is committed and generated by the scripts. `fixtures/local/<name>/BDMV/...` holds the developer's own decrypted discs and is gitignored. `tests/local` and `local-discs.spec.ts` skip when it is absent. Blu-ray clips often exceed 4 GiB, so `tests/local` reads ranges through its own Blob stand-in, because Node's `openAsBlob` reports sizes modulo 2^32.
 - TypeScript is strict, with `noUnusedLocals`/`noUnusedParameters` and `verbatimModuleSyntax` (use `import type` for type-only imports). `tsconfig.app.json` also typechecks `tests/helpers`.
