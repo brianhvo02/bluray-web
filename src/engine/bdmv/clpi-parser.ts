@@ -254,5 +254,13 @@ export function findEpBefore(map: EpMap, pts45: number, range: SpnRange = WHOLE_
 
 /** First entry with pts > target, or undefined. */
 export function findEpAfter(map: EpMap, pts45: number, range: SpnRange = WHOLE_CLIP): EpEntry | undefined {
-  return entriesIn(map, range).find((e) => e.pts > pts45);
+  const entries = entriesIn(map, range);
+  let lo = 0;
+  let hi = entries.length; // binary search for the first pts > target (entries ascend within one STC sequence)
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (entries[mid].pts > pts45) hi = mid;
+    else lo = mid + 1;
+  }
+  return entries[lo];
 }

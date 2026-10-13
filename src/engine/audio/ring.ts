@@ -41,7 +41,7 @@ export function ringViews(sab: SharedArrayBuffer): RingViews {
   return { counters, control, data: new Float32Array(sab, HEADER_BYTES, capacity * 2), capacity, sampleRate: control[Control.SampleRate] };
 }
 
-/** One AudioWorklet render quantum. Runs on the audio thread; must not allocate. */
+/** One AudioWorklet render quantum. Runs on the audio thread: no buffers are allocated (only the BigInt counter writes). */
 export function renderQuantum(views: RingViews, left: Float32Array, right: Float32Array): void {
   const { counters, control, data, capacity } = views;
   Atomics.add(control, Control.Heartbeat, 1);
