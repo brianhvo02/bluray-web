@@ -16,6 +16,14 @@ async function seekTo(page: Page, fraction: number): Promise<void> {
   await page.mouse.click(bar.x + bar.width * fraction, bar.y + bar.height / 2);
 }
 
+/** The clock follows audio and moves: right after a seek it is in audio mode before the output has started. */
+async function audioClockAdvancing(page: Page): Promise<boolean> {
+  const a = await telemetry(page);
+  await page.waitForTimeout(600); // telemetry refreshes every 500 ms
+  const b = await telemetry(page);
+  return a?.clockMode === 'audio' && b?.clockMode === 'audio' && b.clockUs - a.clockUs > 300_000;
+}
+
 test('plays every audio track of the disc in sync', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?telemetry=1');
@@ -32,9 +40,13 @@ test('plays every audio track of the disc in sync', async ({ page }) => {
     await seekTo(page, 1 / 12);
     await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
     await expect.poll(async () => (await telemetry(page))?.audioCodec, { timeout: 10_000 }).toBe(track.codec);
+    // The output may start slowly when another browser opens a stream at the same moment (parallel CI workers);
+    // the player then runs on the wall clock and moves back onto audio by itself with a seek. Measure after that,
+    // allowing the 1 s the spec gives sync to settle after a seek.
+    await expect.poll(() => audioClockAdvancing(page), { timeout: 15_000 }).toBe(true);
+    await page.waitForTimeout(1000);
     const start = (await telemetry(page))?.clockUs ?? 0;
     const underrunsBefore = (await telemetry(page))?.audioUnderruns ?? 0;
-    await page.waitForTimeout(500); // let the switch settle before measuring
     const windows = await collectWindows(page, start + 3_000_000);
     expect(windows.length).toBeGreaterThan(3);
     expectInSync(windows.slice(1));

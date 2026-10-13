@@ -55,3 +55,9 @@ what would change that decision.
   and up to 19 ms mean and 41 ms max on emulated amd64, which is close to the bounds.
   CI (`.github/workflows/ci.yml`) therefore runs with `SYNC_TOLERANCE_SCALE=1.5` (30 ms / 75 ms).
   *Revisit if* GitHub runs log `sync stats` well inside 20/50 ms, then drop the scale back to 1.
+- **A stalled audio output now recovers by itself.** With two Chromes starting audio on one PulseAudio null sink
+  (CI's two Playwright workers), the output took over 500 ms to start (heartbeat 8 after 1.2 s), so the stall
+  detector moved playback to the wall clock. Audio came back only on the user's next seek or resume, which
+  failed the disc3 audio E2E on CI. When the heartbeat moves again during playback, the player now queues a seek
+  to the current time, which puts the clock back on the audio output. Reproduced and verified in an Ubuntu 24.04
+  container (`--workers=2`): 4 of 4 runs pass with the fix, and the test fails without it.

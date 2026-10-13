@@ -367,6 +367,22 @@ describe('Player', () => {
     expect(lastTelemetry(h)?.clockMode).toBe('wall');
   });
 
+  it('goes back to the audio clock by itself once a stalled output runs again, without a seek', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1200, { audio: false }); // e.g. a slow output start while another client opens a stream
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+    await vi.waitFor(
+      async () => {
+        await h.play(100);
+        expect(lastTelemetry(h)?.clockMode).toBe('audio');
+      },
+      { timeout: 5000 },
+    );
+    expect(lastState(h)).toBe('playing');
+  });
+
   it('seeking while paused shows the target frame and stays paused', async () => {
     const h = await harness(CodingType.LPCM);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });

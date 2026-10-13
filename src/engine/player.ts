@@ -78,6 +78,8 @@ interface Session {
   flushStarted: boolean;
   /** Worklet heartbeat when audio was disabled because the output stalled; null if not stalled. */
   audioStalledBeat: number | null;
+  /** A seek that moves playback back onto a recovered output is queued. */
+  audioRecoveryQueued: boolean;
 }
 
 /** Owns one disc and at most one playing playlist. Runs inside the engine worker. */
@@ -285,6 +287,7 @@ export class Player {
       flushed: false,
       flushStarted: false,
       audioStalledBeat: null,
+      audioRecoveryQueued: false,
     };
     ref.current = session;
     decoder.onOutput = (frame) => {
@@ -349,6 +352,7 @@ export class Player {
       s.audioActive = true;
       s.audioStalledBeat = null;
     }
+    s.audioRecoveryQueued = false;
     if (s.audioErrorDisabled && this.ring) {
       s.audioActive = true;
       s.audioErrorDisabled = false;
@@ -630,6 +634,12 @@ export class Player {
   }
 
   private updatePlayback(s: Session): void {
+    if (this.state === 'playing' && !s.audioRecoveryQueued && this.audioRecovered(s)) {
+      // The stalled output runs again (often just a slow start while another client opened a stream):
+      // move back onto it with a seek to the current time, queued like any other command.
+      s.audioRecoveryQueued = true;
+      void this.handle({ type: 'seek', timeUs: this.clock.nowUs() });
+    }
     const ring = s.audioActive ? this.ring : null;
     if (this.state === 'buffering' && this.wantPlaying) {
       const audioReady =
