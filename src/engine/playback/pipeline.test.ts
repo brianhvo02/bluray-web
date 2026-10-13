@@ -260,4 +260,23 @@ describe('PlaybackPipeline', () => {
     expect(got.video.length).toBeGreaterThan(0);
     expect(pipeline.stats.corruptPackets).toBe(1);
   });
+
+  it('stop() aborts the reads still in flight', async () => {
+    const config = await setup();
+    const signals: AbortSignal[] = [];
+    const inner = config.source;
+    const source = { exists: inner.exists.bind(inner), size: inner.size.bind(inner), list: inner.list.bind(inner),
+      read: (path: string, offset: number, length: number, signal?: AbortSignal) => {
+        if (signal) signals.push(signal);
+        return inner.read(path, offset, length, signal);
+      },
+    };
+    const { pipeline, got } = run({ ...config, source }, 0, (g) => g.video.length > 0); // parks after the first chunk, its prefetch in flight
+    await turns(5);
+    expect(signals.length).toBeGreaterThan(0);
+    pipeline.stop();
+    expect(signals.every((s) => s.aborted)).toBe(true);
+    await turns(5);
+    expect(got.errors).toEqual([]);
+  });
 });

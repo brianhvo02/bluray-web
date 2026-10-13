@@ -65,4 +65,38 @@ describe('M2tsReader', () => {
     expect(reader.stats.continuityErrors).toBe(1);
     expect(out.map((p) => p.pts)).toEqual(units.slice(1).map((u) => u.pts));
   });
+
+  it('cancel() aborts the in-flight prefetch and ends the reader', async () => {
+    const { source } = clip(true);
+    const signals: AbortSignal[] = [];
+    const spy = { ...source, exists: source.exists.bind(source), size: source.size.bind(source), list: source.list.bind(source),
+      read: (path: string, offset: number, length: number, signal?: AbortSignal) => {
+        if (signal) signals.push(signal);
+        return source.read(path, offset, length, signal);
+      },
+    };
+    const reader = new M2tsReader({ source: spy, path: PATH, startSpn: 0, pids: new Set([VIDEO]), chunkPackets: 32 });
+    expect(await reader.next()).not.toBeNull();
+    expect(signals.length).toBeGreaterThanOrEqual(2); // the first chunk and its prefetch
+    reader.cancel();
+    expect(signals.every((s) => s.aborted)).toBe(true);
+    expect(await reader.next()).toBeNull();
+  });
+
+  it('returns null instead of data when cancelled during a read', async () => {
+    const { source } = clip(true);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = { exists: source.exists.bind(source), size: source.size.bind(source), list: source.list.bind(source),
+      read: async (path: string, offset: number, length: number) => {
+        await gate; // ignores the signal, like a read that finishes anyway
+        return source.read(path, offset, length);
+      },
+    };
+    const reader = new M2tsReader({ source: slow, path: PATH, startSpn: 0, pids: new Set([VIDEO]), chunkPackets: 32 });
+    const pending = reader.next();
+    reader.cancel();
+    release();
+    expect(await pending).toBeNull();
+  });
 });

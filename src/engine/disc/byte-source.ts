@@ -4,7 +4,8 @@ export interface ByteSource {
   size(path: string): number;
   /** File names directly inside `dir`, sorted. */
   list(dir: string): string[];
-  read(path: string, offset: number, length: number): Promise<Uint8Array>;
+  /** Aborting `signal` stops the read early and rejects with the signal's reason. */
+  read(path: string, offset: number, length: number, signal?: AbortSignal): Promise<Uint8Array>;
 }
 
 export type DiscErrorCode =

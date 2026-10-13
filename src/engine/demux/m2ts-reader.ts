@@ -30,6 +30,7 @@ export class M2tsReader {
   private readonly chunkPackets: number;
   private cursor: number;
   private prefetch: Promise<Uint8Array> | null = null;
+  private readonly abort = new AbortController();
   private done = false;
   private corruptPackets = 0;
 
@@ -46,6 +47,13 @@ export class M2tsReader {
     return { corruptPackets: this.corruptPackets, continuityErrors: this.assembler.continuityErrors };
   }
 
+  /** Stops reading: an in-flight read or prefetch is cancelled, and next() returns null from now on. */
+  cancel(): void {
+    this.done = true;
+    this.prefetch = null;
+    this.abort.abort(new DOMException('reader cancelled', 'AbortError'));
+  }
+
   /** PES packets completed by the next chunk (possibly empty), or null once the range is exhausted. */
   async next(): Promise<PesPacket[] | null> {
     if (this.done) return null;
@@ -57,6 +65,7 @@ export class M2tsReader {
     const chunkStart = this.cursor;
     const count = Math.min(this.chunkPackets, this.endSpn - chunkStart);
     const data = await (this.prefetch ?? this.readPackets(chunkStart, count));
+    if (this.done) return null; // cancelled while the read was in flight
     this.cursor = chunkStart + count;
     this.prefetch = this.cursor < this.endSpn ? this.readPackets(this.cursor, Math.min(this.chunkPackets, this.endSpn - this.cursor)) : null;
 
@@ -73,7 +82,7 @@ export class M2tsReader {
   }
 
   private readPackets(spn: number, count: number): Promise<Uint8Array> {
-    const read = this.opts.source.read(this.opts.path, spn * SOURCE_PACKET_SIZE, count * SOURCE_PACKET_SIZE);
+    const read = this.opts.source.read(this.opts.path, spn * SOURCE_PACKET_SIZE, count * SOURCE_PACKET_SIZE, this.abort.signal);
     read.catch(() => undefined); // an abandoned prefetch must not surface as an unhandled rejection
     return read;
   }

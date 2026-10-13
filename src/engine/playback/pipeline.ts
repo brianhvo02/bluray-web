@@ -64,6 +64,7 @@ export class PlaybackPipeline {
 
   stop(): void {
     this.generation++;
+    this.current?.cancel(); // don't let a read nobody wants keep the disk (or network share) busy
   }
 
   private async run(gen: number, fromUs: number): Promise<void> {
@@ -85,6 +86,7 @@ export class PlaybackPipeline {
       const startSpn = ep ? (findEpBefore(ep, target, range)?.spn ?? range.startSpn) : range.startSpn;
       const endSpn = ep ? (findEpAfter(ep, item.outTime, range)?.spn ?? rangeEnd) : rangeEnd;
       const reader = new M2tsReader({ source, path: streamPath(item.clipId), startSpn, endSpn, pids });
+      this.current?.cancel();
       this.retire(this.current); // a stopped earlier read keeps its counts
       this.current = reader;
 

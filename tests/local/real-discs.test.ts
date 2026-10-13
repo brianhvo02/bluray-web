@@ -25,7 +25,7 @@ function localDiscs(): string[] {
 /**
  * Blob stand-in that reads ranges straight from the file. Node's `fs.openAsBlob` reports sizes modulo
  * 2^32 (an 8 GB clip appears as 3.5 GB), and Blu-ray clips are routinely larger than 4 GiB.
- * FileSource only needs `size` and `slice().arrayBuffer()`.
+ * FileSource only needs `size`, `slice()`, `arrayBuffer()` and `stream()`.
  */
 function fileBlob(path: string, start = 0, end = statSync(path).size): Blob {
   return {
@@ -40,6 +40,23 @@ function fileBlob(path: string, start = 0, end = statSync(path).size): Blob {
         closeSync(fd);
       }
       return buf.buffer;
+    },
+    stream: (): ReadableStream<Uint8Array> => {
+      let at = start;
+      return new ReadableStream<Uint8Array>({
+        pull: (controller) => {
+          if (at >= end) return controller.close();
+          const buf = new Uint8Array(Math.min(1 << 20, end - at));
+          const fd = openSync(path, 'r');
+          try {
+            readSync(fd, buf, 0, buf.length, at);
+          } finally {
+            closeSync(fd);
+          }
+          at += buf.length;
+          controller.enqueue(buf);
+        },
+      });
     },
   } as unknown as Blob;
 }
