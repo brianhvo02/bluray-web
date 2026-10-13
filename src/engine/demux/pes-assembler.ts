@@ -6,6 +6,8 @@ export interface PesPacket {
   /** 90 kHz. */
   readonly pts?: number;
   readonly dts?: number;
+  /** stream_id_extension of a 0xFD packet (Blu-ray: 0x76 AC-3 core, 0x72 TrueHD/MLP). */
+  readonly streamIdExtension?: number;
   readonly payload: Uint8Array;
 }
 
@@ -83,7 +85,8 @@ function parsePes(pid: number, d: Uint8Array): PesPacket | null {
   const end = declared === 0 ? d.length : 6 + declared;
   if (NO_HEADER_STREAM_IDS.has(streamId)) return { pid, streamId, payload: d.subarray(6, end) };
   if (d.length < 9) return null;
-  const ptsDtsFlags = d[7] >> 6;
+  const flags = d[7];
+  const ptsDtsFlags = flags >> 6;
   const headerEnd = 9 + d[8];
   if (headerEnd > end) return null;
   return {
@@ -91,6 +94,29 @@ function parsePes(pid: number, d: Uint8Array): PesPacket | null {
     streamId,
     pts: ptsDtsFlags & 0x2 ? readTimestamp(d, 9) : undefined,
     dts: ptsDtsFlags === 0x3 ? readTimestamp(d, 14) : undefined,
+    streamIdExtension: streamId === 0xfd ? readStreamIdExtension(d, flags, headerEnd) : undefined,
     payload: d.subarray(headerEnd, end),
   };
+}
+
+/** Walks the optional PES header fields (ISO 13818-1 §2.4.3.7) to PES_extension_2. */
+function readStreamIdExtension(d: Uint8Array, flags: number, headerEnd: number): number | undefined {
+  if (!(flags & 0x01)) return undefined;
+  let o = 9;
+  if ((flags >> 6) === 0x2) o += 5;
+  else if ((flags >> 6) === 0x3) o += 10;
+  if (flags & 0x20) o += 6; // ESCR
+  if (flags & 0x10) o += 3; // ES_rate
+  if (flags & 0x08) o += 1; // DSM trick mode
+  if (flags & 0x04) o += 1; // additional copy info
+  if (flags & 0x02) o += 2; // previous PES CRC
+  if (o >= headerEnd) return undefined;
+  const ext = d[o++];
+  if (ext & 0x80) o += 16; // PES_private_data
+  if (ext & 0x40) o += 1 + (o < headerEnd ? d[o] : 0); // pack_header_field
+  if (ext & 0x20) o += 2; // program_packet_sequence_counter
+  if (ext & 0x10) o += 2; // P-STD_buffer
+  if (!(ext & 0x01) || o + 1 >= headerEnd) return undefined;
+  const field = d[o + 1];
+  return field & 0x80 ? undefined : field & 0x7f;
 }

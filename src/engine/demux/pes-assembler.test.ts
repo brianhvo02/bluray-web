@@ -12,6 +12,14 @@ function packetsOf(bytes: Uint8Array): TsPacket[] {
   return out;
 }
 
+function demuxAll(bytes: Uint8Array): PesPacket[] {
+  const out: PesPacket[] = [];
+  const assembler = new PesAssembler((p) => out.push(p));
+  for (const packet of packetsOf(bytes)) assembler.push(packet);
+  assembler.flush();
+  return out;
+}
+
 const units: MuxUnit[] = [
   { pid: 0x1011, streamId: 0xe0, pts: 903_600, dts: 900_000, payload: new Uint8Array(500).fill(1) },
   { pid: 0x1100, streamId: 0xbd, pts: 900_000, payload: new Uint8Array(40).fill(2) },
@@ -75,5 +83,19 @@ describe('PesAssembler', () => {
     for (const p of packetsOf(muxM2ts(units).bytes).slice(1)) asm.push(p);
     asm.flush();
     expect(out.map((p) => p.pid)).toEqual([0x1100, 0x1011]);
+  });
+
+  it('reads stream_id_extension from 0xFD packets (TrueHD and its AC-3 core)', () => {
+    const { bytes } = muxM2ts([
+      { pid: 0x1100, streamId: 0xfd, streamIdExtension: 0x76, pts: 90_000, payload: new Uint8Array([0x0b, 0x77, 1, 2]) },
+      { pid: 0x1100, streamId: 0xfd, streamIdExtension: 0x72, pts: 90_450, payload: new Uint8Array([0xf8, 0x72, 0x6f, 0xba]) },
+      { pid: 0x1101, streamId: 0xbd, pts: 90_000, payload: new Uint8Array([9, 9]) },
+    ]);
+    const pes = demuxAll(bytes);
+    expect(pes.map((p) => [p.pid, p.streamId, p.streamIdExtension, p.pts, [...p.payload]])).toEqual([
+      [0x1100, 0xfd, 0x76, 90_000, [0x0b, 0x77, 1, 2]],
+      [0x1100, 0xfd, 0x72, 90_450, [0xf8, 0x72, 0x6f, 0xba]],
+      [0x1101, 0xbd, undefined, 90_000, [9, 9]],
+    ]);
   });
 });
