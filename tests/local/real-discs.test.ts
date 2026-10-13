@@ -1,4 +1,4 @@
-import { existsSync, openAsBlob, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CodingType } from '../../src/engine/bdmv/stream-types';
@@ -21,13 +21,35 @@ function localDiscs(): string[] {
     .filter((dir) => existsSync(join(dir, 'BDMV')));
 }
 
+/**
+ * Blob stand-in that reads ranges straight from the file. Node's `fs.openAsBlob` reports sizes modulo
+ * 2^32 (an 8 GB clip appears as 3.5 GB), and Blu-ray clips are routinely larger than 4 GiB.
+ * FileSource only needs `size` and `slice().arrayBuffer()`.
+ */
+function fileBlob(path: string, start = 0, end = statSync(path).size): Blob {
+  return {
+    size: Math.max(0, end - start),
+    slice: (from = 0, to?: number): Blob => fileBlob(path, start + from, Math.min(end, to === undefined ? end : start + to)),
+    arrayBuffer: async (): Promise<ArrayBuffer> => {
+      const buf = new Uint8Array(Math.max(0, end - start));
+      const fd = openSync(path, 'r');
+      try {
+        readSync(fd, buf, 0, buf.length, start);
+      } finally {
+        closeSync(fd);
+      }
+      return buf.buffer;
+    },
+  } as unknown as Blob;
+}
+
 async function entriesOf(dir: string): Promise<Array<[string, Blob]>> {
   const out: Array<[string, Blob]> = [];
   const walk = async (path: string): Promise<void> => {
     for (const name of readdirSync(path)) {
       const full = join(path, name);
       if (statSync(full).isDirectory()) await walk(full);
-      else out.push([relative(dir, full).split(sep).join('/'), await openAsBlob(full)]);
+      else out.push([relative(dir, full).split(sep).join('/'), fileBlob(full)]);
     }
   };
   await walk(dir);
@@ -74,6 +96,16 @@ describe.skipIf(discs.length === 0)('local discs', () => {
         console.info(`${dir}: main=${main.id} ${(main.durationUs / 60e6).toFixed(1)} min, ${codec}, audio=${choice.audio ? 'LPCM' : choice.unsupportedAudio.map((a) => a.codingType.toString(16)).join('/')}, bdj=${disc.usesBdj}`);
       }
       expect(reader.stats.corruptPackets).toBe(0);
+
+      // The end of the clip too: real clips are often > 4 GiB, where truncated file handles go silent.
+      const firstClipId = mpls.playItems[0].clipId;
+      const lastEp = clips.get(firstClipId)?.epMaps.find((m) => m.pid === video.pid)?.entries.at(-1);
+      if (!lastEp) throw new Error(`clip ${firstClipId} has no EP map for the video PID`);
+      const tail = new M2tsReader({ source, path: streamPath(firstClipId), startSpn: lastEp.spn, pids: new Set([video.pid]) });
+      const tailUnits = [];
+      for (let batch = await tail.next(); batch !== null; batch = await tail.next()) tailUnits.push(...batch); // last PES completes on flush
+      expect(tailUnits.length, `video PES after the last entry point (SPN ${lastEp.spn})`).toBeGreaterThan(0);
+      expect(tail.stats.corruptPackets).toBe(0);
     }, 60_000);
   }
 });
