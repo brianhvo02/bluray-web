@@ -61,15 +61,22 @@ export class WasmFrameDecoder {
     this.handle = wasm.audio_open(codec);
     if (this.handle === 0) throw new Error(`audio decoder ${codec} could not be opened`);
     this.outPtr = wasm.malloc(MAX_FRAMES * 2 * 4);
-    if (this.outPtr === 0) throw new Error('audio decoder is out of memory');
+    if (this.outPtr === 0) {
+      wasm.audio_close(this.handle);
+      throw new Error('audio decoder is out of memory');
+    }
   }
 
   decode(frame: Uint8Array): { readonly sampleRate: number; readonly stereo: Float32Array } {
     if (frame.length > this.inCap) {
       if (this.inPtr !== 0) this.wasm.free(this.inPtr);
-      this.inCap = Math.max(frame.length, 8192);
-      this.inPtr = this.wasm.malloc(this.inCap);
-      if (this.inPtr === 0) throw new Error('audio decoder is out of memory');
+      this.inPtr = 0;
+      this.inCap = 0;
+      const cap = Math.max(frame.length, 8192);
+      const p = this.wasm.malloc(cap);
+      if (p === 0) throw new Error('audio decoder is out of memory');
+      this.inPtr = p;
+      this.inCap = cap;
     }
     // Views are taken after every call that may grow memory (growth detaches the old buffer).
     new Uint8Array(this.wasm.memory.buffer, this.inPtr, frame.length).set(frame);

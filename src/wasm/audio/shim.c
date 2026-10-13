@@ -42,6 +42,9 @@ EMSCRIPTEN_KEEPALIVE Decoder *audio_open(int codec) {
   av_dict_set(&opts, "downmix", "stereo", 0);
   if (codec == 1) av_dict_set(&opts, "core_only", "1", 0);
   int ok = d->ctx && d->pkt && d->frame && avcodec_open2(d->ctx, c, &opts) >= 0;
+  /* avcodec_open2 removes the options it consumed. A leftover "core_only" means DTS extensions would be decoded: fail.
+   * A leftover "downmix" is tolerated; write_frame folds multichannel output down itself. */
+  if (ok && codec == 1 && av_dict_get(opts, "core_only", NULL, 0)) ok = 0;
   av_dict_free(&opts);
   if (!ok) {
     audio_close(d);
