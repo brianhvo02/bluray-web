@@ -53,7 +53,7 @@ export class Timeline {
   }
 
   itemStartUs(index: number): number {
-    return ticks45ToUs(this.items[index].start);
+    return ticks45ToUs(this.item(index).start);
   }
 
   locate(playlistUs: number): ItemPosition {
@@ -68,7 +68,7 @@ export class Timeline {
   }
 
   toPlaylistUs(itemIndex: number, pts90: number): { us: number; inRange: boolean } {
-    const item = this.items[itemIndex];
+    const item = this.item(itemIndex);
     const delta90 = ptsDelta90(pts90, item.inTime * 2);
     const length90 = (item.outTime - item.inTime) * 2;
     return { us: ticks45ToUs(item.start) + pts90ToUs(delta90), inRange: delta90 >= 0 && delta90 < length90 };
@@ -79,8 +79,15 @@ export class Timeline {
       .filter((m) => m.type === MarkType.ENTRY && m.playItemRef < this.items.length)
       .map((m) => {
         const item = this.items[m.playItemRef];
-        return ticks45ToUs(item.start + Math.max(0, m.time - item.inTime));
+        const offset = Math.min(Math.max(0, m.time - item.inTime), item.outTime - item.inTime); // clamp to the item
+        return ticks45ToUs(item.start + offset);
       });
     return [...new Set(starts)].sort((a, b) => a - b).map((startUs, index) => ({ index, startUs }));
+  }
+
+  private item(index: number): TimelineItem {
+    const item = this.items[index];
+    if (!item) throw new RangeError(`play item ${index} is out of range 0..${this.items.length - 1}`);
+    return item;
   }
 }

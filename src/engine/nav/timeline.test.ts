@@ -25,6 +25,22 @@ function item(clipId: string, inTime: number, outTime: number): PlayItem {
 const timeline = new Timeline([item('A', 900_000, 1_350_000), item('B', 450_000, 675_000)]);
 
 describe('Timeline', () => {
+  it('rejects out-of-range play item indexes with a clear error', () => {
+    expect(() => timeline.itemStartUs(2)).toThrow(RangeError);
+    expect(() => timeline.toPlaylistUs(-1, 0)).toThrow(/play item -1/);
+  });
+
+  it('clamps chapter marks to their play item', () => {
+    const marks = [
+      { type: MarkType.ENTRY, playItemRef: 0, time: 900_000, entryEsPid: 0, duration: 0 },
+      { type: MarkType.ENTRY, playItemRef: 0, time: 1_400_000, entryEsPid: 0, duration: 0 }, // past item A's out time
+    ];
+    expect(timeline.chapters(marks)).toEqual([
+      { index: 0, startUs: 0 },
+      { index: 1, startUs: 10_000_000 },
+    ]);
+  });
+
   it('lays play items end to end', () => {
     expect(timeline.durationUs).toBe(15_000_000);
     expect(timeline.items.map((i) => i.start)).toEqual([0, 450_000]);

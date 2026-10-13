@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ParseError } from '../util/byte-reader';
 import { analyzeHevc, hevcCodecString } from './hevc';
 
 // Escaped SPS prefixes (emulation-prevention bytes included, as on disc).
@@ -10,6 +11,10 @@ function au(...nals: number[][]): Uint8Array {
 }
 
 describe('HEVC analysis', () => {
+  it('rejects a truncated SPS instead of producing a bogus codec string', () => {
+    expect(() => hevcCodecString(MAIN_SPS.subarray(0, 10))).toThrow(ParseError);
+  });
+
   it('derives codec strings from escaped SPS bytes', () => {
     expect(hevcCodecString(MAIN_SPS)).toBe('hev1.1.6.L93.90');
     expect(hevcCodecString(MAIN10_SPS)).toBe('hev1.2.4.L120.90');

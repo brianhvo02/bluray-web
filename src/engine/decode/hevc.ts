@@ -1,3 +1,4 @@
+import { ParseError } from '../util/byte-reader';
 import type { AccessUnitInfo } from './h264';
 import { splitAnnexB, unescapeRbsp } from './nal';
 
@@ -24,6 +25,7 @@ function reverseBits32(x: number): number {
 /** ISO/IEC 14496-15 Annex E codec string from the SPS profile_tier_level. */
 export function hevcCodecString(sps: Uint8Array): string {
   const r = unescapeRbsp(sps);
+  if (r.length < 15) throw new ParseError(`HEVC SPS is truncated (${r.length} bytes before profile_tier_level ends)`);
   const profileSpace = r[3] >> 6;
   const tier = (r[3] >> 5) & 1;
   const profile = r[3] & 0x1f;

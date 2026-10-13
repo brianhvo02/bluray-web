@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { TEST_SPS, avcAu } from '../../../tests/helpers/h264-units';
+import { ParseError } from '../util/byte-reader';
 import { analyzeAvc, avcCodecString } from './h264';
 import { splitAnnexB } from './nal';
 
 describe('H.264 analysis', () => {
+  it('rejects a truncated SPS instead of producing a bogus codec string', () => {
+    expect(() => avcCodecString(new Uint8Array([0x67, 0x64]))).toThrow(ParseError);
+  });
+
   it('derives the codec string from the SPS', () => {
     expect(avcCodecString(TEST_SPS)).toBe('avc1.640028');
   });

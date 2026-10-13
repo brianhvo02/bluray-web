@@ -1,3 +1,4 @@
+import { ParseError } from '../util/byte-reader';
 import { joinAnnexB, splitAnnexB, unescapeRbsp } from './nal';
 
 export interface AccessUnitInfo {
@@ -16,6 +17,7 @@ const MVC_TYPES = new Set([14, 15, 20]);
 const SEI_RECOVERY_POINT = 6;
 
 export function avcCodecString(sps: Uint8Array): string {
+  if (sps.length < 4) throw new ParseError(`H.264 SPS is truncated (${sps.length} bytes)`);
   const hex = (b: number): string => b.toString(16).padStart(2, '0');
   return `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
 }
