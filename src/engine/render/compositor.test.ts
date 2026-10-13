@@ -13,4 +13,8 @@ describe('fitRect', () => {
   it('scales up to fill an exact match', () => {
     expect(fitRect(1280, 720, 1920, 1080)).toEqual({ x: 0, y: 0, width: 1920, height: 1080 });
   });
+
+  it('returns an empty rect for a frame with no size', () => {
+    expect(fitRect(0, 1080, 1920, 1080)).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+  });
 });

@@ -1,5 +1,7 @@
 import type { PcmChunk } from './lpcm';
 
+const OUTPUT_RATE = 48_000;
+
 /** Integer-factor decimator (96/192 kHz → 48 kHz) with a Hamming-windowed sinc low-pass, stateful across chunks. */
 export class Decimator {
   private readonly coeffs: Float32Array;
@@ -10,6 +12,7 @@ export class Decimator {
     readonly factor: number,
     tapsPerPhase = 16,
   ) {
+    if (!Number.isInteger(factor) || factor < 2) throw new RangeError(`decimation factor must be an integer ≥ 2, got ${factor}`);
     const taps = tapsPerPhase * factor * 2 + 1;
     const cutoff = 0.45 / factor; // as a fraction of the input rate
     const coeffs = new Float32Array(taps);
@@ -28,6 +31,9 @@ export class Decimator {
   }
 
   process(input: PcmChunk): PcmChunk {
+    if (input.sampleRate !== this.factor * OUTPUT_RATE) {
+      throw new RangeError(`a ×${this.factor} decimator expects ${this.factor * OUTPUT_RATE} Hz input, got ${input.sampleRate} Hz`);
+    }
     const f = this.factor;
     const taps = this.coeffs.length;
     const historyFrames = this.history.length / 2;

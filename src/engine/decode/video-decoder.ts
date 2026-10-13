@@ -57,11 +57,12 @@ function toDomException(err: unknown): DOMException {
 }
 
 export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
-  onOutput: (frame: VideoFrame) => void = () => undefined;
+  onOutput: (frame: VideoFrame) => void = (frame) => frame.close(); // nobody listening: don't leak GPU memory
   onError: (err: DecoderError) => void = () => undefined;
 
   private decoder: VideoDecoderLike | null = null;
   private config: VideoDecoderConfig | null = null;
+  private closed = false;
   private ops: CodecOps | null = null;
   private needKey = true;
   private requireIdr = false;
@@ -88,7 +89,9 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     const info = ops.analyze(config.firstUnit);
     if (!info.sps) throw new Error('first video access unit has no SPS');
     const vdc: VideoDecoderConfig = { codec: ops.codecString(info.sps) };
+    this.closed = false;
     const support = await this.api.isConfigSupported(vdc);
+    if (this.closed) return; // closed while support was being checked: don't open a decoder nobody owns
     if (!support.supported) {
       throw new UnsupportedCodecError(config.codingType, `This browser cannot decode ${codingName(config.codingType)} (${vdc.codec}).`);
     }
@@ -148,11 +151,16 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       this.open();
       return;
     }
-    decoder.reset();
-    decoder.configure(this.config);
+    try {
+      decoder.reset();
+      decoder.configure(this.config);
+    } catch (err) {
+      this.handleError(decoder, toDomException(err));
+    }
   }
 
   close(): void {
+    this.closed = true;
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = null;
     this.discard.clear();

@@ -61,4 +61,16 @@ describe('AudioWriter', () => {
     writer.start(0);
     expect(() => writer.enqueue(chunk(0, 10, 1, 96_000))).toThrow(/sample rate/);
   });
+
+  it('butts chunks together when their timestamps round within one frame of each other', () => {
+    for (const nextPtsUs of [5_021, 4_979]) {
+      const { writer, ring, views } = setup();
+      writer.start(0);
+      writer.enqueue(chunk(0, 240, 1)); // frames 0..239
+      writer.enqueue(chunk(nextPtsUs, 240, 2)); // rounds to frame 241 or 239 — one frame off contiguous
+      expect(ring.writtenFrames()).toBe(480);
+      expect(views.data[240 * 2]).toBe(2); // no silent gap sample, no trimmed first sample
+      expect(views.data[479 * 2]).toBe(2);
+    }
+  });
 });

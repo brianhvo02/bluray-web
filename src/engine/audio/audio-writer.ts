@@ -5,6 +5,8 @@ import type { RingWriter } from './ring';
 export class AudioWriter {
   private baseUs = 0;
   private baseFrame = 0;
+  /** Frame just after the last chunk written; chunks landing within one frame of it are butted against it. */
+  private nextFrame: number | null = null;
   private readonly queue: PcmChunk[] = [];
 
   constructor(private readonly ring: RingWriter) {}
@@ -14,6 +16,7 @@ export class AudioWriter {
     this.baseUs = baseUs;
     this.baseFrame = this.ring.readFrames();
     this.queue.length = 0;
+    this.nextFrame = null;
   }
 
   get queuedChunks(): number {
@@ -35,7 +38,10 @@ export class AudioWriter {
   drain(): void {
     while (this.queue.length > 0) {
       const chunk = this.queue[0];
-      if (!this.ring.writeAt(this.frameAt(chunk.ptsUs), chunk.stereo.subarray(0, chunk.frames * 2))) return;
+      let at = this.frameAt(chunk.ptsUs);
+      if (this.nextFrame !== null && Math.abs(at - this.nextFrame) <= 1) at = this.nextFrame; // rounding, not a real gap
+      if (!this.ring.writeAt(at, chunk.stereo.subarray(0, chunk.frames * 2))) return;
+      this.nextFrame = at + chunk.frames;
       this.queue.shift();
     }
   }

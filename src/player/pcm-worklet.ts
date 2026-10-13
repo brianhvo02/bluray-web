@@ -12,6 +12,7 @@ declare function registerProcessor(name: string, processorCtor: new (options: Pc
 
 class PcmPlayer extends AudioWorkletProcessor {
   private readonly views: RingViews;
+  private scratch = new Float32Array(128);
 
   constructor(options: PcmPlayerOptions) {
     super();
@@ -20,7 +21,9 @@ class PcmPlayer extends AudioWorkletProcessor {
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const [left, right] = outputs[0];
-    renderQuantum(this.views, left, right);
+    if (!left) return true; // no output connected yet
+    if (!right && this.scratch.length !== left.length) this.scratch = new Float32Array(left.length);
+    renderQuantum(this.views, left, right ?? this.scratch); // mono destination: right is discarded
     return true;
   }
 }

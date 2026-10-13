@@ -51,4 +51,10 @@ describe('Decimator', () => {
     expect([...a.stereo, ...b.stereo]).toEqual([...whole.stereo]);
     expect(b.ptsUs).toBeCloseTo(482 * (1e6 / 96_000), 6);
   });
+
+  it('rejects impossible factors and input rates', () => {
+    expect(() => new Decimator(1.5)).toThrow(RangeError);
+    expect(() => new Decimator(1)).toThrow(RangeError);
+    expect(() => new Decimator(4).process(tone(96_000, 100, 0))).toThrow(RangeError); // 96 kHz / 4 is not 48 kHz-compatible here
+  });
 });

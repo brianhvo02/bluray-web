@@ -21,7 +21,7 @@ export class AudioOutput implements AudioOutputLike {
       this.started = created;
       // A failed start must not stay cached: close the context and let the next user gesture retry.
       created.ready.catch(() => {
-        void context.close();
+        context.close().catch(() => undefined); // already closed: nothing to release
         if (this.started === created) this.started = null;
       });
     }

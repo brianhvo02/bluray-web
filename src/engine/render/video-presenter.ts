@@ -26,6 +26,7 @@ export class VideoPresenter<F extends PresentableFrame> {
   }
 
   select(clockUs: number): F | null {
+    this.dropStale();
     let idx = this.lastDueIndex(clockUs);
     if (idx < 0) {
       if (this.presentedSinceClear || this.queue.length === 0) return null;
@@ -46,6 +47,7 @@ export class VideoPresenter<F extends PresentableFrame> {
 
   /** Closes due frames except the newest one, without presenting (used when rendering is throttled). */
   dropLate(clockUs: number): void {
+    this.dropStale();
     const idx = this.lastDueIndex(clockUs);
     if (idx <= 0) return;
     for (let i = 0; i < idx; i++) {
@@ -61,6 +63,19 @@ export class VideoPresenter<F extends PresentableFrame> {
     this.shown?.close();
     this.shown = null;
     this.presentedSinceClear = false;
+  }
+
+  /** Closes queued frames not newer than the one on screen; showing them would step the picture backwards. */
+  private dropStale(): void {
+    const shownAt = this.shown?.timestamp;
+    if (shownAt === undefined) return;
+    let n = 0;
+    while (n < this.queue.length && this.queue[n].timestamp <= shownAt) {
+      this.queue[n].close();
+      this.dropped++;
+      n++;
+    }
+    if (n > 0) this.queue = this.queue.slice(n);
   }
 
   private lastDueIndex(clockUs: number): number {

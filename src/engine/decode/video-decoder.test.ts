@@ -235,4 +235,35 @@ describe('WebCodecsVideoDecoder', () => {
     expect(errors.map((e) => e.fatal)).toEqual([false]);
     expect(created).toHaveLength(2);
   });
+
+  it('does not open a decoder if closed while configure() was still checking support', async () => {
+    const { api, created } = setup();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow: VideoCodecApi = { ...api, isConfigSupported: async (c) => { await gate; return api.isConfigSupported(c); } };
+    const dec = new WebCodecsVideoDecoder(slow);
+    const pending = dec.configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true }) });
+    dec.close();
+    release();
+    await pending;
+    expect(created).toHaveLength(0);
+  });
+
+  it('routes a synchronous throw from reset() into recovery', async () => {
+    const { dec, created, errors } = await configured();
+    created[0].reset = () => {
+      throw new DOMException('reset failed', 'InvalidStateError');
+    };
+    dec.reset();
+    expect(errors.map((e) => e.fatal)).toEqual([false]);
+    expect(created).toHaveLength(2);
+  });
+
+  it('closes frames when no output handler is set', async () => {
+    const { api, created } = setup();
+    const dec = new WebCodecsVideoDecoder(api);
+    await dec.configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true }) });
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    expect(created[0].frames[0].closed).toBe(true);
+  });
 });

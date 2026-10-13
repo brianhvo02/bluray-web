@@ -6,6 +6,7 @@ export interface Rect {
 }
 
 export function fitRect(srcW: number, srcH: number, dstW: number, dstH: number): Rect {
+  if (!(srcW > 0 && srcH > 0 && dstW > 0 && dstH > 0)) return { x: 0, y: 0, width: 0, height: 0 };
   const scale = Math.min(dstW / srcW, dstH / srcH);
   const width = Math.round(srcW * scale);
   const height = Math.round(srcH * scale);

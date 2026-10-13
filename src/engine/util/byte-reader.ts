@@ -82,9 +82,9 @@ export class ByteReader {
 
   bits(n: number): number {
     if (n < 1 || n > 32) throw new ParseError(`bits(${n}) out of range`);
+    if ((this.bytes.length - this.pos) * 8 - this.bitPos < n) throw new ParseError('bit read past end'); // check first: no partial advance
     let value = 0;
     for (let i = 0; i < n; i++) {
-      if (this.pos >= this.bytes.length) throw new ParseError('bit read past end');
       const bit = (this.bytes[this.pos] >> (7 - this.bitPos)) & 1;
       value = value * 2 + bit;
       if (++this.bitPos === 8) {

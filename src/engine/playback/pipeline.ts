@@ -34,6 +34,8 @@ export class PlaybackPipeline {
   private generation = 0;
   private corruptPackets = 0;
   private continuityErrors = 0;
+  /** Reader for the item being read; its counts join the totals when the item ends or a new read starts. */
+  private current: M2tsReader | null = null;
 
   constructor(
     private readonly config: PipelineConfig,
@@ -42,7 +44,15 @@ export class PlaybackPipeline {
   ) {}
 
   get stats(): DemuxStats {
-    return { corruptPackets: this.corruptPackets, continuityErrors: this.continuityErrors };
+    const live = this.current?.stats;
+    return { corruptPackets: this.corruptPackets + (live?.corruptPackets ?? 0), continuityErrors: this.continuityErrors + (live?.continuityErrors ?? 0) };
+  }
+
+  private retire(reader: M2tsReader | null): void {
+    if (!reader) return;
+    this.corruptPackets += reader.stats.corruptPackets;
+    this.continuityErrors += reader.stats.continuityErrors;
+    if (this.current === reader) this.current = null;
   }
 
   start(fromUs: number): void {
@@ -75,6 +85,8 @@ export class PlaybackPipeline {
       const startSpn = ep ? (findEpBefore(ep, target, range)?.spn ?? range.startSpn) : range.startSpn;
       const endSpn = ep ? (findEpAfter(ep, item.outTime, range)?.spn ?? rangeEnd) : rangeEnd;
       const reader = new M2tsReader({ source, path: streamPath(item.clipId), startSpn, endSpn, pids });
+      this.retire(this.current); // a stopped earlier read keeps its counts
+      this.current = reader;
 
       for (;;) {
         while (this.sinks.isFull()) {
@@ -94,8 +106,7 @@ export class PlaybackPipeline {
           else this.sinks.audio(unit);
         }
       }
-      this.corruptPackets += reader.stats.corruptPackets;
-      this.continuityErrors += reader.stats.continuityErrors;
+      this.retire(reader);
     }
     if (gen === this.generation) this.sinks.ended();
   }

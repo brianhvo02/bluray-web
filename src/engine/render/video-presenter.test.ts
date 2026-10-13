@@ -10,6 +10,18 @@ function frame(timestamp: number): TestFrame {
 }
 
 describe('VideoPresenter', () => {
+  it('drops frames older than the one on screen instead of stepping backwards', () => {
+    const p = new VideoPresenter<TestFrame>();
+    const [a, late, b] = [frame(40_000), frame(20_000), frame(80_000)];
+    p.push(a);
+    expect(p.select(50_000)).toBe(a);
+    p.push(late);
+    p.push(b);
+    expect(p.select(60_000)).toBeNull();
+    expect(late.closed).toBe(true);
+    expect(p.select(80_000)).toBe(b);
+  });
+
   it('shows the newest due frame and closes skipped ones', () => {
     const p = new VideoPresenter<TestFrame>();
     const [a, b, c] = [frame(0), frame(40_000), frame(80_000)];

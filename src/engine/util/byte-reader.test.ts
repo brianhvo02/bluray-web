@@ -62,4 +62,11 @@ describe('ByteReader', () => {
     expect(() => new ByteReader(new Uint8Array(8), -2)).toThrow(ParseError);
     expect(r.position).toBe(0);
   });
+
+  it('leaves the reader where it was when a bit read runs past the end', () => {
+    const r = new ByteReader(new Uint8Array([0xff]));
+    r.bits(4);
+    expect(() => r.bits(8)).toThrow(ParseError);
+    expect(r.bits(4)).toBe(0xf);
+  });
 });

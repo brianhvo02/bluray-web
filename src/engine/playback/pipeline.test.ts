@@ -9,11 +9,13 @@ import { loadClips } from '../disc/open-disc';
 import { Timeline } from '../nav/timeline';
 import { PlaybackPipeline, type PipelineConfig, type PipelineUnit } from './pipeline';
 
-async function setup(): Promise<PipelineConfig> {
+async function setup(corruptPacket?: number): Promise<PipelineConfig> {
   const files = buildSyntheticDisc({
     clips: [syntheticClip('00001', 4, { audio: CodingType.LPCM }), syntheticClip('00002', 4, { audio: CodingType.LPCM })],
     playlists: [{ id: '00000', clipIds: ['00001', '00002'] }],
   });
+  const clip = files.get('BDMV/STREAM/00001.m2ts');
+  if (corruptPacket !== undefined && clip) clip[corruptPacket * 192 + 4] = 0x00; // break one packet's sync byte
   const source = syntheticSource(files);
   const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
   return { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001', '00002']), videoPid: VIDEO_PID, audioPid: AUDIO_PID };
@@ -247,5 +249,15 @@ describe('PlaybackPipeline', () => {
     expect(seek.got.video[0].ptsUs).toBeGreaterThanOrEqual(4_000_000);
     expect(seek.got.video[0].ptsUs).toBeLessThanOrEqual(5_000_000);
     expect(seek.got.video.every((u) => second.has(frameLength(u)))).toBe(true);
+  });
+
+  it('keeps packet-error counts from a read that was stopped part-way (e.g. by a seek)', async () => {
+    let blocking = true;
+    const { pipeline, got } = run(await setup(3), 0, (g) => blocking && g.video.length > 0);
+    await new Promise((r) => setTimeout(r, 30)); // first clip read, paused before the second
+    pipeline.stop();
+    blocking = false;
+    expect(got.video.length).toBeGreaterThan(0);
+    expect(pipeline.stats.corruptPackets).toBe(1);
   });
 });
