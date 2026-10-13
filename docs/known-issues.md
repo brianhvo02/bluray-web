@@ -3,14 +3,6 @@
 Items left open on purpose. Each one says why it was left and
 what would change that decision.
 
-## Behaviour
-
-- **Abandoned prefetch reads run to completion.** Blob reads cannot be aborted.
-  After a seek, any 2 MB read already in flight finishes and its result is thrown away.
-  This costs bandwidth, not correctness.
-  The only way to cancel would be reading through `Blob.stream()`, which adds a chunk copy to every read.
-  *Revisit if* seeks feel slow on network-mounted folders.
-
 ## Performance
 
 - **Rejected: demux PID peek.** Skipping unwanted PIDs before parsing measured
@@ -20,8 +12,9 @@ what would change that decision.
 
 - **E2E A/V sync bounds are tight.** The checks are 20 ms average and 50 ms max.
   They pass locally at 11–15 ms average and 21 ms max but may flake on a slow CI machine.
-  *Revisit when* CI is set up; widen the bounds or mark those checks as local-only.
-  There is no CI to tune them against yet.
+  `SYNC_TOLERANCE_SCALE` widens both bounds without editing the tests (default 1).
+  *Revisit when* CI is set up, to pick that machine's scale from its logged `sync stats`.
+  Note that a CI machine also needs an audio output: without one the clock runs in wall mode and the sync tests fail.
 
 ## Resolved (for reference)
 
@@ -47,3 +40,10 @@ what would change that decision.
   They also check that "next chapter" on the last chapter leaves the clock advancing,
   with no state change and no seek.
 - **The `fsevents` install-script warning** is silenced (`"fsevents": false` in `allowScripts`).
+- **Abandoned prefetch reads are cancelled.** `ByteSource.read` takes an `AbortSignal`.
+  With a signal, `FileSource` reads through `Blob.stream()`, which measured as fast as `arrayBuffer()` in Chrome
+  (200 MB in 84–98 ms vs 83–97 ms on the local disc). `PlaybackPipeline.stop()` and each new item cancel the old reader.
+- **Holding or slowly dragging the seek bar snapped back.** On release Chrome can fire a trailing `change`
+  after `pointerup`. Once the drag value had been cleared, it carried the old playback time, which seeked back there.
+  The seek bar now holds the committed target until the engine reports reaching it, and ignores that repeat.
+  Holding a control also keeps the controls from hiding.

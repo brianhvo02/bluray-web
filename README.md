@@ -4,7 +4,8 @@ Client-side Blu-ray (BDMV) player for Chromium. Design: `docs/superpowers/specs/
 
 - `src/engine/` is derived from libbluray and licensed LGPL-2.1 (see `src/engine/LICENSE`).
 - `npm run dev`: dev server (cross-origin isolated).
-- `npm test`: unit tests. `npm run test:e2e`: Playwright (requires Google Chrome).
+- `npm test`: unit tests. `npm run test:e2e`: Playwright (requires Google Chrome and a working audio output).
+  The A/V sync checks allow 20 ms mean and 50 ms max offset; `SYNC_TOLERANCE_SCALE=2` doubles both on slower machines.
 - Put your own decrypted discs under `fixtures/local/<name>/BDMV/...` to enable `tests/local`.
   `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome and seeks around it.
 
