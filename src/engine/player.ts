@@ -570,6 +570,8 @@ export class Player {
         corruptPackets: stats.corruptPackets + this.corruptAudioUnits,
         continuityErrors: stats.continuityErrors,
         decoderErrors: this.decoderErrors,
+        openGopStarts: s.decoder.openGop.starts,
+        leadingPicturesSkipped: s.decoder.openGop.leadingSkipped,
       },
     });
   }

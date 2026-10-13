@@ -16,6 +16,9 @@ class FakeDecoder implements VideoDecoderLike {
   config: VideoDecoderConfig | null = null;
   readonly chunks: EncodedVideoChunkInit[] = [];
   readonly frames: FakeFrame[] = [];
+  /** When set, frames wait in `queued` until deliver(), like output tasks a real decoder runs later. */
+  asyncOutput = false;
+  readonly queued: FakeFrame[] = [];
 
   constructor(private readonly init: VideoDecoderInit) {}
 
@@ -29,7 +32,13 @@ class FakeDecoder implements VideoDecoderLike {
     this.chunks.push(init);
     const frame: FakeFrame = { timestamp: init.timestamp, closed: false, close() { this.closed = true; } };
     this.frames.push(frame);
-    this.init.output(frame as unknown as VideoFrame);
+    if (this.asyncOutput) this.queued.push(frame);
+    else this.init.output(frame as unknown as VideoFrame);
+  }
+
+  /** Runs the queued output callbacks. reset() deliberately leaves them queued: late delivery is allowed. */
+  deliver(): void {
+    for (const frame of this.queued.splice(0)) this.init.output(frame as unknown as VideoFrame);
   }
 
   async flush(): Promise<void> {}
@@ -119,6 +128,7 @@ describe('WebCodecsVideoDecoder', () => {
       ['delta', 4000],
       ['delta', 3000],
     ]);
+    expect(dec.openGop).toEqual({ starts: 1, leadingSkipped: 2 });
   });
 
   it('does not skip anything after an IDR start', async () => {
@@ -126,6 +136,7 @@ describe('WebCodecsVideoDecoder', () => {
     dec.decode({ data: avcAu({ idr: true }), ptsUs: 2000, discard: false });
     dec.decode({ data: avcAu(), ptsUs: 1000, discard: false });
     expect(created[0].chunks.map((c) => c.timestamp)).toEqual([2000, 1000]);
+    expect(dec.openGop).toEqual({ starts: 0, leadingSkipped: 0 });
   });
 
   it('closes frames of discarded units instead of outputting them', async () => {
@@ -257,6 +268,57 @@ describe('WebCodecsVideoDecoder', () => {
     dec.reset();
     expect(errors.map((e) => e.fatal)).toEqual([false]);
     expect(created).toHaveLength(2);
+  });
+
+  it('closes a late-delivered discarded frame and outputs late-delivered kept ones', async () => {
+    const { dec, created, out } = await configured();
+    created[0].asyncOutput = true;
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: true });
+    dec.decode({ data: avcAu(), ptsUs: 41_708, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 83_416, discard: false });
+    expect(out).toHaveLength(0);
+    created[0].deliver();
+    expect(out.map((f) => f.timestamp)).toEqual([41_708, 83_416]);
+    expect(created[0].frames[0].closed).toBe(true);
+  });
+
+  it('closes frames from before reset() that arrive after it', async () => {
+    const { dec, created, out } = await configured();
+    created[0].asyncOutput = true;
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 5_000_000, discard: false });
+    dec.decode({ data: avcAu(), ptsUs: 5_041_708, discard: false });
+    dec.reset(); // a backward seek
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 1_000_000, discard: false });
+    created[0].deliver();
+    expect(out.map((f) => f.timestamp)).toEqual([1_000_000]);
+    expect(created[0].frames.slice(0, 2).every((f) => f.closed)).toBe(true);
+  });
+
+  it('closes late frames from a decoder replaced after an error', async () => {
+    const { dec, created, out } = await configured();
+    created[0].asyncOutput = true;
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    created[0].fail('boom');
+    created[0].deliver();
+    expect(out).toHaveLength(0);
+    expect(created[0].frames[0].closed).toBe(true);
+  });
+
+  it('forgets timestamps the decoder never outputs once they fall far behind', async () => {
+    const { dec, created, out } = await configured();
+    const fake = created[0];
+    fake.asyncOutput = true;
+    dec.decode({ data: avcAu({ idr: true }), ptsUs: 0, discard: false });
+    for (let i = 1; i < 300; i++) dec.decode({ data: avcAu(), ptsUs: i * 41_708, discard: false });
+    fake.queued.splice(0, 100); // a decoder that silently dropped its first 100 pictures
+    fake.deliver();
+    expect(out).toHaveLength(200);
+    // ts 0 was pruned, so a stray output for it is refused instead of being taken as a live frame.
+    const stray = { timestamp: 0, closed: false, close() { this.closed = true; } };
+    fake.queued.push(stray);
+    fake.deliver();
+    expect(out).toHaveLength(200);
+    expect(stray.closed).toBe(true);
   });
 
   it('closes frames when no output handler is set', async () => {

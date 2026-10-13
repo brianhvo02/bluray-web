@@ -43,6 +43,9 @@ const CODECS: ReadonlyMap<number, CodecOps> = new Map<number, CodecOps>([
 ]);
 
 const MAX_CONSECUTIVE_ERRORS = 3;
+/** Above this many fed-but-unseen timestamps, forget ones far behind the newest output (the decoder dropped them). */
+const PENDING_PRUNE_SIZE = 64;
+const PENDING_PRUNE_WINDOW_US = 2_000_000;
 
 export function isSupportedVideoCoding(codingType: number): boolean {
   return CODECS.has(codingType);
@@ -70,12 +73,23 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   /** PTS of a non-IDR (open-GOP) random access point whose leading pictures must still be skipped. */
   private leadingKeyPtsUs: number | null = null;
   private consecutiveErrors = 0;
-  private readonly discard = new Set<number>();
+  /**
+   * Timestamps fed since the last reset, mapped to whether their frame is discarded. A frame whose timestamp
+   * is missing was decoded before a reset() and delivered late; WebCodecs does not promise to drop those.
+   */
+  private readonly pending = new Map<number, boolean>();
+  private openGopStarts = 0;
+  private leadingSkipped = 0;
 
   constructor(private readonly api: VideoCodecApi = browserVideoCodecApi) {}
 
   get queueSize(): number {
     return this.decoder?.decodeQueueSize ?? 0;
+  }
+
+  /** Decode sequences started on a non-IDR random access point, and the leading pictures skipped after them. */
+  get openGop(): { readonly starts: number; readonly leadingSkipped: number } {
+    return { starts: this.openGopStarts, leadingSkipped: this.leadingSkipped };
   }
 
   get codec(): string | null {
@@ -114,13 +128,17 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       this.needKey = false;
       this.lastKeyWasIdr = info.idr;
       this.leadingKeyPtsUs = info.idr ? null : unit.ptsUs;
+      if (!info.idr) this.openGopStarts++;
     } else if (this.leadingKeyPtsUs !== null) {
       // Open GOP: pictures that follow the I-frame in decode order but precede it in display order
       // reference frames before the random access point, which we never fed to the decoder.
-      if (unit.ptsUs < this.leadingKeyPtsUs) return;
+      if (unit.ptsUs < this.leadingKeyPtsUs) {
+        this.leadingSkipped++;
+        return;
+      }
       this.leadingKeyPtsUs = null;
     }
-    if (unit.discard) this.discard.add(unit.ptsUs);
+    this.pending.set(unit.ptsUs, unit.discard);
     try {
       decoder.decode(this.api.makeChunk({ type: startsSequence || info.idr ? 'key' : 'delta', timestamp: unit.ptsUs, data: info.data }));
     } catch (err) {
@@ -141,7 +159,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   }
 
   reset(): void {
-    this.discard.clear();
+    this.pending.clear();
     this.needKey = true;
     this.leadingKeyPtsUs = null;
     this.requireIdr = false;
@@ -163,7 +181,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     this.closed = true;
     if (this.decoder && this.decoder.state !== 'closed') this.decoder.close();
     this.decoder = null;
-    this.discard.clear();
+    this.pending.clear();
   }
 
   private open(): void {
@@ -177,7 +195,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     this.decoder = decoder;
     this.needKey = true;
     this.leadingKeyPtsUs = null;
-    this.discard.clear();
+    this.pending.clear();
     try {
       decoder.configure(config);
     } catch (err) {
@@ -191,11 +209,19 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       return;
     }
     this.consecutiveErrors = 0;
-    if (this.discard.delete(frame.timestamp)) {
-      frame.close();
+    const discard = this.pending.get(frame.timestamp);
+    this.pending.delete(frame.timestamp);
+    if (discard !== false) {
+      frame.close(); // discarded, or stale from before a reset
       return;
     }
+    this.prunePending(frame.timestamp);
     this.onOutput(frame);
+  }
+
+  private prunePending(outputUs: number): void {
+    if (this.pending.size <= PENDING_PRUNE_SIZE) return;
+    for (const ts of this.pending.keys()) if (ts < outputUs - PENDING_PRUNE_WINDOW_US) this.pending.delete(ts);
   }
 
   private handleError(source: VideoDecoderLike, err: DOMException): void {

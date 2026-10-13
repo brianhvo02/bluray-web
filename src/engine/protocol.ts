@@ -21,6 +21,9 @@ export interface Telemetry {
   readonly corruptPackets: number;
   readonly continuityErrors: number;
   readonly decoderErrors: number;
+  /** Decoding restarts on an open-GOP (non-IDR) keyframe in this session, and leading pictures skipped after them. */
+  readonly openGopStarts: number;
+  readonly leadingPicturesSkipped: number;
 }
 
 export type EngineCommand =

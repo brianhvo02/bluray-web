@@ -10,6 +10,8 @@ interface TelemetrySample {
   avOffsetMaxAbsUs: number | null;
   framesInWindow: number;
   decoderErrors?: number;
+  openGopStarts?: number;
+  leadingPicturesSkipped?: number;
 }
 
 async function telemetry(page: Page): Promise<TelemetrySample | null> {
@@ -165,6 +167,7 @@ test('plays a B-frame, open-GOP disc in sync and seeks without decoder errors', 
   const seeked = await telemetry(page);
   console.log(`disc2 telemetry (after seek): ${JSON.stringify(seeked)}`);
   expect(seeked?.decoderErrors).toBe(0);
+  expect(seeked?.openGopStarts).toBeGreaterThan(0); // the seek really started on the open-GOP I-frame
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing');
 });
 
