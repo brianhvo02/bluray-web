@@ -29,6 +29,17 @@ export interface Telemetry {
   readonly leadingPicturesSkipped: number;
 }
 
+export interface AudioTrack {
+  /** 1-based position in the STN audio list. */
+  readonly index: number;
+  readonly codec: string;
+  /** ISO 639-2 code from the STN, or '' if absent. */
+  readonly language: string;
+  /** One of 'mono', 'stereo', 'multichannel' or ''. */
+  readonly channels: string;
+  readonly playable: boolean;
+}
+
 export type EngineCommand =
   | { readonly type: 'open'; readonly entries: ReadonlyArray<readonly [string, Blob]> }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
@@ -38,6 +49,7 @@ export type EngineCommand =
   | { readonly type: 'play' }
   | { readonly type: 'pause' }
   | { readonly type: 'seek'; readonly timeUs: number }
+  | { readonly type: 'selectAudio'; readonly index: number }
   | { readonly type: 'nextChapter' }
   | { readonly type: 'prevChapter' }
   /** Forget the open disc ("Open another disc"). */
@@ -46,6 +58,7 @@ export type EngineCommand =
 export type EngineEvent =
   | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly warnings: readonly string[] }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
+  | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
   | { readonly type: 'state'; readonly state: PlaybackState }
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }

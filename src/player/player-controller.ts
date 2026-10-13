@@ -50,6 +50,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
+    case 'tracks':
+      return s; // surfaced to the UI in a later task
     case 'state':
       return { ...s, engineState: e.state };
     case 'time':

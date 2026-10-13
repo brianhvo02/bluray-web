@@ -14,7 +14,8 @@ import { normalizeDiscPaths } from './disc/paths';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
-import type { EngineCommand, EngineEvent, NoticeCode, PlaybackState } from './protocol';
+import { audioTracks } from './playback/tracks';
+import type { AudioTrack, EngineCommand, EngineEvent, NoticeCode, PlaybackState } from './protocol';
 import type { CompositorLike } from './render/compositor';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
@@ -53,6 +54,7 @@ interface Session {
   readonly playlistId: string;
   readonly timeline: Timeline;
   readonly chapters: readonly Chapter[];
+  readonly tracks: readonly AudioTrack[];
   readonly videoCodingType: number;
   readonly decoder: WebCodecsVideoDecoder;
   readonly pipeline: PlaybackPipeline;
@@ -143,6 +145,9 @@ export class Player {
           break;
         case 'seek':
           await this.startAt(cmd.timeUs, this.wantPlaying);
+          break;
+        case 'selectAudio':
+          await this.selectAudio(cmd.index);
           break;
         case 'nextChapter':
           await this.skipChapter(1);
@@ -259,6 +264,7 @@ export class Player {
       playlistId,
       timeline,
       chapters: timeline.chapters(mpls.marks),
+      tracks: audioTracks(mpls.playItems[0].stn),
       videoCodingType: choice.video.codingType,
       decoder,
       pipeline,
@@ -288,6 +294,7 @@ export class Player {
     this.audioDecodeErrors = 0;
     this.audioCodec = null;
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
+    this.emitTracks(session);
     await this.startAt(0, true);
   }
 
@@ -305,6 +312,23 @@ export class Player {
     this.ring?.setPlaying(false);
     this.compositor?.drawVideo(null);
     this.wantPlaying = false;
+  }
+
+  private emitTracks(s: Session): void {
+    this.deps.emit({ type: 'tracks', audio: s.tracks, selectedAudio: s.audioStream });
+  }
+
+  /** Switching is a re-seek to the current time with the new stream (a brief video refill). */
+  private async selectAudio(index: number): Promise<void> {
+    const s = this.session;
+    if (!s || index === s.audioStream || this.state === 'error') return;
+    if (!s.tracks.find((t) => t.index === index)?.playable) return;
+    s.audioStream = index;
+    s.audioActive = this.ring !== null;
+    s.audioErrorDisabled = false;
+    s.audioStalledBeat = null;
+    this.emitTracks(s);
+    await this.startAt(this.clock.nowUs(), this.wantPlaying);
   }
 
   private async startAt(targetUs: number, autoplay: boolean): Promise<void> {

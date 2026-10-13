@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildSyntheticDisc, discEntries, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
+import { buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
 import { createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
@@ -462,5 +462,92 @@ describe('Player', () => {
     expect(h.events.some((e) => e.type === 'unsupported')).toBe(false);
     expect(lastTelemetry(h)?.clockMode).toBe('audio');
     expect(lastTelemetry(h)?.corruptPackets).toBeGreaterThanOrEqual(1);
+  });
+
+  const twoTracks = (second: number) => [lpcmStream(0x1100, 4, { lang: 'jpn' }), dummyAudioStream(0x1101, second, 4, { lang: 'eng' })];
+  const tracksEvents = (h: Harness) => h.events.flatMap((e) => (e.type === 'tracks' ? [e] : []));
+
+  it('lists the audio tracks after the chapters and selects the first playable one', async () => {
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3), createAudioDecoder: fakeAudioFactory() });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    const types = h.events.map((e) => e.type);
+    expect(types.indexOf('tracks')).toBeGreaterThan(types.indexOf('chapters'));
+    expect(tracksEvents(h).at(-1)).toEqual({
+      type: 'tracks',
+      selectedAudio: 1,
+      audio: [
+        { index: 1, codec: 'LPCM', language: 'jpn', channels: 'stereo', playable: true },
+        { index: 2, codec: 'Dolby Digital (AC-3)', language: 'eng', channels: 'stereo', playable: true },
+      ],
+    });
+  });
+
+  it('switches the audio track at the current time and keeps playing', async () => {
+    const log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 };
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3), createAudioDecoder: fakeAudioFactory(log) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1500);
+    const at = lastTelemetry(h)?.clockUs ?? 0;
+    await h.player.handle({ type: 'selectAudio', index: 2 });
+    expect(tracksEvents(h).at(-1)?.selectedAudio).toBe(2);
+    await untilPlaying(h);
+    await h.play(800);
+    expect(Math.min(...log.decoded)).toBeGreaterThan(at - 1_100_000); // read from the keyframe before the switch point
+    expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'Dolby Digital (AC-3)' });
+  });
+
+  it('switching while paused stays paused at the same time', async () => {
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3), createAudioDecoder: fakeAudioFactory() });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    await h.player.handle({ type: 'pause' });
+    const pausedAt = lastTelemetry(h)?.clockUs ?? 0;
+    await h.player.handle({ type: 'selectAudio', index: 2 });
+    await h.play(300);
+    expect(lastState(h)).toBe('paused');
+    const lastTime = h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : [])).at(-1) ?? -1;
+    expect(Math.abs(lastTime - pausedAt)).toBeLessThan(300_000);
+  });
+
+  it('ignores unplayable, unknown and already-selected tracks', async () => {
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.EAC3_SECONDARY), createAudioDecoder: fakeAudioFactory() });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const before = h.events.length;
+    for (const index of [2, 9, 1]) await h.player.handle({ type: 'selectAudio', index });
+    expect(h.events.slice(before).filter((e) => e.type === 'tracks' || (e.type === 'state' && e.state === 'buffering'))).toEqual([]);
+  });
+
+  it('the last of two quick switches wins while a decoder is still loading', async () => {
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (open = r));
+    const log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 };
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3), createAudioDecoder: fakeAudioFactory(log, gate) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const toAc3 = h.player.handle({ type: 'selectAudio', index: 2 });
+    const back = h.player.handle({ type: 'selectAudio', index: 1 });
+    open();
+    await Promise.all([toAc3, back]);
+    await untilPlaying(h);
+    log.decoded.length = 0;
+    await h.play(800);
+    expect(tracksEvents(h).at(-1)?.selectedAudio).toBe(1);
+    expect(log.decoded).toEqual([]);
+    expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'LPCM' });
+  });
+
+  it('brings sound back by switching to a playable track after a decoder failed to load', async () => {
+    const h = await harness(undefined, { audioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4), lpcmStream(0x1101, 4)] }); // noWasmFactory
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(500);
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+    await h.player.handle({ type: 'selectAudio', index: 2 });
+    await untilPlaying(h);
+    await h.play(800);
+    expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'LPCM' });
   });
 });
