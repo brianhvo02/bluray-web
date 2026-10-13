@@ -126,3 +126,27 @@ describe('STC-aware EP lookup', () => {
     expect(stcSpnRange(clpi, 7)).toEqual({ startSpn: 0, endSpn: Infinity }); // unknown id: whole clip, like libbluray
   });
 });
+
+describe('CLPI versions and stream attributes', () => {
+  const base = (): Uint8Array =>
+    buildClpi({
+      numSourcePackets: 64,
+      streams: [{ pid: 0x1011, codingType: CodingType.AVC }, { pid: 0x1a00, codingType: 0xa0 }],
+      presentationStart: 0,
+      presentationEnd: 45_000,
+      epMaps: [{ pid: 0x1011, entries: [] }],
+    });
+
+  it('accepts the file versions libbluray accepts (0100, 0200, 0240, 0300) and rejects others', () => {
+    for (const v of ['0100', '0200', '0240', '0300', '0400']) {
+      const bytes = base();
+      bytes.set([...v].map((c) => c.charCodeAt(0)), 4);
+      if (v === '0400') expect(() => parseClpi(bytes)).toThrow(ParseError);
+      else expect(parseClpi(bytes).version).toBe(v);
+    }
+  });
+
+  it('reads the language of coding type 0xa0 streams, as libbluray does', () => {
+    expect(parseClpi(base()).programs[0].streams[1]).toMatchObject({ pid: 0x1a00, codingType: 0xa0, lang: 'eng' });
+  });
+});

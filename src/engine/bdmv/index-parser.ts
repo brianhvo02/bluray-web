@@ -8,6 +8,7 @@
  */
 
 import { ByteReader, ParseError } from '../util/byte-reader';
+import { checkVersion } from './version';
 
 /** Ported from libbluray bdnav/index_parse.c. */
 export type IndexObject =
@@ -35,6 +36,7 @@ export function parseIndex(bytes: Uint8Array): IndexBdmv {
   const signature = r.ascii(4);
   const version = r.ascii(4);
   if (signature !== 'INDX') throw new ParseError(`index.bdmv: bad signature "${signature}"`);
+  checkVersion('index.bdmv', version);
   const indexesStart = r.u32();
   r.seek(indexesStart);
   const length = r.u32();

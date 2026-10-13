@@ -57,4 +57,14 @@ describe('parseIndex', () => {
     expect(index.titles[0].object).toEqual({ kind: 'unknown', objectType: 3 });
     expect(index.titles[1].object).toEqual({ kind: 'hdmv', playbackType: 0, movieObjectId: 3 });
   });
+
+  it('accepts the file versions libbluray accepts (0100, 0200, 0240, 0300) and rejects others', () => {
+    const make = (v: string): Uint8Array => {
+      const bytes = buildIndex({ firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [] });
+      bytes.set([...v].map((c) => c.charCodeAt(0)), 4);
+      return bytes;
+    };
+    for (const v of ['0100', '0200', '0240', '0300']) expect(parseIndex(make(v)).version).toBe(v);
+    expect(() => parseIndex(make('0400'))).toThrow(ParseError);
+  });
 });

@@ -10,6 +10,7 @@
 
 import { ByteReader, ParseError } from '../util/byte-reader';
 import { CodingType, isAudioCoding, isVideoCoding } from './stream-types';
+import { checkVersion } from './version';
 
 /** Ported from libbluray bdnav/mpls_parse.c (playlist, play items, STN, marks). */
 export interface StreamEntry {
@@ -70,6 +71,7 @@ export function parseMpls(bytes: Uint8Array): Mpls {
   const signature = r.ascii(4);
   const version = r.ascii(4);
   if (signature !== 'MPLS') throw new ParseError(`mpls: bad signature "${signature}"`);
+  checkVersion('mpls', version);
   const listPos = r.u32();
   const markPos = r.u32();
   r.u32(); // extension data position

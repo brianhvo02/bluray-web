@@ -10,6 +10,7 @@
 
 import { ByteReader, ParseError } from '../util/byte-reader';
 import { CodingType, isAudioCoding, isVideoCoding } from './stream-types';
+import { checkVersion } from './version';
 
 /** Ported from libbluray bdnav/clpi_parse.c (clip info, sequence info, program info, CPI/EP map). */
 export interface StcSequence {
@@ -64,6 +65,7 @@ export function parseClpi(bytes: Uint8Array): Clpi {
   const signature = r.ascii(4);
   const version = r.ascii(4);
   if (signature !== 'HDMV') throw new ParseError(`clpi: bad signature "${signature}"`);
+  checkVersion('clpi', version);
   const sequenceStart = r.u32();
   const programStart = r.u32();
   const cpiStart = r.u32();
@@ -138,7 +140,8 @@ function readProgramInfo(r: ByteReader, start: number): ProgramInfo[] {
         format = r.bits(4);
         rate = r.bits(4);
         lang = r.ascii(3);
-      } else if (codingType === CodingType.PG || codingType === CodingType.IG) {
+      } else if (codingType === CodingType.PG || codingType === CodingType.IG || codingType === 0xa0) {
+        // 0xa0: read like the graphics streams, as libbluray's clpi _parse_stream_attr does
         lang = r.ascii(3);
       } else if (codingType === CodingType.TEXT_SUBTITLE) {
         r.skip(1);

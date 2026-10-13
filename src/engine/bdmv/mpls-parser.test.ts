@@ -147,4 +147,14 @@ describe('parseMpls', () => {
       [0x1101, true],
     ]);
   });
+
+  it('accepts the file versions libbluray accepts (0100, 0200, 0240, 0300) and rejects others', () => {
+    const make = (v: string): Uint8Array => {
+      const bytes = buildMpls({ playItems: [{ clipId: '00001', inTime: 0, outTime: 100, video: [VIDEO] }] });
+      bytes.set([...v].map((c) => c.charCodeAt(0)), 4);
+      return bytes;
+    };
+    for (const v of ['0100', '0200', '0240', '0300']) expect(parseMpls(make(v)).version).toBe(v);
+    expect(() => parseMpls(make('9999'))).toThrow(ParseError);
+  });
 });
