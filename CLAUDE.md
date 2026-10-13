@@ -1,0 +1,45 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A client-side Blu-ray (BDMV) player for desktop Chromium: a TypeScript port of libbluray (not WASM), its own M2TS demuxer, and WebCodecs decoding. Nothing is uploaded. The design spec is `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`. Milestone 1 ("core player": parsers, demux, H.264/HEVC video, LPCM audio, clock, seek/chapters, basic UI) is done. Milestones 2–4 (AC-3/TrueHD audio, HDMV VM and IG menus, PGS/SRT/ASS subtitles) are not built yet. The spec describes modules such as `hdmv/`, `graphics/` and `subs/` that don't exist yet. `docs/known-issues.md` lists decisions left open on purpose and resolved items. Read it before changing something it covers.
+
+## Commands
+
+- `npm run dev`: Vite dev server, served with COOP/COEP headers.
+- `npm run typecheck` (`tsc -b`) and `npm run build` (typecheck, then `vite build`).
+- `npm test`: Vitest, all unit tests (`src/**/*.test.ts` plus `tests/local/**`). Run one file with `npx vitest run src/engine/demux/ts-packet.test.ts` and filter by name with `-t "<name>"`.
+- `npm run test:e2e`: Playwright against a production build on port 4173 (`npm run build && npm run preview`). It needs installed Google Chrome (`channel: 'chrome'`) and a working audio output, because the A/V sync tests measure the real AudioWorklet clock. Run one test with `npx playwright test playback -g "<title>"`.
+  - `SYNC_TOLERANCE_SCALE=2` widens the 20 ms mean / 50 ms max A/V offset bounds. CI uses 1.5. Keep local runs at the default.
+  - `LOCAL_DISCS=1 npx playwright test local-discs` plays every disc under `fixtures/local/` and seeks around in it.
+  - Nightly drift test: `npx tsx scripts/make-fixture-disc.ts fixtures/local/long-disc --seconds-per-clip 300`, then `NIGHTLY=1 npx playwright test -g "ten minutes"`.
+- `npm run fixture:synthetic`: regenerates the committed discs in `fixtures/synthetic/` from `scripts/` (the scripts build on `tests/helpers/`). Rerun it after changing the builders or muxer, and commit the output.
+- CI (`.github/workflows/ci.yml`) runs Node 24 and needs npm ≥ 11.19 because `package.json` uses `allowScripts`. `scripts/ci-audio.sh` sets up a PulseAudio null sink for the sync tests.
+
+## Architecture
+
+There are three execution contexts. They communicate only through typed messages and one shared buffer.
+
+1. **Main thread** (`src/ui/`, `src/player/`): React UI. `PlayerController` is an external store over the worker protocol, read with `useSyncExternalStore`. There is no state library. `reduceEvent` is a pure reducer from `EngineEvent` to `PlayerSnapshot`, and it is unit-tested. `create-controller.ts` starts the worker. `?telemetry=1` copies telemetry to `window.__blurayTelemetry`, which is what the E2E tests read.
+2. **Engine worker** (`src/engine/`, framework-free, entry point `worker.ts`): `Player` owns one disc and at most one playing playlist (a `Session`). The `<canvas>` is transferred as an `OffscreenCanvas`, so presentation timing doesn't depend on React.
+3. **AudioWorklet** (`src/player/pcm-worklet.ts`): plays PCM from a `SharedArrayBuffer` ring (`engine/audio/ring.ts`) and atomically publishes the count of frames played. `MasterClock` derives playback time from that count, falling back to the wall clock when no audio is playable. Video frames are presented against this clock.
+
+`src/engine/protocol.ts` is the contract between the UI and the engine. It defines the `EngineCommand` and `EngineEvent` discriminated unions and `Telemetry`. Change it first when you add a feature that crosses the boundary.
+
+Data flow inside the engine:
+- `disc/`: `ByteSource` and `FileSource` (a normalized `path → Blob` map, so the engine never sees file handles). `open-disc.ts` loads index, playlists and clips and maps failures to `DiscError` codes. `ByteSource.read` takes an `AbortSignal`.
+- `bdmv/`: `index.bdmv`, `.mpls` and `.clpi` parsers, ported from libbluray.
+- `nav/timeline.ts`: maps play items onto one continuous playlist time, handling the 33-bit PTS wrap and per-item discontinuities. Seeks go through the EP map to an SPN, then to an aligned byte offset.
+- `demux/` (192-byte source packets, then TS, then PES) feeds `playback/pipeline.ts`, which runs read-ahead, backpressure and cancellation of abandoned reads on a seek.
+- `decode/`: `WebCodecsVideoDecoder` (Annex-B; the codec string comes from the SPS in `h264.ts`/`hevc.ts`) and `lpcm.ts`. `render/`: `VideoPresenter` (chooses which frame to show against the clock) and `Compositor`.
+
+Testability pattern: `Player` takes its side effects through `PlayerDeps`: `emit`, `videoCodecApi`, `nowMs`, `requestFrame` and `createCompositor`. `PlayerController` takes a `WorkerLike` and an `AudioOutputLike`. Unit tests inject fakes, for example a fake `VideoDecoder` that can deliver output late. Keep new browser APIs behind injectable interfaces like these.
+
+## Constraints
+
+- **Licensing:** `src/engine/` is LGPL-2.1 and keeps its own `LICENSE` and `NOTICE`. It must not import React or anything from `src/ui/` or `src/player/`. When you port or derive code from libbluray or FFmpeg, record the source file in `src/engine/NOTICE`.
+- **Cross-origin isolation is required** for `SharedArrayBuffer`. The Vite dev and preview servers set COOP/COEP in `vite.config.ts`. Static deploys rely on `public/_headers`. Don't add resources that would break `require-corp`.
+- **Test fixtures:** `fixtures/synthetic/` is committed and generated by the scripts. `fixtures/local/<name>/BDMV/...` holds the developer's own decrypted discs and is gitignored. `tests/local` and `local-discs.spec.ts` skip when it is absent. Blu-ray clips often exceed 4 GiB, so `tests/local` reads ranges through its own Blob stand-in, because Node's `openAsBlob` reports sizes modulo 2^32.
+- TypeScript is strict, with `noUnusedLocals`/`noUnusedParameters` and `verbatimModuleSyntax` (use `import type` for type-only imports). `tsconfig.app.json` also typechecks `tests/helpers`.
