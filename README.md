@@ -9,6 +9,15 @@ Client-side Blu-ray (BDMV) player for Chromium. Design: `docs/superpowers/specs/
 - Put your own decrypted discs under `fixtures/local/<name>/BDMV/...` to enable `tests/local`.
   `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome and seeks around it.
 
+## CI
+
+`.github/workflows/ci.yml` runs typecheck and unit tests, then the Playwright suite in Chrome on `ubuntu-latest`.
+`scripts/ci-audio.sh` gives the runner a PulseAudio null sink, because the sync tests need a running audio output.
+CI uses `SYNC_TOLERANCE_SCALE=1.5`; local runs keep the default bounds.
+
+To try the Linux setup locally in Docker, install Chrome from `dl.google.com/linux/direct/google-chrome-stable_current_<arch>.deb`.
+Google ships arm64 builds, but `npx playwright install chrome` (Playwright 1.64) still refuses to run on Linux arm64.
+
 ## Nightly sync test
 
     npx tsx scripts/make-fixture-disc.ts fixtures/local/long-disc --seconds-per-clip 300

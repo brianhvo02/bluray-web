@@ -8,14 +8,6 @@ what would change that decision.
 - **Rejected: demux PID peek.** Skipping unwanted PIDs before parsing measured
   103 ms vs 105 ms per 400 MB, which is no gain, so it was not kept.
 
-## Tests
-
-- **E2E A/V sync bounds are tight.** The checks are 20 ms average and 50 ms max.
-  They pass locally at 11–15 ms average and 21 ms max but may flake on a slow CI machine.
-  `SYNC_TOLERANCE_SCALE` widens both bounds without editing the tests (default 1).
-  *Revisit when* CI is set up, to pick that machine's scale from its logged `sync stats`.
-  Note that a CI machine also needs an audio output: without one the clock runs in wall mode and the sync tests fail.
-
 ## Resolved (for reference)
 
 - **File version checks** now match libbluray's `bdmv_parse_header`
@@ -47,3 +39,8 @@ what would change that decision.
   after `pointerup`. Once the drag value had been cleared, it carried the old playback time, which seeked back there.
   The seek bar now holds the committed target until the engine reports reaching it, and ignores that repeat.
   Holding a control also keeps the controls from hiding.
+- **E2E A/V sync bounds on CI.** The tests stay at 20 ms mean and 50 ms max offset locally (macOS: 11–15 ms and 21 ms).
+  Ubuntu 24.04 containers with a PulseAudio null sink measured up to 15 ms mean and 41 ms max on native arm64,
+  and up to 19 ms mean and 41 ms max on emulated amd64, which is close to the bounds.
+  CI (`.github/workflows/ci.yml`) therefore runs with `SYNC_TOLERANCE_SCALE=1.5` (30 ms / 75 ms).
+  *Revisit if* GitHub runs log `sync stats` well inside 20/50 ms, then drop the scale back to 1.
