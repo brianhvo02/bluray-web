@@ -164,7 +164,7 @@ describe('Player', () => {
   });
 
   it('keeps unsupported audio off after a seek', async () => {
-    const h = await harness(CodingType.AC3);
+    const h = await harness(CodingType.EAC3_SECONDARY);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
     await h.player.handle({ type: 'seek', timeUs: 2_000_000 });
@@ -252,9 +252,9 @@ describe('Player', () => {
   });
 
   it('plays video on the wall clock when the only audio is unsupported', async () => {
-    const h = await harness(CodingType.AC3);
+    const h = await harness(CodingType.EAC3_SECONDARY);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
-    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'audio', codec: 'Dolby Digital (AC-3)' }));
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'audio', codec: 'Dolby Digital Plus (secondary)' }));
     await untilPlaying(h);
     h.drawn.length = 0;
     await h.play(1000);
@@ -345,7 +345,7 @@ describe('Player', () => {
   });
 
   it('reaches the ended state at the end of the playlist', async () => {
-    const h = await harness(CodingType.AC3);
+    const h = await harness(CodingType.EAC3_SECONDARY);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
     await h.play(8500);
