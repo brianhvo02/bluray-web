@@ -522,8 +522,10 @@ export class Player {
         this.audioUnavailable(s, type, new Error(`${codingName(type)} audio is not supported.`));
         return;
       }
+      const gen = this.seekGeneration;
       this.loadAudioDecoder(s, type).catch((err: unknown) => {
-        if (this.session !== s || !s.audioActive || s.failedAudioTypes.has(type)) return;
+        // Only the read that saw these units may give up on them: after a seek, startAt owns the outcome.
+        if (this.session !== s || this.seekGeneration !== gen || !s.audioActive || s.failedAudioTypes.has(type)) return;
         s.failedAudioTypes.add(type);
         this.audioUnavailable(s, type, err);
       });

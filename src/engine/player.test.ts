@@ -613,6 +613,50 @@ describe('Player', () => {
     expect(lastTelemetry(h)?.clockMode).toBe('wall');
   });
 
+  /** Item 1 LPCM, item 2 AC-3 whose decoder load stays pending until `fail()` rejects it. */
+  async function pendingLaterLoad(): Promise<{ h: Harness; fail: () => void }> {
+    let reject: (err: Error) => void = () => undefined;
+    let requested = false;
+    const h = await harness(undefined, {
+      audioStreams: [lpcmStream(0x1100, 4)],
+      secondClipAudioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4)],
+      createAudioDecoder: (codingType) => {
+        if (codingType !== CodingType.AC3) return noWasmFactory(codingType);
+        requested = true;
+        return new Promise((_, r) => (reject = r));
+      },
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await vi.waitFor(
+      async () => {
+        await h.play(20);
+        expect(requested).toBe(true); // read-ahead reached item 2
+      },
+      { timeout: 5000 },
+    );
+    return { h, fail: () => reject(new Error('offline')) };
+  }
+
+  it('ignores a later item’s failed decoder load that lands after the user seeked away', async () => {
+    const { h, fail } = await pendingLaterLoad();
+    await h.player.handle({ type: 'seek', timeUs: 1_000_000 }); // back into the LPCM item
+    await untilPlaying(h);
+    fail();
+    await h.play(500);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toEqual([]);
+    expect(lastTelemetry(h)?.clockMode).toBe('audio');
+  });
+
+  it('reports a failed decoder load once when the user seeks into the item that needs it', async () => {
+    const { h, fail } = await pendingLaterLoad();
+    const seek = h.player.handle({ type: 'seek', timeUs: 5_000_000 }); // waits on the same pending load
+    fail();
+    await seek;
+    await h.play(300);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
+  });
+
   it('reports an unplayable codec in a later play item once without trying to load it', async () => {
     let loads = 0;
     const h = await harness(undefined, {
