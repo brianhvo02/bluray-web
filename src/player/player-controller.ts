@@ -1,7 +1,7 @@
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { Chapter } from '../engine/nav/timeline';
 import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, PlaybackState, Telemetry } from '../engine/protocol';
-import { trackLabel } from '../ui/language';
+import { trackLabel } from './language';
 
 export interface Notice {
   readonly code: string;
@@ -214,7 +214,9 @@ export class PlayerController {
     const track = this.snapshot.audioTracks.find((t) => t.index === index);
     if (!track?.playable || index === this.snapshot.selectedAudio) return;
     this.post({ type: 'selectAudio', index });
-    this.update(withNotice(this.snapshot, { code: 'audio-track', message: `Audio: ${trackLabel(track)}` }));
+    // Shown at once so the next A press moves on; the engine's `tracks` event corrects it if the switch is refused.
+    const selected = { ...this.snapshot, selectedAudio: index };
+    this.update(withNotice(selected, { code: 'audio-track', message: `Audio: ${trackLabel(track)}` }));
   }
 
   /** The A key: the next playable track, wrapping around. */

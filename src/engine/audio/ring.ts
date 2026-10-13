@@ -1,3 +1,6 @@
+/** The output (AudioContext) rate: every decoder's PCM is delivered at, or resampled to, this rate. */
+export const OUTPUT_SAMPLE_RATE = 48_000;
+
 /** Control slot indices (Int32). */
 export const Control = {
   Playing: 0,

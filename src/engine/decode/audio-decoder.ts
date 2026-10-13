@@ -1,3 +1,4 @@
+import { OUTPUT_SAMPLE_RATE } from '../audio/ring';
 import { CodingType, codingName } from '../bdmv/stream-types';
 import { AudioFramer, type FramerKind } from './audio-frames';
 import { UnsupportedCodecError } from './decoder';
@@ -27,8 +28,6 @@ export interface AudioDecoder {
 }
 
 export type AudioDecoderFactory = (codingType: number) => Promise<AudioDecoder>;
-
-const OUTPUT_RATE = 48_000;
 
 const lpcmDecoder: AudioDecoder = {
   decode(unit) {
@@ -68,7 +67,7 @@ export class FramedWasmDecoder implements AudioDecoder {
         continue;
       }
       if (out.stereo.length === 0) continue;
-      if (out.sampleRate !== OUTPUT_RATE) {
+      if (out.sampleRate !== OUTPUT_SAMPLE_RATE) {
         if (this.produced48k) {
           failedFrames++;
           continue;

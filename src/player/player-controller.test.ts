@@ -245,4 +245,20 @@ describe('audio tracks', () => {
     c.cycleAudio();
     expect(worker.posted).toEqual([{ type: 'selectAudio', index: 1 }]);
   });
+
+  it('shows a selection at once, so quick A presses move on before the engine confirms', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'tracks', audio: tracks, selectedAudio: 1 });
+    worker.posted.length = 0;
+    c.cycleAudio();
+    expect(c.getSnapshot().selectedAudio).toBe(3);
+    c.cycleAudio();
+    expect(worker.posted).toEqual([
+      { type: 'selectAudio', index: 3 },
+      { type: 'selectAudio', index: 1 },
+    ]);
+    worker.emit({ type: 'tracks', audio: tracks, selectedAudio: 3 }); // the engine's word wins
+    expect(c.getSnapshot().selectedAudio).toBe(3);
+  });
 });

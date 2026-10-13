@@ -1,8 +1,7 @@
-import { Control, createRing, ringViews } from '../engine/audio/ring';
+import { Control, OUTPUT_SAMPLE_RATE, createRing, ringViews } from '../engine/audio/ring';
 import type { AudioOutputLike } from './player-controller';
 import workletUrl from './pcm-worklet.ts?worker&url';
 
-export const OUTPUT_SAMPLE_RATE = 48_000;
 const RING_SECONDS = 2;
 
 /** 48 kHz stereo AudioContext playing from the shared ring through a gain node. */

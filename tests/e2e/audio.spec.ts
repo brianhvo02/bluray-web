@@ -38,6 +38,7 @@ test('plays every audio track of the disc in sync', async ({ page }) => {
     const windows = await collectWindows(page, start + 3_000_000);
     expect(windows.length).toBeGreaterThan(3);
     expectInSync(windows.slice(1));
+    expect(windows.map((w) => w.clockMode)).toEqual(windows.map(() => 'audio')); // never fell back to the wall clock mid-track
     const t = await telemetry(page);
     expect(t?.clockMode).toBe('audio');
     expect(t?.audioDecodeErrors).toBe(0);
@@ -53,4 +54,32 @@ test('A cycles the audio track and shows which one is playing', async ({ page })
   await page.keyboard.press('a');
   await expect(page.getByRole('status').filter({ hasText: 'Audio: 2. English · Dolby Digital (AC-3) (multichannel)' })).toBeVisible();
   await expect.poll(async () => (await telemetry(page))?.audioCodec, { timeout: 10_000 }).toBe('Dolby Digital (AC-3)');
+});
+
+test('the audio menu works from the keyboard without seeking or changing volume', async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await page.getByTestId('playlist-00000').click();
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
+  await page.getByTestId('player').hover();
+  await page.getByTestId('audio-menu').click();
+  await expect(page.getByTestId('audio-track-1')).toBeFocused(); // the selected track
+  await page.keyboard.press('ArrowDown');
+  await expect(page.getByTestId('audio-track-2')).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(page.getByTestId('audio-track-4')).toBeFocused();
+  await page.keyboard.press('ArrowDown'); // wraps
+  await expect(page.getByTestId('audio-track-1')).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('audio-menu')).toBeFocused(); // back on the button
+  await expect.poll(async () => (await telemetry(page))?.audioCodec, { timeout: 10_000 }).toBe('DTS');
+  await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('1');
+  expect(Number(await page.getByTestId('seek').inputValue())).toBeLessThan(6_000_000); // no 10 s jumps from the arrows
+
+  await page.getByTestId('player').hover();
+  await page.getByTestId('audio-menu').click();
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('audio-track-1')).toBeHidden();
+  await expect(page.getByTestId('audio-menu')).toBeFocused();
 });

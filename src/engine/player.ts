@@ -1,5 +1,5 @@
 import { AudioWriter } from './audio/audio-writer';
-import { RingWriter, ringViews } from './audio/ring';
+import { OUTPUT_SAMPLE_RATE, RingWriter, ringViews } from './audio/ring';
 import { type PlayItem } from './bdmv/mpls-parser';
 import { codingName, isVideoCoding } from './bdmv/stream-types';
 import { MasterClock } from './clock/master-clock';
@@ -29,7 +29,6 @@ export interface PlayerDeps {
   readonly createAudioDecoder: AudioDecoderFactory;
 }
 
-const OUTPUT_SAMPLE_RATE = 48_000;
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
 const MAX_QUEUED_FRAMES = 8;
 const MAX_DECODE_QUEUE = 8;

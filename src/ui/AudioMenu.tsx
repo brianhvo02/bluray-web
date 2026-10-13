@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import type { AudioTrack } from '../engine/protocol';
-import { trackLabel } from './language';
+import { trackLabel } from '../player/language';
 
 interface AudioMenuProps {
   readonly tracks: readonly AudioTrack[];
@@ -13,7 +13,15 @@ interface AudioMenuProps {
 export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
   const shown = tracks.length > 1;
+
+  const playableItems = (): HTMLButtonElement[] => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
+  const close = (refocus: boolean): void => {
+    setOpen(false);
+    if (refocus) buttonRef.current?.focus();
+  };
 
   useEffect(() => {
     if (!shown) setOpen(false);
@@ -23,11 +31,17 @@ export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMen
 
   useEffect(() => {
     if (!open) return;
+    const items = playableItems();
+    (items.find((b) => b.getAttribute('aria-checked') === 'true') ?? items[0])?.focus();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     const outside = (e: PointerEvent): void => {
       if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
     };
     const escape = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') close(true);
     };
     window.addEventListener('pointerdown', outside);
     window.addEventListener('keydown', escape);
@@ -37,14 +51,24 @@ export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMen
     };
   }, [open]);
 
+  const moveFocus = (e: ReactKeyboardEvent): void => {
+    const items = playableItems();
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: items.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    items[(next + items.length) % items.length].focus();
+  };
+
   if (!shown) return null;
   return (
     <div className="audio-menu" ref={rootRef}>
-      <button type="button" aria-haspopup="menu" aria-expanded={open} data-testid="audio-menu" onClick={() => setOpen((o) => !o)}>
+      <button ref={buttonRef} type="button" aria-haspopup="menu" aria-expanded={open} data-testid="audio-menu" onClick={() => setOpen((o) => !o)}>
         Audio
       </button>
       {open && (
-        <ul role="menu" className="audio-menu-list">
+        <ul ref={listRef} role="menu" className="audio-menu-list" onKeyDown={moveFocus}>
           {tracks.map((t) => (
             <li key={t.index} role="none">
               <button
@@ -56,7 +80,7 @@ export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMen
                 data-testid={`audio-track-${t.index}`}
                 data-codec={t.codec}
                 onClick={() => {
-                  setOpen(false);
+                  close(true);
                   onSelect(t.index);
                 }}
               >

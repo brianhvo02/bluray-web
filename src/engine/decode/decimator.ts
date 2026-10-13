@@ -1,6 +1,5 @@
+import { OUTPUT_SAMPLE_RATE } from '../audio/ring';
 import type { PcmChunk } from './lpcm';
-
-const OUTPUT_RATE = 48_000;
 
 /** Integer-factor decimator (96/192 kHz → 48 kHz) with a Hamming-windowed sinc low-pass, stateful across chunks. */
 export class Decimator {
@@ -31,8 +30,8 @@ export class Decimator {
   }
 
   process(input: PcmChunk): PcmChunk {
-    if (input.sampleRate !== this.factor * OUTPUT_RATE) {
-      throw new RangeError(`a ×${this.factor} decimator expects ${this.factor * OUTPUT_RATE} Hz input, got ${input.sampleRate} Hz`);
+    if (input.sampleRate !== this.factor * OUTPUT_SAMPLE_RATE) {
+      throw new RangeError(`a ×${this.factor} decimator expects ${this.factor * OUTPUT_SAMPLE_RATE} Hz input, got ${input.sampleRate} Hz`);
     }
     const f = this.factor;
     const taps = this.coeffs.length;

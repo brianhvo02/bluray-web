@@ -46,6 +46,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target;
       if (target instanceof HTMLTextAreaElement) return;
+      if (target instanceof Element && target.closest('.audio-menu-list')) return; // the open audio menu handles its own keys
       if (target instanceof HTMLInputElement) {
         if (target.type !== 'range') return;
         // Only the volume slider keeps its native arrow-key stepping; on the seek bar arrows seek by 10 s.

@@ -13,6 +13,7 @@ interface WorkerScope {
 }
 
 const scope = self as unknown as WorkerScope;
+const WASM_FETCH_TIMEOUT_MS = 20_000;
 
 const player = new Player({
   emit: (event) => scope.postMessage(event),
@@ -23,7 +24,8 @@ const player = new Player({
     else setTimeout(callback, 16);
   },
   createCompositor: (canvas) => new Compositor(canvas),
-  createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl))),
+  // Commands run one at a time, so a stalled download would block every later one: give up and report it instead.
+  createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) }))),
 });
 
 scope.onmessage = (event) => {
