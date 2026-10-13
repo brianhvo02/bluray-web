@@ -1,3 +1,6 @@
+import audioWasmUrl from '../wasm/audio/audio.wasm?url';
+import { createAudioDecoderFactory } from './decode/audio-decoder';
+import { loadAudioWasm } from './decode/wasm-audio';
 import { browserVideoCodecApi } from './decode/video-decoder';
 import { Player } from './player';
 import type { EngineCommand, EngineEvent } from './protocol';
@@ -20,6 +23,7 @@ const player = new Player({
     else setTimeout(callback, 16);
   },
   createCompositor: (canvas) => new Compositor(canvas),
+  createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl))),
 });
 
 scope.onmessage = (event) => {

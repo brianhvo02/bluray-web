@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildSyntheticDisc, discEntries, syntheticClip, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
+import { buildSyntheticDisc, discEntries, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
 import { createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
+import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
 import { Player } from './player';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
@@ -49,11 +50,41 @@ interface Harness {
   play(ms: number, opts?: { render?: boolean; audio?: boolean }): Promise<void>;
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[] } = {},
+const noWasmFactory = createAudioDecoderFactory(() => Promise.reject(new Error('no wasm in unit tests')));
+
+interface FakeAudioLog {
+  decoded: number[];
+  resets: number;
+  failNext: number;
+}
+
+/** LPCM decodes for real; AC-3 decodes to silence 240 frames per unit, failing `failNext` units first. */
+function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 }, gate?: Promise<void>): AudioDecoderFactory {
+  return async (codingType) => {
+    if (codingType !== CodingType.AC3) return noWasmFactory(codingType);
+    await gate;
+    return {
+      decode: (u) => {
+        if (log.failNext > 0) {
+          log.failNext--;
+          return { chunks: [], failedFrames: 1 };
+        }
+        log.decoded.push(u.ptsUs);
+        return { chunks: [{ ptsUs: u.ptsUs, sampleRate: 48_000, frames: 240, stereo: new Float32Array(480) }], failedFrames: 0 };
+      },
+      reset: () => {
+        log.resets++;
+      },
+      close: () => undefined,
+    };
+  };
+}
+
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes })],
+    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
   });
   const events: EngineEvent[] = [];
@@ -65,6 +96,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     videoCodecApi: fakeApi,
     nowMs: () => clock.ms,
     requestFrame: (cb) => frames.push(cb),
+    createAudioDecoder: opts.createAudioDecoder ?? noWasmFactory,
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
@@ -142,9 +174,58 @@ describe('Player', () => {
     expect(h.events.filter((e) => e.type === 'error' && e.code === 'internal')).toHaveLength(1);
   });
 
+  it('plays AC-3 audio on the audio clock through the decoder factory', async () => {
+    const log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 };
+    const h = await harness(CodingType.AC3, { createAudioDecoder: fakeAudioFactory(log) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    expect(log.decoded.length).toBeGreaterThan(100);
+    expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'Dolby Digital (AC-3)', audioDecodeErrors: 0 });
+  });
+
+  it('falls back to the wall clock when the audio decoder cannot load', async () => {
+    const h = await harness(CodingType.AC3); // noWasmFactory
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'audio', codec: 'Dolby Digital (AC-3)' }));
+    await untilPlaying(h);
+    h.drawn.length = 0;
+    await h.play(1000);
+    expect(h.drawn.length).toBeGreaterThan(15);
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+  });
+
+  it('resets the audio decoders on seek', async () => {
+    const log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 };
+    const h = await harness(CodingType.AC3, { createAudioDecoder: fakeAudioFactory(log) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const before = log.resets;
+    await h.player.handle({ type: 'seek', timeUs: 3_000_000 });
+    expect(log.resets).toBeGreaterThan(before);
+  });
+
+  it('disables audio after more than 50 failed frames in a row and retries on the next seek', async () => {
+    const log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 };
+    const h = await harness(CodingType.AC3, { createAudioDecoder: fakeAudioFactory(log) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    log.failNext = 60;
+    // the tiny synthetic clips are fully read ahead by now, so a seek is what makes the pipeline decode again
+    await h.player.handle({ type: 'seek', timeUs: 500_000 });
+    await h.play(1000);
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'notice', code: 'audio-disabled' }));
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+    expect(lastTelemetry(h)?.audioDecodeErrors).toBeGreaterThan(50);
+    await h.player.handle({ type: 'seek', timeUs: 1_000_000 });
+    await untilPlaying(h);
+    await h.play(1000);
+    expect(lastTelemetry(h)?.clockMode).toBe('audio');
+  });
+
   it('reports a folder without BDMV', async () => {
     const events: EngineEvent[] = [];
-    const player = new Player({ emit: (e) => events.push(e), videoCodecApi: fakeApi, nowMs: () => 0, requestFrame: () => undefined, createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }) });
+    const player = new Player({ emit: (e) => events.push(e), videoCodecApi: fakeApi, nowMs: () => 0, requestFrame: () => undefined, createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }), createAudioDecoder: noWasmFactory });
     await player.handle({ type: 'open', entries: [['Stuff/readme.txt', new Blob(['hi'])]] });
     expect(events).toContainEqual(expect.objectContaining({ type: 'error', code: 'not-bdmv' }));
     expect(events.at(-1)).toEqual({ type: 'state', state: 'error' });

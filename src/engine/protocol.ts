@@ -19,6 +19,9 @@ export interface Telemetry {
   readonly audioBufferedMs: number;
   readonly audioUnderruns: number;
   readonly corruptPackets: number;
+  /** Coding name of the stream whose decoder last produced PCM, or null before any. */
+  readonly audioCodec: string | null;
+  readonly audioDecodeErrors: number;
   readonly continuityErrors: number;
   readonly decoderErrors: number;
   /** Decoding restarts on an open-GOP (non-IDR) keyframe in this session, and leading pictures skipped after them. */

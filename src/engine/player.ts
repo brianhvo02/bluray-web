@@ -1,10 +1,11 @@
 import { AudioWriter } from './audio/audio-writer';
 import { RingWriter, ringViews } from './audio/ring';
+import { type PlayItem } from './bdmv/mpls-parser';
 import { codingName, isVideoCoding } from './bdmv/stream-types';
 import { MasterClock } from './clock/master-clock';
 import { Decimator } from './decode/decimator';
 import { UnsupportedCodecError, type DecoderError } from './decode/decoder';
-import { decodeLpcm, type PcmChunk } from './decode/lpcm';
+import { type AudioDecodeResult, type AudioDecoder, type AudioDecoderFactory } from './decode/audio-decoder';
 import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
 import { DiscError } from './disc/byte-source';
 import { FileSource } from './disc/file-source';
@@ -12,7 +13,7 @@ import { checkStreamReadable, loadClips, openDisc, playlistPath, type DiscModel 
 import { normalizeDiscPaths } from './disc/paths';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
-import { chooseStreams } from './playback/stream-selection';
+import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
 import type { EngineCommand, EngineEvent, NoticeCode, PlaybackState } from './protocol';
 import type { CompositorLike } from './render/compositor';
 import { VideoPresenter } from './render/video-presenter';
@@ -24,6 +25,7 @@ export interface PlayerDeps {
   nowMs(): number;
   requestFrame(callback: () => void): void;
   createCompositor(canvas: OffscreenCanvas): CompositorLike;
+  readonly createAudioDecoder: AudioDecoderFactory;
 }
 
 const OUTPUT_SAMPLE_RATE = 48_000;
@@ -42,6 +44,7 @@ const TIME_EVENT_INTERVAL_US = 250_000;
 const TELEMETRY_INTERVAL_MS = 500;
 const HEARTBEAT_TIMEOUT_MS = 500;
 /** Frames up to this far before a seek target are still shown (EP pts are truncated by up to ~5.7 ms). */
+const MAX_AUDIO_ERRORS_IN_ROW = 50;
 const SEEK_TOLERANCE_US = 1_000;
 const NEXT_CHAPTER_GUARD_US = 500_000;
 const PREV_CHAPTER_RESTART_US = 3_000_000;
@@ -53,6 +56,14 @@ interface Session {
   readonly videoCodingType: number;
   readonly decoder: WebCodecsVideoDecoder;
   readonly pipeline: PlaybackPipeline;
+  readonly playItems: readonly PlayItem[];
+  /** 1-based STN audio stream number; null when the playlist has no playable audio. */
+  audioStream: number | null;
+  readonly audioDecoders: Map<number, AudioDecoder>;
+  readonly audioDecoderLoads: Map<number, Promise<AudioDecoder>>;
+  audioErrorsInRow: number;
+  /** Audio was turned off by too many decode errors; the next seek or switch tries again. */
+  audioErrorDisabled: boolean;
   audioActive: boolean;
   decimator: Decimator | null;
   videoState: 'unconfigured' | 'configuring' | 'configured' | 'failed';
@@ -86,7 +97,8 @@ export class Player {
   private lastHeartbeatChangeMs = 0;
   private decoderErrors = 0;
   private offsets: number[] = [];
-  private corruptAudioUnits = 0;
+  private audioDecodeErrors = 0;
+  private audioCodec: string | null = null;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: PlayerDeps) {
@@ -250,6 +262,12 @@ export class Player {
       videoCodingType: choice.video.codingType,
       decoder,
       pipeline,
+      playItems: mpls.playItems,
+      audioStream: choice.audioIndex,
+      audioDecoders: new Map(),
+      audioDecoderLoads: new Map(),
+      audioErrorsInRow: 0,
+      audioErrorDisabled: false,
       audioActive,
       decimator: null,
       videoState: 'unconfigured',
@@ -267,7 +285,8 @@ export class Player {
     };
     decoder.onError = (err) => this.onDecoderError(session, err);
     this.session = session;
-    this.corruptAudioUnits = 0;
+    this.audioDecodeErrors = 0;
+    this.audioCodec = null;
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     await this.startAt(0, true);
   }
@@ -280,6 +299,8 @@ export class Player {
     this.seekGeneration++;
     s.pipeline.stop();
     s.decoder.close();
+    for (const d of s.audioDecoders.values()) d.close();
+    s.audioDecoders.clear();
     this.presenter.clear();
     this.ring?.setPlaying(false);
     this.compositor?.drawVideo(null);
@@ -302,6 +323,22 @@ export class Player {
       s.audioActive = true;
       s.audioStalledBeat = null;
     }
+    if (s.audioErrorDisabled && this.ring) {
+      s.audioActive = true;
+      s.audioErrorDisabled = false;
+    }
+    s.audioErrorsInRow = 0;
+    for (const d of s.audioDecoders.values()) d.reset();
+    const audioType = s.audioActive ? this.audioCodingTypeAt(s, t) : null;
+    if (audioType !== null) {
+      try {
+        await this.loadAudioDecoder(s, audioType);
+      } catch (err) {
+        if (gen !== this.seekGeneration) return;
+        this.audioUnavailable(s, audioType, err);
+      }
+      if (gen !== this.seekGeneration) return;
+    }
     s.dropBeforeUs = t - SEEK_TOLERANCE_US;
     this.presenter.clear();
     this.offsets = [];
@@ -319,6 +356,7 @@ export class Player {
       this.clock.useWall(t, false);
     }
     this.emitTime(t, true);
+    s.pipeline.setAudioStream(s.audioActive ? s.audioStream : null);
     s.pipeline.start(t);
   }
 
@@ -404,27 +442,78 @@ export class Player {
     }
   }
 
+  /** Coding type of the selected audio stream in the play item containing `timeUs`, if playable. */
+  private audioCodingTypeAt(s: Session, timeUs: number): number | null {
+    const entry = audioEntryFor(s.playItems[s.timeline.locate(timeUs).item.index], s.audioStream);
+    return entry && PLAYABLE_AUDIO.has(entry.codingType) ? entry.codingType : null;
+  }
+
+  /** One load per coding type per session; a decoder that arrives after teardown is closed. */
+  private loadAudioDecoder(s: Session, codingType: number): Promise<AudioDecoder> {
+    let load = s.audioDecoderLoads.get(codingType);
+    if (!load) {
+      const p = this.deps.createAudioDecoder(codingType);
+      load = p;
+      s.audioDecoderLoads.set(codingType, p);
+      p.then(
+        (d) => {
+          if (this.session === s) s.audioDecoders.set(codingType, d);
+          else d.close();
+        },
+        () => {
+          if (s.audioDecoderLoads.get(codingType) === p) s.audioDecoderLoads.delete(codingType);
+        },
+      );
+    }
+    return load;
+  }
+
+  private audioUnavailable(s: Session, codingType: number, err: unknown): void {
+    const codec = codingName(codingType);
+    const reason = err instanceof Error ? err.message : String(err);
+    this.deps.emit({ type: 'unsupported', kind: 'audio', codec, message: `${codec} audio can't be played (${reason}), so video will play without sound.` });
+    s.audioActive = false;
+  }
+
   private onAudioUnit(s: Session, u: PipelineAudioUnit): void {
     const writer = this.audioWriter;
-    if (!s.audioActive || !writer || !u.inRange) return;
-    let chunk: PcmChunk;
-    try {
-      chunk = decodeLpcm(u.data, u.ptsUs);
-    } catch (err) {
-      if (err instanceof UnsupportedCodecError) {
-        this.deps.emit({ type: 'unsupported', kind: 'audio', codec: codingName(err.codingType), message: err.message });
-        this.disableAudio(s, err.message, false);
-      } else {
-        this.corruptAudioUnits++;
-      }
+    if (!s.audioActive || !writer) return;
+    const decoder = s.audioDecoders.get(u.codingType);
+    if (!decoder) {
+      void this.loadAudioDecoder(s, u.codingType).catch(() => undefined); // a later item switched codec; ready for its next units
       return;
     }
-    if (chunk.sampleRate !== OUTPUT_SAMPLE_RATE) {
-      const factor = chunk.sampleRate / OUTPUT_SAMPLE_RATE;
-      if (!s.decimator || s.decimator.factor !== factor) s.decimator = new Decimator(factor);
-      chunk = s.decimator.process(chunk);
+    let result: AudioDecodeResult;
+    try {
+      result = decoder.decode(u); // out-of-range units still go in, to keep decoder state continuous
+    } catch (err) {
+      if (!(err instanceof UnsupportedCodecError)) throw err;
+      this.deps.emit({ type: 'unsupported', kind: 'audio', codec: codingName(err.codingType), message: err.message });
+      this.disableAudio(s, err.message, false);
+      return;
     }
-    writer.enqueue(chunk);
+    if (result.failedFrames > 0) {
+      this.audioDecodeErrors += result.failedFrames;
+      s.audioErrorsInRow += result.failedFrames;
+      if (s.audioErrorsInRow > MAX_AUDIO_ERRORS_IN_ROW) {
+        s.audioErrorDisabled = true;
+        this.disableAudio(s, `The ${codingName(u.codingType)} audio is too damaged to play, so playback continues without sound.`);
+        return;
+      }
+    }
+    if (result.chunks.length > 0) {
+      s.audioErrorsInRow = 0;
+      this.audioCodec = codingName(u.codingType);
+    }
+    if (!u.inRange) return;
+    for (let chunk of result.chunks) {
+      if (chunk.sampleRate !== OUTPUT_SAMPLE_RATE) {
+        const factor = chunk.sampleRate / OUTPUT_SAMPLE_RATE;
+        if (!s.decimator || s.decimator.factor !== factor) s.decimator = new Decimator(factor);
+        chunk = s.decimator.process(chunk);
+      }
+      writer.enqueue(chunk);
+    }
   }
 
   private isFull(s: Session): boolean {
@@ -567,7 +656,9 @@ export class Player {
         framesDropped: this.presenter.dropped,
         audioBufferedMs: ring ? (ring.buffered() * 1000) / ring.sampleRate : 0,
         audioUnderruns: ring?.underruns() ?? 0,
-        corruptPackets: stats.corruptPackets + this.corruptAudioUnits,
+        corruptPackets: stats.corruptPackets + this.audioDecodeErrors,
+        audioCodec: this.audioCodec,
+        audioDecodeErrors: this.audioDecodeErrors,
         continuityErrors: stats.continuityErrors,
         decoderErrors: this.decoderErrors,
         openGopStarts: s.decoder.openGop.starts,
