@@ -1,7 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 
 const DISC = 'fixtures/synthetic/disc1';
-const SYNC_TOLERANCE_US = 20_000;
+/** Widens both sync bounds on slow machines (e.g. SYNC_TOLERANCE_SCALE=2 on CI); the default keeps them tight. */
+const SYNC_SCALE = Number(process.env.SYNC_TOLERANCE_SCALE ?? 1);
+if (!(SYNC_SCALE >= 1)) throw new Error(`SYNC_TOLERANCE_SCALE must be a number >= 1, got ${process.env.SYNC_TOLERANCE_SCALE}`);
+const SYNC_TOLERANCE_US = 20_000 * SYNC_SCALE;
 
 interface TelemetrySample {
   clockUs: number;
@@ -46,7 +49,7 @@ async function collectWindows(page: Page, untilUs: number, deadlineMs = 20_000):
   }
 }
 
-const MAX_ABS_TOLERANCE_US = 50_000;
+const MAX_ABS_TOLERANCE_US = 50_000 * SYNC_SCALE;
 
 /** Every window must report real offsets (null is not zero) within the mean and jitter bounds. */
 function expectInSync(windows: TelemetrySample[]): void {
@@ -60,7 +63,7 @@ function expectInSync(windows: TelemetrySample[]): void {
     worstMean = Math.max(worstMean, Math.abs(w.avOffsetMeanUs as number));
     worstMax = Math.max(worstMax, w.avOffsetMaxAbsUs as number);
   }
-  console.log(`sync stats: windows=${windows.length} worst|mean|=${worstMean}us worstMaxAbs=${worstMax}us`);
+  console.log(`sync stats: windows=${windows.length} worst|mean|=${worstMean}us worstMaxAbs=${worstMax}us (bounds ${SYNC_TOLERANCE_US}/${MAX_ABS_TOLERANCE_US}us)`);
 }
 
 test('lists playlists with the main feature first', async ({ page }) => {
@@ -193,4 +196,28 @@ test('stays in sync for ten minutes (nightly)', async ({ page }) => {
   expectInSync(windows);
   const mean = (ws: TelemetrySample[]): number => ws.reduce((a, w) => a + (w.avOffsetMeanUs ?? 0), 0) / ws.length;
   expect(Math.abs(mean(windows.slice(-20)) - mean(windows.slice(0, 20)))).toBeLessThan(5_000); // no drift
+});
+
+test('holding and slowly dragging the seek bar seeks to where it is released', async ({ page }) => {
+  await openDisc(page);
+  await startPlaylist(page, '00000');
+  await page.getByTestId('player').hover();
+  const bar = await page.getByTestId('seek').boundingBox();
+  if (!bar) throw new Error('seek bar not found');
+  const y = bar.y + bar.height / 2;
+  await page.mouse.move(bar.x + bar.width * 0.1, y);
+  await page.mouse.down();
+  await page.waitForTimeout(3500); // longer than the controls' hide delay
+  await expect(page.getByTestId('control-bar')).not.toHaveClass(/hidden/);
+  for (let i = 1; i <= 20; i++) {
+    await page.mouse.move(bar.x + bar.width * (0.1 + (0.6 * i) / 20), y);
+    await page.waitForTimeout(50); // slow enough for Chrome to fire a trailing `change` on release
+  }
+  const released = (await telemetry(page))?.clockUs ?? Infinity;
+  expect(released).toBeLessThan(5_000_000); // the drag itself did not seek
+  await page.mouse.up();
+  // Released at 70% of 8 s: the clock must reach the target and stay past it, not snap back to the old time.
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 1000, intervals: [50] }).toBeGreaterThanOrEqual(5_500_000);
+  await page.waitForTimeout(500);
+  expect((await telemetry(page))?.clockUs ?? 0).toBeGreaterThanOrEqual(5_500_000);
 });

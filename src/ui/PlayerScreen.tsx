@@ -22,6 +22,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   const [pickerOpen, setPickerOpen] = useState(false);
   const [idle, setIdle] = useState(false);
   const [activity, setActivity] = useState(0);
+  const [pressed, setPressed] = useState(false);
   const playing = snapshot.engineState === 'playing';
 
   useEffect(() => {
@@ -73,10 +74,25 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   }, [controller]);
 
   useEffect(() => {
-    if (!playing) return;
+    if (!pressed) return;
+    // The release can land outside the player (or on a control that hid meanwhile), so listen on the window.
+    const release = (): void => {
+      setPressed(false);
+      setActivity((a) => a + 1);
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    return () => {
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+    };
+  }, [pressed]);
+
+  useEffect(() => {
+    if (!playing || pressed) return; // holding a control (e.g. the seek thumb) keeps the controls up
     const timer = window.setTimeout(() => setIdle(true), HIDE_CONTROLS_MS);
     return () => window.clearTimeout(timer);
-  }, [playing, activity]);
+  }, [playing, activity, pressed]);
 
   const wake = (): void => {
     setIdle(false);
@@ -94,7 +110,10 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       data-testid="player"
       data-state={snapshot.engineState}
       onPointerMove={wake}
-      onPointerDown={wake}
+      onPointerDown={() => {
+        setPressed(true);
+        wake();
+      }}
     >
       <canvas ref={canvasRef} className="player-canvas" data-testid="video-canvas" onClick={() => controller.togglePlay()} />
       <div className="notices">

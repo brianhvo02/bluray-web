@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { Chapter } from '../engine/nav/timeline';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { formatTime } from './format';
@@ -10,18 +10,52 @@ interface SeekBarProps {
   onSeek(timeUs: number): void;
 }
 
+/** How long a committed seek keeps the thumb at its target if the engine never reports getting there. */
+const SEEK_SETTLE_MS = 3000;
+/** The engine time counts as having reached a committed target within this distance. */
+const SEEK_REACHED_US = 1_000_000;
+
 function SeekBar({ durationUs, timeUs, chapters, onSeek }: SeekBarProps): ReactElement {
-  const [dragUs, setDragUs] = useState<number | null>(null);
+  // While dragging: the thumb position. After a commit: the target, held until the engine time gets there,
+  // so the thumb doesn't jump back to the old time while the seek is in flight.
+  const [heldUs, setHeldUs] = useState<number | null>(null);
   const max = Math.max(1, durationUs);
   const pointerDown = useRef(false);
+  const dragUs = useRef<number | null>(null);
+  const committedUs = useRef<number | null>(null);
+
+  useEffect(() => {
+    const target = committedUs.current;
+    if (target === null || pointerDown.current) return;
+    if (Math.abs(timeUs - target) < SEEK_REACHED_US) {
+      committedUs.current = null;
+      setHeldUs(null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (committedUs.current !== target || pointerDown.current) return;
+      committedUs.current = null;
+      setHeldUs(null);
+    }, SEEK_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [timeUs, heldUs]);
+
+  const seek = (us: number): void => {
+    committedUs.current = us;
+    setHeldUs(us);
+    onSeek(us);
+  };
   const commit = (): void => {
     pointerDown.current = false;
-    if (dragUs !== null) onSeek(dragUs);
-    setDragUs(null);
+    const us = dragUs.current;
+    dragUs.current = null;
+    if (us !== null) seek(us);
   };
   const cancel = (): void => {
+    if (!pointerDown.current) return;
     pointerDown.current = false;
-    setDragUs(null);
+    dragUs.current = null;
+    setHeldUs(committedUs.current);
   };
   return (
     <div className="seek-bar">
@@ -32,14 +66,15 @@ function SeekBar({ durationUs, timeUs, chapters, onSeek }: SeekBarProps): ReactE
         min={0}
         max={max}
         step={100_000}
-        value={Math.min(dragUs ?? timeUs, max)}
+        value={Math.min(heldUs ?? timeUs, max)}
         onChange={(e) => {
           const value = Number(e.target.value);
           if (pointerDown.current) {
-            setDragUs(value);
-          } else {
-            onSeek(value);
-            setDragUs(null);
+            dragUs.current = value;
+            setHeldUs(value);
+          } else if (value !== committedUs.current) {
+            // Chrome may fire a trailing `change` after pointerup; it repeats the committed value and is ignored.
+            seek(value);
           }
         }}
         onPointerDown={() => {
