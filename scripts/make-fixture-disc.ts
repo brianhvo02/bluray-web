@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process';
 import { CodingType } from '../src/engine/bdmv/stream-types';
 import { CLIP_START_PTS, buildSyntheticDisc, type SyntheticClipSpec } from '../tests/helpers/synthetic-disc';
 import { writeFixture } from './fixture-dir';
+import { encodeTestVideo } from './x264';
 
 const [outDir, ...args] = process.argv.slice(2);
 if (!outDir) {
@@ -16,34 +16,7 @@ if (!Number.isInteger(secondsPerClip) || secondsPerClip <= 0) {
 }
 const framesPerClip = secondsPerClip * 24;
 
-// IDR every second, no B-frames (so PTS = DTS = frame index), AUD before every access unit,
-// SPS/PPS repeated at every IDR so any keyframe can start decoding.
-const h264 = execFileSync(
-  'ffmpeg',
-  [
-    '-v', 'error',
-    '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=24',
-    '-frames:v', String(framesPerClip * 2),
-    '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
-    '-x264-params', 'keyint=24:min-keyint=24:scenecut=0:bframes=0:aud=1:repeat-headers=1',
-    '-f', 'h264', '-',
-  ],
-  { maxBuffer: 1 << 30 },
-);
-
-/** Splits an Annex-B stream at access unit delimiters (NAL type 9). */
-function splitAccessUnits(stream: Uint8Array): Uint8Array[] {
-  const starts: number[] = [];
-  for (let i = 0; i + 3 < stream.length; i++) {
-    if (stream[i] === 0 && stream[i + 1] === 0 && stream[i + 2] === 1 && (stream[i + 3] & 0x1f) === 9) {
-      starts.push(i > 0 && stream[i - 1] === 0 ? i - 1 : i);
-    }
-  }
-  return starts.map((s, k) => stream.subarray(s, k + 1 < starts.length ? starts[k + 1] : stream.length));
-}
-
-const aus = splitAccessUnits(new Uint8Array(h264));
-if (aus.length !== framesPerClip * 2) throw new Error(`expected ${framesPerClip * 2} access units, got ${aus.length}`);
+const aus = encodeTestVideo(framesPerClip * 2);
 
 const keyIndices = Array.from({ length: framesPerClip / 24 }, (_, i) => i * 24);
 const clip = (clipId: string, from: number): SyntheticClipSpec => ({

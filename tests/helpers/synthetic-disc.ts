@@ -137,7 +137,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
     const lag = clip.audioMuxLag90k ?? 0;
     const isAudio = (u: MuxUnit): boolean => u.pid !== VIDEO_PID;
     const muxKey = (u: MuxUnit): number => (u.dts ?? u.pts) + (isAudio(u) ? lag : 0);
-    units.sort((a, b) => muxKey(a) - muxKey(b) || (isAudio(a) ? -1 : 1));
+    units.sort((a, b) => muxKey(a) - muxKey(b) || (isAudio(a) === isAudio(b) ? a.pid - b.pid : isAudio(a) ? -1 : 1));
     const { bytes, unitSpns } = muxM2ts(units);
     const keySet = new Set(clip.keyIndices);
     const entries = units.flatMap((u, i) =>
