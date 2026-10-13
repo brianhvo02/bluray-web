@@ -33,7 +33,9 @@ export type EngineCommand =
   | { readonly type: 'pause' }
   | { readonly type: 'seek'; readonly timeUs: number }
   | { readonly type: 'nextChapter' }
-  | { readonly type: 'prevChapter' };
+  | { readonly type: 'prevChapter' }
+  /** Forget the open disc ("Open another disc"). */
+  | { readonly type: 'close' };
 
 export type EngineEvent =
   | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly warnings: readonly string[] }
@@ -43,4 +45,6 @@ export type EngineEvent =
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
   | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
-  | { readonly type: 'telemetry'; readonly telemetry: Telemetry };
+  | { readonly type: 'telemetry'; readonly telemetry: Telemetry }
+  /** The current playlist was torn down (a new pick, a failed pick, or close). */
+  | { readonly type: 'playlistCleared' };

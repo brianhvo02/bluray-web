@@ -62,6 +62,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, error: { code: e.code, message: e.message, paths: e.paths } };
     case 'telemetry':
       return { ...s, telemetry: e.telemetry };
+    case 'playlistCleared':
+      return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0 };
   }
 }
 
@@ -90,13 +92,14 @@ export class PlayerController {
     private readonly audio: AudioOutputLike,
   ) {
     worker.onmessage = (event: MessageEvent<EngineEvent>) => this.update(reduceEvent(this.snapshot, event.data));
-    worker.onerror = (event) => this.reportInternalError(`The player engine failed to load: ${event.message || 'unknown error'}`);
+    worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
     worker.onmessageerror = () => this.reportInternalError('The player engine sent a message that could not be read.');
   }
 
   /** Surfaces a failure of the engine worker itself (it can no longer report through events). */
   reportInternalError(message: string): void {
-    this.update(reduceEvent(this.snapshot, { type: 'error', code: 'internal', message, paths: [] }));
+    const s = reduceEvent(this.snapshot, { type: 'error', code: 'internal', message, paths: [] });
+    this.update({ ...s, engineState: 'error' }); // the engine can't report its own state any more
   }
 
   readonly subscribe = (listener: () => void): (() => void) => {
@@ -199,7 +202,7 @@ export class PlayerController {
   }
 
   closeDisc(): void {
-    this.pause();
+    this.post({ type: 'close' });
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });
   }
 

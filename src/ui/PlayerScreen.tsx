@@ -81,7 +81,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   };
 
   const controlsVisible = !idle || !playing;
-  const showPicker = pickerOpen || snapshot.currentPlaylistId === null;
+  // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading.
+  const showPicker = pickerOpen || (snapshot.currentPlaylistId === null && snapshot.engineState !== 'loading');
 
   return (
     <div

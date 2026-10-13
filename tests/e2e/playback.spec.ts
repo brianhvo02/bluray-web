@@ -95,6 +95,20 @@ test('skips to the next chapter and is back in sync within a second', async ({ p
   expectInSync(windows);
 });
 
+test('opens another disc after closing the current one', async ({ page }) => {
+  await openDisc(page);
+  await startPlaylist(page, '00000');
+  await page.getByTestId('player').hover();
+  await page.getByRole('button', { name: 'Playlists' }).click();
+  await page.getByRole('button', { name: 'Open another disc' }).click();
+  await expect(page.getByTestId('landing')).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId('landing')).toBeVisible(); // late events from the old disc must not bring the player back
+  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await startPlaylist(page, '00000');
+  await expect.poll(async () => (await page.evaluate(() => (window as unknown as { __blurayTelemetry?: { clockUs: number } | null }).__blurayTelemetry?.clockUs)) ?? 0).toBeGreaterThan(1_000_000);
+});
+
 test('pauses and resumes', async ({ page }) => {
   await openDisc(page);
   await startPlaylist(page, '00000');

@@ -62,6 +62,8 @@ interface Session {
   flushed: boolean;
   /** Decoder flush issued at end of input (only after the compressed backlog drains). */
   flushStarted: boolean;
+  /** Worklet heartbeat when audio was disabled because the output stalled; null if not stalled. */
+  audioStalledBeat: number | null;
 }
 
 /** Owns one disc and at most one playing playlist. Runs inside the engine worker. */
@@ -119,10 +121,13 @@ export class Player {
           await this.playPlaylist(cmd.playlistId);
           break;
         case 'play':
-          this.play();
+          await this.play();
           break;
         case 'pause':
           this.pause();
+          break;
+        case 'close':
+          this.close();
           break;
         case 'seek':
           await this.startAt(cmd.timeUs, this.wantPlaying);
@@ -253,6 +258,7 @@ export class Player {
       eof: false,
       flushed: false,
       flushStarted: false,
+      audioStalledBeat: null,
     };
     ref.current = session;
     decoder.onOutput = (frame) => {
@@ -270,6 +276,7 @@ export class Player {
     const s = this.session;
     if (!s) return;
     this.session = null;
+    this.deps.emit({ type: 'playlistCleared' });
     this.seekGeneration++;
     s.pipeline.stop();
     s.decoder.close();
@@ -291,6 +298,10 @@ export class Player {
     s.eof = false;
     s.flushed = false;
     s.flushStarted = false;
+    if (this.audioRecovered(s)) {
+      s.audioActive = true;
+      s.audioStalledBeat = null;
+    }
     s.dropBeforeUs = t - SEEK_TOLERANCE_US;
     this.presenter.clear();
     this.offsets = [];
@@ -311,14 +322,31 @@ export class Player {
     s.pipeline.start(t);
   }
 
-  private play(): void {
-    if (!this.session) return;
+  private async play(): Promise<void> {
+    const s = this.session;
+    if (!s) return;
     if (this.state === 'ended') {
-      void this.startAt(0, true).catch((err: unknown) => this.fail(err));
+      await this.startAt(0, true);
+      return;
+    }
+    if (this.state === 'paused' && this.audioRecovered(s)) {
+      await this.startAt(this.clock.nowUs(), true); // rebase onto the recovered audio output
       return;
     }
     this.wantPlaying = true;
     if (this.state === 'paused') this.setState('buffering');
+  }
+
+  /** Audio was disabled by a stalled output that has since started running again. */
+  private audioRecovered(s: Session): boolean {
+    return s.audioStalledBeat !== null && this.ring !== null && this.ring.heartbeat() !== s.audioStalledBeat;
+  }
+
+  private close(): void {
+    this.teardownSession();
+    this.source = null;
+    this.disc = null;
+    this.setState('idle');
   }
 
   private pause(): void {
@@ -495,6 +523,7 @@ export class Player {
       this.lastHeartbeatChangeMs = nowMs;
     } else if (nowMs - this.lastHeartbeatChangeMs > HEARTBEAT_TIMEOUT_MS) {
       this.disableAudio(s, 'Audio output is not running (the browser may have blocked it), so playback continues without sound.');
+      s.audioStalledBeat = beat;
       return;
     }
     if (!s.eof && ring.buffered() === 0 && !this.readerBlocked(s)) {

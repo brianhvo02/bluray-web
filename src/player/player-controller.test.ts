@@ -57,6 +57,24 @@ describe('reduceEvent', () => {
   });
 });
 
+describe('playlist lifecycle', () => {
+  it('clears the playlist when the engine reports it gone', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'chapters', playlistId: '00000', durationUs: 8_000_000, chapters: [{ index: 0, startUs: 0 }] });
+    s = reduceEvent(s, { type: 'time', timeUs: 3_000_000 });
+    s = reduceEvent(s, { type: 'playlistCleared' });
+    expect(s).toMatchObject({ currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0 });
+  });
+
+  it('closes the disc in the engine, not just the UI', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'titles', playlists: [summary], usesBdj: false, warnings: [] });
+    c.closeDisc();
+    expect(worker.posted).toEqual([{ type: 'close' }]);
+    expect(c.getSnapshot().playlists).toEqual([]);
+  });
+});
+
 describe('notices across playlists', () => {
   // The engine emits a playlist's own notices *before* its `chapters` event (engine/player.ts playPlaylist).
   function startPlaylist(worker: FakeWorker, c: PlayerController, id: string, notices: EngineEvent[]): void {
@@ -96,8 +114,10 @@ describe('PlayerController', () => {
   it('surfaces worker load and message errors as an internal error', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'state', state: 'buffering' });
     worker.onerror?.({ message: 'Failed to fetch module' } as ErrorEvent);
-    expect(c.getSnapshot().error).toEqual({ code: 'internal', message: 'The player engine failed to load: Failed to fetch module', paths: [] });
+    expect(c.getSnapshot().error).toEqual({ code: 'internal', message: 'The player engine stopped unexpectedly: Failed to fetch module', paths: [] });
+    expect(c.getSnapshot().engineState).toBe('error'); // no spinner left behind
     worker.onmessageerror?.({} as MessageEvent);
     expect(c.getSnapshot().error?.code).toBe('internal');
   });

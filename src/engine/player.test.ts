@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildSyntheticDisc, discEntries, syntheticClip } from '../../tests/helpers/synthetic-disc';
+import { buildSyntheticDisc, discEntries, syntheticClip, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
 import { createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
@@ -49,12 +49,12 @@ interface Harness {
   play(ms: number, opts?: { render?: boolean; audio?: boolean }): Promise<void>;
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[] } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
     clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes })],
-    playlists: [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
+    playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
   });
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
@@ -148,6 +148,59 @@ describe('Player', () => {
     await player.handle({ type: 'open', entries: [['Stuff/readme.txt', new Blob(['hi'])]] });
     expect(events).toContainEqual(expect.objectContaining({ type: 'error', code: 'not-bdmv' }));
     expect(events.at(-1)).toEqual({ type: 'state', state: 'error' });
+  });
+
+  it('re-enables audio on the next seek once a stalled output is running again', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1200, { audio: false }); // output stalls → wall-clock fallback
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+    await h.play(100); // the output is running again (heartbeat advances)
+    await h.player.handle({ type: 'seek', timeUs: 2_000_000 });
+    await untilPlaying(h);
+    await h.play(1000);
+    expect(lastTelemetry(h)?.clockMode).toBe('audio');
+  });
+
+  it('keeps unsupported audio off after a seek', async () => {
+    const h = await harness(CodingType.AC3);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'seek', timeUs: 2_000_000 });
+    await untilPlaying(h);
+    await h.play(1000);
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+  });
+
+  it('tells the UI the old playlist is gone when picking another one fails', async () => {
+    const h = await harness(CodingType.LPCM, {
+      playlists: [
+        { id: '00000', clipIds: ['00001'] },
+        { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
+      ],
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const n = h.events.length;
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    const after = h.events.slice(n);
+    expect(after).toContainEqual({ type: 'playlistCleared' });
+    expect(after).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
+    expect(after.findIndex((e) => e.type === 'playlistCleared')).toBeLessThan(after.findIndex((e) => e.type === 'unsupported'));
+    expect(lastState(h)).toBe('error');
+  });
+
+  it('closes the disc: stops playback, clears the playlist and reports idle', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'close' });
+    expect(h.events.at(-1)).toEqual({ type: 'state', state: 'idle' });
+    expect(h.events).toContainEqual({ type: 'playlistCleared' });
+    const n = h.events.length;
+    await h.play(600);
+    expect(h.events.slice(n)).toEqual([]);
   });
 
   it('keeps audio fed when the multiplex puts video 600 ms ahead of audio (regression: real-disc boundary underrun)', async () => {
