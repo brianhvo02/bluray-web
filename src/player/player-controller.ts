@@ -48,16 +48,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'titles':
       return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0 };
     case 'chapters':
-      // A new playlist starts: drop the previous one's codec and audio notices (not the device-level audio-output one).
-      return {
-        ...s,
-        currentPlaylistId: e.playlistId,
-        durationUs: e.durationUs,
-        chapters: e.chapters,
-        timeUs: 0,
-        error: null,
-        notices: s.notices.filter((n) => !n.code.startsWith('unsupported-') && !n.code.startsWith('audio-')),
-      };
+      // Notices are not cleared here: the engine emits a playlist's own notices before this event.
+      return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
     case 'state':
       return { ...s, engineState: e.state };
     case 'time':
@@ -151,6 +143,11 @@ export class PlayerController {
 
   playPlaylist(playlistId: string): void {
     this.startAudio();
+    // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
+    // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay.
+    const playlistScoped = (code: string): boolean =>
+      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered';
+    this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
     this.post({ type: 'playPlaylist', playlistId });
   }
 

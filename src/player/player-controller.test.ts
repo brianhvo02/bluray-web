@@ -57,15 +57,38 @@ describe('reduceEvent', () => {
   });
 });
 
-describe('reduceEvent notices across playlists', () => {
-  it('clears unsupported-* and audio-* notices when a new playlist starts, keeping the others', () => {
-    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'notice', code: 'audio-disabled', message: 'a' });
-    s = reduceEvent(s, { type: 'unsupported', kind: 'audio', codec: 'DTS', message: 'no DTS' });
-    s = reduceEvent(s, { type: 'unsupported', kind: 'video', codec: 'VC-1', message: 'no VC-1' });
-    s = reduceEvent(s, { type: 'notice', code: 'bdj', message: 'bd-j' });
-    s = reduceEvent(s, { type: 'notice', code: 'decoder-recovered', message: 'recovered' });
-    s = reduceEvent(s, { type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
-    expect(s.notices.map((n) => n.code)).toEqual(['bdj', 'decoder-recovered']);
+describe('notices across playlists', () => {
+  // The engine emits a playlist's own notices *before* its `chapters` event (engine/player.ts playPlaylist).
+  function startPlaylist(worker: FakeWorker, c: PlayerController, id: string, notices: EngineEvent[]): void {
+    c.playPlaylist(id);
+    for (const e of notices) worker.emit(e);
+    worker.emit({ type: 'chapters', playlistId: id, durationUs: 1, chapters: [] });
+  }
+
+  it("keeps the new playlist's own unsupported-audio and audio-disabled notices", () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    startPlaylist(worker, c, '00000', [
+      { type: 'unsupported', kind: 'audio', codec: 'DTS', message: 'no DTS' },
+      { type: 'notice', code: 'audio-disabled', message: 'no output' },
+    ]);
+    expect(c.getSnapshot().notices.map((n) => n.code)).toEqual(['unsupported-audio', 'audio-disabled']);
+  });
+
+  it("drops the previous playlist's playlist-specific notices when another is picked, keeping disc and device notices", async () => {
+    const worker = new FakeWorker();
+    const audio = new FakeAudio();
+    audio.fail = true;
+    const c = new PlayerController(worker, audio);
+    worker.emit({ type: 'notice', code: 'bdj', message: 'bd-j' });
+    startPlaylist(worker, c, '00000', [
+      { type: 'unsupported', kind: 'audio', codec: 'DTS', message: 'no DTS' },
+      { type: 'notice', code: 'decoder-recovered', message: 'recovered' },
+    ]);
+    await new Promise((r) => setTimeout(r, 0)); // audio start rejects → 'audio-output' notice
+    startPlaylist(worker, c, '00001', []);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(c.getSnapshot().notices.map((n) => n.code).sort()).toEqual(['audio-output', 'bdj']);
   });
 });
 
