@@ -173,6 +173,19 @@ describe('PlayerController', () => {
     expect(c.getSnapshot()).toMatchObject({ volume: 1, muted: true });
   });
 
+  it('adjustVolume unmutes, so the change is audible', () => {
+    const audio = new FakeAudio();
+    const c = new PlayerController(new FakeWorker(), audio);
+    c.setVolume(0.5);
+    c.toggleMute();
+    c.adjustVolume(0.1);
+    expect(audio.muted).toBe(false);
+    expect(audio.volume).toBeCloseTo(0.6);
+    expect(c.getSnapshot()).toMatchObject({ muted: false });
+    c.adjustVolume(-5);
+    expect(c.getSnapshot().volume).toBe(0);
+  });
+
   it('adds a notice when audio cannot start', async () => {
     const audio = new FakeAudio();
     audio.fail = true;

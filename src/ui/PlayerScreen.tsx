@@ -38,6 +38,9 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      // Any key shows the controls again, like mouse movement does.
+      setIdle(false);
+      setActivity((a) => a + 1);
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target;
       if (target instanceof HTMLTextAreaElement) return;
@@ -58,7 +61,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
           controller.seekBy(action.deltaUs);
           break;
         case 'volumeBy':
-          controller.setVolume(controller.getSnapshot().volume + action.delta);
+          controller.adjustVolume(action.delta);
           break;
         case 'fullscreen':
           toggleFullscreen(rootRef.current);
@@ -90,7 +93,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       className={`player${controlsVisible ? '' : ' idle'}`}
       data-testid="player"
       data-state={snapshot.engineState}
-      onMouseMove={wake}
+      onPointerMove={wake}
+      onPointerDown={wake}
     >
       <canvas ref={canvasRef} className="player-canvas" data-testid="video-canvas" onClick={() => controller.togglePlay()} />
       <div className="notices">

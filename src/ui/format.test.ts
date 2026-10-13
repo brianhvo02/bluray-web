@@ -8,5 +8,7 @@ describe('formatTime', () => {
     expect(formatTime(754_900_000)).toBe('12:34');
     expect(formatTime(7_384_000_000)).toBe('2:03:04');
     expect(formatTime(-5)).toBe('0:00');
+    expect(formatTime(Number.NaN)).toBe('--:--');
+    expect(formatTime(Number.POSITIVE_INFINITY)).toBe('--:--');
   });
 });

@@ -109,6 +109,16 @@ test('opens another disc after closing the current one', async ({ page }) => {
   await expect.poll(async () => (await page.evaluate(() => (window as unknown as { __blurayTelemetry?: { clockUs: number } | null }).__blurayTelemetry?.clockUs)) ?? 0).toBeGreaterThan(1_000_000);
 });
 
+test('a key press brings the hidden controls back', async ({ page }) => {
+  await openDisc(page);
+  await startPlaylist(page, '00000');
+  await page.mouse.move(5, 5);
+  await expect(page.getByTestId('control-bar')).toHaveClass(/hidden/, { timeout: 6000 }); // auto-hides after 3 s
+  await page.keyboard.press('ArrowUp');
+  // Short window: the 8 s fixture ends soon after, and ending also reveals the controls.
+  await expect(page.getByTestId('control-bar')).not.toHaveClass(/hidden/, { timeout: 500 });
+});
+
 test('pauses and resumes', async ({ page }) => {
   await openDisc(page);
   await startPlaylist(page, '00000');

@@ -191,6 +191,12 @@ export class PlayerController {
     this.update({ ...this.snapshot, volume: v });
   }
 
+  /** Volume keys: change the level and unmute, so the change is audible. */
+  adjustVolume(delta: number): void {
+    if (this.snapshot.muted) this.toggleMute();
+    this.setVolume(this.snapshot.volume + delta);
+  }
+
   toggleMute(): void {
     const muted = !this.snapshot.muted;
     this.audio.setMuted(muted);

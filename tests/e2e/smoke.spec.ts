@@ -4,4 +4,6 @@ test('app is served cross-origin isolated', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByTestId('app')).toBeVisible();
   expect(await page.evaluate(() => crossOriginIsolated)).toBe(true);
+  const icon = await page.request.get('/favicon.svg');
+  expect(icon.status()).toBe(200);
 });

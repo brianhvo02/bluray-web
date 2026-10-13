@@ -140,9 +140,9 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
           <h2>Recent discs</h2>
           <ul>
             {recent.map((disc) => (
-              <li key={disc.name}>
+              <li key={disc.id}>
                 <button type="button" onClick={() => onRecent(disc)}>
-                  {disc.name}
+                  {disc.name} <span className="recent-date">· {new Date(disc.openedAt).toLocaleDateString()}</span>
                 </button>
               </li>
             ))}
