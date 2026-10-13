@@ -79,6 +79,32 @@ describe('AudioFramer', () => {
     ]);
   });
 
+  it('gives a frame that starts in one push and completes in the next the PTS of the push it started in', () => {
+    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const b = ac3Frame(2);
+    const c = ac3Frame(3);
+    expect(framer.push(b.subarray(0, 100), 1_000)).toEqual([]);
+    const out = framer.push(cat(b.subarray(100), c), 2_000);
+    expect(out.map((f) => [f.data[10], f.ptsUs])).toEqual([
+      [2, 1_000],
+      [3, 2_000],
+    ]);
+  });
+
+  it('after reset(), a frame split across pushes still takes the PTS of the push it started in', () => {
+    const framer = new AudioFramer('ac3', CodingType.AC3);
+    framer.push(ac3Frame(1), 0);
+    framer.reset();
+    const b = ac3Frame(2);
+    const c = ac3Frame(3);
+    expect(framer.push(cat(ac3Frame(7).subarray(40), b.subarray(0, 100)), 1_000_000)).toEqual([]);
+    const out = framer.push(cat(b.subarray(100), c), 2_000_000);
+    expect(out.map((f) => [f.data[10], f.ptsUs])).toEqual([
+      [2, 1_000_000],
+      [3, 2_000_000],
+    ]);
+  });
+
   it('skips garbage and resyncs when joining mid-frame after a seek', () => {
     const framer = new AudioFramer('ac3', CodingType.AC3);
     const tail = ac3Frame(7).subarray(40); // the end of a frame we never saw the start of

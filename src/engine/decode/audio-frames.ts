@@ -41,6 +41,8 @@ function readBits(b: Uint8Array, bitPos: number, count: number): number {
 export class AudioFramer {
   private carry: Uint8Array = new Uint8Array(0);
   private nextPtsUs: number | null = null;
+  /** PTS of the push a frame started in, for the carried frame that was cut off at that push's end. */
+  private carryPtsUs: number | null = null;
   private group: { parts: Uint8Array[]; ptsUs: number; samples: number } | null = null;
 
   constructor(
@@ -60,8 +62,24 @@ export class AudioFramer {
         at++;
         continue;
       }
-      if (parsed === null || at + parsed.size > buf.length) break;
+      if (parsed === null) {
+        // Header cut off by the push boundary: keep this push's PTS for it unless it turns out to be a dependent frame.
+        if (at >= newFrom && ptsPending) {
+          this.carryPtsUs = ptsUs;
+          ptsPending = false;
+        }
+        break;
+      }
       const start = at;
+      if (at + parsed.size > buf.length) {
+        if (start >= newFrom && ptsPending && parsed.startsUnit) {
+          this.carryPtsUs = ptsUs;
+          ptsPending = false;
+        }
+        break;
+      }
+      const carriedPtsUs = start < newFrom ? this.carryPtsUs : null;
+      this.carryPtsUs = null;
       const bytes = buf.slice(at, at + parsed.size);
       at += parsed.size;
       if (parsed.drop) continue;
@@ -70,7 +88,9 @@ export class AudioFramer {
         continue;
       }
       let frameUs = this.nextPtsUs ?? ptsUs;
-      if (ptsPending && start >= newFrom) {
+      if (carriedPtsUs !== null) {
+        frameUs = carriedPtsUs;
+      } else if (ptsPending && start >= newFrom) {
         frameUs = ptsUs;
         ptsPending = false;
       }
@@ -89,6 +109,7 @@ export class AudioFramer {
   reset(): void {
     this.carry = new Uint8Array(0);
     this.nextPtsUs = null;
+    this.carryPtsUs = null;
     this.group = null;
   }
 
