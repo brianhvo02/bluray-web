@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AUDIO_PID, VIDEO_PID, buildSyntheticDisc, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
+import { VIDEO_PID, buildSyntheticDisc, lpcmStream, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
 import { buildClpi, buildIndex, buildMpls } from '../../../tests/helpers/bdmv-builders';
 import { parseClpi } from '../bdmv/clpi-parser';
 import { parseMpls } from '../bdmv/mpls-parser';
@@ -7,7 +7,7 @@ import { CodingType } from '../bdmv/stream-types';
 import { DiscError, readWhole } from '../disc/byte-source';
 import { loadClips } from '../disc/open-disc';
 import { Timeline } from '../nav/timeline';
-import { PlaybackPipeline, type PipelineConfig, type PipelineUnit } from './pipeline';
+import { PlaybackPipeline, type PipelineAudioUnit, type PipelineConfig, type PipelineUnit } from './pipeline';
 
 async function setup(corruptPacket?: number): Promise<PipelineConfig> {
   const files = buildSyntheticDisc({
@@ -18,12 +18,12 @@ async function setup(corruptPacket?: number): Promise<PipelineConfig> {
   if (corruptPacket !== undefined && clip) clip[corruptPacket * 192 + 4] = 0x00; // break one packet's sync byte
   const source = syntheticSource(files);
   const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
-  return { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001', '00002']), videoPid: VIDEO_PID, audioPid: AUDIO_PID };
+  return { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001', '00002']), videoPid: VIDEO_PID, playItems: mpls.playItems, audioStream: 1 };
 }
 
 interface Collected {
   video: PipelineUnit[];
-  audio: PipelineUnit[];
+  audio: PipelineAudioUnit[];
   ended: number;
   errors: unknown[];
 }
@@ -70,6 +70,50 @@ describe('PlaybackPipeline', () => {
     expect(times.every((t, i) => i === 0 || t > times[i - 1])).toBe(true);
     expect(got.video.every((u) => u.inRange)).toBe(true);
     expect(got.audio.length).toBeGreaterThan(1500);
+  });
+
+  it('resolves the audio PID per play item from the stream number', async () => {
+    const files = buildSyntheticDisc({
+      clips: [
+        syntheticClip('00001', 2, { audioStreams: [lpcmStream(0x1100, 2)] }),
+        syntheticClip('00002', 2, { audioStreams: [lpcmStream(0x1101, 2)] }),
+        syntheticClip('00003', 2, {}),
+      ],
+      playlists: [{ id: '00000', clipIds: ['00001', '00002', '00003'] }],
+    });
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const config: PipelineConfig = {
+      source,
+      timeline: new Timeline(mpls.playItems),
+      clips: await loadClips(source, ['00001', '00002', '00003']),
+      videoPid: VIDEO_PID,
+      playItems: mpls.playItems,
+      audioStream: 1,
+    };
+    const { got, done } = run(config, 0);
+    await done;
+    const inItem = (from: number, to: number) => got.audio.filter((u) => u.ptsUs >= from && u.ptsUs < to);
+    expect(inItem(0, 2_000_000).length).toBeGreaterThan(300);
+    expect(inItem(2_000_000, 4_000_000).length).toBeGreaterThan(300);
+    expect(inItem(4_000_000, 6_000_000)).toEqual([]); // the third item has no audio stream
+    expect(new Set(got.audio.map((u) => u.codingType))).toEqual(new Set([CodingType.LPCM]));
+  });
+
+  it('reads no audio when the stream number is null, and follows setAudioStream on the next start', async () => {
+    const config = { ...(await setup()), audioStream: null };
+    const silent = run(config, 0);
+    await silent.done;
+    expect(silent.got.audio).toEqual([]);
+
+    let finish: () => void = () => undefined;
+    const done = new Promise<void>((r) => (finish = r));
+    const got: PipelineAudioUnit[] = [];
+    const p = new PlaybackPipeline(config, { video: () => undefined, audio: (u) => got.push(u), isFull: () => false, ended: () => finish(), failed: () => finish() });
+    p.setAudioStream(1);
+    p.start(0);
+    await done;
+    expect(got.length).toBeGreaterThan(0);
   });
 
   it('starts from the keyframe before a seek target inside the second item', async () => {
@@ -232,7 +276,7 @@ describe('PlaybackPipeline', () => {
     ]);
     const source = syntheticSource(files);
     const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
-    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00003']), videoPid: VIDEO_PID, audioPid: null };
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00003']), videoPid: VIDEO_PID, playItems: mpls.playItems, audioStream: null };
     const frameLength = (u: PipelineUnit): number => u.data.length;
 
     const all = run(config, 0);

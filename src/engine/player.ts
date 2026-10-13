@@ -11,7 +11,7 @@ import { FileSource } from './disc/file-source';
 import { checkStreamReadable, loadClips, openDisc, playlistPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
 import { Timeline, type Chapter } from './nav/timeline';
-import { PlaybackPipeline, type PipelineUnit } from './playback/pipeline';
+import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { chooseStreams } from './playback/stream-selection';
 import type { EngineCommand, EngineEvent, NoticeCode, PlaybackState } from './protocol';
 import type { CompositorLike } from './render/compositor';
@@ -226,7 +226,7 @@ export class Player {
     const decoder = new WebCodecsVideoDecoder(this.deps.videoCodecApi);
     const ref: { current: Session | null } = { current: null };
     const pipeline = new PlaybackPipeline(
-      { source, timeline, clips, videoPid: choice.video.pid, audioPid: audioActive && choice.audio ? choice.audio.pid : null },
+      { source, timeline, clips, videoPid: choice.video.pid, playItems: mpls.playItems, audioStream: audioActive ? choice.audioIndex : null },
       {
         video: (u) => {
           if (ref.current) this.onVideoUnit(ref.current, u);
@@ -404,7 +404,7 @@ export class Player {
     }
   }
 
-  private onAudioUnit(s: Session, u: PipelineUnit): void {
+  private onAudioUnit(s: Session, u: PipelineAudioUnit): void {
     const writer = this.audioWriter;
     if (!s.audioActive || !writer || !u.inRange) return;
     let chunk: PcmChunk;

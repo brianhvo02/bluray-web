@@ -1,7 +1,7 @@
 import { CodingType } from '../../src/engine/bdmv/stream-types';
 import { FileSource } from '../../src/engine/disc/file-source';
 import { normalizeDiscPaths } from '../../src/engine/disc/paths';
-import { buildClpi, buildIndex, buildMpls, type MarkSpec } from './bdmv-builders';
+import { buildClpi, buildIndex, buildMpls, type MarkSpec, type StreamSpec } from './bdmv-builders';
 import { avcAu } from './h264-units';
 import { muxM2ts, type MuxUnit } from './ts-muxer';
 
@@ -13,6 +13,20 @@ export const FRAME_TICKS_90K = 3750;
 export const AUDIO_FRAMES_PER_PES = 240;
 const AUDIO_PES_TICKS_90K = 450;
 export const CLIP_START_PTS = 900_000;
+
+export interface SyntheticAudioUnit {
+  pts: number;
+  payload: Uint8Array;
+  streamIdExtension?: number;
+}
+
+export interface SyntheticAudioStream {
+  pid: number;
+  codingType: number;
+  format?: number;
+  lang?: string;
+  units: SyntheticAudioUnit[];
+}
 
 export interface SyntheticClipSpec {
   clipId: string;
@@ -32,6 +46,8 @@ export interface SyntheticClipSpec {
   corruptAudioPesIndex?: number;
   /** Multiplex audio this many 90 kHz ticks later than its PTS (video leads audio in the stream), as some discs do. */
   audioMuxLag90k?: number;
+  /** Replaces `audio` when set: each stream on its own PID, listed in this order in the CLPI and STN. */
+  audioStreams?: SyntheticAudioStream[];
 }
 
 export interface SyntheticPlaylistSpec {
@@ -66,8 +82,24 @@ export function lpcmPayload(frames: number, startFrame: number): Uint8Array {
   return out;
 }
 
+/** LPCM tone PES every 5 ms on `pid`. */
+export function lpcmStream(pid: number, seconds: number, opts: { startPts?: number; lang?: string } = {}): SyntheticAudioStream {
+  const start = opts.startPts ?? CLIP_START_PTS;
+  const count = Math.ceil((seconds * 90_000) / AUDIO_PES_TICKS_90K);
+  const units = Array.from({ length: count }, (_, j) => ({ pts: start + j * AUDIO_PES_TICKS_90K, payload: lpcmPayload(AUDIO_FRAMES_PER_PES, j * AUDIO_FRAMES_PER_PES) }));
+  return { pid, codingType: CodingType.LPCM, lang: opts.lang, units };
+}
+
+/** Placeholder payloads every 5 ms for codecs the unit tests decode with fakes. */
+export function dummyAudioStream(pid: number, codingType: number, seconds: number, opts: { startPts?: number; lang?: string; format?: number } = {}): SyntheticAudioStream {
+  const start = opts.startPts ?? CLIP_START_PTS;
+  const count = Math.ceil((seconds * 90_000) / AUDIO_PES_TICKS_90K);
+  const units = Array.from({ length: count }, (_, j) => ({ pts: start + j * AUDIO_PES_TICKS_90K, payload: new Uint8Array(64).fill(0x0b) }));
+  return { pid, codingType, lang: opts.lang, format: opts.format, units };
+}
+
 /** A clip of fake AVC units (IDR every `keyEvery` frames), optionally with audio. */
-export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number; audioMuxLag90k?: number; frameBytes?: number } = {},
+export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number; audioMuxLag90k?: number; frameBytes?: number; audioStreams?: SyntheticAudioStream[] } = {},
 ): SyntheticClipSpec {
   const keyEvery = opts.keyEvery ?? 24;
   const frames = seconds * 24;
@@ -78,13 +110,13 @@ export function syntheticClip(clipId: string, seconds: number, opts: { audio?: n
     if (idr) keyIndices.push(i);
     videoAus.push(avcAu({ idr, fill: opts.frameBytes ?? 300 }));
   }
-  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, audioMuxLag90k: opts.audioMuxLag90k };
+  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, audioMuxLag90k: opts.audioMuxLag90k, audioStreams: opts.audioStreams };
 }
 
 export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Array<ArrayBuffer>> {
   const files = new Map<string, Uint8Array<ArrayBuffer>>();
   files.set('BDMV/index.bdmv', buildIndex({ firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [{ kind: 'hdmv', movieObjectId: 2 }] }));
-  const clips = new Map<string, { inTime: number; outTime: number; audio?: number }>();
+  const clips = new Map<string, { inTime: number; outTime: number; audio: StreamSpec[] }>();
 
   for (const clip of spec.clips) {
     const endPts = (clip.pts ? Math.max(...clip.pts) : clip.startPts + (clip.videoAus.length - 1) * FRAME_TICKS_90K) + FRAME_TICKS_90K;
@@ -96,30 +128,29 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
       payload,
       videoIndex: i,
     }));
-    if (clip.audio !== undefined) {
-      const count = Math.ceil((endPts - clip.startPts) / AUDIO_PES_TICKS_90K);
-      for (let j = 0; j < count; j++) {
-        const payload = clip.audio === CodingType.LPCM ? lpcmPayload(AUDIO_FRAMES_PER_PES, j * AUDIO_FRAMES_PER_PES) : new Uint8Array(64).fill(0x0b);
-        if (j === clip.corruptAudioPesIndex && payload.length > 2) payload[2] = 0x30; // reserved sample-rate code
-        units.push({ pid: AUDIO_PID, streamId: 0xbd, pts: clip.startPts + j * AUDIO_PES_TICKS_90K, payload });
+    const audioStreams: SyntheticAudioStream[] = clip.audioStreams ?? (clip.audio !== undefined ? [legacyAudioStream(clip, endPts)] : []);
+    for (const stream of audioStreams) {
+      for (const u of stream.units) {
+        units.push({ pid: stream.pid, streamId: u.streamIdExtension === undefined ? 0xbd : 0xfd, streamIdExtension: u.streamIdExtension, pts: u.pts, payload: u.payload });
       }
     }
     const lag = clip.audioMuxLag90k ?? 0;
-    const muxKey = (u: MuxUnit): number => (u.dts ?? u.pts) + (u.pid === AUDIO_PID ? lag : 0);
-    units.sort((a, b) => muxKey(a) - muxKey(b) || (a.pid === AUDIO_PID ? -1 : 1));
+    const isAudio = (u: MuxUnit): boolean => u.pid !== VIDEO_PID;
+    const muxKey = (u: MuxUnit): number => (u.dts ?? u.pts) + (isAudio(u) ? lag : 0);
+    units.sort((a, b) => muxKey(a) - muxKey(b) || (isAudio(a) ? -1 : 1));
     const { bytes, unitSpns } = muxM2ts(units);
     const keySet = new Set(clip.keyIndices);
     const entries = units.flatMap((u, i) =>
       u.videoIndex !== undefined && keySet.has(u.videoIndex) ? [{ pts: Math.floor(u.pts / 2), spn: unitSpns[i] }] : [],
     );
-    const streams: Array<{ pid: number; codingType: number }> = [{ pid: VIDEO_PID, codingType: CodingType.AVC }];
-    if (clip.audio !== undefined) streams.push({ pid: AUDIO_PID, codingType: clip.audio });
+    const audioSpecs = audioStreams.map((s) => ({ pid: s.pid, codingType: s.codingType, format: s.format, lang: s.lang }));
+    const streams: Array<{ pid: number; codingType: number }> = [{ pid: VIDEO_PID, codingType: CodingType.AVC }, ...audioSpecs.map(({ pid, codingType }) => ({ pid, codingType }))];
     files.set(`BDMV/STREAM/${clip.clipId}.m2ts`, bytes);
     files.set(
       `BDMV/CLIPINF/${clip.clipId}.clpi`,
       buildClpi({ numSourcePackets: bytes.length / 192, streams, presentationStart: clip.startPts / 2, presentationEnd: endPts / 2, epMaps: [{ pid: VIDEO_PID, entries }] }),
     );
-    clips.set(clip.clipId, { inTime: clip.startPts / 2, outTime: endPts / 2, audio: clip.audio });
+    clips.set(clip.clipId, { inTime: clip.startPts / 2, outTime: endPts / 2, audio: audioSpecs });
   }
 
   for (const playlist of spec.playlists) {
@@ -135,12 +166,23 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         outTime: clip.outTime,
         connectionCondition: index === 0 ? 1 : 5,
         video: [{ pid: VIDEO_PID, codingType: playlist.videoCodingType ?? CodingType.AVC }],
-        audio: clip.audio === undefined ? [] : [{ pid: AUDIO_PID, codingType: clip.audio }],
+        audio: clip.audio,
       };
     });
     files.set(`BDMV/PLAYLIST/${playlist.id}.mpls`, buildMpls({ playItems, marks }));
   }
   return files;
+}
+
+function legacyAudioStream(clip: SyntheticClipSpec, endPts: number): SyntheticAudioStream {
+  const codingType = clip.audio ?? CodingType.LPCM;
+  const count = Math.ceil((endPts - clip.startPts) / AUDIO_PES_TICKS_90K);
+  const units = Array.from({ length: count }, (_, j) => {
+    const payload = codingType === CodingType.LPCM ? lpcmPayload(AUDIO_FRAMES_PER_PES, j * AUDIO_FRAMES_PER_PES) : new Uint8Array(64).fill(0x0b);
+    if (j === clip.corruptAudioPesIndex && payload.length > 2) payload[2] = 0x30; // reserved sample-rate code
+    return { pts: clip.startPts + j * AUDIO_PES_TICKS_90K, payload };
+  });
+  return { pid: AUDIO_PID, codingType, units };
 }
 
 export function discEntries(files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>, root = 'Disc'): Array<[string, File]> {
