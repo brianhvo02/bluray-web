@@ -520,7 +520,8 @@ describe('Player', () => {
     expect(h.events.slice(before).filter((e) => e.type === 'tracks' || (e.type === 'state' && e.state === 'buffering'))).toEqual([]);
   });
 
-  it('the last of two quick switches wins while a decoder is still loading', async () => {
+  it('applies two quick switches in order: the last one wins, with no stale decoder output (commands are serialized)', async () => {
+    // Player.handle serializes commands, so the gated load of the first switch finishes before the second runs.
     let open: () => void = () => undefined;
     const gate = new Promise<void>((r) => (open = r));
     const log: FakeAudioLog = { decoded: [], resets: 0, failNext: 0 };
