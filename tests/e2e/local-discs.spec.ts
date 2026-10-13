@@ -27,9 +27,13 @@ for (const name of discs) {
       // New pictures after the seek, not just a still.
       await expect.poll(async () => (await telemetry(page))?.framesPresented ?? 0, { timeout: 10_000 }).toBeGreaterThan(presented + 20);
     }
-    await page.getByTestId('player').hover(); // wake the auto-hidden controls
     const menu = page.getByTestId('audio-menu');
-    if (await menu.isVisible()) {
+    const trackCount = Number((await page.getByTestId('player').getAttribute('data-audio-tracks')) ?? '0');
+    if (trackCount <= 1) {
+      console.log(`${name}: single audio track, switching skipped`);
+    } else {
+      await page.getByTestId('player').hover(); // wake the auto-hidden controls
+      await expect(menu).toBeVisible();
       const items = page.locator('[data-testid^="audio-track-"]:not([disabled])');
       await menu.click();
       const count = await items.count();
@@ -38,10 +42,16 @@ for (const name of discs) {
         tracks.push({ id: (await items.nth(i).getAttribute('data-testid')) ?? '', codec: (await items.nth(i).getAttribute('data-codec')) ?? '' });
       }
       await page.keyboard.press('Escape');
+      expect(count, 'playable audio tracks in the menu').toBeGreaterThanOrEqual(1);
       for (const track of tracks) {
         await page.getByTestId('player').hover();
         await menu.click();
         await page.getByTestId(track.id).click();
+        // Same-codec tracks look identical in telemetry, so prove the switch from the menu's checked item.
+        await page.getByTestId('player').hover();
+        await menu.click();
+        await expect(page.getByTestId(track.id)).toHaveAttribute('aria-checked', 'true');
+        await page.keyboard.press('Escape');
         await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
         await expect.poll(async () => (await telemetry(page))?.audioCodec, { timeout: 15_000 }).toBe(track.codec);
         await page.waitForTimeout(500);

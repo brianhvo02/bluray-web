@@ -120,6 +120,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       className={`player${controlsVisible ? '' : ' idle'}`}
       data-testid="player"
       data-state={snapshot.engineState}
+      data-audio-tracks={snapshot.audioTracks.length}
       onPointerMove={wake}
       onPointerDown={() => {
         setPressed(true);
