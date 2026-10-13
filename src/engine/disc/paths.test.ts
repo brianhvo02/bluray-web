@@ -37,6 +37,21 @@ describe('normalizeDiscPaths', () => {
     }
   });
 
+  it('rejects files whose names differ only in case instead of keeping one', () => {
+    try {
+      keys(['Disc/BDMV/index.bdmv', 'Disc/BDMV/STREAM/00001.m2ts', 'Disc/BDMV/STREAM/00001.M2TS']);
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiscError);
+      expect((err as DiscError).code).toBe('case-collision');
+      expect((err as DiscError).paths).toEqual(['Disc/BDMV/STREAM/00001.M2TS', 'Disc/BDMV/STREAM/00001.m2ts']);
+    }
+  });
+
+  it('accepts the same path listed twice', () => {
+    expect(keys(['BDMV/index.bdmv', 'BDMV/index.bdmv'])).toEqual(['BDMV/INDEX.BDMV']);
+  });
+
   it('rejects a selection without a BDMV folder', () => {
     expect(() => keys(['Photos/a.jpg'])).toThrow(DiscError);
   });

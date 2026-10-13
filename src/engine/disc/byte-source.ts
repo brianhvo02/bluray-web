@@ -10,6 +10,7 @@ export interface ByteSource {
 export type DiscErrorCode =
   | 'not-bdmv'
   | 'multiple-discs'
+  | 'case-collision'
   | 'missing-file'
   | 'source-changed'
   | 'encrypted'

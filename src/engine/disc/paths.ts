@@ -19,10 +19,20 @@ export function normalizeDiscPaths(entries: ReadonlyArray<readonly [string, Blob
   const [root] = [...roots];
   const prefix = root === '' ? '' : `${root}/`;
   const files = new Map<string, Blob>();
+  const originals = new Map<string, string>();
+  const collisions = new Set<string>();
   for (const [path, blob] of entries) {
     const relative = path.split('/').filter(Boolean).join('/');
     if (prefix !== '' && !relative.startsWith(prefix)) continue;
-    files.set(relative.slice(prefix.length).toUpperCase(), blob);
+    const key = relative.slice(prefix.length).toUpperCase();
+    const seen = originals.get(key);
+    if (seen !== undefined && seen !== relative) collisions.add(seen).add(relative);
+    originals.set(key, relative);
+    files.set(key, blob);
+  }
+  // Disc names are case-insensitive, so two picked files differing only in case would silently shadow each other.
+  if (collisions.size > 0) {
+    throw new DiscError('case-collision', 'The disc folder has files whose names differ only in upper/lower case. Keep one of each and reopen it.', [...collisions].sort());
   }
   return files;
 }
