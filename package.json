@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "wasm:build": "src/wasm/audio/build.sh",
-    "fixture:synthetic": "tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2"
+    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2"
   },
   "dependencies": {
     "react": "^19.3.0",
