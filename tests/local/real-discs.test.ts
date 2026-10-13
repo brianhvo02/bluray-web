@@ -1,7 +1,8 @@
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { CodingType } from '../../src/engine/bdmv/stream-types';
+import { CodingType, codingName } from '../../src/engine/bdmv/stream-types';
 import { analyzeAvc, avcCodecString } from '../../src/engine/decode/h264';
 import { analyzeHevc, hevcCodecString } from '../../src/engine/decode/hevc';
 import { hasSps } from '../../src/engine/decode/video-decoder';
@@ -12,7 +13,7 @@ import { M2tsReader } from '../../src/engine/demux/m2ts-reader';
 import { Timeline } from '../../src/engine/nav/timeline';
 import { chooseStreams } from '../../src/engine/playback/stream-selection';
 
-const LOCAL = 'fixtures/local';
+const LOCAL = fileURLToPath(new URL('../../fixtures/local', import.meta.url)); // independent of the working directory
 
 function localDiscs(): string[] {
   if (!existsSync(LOCAL)) return [];
@@ -60,7 +61,7 @@ const discs = localDiscs();
 
 describe.skipIf(discs.length === 0)('local discs', () => {
   for (const dir of discs) {
-    it(`parses and demuxes ${dir}`, async () => {
+    it(`parses and demuxes ${basename(dir)}`, async () => {
       const source = new FileSource(normalizeDiscPaths(await entriesOf(dir)));
       const disc = await openDisc(source);
       const main = disc.summaries.find((s) => s.playable);
@@ -85,16 +86,21 @@ describe.skipIf(discs.length === 0)('local discs', () => {
       expect(video, 'a main-path video stream').not.toBeNull();
       if (!video) return;
       const reader = new M2tsReader({ source, path: streamPath(mpls.playItems[0].clipId), startSpn: 0, pids: new Set([video.pid]) });
-      const first = (await reader.next())?.find((p) => hasSps(video.codingType, p.payload));
+      const batch = (await reader.next()) ?? [];
+      const first = batch.find((p) => hasSps(video.codingType, p.payload));
+      let codec = codingName(video.codingType);
       if (video.codingType === CodingType.AVC || video.codingType === CodingType.HEVC) {
         expect(first, 'an access unit with SPS in the first 2 MB').toBeDefined();
         if (!first) return;
         const sps = (video.codingType === CodingType.AVC ? analyzeAvc : analyzeHevc)(first.payload).sps;
         if (!sps) throw new Error('SPS disappeared');
-        const codec = video.codingType === CodingType.AVC ? avcCodecString(sps) : hevcCodecString(sps);
+        codec = video.codingType === CodingType.AVC ? avcCodecString(sps) : hevcCodecString(sps);
         expect(codec).toMatch(/^(avc1|hev1)\./);
-        console.info(`${dir}: main=${main.id} ${(main.durationUs / 60e6).toFixed(1)} min, ${codec}, audio=${choice.audio ? 'LPCM' : choice.unsupportedAudio.map((a) => a.codingType.toString(16)).join('/')}, bdj=${disc.usesBdj}`);
+      } else {
+        expect(batch.length, `video PES (${codec}) in the first 2 MB`).toBeGreaterThan(0);
       }
+      const audio = choice.audio ? codingName(choice.audio.codingType) : `none playable (${choice.unsupportedAudio.map((a) => codingName(a.codingType)).join(', ') || 'no audio'})`;
+      console.info(`${basename(dir)}: main=${main.id} ${(main.durationUs / 60e6).toFixed(1)} min, ${codec}, audio=${audio}, bdj=${disc.usesBdj}`);
       expect(reader.stats.corruptPackets).toBe(0);
 
       // The end of the clip too: real clips are often > 4 GiB, where truncated file handles go silent.

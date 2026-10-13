@@ -4,3 +4,4 @@ fixtures/local
 test-results
 playwright-report
 *.tsbuildinfo
+.claude/worktrees/

@@ -1,12 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { CodingType } from '../src/engine/bdmv/stream-types';
 import { analyzeAvc } from '../src/engine/decode/h264';
 import { SOURCE_PACKET_SIZE } from '../src/engine/demux/constants';
 import { PesAssembler, type PesPacket } from '../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../src/engine/demux/ts-packet';
 import { CLIP_START_PTS, buildSyntheticDisc } from '../tests/helpers/synthetic-disc';
+import { writeFixture } from './fixture-dir';
 
 const outDir = process.argv[2];
 if (!outDir) {
@@ -66,10 +65,5 @@ const files = buildSyntheticDisc({
   playlists: [{ id: '00000', clipIds: ['00001'], chapterEverySeconds: 2 }],
 });
 
-rmSync(outDir, { recursive: true, force: true });
-for (const [path, bytes] of files) {
-  const target = join(outDir, path);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, bytes);
-}
+writeFixture(outDir, files);
 console.log(`wrote ${files.size} files to ${outDir}`);

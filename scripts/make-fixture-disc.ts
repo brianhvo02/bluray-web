@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { CodingType } from '../src/engine/bdmv/stream-types';
 import { CLIP_START_PTS, buildSyntheticDisc, type SyntheticClipSpec } from '../tests/helpers/synthetic-disc';
+import { writeFixture } from './fixture-dir';
 
 const [outDir, ...args] = process.argv.slice(2);
 if (!outDir) {
@@ -11,6 +10,10 @@ if (!outDir) {
 }
 const flag = args.indexOf('--seconds-per-clip');
 const secondsPerClip = flag >= 0 ? Number(args[flag + 1]) : 4;
+if (!Number.isInteger(secondsPerClip) || secondsPerClip <= 0) {
+  console.error(`--seconds-per-clip must be a positive whole number of seconds (got ${args[flag + 1]})`);
+  process.exit(1);
+}
 const framesPerClip = secondsPerClip * 24;
 
 // IDR every second, no B-frames (so PTS = DTS = frame index), AUD before every access unit,
@@ -59,10 +62,5 @@ const files = buildSyntheticDisc({
   ],
 });
 
-rmSync(outDir, { recursive: true, force: true });
-for (const [path, bytes] of files) {
-  const target = join(outDir, path);
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, bytes);
-}
+writeFixture(outDir, files);
 console.log(`wrote ${files.size} files to ${outDir}`);

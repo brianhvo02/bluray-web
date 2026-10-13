@@ -1,17 +1,9 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { CodingType } from '../src/engine/bdmv/stream-types';
 import { buildSyntheticDisc, syntheticClip } from '../tests/helpers/synthetic-disc';
+import { writeFixture } from './fixture-dir';
 
 function write(outDir: string, files: ReadonlyMap<string, Uint8Array>, skip: (path: string) => boolean = () => false): void {
-  rmSync(outDir, { recursive: true, force: true });
-  for (const [path, bytes] of files) {
-    if (skip(path)) continue;
-    const target = join(outDir, path);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, bytes);
-  }
-  console.log(`wrote ${outDir}`);
+  writeFixture(outDir, files, skip);
 }
 
 // A disc whose playlist declares VC-1 video (fake AVC payload; it is rejected before decoding).
