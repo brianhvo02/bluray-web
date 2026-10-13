@@ -154,11 +154,12 @@ test('plays a B-frame, open-GOP disc in sync and seeks without decoder errors', 
   await page.getByTestId('player').hover();
   const bar = await page.getByTestId('seek').boundingBox();
   if (!bar) throw new Error('seek bar not found');
-  const clickedAt = Date.now();
+  const before = (await telemetry(page))?.clockUs ?? Infinity;
+  expect(before).toBeLessThan(2_000_000);
   await page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
+  // A jump, not ordinary playback: from < 2 s the clock must reach the ~3 s target within 0.7 s.
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 700, intervals: [50] }).toBeGreaterThanOrEqual(2_800_000);
   const after = await collectWindows(page, 3_500_000);
-  // Playing on from ~1 s would need 2.5 s of wall time to reach 3.5 s, so this proves a jump.
-  expect(Date.now() - clickedAt).toBeLessThan(2200);
   expect(after.length).toBeGreaterThan(0);
   expectInSync(after);
   const seeked = await telemetry(page);

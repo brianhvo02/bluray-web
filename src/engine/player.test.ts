@@ -283,6 +283,26 @@ describe('Player', () => {
     expect(lastTelemetry(h)?.clockMode).toBe('wall');
   });
 
+  it('seeking while paused shows the target frame and stays paused', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'pause' });
+    expect(lastState(h)).toBe('paused');
+    h.drawn.length = 0;
+    await h.player.handle({ type: 'seek', timeUs: 5_000_000 });
+    await vi.waitFor(async () => {
+      await h.play(20);
+      expect(h.drawn.length).toBeGreaterThan(0);
+    });
+    expect(h.drawn[0]).toBeGreaterThanOrEqual(4_999_000);
+    expect(h.drawn[0]).toBeLessThan(5_100_000);
+    await h.play(500);
+    expect(lastState(h)).toBe('paused');
+    expect(h.drawn).toHaveLength(1); // a paused preview: one frame, no playback
+    expect(h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : [])).at(-1)).toBe(5_000_000);
+  });
+
   it('jumps to the next chapter', async () => {
     const h = await harness(CodingType.LPCM);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });

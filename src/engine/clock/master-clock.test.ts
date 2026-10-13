@@ -56,11 +56,17 @@ describe('MasterClock', () => {
     expect(clock.nowUs()).toBe(1_010_000);
   });
 
-  it('ignores setRunning in audio mode', () => {
+  it('ignores setRunning in audio mode, so pausing cannot corrupt the audio-based time', () => {
+    let now = 0;
     const audio = new FakeAudio();
-    const clock = new MasterClock(() => 0);
+    const clock = new MasterClock(() => now);
     clock.useAudio(audio, 0);
+    audio.frames = 48_000; // 1 s played
+    now = 5_000;
+    clock.setRunning(false); // would fold a wall-clock reading into the base if it weren't ignored
     clock.setRunning(true);
-    expect(clock.nowUs()).toBe(0);
+    audio.frames = 96_000; // 2 s played
+    now = 9_000;
+    expect(clock.nowUs()).toBe(2_000_000);
   });
 });

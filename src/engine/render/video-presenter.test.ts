@@ -3,10 +3,11 @@ import { VideoPresenter, type PresentableFrame } from './video-presenter';
 
 interface TestFrame extends PresentableFrame {
   closed: boolean;
+  closes: number;
 }
 
 function frame(timestamp: number): TestFrame {
-  return { timestamp, closed: false, close() { this.closed = true; } };
+  return { timestamp, closed: false, closes: 0, close() { this.closed = true; this.closes++; } };
 }
 
 describe('VideoPresenter', () => {
@@ -76,5 +77,19 @@ describe('VideoPresenter', () => {
     expect(a.closed && b.closed).toBe(true);
     expect(p.current).toBeNull();
     expect(p.size).toBe(0);
+  });
+
+  it('closes every frame exactly once across select, dropLate, stale drops and clear', () => {
+    const p = new VideoPresenter<TestFrame>();
+    const frames = [0, 40_000, 80_000, 120_000, 160_000, 200_000].map(frame);
+    for (const f of frames.slice(0, 4)) p.push(f);
+    p.select(50_000); // shows 40k, drops 0
+    p.dropLate(130_000); // drops 80k, keeps 120k queued
+    p.push(frame(10_000)); // stale (older than shown)
+    p.push(frames[4]);
+    p.select(170_000); // drops 120k + stale, shows 160k
+    p.push(frames[5]);
+    p.clear(); // closes 160k (shown) and 200k (queued)
+    expect(frames.map((f) => f.closes)).toEqual([1, 1, 1, 1, 1, 1]);
   });
 });

@@ -124,4 +124,27 @@ describe('parseMpls', () => {
     new DataView(bytes.buffer).setUint16(listPos + 10, 10); // first play item's length field
     expect(() => parseMpls(bytes)).toThrow(ParseError);
   });
+
+  it('reads PIDs of sub-path stream types 3 and 4 and flags them', () => {
+    const mpls = parseMpls(
+      buildMpls({
+        playItems: [
+          {
+            clipId: '00001',
+            inTime: 0,
+            outTime: 100,
+            video: [VIDEO],
+            audio: [
+              { pid: 0x1100, codingType: CodingType.LPCM, streamType: 3 },
+              { pid: 0x1101, codingType: CodingType.LPCM, streamType: 4 },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(mpls.playItems[0].stn.audio.map((a) => [a.pid, a.subPath])).toEqual([
+      [0x1100, true],
+      [0x1101, true],
+    ]);
+  });
 });

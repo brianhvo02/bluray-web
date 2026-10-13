@@ -50,4 +50,15 @@ describe('LPCM', () => {
   it('rejects reserved sample rates', () => {
     expect(() => parseLpcmHeader(lpcm(3, 2, 1, []))).toThrow(/sample rate/);
   });
+
+  it('puts each surround of a 3/4 (7.1) layout on its own side and drops LFE', () => {
+    // Coded order: L R C Ls Lb Rb Rs LFE. Only the left surrounds carry signal.
+    const left = decodeLpcm(lpcm(11, 1, 3, [[0, 0, 0, 0x400000, 0x400000, 0, 0, 0x7fffff]]), 0);
+    expect(left.stereo[0]).toBeGreaterThan(0);
+    expect(left.stereo[1]).toBe(0);
+    // Only the right surrounds carry signal.
+    const right = decodeLpcm(lpcm(11, 1, 3, [[0, 0, 0, 0, 0, 0x400000, 0x400000, 0]]), 0);
+    expect(right.stereo[0]).toBe(0);
+    expect(right.stereo[1]).toBeCloseTo(left.stereo[0], 6);
+  });
 });

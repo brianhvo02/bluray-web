@@ -105,4 +105,28 @@ describe('audio ring', () => {
     expect(writer.readFrames()).toBe(500);
     expect(views.control[Control.DiscardRequest]).toBe(0);
   });
+
+  it('plays frames written across the wrap-around point intact', () => {
+    const views = ringViews(createRing(1000, 0.256)); // capacity 256 frames
+    const writer = new RingWriter(views);
+    const quantum = (): Float32Array => {
+      const left = new Float32Array(128);
+      renderQuantum(views, left, new Float32Array(128));
+      return left;
+    };
+    writer.setPlaying(true);
+    writer.writeAt(0, stereo(200, 0));
+    quantum(); // read head at 128
+    const data = new Float32Array(150 * 2);
+    for (let i = 0; i < 150; i++) data[i * 2] = i + 1;
+    expect(writer.writeAt(200, data)).toBe(true); // frames 200..349 → slots 200..255 then wrap to 0..93
+    const first = quantum(); // frames 128..255
+    expect(first[71]).toBe(0);
+    expect(first[72]).toBe(1);
+    expect(first[127]).toBe(56);
+    const second = quantum(); // frames 256..383, read from wrapped slots 0..
+    expect(second[0]).toBe(57);
+    expect(second[93]).toBe(150);
+    expect(second[94]).toBe(0); // past the written end: silence
+  });
 });

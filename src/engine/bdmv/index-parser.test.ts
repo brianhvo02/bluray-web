@@ -47,4 +47,14 @@ describe('parseIndex', () => {
     const bytes = buildIndex({ firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'hdmv', movieObjectId: 1 }] });
     expect(() => parseIndex(bytes.subarray(0, bytes.length - 4))).toThrow(ParseError);
   });
+
+  it('keeps parsing past an object of unknown type', () => {
+    const bytes = buildIndex({ firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [{ kind: 'hdmv', movieObjectId: 2 }, { kind: 'hdmv', movieObjectId: 3 }] });
+    const indexesStart = new DataView(bytes.buffer).getUint32(8);
+    const firstTitle = indexesStart + 4 + 12 + 12 + 2;
+    bytes[firstTitle] = (bytes[firstTitle] & 0x3f) | (3 << 6); // object_type 3: not HDMV or BD-J
+    const index = parseIndex(bytes);
+    expect(index.titles[0].object).toEqual({ kind: 'unknown', objectType: 3 });
+    expect(index.titles[1].object).toEqual({ kind: 'hdmv', playbackType: 0, movieObjectId: 3 });
+  });
 });
