@@ -1,6 +1,3 @@
-import { codingName } from '../bdmv/stream-types';
-import { UnsupportedCodecError } from './decoder';
-
 export type FramerKind = 'ac3' | 'eac3' | 'dts';
 
 export interface AudioFrame {
@@ -45,10 +42,7 @@ export class AudioFramer {
   private carryPtsUs: number | null = null;
   private group: { parts: Uint8Array[]; ptsUs: number; samples: number } | null = null;
 
-  constructor(
-    private readonly kind: FramerKind,
-    private readonly codingType: number,
-  ) {}
+  constructor(private readonly kind: FramerKind) {}
 
   push(data: Uint8Array, ptsUs: number): AudioFrame[] {
     const buf = this.carry.length === 0 ? data : concat(this.carry, data);
@@ -127,9 +121,7 @@ export class AudioFramer {
     if (bsid > 16) return 'resync';
     const strmtyp = b[at + 2] >> 6;
     if (strmtyp === 3) return 'resync';
-    if (fscod !== 0) {
-      throw new UnsupportedCodecError(this.codingType, `${codingName(this.codingType)} below 48 kHz is not supported.`);
-    }
+    if (fscod !== 0) return 'resync'; // reduced-rate header: corrupt or a false sync; real non-48 kHz streams fail the decoder's rate check
     const substreamId = (b[at + 2] >> 3) & 0x07;
     const frmsiz = ((b[at + 2] & 0x07) << 8) | b[at + 3];
     const blocks = EAC3_BLOCKS[(b[at + 4] >> 4) & 0x03];

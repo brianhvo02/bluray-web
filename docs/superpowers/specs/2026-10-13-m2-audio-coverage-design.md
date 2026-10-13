@@ -54,12 +54,11 @@ Decisions taken during brainstorming:
 Deviation: frame splitting is in `src/engine/decode/audio-frames.ts` (`AudioFramer`), not here.
 
 - `loadAudioWasm(url)` compiles the module once per worker with `WebAssembly.instantiateStreaming`. It falls back to `instantiate(bytes)` in Node for tests. Its import object supplies only memory growth and `abort`.
-- `WasmAudioDecoder(module, codec)` has a synchronous `decode(unit: PipelineUnit): PcmChunk[]`, `reset()` and `close()`.
-  - It keeps a carry buffer and splits frames on sync words: AC-3 and E-AC-3 `0x0B77` (frame size from the header), DTS core `0x7FFE8001` (frame size from the header).
+- `WasmFrameDecoder(wasm, codec)` decodes one whole frame at a time (`decode(frame)`), with `reset()` and `close()`. The splitting below happens in `AudioFramer`, which keeps a carry buffer and splits frames on sync words: AC-3 and E-AC-3 `0x0B77` (frame size from the header), DTS core `0x7FFE8001` (frame size from the header).
   - E-AC-3 dependent-substream frames (`strmtyp` 1, as used for 7.1 on Blu-ray) are grouped with the independent frame before them into one access unit. FFmpeg mixes them into the downmix.
   - A DTS-HD extension substream (`0x64582025`) that follows a core frame is skipped. FFmpeg ignores it in core-only mode anyway.
   - Timestamps: the PES PTS belongs to the first frame that starts in that PES. Every later frame (including one carried into the next PES) gets the previous PTS plus its duration: 1536 samples for AC-3, 256 × number of blocks for E-AC-3, and samples per frame from the header for DTS.
-  - A sample rate other than 48 kHz throws `UnsupportedCodecError`.
+  - A sample rate other than 48 kHz throws `UnsupportedCodecError` (only until the decoder has produced 48 kHz output; after that such a frame is counted as failed and skipped). A reduced-rate E-AC-3 header is treated as no sync.
 
 ### 2.3 `src/engine/decode/truehd-core.ts`
 

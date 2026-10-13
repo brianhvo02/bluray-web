@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CodingType } from '../bdmv/stream-types';
 import { AudioFramer } from './audio-frames';
-import { UnsupportedCodecError } from './decoder';
 
 const FRAME_US = (1536 * 1e6) / 48_000; // 32 000
 
@@ -56,7 +54,7 @@ const cat = (...parts: Uint8Array[]): Uint8Array => {
 
 describe('AudioFramer', () => {
   it('splits several AC-3 frames in one PES and times them from the PES PTS', () => {
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     const frames = framer.push(cat(ac3Frame(1), ac3Frame(2), ac3Frame(3)), 1_000_000);
     expect(frames.map((f) => [f.data.length, f.data[10], f.ptsUs, f.samples])).toEqual([
       [256, 1, 1_000_000, 1536],
@@ -66,7 +64,7 @@ describe('AudioFramer', () => {
   });
 
   it('carries a frame split across PES packets; the next PTS goes to the first frame starting in that PES', () => {
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     const a = ac3Frame(1);
     const b = ac3Frame(2);
     const c = ac3Frame(3);
@@ -80,7 +78,7 @@ describe('AudioFramer', () => {
   });
 
   it('gives a frame that starts in one push and completes in the next the PTS of the push it started in', () => {
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     const b = ac3Frame(2);
     const c = ac3Frame(3);
     expect(framer.push(b.subarray(0, 100), 1_000)).toEqual([]);
@@ -92,7 +90,7 @@ describe('AudioFramer', () => {
   });
 
   it('after reset(), a frame split across pushes still takes the PTS of the push it started in', () => {
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     framer.push(ac3Frame(1), 0);
     framer.reset();
     const b = ac3Frame(2);
@@ -106,19 +104,19 @@ describe('AudioFramer', () => {
   });
 
   it('skips garbage and resyncs when joining mid-frame after a seek', () => {
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     const tail = ac3Frame(7).subarray(40); // the end of a frame we never saw the start of
     const frames = framer.push(cat(tail, ac3Frame(1)), 5_000_000);
     expect(frames.map((f) => [f.data[10], f.ptsUs])).toEqual([[1, 5_000_000]]);
   });
 
   it('treats a non-48 kHz AC-3 header as no sync', () => {
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     expect(framer.push(cat(ac3Frame(9, 8, 1), ac3Frame(1)), 0).map((f) => f.data[10])).toEqual([1]);
   });
 
   it('groups an E-AC-3 independent frame with its dependent frames and emits the group when the next one starts', () => {
-    const framer = new AudioFramer('eac3', CodingType.EAC3);
+    const framer = new AudioFramer('eac3');
     expect(framer.push(cat(eac3Frame(0, 200, 1), eac3Frame(1, 100, 2)), 0)).toEqual([]);
     const out = framer.push(eac3Frame(0, 200, 3), 32_000);
     expect(out).toHaveLength(1);
@@ -127,19 +125,21 @@ describe('AudioFramer', () => {
   });
 
   it('drops a dependent E-AC-3 frame with no independent frame before it', () => {
-    const framer = new AudioFramer('eac3', CodingType.EAC3);
+    const framer = new AudioFramer('eac3');
     framer.push(cat(eac3Frame(1, 100, 2), eac3Frame(0, 200, 1)), 0);
     const out = framer.push(eac3Frame(0, 200, 3), 32_000);
     expect(out.map((f) => [f.data.length, f.data[10]])).toEqual([[200, 1]]);
   });
 
-  it('throws UnsupportedCodecError for reduced-rate E-AC-3', () => {
-    const framer = new AudioFramer('eac3', CodingType.EAC3);
-    expect(() => framer.push(eac3Frame(0, 200, 1, 0, 1), 0)).toThrow(UnsupportedCodecError);
+  it('treats a reduced-rate E-AC-3 header as no sync (a following valid frame is still emitted)', () => {
+    const framer = new AudioFramer('eac3');
+    framer.push(eac3Frame(0, 200, 1, 0, 1), 0);
+    const out = framer.push(cat(eac3Frame(0, 200, 2), eac3Frame(0, 200, 3)), 0);
+    expect(out.map((f) => f.data[10])).toEqual([2]);
   });
 
   it('reset() drops a half-built group and kept bytes, so the next PTS is the new PES PTS', () => {
-    const framer = new AudioFramer('eac3', CodingType.EAC3);
+    const framer = new AudioFramer('eac3');
     framer.push(cat(eac3Frame(0, 200, 1), eac3Frame(0, 200, 2).subarray(0, 50)), 0);
     framer.reset();
     framer.push(eac3Frame(0, 200, 5), 9_000_000);
@@ -148,7 +148,7 @@ describe('AudioFramer', () => {
   });
 
   it('splits DTS core frames (512 samples) and drops DTS-HD extension substreams', () => {
-    const framer = new AudioFramer('dts', CodingType.DTSHD_MASTER);
+    const framer = new AudioFramer('dts');
     const frames = framer.push(cat(dtsFrame(1006, 1), exss(300), dtsFrame(1006, 2), exss(300)), 2_000_000);
     expect(frames.map((f) => [f.data.length, f.data[20], f.ptsUs, f.samples])).toEqual([
       [1006, 1, 2_000_000, 512],

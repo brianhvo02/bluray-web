@@ -44,8 +44,8 @@ const AUDIO_PREBUFFER_US = 200_000;
 const TIME_EVENT_INTERVAL_US = 250_000;
 const TELEMETRY_INTERVAL_MS = 500;
 const HEARTBEAT_TIMEOUT_MS = 500;
-/** Frames up to this far before a seek target are still shown (EP pts are truncated by up to ~5.7 ms). */
 const MAX_AUDIO_ERRORS_IN_ROW = 50;
+/** Frames up to this far before a seek target are still shown (EP pts are truncated by up to ~5.7 ms). */
 const SEEK_TOLERANCE_US = 1_000;
 const NEXT_CHAPTER_GUARD_US = 500_000;
 const PREV_CHAPTER_RESTART_US = 3_000_000;
@@ -64,6 +64,8 @@ interface Session {
   readonly audioDecoders: Map<number, AudioDecoder>;
   readonly audioDecoderLoads: Map<number, Promise<AudioDecoder>>;
   audioErrorsInRow: number;
+  /** Coding types whose decoder is unusable this session (not playable, or the load failed); cleared by a seek or switch. */
+  readonly failedAudioTypes: Set<number>;
   /** Audio was turned off by too many decode errors; the next seek or switch tries again. */
   audioErrorDisabled: boolean;
   audioActive: boolean;
@@ -273,6 +275,7 @@ export class Player {
       audioDecoders: new Map(),
       audioDecoderLoads: new Map(),
       audioErrorsInRow: 0,
+      failedAudioTypes: new Set(),
       audioErrorDisabled: false,
       audioActive,
       decimator: null,
@@ -352,9 +355,16 @@ export class Player {
       s.audioErrorDisabled = false;
     }
     s.audioErrorsInRow = 0;
+    s.failedAudioTypes.clear();
     for (const d of s.audioDecoders.values()) d.reset();
     const audioType = s.audioActive ? this.audioCodingTypeAt(s, t) : null;
     if (audioType !== null) {
+      // The decoder may take a while to load (first WASM compile): stop the old audio and clock and show buffering meanwhile.
+      this.wantPlaying = false;
+      this.setState(autoplay ? 'buffering' : 'paused');
+      this.presenter.clear();
+      this.ring?.setPlaying(false);
+      this.clock.useWall(this.clock.nowUs(), false);
       try {
         await this.loadAudioDecoder(s, audioType);
       } catch (err) {
@@ -496,7 +506,7 @@ export class Player {
     const codec = codingName(codingType);
     const reason = err instanceof Error ? err.message : String(err);
     this.deps.emit({ type: 'unsupported', kind: 'audio', codec, message: `${codec} audio can't be played (${reason}), so video will play without sound.` });
-    s.audioActive = false;
+    this.disableAudio(s, '', false); // also stops the ring (it still holds the previous track or position) and moves the clock to wall time
   }
 
   private onAudioUnit(s: Session, u: PipelineAudioUnit): void {
@@ -504,7 +514,19 @@ export class Player {
     if (!s.audioActive || !writer) return;
     const decoder = s.audioDecoders.get(u.codingType);
     if (!decoder) {
-      void this.loadAudioDecoder(s, u.codingType).catch(() => undefined); // a later item switched codec; ready for its next units
+      // A later item switched codec: load its decoder (ready for its next units); give up once if that is impossible.
+      const type = u.codingType;
+      if (s.failedAudioTypes.has(type)) return;
+      if (!PLAYABLE_AUDIO.has(type)) {
+        s.failedAudioTypes.add(type);
+        this.audioUnavailable(s, type, new Error(`${codingName(type)} audio is not supported.`));
+        return;
+      }
+      this.loadAudioDecoder(s, type).catch((err: unknown) => {
+        if (this.session !== s || !s.audioActive || s.failedAudioTypes.has(type)) return;
+        s.failedAudioTypes.add(type);
+        this.audioUnavailable(s, type, err);
+      });
       return;
     }
     let result: AudioDecodeResult;

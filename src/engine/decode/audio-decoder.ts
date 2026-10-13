@@ -43,11 +43,14 @@ const lpcmDecoder: AudioDecoder = {
   close: () => undefined,
 };
 
-class FramedWasmDecoder implements AudioDecoder {
+export class FramedWasmDecoder implements AudioDecoder {
+  /** Set once a frame came out at 48 kHz; survives reset() because the stream is then known to be good. */
+  private produced48k = false;
+
   constructor(
     private readonly codingType: number,
     private readonly framer: AudioFramer,
-    private readonly frames: WasmFrameDecoder,
+    private readonly frames: Pick<WasmFrameDecoder, 'decode' | 'reset' | 'close'>,
     private readonly coreFilter: TrueHdCoreFilter | null,
   ) {}
 
@@ -66,8 +69,13 @@ class FramedWasmDecoder implements AudioDecoder {
       }
       if (out.stereo.length === 0) continue;
       if (out.sampleRate !== OUTPUT_RATE) {
+        if (this.produced48k) {
+          failedFrames++;
+          continue;
+        }
         throw new UnsupportedCodecError(this.codingType, `${codingName(this.codingType)} at ${out.sampleRate} Hz is not supported (only 48 kHz).`);
       }
+      this.produced48k = true;
       chunks.push({ ptsUs: frame.ptsUs, sampleRate: out.sampleRate, frames: out.stereo.length / 2, stereo: out.stereo });
     }
     return { chunks, failedFrames };
@@ -113,7 +121,7 @@ export function createAudioDecoderFactory(loadWasm: () => Promise<AudioWasm>): A
     const module = await getWasm();
     return new FramedWasmDecoder(
       codingType,
-      new AudioFramer(kind, codingType),
+      new AudioFramer(kind),
       new WasmFrameDecoder(module, kind === 'dts' ? WasmCodec.DTS : WasmCodec.AC3),
       codingType === CodingType.TRUEHD ? new TrueHdCoreFilter() : null,
     );

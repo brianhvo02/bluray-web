@@ -1,10 +1,10 @@
 import type { StnTable } from '../bdmv/mpls-parser';
 import { codingName } from '../bdmv/stream-types';
-import type { AudioTrack } from '../protocol';
+import type { AudioTrack, ChannelsLabel } from '../protocol';
 import { PLAYABLE_AUDIO } from './stream-selection';
 
 /** STN audio_format (libbluray mpls_data.h): 1 mono, 3 stereo, 6 multichannel, 12 stereo + multichannel. */
-export function channelsLabel(format: number): string {
+export function channelsLabel(format: number): ChannelsLabel {
   switch (format) {
     case 1:
       return 'mono';

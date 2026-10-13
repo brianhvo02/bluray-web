@@ -29,14 +29,15 @@ export interface Telemetry {
   readonly leadingPicturesSkipped: number;
 }
 
+export type ChannelsLabel = 'mono' | 'stereo' | 'multichannel' | '';
+
 export interface AudioTrack {
   /** 1-based position in the STN audio list. */
   readonly index: number;
   readonly codec: string;
   /** ISO 639-2 code from the STN, or '' if absent. */
   readonly language: string;
-  /** One of 'mono', 'stereo', 'multichannel' or ''. */
-  readonly channels: string;
+  readonly channels: ChannelsLabel;
   readonly playable: boolean;
 }
 

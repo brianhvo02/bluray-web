@@ -21,8 +21,8 @@ function encode(codec: string[], layout: 'stereo' | '5.1'): Uint8Array {
 }
 
 /** One codec frame per PES, timed by sample count from the clip start. */
-function framed(bytes: Uint8Array, kind: 'ac3' | 'dts', codingType: number, ext?: number): Array<{ pts: number; payload: Uint8Array; streamIdExtension?: number }> {
-  const frames = new AudioFramer(kind, codingType).push(bytes, 0);
+function framed(bytes: Uint8Array, kind: 'ac3' | 'dts', ext?: number): Array<{ pts: number; payload: Uint8Array; streamIdExtension?: number }> {
+  const frames = new AudioFramer(kind).push(bytes, 0);
   let samples = 0;
   return frames.map((f) => {
     const unit = { pts: CLIP_START_PTS + Math.round(samples * TICKS_PER_SAMPLE), payload: f.data, streamIdExtension: ext };
@@ -62,15 +62,15 @@ const dts = encode(['-c:a', 'dca', '-strict', '-2', '-b:a', '768k', '-f', 'dts']
 const lpcmCount = Math.ceil((SECONDS * 90_000) / 450);
 const streams: SyntheticAudioStream[] = [
   { pid: 0x1100, codingType: CodingType.LPCM, lang: 'jpn', format: 3, units: Array.from({ length: lpcmCount }, (_, j) => ({ pts: CLIP_START_PTS + j * 450, payload: lpcmPayload(240, j * 240) })) },
-  { pid: 0x1101, codingType: CodingType.AC3, lang: 'eng', format: 6, units: framed(ac3, 'ac3', CodingType.AC3) },
+  { pid: 0x1101, codingType: CodingType.AC3, lang: 'eng', format: 6, units: framed(ac3, 'ac3') },
   {
     pid: 0x1102,
     codingType: CodingType.TRUEHD,
     lang: 'eng',
     format: 3,
-    units: [...framed(core, 'ac3', CodingType.AC3, 0x76), ...truehdUnits(mlp)].sort((a, b) => a.pts - b.pts || (a.streamIdExtension === 0x76 ? -1 : 1)),
+    units: [...framed(core, 'ac3', 0x76), ...truehdUnits(mlp)].sort((a, b) => a.pts - b.pts || (a.streamIdExtension === 0x76 ? -1 : 1)),
   },
-  { pid: 0x1103, codingType: CodingType.DTS, lang: 'fra', format: 6, units: framed(dts, 'dts', CodingType.DTS) },
+  { pid: 0x1103, codingType: CodingType.DTS, lang: 'fra', format: 6, units: framed(dts, 'dts') },
 ];
 
 const frames = SECONDS * 24;

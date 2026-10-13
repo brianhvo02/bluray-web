@@ -232,7 +232,7 @@ Ported from libbluray `bluray.c`, `bdnav/`, `hdmv/`, `decoders/ig_decode.c`, and
 
 ## 10. Licensing
 
-- `src/engine/` and `src/wasm/` contain code ported from libbluray and an FFmpeg-derived AC-3 decoder. Both are LGPL-2.1, with their own `LICENSE` file and published source.
+- `src/engine/` and `src/wasm/` contain code ported from libbluray and FFmpeg-derived AC-3/E-AC-3/DTS decoders. Both are LGPL-2.1, with their own `LICENSE` file and published source.
 - The UI and the remaining app code are under a license of the owner's choosing.
 - The AACS/BD+ phase requires a separate legal review (e.g. DMCA §1201) before any public release.
 

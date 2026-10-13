@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { loadNodeAudioWasm } from '../../../tests/helpers/audio-wasm';
 import { lpcmPayload } from '../../../tests/helpers/synthetic-disc';
 import { CodingType } from '../bdmv/stream-types';
-import { createAudioDecoderFactory } from './audio-decoder';
+import { AudioFramer } from './audio-frames';
+import { FramedWasmDecoder, createAudioDecoderFactory } from './audio-decoder';
 import { UnsupportedCodecError } from './decoder';
 
 const AC3 = readFileSync(fileURLToPath(new URL('../../../fixtures/synthetic/audio/tone-ac3-stereo.ac3', import.meta.url)));
@@ -62,5 +63,33 @@ describe('createAudioDecoderFactory', () => {
 
   it('rejects secondary audio as unsupported', async () => {
     await expect(createAudioDecoderFactory(loadNodeAudioWasm)(CodingType.EAC3_SECONDARY)).rejects.toBeInstanceOf(UnsupportedCodecError);
+  });
+});
+
+describe('FramedWasmDecoder sample-rate check', () => {
+  // A 256-byte AC-3 frame (frmsizecod 8) per unit.
+  const unit = (n: number): { data: Uint8Array; ptsUs: number } => {
+    const f = new Uint8Array(256).fill(n);
+    f.set([0x0b, 0x77, 0, 0, 8, 8 << 3]);
+    return { data: f, ptsUs: n * 32_000 };
+  };
+  const fakeFrames = (rates: number[]): { decode: () => { sampleRate: number; stereo: Float32Array }; reset: () => void; close: () => void } => ({
+    decode: () => ({ sampleRate: rates.shift() ?? 48_000, stereo: new Float32Array(2 * 1536) }),
+    reset: () => undefined,
+    close: () => undefined,
+  });
+
+  it('rejects a stream whose first frame is not 48 kHz', () => {
+    const d = new FramedWasmDecoder(CodingType.AC3, new AudioFramer('ac3'), fakeFrames([44_100]), null);
+    expect(() => d.decode(unit(1))).toThrow(UnsupportedCodecError);
+  });
+
+  it('skips and counts an odd-rate frame once 48 kHz output exists, also after reset()', () => {
+    const d = new FramedWasmDecoder(CodingType.AC3, new AudioFramer('ac3'), fakeFrames([48_000, 44_100, 48_000, 44_100]), null);
+    expect(d.decode(unit(1)).chunks).toHaveLength(1);
+    expect(d.decode(unit(2))).toMatchObject({ chunks: [], failedFrames: 1 });
+    expect(d.decode(unit(3)).chunks).toHaveLength(1);
+    d.reset();
+    expect(d.decode(unit(4))).toMatchObject({ chunks: [], failedFrames: 1 });
   });
 });

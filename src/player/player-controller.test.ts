@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { EngineEvent } from '../engine/protocol';
+import type { AudioTrack, EngineEvent } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
 
 class FakeWorker implements WorkerLike {
@@ -212,7 +212,7 @@ describe('PlayerController', () => {
 });
 
 describe('audio tracks', () => {
-  const tracks = [
+  const tracks: AudioTrack[] = [
     { index: 1, codec: 'LPCM', language: 'jpn', channels: 'stereo', playable: true },
     { index: 2, codec: 'DTS-HD (secondary)', language: 'eng', channels: 'stereo', playable: false },
     { index: 3, codec: 'Dolby Digital (AC-3)', language: 'eng', channels: 'multichannel', playable: true },

@@ -24,12 +24,22 @@ export class AudioFrameError extends Error {
 const MAX_FRAMES = 8192;
 const ENOSYS = 52;
 
+/** Streams the compile; a wrong Content-Type makes that reject with a TypeError, so retry from the buffered body. */
+async function compileResponse(response: Response): Promise<WebAssembly.Module> {
+  try {
+    return await WebAssembly.compileStreaming(response.clone());
+  } catch (err) {
+    if (!(err instanceof TypeError)) throw err;
+    return WebAssembly.compile(await response.arrayBuffer());
+  }
+}
+
 /**
  * Instantiates the standalone (WASI-flavoured) module without emscripten's JS glue. The shim never does I/O,
  * so WASI calls fail with ENOSYS and exits throw.
  */
 export async function loadAudioWasm(source: BufferSource | Promise<Response>): Promise<AudioWasm> {
-  const module = source instanceof Promise ? await WebAssembly.compileStreaming(source) : await WebAssembly.compile(source);
+  const module = source instanceof Promise ? await compileResponse(await source) : await WebAssembly.compile(source);
   const imports: Record<string, Record<string, WebAssembly.ImportValue>> = {};
   for (const imp of WebAssembly.Module.imports(module)) {
     if (imp.kind !== 'function') throw new Error(`audio.wasm needs an unexpected ${imp.kind} import ${imp.module}.${imp.name}`);

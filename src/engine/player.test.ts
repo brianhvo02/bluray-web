@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
-import { createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
+import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
@@ -46,6 +46,8 @@ interface Harness {
   drawn: number[];
   /** Callbacks the engine registered with requestFrame. */
   frames: Array<() => void>;
+  /** Whether the engine has the ring in its playing state. */
+  ringPlaying(): boolean;
   /** Advance simulated time; the fake worklet consumes audio unless audio: false; ticks unless render: false. */
   play(ms: number, opts?: { render?: boolean; audio?: boolean }): Promise<void>;
 }
@@ -80,11 +82,11 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams })],
+    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
   });
   const events: EngineEvent[] = [];
@@ -117,6 +119,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     events,
     drawn,
     frames,
+    ringPlaying: () => Atomics.load(views.control, Control.Playing) === 1,
     async play(ms, opts = {}) {
       for (let elapsed = 0; elapsed < ms; elapsed += STEP_MS) {
         clock.ms += STEP_MS;
@@ -550,5 +553,81 @@ describe('Player', () => {
     await untilPlaying(h);
     await h.play(800);
     expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'LPCM' });
+  });
+
+  it('stops the ring when the decoder of the switched-to track cannot load, so no stale audio plays on', async () => {
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3) }); // noWasmFactory: AC-3 fails to load
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(500);
+    expect(h.ringPlaying()).toBe(true);
+    await h.player.handle({ type: 'selectAudio', index: 2 });
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
+    expect(h.ringPlaying()).toBe(false);
+    await untilPlaying(h);
+    await h.play(800);
+    expect(h.ringPlaying()).toBe(false);
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+  });
+
+  it('shows buffering with the old audio stopped while the new track decoder is still loading', async () => {
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (open = r));
+    const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3), createAudioDecoder: fakeAudioFactory(undefined, gate) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await h.play(20);
+    await vi.waitFor(async () => {
+      await h.play(20);
+      expect(lastState(h)).toBe('playing');
+    });
+    expect(h.ringPlaying()).toBe(true);
+    const switching = h.player.handle({ type: 'selectAudio', index: 2 });
+    await h.play(100);
+    expect(lastState(h)).toBe('buffering');
+    expect(h.ringPlaying()).toBe(false);
+    const frozen = lastTelemetry(h)?.clockUs;
+    await h.play(100);
+    expect(lastTelemetry(h)?.clockUs).toBe(frozen);
+    open();
+    await switching;
+    await untilPlaying(h);
+    await h.play(500);
+    expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'Dolby Digital (AC-3)' });
+  });
+
+  it('reports a failing decoder load for a later play item once, with a single load attempt', async () => {
+    let loads = 0;
+    const h = await harness(undefined, {
+      audioStreams: [lpcmStream(0x1100, 4)],
+      secondClipAudioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4)],
+      createAudioDecoder: (codingType) => {
+        if (codingType === CodingType.AC3) loads++;
+        return noWasmFactory(codingType);
+      },
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(5500);
+    expect(loads).toBe(1);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
+  });
+
+  it('reports an unplayable codec in a later play item once without trying to load it', async () => {
+    let loads = 0;
+    const h = await harness(undefined, {
+      audioStreams: [lpcmStream(0x1100, 4)],
+      secondClipAudioStreams: [dummyAudioStream(0x1100, CodingType.EAC3_SECONDARY, 4)],
+      createAudioDecoder: (codingType) => {
+        if (codingType === CodingType.EAC3_SECONDARY) loads++;
+        return noWasmFactory(codingType);
+      },
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(5500);
+    expect(loads).toBe(0);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
+    expect(lastTelemetry(h)?.clockMode).toBe('wall');
   });
 });

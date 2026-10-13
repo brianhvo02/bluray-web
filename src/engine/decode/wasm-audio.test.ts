@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { CodingType } from '../bdmv/stream-types';
 import { AudioFramer } from './audio-frames';
 import { loadNodeAudioWasm } from '../../../tests/helpers/audio-wasm';
-import { AudioFrameError, WasmCodec, WasmFrameDecoder, type AudioWasm } from './wasm-audio';
+import { AudioFrameError, WasmCodec, loadAudioWasm, WasmFrameDecoder, type AudioWasm } from './wasm-audio';
 
 describe('audio.wasm', () => {
   it('loads and opens and closes both decoders', async () => {
@@ -14,6 +14,16 @@ describe('audio.wasm', () => {
       d.reset();
       d.close();
     }
+  });
+
+  it('falls back to a buffered compile when the response has the wrong Content-Type', async () => {
+    const bytes = readFileSync(fileURLToPath(new URL('../../wasm/audio/audio.wasm', import.meta.url)));
+    const wrong = new Response(bytes, { headers: { 'Content-Type': 'application/octet-stream' } });
+    const wasm = await loadAudioWasm(Promise.resolve(wrong));
+    const d = new WasmFrameDecoder(wasm, WasmCodec.AC3);
+    d.close();
+    const right = new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } });
+    await expect(loadAudioWasm(Promise.resolve(right))).resolves.toBeDefined();
   });
 
   it('reports a frame that is not audio as an AudioFrameError', async () => {
@@ -62,9 +72,9 @@ describe('WasmFrameDecoder allocation failures', () => {
 const AUDIO = fileURLToPath(new URL('../../../fixtures/synthetic/audio/', import.meta.url));
 
 /** Decodes a whole elementary stream pushed as 4 KB "PES" pieces; returns the left channel and the frame PTS list. */
-async function decodeFile(name: string, kind: 'ac3' | 'eac3' | 'dts', codingType: number): Promise<{ left: Float32Array; right: Float32Array; pts: number[]; failed: number }> {
+async function decodeFile(name: string, kind: 'ac3' | 'eac3' | 'dts'): Promise<{ left: Float32Array; right: Float32Array; pts: number[]; failed: number }> {
   const bytes = readFileSync(AUDIO + name);
-  const framer = new AudioFramer(kind, codingType);
+  const framer = new AudioFramer(kind);
   const decoder = new WasmFrameDecoder(await loadNodeAudioWasm(), kind === 'dts' ? WasmCodec.DTS : WasmCodec.AC3);
   const left: number[] = [];
   const right: number[] = [];
@@ -111,8 +121,8 @@ describe('audio.wasm decoding', () => {
     ['tone-ac3-51.ac3', 'ac3', CodingType.AC3, 0.084],
     ['tone-eac3-51.eac3', 'eac3', CodingType.EAC3, 0.084],
     ['tone-dts-51.dts', 'dts', CodingType.DTS, 0.073],
-  ] as const)('decodes %s to a 440 Hz stereo tone at the right level', async (name, kind, codingType, expectedRms) => {
-    const { left, right, failed } = await decodeFile(name, kind, codingType);
+  ] as const)('decodes %s to a 440 Hz stereo tone at the right level', async (name, kind, _codingType, expectedRms) => {
+    const { left, right, failed } = await decodeFile(name, kind);
     expect(failed).toBe(0);
     expect(left.length).toBeGreaterThan(40_000); // about 1 s; the last E-AC-3 group stays open
     expect(right.length).toBe(left.length);
@@ -129,13 +139,13 @@ describe('audio.wasm decoding', () => {
   });
 
   it('times AC-3 frames 32 ms apart', async () => {
-    const { pts } = await decodeFile('tone-ac3-stereo.ac3', 'ac3', CodingType.AC3);
+    const { pts } = await decodeFile('tone-ac3-stereo.ac3', 'ac3');
     expect(pts.slice(0, 3)).toEqual([0, 32_000, 64_000]);
   });
 
   it('keeps decoding past a corrupted frame body', async () => {
     const bytes = new Uint8Array(readFileSync(AUDIO + 'tone-ac3-stereo.ac3'));
-    const framer = new AudioFramer('ac3', CodingType.AC3);
+    const framer = new AudioFramer('ac3');
     const frames = framer.push(bytes, 0);
     expect(frames.length).toBeGreaterThan(5);
     frames[5].data.fill(0xff, 8); // keep the sync and size, ruin CRC and payload
