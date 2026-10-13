@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { Chapter } from '../engine/nav/timeline';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
+import { AudioMenu } from './AudioMenu';
 import { formatTime } from './format';
 
 interface SeekBarProps {
@@ -96,9 +97,10 @@ interface ControlBarProps {
   readonly visible: boolean;
   onOpenPlaylists(): void;
   onFullscreen(): void;
+  onMenuOpenChange(open: boolean): void;
 }
 
-export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onFullscreen }: ControlBarProps): ReactElement {
+export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onFullscreen, onMenuOpenChange }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
   return (
@@ -134,6 +136,7 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
             controller.setVolume(Number(e.target.value));
           }}
         />
+        <AudioMenu tracks={snapshot.audioTracks} selected={snapshot.selectedAudio} onSelect={(i) => controller.selectAudio(i)} onOpenChange={onMenuOpenChange} />
         <button type="button" onClick={onOpenPlaylists}>
           Playlists
         </button>

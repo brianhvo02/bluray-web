@@ -23,6 +23,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   const [idle, setIdle] = useState(false);
   const [activity, setActivity] = useState(0);
   const [pressed, setPressed] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const playing = snapshot.engineState === 'playing';
 
   useEffect(() => {
@@ -67,6 +68,9 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         case 'fullscreen':
           toggleFullscreen(rootRef.current);
           break;
+        case 'cycleAudio':
+          controller.cycleAudio();
+          break;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -89,10 +93,17 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   }, [pressed]);
 
   useEffect(() => {
-    if (!playing || pressed) return; // holding a control (e.g. the seek thumb) keeps the controls up
+    if (!playing || pressed || menuOpen) return; // holding a control (e.g. the seek thumb) or an open menu keeps the controls up
     const timer = window.setTimeout(() => setIdle(true), HIDE_CONTROLS_MS);
     return () => window.clearTimeout(timer);
-  }, [playing, activity, pressed]);
+  }, [playing, activity, pressed, menuOpen]);
+
+  const trackNotice = snapshot.notices.find((n) => n.code === 'audio-track')?.message;
+  useEffect(() => {
+    if (!trackNotice) return;
+    const timer = window.setTimeout(() => controller.dismissNotice('audio-track'), 3000);
+    return () => window.clearTimeout(timer);
+  }, [controller, trackNotice]);
 
   const wake = (): void => {
     setIdle(false);
@@ -151,6 +162,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         visible={controlsVisible}
         onOpenPlaylists={() => setPickerOpen(true)}
         onFullscreen={() => toggleFullscreen(rootRef.current)}
+        onMenuOpenChange={setMenuOpen}
       />
     </div>
   );

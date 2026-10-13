@@ -1,6 +1,7 @@
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { Chapter } from '../engine/nav/timeline';
-import type { EngineCommand, EngineEvent, ErrorCode, PlaybackState, Telemetry } from '../engine/protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, PlaybackState, Telemetry } from '../engine/protocol';
+import { trackLabel } from '../ui/language';
 
 export interface Notice {
   readonly code: string;
@@ -21,6 +22,8 @@ export interface PlayerSnapshot {
   readonly telemetry: Telemetry | null;
   readonly volume: number;
   readonly muted: boolean;
+  readonly audioTracks: readonly AudioTrack[];
+  readonly selectedAudio: number | null;
 }
 
 export const INITIAL_SNAPSHOT: PlayerSnapshot = {
@@ -37,6 +40,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   telemetry: null,
   volume: 1,
   muted: false,
+  audioTracks: [],
+  selectedAudio: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -46,12 +51,12 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0 };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
     case 'tracks':
-      return s; // surfaced to the UI in a later task
+      return { ...s, audioTracks: e.audio, selectedAudio: e.selectedAudio };
     case 'state':
       return { ...s, engineState: e.state };
     case 'time':
@@ -65,7 +70,7 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'telemetry':
       return { ...s, telemetry: e.telemetry };
     case 'playlistCleared':
-      return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0 };
+      return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
   }
 }
 
@@ -151,7 +156,7 @@ export class PlayerController {
     // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
     // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay.
     const playlistScoped = (code: string): boolean =>
-      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered';
+      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track';
     this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
     this.post({ type: 'playPlaylist', playlistId });
   }
@@ -203,6 +208,21 @@ export class PlayerController {
     const muted = !this.snapshot.muted;
     this.audio.setMuted(muted);
     this.update({ ...this.snapshot, muted });
+  }
+
+  selectAudio(index: number): void {
+    const track = this.snapshot.audioTracks.find((t) => t.index === index);
+    if (!track?.playable || index === this.snapshot.selectedAudio) return;
+    this.post({ type: 'selectAudio', index });
+    this.update(withNotice(this.snapshot, { code: 'audio-track', message: `Audio: ${trackLabel(track)}` }));
+  }
+
+  /** The A key: the next playable track, wrapping around. */
+  cycleAudio(): void {
+    const playable = this.snapshot.audioTracks.filter((t) => t.playable);
+    if (playable.length < 2) return;
+    const at = playable.findIndex((t) => t.index === this.snapshot.selectedAudio);
+    this.selectAudio(playable[(at + 1) % playable.length].index);
   }
 
   dismissNotice(code: string): void {

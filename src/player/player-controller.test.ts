@@ -210,3 +210,39 @@ describe('PlayerController', () => {
     expect(worker.posted.filter((m) => (m as { type: string }).type === 'attachAudio')).toEqual([{ type: 'attachAudio', ring: audio.ring }]);
   });
 });
+
+describe('audio tracks', () => {
+  const tracks = [
+    { index: 1, codec: 'LPCM', language: 'jpn', channels: 'stereo', playable: true },
+    { index: 2, codec: 'DTS-HD (secondary)', language: 'eng', channels: 'stereo', playable: false },
+    { index: 3, codec: 'Dolby Digital (AC-3)', language: 'eng', channels: 'multichannel', playable: true },
+  ];
+
+  it('stores tracks and clears them with the playlist', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'tracks', audio: tracks, selectedAudio: 1 });
+    expect(s).toMatchObject({ audioTracks: tracks, selectedAudio: 1 });
+    s = reduceEvent(s, { type: 'playlistCleared' });
+    expect(s).toMatchObject({ audioTracks: [], selectedAudio: null });
+  });
+
+  it('selects a playable track with a confirmation notice and ignores the rest', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'tracks', audio: tracks, selectedAudio: 1 });
+    worker.posted.length = 0;
+    c.selectAudio(2);
+    c.selectAudio(1);
+    c.selectAudio(3);
+    expect(worker.posted).toEqual([{ type: 'selectAudio', index: 3 }]);
+    expect(c.getSnapshot().notices).toContainEqual({ code: 'audio-track', message: 'Audio: 3. English · Dolby Digital (AC-3) (multichannel)' });
+  });
+
+  it('cycles through playable tracks and wraps around', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'tracks', audio: tracks, selectedAudio: 3 });
+    worker.posted.length = 0;
+    c.cycleAudio();
+    expect(worker.posted).toEqual([{ type: 'selectAudio', index: 1 }]);
+  });
+});

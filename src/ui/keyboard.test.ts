@@ -12,4 +12,9 @@ describe('keyToAction', () => {
     expect(keyToAction('F')).toEqual({ type: 'fullscreen' });
     expect(keyToAction('x')).toBeNull();
   });
+
+  it('cycles audio tracks with A', () => {
+    expect(keyToAction('a')).toEqual({ type: 'cycleAudio' });
+    expect(keyToAction('A')).toEqual({ type: 'cycleAudio' });
+  });
 });

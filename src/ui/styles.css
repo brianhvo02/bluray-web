@@ -45,3 +45,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .picker-error p { margin: 4px 0; }
 .missing-list { list-style: none; padding: 0; margin: 4px 0; font-family: monospace; font-size: 0.85em; }
 .playlist-missing { display: block; font-size: 0.75em; opacity: 0.8; margin-top: 2px; }
+
+.audio-menu { position: relative; }
+.audio-menu-list { position: absolute; bottom: calc(100% + 8px); right: 0; margin: 0; padding: 4px; list-style: none; background: rgba(30, 30, 36, 0.96); border-radius: 8px; min-width: 280px; }
+.audio-menu-list button { display: block; width: 100%; text-align: left; padding: 6px 10px; white-space: nowrap; }
+.audio-menu-list button[aria-checked='true']::before { content: '✓ '; }
+.audio-menu-list button:disabled { opacity: 0.45; cursor: not-allowed; }
