@@ -311,6 +311,39 @@ describe('Player', () => {
     expect(h.events).toContainEqual({ type: 'time', timeUs: 2_000_000 });
   });
 
+  it('skips a chapter that starts within the guard instead of landing just ahead', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'seek', timeUs: 1_800_000 });
+    await untilPlaying(h);
+    const mark = h.events.length;
+    await h.player.handle({ type: 'nextChapter' });
+    expect(h.events.slice(mark)).toContainEqual({ type: 'time', timeUs: 4_000_000 }); // 2.0 s is under 0.5 s away
+  });
+
+  it('leaves the clock running when there is no next chapter', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'seek', timeUs: 6_200_000 });
+    await untilPlaying(h);
+    await h.play(300);
+    const times = (from: number): number[] => h.events.slice(from).flatMap((e) => (e.type === 'time' ? [e.timeUs] : []));
+    const before = times(0).at(-1) ?? 0;
+    expect(before).toBeGreaterThan(6_300_000);
+    const mark = h.events.length;
+    await h.player.handle({ type: 'nextChapter' });
+    await h.play(600);
+    const after = h.events.slice(mark);
+    expect(after.filter((e) => e.type === 'state')).toEqual([]);
+    const clock = times(mark);
+    expect(clock.length).toBeGreaterThan(0);
+    // The clock kept advancing from where it was: no seek to a target, no pause.
+    expect(clock.every((t, i) => t > (i === 0 ? before : clock[i - 1]))).toBe(true);
+    expect((clock.at(-1) ?? 0) - before).toBeGreaterThan(400_000);
+  });
+
   it('reaches the ended state at the end of the playlist', async () => {
     const h = await harness(CodingType.AC3);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
