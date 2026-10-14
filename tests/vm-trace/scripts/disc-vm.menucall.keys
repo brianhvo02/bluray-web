@@ -1,0 +1,8 @@
+# title 1 masks Menu Call while it plays; in title 2 the call goes through and jumps to the top menu
+wait playlist 1
+key topmenu
+wait playlist 2
+key topmenu
+wait title 2
+key topmenu
+wait end

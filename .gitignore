@@ -6,3 +6,4 @@ playwright-report
 *.tsbuildinfo
 .claude/worktrees/
 .cache/
+tools/vm-trace/out/

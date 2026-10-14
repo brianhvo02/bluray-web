@@ -1,0 +1,4 @@
+# runs the boot sequence to its end, then plays title 2 and runs to the end again
+wait end
+play title 2
+wait end

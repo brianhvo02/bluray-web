@@ -55,6 +55,8 @@ export interface EpMap {
 export interface Clpi {
   readonly version: string;
   readonly numSourcePackets: number;
+  /** TS_recording_rate, bytes per second. */
+  readonly recordingRate: number;
   readonly atcSequences: readonly AtcSequence[];
   readonly programs: readonly ProgramInfo[];
   readonly epMaps: readonly EpMap[];
@@ -78,12 +80,13 @@ export function parseClpi(bytes: Uint8Array): Clpi {
   r.u8(); // clip_stream_type
   r.u8(); // application_type
   r.skip(4); // reserved + is_atc_delta
-  r.u32(); // ts_recording_rate
+  const recordingRate = r.u32();
   const numSourcePackets = r.u32();
 
   return {
     version,
     numSourcePackets,
+    recordingRate,
     atcSequences: readSequenceInfo(r, sequenceStart),
     programs: readProgramInfo(r, programStart),
     epMaps: readCpi(r, cpiStart),

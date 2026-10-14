@@ -1,0 +1,108 @@
+--- a/src/libbluray/register.c
++++ b/src/libbluray/register.c
+@@ -362,6 +362,9 @@
+  * GPR read / write
+  */
+ 
++/* vm-trace: called after every successful register write (psr: 0 = GPR, 1 = PSR) */
++void (*bd_trace_write_cb)(int psr, int reg, uint32_t val) = NULL;
++
+ int bd_gpr_write(BD_REGISTERS *p, unsigned int reg, uint32_t val)
+ {
+     if (reg >= BD_GPR_COUNT) {
+@@ -370,6 +373,9 @@
+     }
+ 
+     p->gpr[reg] = val;
++    if (bd_trace_write_cb) {
++        bd_trace_write_cb(0, reg, val);
++    }
+     return 0;
+ }
+ 
+@@ -442,6 +448,10 @@
+         p->psr[reg] = val;
+     }
+ 
++    if (bd_trace_write_cb) {
++        bd_trace_write_cb(1, reg, val);
++    }
++
+     bd_psr_unlock(p);
+ 
+     return 0;
+--- a/src/libbluray/bluray.c
++++ b/src/libbluray/bluray.c
+@@ -245,10 +245,16 @@
+     return result;
+ }
+ 
++/* vm-trace: called for every event put in the queue */
++void (*bd_trace_event_cb)(uint32_t event, uint32_t param) = NULL;
++
+ static int _queue_event(BLURAY *bd, uint32_t event, uint32_t param)
+ {
+     int result = 0;
+     if (bd->event_queue) {
++        if (bd_trace_event_cb) {
++            bd_trace_event_cb(event, param);
++        }
+         BD_EVENT ev = { event, param };
+         result = event_queue_put(bd->event_queue, &ev);
+         if (!result) {
+@@ -3932,6 +3938,12 @@
+     _get_event(bd, event);
+ 
+     return bytes;
++}
++
++/* vm-trace: the HDMV program has ended and no playlist is playing */
++int bd_trace_finished(BLURAY *bd)
++{
++    return bd->title_type == title_hdmv && bd->hdmv_vm && !hdmv_vm_running(bd->hdmv_vm) && (!bd->title || !bd->st0.clip);
+ }
+ 
+ int bd_read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
+--- a/src/libbluray/hdmv/hdmv_vm.c
++++ b/src/libbluray/hdmv/hdmv_vm.c
+@@ -384,11 +384,7 @@
+     p->num_titles      = num_titles;
+     p->have_top_menu   = top_menu_available;
+     p->have_first_play = first_play_available;
+-#ifdef DEBUG
+-    p->rand = 1;
+-#else
+-    p->rand = time(NULL);
+-#endif
++    p->rand = 1; /* vm-trace: deterministic */
+ 
+     bd_mutex_init(&p->mutex);
+ 
+--- a/src/util/time.c
++++ b/src/util/time.c
+@@ -61,15 +61,16 @@
+ 
+ #endif
+ 
+-uint64_t bd_get_scr(void)
++/* vm-trace: deterministic clock, advanced by the harness once per read */
++static uint64_t trace_scr = 0;
++
++void bd_trace_tick(void)
+ {
+-    static uint64_t t0 = (uint64_t)-1;
++    trace_scr += 1800;
++}
+ 
+-    uint64_t now = _bd_get_scr_impl();
+-
+-    if (t0 > now) {
+-        t0 = now;
+-    }
+-
+-    return now - t0;
++uint64_t bd_get_scr(void)
++{
++    (void)_bd_get_scr_impl; /* wall clock replaced by the counter */
++    return trace_scr;
+ }
