@@ -1,6 +1,7 @@
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
 import type { PlaylistSummary } from './disc/open-disc';
+import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
@@ -53,11 +54,18 @@ export type EngineCommand =
   | { readonly type: 'selectAudio'; readonly index: number }
   | { readonly type: 'nextChapter' }
   | { readonly type: 'prevChapter' }
+  /** HDMV discs only: 0 = top menu. */
+  | { readonly type: 'playTitle'; readonly title: number }
+  | { readonly type: 'menuCall' }
   /** Forget the open disc ("Open another disc"). */
   | { readonly type: 'close' };
 
 export type EngineEvent =
   | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly warnings: readonly string[] }
+  /** After 'titles', for discs whose First Play is an HDMV object. */
+  | { readonly type: 'indexTitles'; readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>; readonly hasTopMenu: boolean }
+  | { readonly type: 'uoMask'; readonly masked: readonly UoOp[] }
+  | { readonly type: 'menuActive'; readonly active: boolean; readonly popupAvailable: boolean }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
   | { readonly type: 'state'; readonly state: PlaybackState }

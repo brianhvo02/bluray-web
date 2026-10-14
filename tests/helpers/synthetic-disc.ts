@@ -56,11 +56,16 @@ export interface SyntheticPlaylistSpec {
   /** Video coding type declared in the STN table (default AVC). */
   videoCodingType?: number;
   chapterEverySeconds?: number;
+  /** 8-byte UO mask table of the playlist. */
+  uoMask?: number[];
 }
 
 export interface SyntheticDiscSpec {
   clips: SyntheticClipSpec[];
   playlists: SyntheticPlaylistSpec[];
+  /** Adds BDMV/MovieObject.bdmv (see buildMovieObjects) and, optionally, a replacement index. */
+  movieObjects?: Uint8Array<ArrayBuffer>;
+  index?: Parameters<typeof buildIndex>[0];
 }
 
 /** One LPCM PES payload: 48 kHz, 16-bit stereo, 440 Hz at −12 dBFS. */
@@ -115,7 +120,8 @@ export function syntheticClip(clipId: string, seconds: number, opts: { audio?: n
 
 export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Array<ArrayBuffer>> {
   const files = new Map<string, Uint8Array<ArrayBuffer>>();
-  files.set('BDMV/index.bdmv', buildIndex({ firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [{ kind: 'hdmv', movieObjectId: 2 }] }));
+  files.set('BDMV/index.bdmv', buildIndex(spec.index ?? { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [{ kind: 'hdmv', movieObjectId: 2 }] }));
+  if (spec.movieObjects) files.set('BDMV/MovieObject.bdmv', spec.movieObjects);
   const clips = new Map<string, { inTime: number; outTime: number; audio: StreamSpec[] }>();
 
   for (const clip of spec.clips) {
@@ -169,7 +175,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         audio: clip.audio,
       };
     });
-    files.set(`BDMV/PLAYLIST/${playlist.id}.mpls`, buildMpls({ playItems, marks }));
+    files.set(`BDMV/PLAYLIST/${playlist.id}.mpls`, buildMpls({ playItems, marks, uoMask: playlist.uoMask }));
   }
   return files;
 }

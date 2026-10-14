@@ -69,6 +69,10 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, error: { code: e.code, message: e.message, paths: e.paths } };
     case 'telemetry':
       return { ...s, telemetry: e.telemetry };
+    case 'indexTitles':
+    case 'uoMask':
+    case 'menuActive':
+      return s; // consumed by the menu UI in a later task
     case 'playlistCleared':
       return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
   }

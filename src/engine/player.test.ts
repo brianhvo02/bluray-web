@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
 import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
@@ -82,12 +83,13 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer> } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
     clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
+    movieObjects: opts.movieObjects,
   });
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
@@ -689,5 +691,95 @@ describe('Player', () => {
     expect(loads).toBe(0);
     expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
     expect(lastTelemetry(h)?.clockMode).toBe('wall');
+  });
+});
+
+describe('Player with HDMV navigation', () => {
+  const idle = { cmds: [] };
+  const shortPlaylists = [
+    { id: '00000', clipIds: ['00001'], chapterEverySeconds: 1 },
+    { id: '00001', clipIds: ['00002'], chapterEverySeconds: 1 },
+  ];
+  const nav = (objects: Array<{ cmds: Uint8Array[] }>, extra: Parameters<typeof harness>[1] = {}) =>
+    harness(CodingType.LPCM, { playlists: shortPlaylists, movieObjects: buildMovieObjects(objects), ...extra });
+  const selectedAudio = (h: Harness) => h.events.flatMap((e) => (e.type === 'tracks' ? [e.selectedAudio] : [])).at(-1);
+  const chapterIds = (h: Harness) => h.events.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : []));
+
+  it('boots First Play without a playPlaylist command', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
+    await untilPlaying(h);
+    expect(chapterIds(h)).toEqual(['00000']);
+    expect(h.events).toContainEqual({ type: 'indexTitles', titles: [{ number: 1, kind: 'hdmv' }], hasTopMenu: true });
+    const types = h.events.map((e) => e.type);
+    expect(types.indexOf('indexTitles')).toBeGreaterThan(types.indexOf('titles'));
+  });
+
+  it('plays a title at a mark', async () => {
+    const h = await nav([idle, idle, { cmds: [asm.playPlPm(imm(1), imm(1))] }]);
+    expect(chapterIds(h)).toEqual([]);
+    await h.player.handle({ type: 'playTitle', title: 1 });
+    await untilPlaying(h);
+    await h.play(300);
+    expect(chapterIds(h)).toEqual(['00001']);
+    expect(Math.abs(h.drawn[0]! - 1_000_000)).toBeLessThanOrEqual(41_667);
+  });
+
+  it('starts the next playlist when one ends', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0)), asm.playPl(imm(1))] }, idle, idle]);
+    await vi.waitFor(
+      async () => {
+        await h.play(100);
+        expect(chapterIds(h)).toEqual(['00000', '00001']);
+      },
+      { timeout: 10000 },
+    );
+    expect(states(h)).not.toContain('ended');
+  });
+
+  it('follows a VM setStream into the audio selection', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.setStream(imm(0x80020000), imm(0)), asm.playPl(imm(0))] }], {
+      audioStreams: [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })],
+    });
+    await untilPlaying(h);
+    expect(selectedAudio(h)).toBe(1);
+    await h.player.handle({ type: 'playTitle', title: 1 });
+    await untilPlaying(h);
+    expect(chapterIds(h)).toEqual(['00000', '00000']);
+    expect(selectedAudio(h)).toBe(2);
+  });
+
+  it('stops the VM when a raw playlist is picked', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0)), asm.playPl(imm(0))] }, idle, idle]);
+    await untilPlaying(h);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    await vi.waitFor(
+      async () => {
+        await h.play(100);
+        expect(lastState(h)).toBe('ended');
+      },
+      { timeout: 10000 },
+    );
+    await h.play(500);
+    expect(chapterIds(h)).toEqual(['00000', '00001']);
+  });
+
+  const twoLanguages = [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })];
+
+  it('routes a user audio change through PSR1', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { audioStreams: twoLanguages });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'selectAudio', index: 2 });
+    expect(selectedAudio(h)).toBe(2);
+  });
+
+  it('refuses a user audio change while primaryAudioChange is masked', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], {
+      audioStreams: twoLanguages,
+      playlists: [{ id: '00000', clipIds: ['00001'], uoMask: [0, 0, 0x04, 0, 0, 0, 0, 0] }],
+    });
+    await untilPlaying(h);
+    expect(h.events).toContainEqual({ type: 'uoMask', masked: ['primaryAudioChange'] });
+    await h.player.handle({ type: 'selectAudio', index: 2 });
+    expect(selectedAudio(h)).toBe(1);
   });
 });

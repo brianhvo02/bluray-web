@@ -11,6 +11,8 @@ import { DiscError } from './disc/byte-source';
 import { FileSource } from './disc/file-source';
 import { checkStreamReadable, loadClips, openDisc, playlistPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
+import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
+import { Navigator, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
@@ -19,6 +21,7 @@ import type { AudioTrack, EngineCommand, EngineEvent, NoticeCode, PlaybackState 
 import type { CompositorLike } from './render/compositor';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
+import { ticks45ToUs } from './util/time';
 
 export interface PlayerDeps {
   emit(event: EngineEvent): void;
@@ -48,6 +51,10 @@ const MAX_AUDIO_ERRORS_IN_ROW = 50;
 const SEEK_TOLERANCE_US = 1_000;
 const NEXT_CHAPTER_GUARD_US = 500_000;
 const PREV_CHAPTER_RESTART_US = 3_000_000;
+/** A still play item is held this close to its end, so the last frame stays on screen. */
+const STILL_MARGIN_US = 40_000;
+const SCR_PER_MS = 90;
+const INDEX_ID_NONE = 0xffff;
 
 interface Session {
   readonly playlistId: string;
@@ -105,6 +112,17 @@ export class Player {
   private audioDecodeErrors = 0;
   private audioCodec: string | null = null;
   private queue: Promise<void> = Promise.resolve();
+  /** HDMV navigation (First Play, titles, menus); null for discs without MovieObject.bdmv, BD-J First Play, or after a raw pick. */
+  private navigator: Navigator | null = null;
+  private navRegs: RegisterFile | null = null;
+  private navItem = 0;
+  private navChapter = -1;
+  /** Presentation is frozen (still image): the clock and audio output are stopped. */
+  private held = false;
+  private menuActive = false;
+  private popupAvailable = false;
+  /** Bumped by every playlist open and by navigator teardown, so a superseded open stops early. */
+  private openGeneration = 0;
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
@@ -135,7 +153,14 @@ export class Player {
           this.compositor?.drawVideo(this.presenter.current);
           break;
         case 'playPlaylist':
+          this.stopNavigator();
           await this.playPlaylist(cmd.playlistId);
+          break;
+        case 'playTitle':
+          this.navigator?.playTitle(cmd.title);
+          break;
+        case 'menuCall':
+          this.navigator?.menuCall();
           break;
         case 'play':
           await this.play();
@@ -166,9 +191,11 @@ export class Player {
 
   /** One render tick (requestAnimationFrame in the worker; called directly by tests). */
   tick(): void {
+    this.navigator?.tick();
     const s = this.session;
     if (!s) return;
     this.updatePlayback(s);
+    this.syncNavigator(s);
     const now = this.clock.nowUs();
     const frame = this.presenter.select(now);
     if (frame) {
@@ -177,11 +204,13 @@ export class Player {
     }
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
-    if (this.state === 'playing' && s.flushed && this.presenter.size === 0 && now >= (last?.timestamp ?? 0) + 100_000) {
+    if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= (last?.timestamp ?? 0) + 100_000) {
       this.wantPlaying = false;
       this.ring?.setPlaying(false);
       this.clock.setRunning(false);
-      this.setState('ended');
+      // With a navigator, its program decides what follows: the next playlist replaces the session
+      this.navigator?.playlistEnded();
+      if (this.session === s) this.setState('ended');
     }
     this.emitTime(Math.min(now, s.timeline.durationUs), false);
     this.maybeEmitTelemetry(s);
@@ -203,6 +232,7 @@ export class Player {
   }
 
   private async open(entries: ReadonlyArray<readonly [string, Blob]>): Promise<void> {
+    this.stopNavigator();
     this.teardownSession();
     this.setState('loading');
     const source = new FileSource(normalizeDiscPaths(entries));
@@ -210,27 +240,210 @@ export class Player {
     this.source = source;
     this.disc = disc;
     this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, warnings: disc.warnings });
+    if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.usesBdj) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
     this.setState('idle');
+    if (disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
+      this.navigator = this.createNavigator(disc);
+      this.navigator.start();
+    }
   }
 
-  private async playPlaylist(playlistId: string): Promise<void> {
+  private emitIndexTitles(disc: DiscModel): void {
+    const titles = disc.index.titles.flatMap((t, i) => (t.object.kind === 'hdmv' || t.object.kind === 'bdj' ? [{ number: i + 1, kind: t.object.kind }] : []));
+    const top = disc.index.topMenu;
+    const hasTopMenu = top.kind === 'bdj' || (top.kind === 'hdmv' && top.movieObjectId !== INDEX_ID_NONE);
+    this.deps.emit({ type: 'indexTitles', titles, hasTopMenu });
+  }
+
+  private createNavigator(disc: DiscModel): Navigator {
+    const regs = new RegisterFile();
+    regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
+    this.navRegs = regs;
+    this.menuActive = false;
+    this.popupAvailable = false;
+    return new Navigator({
+      disc,
+      regs,
+      port: this.navigationPort(),
+      emit: (e) => this.onNavigatorEvent(e),
+      nowScr: () => this.deps.nowMs() * SCR_PER_MS,
+    });
+  }
+
+  /** Drops the navigator (and with it the VM and the registers) and releases a hold. */
+  private stopNavigator(): void {
+    const nav = this.navigator;
+    if (!nav) return;
+    this.navigator = null;
+    this.navRegs = null;
+    this.openGeneration++;
+    nav.stop();
+    this.setHold(false);
+    this.updateMenuState(false, false);
+    this.deps.emit({ type: 'uoMask', masked: [] });
+  }
+
+  private onNavigatorEvent(e: NavigatorEvent): void {
+    switch (e.type) {
+      case 'uoMask':
+        this.deps.emit({ type: 'uoMask', masked: [...e.mask] });
+        break;
+      case 'menu':
+        this.updateMenuState(e.active, this.popupAvailable);
+        break;
+      case 'popup':
+        this.updateMenuState(this.menuActive, e.available);
+        break;
+      case 'bdjTitle':
+        this.notice('bdj', 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.');
+        break;
+      case 'error':
+        // The picker shows an 'error' event's message (PlayerScreen reads snapshot.error) once the session is gone.
+        this.stopNavigator();
+        this.teardownSession();
+        this.deps.emit({ type: 'error', code: 'internal', message: e.message, paths: [] });
+        this.setState('idle');
+        break;
+      default:
+        break; // 'title' and 'sound' are for the menu UI
+    }
+  }
+
+  private updateMenuState(active: boolean, popupAvailable: boolean): void {
+    if (active === this.menuActive && popupAvailable === this.popupAvailable) return;
+    this.menuActive = active;
+    this.popupAvailable = popupAvailable;
+    this.deps.emit({ type: 'menuActive', active, popupAvailable });
+  }
+
+  private navigationPort(): PlaybackPort {
+    return {
+      playPlaylist: (id, at) => this.playPlaylist(id, at, true),
+      seekPlayItem: (item) => {
+        const s = this.session;
+        if (s && item >= 0 && item < s.timeline.items.length) this.enqueue(() => this.startAt(s.timeline.itemStartUs(item), this.wantPlaying));
+      },
+      seekMark: (mark) => {
+        const s = this.session;
+        if (!s) return;
+        try {
+          const t = s.timeline.markTimeUs(mark);
+          this.enqueue(() => this.startAt(t, this.wantPlaying));
+        } catch (err) {
+          if (!(err instanceof RangeError)) throw err;
+        }
+      },
+      stopPlaylist: () => {
+        this.teardownSession();
+        this.setState('idle');
+      },
+      hold: (on) => this.setHold(on),
+      // _update_time_psr_from_stream: the clip time of the presentation position
+      currentClipTime45: () => (this.session ? this.session.timeline.locate(this.clock.nowUs()).clipTime45 : undefined),
+    };
+  }
+
+  /** Runs `work` after the queued commands, reporting a failure like a command's. */
+  private enqueue(work: () => Promise<void>): void {
+    this.queue = this.queue.then(async () => {
+      try {
+        await work();
+      } catch (err) {
+        this.fail(err);
+      }
+    });
+  }
+
+  private setHold(on: boolean): void {
+    if (on === this.held) return;
+    this.held = on;
+    if (on) {
+      this.ring?.setPlaying(false);
+      this.clock.setRunning(false);
+    } else if (this.state === 'playing') {
+      const ring = this.session?.audioActive ? this.ring : null;
+      if (ring) {
+        ring.setPlaying(true);
+        this.lastHeartbeat = ring.heartbeat();
+        this.lastHeartbeatChangeMs = this.deps.nowMs();
+      } else {
+        this.clock.setRunning(true);
+      }
+    }
+  }
+
+  /** PSR1 (primary audio stream) selects the audio: the registers are the single source of the selection. */
+  private onPsrEvent(e: PsrEvent, regs: RegisterFile): void {
+    if (e.type !== 'change' || e.psr !== PSR.PRIMARY_AUDIO_ID || regs !== this.navRegs) return;
+    const index = regs.psrRead(PSR.PRIMARY_AUDIO_ID) & 0xfff;
+    this.enqueue(() => this.applyAudio(index));
+  }
+
+  /** Presentation follows the clock: tell the navigator about item and chapter changes and about the end of a still item. */
+  private syncNavigator(s: Session): void {
+    const nav = this.navigator;
+    if (!nav || (this.state !== 'playing' && this.state !== 'paused') || this.held) return;
+    const now = this.clock.nowUs();
+    const { item } = s.timeline.locate(now);
+    if (item.index !== this.navItem) {
+      this.navItem = item.index;
+      nav.playItemChanged(item.index);
+    }
+    const chapter = this.chapterAt(s.chapters, now);
+    if (chapter !== this.navChapter) {
+      this.navChapter = chapter;
+      nav.chapterChanged(chapter);
+    }
+    const stillMode = s.playItems[item.index]?.stillMode ?? 0;
+    if (this.state === 'playing' && stillMode !== 0 && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
+      nav.playItemEnded(item.index);
+    }
+  }
+
+  /** bd_get_current_chapter: 0-based, the last chapter starting at or before `timeUs`. */
+  private chapterAt(chapters: readonly Chapter[], timeUs: number): number {
+    let chapter = 0;
+    for (const c of chapters) if (c.startUs <= timeUs) chapter = c.index;
+    return chapter;
+  }
+
+  /**
+   * `viaNavigator`: the navigator asked for it. Then the result says whether the playlist exists, and the navigator is told
+   * of the start (playlistStarted, then the starting chapter) synchronously, before the first await.
+   */
+  private async playPlaylist(playlistId: string, at: PlayAt = {}, viaNavigator = false): Promise<boolean> {
     const source = this.source;
     const mpls = this.disc?.playlists.get(playlistId);
     if (!source || !mpls || mpls.playItems.length === 0) {
+      if (viaNavigator) return false;
       throw new DiscError('missing-file', `Playlist ${playlistId} is not available.`, [playlistPath(playlistId)]);
     }
+    const generation = ++this.openGeneration;
     this.teardownSession();
+    const timeline = new Timeline(mpls.playItems, mpls.marks);
+    const startUs = this.startTimeUs(timeline, at);
+    const chapters = timeline.chapters(mpls.marks);
+    const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
+    this.navItem = startItem;
+    this.navChapter = -1;
+    if (viaNavigator && this.navigator) {
+      this.navigator.playlistStarted(playlistId, startItem);
+      this.navChapter = this.chapterAt(chapters, startUs);
+      this.navigator.chapterChanged(this.navChapter);
+    }
     this.setState('loading');
     const clipIds = [...new Set(mpls.playItems.map((p) => p.clipId))];
     const clips = await loadClips(source, clipIds);
     await checkStreamReadable(source, clipIds[0]);
+    if (generation !== this.openGeneration) return true; // superseded while loading
 
     const choice = chooseStreams(mpls.playItems[0].stn);
     if (!choice.video) {
+      if (viaNavigator) throw new Error('This playlist has no video stream.');
       this.deps.emit({ type: 'error', code: 'no-video', message: 'This playlist has no video stream.', paths: [] });
       this.setState('error');
-      return;
+      return true;
     }
     if (!choice.audio && choice.unsupportedAudio.length > 0) {
       const codec = [...new Set(choice.unsupportedAudio.map((a) => codingName(a.codingType)))].join(', ');
@@ -239,14 +452,22 @@ export class Player {
     if (!isSupportedVideoCoding(choice.video.codingType)) {
       throw new UnsupportedCodecError(choice.video.codingType, `${codingName(choice.video.codingType)} video is not supported.`);
     }
-    const audioActive = choice.audio !== null && this.ring !== null;
-    if (choice.audio && !this.ring) this.notice('audio-disabled', 'Audio output is not available, so video will play without sound.');
+    // With a navigator the audio stream register (PSR1) decides, when it names a playable stream
+    let audioIndex = choice.audioIndex;
+    let audioEntry = choice.audio;
+    const wanted = this.navRegs ? this.navRegs.psrRead(PSR.PRIMARY_AUDIO_ID) & 0xfff : 0;
+    const wantedEntry = wanted > 0 ? audioEntryFor(mpls.playItems[startItem], wanted) : null;
+    if (wantedEntry && PLAYABLE_AUDIO.has(wantedEntry.codingType)) {
+      audioIndex = wanted;
+      audioEntry = wantedEntry;
+    }
+    const audioActive = audioEntry !== null && this.ring !== null;
+    if (audioEntry && !this.ring) this.notice('audio-disabled', 'Audio output is not available, so video will play without sound.');
 
-    const timeline = new Timeline(mpls.playItems);
     const decoder = new WebCodecsVideoDecoder(this.deps.videoCodecApi);
     const ref: { current: Session | null } = { current: null };
     const pipeline = new PlaybackPipeline(
-      { source, timeline, clips, videoPid: choice.video.pid, playItems: mpls.playItems, audioStream: audioActive ? choice.audioIndex : null },
+      { source, timeline, clips, videoPid: choice.video.pid, playItems: mpls.playItems, audioStream: audioActive ? audioIndex : null },
       {
         video: (u) => {
           if (ref.current) this.onVideoUnit(ref.current, u);
@@ -266,13 +487,13 @@ export class Player {
     const session: Session = {
       playlistId,
       timeline,
-      chapters: timeline.chapters(mpls.marks),
-      tracks: audioTracks(mpls.playItems[0].stn),
+      chapters,
+      tracks: audioTracks(mpls.playItems[startItem].stn),
       videoCodingType: choice.video.codingType,
       decoder,
       pipeline,
       playItems: mpls.playItems,
-      audioStream: choice.audioIndex,
+      audioStream: audioIndex,
       audioDecoders: new Map(),
       audioDecoderLoads: new Map(),
       audioErrorsInRow: 0,
@@ -300,7 +521,25 @@ export class Player {
     this.audioCodec = null;
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
-    await this.startAt(0, true);
+    await this.startAt(startUs, true);
+    return true;
+  }
+
+  private startTimeUs(timeline: Timeline, at: PlayAt): number {
+    if (at.item !== undefined && at.item >= 0 && at.item < timeline.items.length) {
+      const item = timeline.items[at.item]!;
+      if (at.clipTime45 === undefined) return timeline.itemStartUs(at.item);
+      const offset = Math.min(Math.max(0, at.clipTime45 - item.inTime), item.outTime - item.inTime);
+      return ticks45ToUs(item.start + offset);
+    }
+    if (at.mark !== undefined) {
+      try {
+        return timeline.markTimeUs(at.mark);
+      } catch (err) {
+        if (!(err instanceof RangeError)) throw err;
+      }
+    }
+    return 0;
   }
 
   private teardownSession(): void {
@@ -325,6 +564,19 @@ export class Player {
 
   /** Switching is a re-seek to the current time with the new stream (a brief video refill). */
   private async selectAudio(index: number): Promise<void> {
+    const nav = this.navigator;
+    const s = this.session;
+    if (nav && this.navRegs) {
+      // The register change selects (applyAudio); a masked primaryAudioChange refuses the user's request
+      if (nav.isMasked('primaryAudioChange') || !s?.tracks.find((t) => t.index === index)?.playable) return;
+      this.navRegs.psrWrite(PSR.PRIMARY_AUDIO_ID, index);
+      await this.applyAudio(index); // the register event queued the same switch behind this command: it finds nothing to do
+      return;
+    }
+    await this.applyAudio(index);
+  }
+
+  private async applyAudio(index: number): Promise<void> {
     const s = this.session;
     if (!s || index === s.audioStream || this.state === 'error') return;
     if (!s.tracks.find((t) => t.index === index)?.playable) return;
@@ -418,6 +670,7 @@ export class Player {
   }
 
   private close(): void {
+    this.stopNavigator();
     this.teardownSession();
     this.source = null;
     this.disc = null;
