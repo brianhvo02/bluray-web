@@ -33,7 +33,7 @@ class FakeAudio implements AudioOutputLike {
   }
 }
 
-const summary = { id: '00000', durationUs: 8_000_000, chapterCount: 4, clipIds: ['00001'], playable: true, missingPaths: [] };
+const summary = { id: '00000', durationUs: 8_000_000, chapterCount: 4, clipIds: ['00001'], playable: true, missingPaths: [], looped: false };
 
 describe('reduceEvent', () => {
   it('tracks titles, chapters, state and time', () => {

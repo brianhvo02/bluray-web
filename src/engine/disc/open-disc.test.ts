@@ -56,6 +56,18 @@ describe('openDisc', () => {
     expect(model.playlists.get('00000')?.playItems).toHaveLength(2);
   });
 
+  it('lists the main feature first and a longer loop playlist last, still listed', async () => {
+    const files = baseFiles();
+    const segment = { clipId: '00002', inTime: 0, outTime: 45_000, video: VIDEO };
+    files['Movie/BDMV/PLAYLIST/00149.mpls'] = buildMpls({ playItems: Array.from({ length: 30 }, () => segment) }); // 30 s, longer than 00000
+    const model = await openDisc(disc(files));
+    expect(model.summaries.map((s) => [s.id, s.looped])).toEqual([
+      ['00000', false],
+      ['00001', false],
+      ['00149', true],
+    ]);
+  });
+
   it('marks playlists with missing clip files as not playable', async () => {
     const files = baseFiles();
     delete files['Movie/BDMV/STREAM/00002.m2ts'];

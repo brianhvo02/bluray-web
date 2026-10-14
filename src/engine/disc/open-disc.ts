@@ -5,6 +5,7 @@ import { ALIGNED_UNIT_SIZE, SOURCE_PACKET_SIZE } from '../demux/constants';
 import { ParseError } from '../util/byte-reader';
 import { ticks45ToUs } from '../util/time';
 import { DiscError, readWhole, type ByteSource } from './byte-source';
+import { chooseMainTitle, hasRepeatedSegments } from './main-title';
 
 const INDEX_PATH = 'BDMV/INDEX.BDMV';
 
@@ -19,13 +20,15 @@ export interface PlaylistSummary {
   readonly clipIds: readonly string[];
   readonly playable: boolean;
   readonly missingPaths: readonly string[];
+  /** Plays one segment more than twice (a maze or loop playlist); never chosen as the main feature. */
+  readonly looped: boolean;
 }
 
 export interface DiscModel {
   readonly index: IndexBdmv;
   readonly usesBdj: boolean;
   readonly playlists: ReadonlyMap<string, Mpls>;
-  /** Longest first. */
+  /** The main feature first (libbluray's choice among playable playlists), then the rest longest first, loops last. */
   readonly summaries: readonly PlaylistSummary[];
   readonly warnings: readonly string[];
 }
@@ -57,9 +60,10 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
     }
   }
 
-  const summaries = [...playlists]
-    .map(([id, mpls]) => summarize(source, id, mpls))
-    .sort((a, b) => b.durationUs - a.durationUs || a.id.localeCompare(b.id));
+  const all = [...playlists].map(([id, mpls]) => summarize(source, id, mpls));
+  const mainId = chooseMainTitle(all.filter((s) => s.playable).map((s) => ({ id: s.id, mpls: playlists.get(s.id) as Mpls })));
+  const rank = (s: PlaylistSummary): number => (s.id === mainId ? 0 : s.looped ? 2 : 1);
+  const summaries = all.sort((a, b) => rank(a) - rank(b) || b.durationUs - a.durationUs || a.id.localeCompare(b.id));
   const main = summaries.find((s) => s.playable);
   if (main) await checkStreamReadable(source, main.clipIds[0]);
   return { index, usesBdj: indexUsesBdj(index), playlists, summaries, warnings };
@@ -77,6 +81,7 @@ function summarize(source: ByteSource, id: string, mpls: Mpls): PlaylistSummary 
     clipIds,
     playable: hasVideo && missingPaths.length === 0,
     missingPaths,
+    looped: hasRepeatedSegments(mpls),
   };
 }
 

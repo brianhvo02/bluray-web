@@ -19,18 +19,21 @@ what would change that decision.
   the next one starts.
 - **AC-3 at 44.1 or 32 kHz is ignored** (treated as no sync). Blu-ray AC-3 is always 48 kHz.
 
-- **Decoy playlists are picked as the main feature.** BD-J discs can carry maze playlists that loop a few clips
-  into a long runtime (A_NEW_ERA and RENTAL_FAMILY: `00149`, about 250 min from 251–301 play items over 2–3 clips).
-  Playlists are ranked by duration, so the picker labels the decoy "Main feature". The local-disc tests also
-  take that first entry, so they checked one AC-3 track instead of the real features (`00040`, `00800`).
-  *Revisit:* rank by unique clip time (or skip playlists that repeat clips), then the tests follow automatically.
-
 ## Resolved (for reference)
+
+- **Decoy playlists are no longer picked as the main feature.** BD-J discs can carry maze playlists that play one
+  segment hundreds of times (A_NEW_ERA and RENTAL_FAMILY: `00149`, about 250 min). The main feature is now chosen
+  as libbluray's title list does (`disc/main-title.ts`, from `navigation.c`): loops (any segment more than twice)
+  and exact duplicates are skipped, then chapters, video, HD audio, duration and stream count decide. The main
+  feature is listed first, loops last. Differences: HD audio is judged by coding type (libbluray compares the
+  channel-layout field there, which never matches), BD-J "known playlist" hints are not used, and a full tie goes
+  to the lower playlist number. The local-disc tests now play `00040` and `00800`.
 
 - **Milestone 2 real-disc gate passed (2026-10-13).** All 10 playable tracks of A_NEW_ERA `00040` (TrueHD core,
   3× AC-3; HEVC video) and RENTAL_FAMILY `00800` (DTS-HD MA core, 5× AC-3) played in Chrome at the local bounds
   (worst 16.9 ms mean / 34.5 ms max), with 0 decode errors and no underruns; each also decoded cleanly in Node
-  at 0% and 30% into the film. Not covered by a real disc yet: E-AC-3 and plain DTS (synthetic only for DTS).
+  at 0% and 30% into the film. Since the main-title fix, `LOCAL_DISCS=1 npx playwright test local-discs` covers
+  these tracks directly. Not covered by a real disc yet: E-AC-3 and plain DTS (synthetic only for DTS).
 
 - **File version checks** now match libbluray's `bdmv_parse_header`
   (`0100`, `0200`, `0240`, `0300`), checked against a libbluray clone at 448f896.

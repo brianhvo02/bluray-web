@@ -37,7 +37,7 @@ export function PlaylistPicker({ playlists, usesBdj, messages = [], onPick, onCl
             {missing.length > 10 && <p>…and {missing.length - 10} more</p>}
           </div>
         )}
-        {usesBdj && <p className="hint">This disc uses BD-J menus, which aren't supported. The longest playlist is usually the main feature.</p>}
+        {usesBdj && <p className="hint">This disc uses BD-J menus, which aren't supported. Choose a playlist; the likely main feature is marked.</p>}
         <ul>
           {playlists.map((p) => (
             <li key={p.id}>
