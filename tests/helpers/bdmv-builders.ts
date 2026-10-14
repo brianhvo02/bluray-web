@@ -63,6 +63,11 @@ export interface PlayItemSpec {
   ig?: StreamSpec[];
   pipPg?: StreamSpec[];
   angleClipIds?: string[];
+  /** 0 none, 1 time, 2 infinite. */
+  stillMode?: number;
+  stillTime?: number;
+  /** 8-byte UO mask table. */
+  uoMask?: ArrayLike<number>;
 }
 
 export interface MarkSpec {
@@ -74,6 +79,8 @@ export interface MarkSpec {
 export interface MplsSpec {
   playItems: PlayItemSpec[];
   marks?: MarkSpec[];
+  /** 8-byte UO mask table of the playlist. */
+  uoMask?: ArrayLike<number>;
 }
 
 /** Writes a length byte plus a 5-byte (or longer) stream attribute block, shared by MPLS and CLPI. */
@@ -105,6 +112,10 @@ function writeStream(w: ByteWriter, s: StreamSpec): void {
   writeCodingInfo(w, s.codingType, { format: s.format, rate: s.rate, lang: s.lang, extraBytes: s.extraAttrBytes });
 }
 
+function writeUoMask(w: ByteWriter, mask: ArrayLike<number> | undefined): void {
+  for (let i = 0; i < 8; i++) w.u8(mask?.[i] ?? 0);
+}
+
 function writePlayItem(w: ByteWriter, item: PlayItemSpec): void {
   const start = w.position;
   w.u16(0);
@@ -112,9 +123,9 @@ function writePlayItem(w: ByteWriter, item: PlayItemSpec): void {
   w.ascii(item.clipId).ascii('M2TS');
   w.bits(11, 0).bits(1, angles.length > 0 ? 1 : 0).bits(4, item.connectionCondition ?? 1);
   w.u8(item.stcId ?? 0).u32(item.inTime).u32(item.outTime);
-  w.zeros(8); // UO mask
+  writeUoMask(w, item.uoMask);
   w.u8(0); // random_access_flag + reserved
-  w.u8(0).u16(0); // still mode, still time
+  w.u8(item.stillMode ?? 0).u16(item.stillTime ?? 0);
   if (angles.length > 0) {
     w.u8(angles.length + 1).u8(0);
     for (const clip of angles) w.ascii(clip).ascii('M2TS').u8(0);
@@ -139,7 +150,9 @@ export function buildMpls(spec: MplsSpec): Uint8Array<ArrayBuffer> {
   const listPosAt = w.position;
   w.u32(0).u32(0).u32(0); // list, mark, extension positions
   w.zeros(20);
-  w.u32(14).u8(0).u8(1).u16(0).zeros(8).u16(0); // AppInfoPlayList
+  w.u32(14).u8(0).u8(1).u16(0);
+  writeUoMask(w, spec.uoMask);
+  w.u16(0); // AppInfoPlayList
   w.patchU32(listPosAt, w.position);
   const listStart = w.position;
   w.u32(0).u16(0).u16(spec.playItems.length).u16(0);

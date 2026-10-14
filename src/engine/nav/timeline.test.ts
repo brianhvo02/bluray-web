@@ -84,4 +84,19 @@ describe('Timeline', () => {
       { index: 2, startUs: 10_000_000 },
     ]);
   });
+
+  it('indexes marks over all marks, entry and link', () => {
+    const marks = [
+      { type: MarkType.ENTRY, playItemRef: 0, time: 900_000, entryEsPid: 0, duration: 0 },
+      { type: MarkType.LINK, playItemRef: 1, time: 540_000, entryEsPid: 0, duration: 0 },
+      { type: MarkType.ENTRY, playItemRef: 1, time: 450_000, entryEsPid: 0, duration: 0 },
+      { type: MarkType.ENTRY, playItemRef: 0, time: 0, entryEsPid: 0, duration: 0 },
+    ];
+    const t = new Timeline([item('A', 900_000, 1_350_000), item('B', 450_000, 675_000)], marks);
+    expect(t.markTimeUs(0)).toBe(0);
+    expect(t.markTimeUs(1)).toBe(12_000_000); // the link mark counts: index 1, 2 s into item B
+    expect(t.markTimeUs(2)).toBe(10_000_000);
+    expect(t.markTimeUs(3)).toBe(0); // before the item's IN time: clamped
+    expect(() => t.markTimeUs(4)).toThrow(RangeError);
+  });
 });

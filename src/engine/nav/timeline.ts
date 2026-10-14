@@ -38,8 +38,10 @@ export interface ItemPosition {
 export class Timeline {
   readonly items: readonly TimelineItem[];
   readonly duration45: number;
+  private readonly marks: readonly PlayListMark[];
 
-  constructor(playItems: readonly PlayItem[]) {
+  constructor(playItems: readonly PlayItem[], marks: readonly PlayListMark[] = []) {
+    this.marks = marks;
     const items: TimelineItem[] = [];
     let start = 0;
     playItems.forEach((p, index) => {
@@ -74,6 +76,15 @@ export class Timeline {
     const delta90 = ptsDelta90(pts90, item.inTime * 2);
     const length90 = (item.outTime - item.inTime) * 2;
     return { us: ticks45ToUs(item.start) + pts90ToUs(delta90), inRange: delta90 >= 0 && delta90 < length90 };
+  }
+
+  /** Playlist time of mark `index` over all marks, entry and link (libbluray mark_list). */
+  markTimeUs(index: number): number {
+    const mark = this.marks[index];
+    if (!mark) throw new RangeError(`mark ${index} is out of range 0..${this.marks.length - 1}`);
+    const item = this.item(mark.playItemRef);
+    const offset = Math.min(Math.max(0, mark.time - item.inTime), item.outTime - item.inTime);
+    return ticks45ToUs(item.start + offset);
   }
 
   chapters(marks: readonly PlayListMark[]): Chapter[] {
