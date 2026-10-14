@@ -342,6 +342,21 @@ describe('Navigator review fixes', () => {
     expect(regs.psrRead(PSR.TIME)).toBe(40000); // playlistStarted does not clobber the restored time
   });
 
+  it('restores the time inside a later play item', () => {
+    const { nav, port, regs } = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle],
+      playlists: { '00000': { items: [item({ inTime: 1000, outTime: 91000 }), item({ inTime: 5000, outTime: 95000 })] } },
+    });
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+    nav.start();
+    nav.playItemChanged(1);
+    port.clipTime = 60000;
+    nav.menuCall();
+    expect(port.lastAt).toEqual({ item: 1, clipTime45: 60000 });
+    expect(regs.psrRead(PSR.PLAYITEM)).toBe(1);
+    expect(regs.psrRead(PSR.TIME)).toBe(60000);
+  });
+
   it('does not store a position outside the play item', () => {
     const { nav, port, regs } = setup({
       objects: [{ cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle],
