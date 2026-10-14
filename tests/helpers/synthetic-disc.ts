@@ -58,6 +58,8 @@ export interface SyntheticPlaylistSpec {
   chapterEverySeconds?: number;
   /** 8-byte UO mask table of the playlist. */
   uoMask?: number[];
+  /** Still mode (1 time, 2 infinite) and time in seconds, by play item index. */
+  stills?: Record<number, { mode: number; time?: number }>;
 }
 
 export interface SyntheticDiscSpec {
@@ -171,6 +173,8 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         inTime: clip.inTime,
         outTime: clip.outTime,
         connectionCondition: index === 0 ? 1 : 5,
+        stillMode: playlist.stills?.[index]?.mode,
+        stillTime: playlist.stills?.[index]?.time,
         video: [{ pid: VIDEO_PID, codingType: playlist.videoCodingType ?? CodingType.AVC }],
         audio: clip.audio,
       };

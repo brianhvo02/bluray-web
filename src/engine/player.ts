@@ -89,6 +89,10 @@ interface Session {
   audioRecoveryQueued: boolean;
 }
 
+function isMediaError(err: unknown): boolean {
+  return err instanceof DiscError || err instanceof UnsupportedCodecError || err instanceof ParseError;
+}
+
 /** Owns one disc and at most one playing playlist. Runs inside the engine worker. */
 export class Player {
   private source: FileSource | null = null;
@@ -119,6 +123,8 @@ export class Player {
   private navChapter = -1;
   /** Presentation is frozen (still image): the clock and audio output are stopped. */
   private held = false;
+  /** The play item whose end was reported to the navigator; reset on an item change and on every seek. */
+  private navEndReported: number | null = null;
   private menuActive = false;
   private popupAvailable = false;
   /** Bumped by every playlist open and by navigator teardown, so a superseded open stops early. */
@@ -212,6 +218,7 @@ export class Player {
       this.navigator?.playlistEnded();
       if (this.session === s) this.setState('ended');
     }
+    if (this.session !== s) return; // the navigator replaced the session
     this.emitTime(Math.min(now, s.timeline.durationUs), false);
     this.maybeEmitTelemetry(s);
   }
@@ -319,22 +326,33 @@ export class Player {
 
   private navigationPort(): PlaybackPort {
     return {
-      playPlaylist: (id, at) => this.playPlaylist(id, at, true),
+      playPlaylist: async (id, at) => {
+        try {
+          return await this.playPlaylist(id, at, true);
+        } catch (err) {
+          // A clip that cannot be opened or decoded is an invalid playlist to the VM (_open_playlist returns 0)
+          if (!isMediaError(err)) throw err;
+          this.reportError(err);
+          if (!this.session) this.setState('idle');
+          return false;
+        }
+      },
       seekPlayItem: (item) => {
         const s = this.session;
-        if (s && item >= 0 && item < s.timeline.items.length) this.enqueue(() => this.startAt(s.timeline.itemStartUs(item), this.wantPlaying));
+        if (s && item >= 0 && item < s.timeline.items.length) this.enqueue(async () => this.session === s ? this.startAt(s.timeline.itemStartUs(item), this.wantPlaying) : undefined);
       },
       seekMark: (mark) => {
         const s = this.session;
         if (!s) return;
         try {
           const t = s.timeline.markTimeUs(mark);
-          this.enqueue(() => this.startAt(t, this.wantPlaying));
+          this.enqueue(async () => this.session === s ? this.startAt(t, this.wantPlaying) : undefined);
         } catch (err) {
           if (!(err instanceof RangeError)) throw err;
         }
       },
       stopPlaylist: () => {
+        this.openGeneration++; // also cancels an open that is still loading
         this.teardownSession();
         this.setState('idle');
       },
@@ -388,6 +406,7 @@ export class Player {
     const { item } = s.timeline.locate(now);
     if (item.index !== this.navItem) {
       this.navItem = item.index;
+      this.navEndReported = null;
       nav.playItemChanged(item.index);
     }
     const chapter = this.chapterAt(s.chapters, now);
@@ -396,7 +415,8 @@ export class Player {
       nav.chapterChanged(chapter);
     }
     const stillMode = s.playItems[item.index]?.stillMode ?? 0;
-    if (this.state === 'playing' && stillMode !== 0 && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
+    if (this.state === 'playing' && stillMode !== 0 && this.navEndReported !== item.index && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
+      this.navEndReported = item.index;
       nav.playItemEnded(item.index);
     }
   }
@@ -426,6 +446,7 @@ export class Player {
     const chapters = timeline.chapters(mpls.marks);
     const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
     this.navItem = startItem;
+    this.navEndReported = null;
     this.navChapter = -1;
     if (viaNavigator && this.navigator) {
       this.navigator.playlistStarted(playlistId, startItem);
@@ -440,8 +461,8 @@ export class Player {
 
     const choice = chooseStreams(mpls.playItems[0].stn);
     if (!choice.video) {
-      if (viaNavigator) throw new Error('This playlist has no video stream.');
       this.deps.emit({ type: 'error', code: 'no-video', message: 'This playlist has no video stream.', paths: [] });
+      if (viaNavigator) return false;
       this.setState('error');
       return true;
     }
@@ -592,6 +613,7 @@ export class Player {
     const s = this.session;
     if (!s) return;
     const gen = ++this.seekGeneration;
+    this.navEndReported = null;
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
     s.pipeline.stop();
     if (s.videoState === 'configured') s.decoder.reset();
@@ -887,6 +909,7 @@ export class Player {
   }
 
   private updatePlayback(s: Session): void {
+    if (this.held) return; // a still image: the output is stopped on purpose, so neither stall detection nor start-up applies
     if (this.state === 'playing' && !s.audioRecoveryQueued && this.audioRecovered(s)) {
       // The stalled output runs again (often just a slow start while another client opened a stream):
       // move back onto it with a seek to the current time, queued like any other command.
@@ -988,6 +1011,15 @@ export class Player {
   }
 
   private fail(err: unknown): void {
+    this.reportError(err);
+    this.session?.pipeline.stop();
+    this.wantPlaying = false;
+    this.ring?.setPlaying(false);
+    this.clock.setRunning(false);
+    this.setState('error');
+  }
+
+  private reportError(err: unknown): void {
     if (err instanceof DiscError) {
       this.deps.emit({ type: 'error', code: err.code, message: err.message, paths: err.paths });
     } else if (err instanceof UnsupportedCodecError) {
@@ -997,10 +1029,5 @@ export class Player {
     } else {
       this.deps.emit({ type: 'error', code: 'internal', message: err instanceof Error ? err.message : String(err), paths: [] });
     }
-    this.session?.pipeline.stop();
-    this.wantPlaying = false;
-    this.ring?.setPlaying(false);
-    this.clock.setRunning(false);
-    this.setState('error');
   }
 }

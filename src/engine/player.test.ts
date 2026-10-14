@@ -5,6 +5,7 @@ import { Control, createRing, renderQuantum, ringViews, type RingViews } from '.
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
+import { Navigator } from './nav/navigator';
 import { Player } from './player';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
 
@@ -83,7 +84,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer> } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[] } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
@@ -91,6 +92,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
     movieObjects: opts.movieObjects,
   });
+  for (const f of opts.dropFiles ?? []) files.delete(f);
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
   const frames: Array<() => void> = [];
@@ -781,5 +783,66 @@ describe('Player with HDMV navigation', () => {
     expect(h.events).toContainEqual({ type: 'uoMask', masked: ['primaryAudioChange'] });
     await h.player.handle({ type: 'selectAudio', index: 2 });
     expect(selectedAudio(h)).toBe(1);
+  });
+
+  describe('review fixes', () => {
+    const noticeCodes = (h: Harness) => h.events.flatMap((e) => (e.type === 'notice' ? [e.code] : []));
+
+    it('keeps a held still frozen on the audio clock', async () => {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { playlists: [{ id: '00000', clipIds: ['00001'], stills: { 0: { mode: 2 } } }] });
+      await untilPlaying(h);
+      await h.play(4500);
+      await h.play(1000);
+      const frozen = lastTelemetry(h)?.clockUs;
+      expect(frozen).toBeGreaterThan(3_900_000);
+      expect(frozen).toBeLessThan(4_000_000);
+      await h.play(2000, { audio: false }); // a suspended output: the worklet does not run, which is no stall while held
+      expect(lastTelemetry(h)?.clockUs).toBe(frozen);
+      expect(lastTelemetry(h)?.clockMode).toBe('audio');
+      expect(noticeCodes(h)).not.toContain('audio-disabled');
+    });
+
+    it('reports the end of a time still once and moves on to the next item', async () => {
+      const ended = vi.spyOn(Navigator.prototype, 'playItemEnded');
+      const changed = vi.spyOn(Navigator.prototype, 'playItemChanged');
+      try {
+        const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { playlists: [{ id: '00000', clipIds: ['00001', '00002'], stills: { 0: { mode: 1, time: 1 } } }] });
+        await untilPlaying(h);
+        await h.play(7500);
+        expect(ended.mock.calls.filter(([i]) => i === 0)).toHaveLength(1);
+        expect(changed.mock.calls.map(([i]) => i)).toEqual([1]);
+        expect(lastTelemetry(h)?.clockUs).toBeGreaterThan(4_500_000);
+      } finally {
+        ended.mockRestore();
+        changed.mockRestore();
+      }
+    });
+
+    it('does not start a playlist whose open was cancelled while loading', async () => {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
+      await h.player.handle({ type: 'playTitle', title: 1 }); // jumping to an object stops the playlist that is still loading
+      await h.play(500);
+      expect(chapterIds(h)).toEqual([]);
+      expect(lastState(h)).toBe('idle');
+    });
+
+    it('treats a playlist with a missing clip as invalid and lets the program continue', async () => {
+      const h = await nav([{ cmds: [asm.playPl(imm(1)), asm.playPl(imm(0))] }, idle, idle], { dropFiles: ['BDMV/CLIPINF/00002.clpi'] });
+      await untilPlaying(h);
+      expect(chapterIds(h)).toEqual(['00000']);
+      expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
+    });
+
+    it('reports an unsupported codec of a program-started playlist as for a picked one', async () => {
+      const h = await nav([{ cmds: [asm.playPl(imm(1))] }, idle, idle], {
+        playlists: [
+          { id: '00000', clipIds: ['00001'] },
+          { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
+        ],
+      });
+      await h.play(300);
+      expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
+      expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
+    });
   });
 });
