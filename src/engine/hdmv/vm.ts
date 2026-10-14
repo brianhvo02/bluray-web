@@ -11,7 +11,7 @@ import {
   BranchSub, CmpOpt, GotoOpt, InsnGroup, JumpOpt, PlayOpt, SetOpt, SetSub, SetSystemOpt,
   type MobjCmd, type MovieObject, type MovieObjects,
 } from '../bdmv/mobj-parser';
-import type { RegisterFile } from './registers';
+import { PSR, type RegisterFile } from './registers';
 
 /** hdmv_event_e */
 export const HdmvEventType = {
@@ -67,13 +67,13 @@ export class HdmvVm {
   private playingObject: MovieObject | null = null;
   private playingPc = 0;
   private suspendedObject: MovieObject | null = null;
-  /** Read by Task 4's _resume_object; not private so noUnusedLocals accepts it until then. */
-  protected suspendedPc = 0;
+  private suspendedPc = 0;
+  private readonly nvTimer = { time: 0, mobjId: 0 };
 
   constructor(
     private readonly movieObjects: MovieObjects,
     private readonly regs: RegisterFile,
-    readonly opts: HdmvVmOptions,
+    private readonly opts: HdmvVmOptions,
   ) {
     this.rand = BigInt(opts.seed ?? Math.floor(Date.now() / 1000));
   }
@@ -188,7 +188,7 @@ export class HdmvVm {
     return 0;
   }
 
-  /** _jump_object (needed by selectObject; Task 4 owns the rest of the branching group) */
+  /** _jump_object */
   private jumpObject(object: number): number {
     const target = this.movieObjects.objects[object];
     if (!target) return -1;
@@ -200,25 +200,227 @@ export class HdmvVm {
     return 0;
   }
 
-  // ---- Task 4 stubs: branching, playback control and SET/SYSTEM bodies ----
+  /** _suspended_at_play_pl */
+  private suspendedAtPlayPl(): boolean {
+    const o = this.suspendedObject;
+    if (!o) return false;
+    const insn = o.cmds[this.suspendedPc]?.insn;
+    if (!insn) return false;
+    return insn.grp === InsnGroup.BRANCH && insn.subGrp === BranchSub.PLAY &&
+      (insn.branchOpt === PlayOpt.PLAY_PL || insn.branchOpt === PlayOpt.PLAY_PL_PI || insn.branchOpt === PlayOpt.PLAY_PL_PM);
+  }
 
-  private _jumpTitle(_title: number): number { return -1; }
-  private _callTitle(_title: number): number { return -1; }
-  private _resumeObject(_psrRestore: boolean): number { return -1; }
-  private _callObject(_object: number): number { return -1; }
-  private _playAt(_playlist: number, _playitem: number, _playmark: number): number { return -1; }
-  private _linkAt(_playitem: number, _playmark: number): number { return -1; }
-  private _playStop(): number { return -1; }
-  private _setStream(_dst: number, _src: number): number { return -1; }
-  private _setSecStream(_dst: number, _src: number): number { return -1; }
-  private _setNvTimer(_dst: number, _src: number): number { return -1; }
-  private _setButtonPage(_dst: number, _src: number): number { return -1; }
-  private _enableButton(_dst: number, _enable: boolean): number { return -1; }
-  private _popupOff(): number { return -1; }
-  private _setStillMode(_enable: boolean): number { return -1; }
-  private _setOutputMode(_dst: number): number { return -1; }
-  private _setStreamSs(_dst: number, _src: number): number { return -1; }
-  private _setsystem0x10(_dst: number, _src: number): number { return -1; }
+  /** _suspend_for_play_pl */
+  private suspendForPlayPl(): number {
+    if (this.playingObject) return -1;
+    this.playingObject = this.object;
+    this.playingPc = this.pc;
+    this.object = null;
+    return 0;
+  }
+
+  /** _suspend_object */
+  private suspendObject(psrBackup: boolean): void {
+    if (psrBackup) this.regs.saveState();
+
+    if (this.igObject) {
+      if (!this.playingObject) return;
+      this.suspendedObject = this.playingObject;
+      this.suspendedPc = this.playingPc;
+      this.playingObject = null;
+    } else {
+      if (this.playingObject) return;
+      this.suspendedObject = this.object;
+      this.suspendedPc = this.pc;
+    }
+
+    this.object = null;
+    this.freeIgObject();
+  }
+
+  /** _is_valid_title */
+  private isValidTitle(title: number): boolean {
+    if (title === 0) return this.opts.topMenu;
+    if (title === 0xffff) return this.opts.firstPlay;
+    return title > 0 && title <= this.opts.numTitles;
+  }
+
+  // ---- branching and playback control; the underscore names mirror libbluray's static functions ----
+
+  /** _jump_title */
+  private _jumpTitle(title: number): number {
+    if (!this.isValidTitle(title)) return -1;
+    this.suspendedObject = null;
+    this.playingObject = null;
+    this.regs.resetBackupRegisters();
+    this.queueEvent(HdmvEventType.TITLE, title);
+    return 0;
+  }
+
+  /** _call_title */
+  private _callTitle(title: number): number {
+    if (!this.isValidTitle(title)) return -1;
+    this.suspendObject(true);
+    this.queueEvent(HdmvEventType.TITLE, title);
+    return 0;
+  }
+
+  /** _resume_object */
+  private _resumeObject(psrRestore: boolean): number {
+    if (!this.suspendedObject) return -1;
+
+    this.object = null;
+    this.playingObject = null;
+    this.freeIgObject();
+
+    if (psrRestore) {
+      if (this.suspendedAtPlayPl()) {
+        this.playingObject = this.suspendedObject;
+        this.playingPc = this.suspendedPc;
+        this.suspendedObject = null;
+        this.regs.restoreState();
+        return 0;
+      }
+      this.regs.restoreState();
+    }
+
+    this.object = this.suspendedObject;
+    this.pc = this.suspendedPc + 1;
+    this.suspendedObject = null;
+    this.queueEvent(HdmvEventType.PLAY_STOP, 0);
+    return 0;
+  }
+
+  /** _call_object */
+  private _callObject(object: number): number {
+    if (object >= this.movieObjects.objects.length) return -1;
+    this.suspendObject(true);
+    return this.jumpObject(object);
+  }
+
+  /** _play_at: playitem and playmark are C ints, -1 meaning absent. */
+  private _playAt(playlist: number, playitem: number, playmark: number): number {
+    if (this.igObject) return -1;
+    const item = playitem | 0;
+    const mark = playmark | 0;
+    if (item >= 0) this.queueEvent2(HdmvEventType.PLAY_PL_PI, playlist, item);
+    else if (mark >= 0) this.queueEvent2(HdmvEventType.PLAY_PL_PM, playlist, mark);
+    else this.queueEvent(HdmvEventType.PLAY_PL, playlist);
+    this.suspendForPlayPl();
+    return 0;
+  }
+
+  /** _link_at */
+  private _linkAt(playitem: number, playmark: number): number {
+    if (!this.igObject) return -1;
+    const item = playitem | 0;
+    const mark = playmark | 0;
+    if (item >= 0) this.queueEvent(HdmvEventType.PLAY_PI, item);
+    else if (mark >= 0) this.queueEvent(HdmvEventType.PLAY_PM, mark);
+    return 0;
+  }
+
+  /** _play_stop */
+  private _playStop(): number {
+    if (!this.igObject) return -1;
+    this.queueEvent(HdmvEventType.PLAY_STOP, 1);
+    return this.resumeFromPlayPl() < 0 ? -1 : 0;
+  }
+
+  // ---- SET/SYSTEM bodies ----
+
+  /** _set_stream */
+  private _setStream(dst: number, src: number): void {
+    if ((dst & PSR_FLAG) !== 0) this.regs.psrWrite(PSR.PRIMARY_AUDIO_ID, (dst >>> 16) & 0xfff);
+    if ((src & PSR_FLAG) !== 0) this.regs.psrWrite(PSR.IG_STREAM_ID, (src >>> 16) & 0xff);
+    if ((src & 0x8000) !== 0) this.regs.psrWrite(PSR.ANGLE_NUMBER, src & 0xff);
+
+    let psr2 = this.regs.psrRead(PSR.PG_STREAM);
+    if ((dst & 0x8000) !== 0) psr2 = ((dst & 0xfff) | (psr2 & 0xfffff000)) >>> 0;
+    const dispSFlag = ((dst & 0x4000) << 17) >>> 0;
+    psr2 = (dispSFlag | (psr2 & 0x7fffffff)) >>> 0;
+    this.regs.psrWrite(PSR.PG_STREAM, psr2);
+  }
+
+  /** _set_sec_stream */
+  private _setSecStream(dst: number, src: number): void {
+    const dispVFlag = (dst >>> 30) & 1;
+    const dispAFlag = (src >>> 30) & 1;
+    const textStFlags = (src >>> 13) & 3;
+
+    let psr14 = this.regs.psrRead(PSR.SECONDARY_AUDIO_VIDEO);
+    if ((dst & PSR_FLAG) !== 0) psr14 = (((dst & 0xff) << 8) | (psr14 & 0xffff00ff)) >>> 0;
+    if ((dst & 0x00800000) !== 0) psr14 = ((((dst >>> 16) & 0xf) << 24) | (psr14 & 0xf0ffffff)) >>> 0;
+    if ((src & PSR_FLAG) !== 0) psr14 = (((src >>> 16) & 0xff) | (psr14 & 0xffffff00)) >>> 0;
+    psr14 = ((dispVFlag << 31) | (psr14 & 0x7fffffff)) >>> 0;
+    psr14 = ((dispAFlag << 30) | (psr14 & 0xbfffffff)) >>> 0;
+    this.regs.psrWrite(PSR.SECONDARY_AUDIO_VIDEO, psr14);
+
+    let psr2 = this.regs.psrRead(PSR.PG_STREAM);
+    if ((src & 0x8000) !== 0) psr2 = (((src & 0xfff) << 16) | (psr2 & 0xf000ffff)) >>> 0;
+    psr2 = ((textStFlags << 30) | (psr2 & 0x3fffffff)) >>> 0;
+    this.regs.psrWrite(PSR.PG_STREAM, psr2);
+  }
+
+  /** _set_nv_timer: stores the expiry only; libbluray never checks it either (_check_nv_timer is unused). */
+  private _setNvTimer(dst: number, src: number): void {
+    const mobjId = dst & 0xffff;
+    const timeout = src & 0xffff;
+
+    if (!timeout) {
+      this.nvTimer.time = 0;
+      this.regs.psrWrite(PSR.NAV_TIMER, 0);
+      return;
+    }
+    if (mobjId >= this.movieObjects.objects.length) return;
+    if (timeout > 300) return;
+
+    this.nvTimer.time = Math.floor(Date.now() / 1000) + timeout;
+    this.nvTimer.mobjId = mobjId;
+    this.regs.psrWrite(PSR.NAV_TIMER, timeout);
+  }
+
+  /** _set_button_page */
+  private _setButtonPage(dst: number, src: number): void {
+    if (this.igObject) {
+      const param = ((src & 0xc0000000) | ((dst & PSR_FLAG) >>> 2) | ((src & 0xff) << 16) | (dst & 0xffff)) >>> 0;
+      this.queueEvent(HdmvEventType.SET_BUTTON_PAGE, param);
+      this.pc = TERMINATE_PC;
+      return;
+    }
+    if ((dst & PSR_FLAG) !== 0) this.regs.psrWrite(PSR.SELECTED_BUTTON_ID, dst & 0xffff);
+    if ((src & PSR_FLAG) !== 0) this.regs.psrWrite(PSR.MENU_PAGE_ID, src & 0xff);
+  }
+
+  /** _enable_button */
+  private _enableButton(dst: number, enable: boolean): void {
+    if (this.igObject) this.queueEvent(enable ? HdmvEventType.ENABLE_BUTTON : HdmvEventType.DISABLE_BUTTON, dst);
+  }
+
+  /** _popup_off */
+  private _popupOff(): void {
+    if (this.igObject) this.queueEvent(HdmvEventType.POPUP_OFF, 1);
+  }
+
+  /** _set_still_mode */
+  private _setStillMode(enable: boolean): void {
+    if (this.igObject) this.queueEvent(HdmvEventType.STILL, enable ? 1 : 0);
+  }
+
+  /** _set_output_mode: only a profile 5 player honours it. */
+  private _setOutputMode(dst: number): void {
+    if (((this.regs.psrRead(PSR.PROFILE_VERSION) & 0x130240) >>> 0) !== 0x130240) return;
+    const psr22 = this.regs.psrRead(PSR['3D_STATUS']);
+    this.regs.psrWrite(PSR['3D_STATUS'], (dst & 1) !== 0 ? (psr22 | 1) >>> 0 : (psr22 & ~1) >>> 0);
+  }
+
+  /** _set_stream_ss: libbluray ignores it in 2D and leaves 3D unimplemented, so it is a no-op. */
+  private _setStreamSs(_dst: number, _src: number): void {}
+
+  /** _setsystem_0x10 */
+  private _setsystem0x10(dst: number, _src: number): void {
+    this.regs.psrWrite(103, dst);
+  }
 
   // ---- interpreter ----
 

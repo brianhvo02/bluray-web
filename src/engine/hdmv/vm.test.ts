@@ -83,4 +83,116 @@ describe('HdmvVm CMP and GOTO', () => {
     expect(m.run()).toBeNull();
     expect(m.running()).toBe(false);
   });
+
+  it('stops after MAX_LOOP - 1 steps (--max_loop > 0): 500000 ADDs ran', () => {
+    const { m, regs } = vm([{ cmds: [asm.set('add', reg(1), imm(1)), asm.goto(0)] }]);
+    m.selectObject(0);
+    expect(m.run()?.type).toBe(HdmvEventType.PLAY_STOP);
+    expect(m.run()).toBeNull();
+    expect(regs.gprRead(1)).toBe(500000);
+  });
+});
+
+describe('HdmvVm branching and playback', () => {
+  // hdmv_vm_select_object queues PLAY_STOP and _vm_run returns pending events first.
+  const start = (m: HdmvVm) => {
+    m.selectObject(0);
+    expect(m.run()?.type).toBe(HdmvEventType.PLAY_STOP);
+  };
+
+  it('PLAY_PL queues the event and suspends; resume() continues after it', () => {
+    const { m, regs } = vm([{ cmds: [asm.playPl(imm(5)), asm.set('move', reg(1), imm(1))] }]);
+    start(m);
+    const ev = m.run();
+    expect(ev).toEqual({ type: HdmvEventType.PLAY_PL, param: 5, param2: 0 });
+    expect(m.running()).toBe(false);
+    expect(m.resume()).toBe(0);
+    runAll(m);
+    expect(regs.gprRead(1)).toBe(1);
+  });
+
+  it('PLAY_PL_PI and PLAY_PL_PM carry the item or mark in param2', () => {
+    const a = vm([{ cmds: [asm.playPlPi(imm(2), imm(3))] }]);
+    start(a.m);
+    expect(a.m.run()).toEqual({ type: HdmvEventType.PLAY_PL_PI, param: 2, param2: 3 });
+    const b = vm([{ cmds: [asm.playPlPm(imm(2), imm(4))] }]);
+    start(b.m);
+    expect(b.m.run()).toEqual({ type: HdmvEventType.PLAY_PL_PM, param: 2, param2: 4 });
+  });
+
+  it('JUMP_OBJECT queues PLAY_STOP and starts the other object', () => {
+    const { m, regs } = vm([{ cmds: [asm.jumpObject(imm(1))] }, { cmds: [asm.set('move', reg(1), imm(7))] }]);
+    m.selectObject(0);
+    expect(runAll(m).map((e) => e?.type)).toContain(HdmvEventType.PLAY_STOP);
+    expect(regs.gprRead(1)).toBe(7);
+  });
+
+  it('an invalid JUMP_OBJECT keeps the pc and execution continues', () => {
+    const { m, regs } = vm([{ cmds: [asm.jumpObject(imm(9)), asm.set('move', reg(1), imm(1))] }]);
+    m.selectObject(0); runAll(m);
+    expect(regs.gprRead(1)).toBe(1);
+  });
+
+  it('CALL_OBJECT saves PSRs and RESUME returns after the call, restoring them', () => {
+    const { m, regs } = vm([
+      { cmds: [asm.callObject(imm(1)), asm.set('move', reg(3), imm(9)), asm.set('move', reg(2), imm(2))] },
+      { cmds: [asm.set('move', reg(1), imm(1)), asm.resume()] },
+    ]);
+    regs.psrWrite(4, 3); // title 3 before the call
+    m.selectObject(0);
+    runAll(m);
+    expect([regs.gprRead(1), regs.gprRead(2), regs.psrRead(4)]).toEqual([1, 2, 3]);
+    // libbluray quirk: _resume_object sets pc = suspended_pc + 1 and _hdmv_step then adds inc_pc = 1,
+    // so the command right after CALL_OBJECT is skipped.
+    expect(regs.gprRead(3)).toBe(0);
+  });
+
+  it('JUMP_TITLE validates the title (0 top menu, 0xffff first play, 1..numTitles)', () => {
+    const ok = vm([{ cmds: [asm.jumpTitle(imm(2))] }]);
+    start(ok.m);
+    expect(ok.m.run()).toEqual({ type: HdmvEventType.TITLE, param: 2, param2: 0 });
+    const bad = vm([{ cmds: [asm.jumpTitle(imm(9)), asm.set('move', reg(1), imm(1))] }]);
+    bad.m.selectObject(0);
+    runAll(bad.m);
+    expect(bad.regs.gprRead(1)).toBe(1); // invalid title is ignored; execution continues
+  });
+
+  it('button commands: LINK_PI and SET_BUTTON_PAGE queue events and terminate the IG object', () => {
+    const { m } = vm([{ cmds: [asm.playPl(imm(1))] }]);
+    start(m); m.run(); // now playing playlist 1, suspended in PLAY_PL
+    const cmds = [asm.linkPi(imm(2)), asm.setButtonPage(imm(0x80000003), imm(0x80000001))].map((b) => parseMovieObjects(buildMovieObjects([{ cmds: [b] }])).objects[0].cmds[0]);
+    expect(m.setObject(cmds)).toBe(0);
+    const evs = runAll(m);
+    expect(evs.map((e) => e?.type)).toEqual(expect.arrayContaining([HdmvEventType.PLAY_PI, HdmvEventType.SET_BUTTON_PAGE]));
+  });
+
+  it('SET_BUTTON_PAGE in a movie object writes PSR10/11 directly', () => {
+    const { m, regs } = vm([{ cmds: [asm.setButtonPage(imm(0x80000004), imm(0x80000002))] }]);
+    m.selectObject(0); runAll(m);
+    expect([regs.psrRead(10), regs.psrRead(11)]).toEqual([4, 2]);
+  });
+
+  it('SET_STREAM writes the primary audio PSR when its flag is set', () => {
+    const { m, regs } = vm([{ cmds: [asm.setStream(imm(0x80020000), imm(0))] }]);
+    m.selectObject(0); runAll(m);
+    expect(regs.psrRead(1)).toBe(2);
+  });
+
+  it('uoMask reflects the running or playing object flags', () => {
+    const { m } = vm([{ menuCallMask: true, titleSearchMask: true, cmds: [asm.playPl(imm(1))] }]);
+    start(m); m.run();
+    expect(m.running()).toBe(false);
+    expect(m.uoMask()).toBe(0b11);
+  });
+
+  it('suspendPlaylist keeps a resumable object only when it has resume intention', () => {
+    const keep = vm([{ resumeIntention: true, cmds: [asm.playPl(imm(1))] }]);
+    start(keep.m); keep.m.run();
+    expect(keep.m.suspendPlaylist()).toBe(0);
+    expect(keep.m.resume()).toBe(-1); // moved to the suspended slot, no longer playing
+    const drop = vm([{ resumeIntention: false, cmds: [asm.playPl(imm(1))] }]);
+    start(drop.m); drop.m.run();
+    expect(drop.m.suspendPlaylist()).toBe(0);
+    expect(drop.m.resume()).toBe(-1);
+  });
 });
