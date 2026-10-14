@@ -87,6 +87,7 @@ export interface EffectSpec {
 export interface IcsSpec {
   width?: number;
   height?: number;
+  frameRateCode?: number;
   compositionNumber?: number;
   compositionState: 'epochStart' | 'acquisition' | 'normal';
   uiModel: 'alwaysOn' | 'popup';
@@ -98,6 +99,7 @@ export interface IcsSpec {
     id: number;
     defaultSelected: number;
     defaultActivated?: number;
+    animationFrameRateCode?: number;
     paletteId: number;
     uoMask?: Uint8Array;
     inEffects?: EffectSpec;
@@ -114,6 +116,8 @@ export interface IcsSpec {
         activated: [start: number, end: number];
         selectedSound?: number;
         activatedSound?: number;
+        normalRepeat?: boolean;
+        selectedRepeat?: boolean;
         autoAction?: boolean;
         numericValue?: number;
         cmds: Uint8Array[];
@@ -149,7 +153,7 @@ export function icsSegment(spec: IcsSpec, maxBody = MAX_SEGMENT_BODY): Uint8Arra
     writeEffects(body, page.inEffects);
     writeEffects(body, page.outEffects);
     body
-      .u8(0) // animation_frame_rate_code
+      .u8(page.animationFrameRateCode ?? 0)
       .u16(page.defaultSelected)
       .u16(page.defaultActivated ?? NONE)
       .u8(page.paletteId)
@@ -164,8 +168,8 @@ export function icsSegment(spec: IcsSpec, maxBody = MAX_SEGMENT_BODY): Uint8Arra
           .bits(1, b.autoAction ? 1 : 0).bits(7, 0)
           .u16(b.x).u16(b.y)
           .u16(up).u16(down).u16(left).u16(right)
-          .u16(b.normal[0]).u16(b.normal[1]).bits(1, 0).bits(7, 0)
-          .u8(b.selectedSound ?? 0xff).u16(b.selected[0]).u16(b.selected[1]).bits(1, 0).bits(7, 0)
+          .u16(b.normal[0]).u16(b.normal[1]).bits(1, b.normalRepeat ? 1 : 0).bits(7, 0)
+          .u8(b.selectedSound ?? 0xff).u16(b.selected[0]).u16(b.selected[1]).bits(1, b.selectedRepeat ? 1 : 0).bits(7, 0)
           .u8(b.activatedSound ?? 0xff).u16(b.activated[0]).u16(b.activated[1])
           .u16(b.cmds.length);
         for (const c of b.cmds) body.bytes(c);
@@ -175,7 +179,7 @@ export function icsSegment(spec: IcsSpec, maxBody = MAX_SEGMENT_BODY): Uint8Arra
   const data = body.toBytes();
   const blob = new ByteWriter().u8(data.length >>> 16).u16(data.length & 0xffff).bytes(data).toBytes();
   const header = new ByteWriter()
-    .u16(spec.width ?? 1920).u16(spec.height ?? 1080).bits(4, 1).bits(4, 0) // video descriptor, frame_rate code 1
+    .u16(spec.width ?? 1920).u16(spec.height ?? 1080).bits(4, spec.frameRateCode ?? 1).bits(4, 0) // video descriptor, frame_rate code (default 1)
     .u16(spec.compositionNumber ?? 0).bits(2, STATE[spec.compositionState]).bits(6, 0) // composition descriptor
     .toBytes();
   return fragments(ICS, header, blob, maxBody);

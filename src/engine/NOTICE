@@ -23,6 +23,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     nav/navigator.ts      from src/libbluray/bluray.c (HDMV title and navigation parts)
     graphics/segments.ts  from src/libbluray/decoders/graphics_processor.c (segment joining), pg_decode.c, pg.h
     graphics/ig-decoder.ts from src/libbluray/decoders/ig_decode.c, ig.h, graphics_processor.c (IG display set decoding)
+    graphics/graphics-controller.ts from src/libbluray/decoders/graphics_controller.c, graphics_controller.h, keys.h (IG paths)
     graphics/rle.ts       from src/libbluray/decoders/rle.c (rle_crop_object)
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
   util/byte-reader.ts is an original implementation modelled on libbluray's
