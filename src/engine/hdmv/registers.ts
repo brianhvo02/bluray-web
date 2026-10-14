@@ -1,0 +1,124 @@
+/*
+ * Ported from libbluray src/libbluray/register.c
+ * Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
+ *
+ * Ported to TypeScript and modified for bluray-web, 2026.
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
+const PSR_COUNT = 128;
+const GPR_COUNT = 4096;
+
+export const PSR = {
+  IG_STREAM_ID: 0, PRIMARY_AUDIO_ID: 1, PG_STREAM: 2, ANGLE_NUMBER: 3, TITLE_NUMBER: 4, CHAPTER: 5, PLAYLIST: 6,
+  PLAYITEM: 7, TIME: 8, NAV_TIMER: 9, SELECTED_BUTTON_ID: 10, MENU_PAGE_ID: 11, STYLE: 12, PARENTAL: 13,
+  SECONDARY_AUDIO_VIDEO: 14, AUDIO_CAP: 15, AUDIO_LANG: 16, PG_AND_SUB_LANG: 17, MENU_LANG: 18, COUNTRY: 19,
+  REGION: 20, OUTPUT_PREFER: 21, '3D_STATUS': 22, PROFILE_VERSION: 31,
+} as const;
+
+export type PsrEventType = 'save' | 'write' | 'change' | 'restore';
+export interface PsrEvent { readonly type: PsrEventType; readonly psr: number; readonly oldValue: number; readonly newValue: number }
+export interface RegisterWrite { readonly kind: 'gpr' | 'psr'; readonly index: number; readonly value: number }
+
+/** bd_psr_init: initial values (5.8.2). */
+const PSR_INIT: readonly number[] = (() => {
+  const t = new Array<number>(PSR_COUNT).fill(0);
+  t[0] = 1; t[1] = 0xff; t[2] = 0x0fff0fff; t[3] = 1; t[4] = 0xffff; t[5] = 0xffff;
+  t[10] = 0xffff; t[12] = 0xff; t[13] = 0xff; t[14] = 0xffff;
+  // BLURAY_ACAP_{LPCM_48_96,LPCM_192,DDPLUS,DDPLUS_DEP,DTSHD_CORE,DTSHD_EXT,DD,MLP}_SURROUND
+  t[15] = 0x0002 | 0x0008 | 0x0020 | 0x0080 | 0x0200 | 0x0800 | 0x2000 | 0x8000;
+  t[16] = 0xffffff; t[17] = 0xffffff; t[18] = 0xffffff; t[19] = 0xffff;
+  t[20] = 2; // BLURAY_REGION_B
+  t[21] = 0; // BLURAY_OUTPUT_PREFER_2D
+  t[29] = 0x01 | 0x02; // BLURAY_VCAP_SECONDARY_HD | BLURAY_VCAP_25Hz_50Hz
+  t[30] = 0x1ffff;
+  t[31] = (0x03 << 16) | 0x0200; // BLURAY_PLAYER_PROFILE_2_v2_0
+  t[36] = 0xffff; t[37] = 0xffff; t[42] = 0xffff; t[44] = 0xff;
+  for (let i = 48; i <= 61; i++) t[i] = 0xffffffff;
+  return t;
+})();
+
+export class RegisterFile {
+  private readonly psr = Uint32Array.from(PSR_INIT);
+  private readonly gpr = new Uint32Array(GPR_COUNT);
+  private readonly listeners: ((e: PsrEvent) => void)[] = [];
+  /** Trace hook: fires for every successful bd_gpr_write and bd_psr_setting_write, not for save/restore copies. */
+  onWrite: ((w: RegisterWrite) => void) | null = null;
+
+  /** bd_psr_register_cb / bd_psr_unregister_cb (no duplicates). */
+  onPsrEvent(listener: (e: PsrEvent) => void): () => void {
+    if (!this.listeners.includes(listener)) this.listeners.push(listener);
+    return () => {
+      const i = this.listeners.indexOf(listener);
+      if (i >= 0) this.listeners.splice(i, 1);
+    };
+  }
+
+  private emit(e: PsrEvent): void {
+    for (const l of [...this.listeners]) l(e);
+  }
+
+  gprWrite(i: number, v: number): number {
+    if (!(i >= 0 && i < GPR_COUNT)) return -1;
+    this.gpr[i] = v;
+    this.onWrite?.({ kind: 'gpr', index: i, value: this.gpr[i]! });
+    return 0;
+  }
+
+  gprRead(i: number): number {
+    return i >= 0 && i < GPR_COUNT ? this.gpr[i]! : 0;
+  }
+
+  psrRead(i: number): number {
+    return i >= 0 && i < PSR_COUNT ? this.psr[i]! : 0xffffffff;
+  }
+
+  /** bd_psr_setting_write */
+  psrSettingWrite(i: number, v: number): number {
+    if (!(i >= 0 && i < PSR_COUNT)) return -1;
+    const old = this.psr[i]!;
+    this.psr[i] = v;
+    const next = this.psr[i]!;
+    this.emit({ type: old === next ? 'write' : 'change', psr: i, oldValue: old, newValue: next });
+    this.onWrite?.({ kind: 'psr', index: i, value: next });
+    return 0;
+  }
+
+  /** bd_psr_write: refuses the player-setting registers. */
+  psrWrite(i: number, v: number): number {
+    if (i === 13 || (i >= 15 && i <= 21) || (i >= 23 && i <= 31) || (i >= 48 && i <= 61)) return -2;
+    return this.psrSettingWrite(i, v);
+  }
+
+  /** bd_psr_write_bits */
+  psrWriteBits(i: number, v: number, mask: number): number {
+    if (mask >>> 0 === 0xffffffff) return this.psrWrite(i, v);
+    const cur = this.psrRead(i);
+    return this.psrWrite(i, ((cur & ~mask) | (v & mask)) >>> 0);
+  }
+
+  /** bd_psr_save_state: PSR4-8 to PSR36-40, PSR10-12 to PSR42-44. */
+  saveState(): void {
+    this.psr.copyWithin(36, 4, 9);
+    this.psr.copyWithin(42, 10, 13);
+    this.emit({ type: 'save', psr: -1, oldValue: 0, newValue: 0 });
+  }
+
+  /** bd_psr_reset_backup_registers */
+  resetBackupRegisters(): void {
+    for (const i of [36, 37, 38, 39, 40, 42, 43, 44]) this.psr[i] = PSR_INIT[i]!;
+  }
+
+  /** bd_psr_restore_state */
+  restoreState(): void {
+    const oldPsr = this.psr.slice(0, 13);
+    this.psr.copyWithin(4, 36, 41);
+    this.psr.copyWithin(10, 42, 45);
+    const newPsr = this.psr.slice(0, 13);
+    this.resetBackupRegisters();
+    for (let i = 4; i < 13; i++) {
+      if (i !== PSR.NAV_TIMER) this.emit({ type: 'restore', psr: i, oldValue: oldPsr[i]!, newValue: newPsr[i]! });
+    }
+  }
+}

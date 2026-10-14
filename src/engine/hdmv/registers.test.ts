@@ -1,0 +1,75 @@
+import { describe, expect, it } from 'vitest';
+import { PSR, RegisterFile, type PsrEvent, type RegisterWrite } from './registers';
+
+describe('RegisterFile', () => {
+  it('starts with libbluray initial PSR values and zeroed GPRs', () => {
+    const r = new RegisterFile();
+    expect([r.psrRead(PSR.IG_STREAM_ID), r.psrRead(PSR.PRIMARY_AUDIO_ID), r.psrRead(PSR.PG_STREAM), r.psrRead(PSR.SELECTED_BUTTON_ID), r.psrRead(PSR.REGION)]).toEqual([1, 0xff, 0x0fff0fff, 0xffff, 1 << 1]);
+    expect(r.gprRead(4095)).toBe(0);
+  });
+
+  it('rejects out-of-range registers like libbluray', () => {
+    const r = new RegisterFile();
+    expect(r.gprWrite(4096, 1)).toBe(-1);
+    expect(r.psrRead(128)).toBe(0xffffffff); // bd_psr_read returns (uint32_t)-1 for an invalid PSR
+    expect(r.gprRead(4096)).toBe(0);           // bd_gpr_read returns 0 for an invalid GPR
+  });
+
+  it('reports write and change events and logs every write for traces', () => {
+    const r = new RegisterFile();
+    const events: PsrEvent[] = [];
+    const writes: RegisterWrite[] = [];
+    r.onPsrEvent((e) => events.push(e));
+    r.onWrite = (w) => writes.push(w);
+    r.psrWrite(PSR.SELECTED_BUTTON_ID, 3);
+    r.psrWrite(PSR.SELECTED_BUTTON_ID, 3);
+    r.gprWrite(7, 9);
+    // bd_psr_setting_write: one event per write, CHANGE when the value differs, WRITE when it is the same
+    expect(events.map((e) => [e.type, e.psr, e.oldValue, e.newValue])).toEqual([
+      ['change', 10, 0xffff, 3], ['write', 10, 3, 3],
+    ]);
+    expect(writes).toEqual([{ kind: 'psr', index: 10, value: 3 }, { kind: 'psr', index: 10, value: 3 }, { kind: 'gpr', index: 7, value: 9 }]);
+  });
+
+  it('refuses player-setting PSRs through psrWrite (-2) but allows psrSettingWrite', () => {
+    const r = new RegisterFile();
+    expect(r.psrWrite(PSR.REGION, 4)).toBe(-2);
+    expect(r.psrSettingWrite(PSR.REGION, 4)).toBe(0);
+    expect(r.psrRead(PSR.REGION)).toBe(4);
+  });
+
+  it('saves playback PSRs to the backup registers and restores them', () => {
+    const r = new RegisterFile();
+    r.psrWrite(PSR.TITLE_NUMBER, 2); r.psrWrite(PSR.PLAYLIST, 5); r.psrWrite(PSR.SELECTED_BUTTON_ID, 4);
+    r.saveState();
+    r.psrWrite(PSR.TITLE_NUMBER, 0); r.psrWrite(PSR.PLAYLIST, 1);
+    r.restoreState();
+    expect([r.psrRead(PSR.TITLE_NUMBER), r.psrRead(PSR.PLAYLIST), r.psrRead(PSR.SELECTED_BUTTON_ID)]).toEqual([2, 5, 4]);
+  });
+
+  it('emits restore events for PSR4-12 except 9, without trace-logging writes', () => {
+    const r = new RegisterFile();
+    r.psrWrite(PSR.TITLE_NUMBER, 2);
+    r.saveState();
+    r.psrWrite(PSR.TITLE_NUMBER, 7);
+    const events: PsrEvent[] = [];
+    const writes: RegisterWrite[] = [];
+    r.onPsrEvent((e) => events.push(e));
+    r.onWrite = (w) => writes.push(w);
+    r.restoreState();
+    expect(events.map((e) => e.psr)).toEqual([4, 5, 6, 7, 8, 10, 11, 12]);
+    expect(events.every((e) => e.type === 'restore')).toBe(true);
+    expect(events[0]).toMatchObject({ oldValue: 7, newValue: 2 });
+    expect(writes).toEqual([]);
+    expect(r.psrRead(36)).toBe(0xffff); // backups return to their defaults
+  });
+
+  it('psrWriteBits merges masked bits', () => {
+    const r = new RegisterFile();
+    r.psrWrite(PSR.CHAPTER, 0xabcd);
+    r.psrWriteBits(PSR.CHAPTER, 0x12, 0xff);
+    expect(r.psrRead(PSR.CHAPTER)).toBe(0xab12);
+    r.psrWriteBits(PSR.CHAPTER, 0xffffffff, 0xffffffff);
+    expect(r.psrRead(PSR.CHAPTER)).toBe(0xffffffff);
+  });
+});
