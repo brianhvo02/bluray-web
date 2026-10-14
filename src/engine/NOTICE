@@ -12,6 +12,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdmv/mpls-parser.ts   from src/libbluray/bdnav/mpls_parse.c
     bdmv/clpi-parser.ts   from src/libbluray/bdnav/clpi_parse.c
     bdmv/index-parser.ts  from src/libbluray/bdnav/index_parse.c
+    bdmv/mobj-parser.ts   from src/libbluray/hdmv/mobj_parse.c
     bdmv/version.ts       from src/libbluray/bdnav/bdmv_parse.c (bdmv_parse_header)
     nav/timeline.ts       derived from libbluray navigation time math
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
