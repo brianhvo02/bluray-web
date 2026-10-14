@@ -236,7 +236,7 @@ export class Player {
     const igChanged = plane !== null && plane.dirty() !== null;
     if (frame) this.compositor?.drawVideo(frame);
     else if (igChanged) this.compositor?.drawVideo(this.presenter.current);
-    if (!plane || !(frame || igChanged)) return;
+    if (!plane || !(frame || igChanged) || !(plane.hasContent || igChanged)) return; // an empty plane needs no per-frame draw
     if (this.compositor?.drawIg) this.compositor.drawIg(plane);
     else plane.takeDirty();
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
@@ -668,7 +668,7 @@ export class Player {
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
     this.navNextMark = this.nextMarkAfter(s.timeline, t);
     s.pipeline.stop();
-    this.navigator?.resetGraphics(); // menus built before the seek wait for a new epoch start
+    this.navigator?.seekGraphics(); // queued units from the old read position are dropped; the menu stays
     if (s.videoState === 'configured') s.decoder.reset();
     s.pendingVideo = [];
     s.decimator?.reset();

@@ -137,4 +137,13 @@ describe('OverlayPlane', () => {
     const out = new Uint32Array(plane.rgba({ x: 0, y: 0, w: 64, h: 32 }).buffer);
     expect(out[0]).toBe(ycrcbToRgba(Z));
   });
+
+  it('hasContent follows draws and clears', () => {
+    const plane = new OverlayPlane(16, 8);
+    expect(plane.hasContent).toBe(false);
+    plane.apply({ cmd: 'draw', pts: -1, x: 0, y: 0, w: 2, h: 1, palette: palette(), img: [{ len: 2, color: 1 }, E] });
+    expect(plane.hasContent).toBe(true);
+    plane.apply({ cmd: 'clear', pts: -1, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hasContent).toBe(false);
+  });
 });

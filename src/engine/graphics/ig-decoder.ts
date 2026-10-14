@@ -250,6 +250,12 @@ export class IgSegmentDecoder {
     return result;
   }
 
+  /** Drops the display set being received (a seek cut it); the epoch's objects and palettes stay. */
+  discardPartial(): void {
+    this.joiner.reset();
+    this.decoding = false;
+  }
+
   reset(): void {
     this.joiner.reset();
     this.ics = null;

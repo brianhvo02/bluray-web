@@ -59,6 +59,8 @@ export class OverlayPlane {
   /** Plane word (Y, Cr, Cb, T) to packed RGBA; menus use a few dozen colours, so this replaces the per-pixel conversion. */
   private readonly rgbaCache = new Map<number, number>();
   private dirtyRect: Rect | null = null;
+  /** False while nothing was drawn since the plane was last cleared (a wipe does not reset it). */
+  hasContent = false;
 
   constructor(width = 1920, height = 1080) {
     this.width = width;
@@ -73,6 +75,7 @@ export class OverlayPlane {
       case 'close':
       case 'clear':
         this.px.fill(0);
+        this.hasContent = false;
         this.markDirty(0, 0, this.width, this.height);
         break;
       case 'draw':
@@ -183,6 +186,7 @@ export class OverlayPlane {
   private draw(op: OverlayOp): void {
     const { img, palette } = op;
     if (!img || !palette) return;
+    this.hasContent = true;
     let row = op.y;
     let col = 0;
     for (const e of img) {

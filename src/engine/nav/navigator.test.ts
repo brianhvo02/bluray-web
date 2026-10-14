@@ -527,40 +527,75 @@ describe('Navigator interactive graphics', () => {
     expect(nav.takeDrawCount()).toBeGreaterThan(0);
   });
 
-  it('decodes units in PTS order whatever order they arrive in', async () => {
+  it('keeps stream order and gates by DTS when the ICS is presented after its objects are decoded', async () => {
     const { nav, events } = await menuSetup();
-    pushMenu(nav, 2_000_000, { compositionState: 'normal' });
-    pushMenu(nav, 1_000_000);
-    nav.tick(3_000_000);
+    const segs = simpleMenuSegments();
+    // ICS first in the stream, presented at 5 s but decoded at 0.9 s; the rest carry the earlier time
+    segs.forEach((data, i) => nav.pushIg(i === 0 ? { data, ptsUs: 5_000_000, dtsUs: 900_000 } : { data, ptsUs: 900_000, dtsUs: 900_000 }));
+    nav.tick(899_999);
+    expect(menuEvents(events)).toEqual([]);
+    nav.tick(900_000);
+    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
+    expect(nav.takeDrawCount()).toBeGreaterThan(0);
+    expect(nav.igErrors).toBe(0);
+  });
+
+  it('does not release a unit behind one that is not due', async () => {
+    const { nav, events } = await menuSetup();
+    const segs = simpleMenuSegments();
+    nav.pushIg({ data: segs[0]!, ptsUs: 2_000_000, dtsUs: 2_000_000 });
+    segs.slice(1).forEach((data) => nav.pushIg({ data, ptsUs: 0, dtsUs: 0 }));
+    nav.tick(1_000_000);
+    expect(menuEvents(events)).toEqual([]);
+    nav.tick(2_000_000);
     expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
   });
 
-  it('after resetGraphics() waits for a new epoch start before drawing a menu again', async () => {
-    const { nav, events, regs } = await menuSetup();
+  it('a seek drops queued and half-received sets but keeps the menu that is shown', async () => {
+    const { nav, events } = await menuSetup();
     pushMenu(nav, 0);
     nav.tick(0);
-    expect(regs.psrRead(PSR.MENU_PAGE_ID)).toBe(0);
-    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
     const plane = nav.igPlane!;
-    const hashOpen = plane.hash();
+    const shown = plane.hash();
+    nav.takeDrawCount();
 
-    pushMenu(nav, 9_000_000); // queued, not yet due
-    nav.resetGraphics();
-    expect(menuEvents(events).at(-1)).toEqual({ type: 'menu', active: false });
-    expect(plane.hash()).not.toBe(hashOpen);
-    const draws = nav.takeDrawCount();
-
-    nav.tick(10_000_000); // the queued unit was dropped by the reset
-    pushMenu(nav, 10_000_000, { compositionState: 'normal' });
+    pushMenu(nav, 9_000_000); // old read position, not yet due
+    nav.seekGraphics();
     nav.tick(10_000_000);
-    expect(menuEvents(events)).toHaveLength(2);
     expect(nav.takeDrawCount()).toBe(0);
-    expect(draws).toBeGreaterThan(0);
 
-    pushMenu(nav, 10_000_000);
+    const [ics, ...rest] = simpleMenuSegments({ compositionState: 'normal' });
+    nav.pushIg({ data: ics!, ptsUs: 10_000_000 });
+    nav.tick(10_000_000); // the set is half received
+    nav.seekGraphics();
+    for (const data of rest) nav.pushIg({ data, ptsUs: 10_000_000 });
     nav.tick(10_000_000);
+    expect(nav.takeDrawCount()).toBe(0);
+    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
+    expect(plane.hash()).toBe(shown);
+    expect(nav.uoMask).toBeDefined();
+  });
+
+  it('closing the playlist resets silently and waits for a new epoch start', async () => {
+    const { nav, events } = await menuSetup();
+    pushMenu(nav, 0);
+    nav.tick(0);
+    const plane = nav.igPlane!;
+    const shown = plane.hash();
+    nav.stop();
+    expect(plane.hash()).not.toBe(shown);
+    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]); // _close_playlist sends no menu event
+
+    nav.start();
+    await flush();
+    nav.takeDrawCount();
+    pushMenu(nav, 0, { compositionState: 'normal' });
+    nav.tick(0);
+    expect(nav.takeDrawCount()).toBe(0);
+    pushMenu(nav, 0);
+    nav.tick(0);
     expect(menuEvents(events).at(-1)).toEqual({ type: 'menu', active: true });
-    expect(plane.hash()).toBe(hashOpen);
+    expect(plane.hash()).toBe(shown);
   });
 
   it('resizes the plane to the composition video size', async () => {
@@ -583,16 +618,15 @@ describe('Navigator interactive graphics', () => {
   });
 
   it('clears the overlay and drops stale units when stopped', async () => {
-    const { nav, events } = await menuSetup();
+    const { nav } = await menuSetup();
     pushMenu(nav, 0);
     nav.tick(0);
     const plane = nav.igPlane!;
     nav.stop();
-    expect(menuEvents(events).at(-1)).toEqual({ type: 'menu', active: false });
     const cleared = plane.hash();
     pushMenu(nav, 0);
     nav.tick(0);
     expect(plane.hash()).toBe(cleared);
-    expect(menuEvents(events)).toHaveLength(2);
+    expect(plane.hasContent).toBe(false);
   });
 });

@@ -838,7 +838,25 @@ describe('Player with HDMV navigation', () => {
       expect(telemetries(h)).toHaveLength(seen);
     });
 
-    it('a seek clears the menu until a new epoch start arrives', async () => {
+    it('a seek keeps the menu that is shown and does not draw units from the old read position', async () => {
+      const h = await bootMenu({ igUnits: [...menuAt(0.2), ...simpleMenuSegments({ compositionState: 'normal' }).map((payload) => ({ pts: CLIP_START_PTS + 3 * 90_000, payload }))] });
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+      const activeEvents = menuEvents(h).length;
+      await h.player.handle({ type: 'seek', timeUs: 1_000_000 });
+      await h.play(1500);
+      expect(menuEvents(h)).toHaveLength(activeEvents);
+      expect(menuEvents(h).at(-1)).toMatchObject({ active: true });
+      expect(lastTelemetry(h)!.menu).not.toBeNull();
+    });
+
+    it('stops drawing the IG plane every frame once it is empty', async () => {
       const h = await bootMenu();
       await untilPlaying(h);
       await vi.waitFor(
@@ -848,10 +866,12 @@ describe('Player with HDMV navigation', () => {
         },
         { timeout: 5000 },
       );
-      await h.player.handle({ type: 'seek', timeUs: 2_000_000 }); // the menu's epoch start lies behind the new position
-      await h.play(1500);
-      expect(menuEvents(h).at(-1)).toMatchObject({ active: false });
-      expect(lastTelemetry(h)!.menu).toBeNull();
+      const plane = h.igDraws[0]!;
+      plane.apply({ cmd: 'clear', pts: -1, x: 0, y: 0, w: 0, h: 0 });
+      await h.play(100);
+      const after = h.igDraws.length; // the clear itself was painted
+      await h.play(500);
+      expect(h.igDraws).toHaveLength(after);
     });
   });
 

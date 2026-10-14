@@ -10,6 +10,8 @@ export interface PipelineUnit {
   readonly data: Uint8Array;
   /** Playlist time. */
   readonly ptsUs: number;
+  /** Playlist time of the decode timestamp, when the PES has one. */
+  readonly dtsUs?: number;
   /** False when the PTS lies outside the play item's in/out range. */
   readonly inRange: boolean;
 }
@@ -139,7 +141,7 @@ export class PlaybackPipeline {
           if (pes.pts === undefined) continue;
           const { us, inRange } = timeline.toPlaylistUs(i, pes.pts);
           if (pes.pid === videoPid) this.sinks.video({ data: pes.payload, ptsUs: us, inRange });
-          else if (igEntry && pes.pid === igEntry.pid) this.sinks.ig?.({ data: pes.payload, ptsUs: us, inRange });
+          else if (igEntry && pes.pid === igEntry.pid) this.sinks.ig?.({ data: pes.payload, ptsUs: us, dtsUs: pes.dts === undefined ? undefined : timeline.toPlaylistUs(i, pes.dts).us, inRange });
           else if (audioEntry && pes.pid === audioEntry.pid) {
             this.sinks.audio({ data: pes.payload, ptsUs: us, inRange, codingType: audioEntry.codingType, streamIdExtension: pes.streamIdExtension });
           }
