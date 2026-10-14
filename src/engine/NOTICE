@@ -16,7 +16,8 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdmv/version.ts       from src/libbluray/bdnav/bdmv_parse.c (bdmv_parse_header)
     hdmv/registers.ts     from src/libbluray/register.c
     hdmv/uo-mask.ts       from src/libbluray/bdnav/uo_mask.c, uo_mask.h, uo_mask_table.h
-    nav/timeline.ts       derived from libbluray navigation time math
+    hdmv/vm.ts            from src/libbluray/hdmv/hdmv_vm.c
+    nav/timeline.ts      derived from libbluray navigation time math
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
