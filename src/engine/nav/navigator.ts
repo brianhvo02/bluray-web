@@ -64,11 +64,11 @@ export interface NavigatorDeps {
   nowScr(): number;
   readonly seed?: number;
   /**
-   * _preload_m2ts for an IG sub-path: reads the whole sub-path clip and returns the PES units of `pid` in stream order.
-   * Rejects when the clip cannot be read (no menu, counted as an IG error); the read stops when `signal` aborts.
+   * _preload_m2ts for an IG sub-path: reads the whole sub-path clip and returns the PES units of all its IG PIDs (each
+   * unit carries its `pid`) in stream order; the navigator filters by the PID PSR0 names at each init. Rejects when the clip cannot be read (no menu, counted as an IG error); the read stops when `signal` aborts.
    * Without it, IG streams carried in sub-paths show no menu.
    */
-  preloadSubPathIg?(clipId: string, pid: number, signal: AbortSignal): Promise<IgUnit[]>;
+  preloadSubPathIg?(clipId: string, signal: AbortSignal): Promise<IgUnit[]>;
 }
 
 const TITLE_FIRST_PLAY = 0xffff;
@@ -99,6 +99,8 @@ const COMPOSITION_ACQUISITION_POINT = 1;
 
 /** A graphics PES payload of the IG stream, in playlist time. */
 export interface IgUnit {
+  /** PID of a preloaded sub-path unit (main-path units come from one PID and carry none). */
+  readonly pid?: number;
   readonly data: Uint8Array;
   readonly ptsUs: number;
   /** Decode time: segments carry it ahead of the ICS's presentation time, and gating follows it (graphics_processor_decode_pes). */
@@ -117,9 +119,7 @@ function sameMask(a: UoMask, b: UoMask): boolean {
 }
 
 interface SubIgPreload {
-  readonly key: string;
   readonly clipId: string;
-  readonly pid: number;
   readonly abort: AbortController;
   /** null while the clip is loading; the whole stream's units once loaded. */
   units: readonly IgUnit[] | null;
@@ -146,6 +146,7 @@ export class Navigator {
   private subIgErrors = 0;
   /** The graphics processor's queue of preloaded units not yet decoded (gc->igp->queue). */
   private subIgQueue: IgUnit[] = [];
+  private subIgPid = -1;
   private gcStatus: number = GcStatus.NONE;
   private drawsSincePaint = 0;
   private vm: HdmvVm | null = null;
@@ -545,9 +546,9 @@ export class Navigator {
         this.syncHold();
         break;
 
-      case HdmvEventType.ENABLE_BUTTON: this.runGc('ENABLE_BUTTON'); break;
-      case HdmvEventType.DISABLE_BUTTON: this.runGc('DISABLE_BUTTON'); break;
-      case HdmvEventType.SET_BUTTON_PAGE: this.runGc('SET_BUTTON_PAGE'); break;
+      case HdmvEventType.ENABLE_BUTTON: this.runGc('ENABLE_BUTTON', ev.param); break;
+      case HdmvEventType.DISABLE_BUTTON: this.runGc('DISABLE_BUTTON', ev.param); break;
+      case HdmvEventType.SET_BUTTON_PAGE: this.runGc('SET_BUTTON_PAGE', ev.param); break;
       case HdmvEventType.POPUP_OFF: this.runGc('POPUP'); break;
       case HdmvEventType.IG_END: this.runGc('IG_END'); break;
       default: break; // END, NONE
@@ -582,8 +583,8 @@ export class Navigator {
     }
   }
 
-  /** gc_decode_ts for one graphics unit: INIT_MENU when it completes a display set. Returns true if a display set completed. */
-  private decodeIgUnit(unit: IgUnit): boolean {
+  /** gc_decode_ts for one graphics unit. `init`: INIT_MENU when it completes a display set (_read_ext does for the main path). Returns true if a display set completed. */
+  private decodeIgUnit(unit: IgUnit, init = true): boolean {
     const to90 = (us: number): number => Math.round((us * 90) / 1000);
     const ds = this.igDecoder.push(unit.data, to90(unit.ptsUs), unit.dtsUs === undefined ? null : to90(unit.dtsUs));
     if (!ds) return false;
@@ -593,7 +594,7 @@ export class Navigator {
       this.igNeedsEpoch = false;
     }
     this.ensurePlane(ds);
-    if (this.gc.decodeDisplaySet(ds)) this.runGc('INIT_MENU'); // initialize menus
+    if (this.gc.decodeDisplaySet(ds) && init) this.runGc('INIT_MENU'); // initialize menus (gc_decode_ts itself never does)
     return true;
   }
 
@@ -633,6 +634,7 @@ export class Navigator {
     this.igDecoder.reset();
     this.igQueue = [];
     this.subIgQueue = [];
+    this.subIgPid = -1;
     this.igNeedsEpoch = true;
     this.gc.run('reset');
   }
@@ -645,78 +647,75 @@ export class Navigator {
   }
 
   /**
-   * _init_ig_stream. A main-path IG stream is decoded from the clip as the pipeline delivers it. A sub-path stream was
-   * preloaded at playlist open: all of it is decoded now, in stream order and with no timing gate (gc_decode_ts with
-   * stc -1), or as soon as the preload settles if it is still loading.
+   * _init_ig_stream. A preloaded sub-path buffer is decoded whenever there is one, with the PID PSR0 names now, even if
+   * that entry is a main-path stream. Otherwise a main-path IG stream is decoded from the clip as the pipeline delivers it.
+   * The caller runs INIT_MENU, once.
    */
   private initIgStream(): number {
     this.igReady = false;
     const entry = this.findIgEntry();
     if (!entry) return 0;
-    if (!entry.subPath) {
+    const preload = this.subIg;
+    if (preload && !preload.failed) {
+      if (preload.units) this.decodePreloadedIg(preload.units, entry.pid);
+      else preload.initPending = true;
+      return 1;
+    }
+    if (entry.streamType !== 2) {
       this.igReady = true;
       return 1;
     }
-    const preload = this.preloadSubPathIg(entry);
-    if (!preload || preload.failed) return 0;
-    if (preload.units) this.decodePreloadedIg(preload.units);
-    else preload.initPending = true;
-    return 1;
+    return 0;
   }
 
-  /** _preload_ig_subpath at playlist open, for the IG stream PSR0 names in the first play item. */
+  /** _find_ig_stream, then _preload_ig_subpath at playlist open (from _preload_subpaths): only stream_type 2 is a sub-path IG. */
   private startSubPathPreload(): void {
     this.dropSubIg();
     const entry = this.findIgEntry();
-    if (entry?.subPath) this.preloadSubPathIg(entry);
-  }
-
-  /** Starts (or reuses) the preload of the sub-path clip `entry` is carried in; null if it names no usable clip. */
-  private preloadSubPathIg(entry: StreamEntry): SubIgPreload | null {
     const load = this.deps.preloadSubPathIg;
+    if (!entry || entry.streamType !== 2 || !load) return;
     const clip = this.playlist?.subPaths[entry.subPathId]?.items[entry.subClipId]; // invalid subclip id: no preload
-    if (!load || !clip) return null;
-    const key = `${clip.clipId}:${entry.pid}`;
-    if (this.subIg?.key === key) return this.subIg;
-    this.dropSubIg();
-    const preload: SubIgPreload = { key, clipId: clip.clipId, pid: entry.pid, abort: new AbortController(), units: null, failed: false, initPending: false };
+    if (!clip) return;
+    const preload: SubIgPreload = { clipId: clip.clipId, abort: new AbortController(), units: null, failed: false, initPending: false };
     this.subIg = preload;
     const generation = this.generation;
-    const settle = (): boolean => generation === this.generation && this.subIg === preload;
+    const current = (): boolean => generation === this.generation && this.subIg === preload;
     let request: Promise<IgUnit[]>;
     try {
-      request = load(clip.clipId, entry.pid, preload.abort.signal);
+      request = load(clip.clipId, preload.abort.signal);
     } catch (err) {
       request = Promise.reject(err);
     }
     request.then(
       (units) => {
-        if (!settle()) return;
+        if (!current()) return;
         preload.units = units;
         if (!preload.initPending) return;
         preload.initPending = false;
-        this.decodePreloadedIg(units);
-        this.runGc('INIT_MENU');
+        this.decodePreloadedIg(units, this.findIgEntry()?.pid ?? entry.pid);
+        this.runGc('INIT_MENU'); // the caller's INIT came first and found nothing: run it again, once
       },
       () => {
-        if (!settle()) return; // aborted or superseded
+        if (!current()) return; // aborted or superseded
         this.subIgErrors++; // a failed preload means no menu, as _close_preload leaves no st_ig clip
         preload.failed = true;
         preload.initPending = false;
       },
     );
-    return preload;
   }
 
   /**
-   * gc_decode_ts(pid, buffer, ..., -1): the preloaded units join the graphics processor's queue and are decoded from its
+   * gc_decode_ts(pid, buffer, ..., -1): the units of `pid` join the graphics processor's queue and are decoded from its
    * head with no timing gate, but graphics_processor_decode_pes returns at the first complete display set. The rest stays
-   * queued (until the playlist closes), where only a further init in the same playlist would reach it.
+   * queued (until the playlist closes). A different PID than last time flushes the queue (graphics_processor_decode_ts).
+   * Decode only: INIT_MENU is the caller's.
    */
-  private decodePreloadedIg(units: readonly IgUnit[]): void {
-    for (const unit of units) this.subIgQueue.push(unit);
+  private decodePreloadedIg(units: readonly IgUnit[], pid: number): void {
+    if (pid !== this.subIgPid) this.subIgQueue = [];
+    this.subIgPid = pid;
+    for (const unit of units) if (unit.pid === pid) this.subIgQueue.push(unit);
     while (this.subIgQueue.length > 0) {
-      if (this.decodeIgUnit(this.subIgQueue.shift()!)) return;
+      if (this.decodeIgUnit(this.subIgQueue.shift()!, false)) return;
     }
   }
 

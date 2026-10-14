@@ -21,6 +21,8 @@ export interface StreamEntry {
   readonly lang: string;
   /** True for streams carried in a sub-path clip (stream_type 2–4); M1 plays main-path streams only. */
   readonly subPath: boolean;
+  /** STN stream_type: 1 main clip, 2 sub-path clip, 3 and 4 other sub-path streams. libbluray's IG lookup treats only 2 as a sub-path IG. */
+  readonly streamType: number;
   /** STN subpath_id (stream_type 2, 3, 4); 0 for main-path entries. */
   readonly subPathId: number;
   /** STN subclip_id (stream_type 2); 0 otherwise. */
@@ -268,7 +270,7 @@ function readStream(r: ByteReader): StreamEntry {
     lang = r.ascii(3);
   }
   r.seek(attrStart + attrLength);
-  return { pid, codingType, format, rate, lang, subPath: streamType !== 1, subPathId, subClipId };
+  return { pid, codingType, format, rate, lang, subPath: streamType !== 1, streamType, subPathId, subClipId };
 }
 
 function readMarks(r: ByteReader, markPos: number): PlayListMark[] {

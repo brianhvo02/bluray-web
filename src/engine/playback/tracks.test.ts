@@ -3,7 +3,7 @@ import type { StreamEntry } from '../bdmv/mpls-parser';
 import { CodingType } from '../bdmv/stream-types';
 import { audioTracks, channelsLabel } from './tracks';
 
-const entry = (codingType: number, format: number, lang: string, subPath = false): StreamEntry => ({ pid: 0x1100, codingType, format, rate: 1, lang, subPath, subPathId: 0, subClipId: 0 });
+const entry = (codingType: number, format: number, lang: string, subPath = false): StreamEntry => ({ pid: 0x1100, codingType, format, rate: 1, lang, subPath, streamType: subPath ? 2 : 1, subPathId: 0, subClipId: 0 });
 
 describe('audioTracks', () => {
   it('lists every STN audio entry with its 1-based number and playability', () => {

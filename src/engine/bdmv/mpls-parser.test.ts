@@ -39,7 +39,7 @@ describe('parseMpls', () => {
     expect(first.codecId).toBe('M2TS');
     expect(first.inTime).toBe(900_000);
     expect(first.outTime).toBe(1_800_000);
-    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', subPath: false, subPathId: 0, subClipId: 0 }]);
+    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', subPath: false, streamType: 1, subPathId: 0, subClipId: 0 }]);
     expect(first.stn.audio.map((a) => [a.pid, a.codingType, a.lang])).toEqual([
       [0x1100, CodingType.LPCM, 'eng'],
       [0x1101, CodingType.AC3, 'fra'],
@@ -187,10 +187,10 @@ describe('parseMpls', () => {
     expect(mpls.subPaths[1]!.isRepeat).toBe(true);
     expect(mpls.subPaths[1]!.items[0]).toMatchObject({ clipId: '00011', connectionCondition: 5, isMultiClip: true, stcId: 3, inTime: 1, outTime: 2 });
     expect(mpls.subPaths[1]!.items[1]).toMatchObject({ clipId: '00014', syncPlayItemId: 7, syncPts: 99 });
-    expect(mpls.playItems[0]!.stn.ig.map((e) => [e.pid, e.subPath, e.subPathId, e.subClipId])).toEqual([
-      [0x1400, true, 1, 2],
-      [0x1401, true, 4, 0],
-      [0x1402, false, 0, 0],
+    expect(mpls.playItems[0]!.stn.ig.map((e) => [e.pid, e.subPath, e.streamType, e.subPathId, e.subClipId])).toEqual([
+      [0x1400, true, 2, 1, 2],
+      [0x1401, true, 3, 4, 0],
+      [0x1402, false, 1, 0, 0],
     ]);
   });
 

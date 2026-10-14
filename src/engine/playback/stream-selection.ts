@@ -39,5 +39,5 @@ export function audioEntryFor(item: PlayItem, stream: number | null): StreamEntr
 export function igEntryFor(item: PlayItem, stream: number | null): StreamEntry | null {
   if (stream === null) return null;
   const entry = item.stn.ig[stream - 1];
-  return entry && !entry.subPath ? entry : null;
+  return entry && entry.streamType !== 2 ? entry : null; // as _find_ig_stream: only type 2 is a sub-path IG
 }

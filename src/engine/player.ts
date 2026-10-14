@@ -298,23 +298,23 @@ export class Player {
       port: this.navigationPort(),
       emit: (e) => this.onNavigatorEvent(e),
       nowScr: () => this.deps.nowMs() * SCR_PER_MS,
-      preloadSubPathIg: (clipId, pid, signal) => this.preloadSubPathIg(clipId, pid, signal),
+      preloadSubPathIg: (clipId, signal) => this.preloadSubPathIg(clipId, signal),
     });
   }
 
-  /** _preload_m2ts for an IG sub-path: the whole clip is demuxed into the PES units of `pid`, in stream order. */
-  private async preloadSubPathIg(clipId: string, pid: number, signal: AbortSignal): Promise<IgUnit[]> {
+  /** _preload_m2ts for an IG sub-path: the whole clip is demuxed into the PES units of every IG PID (0x1400 to 0x141f), in stream order. */
+  private async preloadSubPathIg(clipId: string, signal: AbortSignal): Promise<IgUnit[]> {
     const source = this.source;
     const path = streamPath(clipId);
     if (!source || !source.exists(path)) throw new DiscError('missing-file', `Missing sub-path clip ${path}`, [path]);
     if (source.size(path) > PRELOAD_SIZE_LIMIT) throw new DiscError('unreadable-stream', `Sub-path clip ${path} is too large to preload`, [path]);
-    const reader = new M2tsReader({ source, path, startSpn: 0, pids: new Set([pid]) });
+    const reader = new M2tsReader({ source, path, startSpn: 0, pids: new Set(Array.from({ length: 0x20 }, (_, k) => 0x1400 + k)) });
     const cancel = (): void => reader.cancel();
     signal.addEventListener('abort', cancel, { once: true });
     const units: IgUnit[] = [];
     try {
       for (let pes = await reader.next(); pes !== null; pes = await reader.next()) {
-        for (const p of pes) units.push({ data: p.payload, ptsUs: pts90ToUs(p.pts ?? 0), dtsUs: p.dts === undefined ? undefined : pts90ToUs(p.dts) });
+        for (const p of pes) units.push({ pid: p.pid, data: p.payload, ptsUs: pts90ToUs(p.pts ?? 0), dtsUs: p.dts === undefined ? undefined : pts90ToUs(p.dts) });
       }
     } finally {
       signal.removeEventListener('abort', cancel);

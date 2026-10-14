@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildIndex, buildMpls, type IndexObjectSpec, type MarkSpec, type PlayItemSpec, type SubPathSpec } from '../../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../../tests/helpers/hdmv-builders';
-import { simpleMenuSegments } from '../../../tests/helpers/ig-builders';
+import { endSegment, icsSegment, odsSegment, pdsSegment, simpleMenuSegments } from '../../../tests/helpers/ig-builders';
 import type { Clpi } from '../bdmv/clpi-parser';
 import { parseIndex } from '../bdmv/index-parser';
 import { parseMovieObjects } from '../bdmv/mobj-parser';
@@ -636,7 +636,7 @@ describe('Navigator IG menus in sub-paths', () => {
   const SUB_IG = { pid: 0x1400, codingType: 0x91, streamType: 2, subPathId: 0, subClipId: 0 };
   const subPaths: SubPathSpec[] = [{ type: 3, items: [{ clipId: '00002', inTime: 0, outTime: 90000 }] }];
   const menuUnits = (opts: Parameters<typeof simpleMenuSegments>[0] = {}): IgUnit[] =>
-    simpleMenuSegments(opts).map((data) => ({ data, ptsUs: 9_000_000_000 })); // far beyond the clock: no timing gate applies
+    simpleMenuSegments(opts).map((data) => ({ data, ptsUs: 9_000_000_000, pid: 0x1400 })); // far beyond the clock: no timing gate applies
   const flushAll = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
   const menuEvents = (events: NavigatorEvent[]) => events.filter((e) => e.type === 'menu');
 
@@ -651,11 +651,11 @@ describe('Navigator IG menus in sub-paths', () => {
   }
 
   it('preloads the sub-path clip at playlist open and boots into the menu without any tick', async () => {
-    const calls: Array<[string, number]> = [];
-    const t = subSetup(async (clipId, pid) => { calls.push([clipId, pid]); return menuUnits(); });
+    const calls: string[] = [];
+    const t = subSetup(async (clipId) => { calls.push(clipId); return menuUnits(); });
     t.nav.start();
     await flushAll();
-    expect(calls).toEqual([['00002', 0x1400]]);
+    expect(calls).toEqual(['00002']);
     expect(t.nav.igPlane).not.toBeNull();
     expect(t.nav.igPlane!.hasContent).toBe(true);
     expect(menuEvents(t.events)).toEqual([{ type: 'menu', active: true }]);
@@ -715,7 +715,7 @@ describe('Navigator IG menus in sub-paths', () => {
   it('aborts the read and ignores the result when the playlist closes first', async () => {
     let signal!: AbortSignal;
     let resolve!: (u: IgUnit[]) => void;
-    const t = subSetup((_c, _p, s) => { signal = s; return new Promise<IgUnit[]>((r) => { resolve = r; }); });
+    const t = subSetup((_c, s) => { signal = s; return new Promise<IgUnit[]>((r) => { resolve = r; }); });
     t.nav.start();
     await flushAll();
     expect(signal.aborted).toBe(false);
@@ -728,7 +728,7 @@ describe('Navigator IG menus in sub-paths', () => {
   });
 
   it('treats an abort rejection after close as no error', async () => {
-    const t = subSetup((_c, _p, s) => new Promise<IgUnit[]>((_r, reject) => s.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))));
+    const t = subSetup((_c, s) => new Promise<IgUnit[]>((_r, reject) => s.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))));
     t.nav.start();
     await flushAll();
     t.nav.stop();
@@ -748,12 +748,148 @@ describe('Navigator IG menus in sub-paths', () => {
     await flushAll();
     expect(called).toBe(0);
     expect(bad.nav.igPlane).toBeNull();
-    const none = subSetup(async () => menuUnits());
     const t = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }], playlists: { '00000': { items: [item({ ig: [SUB_IG] })], subPaths } } });
     t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
     t.nav.start();
     await flushAll();
     expect(t.nav.igPlane).toBeNull();
-    none.nav.stop();
+  });
+
+  /** Counts the INIT_MENU messages that reach the graphics controller. */
+  function countInit(nav: Navigator): { count: () => number } {
+    const gc = (nav as unknown as { gc: { run: (msg: string, param?: number) => unknown } }).gc;
+    const run = gc.run.bind(gc);
+    let n = 0;
+    gc.run = (msg, param) => { if (msg === 'initMenu') n++; return run(msg, param); };
+    return { count: () => n };
+  }
+
+  it('runs INIT_MENU exactly once per sub-path init: decoding the preload does not run it (gc_decode_ts never does)', async () => {
+    const t = subSetup(async () => menuUnits());
+    const init = countInit(t.nav);
+    t.nav.start();
+    await flushAll();
+    expect(t.nav.igPlane?.hasContent).toBe(true);
+    expect(init.count()).toBe(1);
+  });
+
+  it('runs INIT_MENU once when the preload settles after INIT, and once per restore', async () => {
+    let resolve!: (u: IgUnit[]) => void;
+    const t = subSetup(() => new Promise<IgUnit[]>((r) => { resolve = r; }));
+    const init = countInit(t.nav);
+    t.nav.start();
+    await flushAll();
+    const before = init.count(); // the caller's INIT ran with nothing decoded yet
+    resolve(menuUnits());
+    await flushAll();
+    expect(init.count() - before).toBe(1);
+    expect(t.nav.igPlane?.hasContent).toBe(true);
+
+    const r = subSetup(async () => menuUnits(), [{ cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle]);
+    const restoreInit = countInit(r.nav);
+    r.nav.start();
+    await flushAll();
+    expect(restoreInit.count()).toBe(1);
+    r.nav.menuCall();
+    await flushAll();
+    expect(restoreInit.count()).toBe(2);
+  });
+
+  it('does not preload IG entries of stream_type 3 or 4: they decode from the main path with their PID', async () => {
+    for (const streamType of [3, 4]) {
+      let called = 0;
+      const t = setup({
+        objects: [{ cmds: [asm.playPl(imm(0))] }],
+        playlists: { '00000': { items: [item({ ig: [{ pid: 0x1400, codingType: 0x91, streamType, subPathId: 0 }] })], subPaths } },
+        preloadSubPathIg: async () => { called++; return menuUnits(); },
+      });
+      t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+      t.nav.start();
+      await flushAll();
+      expect(called).toBe(0);
+      for (const data of simpleMenuSegments()) t.nav.pushIg({ data, ptsUs: 0 });
+      t.nav.tick(0);
+      expect(t.nav.igPlane?.hasContent, `type ${streamType}`).toBe(true);
+    }
+  });
+
+  it('decodes the preloaded buffer filtered by the PID PSR0 names at init, without a new preload', async () => {
+    let loads = 0;
+    const other = simpleMenuSegments({ buttons: 1 }).map((data) => ({ data, ptsUs: 0, pid: 0x1401 }));
+    const mine = menuUnits({ buttons: 2 });
+    const t = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))] }],
+      playlists: { '00000': { items: [item({ ig: [SUB_IG, { ...SUB_IG, pid: 0x1401 }] })], subPaths } },
+      preloadSubPathIg: async () => { loads++; return [...other, ...mine]; },
+    });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    t.regs.psrWrite(PSR.IG_STREAM_ID, 2); // names the second entry (pid 0x1401) when the playlist opens
+    t.nav.start();
+    await flushAll();
+    expect(loads).toBe(1);
+    const second = t.nav.igPlane!.hash();
+    const ref = subSetup(async () => other.map((u) => ({ ...u, pid: 0x1400 })));
+    ref.nav.start();
+    await flushAll();
+    expect(second).toBe(ref.nav.igPlane!.hash());
+  });
+});
+
+describe('Navigator IG button commands reach the graphics controller with their parameter', () => {
+  const SUB_IG = { pid: 0x1400, codingType: 0x91, streamType: 2, subPathId: 0, subClipId: 0 };
+  const subPaths: SubPathSpec[] = [{ type: 3, items: [{ clipId: '00002', inTime: 0, outTime: 90000 }] }];
+  const flushAll = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const event = (type: number, param: number) => ({ type, param, param2: 0 });
+  type Internals = { processHdmvVmEvent(e: unknown): void };
+
+  async function boot(units: IgUnit[]) {
+    const t = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))] }],
+      playlists: { '00000': { items: [item({ ig: [SUB_IG] })], subPaths } },
+      preloadSubPathIg: async () => units,
+    });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    t.nav.start();
+    await flushAll();
+    return t;
+  }
+  const toUnits = (segs: Uint8Array[]): IgUnit[] => segs.map((data) => ({ data, ptsUs: 0, pid: 0x1400 }));
+
+  it('SET_BUTTON_PAGE from a page-0 routing button changes the page (TSURUNE clip 00021 pattern)', async () => {
+    const page = (id: number, cmds: Uint8Array[], autoAction: boolean, objectBase: number) => ({
+      id, defaultSelected: 1, paletteId: 0,
+      bogs: [{ defaultValid: 1, buttons: [{ id: 1, x: 10, y: 10, normal: [objectBase, objectBase] as [number, number], selected: [objectBase, objectBase] as [number, number], activated: [objectBase, objectBase] as [number, number], autoAction, cmds }] }],
+    });
+    const segs = [
+      ...icsSegment({
+        compositionState: 'epochStart', uiModel: 'alwaysOn',
+        pages: [page(0, [asm.setButtonPage(imm(0), imm(0x80000001))], true, 0xffff), page(1, [], false, 10)],
+      }),
+      pdsSegment(0, 0, [[1, 100, 128, 128, 255]]),
+      ...odsSegment(10, 0, 8, 4, Array.from({ length: 4 }, () => new Array<number>(8).fill(1))),
+      endSegment(),
+    ].flat() as Uint8Array[];
+    const t = await boot(toUnits(segs));
+    t.nav.tick(0);
+    await flushAll();
+    expect(t.regs.psrRead(PSR.MENU_PAGE_ID)).toBe(1);
+    expect(t.nav.igPlane?.hasContent).toBe(true);
+  });
+
+  it('ENABLE_BUTTON and DISABLE_BUTTON act on the button they name', async () => {
+    const t = await boot(toUnits(simpleMenuSegments({ buttons: 2 })));
+    expect(t.regs.psrRead(PSR.SELECTED_BUTTON_ID)).toBe(1);
+    const nav = t.nav as unknown as Internals;
+    nav.processHdmvVmEvent(event(HdmvEventType.DISABLE_BUTTON, 1));
+    expect(t.regs.psrRead(PSR.SELECTED_BUTTON_ID)).toBe(0xffff); // the selected button was disabled
+    nav.processHdmvVmEvent(event(HdmvEventType.ENABLE_BUTTON, 1));
+    expect(t.regs.psrRead(PSR.SELECTED_BUTTON_ID) & 0xffff).not.toBe(0xffff);
+  });
+
+  it('SET_BUTTON_PAGE passes its parameter (page flag and page id)', async () => {
+    const t = await boot(toUnits(simpleMenuSegments({ buttons: 2 })));
+    const spy = vi.spyOn((t.nav as unknown as { gc: { run: (m: string, p?: number) => unknown } }).gc, 'run');
+    (t.nav as unknown as Internals).processHdmvVmEvent(event(HdmvEventType.SET_BUTTON_PAGE, 0x80010000));
+    expect(spy).toHaveBeenCalledWith('setButtonPage', 0x80010000);
   });
 });

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { PlayItem, StreamEntry } from '../bdmv/mpls-parser';
 import { CodingType } from '../bdmv/stream-types';
-import { audioEntryFor, chooseStreams } from './stream-selection';
+import { audioEntryFor, chooseStreams, igEntryFor } from './stream-selection';
 
-const entry = (pid: number, codingType: number, subPath = false): StreamEntry => ({ pid, codingType, format: 0, rate: 0, lang: 'eng', subPath, subPathId: 0, subClipId: 0 });
+const entry = (pid: number, codingType: number, subPath = false): StreamEntry => ({ pid, codingType, format: 0, rate: 0, lang: 'eng', subPath, streamType: subPath ? 2 : 1, subPathId: 0, subClipId: 0 });
 
 describe('chooseStreams', () => {
   it('picks the first main-path video and the first playable audio, with its stream number', () => {
@@ -51,5 +51,17 @@ describe('audioEntryFor', () => {
     expect(audioEntryFor(item, 3)).toBeNull(); // sub-path
     expect(audioEntryFor(item, 4)).toBeNull();
     expect(audioEntryFor(item, null)).toBeNull();
+  });
+});
+
+describe('igEntryFor', () => {
+  const item = (ig: StreamEntry[]): PlayItem => ({ stn: { video: [], audio: [], pg: [], ig } }) as unknown as PlayItem;
+  it('returns main-path IG entries and those of stream_type 3 and 4, but not sub-path clip IG (type 2), as _find_ig_stream', () => {
+    const type = (streamType: number): StreamEntry => ({ ...entry(0x1400, CodingType.IG, streamType !== 1), streamType });
+    expect(igEntryFor(item([type(1)]), 1)?.pid).toBe(0x1400);
+    expect(igEntryFor(item([type(3)]), 1)?.pid).toBe(0x1400);
+    expect(igEntryFor(item([type(4)]), 1)?.pid).toBe(0x1400);
+    expect(igEntryFor(item([type(2)]), 1)).toBeNull();
+    expect(igEntryFor(item([type(1)]), null)).toBeNull();
   });
 });
