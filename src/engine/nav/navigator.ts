@@ -45,6 +45,8 @@ export type NavigatorEvent =
   | { readonly type: 'popup'; readonly available: boolean }
   | { readonly type: 'sound'; readonly id: number }
   | { readonly type: 'title'; readonly title: number }
+  /** A seek the program asked for was accepted (bd_seek_playitem, bd_seek_mark, _clip_seek_time); `value` is the item, mark or 45 kHz clip time. */
+  | { readonly type: 'seek'; readonly what: 'item' | 'mark' | 'time'; readonly value: number }
   | { readonly type: 'bdjTitle'; readonly title: number }
   | { readonly type: 'error'; readonly message: string };
 
@@ -116,6 +118,8 @@ export class Navigator {
   /** A restored PSR8 that the next playlistStarted() must keep. */
   private keepTime: number | null = null;
   private currentItem = 0;
+  /** What the playlist being opened was asked to start at, for the seeks that follow its open. */
+  private startAt: PlayAt | null = null;
 
   constructor(private readonly deps: NavigatorDeps) {
     deps.regs.onPsrEvent((e) => this.onPsrEvent(e));
@@ -166,8 +170,14 @@ export class Navigator {
     this.runVm();
   }
 
-  /** _update_playlist_psrs and the clip-open part of _open_m2ts, once the player has opened the playlist. */
+  /**
+   * _update_playlist_psrs and the clip-open part of _open_m2ts, once the player has opened the playlist. Then, as
+   * _open_playlist and the bd_seek_* calls that follow it do: _find_next_playmark (the chapter PSR) after the first clip,
+   * and again after each seek to the requested item, mark or restored time.
+   */
   playlistStarted(playlistId: string, item: number): void {
+    const at = this.startAt;
+    this.startAt = null;
     this.playlist = this.deps.disc.playlists.get(playlistId) ?? null;
     this.playing = true;
     this.ended = false;
@@ -178,7 +188,10 @@ export class Navigator {
     const restoredTime = this.keepTime;
     this.keepTime = null;
     this.openClip(0);
+    this.updateChapterPsrAt(0, this.playlist?.playItems[0]?.inTime ?? 0);
+    if (at) this.emitSeek(at);
     if (item !== 0) this.openClip(item);
+    if (at) this.seekChapterUpdates(at);
     if (restoredTime !== null) this.deps.regs.psrWrite(PSR.TIME, restoredTime); // after the last clip open can overwrite it
   }
 
@@ -189,10 +202,12 @@ export class Navigator {
     this.openClip(item);
   }
 
-  /** _update_chapter_psr; `chapter` is bd_get_current_chapter (0-based). */
-  chapterChanged(chapter: number): void {
-    const hasChapters = this.playlist?.marks.some((m) => m.type === MarkType.ENTRY) ?? false;
-    if (!this.isInteractiveTitle() && hasChapters) this.deps.regs.psrWrite(PSR.CHAPTER, chapter + 1);
+  /**
+   * _playmark_reached: the position passed one or more play marks (ENTRY or LINK), at `clipTime45` in play item `item`.
+   * Updates the chapter PSR (_update_chapter_psr) even when the chapter is unchanged.
+   */
+  markReached(item: number, clipTime45: number): void {
+    this.updateChapterPsrAt(item, clipTime45);
   }
 
   /** The last play item ended (see playItemEnded). */
@@ -399,11 +414,15 @@ export class Navigator {
       }
 
       case HdmvEventType.PLAY_PI:
+        this.emitSeek({ item: ev.param });
         this.deps.port.seekPlayItem(ev.param);
+        this.seekChapterUpdates({ item: ev.param });
         break;
 
       case HdmvEventType.PLAY_PM:
+        this.emitSeek({ mark: ev.param });
         this.deps.port.seekMark(ev.param);
+        this.seekChapterUpdates({ mark: ev.param });
         break;
 
       case HdmvEventType.PLAY_STOP:
@@ -449,6 +468,7 @@ export class Navigator {
       this.playlist = this.deps.disc.playlists.get(id) ?? null;
       this.playing = true;
       this.keepTime = at.clipTime45 ?? null;
+      this.startAt = at;
       request = this.deps.port.playPlaylist(id, at);
     }
     request.then(
@@ -473,6 +493,7 @@ export class Navigator {
   private closePlaylist(stopPort: boolean): void {
     this.runGc('RESET');
     this.keepTime = null;
+    this.startAt = null;
     this.generation++; // a pending playPlaylist() result no longer applies
     if (stopPort && this.playing && !this.ended) this.deps.port.stopPlaylist();
     this.playing = false;
@@ -667,6 +688,73 @@ export class Navigator {
       const v = regs.psrRead(PSR.IG_STREAM_ID);
       if (v === 0 || v > stn.ig.length) regs.psrWrite(PSR.IG_STREAM_ID, 1);
     }
+  }
+
+  // ---- chapter PSR ----
+
+  /** The accepted bd_seek_mark / bd_seek_playitem request (before the clip is reopened). */
+  private emitSeek(at: PlayAt): void {
+    const pl = this.playlist;
+    if (!pl) return;
+    if (at.mark !== undefined) {
+      if (pl.marks[at.mark]) this.deps.emit({ type: 'seek', what: 'mark', value: at.mark });
+    } else if (at.item !== undefined && pl.playItems[at.item]) {
+      this.deps.emit({ type: 'seek', what: 'item', value: at.item });
+    }
+  }
+
+  /**
+   * The _seek_internal tail (_find_next_playmark) of the bd_seek_playitem, bd_seek_mark and _clip_seek_time calls that
+   * bd_seek_* / restore make; a seek that libbluray rejects (index out of range, time past the item) changes nothing.
+   */
+  private seekChapterUpdates(at: PlayAt): void {
+    const pl = this.playlist;
+    if (!pl) return;
+    if (at.mark !== undefined) {
+      const mark = pl.marks[at.mark];
+      if (mark) this.updateChapterPsrAt(mark.playItemRef, mark.time);
+      return;
+    }
+    const pi = at.item !== undefined ? pl.playItems[at.item] : undefined;
+    if (at.item !== undefined && pi) this.updateChapterPsrAt(at.item, pi.inTime);
+    if (at.clipTime45 !== undefined && at.item !== undefined && pi && at.clipTime45 < pi.outTime) {
+      this.deps.emit({ type: 'seek', what: 'time', value: at.clipTime45 });
+      this.updateChapterPsrAt(at.item, at.clipTime45);
+    }
+  }
+
+  /**
+   * 45 kHz playlist time of `clipTime45` within play item `item`, clamped to the item. libbluray compares source packet
+   * positions, and a packet position only resolves clip time to the EP map's granularity (the low 8 bits are not stored),
+   * so times are floored to it: a restored or EP-quantized position still lands on the mark it was taken from.
+   */
+  private playlistTime(item: number, clipTime45: number): number {
+    const items = this.playlist?.playItems ?? [];
+    let start = 0;
+    for (let i = 0; i < item && i < items.length; i++) start += Math.max(0, items[i]!.outTime - items[i]!.inTime);
+    const pi = items[item];
+    if (!pi) return start;
+    const clamped = Math.min(Math.max(pi.inTime, clipTime45), pi.outTime);
+    const floor = (t: number): number => Math.floor(t / 256) * 256;
+    return start + Math.max(0, floor(clamped) - floor(pi.inTime));
+  }
+
+  /** nav_chapter_get_current over the ENTRY marks; 0-based. */
+  private chapterAt(playlistTime: number): number {
+    const chapters = (this.playlist?.marks ?? []).filter((m) => m.type === MarkType.ENTRY).map((m) => this.playlistTime(m.playItemRef, m.time));
+    for (let i = 0; i < chapters.length; i++) {
+      if (chapters[i]! <= playlistTime) {
+        if (i === chapters.length - 1) return i;
+        if (chapters[i + 1]! > playlistTime) return i;
+      }
+    }
+    return 0;
+  }
+
+  /** _update_chapter_psr, for the position `clipTime45` in play item `item`. */
+  private updateChapterPsrAt(item: number, clipTime45: number): void {
+    const hasChapters = this.playlist?.marks.some((m) => m.type === MarkType.ENTRY) ?? false;
+    if (!this.isInteractiveTitle() && hasChapters) this.deps.regs.psrWrite(PSR.CHAPTER, this.chapterAt(this.playlistTime(item, clipTime45)) + 1);
   }
 
   /** _is_interactive_title */

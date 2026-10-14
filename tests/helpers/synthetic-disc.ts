@@ -56,6 +56,8 @@ export interface SyntheticPlaylistSpec {
   /** Video coding type declared in the STN table (default AVC). */
   videoCodingType?: number;
   chapterEverySeconds?: number;
+  /** Replaces the chapter marks: any ENTRY / LINK marks, times in 45 kHz clip time. */
+  marks?: MarkSpec[];
   /** 8-byte UO mask table of the playlist. */
   uoMask?: number[];
   /** Still mode (1 time, 2 infinite) and time in seconds, by play item index. */
@@ -162,12 +164,12 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
   }
 
   for (const playlist of spec.playlists) {
-    const marks: MarkSpec[] = [];
+    const marks: MarkSpec[] = playlist.marks ? [...playlist.marks] : [];
     const playItems = playlist.clipIds.map((clipId, index) => {
       const clip = clips.get(clipId);
       if (!clip) throw new Error(`unknown clip ${clipId}`);
       const step = (playlist.chapterEverySeconds ?? 0) * 45_000;
-      if (step > 0) for (let t = clip.inTime; t < clip.outTime; t += step) marks.push({ playItemRef: index, time: t });
+      if (step > 0 && !playlist.marks) for (let t = clip.inTime; t < clip.outTime; t += step) marks.push({ playItemRef: index, time: t });
       return {
         clipId,
         inTime: clip.inTime,

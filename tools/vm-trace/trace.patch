@@ -33,12 +33,14 @@
      return 0;
 --- a/src/libbluray/bluray.c
 +++ b/src/libbluray/bluray.c
-@@ -245,10 +245,16 @@
+@@ -245,10 +245,18 @@
      return result;
  }
  
 +/* vm-trace: called for every event put in the queue */
 +void (*bd_trace_event_cb)(uint32_t event, uint32_t param) = NULL;
++/* vm-trace: called for each accepted seek request (what: 0 play item, 1 mark, 2 clip time) */
++void (*bd_trace_seek_cb)(int what, uint32_t value) = NULL;
 +
  static int _queue_event(BLURAY *bd, uint32_t event, uint32_t param)
  {
@@ -50,19 +52,50 @@
          BD_EVENT ev = { event, param };
          result = event_queue_put(bd->event_queue, &ev);
          if (!result) {
-@@ -3932,6 +3938,12 @@
-     _get_event(bd, event);
+@@ -1905,6 +1913,9 @@
  
-     return bytes;
-+}
+       _change_angle(bd);
+ 
++      if (bd_trace_seek_cb) {
++          bd_trace_seek_cb(0, clip_ref);
++      }
+       clip     = &bd->title->clip_list.clip[clip_ref];
+       clip_pkt = clip->start_pkt;
+       out_pkt  = clip->title_pkt;
+@@ -1932,6 +1943,9 @@
+ 
+         _change_angle(bd);
+ 
++        if (bd_trace_seek_cb) {
++            bd_trace_seek_cb(1, mark);
++        }
+         // Find the closest access unit to the requested position
+         clip = nav_mark_search(bd->title, mark, &clip_pkt, &out_pkt);
+ 
+@@ -2026,6 +2040,10 @@
+         return -1;
+     }
+ 
++    if (bd_trace_seek_cb) {
++        bd_trace_seek_cb(2, tick);
++    }
 +
+     // Find the closest access unit to the requested position
+     nav_clip_time_search(bd->st0.clip, tick, &clip_pkt, &out_pkt);
+ 
+@@ -3934,6 +3952,12 @@
+     return bytes;
+ }
+ 
 +/* vm-trace: the HDMV program has ended and no playlist is playing */
 +int bd_trace_finished(BLURAY *bd)
 +{
 +    return bd->title_type == title_hdmv && bd->hdmv_vm && !hdmv_vm_running(bd->hdmv_vm) && (!bd->title || !bd->st0.clip);
- }
- 
++}
++
  int bd_read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
+ {
+     int ret;
 --- a/src/libbluray/hdmv/hdmv_vm.c
 +++ b/src/libbluray/hdmv/hdmv_vm.c
 @@ -384,11 +384,7 @@

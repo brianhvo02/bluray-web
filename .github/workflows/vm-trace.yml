@@ -9,6 +9,11 @@ on:
       - 'scripts/make-menu-disc.ts'
       - 'fixtures/synthetic/disc-vm/**'
       - 'fixtures/synthetic/disc-menu/**'
+      - 'tests/vm-trace/scripts/**'
+      - 'tests/vm-trace/golden/**'
+      - 'tests/helpers/synthetic-disc.ts'
+      - 'tests/helpers/bdmv-builders.ts'
+      - 'tests/helpers/hdmv-builders.ts'
       - '.github/workflows/vm-trace.yml'
   pull_request:
     paths:
@@ -17,7 +22,15 @@ on:
       - 'scripts/make-menu-disc.ts'
       - 'fixtures/synthetic/disc-vm/**'
       - 'fixtures/synthetic/disc-menu/**'
+      - 'tests/vm-trace/scripts/**'
+      - 'tests/vm-trace/golden/**'
+      - 'tests/helpers/synthetic-disc.ts'
+      - 'tests/helpers/bdmv-builders.ts'
+      - 'tests/helpers/hdmv-builders.ts'
       - '.github/workflows/vm-trace.yml'
+
+permissions:
+  contents: read
 
 jobs:
   golden:

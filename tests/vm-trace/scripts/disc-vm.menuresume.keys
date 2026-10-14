@@ -1,0 +1,5 @@
+# menu call in the middle of title 2 (a playlist): the top menu object resumes, restoring the playlist position
+wait title 2
+wait reads 50
+key topmenu
+wait end

@@ -2,7 +2,7 @@
 export type KeyName = 'up' | 'down' | 'left' | 'right' | 'ok' | 'topmenu' | 'popup' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9';
 
 export type ScriptStep =
-  | { readonly op: 'wait'; readonly what: 'title' | 'playlist'; readonly n: number }
+  | { readonly op: 'wait'; readonly what: 'title' | 'playlist' | 'reads'; readonly n: number }
   | { readonly op: 'wait'; readonly what: 'menu' | 'popup' | 'end' }
   | { readonly op: 'key'; readonly key: KeyName }
   | { readonly op: 'mouse' | 'click'; readonly x: number; readonly y: number }
@@ -22,7 +22,7 @@ export function parseScript(text: string): ScriptStep[] {
     const int = (s: string | undefined): number => (s !== undefined && /^\d+$/.test(s) ? Number(s) : bad());
     switch (op) {
       case 'wait':
-        if (a === 'title' || a === 'playlist') steps.push({ op: 'wait', what: a, n: int(b) });
+        if (a === 'title' || a === 'playlist' || a === 'reads') steps.push({ op: 'wait', what: a, n: int(b) });
         else if (a === 'menu' || a === 'popup' || a === 'end') steps.push({ op: 'wait', what: a });
         else bad();
         break;

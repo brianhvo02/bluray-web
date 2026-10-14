@@ -1,0 +1,7 @@
+# menu call in the second play item of a movie title with chapters; resume restores item and time
+wait end
+play title 3
+wait playlist 3
+wait reads 125
+key topmenu
+wait end

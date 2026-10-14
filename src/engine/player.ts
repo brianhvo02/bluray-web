@@ -120,7 +120,8 @@ export class Player {
   private navigator: Navigator | null = null;
   private navRegs: RegisterFile | null = null;
   private navItem = 0;
-  private navChapter = -1;
+  /** libbluray's next_mark: index of the first play mark after the presentation position, -1 when none is left. */
+  private navNextMark = -1;
   /** Presentation is frozen (still image): the clock and audio output are stopped. */
   private held = false;
   /** The play item whose end was reported to the navigator; reset on an item change and on every seek. */
@@ -409,11 +410,13 @@ export class Player {
       this.navEndReported = null;
       nav.playItemChanged(item.index);
     }
-    const chapter = this.chapterAt(s.chapters, now);
-    if (chapter !== this.navChapter) {
-      this.navChapter = chapter;
-      nav.chapterChanged(chapter);
+    // _playmark_reached: every mark passed since the last look, ENTRY or LINK, is one chapter PSR update
+    let marksReached = false;
+    while (this.navNextMark >= 0 && now > s.timeline.markTimeUs(this.navNextMark)) {
+      marksReached = true;
+      this.navNextMark = this.navNextMark + 1 < s.timeline.markCount ? this.navNextMark + 1 : -1;
     }
+    if (marksReached) nav.markReached(item.index, s.timeline.locate(now).clipTime45);
     const stillMode = s.playItems[item.index]?.stillMode ?? 0;
     if (this.state === 'playing' && stillMode !== 0 && this.navEndReported !== item.index && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
       this.navEndReported = item.index;
@@ -421,16 +424,15 @@ export class Player {
     }
   }
 
-  /** bd_get_current_chapter: 0-based, the last chapter starting at or before `timeUs`. */
-  private chapterAt(chapters: readonly Chapter[], timeUs: number): number {
-    let chapter = 0;
-    for (const c of chapters) if (c.startUs <= timeUs) chapter = c.index;
-    return chapter;
+  /** _find_next_playmark: the first mark after `timeUs`. */
+  private nextMarkAfter(timeline: Timeline, timeUs: number): number {
+    for (let i = 0; i < timeline.markCount; i++) if (timeline.markTimeUs(i) > timeUs) return i;
+    return -1;
   }
 
   /**
    * `viaNavigator`: the navigator asked for it. Then the result says whether the playlist exists, and the navigator is told
-   * of the start (playlistStarted, then the starting chapter) synchronously, before the first await.
+   * of the start (playlistStarted) synchronously, before the first await.
    */
   private async playPlaylist(playlistId: string, at: PlayAt = {}, viaNavigator = false): Promise<boolean> {
     const source = this.source;
@@ -447,12 +449,8 @@ export class Player {
     const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
     this.navItem = startItem;
     this.navEndReported = null;
-    this.navChapter = -1;
-    if (viaNavigator && this.navigator) {
-      this.navigator.playlistStarted(playlistId, startItem);
-      this.navChapter = this.chapterAt(chapters, startUs);
-      this.navigator.chapterChanged(this.navChapter);
-    }
+    this.navNextMark = this.nextMarkAfter(timeline, startUs);
+    if (viaNavigator && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
     this.setState('loading');
     const clipIds = [...new Set(mpls.playItems.map((p) => p.clipId))];
     const clips = await loadClips(source, clipIds);
@@ -615,6 +613,7 @@ export class Player {
     const gen = ++this.seekGeneration;
     this.navEndReported = null;
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
+    this.navNextMark = this.nextMarkAfter(s.timeline, t);
     s.pipeline.stop();
     if (s.videoState === 'configured') s.decoder.reset();
     s.pendingVideo = [];

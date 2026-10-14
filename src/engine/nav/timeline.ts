@@ -52,6 +52,10 @@ export class Timeline {
     this.duration45 = start;
   }
 
+  get markCount(): number {
+    return this.marks.length;
+  }
+
   get durationUs(): number {
     return ticks45ToUs(this.duration45);
   }

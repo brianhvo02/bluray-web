@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { MarkType, type Mpls } from '../../src/engine/bdmv/mpls-parser';
+import type { Mpls } from '../../src/engine/bdmv/mpls-parser';
 import type { Clpi } from '../../src/engine/bdmv/clpi-parser';
 import { FileSource } from '../../src/engine/disc/file-source';
 import { loadClips, openDisc, type DiscModel } from '../../src/engine/disc/open-disc';
@@ -15,8 +15,6 @@ const READ_SIZE = 6144;
 const SCR_PER_READ = 1800;
 const MAX_READS = 10_000_000;
 const TAIL_READS = 200;
-/** 48 Mbit/s in bytes per second, used when the clip declares no TS_recording_rate. */
-const FALLBACK_RATE = 6_000_000;
 const NO_CHAPTER = 0xffff;
 
 /** bd_event_e BLURAY_UO_* bits of libbluray's _compressed_mask (playFirstPlay and pauseOff have none). */
@@ -38,8 +36,10 @@ function compressedMask(mask: UoMask): number {
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /**
- * Simulated player: playlist time advances by the duration of one 6144-byte read per step at the clip's rate, and the
- * Navigator hears about play items, chapters and the end of the playlist as the position crosses them.
+ * Simulated player, positioned in source packets like libbluray's read loop: a read takes the rest of the current 6144-byte
+ * aligned unit of the play item's clip, seeks land on the EP map entry at or before the target (clpi_lookup_spn), and
+ * every play item starts at packet 0 (true of disc-vm: first item and seamless connections, see _fill_clip). The Navigator
+ * hears about play items, play marks and the end of the playlist as the position crosses them.
  */
 class SimPort implements PlaybackPort {
   navigator!: Navigator;
@@ -47,10 +47,11 @@ class SimPort implements PlaybackPort {
   private mpls: Mpls | null = null;
   private clips: ReadonlyMap<string, Clpi> = new Map();
   private item = 0;
-  /** 45 kHz ticks since the current play item's IN time. */
-  private pos = 0;
+  /** Byte position in the current play item's clip (clip_pos). */
+  private bytes = 0;
   private ended = false;
-  private chapter = NO_CHAPTER;
+  /** libbluray's next_mark: the first play mark after the position, -1 when none is left. */
+  private nextMark = -1;
 
   constructor(private readonly disc: DiscModel, private readonly onHold: (on: boolean) => void) {}
 
@@ -69,35 +70,31 @@ class SimPort implements PlaybackPort {
     this.mpls = mpls;
     this.ended = false;
     this.held = false;
-    this.chapter = NO_CHAPTER;
-    this.item = 0;
-    this.pos = 0;
     let item = 0;
-    let pos = 0;
+    let pkt = 0;
     if (at.mark !== undefined && mpls.marks[at.mark]) {
       const mark = mpls.marks[at.mark]!;
       item = mark.playItemRef;
-      pos = Math.max(0, mark.time - mpls.playItems[item]!.inTime);
+      pkt = this.lookupPkt(item, mark.time);
     } else if (at.item !== undefined && at.item < mpls.playItems.length) {
       item = at.item;
     }
-    if (at.clipTime45 !== undefined && mpls.playItems[item]) pos = Math.max(0, at.clipTime45 - mpls.playItems[item]!.inTime);
+    if (at.clipTime45 !== undefined && mpls.playItems[item] && at.clipTime45 < mpls.playItems[item]!.outTime) pkt = this.lookupPkt(item, at.clipTime45);
     this.item = item;
-    this.pos = pos;
+    this.bytes = pkt * 192;
+    this.findNextMark();
     this.navigator.playlistStarted(id, item); // synchronously, as the real player does
-    this.updateChapter();
     return Promise.resolve(true);
   }
 
   seekPlayItem(item: number): void {
     if (!this.mpls || item >= this.mpls.playItems.length) return;
-    this.moveTo(item, 0);
+    this.moveTo(item, 0, true);
   }
 
   seekMark(mark: number): void {
     const m = this.mpls?.marks[mark];
-    if (!this.mpls || !m) return;
-    this.moveTo(m.playItemRef, Math.max(0, m.time - this.mpls.playItems[m.playItemRef]!.inTime));
+    if (this.mpls && m) this.moveTo(m.playItemRef, this.lookupPkt(m.playItemRef, m.time), true);
   }
 
   stopPlaylist(): void {
@@ -109,56 +106,98 @@ class SimPort implements PlaybackPort {
     this.onHold(on);
   }
 
+  /** _update_time_psr_from_stream: nav_clip_packet_search at the read position. */
   currentClipTime45(): number | undefined {
     const pi = this.mpls?.playItems[this.item];
-    return pi ? pi.inTime + Math.floor(this.pos) : undefined;
+    if (!pi) return undefined;
+    const pkt = Math.floor(this.bytes / 192);
+    const eps = this.epEntries(this.item);
+    let time = 0;
+    for (const e of eps) if (e.spn <= pkt) time = e.pts;
+    return time !== 0 && time < pi.inTime ? pi.inTime : time; // the EP map does not store the low 8 bits
   }
 
-  /** One bd_read_ext() worth of stream data. */
+  /** One bd_read_ext() worth of stream data (_bd_read). */
   read(): void {
     const mpls = this.mpls;
     if (!mpls || this.ended || this.held) return;
-    const pi = mpls.playItems[this.item]!;
-    const rate = this.clips.get(pi.clipId)?.recordingRate || FALLBACK_RATE;
-    this.pos += (READ_SIZE / rate) * 45_000;
-    if (this.pos < pi.outTime - pi.inTime) {
-      this.updateChapter();
-      return;
-    }
-    this.pos = pi.outTime - pi.inTime;
-    if (this.item < mpls.playItems.length - 1) {
+    if (this.bytes >= this.clipBytes(this.item)) {
+      // the clip is used up: still, next play item, or the end of the title
+      if (this.item >= mpls.playItems.length - 1) {
+        this.ended = true;
+        this.navigator.playlistEnded();
+        return;
+      }
       this.navigator.playItemEnded(this.item);
-      if (!this.held && this.mpls === mpls && !this.ended) this.moveTo(this.item + 1, 0);
-    } else {
-      this.ended = true;
-      this.navigator.playlistEnded();
+      if (this.held || this.mpls !== mpls || this.ended) return;
+      this.moveTo(this.item + 1, 0, false);
+    }
+    this.bytes = Math.min(this.clipBytes(this.item), (Math.floor(this.bytes / READ_SIZE) + 1) * READ_SIZE);
+    this.playmarkReached();
+  }
+
+  private epEntries(item: number): readonly { pts: number; spn: number }[] {
+    return this.clips.get(this.mpls!.playItems[item]!.clipId)?.epMaps[0]?.entries ?? [];
+  }
+
+  /** clpi_lookup_spn(before): the packet of the last EP map entry at or before `time45`. */
+  private lookupPkt(item: number, time45: number): number {
+    let pkt = 0;
+    for (const e of this.epEntries(item)) if (e.pts <= time45) pkt = e.spn;
+    return pkt;
+  }
+
+  private clipBytes(item: number): number {
+    const clip = this.clips.get(this.mpls!.playItems[item]!.clipId);
+    return (clip?.numSourcePackets ?? 0) * 192;
+  }
+
+  /** Byte position in the whole playlist (s_pos). */
+  private position(): number {
+    let pos = this.bytes;
+    for (let i = 0; i < this.item; i++) pos += this.clipBytes(i);
+    return pos;
+  }
+
+  private markPosition(index: number): number {
+    const m = this.mpls!.marks[index]!;
+    let pos = this.lookupPkt(m.playItemRef, m.time) * 192;
+    for (let i = 0; i < m.playItemRef; i++) pos += this.clipBytes(i);
+    return pos;
+  }
+
+  /** _find_next_playmark (the chapter PSR part is the Navigator's). */
+  private findNextMark(): void {
+    const here = this.position();
+    this.nextMark = -1;
+    for (let i = 0; i < this.mpls!.marks.length; i++) {
+      if (this.markPosition(i) > here) {
+        this.nextMark = i;
+        break;
+      }
     }
   }
 
-  private moveTo(item: number, pos: number): void {
+  /** _playmark_reached: marks the position has passed, one chapter update for all of them. */
+  private playmarkReached(): void {
+    const here = this.position();
+    let reached = -1;
+    while (this.nextMark >= 0 && here > this.markPosition(this.nextMark)) {
+      reached = this.nextMark;
+      this.nextMark = this.nextMark + 1 < this.mpls!.marks.length ? this.nextMark + 1 : -1;
+    }
+    // the position is just past the last mark reached, so that mark's time stands for it
+    const mark = reached >= 0 ? this.mpls!.marks[reached]! : null;
+    if (mark) this.navigator.markReached(mark.playItemRef, mark.time);
+  }
+
+  /** `seek`: _seek_internal (restarts mark tracking); otherwise the next clip is simply opened. */
+  private moveTo(item: number, pkt: number, seek: boolean): void {
     const changed = item !== this.item;
     this.item = item;
-    this.pos = pos;
+    this.bytes = pkt * 192;
+    if (seek) this.findNextMark();
     if (changed) this.navigator.playItemChanged(item);
-    this.updateChapter();
-  }
-
-  /** bd_get_current_chapter: the last ENTRY mark at or before the position. */
-  private updateChapter(): void {
-    const mpls = this.mpls;
-    if (!mpls) return;
-    const here = this.item * 1e12 + (mpls.playItems[this.item]!.inTime + this.pos);
-    let chapter = 0;
-    let index = 0;
-    for (const m of mpls.marks) {
-      if (m.type !== MarkType.ENTRY) continue;
-      if (m.playItemRef * 1e12 + m.time <= here) chapter = index;
-      index++;
-    }
-    if (chapter !== this.chapter) {
-      this.chapter = chapter;
-      this.navigator.chapterChanged(chapter);
-    }
   }
 }
 
@@ -197,6 +236,8 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
   let popupOpen = false;
   let errored = false;
   let scr = 0;
+  let readsDone = 0;
+  let readsBase = 0;
   const port = new SimPort(disc, (on) => trace.push({ k: 'still', v: on ? 1 : 0 }));
   port.setClips(clips);
   const emit = (e: NavigatorEvent): void => {
@@ -205,6 +246,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
       case 'menu': menuOpen = e.active; trace.push({ k: 'menu', v: e.active ? 1 : 0 }); break;
       case 'popup': popupOpen = e.available; trace.push({ k: 'popup', v: e.available ? 1 : 0 }); break;
       case 'sound': trace.push({ k: 'sound', v: e.id }); break;
+      case 'seek': trace.push({ k: 'seek', what: e.what, v: e.value }); break;
       case 'error': errored = true; break;
       default: break; // title events come from the PSR listener above
     }
@@ -223,6 +265,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
     switch (s.what) {
       case 'title': return lastTitle === s.n;
       case 'playlist': return lastPlaylist === s.n;
+      case 'reads': return readsDone - readsBase >= s.n;
       case 'menu': return menuOpen;
       case 'popup': return popupOpen;
       case 'end': return finished();
@@ -252,6 +295,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
       run(steps[idx]!);
       await settle();
       trace.push({ k: 'step', n: idx });
+      readsBase = readsDone;
       idx++;
     }
     if (errored) {
@@ -264,6 +308,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
     }
     scr += SCR_PER_READ;
     port.read();
+    readsDone++;
     await flush();
   }
   trace.push({ k: 'end', why: 'limit' });

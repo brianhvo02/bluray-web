@@ -6,6 +6,7 @@ import { parseMovieObjects } from '../bdmv/mobj-parser';
 import { parseMpls, type Mpls } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
 import { PSR, RegisterFile } from '../hdmv/registers';
+import { HdmvEventType } from '../hdmv/vm';
 import { Navigator, type NavigatorEvent, type PlaybackPort, type PlayAt } from './navigator';
 
 class FakePort implements PlaybackPort {
@@ -310,19 +311,63 @@ describe('Navigator UO masks and PSRs', () => {
 
   it('writes the chapter PSR only for non-interactive titles', () => {
     const marks = [{ playItemRef: 0, time: 0 }, { playItemRef: 0, time: 45000 }];
-    const run = (playbackType: number): number => {
+    const run = (playbackType: number): number[] => {
       const { nav, regs } = setup({
         objects: [{ cmds: [asm.playPl(imm(0))] }],
         firstPlay: { kind: 'hdmv', movieObjectId: 0, playbackType },
         playlists: { '00000': { items: [item()], marks } },
       });
+      const seen: number[] = [];
+      regs.onWrite = (w) => { if (w.kind === 'psr' && w.index === PSR.CHAPTER) seen.push(w.value); };
       nav.start();
       nav.playlistStarted('00000', 0);
-      nav.chapterChanged(1);
-      return regs.psrRead(PSR.CHAPTER);
+      nav.markReached(0, 50000);
+      return seen;
     };
-    expect(run(0)).toBe(2);
-    expect(run(1)).toBe(0xffff);
+    expect(run(0)).toEqual([0xffff, 1, 2]);
+    expect(run(1)).toEqual([0xffff]);
+  });
+
+  it('follows libbluray for a start item: PSR5 after the first clip, again after the seek, and on every mark (LINK too)', () => {
+    const marks = [
+      { playItemRef: 0, time: 0 }, { playItemRef: 0, time: 45000, type: 2 },
+      { playItemRef: 1, time: 0 }, { playItemRef: 1, time: 45000 },
+    ];
+    const { nav, regs, port } = setup({
+      objects: [{ cmds: [asm.playPlPi(imm(0), imm(1)), asm.playPlPm(imm(0), imm(3))] }],
+      firstPlay: { kind: 'hdmv', movieObjectId: 0, playbackType: 0 },
+      playlists: { '00000': { items: [item(), item()], marks } },
+    });
+    const writes: string[] = [];
+    regs.onWrite = (w) => { if (w.kind === 'psr' && (w.index === PSR.CHAPTER || w.index === PSR.PLAYITEM)) writes.push(`${w.index}=${w.value}`); };
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.mark !== undefined ? 1 : at.item ?? 0);
+    nav.start();
+    expect(writes).toEqual(['5=65535', '7=0', '5=1', '7=1', '5=2']);
+    nav.markReached(1, 10000); // a LINK mark would do the same: PSR5 is written even when unchanged
+    nav.markReached(1, 11000);
+    expect(writes.slice(5)).toEqual(['5=2', '5=2']);
+  });
+
+  it('updates the chapter PSR after PLAY_PM and PLAY_PI within the playlist', async () => {
+    // LINK_MK / LINK_PI only run in button objects (Task 12), so the VM events are injected
+    const marks = [{ playItemRef: 0, time: 0 }, { playItemRef: 0, time: 45000 }, { playItemRef: 1, time: 0 }];
+    const { nav, regs, port } = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))] }],
+      firstPlay: { kind: 'hdmv', movieObjectId: 0, playbackType: 0 },
+      playlists: { '00000': { items: [item(), item()], marks } },
+    });
+    port.onOpen = (id) => nav.playlistStarted(id, 0);
+    nav.start();
+    await flush();
+    const seen: number[] = [];
+    regs.onWrite = (w) => { if (w.kind === 'psr' && w.index === PSR.CHAPTER) seen.push(w.value); };
+    const inject = (type: HdmvEventType, param: number): void =>
+      (nav as unknown as { processHdmvVmEvent(e: { type: HdmvEventType; param: number; param2: number }): void }).processHdmvVmEvent({ type, param, param2: 0 });
+    inject(HdmvEventType.PLAY_PM, 1);
+    inject(HdmvEventType.PLAY_PI, 1);
+    inject(HdmvEventType.PLAY_PM, 9); // out of range: libbluray's bd_seek_mark fails without touching anything
+    expect(port.calls.slice(1)).toEqual(['mark 1', 'item 1', 'mark 9']);
+    expect(seen).toEqual([2, 3]);
   });
 });
 

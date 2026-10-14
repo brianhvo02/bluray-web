@@ -18,6 +18,7 @@
 
 extern void (*bd_trace_write_cb)(int psr, int reg, uint32_t val);
 extern void (*bd_trace_event_cb)(uint32_t event, uint32_t param);
+extern void (*bd_trace_seek_cb)(int what, uint32_t value);
 extern void bd_trace_tick(void);
 extern int bd_trace_finished(BLURAY *bd);
 
@@ -34,6 +35,7 @@ extern int bd_trace_finished(BLURAY *bd);
 static int tracing;
 static long last_title = -1, last_playlist = -1;
 static int menu_open, popup_open, errored, ended;
+static long reads_done, reads_base;
 
 static void emit_value(const char *kind, uint32_t v)
 {
@@ -46,6 +48,14 @@ static void write_cb(int psr, int reg, uint32_t val)
         return;
     }
     printf("{\"k\":\"%s\",\"i\":%d,\"v\":%" PRIu32 "}\n", psr ? "psr" : "gpr", reg, val);
+}
+
+static void seek_cb(int what, uint32_t value)
+{
+    static const char *const NAMES[] = { "item", "mark", "time" };
+    if (tracing) {
+        printf("{\"k\":\"seek\",\"what\":\"%s\",\"v\":%" PRIu32 "}\n", NAMES[what], value);
+    }
 }
 
 static void event_cb(uint32_t event, uint32_t param)
@@ -155,7 +165,7 @@ static void overlay_proc(void *handle, const struct bd_overlay_s * const ov)
 
 /* ---- script ---- */
 
-typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE } step_kind;
+typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE } step_kind;
 typedef struct { step_kind kind; int a, b; } step_t;
 
 static const struct { const char *name; uint32_t vk; } KEYS[] = {
@@ -188,6 +198,7 @@ static int parse_script(const char *path, step_t **out)
         if (!strcmp(w1, "wait") && cnt >= 2) {
             if (!strcmp(w2, "title")) { s.kind = S_WAIT_TITLE; s.a = a; }
             else if (!strcmp(w2, "playlist")) { s.kind = S_WAIT_PLAYLIST; s.a = a; }
+            else if (!strcmp(w2, "reads")) { s.kind = S_WAIT_READS; s.a = a; }
             else if (!strcmp(w2, "menu")) s.kind = S_WAIT_MENU;
             else if (!strcmp(w2, "popup")) s.kind = S_WAIT_POPUP;
             else if (!strcmp(w2, "end")) s.kind = S_WAIT_END;
@@ -240,6 +251,7 @@ static int wait_met(const step_t *s)
     switch (s->kind) {
         case S_WAIT_TITLE: return last_title == s->a;
         case S_WAIT_PLAYLIST: return last_playlist == s->a;
+        case S_WAIT_READS: return reads_done - reads_base >= s->a;
         case S_WAIT_MENU: return menu_open;
         case S_WAIT_POPUP: return popup_open;
         case S_WAIT_END: return ended;
@@ -313,6 +325,7 @@ int main(int argc, char **argv)
 
     bd_trace_write_cb = write_cb;
     bd_trace_event_cb = event_cb;
+    bd_trace_seek_cb = seek_cb;
     tracing = 1;
 
     if (!bd_play(bd)) {
@@ -325,6 +338,7 @@ int main(int argc, char **argv)
             run_step(bd, &steps[idx]);
             settle(bd);
             printf("{\"k\":\"step\",\"n\":%d}\n", idx);
+            reads_base = reads_done;
             idx++;
         }
         if (errored) {
@@ -338,6 +352,7 @@ int main(int argc, char **argv)
 
         bd_trace_tick();
         bd_read_ext(bd, buf, READ_SIZE, &ev);
+        reads_done++;
     }
     finish("limit");
     free(steps);
