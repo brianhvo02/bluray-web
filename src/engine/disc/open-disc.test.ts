@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildClpi, buildIndex, buildMpls } from '../../../tests/helpers/bdmv-builders';
+import { buildClpi, buildIndex, buildMpls, buildSoundBdmv } from '../../../tests/helpers/bdmv-builders';
+import { asm, buildMovieObjects } from '../../../tests/helpers/hdmv-builders';
 import { CodingType } from '../bdmv/stream-types';
 import { DiscError } from './byte-source';
 import { FileSource } from './file-source';
@@ -108,5 +109,30 @@ describe('openDisc', () => {
     const clips = await loadClips(disc(baseFiles()), ['00001', '00002']);
     expect([...clips.keys()]).toEqual(['00001', '00002']);
     expect(clips.get('00001')?.epMaps[0].entries).toEqual([{ pts: 0, spn: 0 }]);
+  });
+
+  it('loads movie objects and sounds', async () => {
+    const files = baseFiles();
+    files['Movie/BDMV/MovieObject.bdmv'] = buildMovieObjects([{ cmds: [asm.nop()] }]);
+    files['Movie/BDMV/AUXDATA/sound.bdmv'] = buildSoundBdmv([{ channels: 1, samples: Int16Array.of(5) }]);
+    const model = await openDisc(disc(files));
+    expect(model.movieObjects?.objects.length).toBeGreaterThan(0);
+    expect([...(model.sounds?.clips[0].samples ?? [])]).toEqual([5]);
+    expect(model.warnings).toEqual([]);
+  });
+
+  it('ignores a damaged MovieObject.bdmv with a warning', async () => {
+    const files = baseFiles();
+    files['Movie/BDMV/MovieObject.bdmv'] = new Uint8Array([0x4d, 0x4f]);
+    const model = await openDisc(disc(files));
+    expect(model.movieObjects).toBeNull();
+    expect(model.warnings[0]).toMatch(/^MovieObject\.bdmv/);
+  });
+
+  it('has no sounds and no warning when AUXDATA is absent', async () => {
+    const model = await openDisc(disc(baseFiles()));
+    expect(model.sounds).toBeNull();
+    expect(model.movieObjects).toBeNull();
+    expect(model.warnings).toEqual([]);
   });
 });

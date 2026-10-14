@@ -240,3 +240,18 @@ export function buildClpi(spec: ClpiSpec): Uint8Array<ArrayBuffer> {
   w.patchU32(addrAt, seqStart).patchU32(addrAt + 4, progStart).patchU32(addrAt + 8, cpiStart).patchU32(addrAt + 12, clipMarkStart);
   return w.toBytes();
 }
+
+export function buildSoundBdmv(clips: Array<{ channels: 1 | 2; samples: Int16Array }>): Uint8Array<ArrayBuffer> {
+  const dataStart = 40 + 4 + 2 + clips.length * 10;
+  const w = new ByteWriter().ascii('BCLK').ascii('0200').u32(dataStart).u32(0).zeros(40 - 16);
+  const totalBytes = clips.reduce((sum, c) => sum + c.samples.length * 2, 0);
+  w.u32(Math.max(1, totalBytes)).u8(0).u8(clips.length);
+  let offset = 0;
+  for (const c of clips) {
+    w.bits(4, c.channels === 2 ? 3 : 1).bits(4, 1).bits(2, 1).bits(6, 0);
+    w.u32(offset).u32(c.samples.length * 2);
+    offset += c.samples.length * 2;
+  }
+  for (const c of clips) for (const s of c.samples) w.u16(s & 0xffff);
+  return w.toBytes();
+}

@@ -1,6 +1,8 @@
 import { parseClpi, type Clpi } from '../bdmv/clpi-parser';
 import { indexUsesBdj, parseIndex, type IndexBdmv } from '../bdmv/index-parser';
+import { parseMovieObjects, type MovieObjects } from '../bdmv/mobj-parser';
 import { MarkType, parseMpls, type Mpls } from '../bdmv/mpls-parser';
+import { parseSoundBdmv, type SoundData } from '../bdmv/sound-parser';
 import { ALIGNED_UNIT_SIZE, SOURCE_PACKET_SIZE } from '../demux/constants';
 import { ParseError } from '../util/byte-reader';
 import { ticks45ToUs } from '../util/time';
@@ -8,6 +10,8 @@ import { DiscError, readWhole, type ByteSource } from './byte-source';
 import { chooseMainTitle, hasRepeatedSegments } from './main-title';
 
 const INDEX_PATH = 'BDMV/INDEX.BDMV';
+const MOVIE_OBJECT_PATH = 'BDMV/MOVIEOBJECT.BDMV';
+const SOUND_PATH = 'BDMV/AUXDATA/SOUND.BDMV';
 
 export const playlistPath = (id: string): string => `BDMV/PLAYLIST/${id}.MPLS`;
 export const clipInfoPath = (clipId: string): string => `BDMV/CLIPINF/${clipId}.CLPI`;
@@ -30,6 +34,10 @@ export interface DiscModel {
   readonly playlists: ReadonlyMap<string, Mpls>;
   /** The main feature first (libbluray's choice among playable playlists), then the rest longest first, loops last. */
   readonly summaries: readonly PlaylistSummary[];
+  /** null when MovieObject.bdmv is missing or damaged. */
+  readonly movieObjects: MovieObjects | null;
+  /** BDMV/AUXDATA/sound.bdmv (menu sounds); null when absent or damaged. */
+  readonly sounds: SoundData | null;
   readonly warnings: readonly string[];
 }
 
@@ -60,13 +68,32 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
     }
   }
 
+  let movieObjects: MovieObjects | null = null;
+  if (source.exists(MOVIE_OBJECT_PATH)) {
+    try {
+      movieObjects = parseMovieObjects(await readWhole(source, MOVIE_OBJECT_PATH));
+    } catch (err) {
+      if (!(err instanceof ParseError)) throw err;
+      warnings.push(`MovieObject.bdmv is damaged and was ignored: ${err.message}`);
+    }
+  }
+
+  let sounds: SoundData | null = null;
+  if (source.exists(SOUND_PATH)) {
+    try {
+      sounds = parseSoundBdmv(await readWhole(source, SOUND_PATH));
+    } catch (err) {
+      if (!(err instanceof ParseError)) throw err;
+    }
+  }
+
   const all = [...playlists].map(([id, mpls]) => summarize(source, id, mpls));
   const mainId = chooseMainTitle(all.filter((s) => s.playable).map((s) => ({ id: s.id, mpls: playlists.get(s.id) as Mpls })));
   const rank = (s: PlaylistSummary): number => (s.id === mainId ? 0 : s.looped ? 2 : 1);
   const summaries = all.sort((a, b) => rank(a) - rank(b) || b.durationUs - a.durationUs || a.id.localeCompare(b.id));
   const main = summaries.find((s) => s.playable);
   if (main) await checkStreamReadable(source, main.clipIds[0]);
-  return { index, usesBdj: indexUsesBdj(index), playlists, summaries, warnings };
+  return { index, usesBdj: indexUsesBdj(index), playlists, summaries, movieObjects, sounds, warnings };
 }
 
 function summarize(source: ByteSource, id: string, mpls: Mpls): PlaylistSummary {
