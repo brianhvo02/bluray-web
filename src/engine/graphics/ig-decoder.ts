@@ -288,10 +288,13 @@ export class IgSegmentDecoder {
     const start = r.position;
     const id = r.u16();
     r.seek(start);
+    const prev = this.objects.get(id);
+    const written = { id, version: prev?.version ?? 0, width: prev?.width ?? 0, height: prev?.height ?? 0 };
     try {
-      this.objects.set(id, decodeObject(r));
+      this.objects.set(id, decodeObject(r, written));
     } catch (e) {
-      this.objects.delete(id);
+      // C: an existing entry keeps whatever pg_decode_object wrote, with img = NULL; a new id is never added
+      if (prev) this.objects.set(id, { ...written, img: [] });
       throw e;
     }
   }

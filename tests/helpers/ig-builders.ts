@@ -70,7 +70,8 @@ export function odsSegment(
   maxBody = MAX_SEGMENT_BODY,
 ): Uint8Array[] {
   const rle = encodeRle(rows);
-  const blob = new ByteWriter().u8(0).u16(rle.length + 4).u16(width).u16(height).bytes(rle).toBytes();
+  const dataLen = rle.length + 4;
+  const blob = new ByteWriter().u8(dataLen >>> 16).u16(dataLen & 0xffff).u16(width).u16(height).bytes(rle).toBytes();
   return fragments(ODS, new ByteWriter().u16(id).u8(version).toBytes(), blob, maxBody);
 }
 

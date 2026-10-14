@@ -137,9 +137,14 @@ function decodeRle(r: ByteReader, width: number, height: number): RleElem[] {
 }
 
 /** pg_decode_object: `r` is positioned after the 3-byte segment header; fragments must already be joined. */
-export function decodeObject(r: ByteReader): PgObject {
+export function decodeObject(r: ByteReader, written?: { id: number; version: number; width: number; height: number }): PgObject {
+  // `written` receives the fields pg_decode_object has stored in the C struct when it fails part-way
   const id = r.u16();
   const version = r.u8();
+  if (written) {
+    written.id = id;
+    written.version = version;
+  }
   const sd = decodeSequenceDescriptor(r);
   if (!sd.firstInSeq) throw new ParseError('pg_decode_object(): not first in sequence');
   if (!sd.lastInSeq) throw new ParseError('pg_decode_object(): not last in sequence');
@@ -147,6 +152,10 @@ export function decodeObject(r: ByteReader): PgObject {
   if (dataLen !== r.remaining) throw new ParseError(`pg_decode_object(): buffer size mismatch (expected ${dataLen}, have ${r.remaining})`);
   const width = r.u16();
   const height = r.u16();
+  if (written) {
+    written.width = width;
+    written.height = height;
+  }
   return { id, version, width, height, img: decodeRle(r, width, height) };
 }
 
@@ -183,6 +192,8 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
  * PES packets (first_in_seq without last_in_seq, then continuations with the same id bytes). Feed each
  * segment to push(); it returns the segments that are now ready to decode, in order.
  */
+// Deviation from C: fragments are joined in arrival order only (no queue search); a too-short continuation is
+// treated as a non-matching segment (C drops it). Readers are strict about overreads where C zero-fills.
 export class SegmentJoiner {
   private chunks: Uint8Array[] = [];
   private layout: FragmentLayout | null = null;
