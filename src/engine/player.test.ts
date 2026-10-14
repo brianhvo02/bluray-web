@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
-import { buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
+import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
+import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
 import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
+import type { OverlayPlane } from './graphics/overlay-plane';
 import { Navigator } from './nav/navigator';
 import { Player } from './player';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
@@ -46,6 +48,8 @@ interface Harness {
   player: Player;
   events: EngineEvent[];
   drawn: number[];
+  /** The IG planes handed to drawIg, one entry per call. */
+  igDraws: OverlayPlane[];
   /** Callbacks the engine registered with requestFrame. */
   frames: Array<() => void>;
   /** Whether the engine has the ring in its playing state. */
@@ -84,17 +88,18 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[] } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; igUnits?: Array<{ pts: number; payload: Uint8Array }> } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
+    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
     movieObjects: opts.movieObjects,
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
+  const igDraws: OverlayPlane[] = [];
   const frames: Array<() => void> = [];
   const clock = { ms: 1000 };
   const player = new Player({
@@ -109,6 +114,10 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
         if (f && opts.throwOnDraw) throw new Error('draw exploded');
         if (f) drawn.push(f.timestamp);
       },
+      drawIg: (plane) => {
+        igDraws.push(plane);
+        plane.takeDirty();
+      },
     }),
   });
   const ring = createRing(48_000, 2);
@@ -122,6 +131,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     player,
     events,
     drawn,
+    igDraws,
     frames,
     ringPlaying: () => Atomics.load(views.control, Control.Playing) === 1,
     async play(ms, opts = {}) {
@@ -763,6 +773,86 @@ describe('Player with HDMV navigation', () => {
     );
     await h.play(500);
     expect(chapterIds(h)).toEqual(['00000', '00001']);
+  });
+
+  describe('menus', () => {
+    const menuAt = (seconds: number) => simpleMenuSegments().map((payload) => ({ pts: CLIP_START_PTS + seconds * 90_000, payload }));
+    const telemetries = (h: Harness) => h.events.flatMap((e) => (e.type === 'telemetry' ? [e.telemetry] : []));
+    const menuEvents = (h: Harness) => h.events.flatMap((e) => (e.type === 'menuActive' ? [e] : []));
+    const bootMenu = (extra: Parameters<typeof harness>[1] = {}) => nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { igUnits: menuAt(0.2), ...extra });
+
+    it('boots into a menu: telemetry carries the page and the buttons drawn, and menuActive is emitted', async () => {
+      const h = await bootMenu();
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+      const menu = lastTelemetry(h)!.menu!;
+      expect(menu.page).toBe(0);
+      expect(menu.selectedButton).toBe(1);
+      expect(menu.buttonsDrawn).toBeGreaterThan(0);
+      expect(menuEvents(h)).toContainEqual({ type: 'menuActive', active: true, popupAvailable: false });
+      expect(lastTelemetry(h)!.igErrors).toBe(0);
+      expect(h.igDraws.length).toBeGreaterThan(0);
+      expect(h.igDraws[0]!.width).toBe(1920);
+    });
+
+    it('does not show the menu before the clock reaches its PTS', async () => {
+      const h = await bootMenu({ igUnits: menuAt(3) });
+      await untilPlaying(h);
+      await h.play(500);
+      expect(lastTelemetry(h)?.menu ?? null).toBeNull();
+      expect(h.igDraws).toEqual([]);
+    });
+
+    it('reports no menu for a disc without IG', async () => {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
+      await untilPlaying(h);
+      await h.play(700);
+      expect(lastTelemetry(h)).toMatchObject({ menu: null, igErrors: 0 });
+      expect(h.igDraws).toEqual([]);
+    });
+
+    it('close while a menu is shown clears the plane and stops menu telemetry', async () => {
+      const h = await bootMenu();
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+      const plane = h.igDraws[0]!;
+      const emptyHash = new (plane.constructor as new (w: number, h: number) => OverlayPlane)(plane.width, plane.height).hash();
+      expect(plane.hash()).not.toBe(emptyHash);
+      await h.player.handle({ type: 'close' });
+      expect(plane.hash()).toBe(emptyHash);
+      expect(menuEvents(h).at(-1)).toMatchObject({ active: false });
+      const seen = telemetries(h).length;
+      await h.play(1200);
+      expect(telemetries(h)).toHaveLength(seen);
+    });
+
+    it('a seek clears the menu until a new epoch start arrives', async () => {
+      const h = await bootMenu();
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+      await h.player.handle({ type: 'seek', timeUs: 2_000_000 }); // the menu's epoch start lies behind the new position
+      await h.play(1500);
+      expect(menuEvents(h).at(-1)).toMatchObject({ active: false });
+      expect(lastTelemetry(h)!.menu).toBeNull();
+    });
   });
 
   type Internals = { navRegs: { psrRead(i: number): number }; navigator: { processHdmvVmEvent(e: unknown): void }; navNextMark: number; session: unknown; syncNavigator(s: unknown): void };

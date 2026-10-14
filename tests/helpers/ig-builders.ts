@@ -184,3 +184,24 @@ export function icsSegment(spec: IcsSpec, maxBody = MAX_SEGMENT_BODY): Uint8Arra
     .toBytes();
   return fragments(ICS, header, blob, maxBody);
 }
+
+/** The segments (one per PES) of a menu with `buttons` stacked buttons on page 0 (ids 1..n, 1 selected), objects 10n..10n+2 (normal, selected, activated), one palette. */
+export function simpleMenuSegments(opts: { buttons?: number; compositionState?: IcsSpec['compositionState']; width?: number; height?: number; cmds?: Uint8Array[] } = {}): Uint8Array[] {
+  const n = opts.buttons ?? 2;
+  const ids = Array.from({ length: n }, (_, i) => i + 1);
+  const spec: IcsSpec = {
+    width: opts.width,
+    height: opts.height,
+    compositionState: opts.compositionState ?? 'epochStart',
+    uiModel: 'alwaysOn',
+    pages: [{
+      id: 0, defaultSelected: 1, paletteId: 0,
+      bogs: ids.map((id) => ({
+        defaultValid: id,
+        buttons: [{ id, x: 100, y: 100 * id, neighbours: [Math.max(1, id - 1), Math.min(n, id + 1), id, id] as [number, number, number, number], normal: [id * 10, id * 10] as [number, number], selected: [id * 10 + 1, id * 10 + 1] as [number, number], activated: [id * 10 + 2, id * 10 + 2] as [number, number], cmds: opts.cmds ?? [] }],
+      })),
+    }],
+  };
+  const objects = ids.flatMap((id) => [0, 1, 2].flatMap((k) => odsSegment(id * 10 + k, 0, 8, 4, Array.from({ length: 4 }, () => new Array<number>(8).fill(1)))));
+  return [...icsSegment(spec), pdsSegment(0, 0, [[1, 100, 128, 128, 255]]), ...objects, endSegment()];
+}

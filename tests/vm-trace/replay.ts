@@ -253,7 +253,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
   port.navigator = navigator;
 
   const settle = async (): Promise<void> => {
-    navigator.tick();
+    navigator.tick(0);
     await flush();
   };
   /** bd_trace_finished: the program has ended and no playlist is playing. */

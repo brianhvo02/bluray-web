@@ -28,6 +28,10 @@ export interface Telemetry {
   /** Decoding restarts on an open-GOP (non-IDR) keyframe in this session, and leading pictures skipped after them. */
   readonly openGopStarts: number;
   readonly leadingPicturesSkipped: number;
+  /** Interactive menu state (PSR11, PSR10, draw operations in the last repaint of the IG plane), or null while no menu is open. */
+  readonly menu: { readonly page: number; readonly selectedButton: number; readonly buttonsDrawn: number } | null;
+  /** Corrupt IG segments dropped. */
+  readonly igErrors: number;
 }
 
 export type ChannelsLabel = 'mono' | 'stereo' | 'multichannel' | '';

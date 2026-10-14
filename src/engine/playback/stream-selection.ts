@@ -34,3 +34,10 @@ export function audioEntryFor(item: PlayItem, stream: number | null): StreamEntr
   const entry = item.stn.audio[stream - 1];
   return entry && !entry.subPath ? entry : null;
 }
+
+/** The main-path entry for IG stream number `stream` in this play item, if it has one. */
+export function igEntryFor(item: PlayItem, stream: number | null): StreamEntry | null {
+  if (stream === null) return null;
+  const entry = item.stn.ig[stream - 1];
+  return entry && !entry.subPath ? entry : null;
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { OverlayPlane, type OverlayOp } from './overlay-plane';
-import { paletteToRgba } from './palette';
+import { paletteToRgba, ycrcbToRgba } from './palette';
 import { cropRle } from './rle';
 import type { PgPaletteEntry, RleElem } from './segments';
 
@@ -113,5 +113,28 @@ describe('OverlayPlane', () => {
     plane.hash();
     plane.rgba({ x: 0, y: 0, w: 64, h: 64 });
     expect(performance.now() - t0).toBeLessThan(3000);
+  });
+
+  it('rgba() matches the per-pixel conversion for many colours, including after a plane change', () => {
+    const plane = new OverlayPlane(64, 32);
+    const pal: PgPaletteEntry[] = Array.from({ length: 256 }, (_, i) => ({ y: (i * 7) & 0xff, cr: (i * 13) & 0xff, cb: (i * 29) & 0xff, t: (i * 3) & 0xff }));
+    const img: RleElem[] = [];
+    for (let row = 0; row < 32; row++) {
+      for (let c = 0; c < 64; c++) img.push({ len: 1, color: (row * 5 + c * 3) & 0xff });
+      img.push(E);
+    }
+    plane.apply({ cmd: 'draw', pts: -1, x: 0, y: 0, w: 64, h: 32, palette: pal, img });
+    const expectAll = (): void => {
+      const out = plane.rgba({ x: 0, y: 0, w: 64, h: 32 });
+      const words = new Uint32Array(out.buffer);
+      for (let row = 0; row < 32; row++) {
+        for (let c = 0; c < 64; c++) expect(words[row * 64 + c]).toBe(ycrcbToRgba(pal[(row * 5 + c * 3) & 0xff]));
+      }
+    };
+    expectAll();
+    expectAll(); // served from the colour cache
+    plane.apply({ cmd: 'wipe', pts: -1, x: 0, y: 0, w: 64, h: 16 });
+    const out = new Uint32Array(plane.rgba({ x: 0, y: 0, w: 64, h: 32 }).buffer);
+    expect(out[0]).toBe(ycrcbToRgba(Z));
   });
 });

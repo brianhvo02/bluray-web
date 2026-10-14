@@ -130,6 +130,8 @@ export class Player {
   /** The play item whose end was reported to the navigator; reset on an item change and on every seek. */
   private navEndReported: number | null = null;
   private menuActive = false;
+  /** Draw operations of the last repaint of the IG plane. */
+  private igDraws = 0;
   private popupAvailable = false;
   /** Bumped by every playlist open and by navigator teardown, so a superseded open stops early. */
   private openGeneration = 0;
@@ -161,6 +163,7 @@ export class Player {
         case 'resize':
           this.compositor?.resize(cmd.width, cmd.height);
           this.compositor?.drawVideo(this.presenter.current);
+          if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
           break;
         case 'playPlaylist':
           this.stopNavigator();
@@ -202,17 +205,15 @@ export class Player {
 
   /** One render tick (requestAnimationFrame in the worker; called directly by tests). */
   tick(): void {
-    this.navigator?.tick();
+    this.navigator?.tick(this.clock.nowUs());
     const s = this.session;
     if (!s) return;
     this.updatePlayback(s);
     this.syncNavigator(s);
     const now = this.clock.nowUs();
     const frame = this.presenter.select(now);
-    if (frame) {
-      this.compositor?.drawVideo(frame);
-      if (this.state === 'playing') this.offsets.push(now - frame.timestamp);
-    }
+    if (frame && this.state === 'playing') this.offsets.push(now - frame.timestamp);
+    this.paint(frame);
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
     if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= (last?.timestamp ?? 0) + 100_000) {
@@ -226,6 +227,19 @@ export class Player {
     if (this.session !== s) return; // the navigator replaced the session
     this.emitTime(Math.min(now, s.timeline.durationUs), false);
     this.maybeEmitTelemetry(s);
+  }
+
+  /** Video, then the IG plane over it. A changed plane repaints the video under it too (the overlay replaces pixels, it does not blend with what it covered). */
+  private paint(frame: VideoFrame | null): void {
+    const nav = this.navigator;
+    const plane = nav?.igPlane ?? null;
+    const igChanged = plane !== null && plane.dirty() !== null;
+    if (frame) this.compositor?.drawVideo(frame);
+    else if (igChanged) this.compositor?.drawVideo(this.presenter.current);
+    if (!plane || !(frame || igChanged)) return;
+    if (this.compositor?.drawIg) this.compositor.drawIg(plane);
+    else plane.takeDirty();
+    if (igChanged && nav) this.igDraws = nav.takeDrawCount();
   }
 
   private startRenderLoop(): void {
@@ -274,6 +288,7 @@ export class Player {
     this.navRegs = regs;
     this.menuActive = false;
     this.popupAvailable = false;
+    this.igDraws = 0;
     return new Navigator({
       disc,
       regs,
@@ -514,13 +529,17 @@ export class Player {
     const decoder = new WebCodecsVideoDecoder(this.deps.videoCodecApi);
     const ref: { current: Session | null } = { current: null };
     const pipeline = new PlaybackPipeline(
-      { source, timeline, clips, videoPid: choice.video.pid, playItems: mpls.playItems, audioStream: audioActive ? audioIndex : null },
+      { source, timeline, clips, videoPid: choice.video.pid, playItems: mpls.playItems, audioStream: audioActive ? audioIndex : null, igStream: this.igStreamNumber() },
       {
         video: (u) => {
           if (ref.current) this.onVideoUnit(ref.current, u);
         },
         audio: (u) => {
           if (ref.current) this.onAudioUnit(ref.current, u);
+        },
+        ig: (u) => {
+          // units of a superseded session or a torn-down navigator are dropped
+          if (ref.current && ref.current === this.session) this.navigator?.pushIg(u);
         },
         isFull: () => ref.current !== null && this.isFull(ref.current),
         ended: () => {
@@ -570,6 +589,12 @@ export class Player {
     this.emitTracks(session);
     await this.startAt(startUs, true);
     return true;
+  }
+
+  /** PSR0, the IG stream number, with a navigator; discs without one show no menus. */
+  private igStreamNumber(): number | null {
+    const n = this.navRegs?.psrRead(PSR.IG_STREAM_ID) ?? 0;
+    return n > 0 ? n : null;
   }
 
   private startTimeUs(timeline: Timeline, at: PlayAt): number {
@@ -643,6 +668,7 @@ export class Player {
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
     this.navNextMark = this.nextMarkAfter(s.timeline, t);
     s.pipeline.stop();
+    this.navigator?.resetGraphics(); // menus built before the seek wait for a new epoch start
     if (s.videoState === 'configured') s.decoder.reset();
     s.pendingVideo = [];
     s.decimator?.reset();
@@ -695,6 +721,7 @@ export class Player {
     }
     this.emitTime(t, true);
     s.pipeline.setAudioStream(s.audioActive ? s.audioStream : null);
+    s.pipeline.setIgStream(this.igStreamNumber());
     s.pipeline.start(t);
   }
 
@@ -1026,6 +1053,8 @@ export class Player {
         decoderErrors: this.decoderErrors,
         openGopStarts: s.decoder.openGop.starts,
         leadingPicturesSkipped: s.decoder.openGop.leadingSkipped,
+        menu: this.menuActive && this.navRegs ? { page: this.navRegs.psrRead(PSR.MENU_PAGE_ID), selectedButton: this.navRegs.psrRead(PSR.SELECTED_BUTTON_ID), buttonsDrawn: this.igDraws } : null,
+        igErrors: this.navigator?.igErrors ?? 0,
       },
     });
   }

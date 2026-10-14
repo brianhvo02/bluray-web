@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildIndex, buildMpls, type IndexObjectSpec, type MarkSpec, type PlayItemSpec } from '../../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../../tests/helpers/hdmv-builders';
+import { simpleMenuSegments } from '../../../tests/helpers/ig-builders';
 import type { Clpi } from '../bdmv/clpi-parser';
 import { parseIndex } from '../bdmv/index-parser';
 import { parseMovieObjects } from '../bdmv/mobj-parser';
@@ -163,11 +164,11 @@ describe('Navigator playlists', () => {
   it('stops the VM and reports an error when a program never settles', () => {
     const { nav, port, events } = setup({ objects: [{ cmds: [asm.jumpTitle(imm(1))] }, idle, { cmds: [asm.jumpTitle(imm(1))] }, idle] });
     nav.start();
-    nav.tick();
+    nav.tick(0);
     expect(events.filter((e) => e.type === 'error')).toHaveLength(1);
     expect(nav.vmRunning).toBe(false);
     const before = events.length;
-    nav.tick();
+    nav.tick(0);
     expect(events).toHaveLength(before);
     expect(port.calls).toEqual([]);
   }, 2000);
@@ -229,10 +230,10 @@ describe('Navigator play item stills', () => {
     nav.playlistEnded();
     expect(port.calls).toEqual(['play 00000 - -', 'hold true']);
     clock.scr = 2 * 90000 - 1;
-    nav.tick();
+    nav.tick(0);
     expect(port.calls).toEqual(['play 00000 - -', 'hold true']);
     clock.scr = 2 * 90000;
-    nav.tick();
+    nav.tick(0);
     expect(port.calls).toEqual(['play 00000 - -', 'hold true', 'hold false', 'play 00001 - -']);
   });
 
@@ -241,7 +242,7 @@ describe('Navigator play item stills', () => {
     nav.start();
     nav.playlistEnded();
     clock.scr = 1e9;
-    nav.tick();
+    nav.tick(0);
     expect(port.calls).toEqual(['play 00000 - -', 'hold true']);
   });
 
@@ -253,7 +254,7 @@ describe('Navigator play item stills', () => {
     nav.start();
     nav.playItemEnded(0);
     clock.scr = 90000;
-    nav.tick();
+    nav.tick(0);
     expect(port.calls).toEqual(['play 00000 - -', 'hold true', 'hold false', 'item 1']);
   });
 
@@ -497,5 +498,101 @@ describe('Navigator review fixes', () => {
     nav.playTitle(1);
     await flush();
     expect(port.calls).toEqual(['play 00000 - -', 'stop', 'play 00001 - -']);
+  });
+});
+
+describe('Navigator interactive graphics', () => {
+  const pushMenu = (nav: Navigator, ptsUs: number, opts: Parameters<typeof simpleMenuSegments>[0] = {}): void => {
+    for (const data of simpleMenuSegments(opts)) nav.pushIg({ data, ptsUs });
+  };
+  const IG = { pid: 0x1400, codingType: 0x91 };
+  async function menuSetup() {
+    const t = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }], playlists: { '00000': { items: [item({ ig: [IG] })] } } });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    t.nav.start();
+    await flush();
+    return t;
+  }
+  const menuEvents = (events: NavigatorEvent[]) => events.filter((e) => e.type === 'menu');
+
+  it('holds a display set back until the clock reaches its PTS', async () => {
+    const { nav, events } = await menuSetup();
+    pushMenu(nav, 5_000_000);
+    nav.tick(4_999_999);
+    expect(nav.igPlane).toBeNull();
+    expect(menuEvents(events)).toEqual([]);
+    nav.tick(5_000_000);
+    expect(nav.igPlane).not.toBeNull();
+    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
+    expect(nav.takeDrawCount()).toBeGreaterThan(0);
+  });
+
+  it('decodes units in PTS order whatever order they arrive in', async () => {
+    const { nav, events } = await menuSetup();
+    pushMenu(nav, 2_000_000, { compositionState: 'normal' });
+    pushMenu(nav, 1_000_000);
+    nav.tick(3_000_000);
+    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
+  });
+
+  it('after resetGraphics() waits for a new epoch start before drawing a menu again', async () => {
+    const { nav, events, regs } = await menuSetup();
+    pushMenu(nav, 0);
+    nav.tick(0);
+    expect(regs.psrRead(PSR.MENU_PAGE_ID)).toBe(0);
+    expect(menuEvents(events)).toEqual([{ type: 'menu', active: true }]);
+    const plane = nav.igPlane!;
+    const hashOpen = plane.hash();
+
+    pushMenu(nav, 9_000_000); // queued, not yet due
+    nav.resetGraphics();
+    expect(menuEvents(events).at(-1)).toEqual({ type: 'menu', active: false });
+    expect(plane.hash()).not.toBe(hashOpen);
+    const draws = nav.takeDrawCount();
+
+    nav.tick(10_000_000); // the queued unit was dropped by the reset
+    pushMenu(nav, 10_000_000, { compositionState: 'normal' });
+    nav.tick(10_000_000);
+    expect(menuEvents(events)).toHaveLength(2);
+    expect(nav.takeDrawCount()).toBe(0);
+    expect(draws).toBeGreaterThan(0);
+
+    pushMenu(nav, 10_000_000);
+    nav.tick(10_000_000);
+    expect(menuEvents(events).at(-1)).toEqual({ type: 'menu', active: true });
+    expect(plane.hash()).toBe(hashOpen);
+  });
+
+  it('resizes the plane to the composition video size', async () => {
+    const { nav } = await menuSetup();
+    pushMenu(nav, 0, { width: 1280, height: 720 });
+    nav.tick(0);
+    expect(nav.igPlane).toMatchObject({ width: 1280, height: 720 });
+  });
+
+  it('ignores IG units without an open playlist and when the playlist has no IG stream', async () => {
+    const t = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }], playlists: { '00000': { items: [item()] } } });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    pushMenu(t.nav, 0); // nothing open yet
+    t.nav.start();
+    await flush();
+    pushMenu(t.nav, 0);
+    t.nav.tick(0);
+    expect(t.nav.igPlane).toBeNull();
+    expect(menuEvents(t.events)).toEqual([]);
+  });
+
+  it('clears the overlay and drops stale units when stopped', async () => {
+    const { nav, events } = await menuSetup();
+    pushMenu(nav, 0);
+    nav.tick(0);
+    const plane = nav.igPlane!;
+    nav.stop();
+    expect(menuEvents(events).at(-1)).toEqual({ type: 'menu', active: false });
+    const cleared = plane.hash();
+    pushMenu(nav, 0);
+    nav.tick(0);
+    expect(plane.hash()).toBe(cleared);
+    expect(menuEvents(events)).toHaveLength(2);
   });
 });

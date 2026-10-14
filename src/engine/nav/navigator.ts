@@ -12,6 +12,9 @@
 import type { IndexObject } from '../bdmv/index-parser';
 import { MarkType, type Mpls, type StreamEntry } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
+import { GraphicsController, GcStatus, type GcCtrl as GraphicsCtrl } from '../graphics/graphics-controller';
+import { IgSegmentDecoder, type IgDisplaySet } from '../graphics/ig-decoder';
+import { OverlayPlane, type OverlayOp } from '../graphics/overlay-plane';
 import { PSR, type PsrEvent, type RegisterFile } from '../hdmv/registers';
 import { combineUoMasks, EMPTY_UO_MASK, parseUoMaskTable, type UoMask, type UoOp } from '../hdmv/uo-mask';
 import { HdmvEventType, HdmvVm, type HdmvEvent } from '../hdmv/vm';
@@ -76,8 +79,23 @@ const INDEX_PLAYBACK_INTERACTIVE = [1, 3]; // indx_hdmv_playback_type_interactiv
 const NO_PLAYLIST = 0xffff;
 
 type TitleType = 'undef' | 'hdmv' | 'bdj';
-/** gc_ctrl_e values the graphics controller will handle (Task 12). */
+/** gc_ctrl_e values the navigator sends to the graphics controller. */
 type GcCtrl = 'INIT_MENU' | 'RESET' | 'ENABLE_BUTTON' | 'DISABLE_BUTTON' | 'SET_BUTTON_PAGE' | 'POPUP' | 'IG_END' | 'NOP';
+
+const GC_CTRL: Readonly<Record<GcCtrl, GraphicsCtrl>> = {
+  INIT_MENU: 'initMenu', RESET: 'reset', ENABLE_BUTTON: 'enableButton', DISABLE_BUTTON: 'disableButton',
+  SET_BUTTON_PAGE: 'setButtonPage', POPUP: 'popup', IG_END: 'igEnd', NOP: 'nop',
+};
+
+const DEFAULT_PLANE_WIDTH = 1920;
+const DEFAULT_PLANE_HEIGHT = 1080;
+const COMPOSITION_ACQUISITION_POINT = 1;
+
+/** A graphics PES payload of the IG stream, in playlist time. */
+export interface IgUnit {
+  readonly data: Uint8Array;
+  readonly ptsUs: number;
+}
 
 /** str_to_uint32(s, 3) */
 function langToUint32(lang: string): number {
@@ -91,8 +109,18 @@ function sameMask(a: UoMask, b: UoMask): boolean {
 }
 
 export class Navigator {
-  /** Graphics controller: Task 12 fills _run_gc / _init_ig_stream. */
-  private readonly gc: null = null;
+  private readonly gc: GraphicsController;
+  private readonly igDecoder = new IgSegmentDecoder();
+  /** The IG overlay (main path only), sized by the composition's video descriptor; null before the first display set. */
+  private plane: OverlayPlane | null = null;
+  /** IG units not yet due, sorted by playlist PTS. */
+  private igQueue: IgUnit[] = [];
+  /** st0.ig_pid > 0: set by _init_ig_stream, cleared when a playlist opens or closes. */
+  private igReady = false;
+  /** After a reset, display sets are ignored until one that carries a whole epoch (epoch start or acquisition point). */
+  private igNeedsEpoch = true;
+  private gcStatus: number = GcStatus.NONE;
+  private drawsSincePaint = 0;
   private vm: HdmvVm | null = null;
   private titleType: TitleType = 'undef';
   private hdmvSuspended = true;
@@ -126,6 +154,40 @@ export class Navigator {
 
   constructor(private readonly deps: NavigatorDeps) {
     deps.regs.onPsrEvent((e) => this.onPsrEvent(e));
+    this.gc = new GraphicsController({ regs: deps.regs, onOverlay: (op) => this.onOverlay(op), nowScr: deps.nowScr });
+  }
+
+  /** The IG plane to composite over the video, or null before any menu was decoded. */
+  get igPlane(): OverlayPlane | null {
+    return this.plane;
+  }
+
+  /** Corrupt IG segments dropped so far. */
+  get igErrors(): number {
+    return this.igDecoder.errors;
+  }
+
+  /** Draw operations applied since the last call: what the last repaint of the plane drew. */
+  takeDrawCount(): number {
+    const n = this.drawsSincePaint;
+    this.drawsSincePaint = 0;
+    return n;
+  }
+
+  /**
+   * An IG graphics unit of the main path arrived. Dropped unless a playlist is open (units of a torn-down
+   * session can still be in flight); decoded by tick() once the clock reaches its PTS.
+   */
+  pushIg(unit: IgUnit): void {
+    if (!this.playing) return;
+    let at = this.igQueue.length;
+    while (at > 0 && this.igQueue[at - 1]!.ptsUs > unit.ptsUs) at--;
+    this.igQueue.splice(at, 0, unit);
+  }
+
+  /** The presentation position moved (a seek): menus built before it are dropped until a new epoch starts. */
+  resetGraphics(): void {
+    this.runGc('RESET');
   }
 
   get uoMask(): UoMask {
@@ -167,8 +229,12 @@ export class Navigator {
     return ok;
   }
 
-  /** The VM part of _read_ext, plus the play-item still timer of bd_read_skip_still. */
-  tick(): void {
+  /**
+   * The VM part of _read_ext, plus the play-item still timer of bd_read_skip_still. IG units whose PTS the playlist
+   * clock (`clockUs`) has reached are decoded first (spec 3.3), as _read_ext decodes a block before it runs the VM.
+   */
+  tick(clockUs: number): void {
+    this.decodeDueIg(clockUs);
     if (this.itemStill && this.itemStill.until !== null && this.deps.nowScr() >= this.itemStill.until) this.skipStill();
     this.runVm();
   }
@@ -457,14 +523,86 @@ export class Navigator {
     }
   }
 
-  /** _run_gc: no graphics controller yet. */
-  private runGc(_msg: GcCtrl): void {
-    if (this.gc === null) return;
+  private onOverlay(op: OverlayOp): void {
+    if (!this.plane) this.plane = new OverlayPlane(DEFAULT_PLANE_WIDTH, DEFAULT_PLANE_HEIGHT);
+    if (op.cmd === 'draw') this.drawsSincePaint++;
+    this.plane.apply(op);
   }
 
-  /** _init_ig_stream: no graphics controller yet. */
-  private initIgStream(): void {
-    if (this.gc === null) return;
+  /** The plane follows the composition's video descriptor; a new one starts blank (and dirty, so the old picture goes). */
+  private ensurePlane(ds: IgDisplaySet): void {
+    const width = ds.composition?.videoWidth || DEFAULT_PLANE_WIDTH;
+    const height = ds.composition?.videoHeight || DEFAULT_PLANE_HEIGHT;
+    if (this.plane && this.plane.width === width && this.plane.height === height) return;
+    this.plane = new OverlayPlane(width, height);
+    this.plane.apply({ cmd: 'clear', pts: -1, x: 0, y: 0, w: 0, h: 0 });
+  }
+
+  /**
+   * The decode half of _read_ext for the IG stream: gc_decode_ts, and INIT_MENU for every complete display set.
+   * libbluray decodes into gc->igs in place, so while a display set is still arriving (ICS seen, END not yet)
+   * gc_run answers -1 to everything but reset; here only complete sets are handed over, so input in that window
+   * acts on the previous set (Task 13 may need to align).
+   */
+  private decodeDueIg(clockUs: number): void {
+    if (!this.igReady || !this.playing) return;
+    while (this.igQueue.length > 0 && this.igQueue[0]!.ptsUs <= clockUs) {
+      const unit = this.igQueue.shift()!;
+      const ds = this.igDecoder.push(unit.data, Math.round((unit.ptsUs * 90) / 1000), null);
+      if (!ds || !ds.composition) continue;
+      if (this.igNeedsEpoch) {
+        if (!ds.epochStart && ds.composition.compositionState !== COMPOSITION_ACQUISITION_POINT) continue;
+        this.igNeedsEpoch = false;
+      }
+      this.ensurePlane(ds);
+      if (this.gc.decodeDisplaySet(ds)) this.runGc('INIT_MENU'); // initialize menus
+    }
+  }
+
+  /** _run_gc */
+  private runGc(msg: GcCtrl, param = 0): number {
+    const gc = this.gc;
+    if (msg === 'RESET') {
+      // _gc_reset also frees the graphics processors
+      this.igDecoder.reset();
+      this.igQueue = [];
+      this.igNeedsEpoch = true;
+    }
+    const vm = this.vm;
+    if (!vm) {
+      if (msg === 'RESET') gc.run('reset'); // the overlay must go even without a program
+      if (this.gcStatus & GcStatus.MENU_OPEN) this.deps.emit({ type: 'menu', active: false });
+      if (this.gcStatus & GcStatus.POPUP) this.deps.emit({ type: 'popup', available: false });
+      this.gcStatus = GcStatus.NONE;
+      return -1;
+    }
+
+    const { result, cmds } = gc.run(GC_CTRL[msg], param);
+    if (cmds.navCmds && cmds.navCmds.length > 0) {
+      vm.setObject(cmds.navCmds);
+      this.hdmvSuspended = !vm.running();
+    }
+    if (cmds.status !== this.gcStatus) {
+      const changed = cmds.status ^ this.gcStatus;
+      this.gcStatus = cmds.status;
+      if (changed & GcStatus.MENU_OPEN) this.deps.emit({ type: 'menu', active: !!(this.gcStatus & GcStatus.MENU_OPEN) });
+      if (changed & GcStatus.POPUP) this.deps.emit({ type: 'popup', available: !!(this.gcStatus & GcStatus.POPUP) });
+    }
+    if (cmds.soundId >= 0 && cmds.soundId < 0xff) this.deps.emit({ type: 'sound', id: cmds.soundId });
+    this.gcUoMask = cmds.pageUoMask;
+    this.updateUoMask();
+    return result;
+  }
+
+  /** _init_ig_stream: the main-path IG stream named by PSR0 is decoded from the clip; sub-path IG is not supported. */
+  private initIgStream(): number {
+    this.igReady = false;
+    const stn = this.playlist?.playItems[this.currentItem]?.stn;
+    const stream = this.deps.regs.psrRead(PSR.IG_STREAM_ID);
+    const entry = stn && stream > 0 && stream <= stn.ig.length ? stn.ig[stream - 1] : undefined;
+    if (!entry || entry.subPath) return 0;
+    this.igReady = true;
+    return 1;
   }
 
   // ---- playlists ----
@@ -472,6 +610,7 @@ export class Navigator {
   /** _open_playlist; `done` is skipped when the playlist was superseded meanwhile. */
   private openPlaylist(num: number, at: PlayAt, done: (ok: boolean) => void): void {
     this.closePlaylist(false);
+    this.igReady = false;
     const generation = ++this.generation;
     const id = String(num).padStart(5, '0');
     let request: Promise<boolean>;
@@ -505,6 +644,7 @@ export class Navigator {
   /** _close_playlist; the port is only told to stop a playlist that has not ended. */
   private closePlaylist(stopPort: boolean): void {
     this.runGc('RESET');
+    this.igReady = false;
     this.keepTime = null;
     this.startAt = null;
     this.generation++; // a pending playPlaylist() result no longer applies

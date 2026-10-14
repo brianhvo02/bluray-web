@@ -24,6 +24,8 @@ export interface OverlayOp {
   readonly paletteUpdate?: boolean;
 }
 
+const MAX_CACHED_COLOURS = 4096;
+
 export interface Rect { readonly x: number; readonly y: number; readonly w: number; readonly h: number }
 
 /**
@@ -52,12 +54,17 @@ export class OverlayPlane {
   readonly width: number;
   readonly height: number;
   private readonly px: Uint8Array;
+  /** The same bytes as one little-endian word per pixel: the key of the colour cache. */
+  private readonly words: Uint32Array;
+  /** Plane word (Y, Cr, Cb, T) to packed RGBA; menus use a few dozen colours, so this replaces the per-pixel conversion. */
+  private readonly rgbaCache = new Map<number, number>();
   private dirtyRect: Rect | null = null;
 
   constructor(width = 1920, height = 1080) {
     this.width = width;
     this.height = height;
     this.px = new Uint8Array(width * height * 4);
+    this.words = new Uint32Array(this.px.buffer);
   }
 
   apply(op: OverlayOp): void {
@@ -91,7 +98,7 @@ export class OverlayPlane {
   }
 
   /** RGBA (non-premultiplied, ImageData order) for the rect clipped to the plane; only touches the rect. */
-  rgba(rect: Rect): Uint8ClampedArray {
+  rgba(rect: Rect): Uint8ClampedArray<ArrayBuffer> {
     const x0 = Math.max(0, rect.x);
     const y0 = Math.max(0, rect.y);
     const x1 = Math.min(this.width, rect.x + rect.w);
@@ -100,11 +107,26 @@ export class OverlayPlane {
     const h = Math.max(0, y1 - y0);
     const out = new Uint8ClampedArray(w * h * 4);
     const out32 = new Uint32Array(out.buffer);
+    const cache = this.rgbaCache;
+    if (cache.size > MAX_CACHED_COLOURS) cache.clear();
     let o = 0;
+    let lastWord = -1; // no word equals it
+    let lastRgba = 0;
     for (let y = y0; y < y1; y++) {
-      let p = (y * this.width + x0) * 4;
-      for (let x = x0; x < x1; x++, p += 4) {
-        out32[o++] = ycrcbToRgba({ y: this.px[p]!, cr: this.px[p + 1]!, cb: this.px[p + 2]!, t: this.px[p + 3]! });
+      let i = y * this.width + x0;
+      for (let x = x0; x < x1; x++, i++) {
+        const word = this.words[i]!;
+        if (word !== lastWord) {
+          let rgba = cache.get(word);
+          if (rgba === undefined) {
+            const p = i * 4;
+            rgba = ycrcbToRgba({ y: this.px[p]!, cr: this.px[p + 1]!, cb: this.px[p + 2]!, t: this.px[p + 3]! });
+            cache.set(word, rgba);
+          }
+          lastWord = word;
+          lastRgba = rgba;
+        }
+        out32[o++] = lastRgba;
       }
     }
     return out;

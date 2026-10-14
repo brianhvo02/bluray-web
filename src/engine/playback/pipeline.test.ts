@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { VIDEO_PID, buildSyntheticDisc, lpcmStream, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
+import { CLIP_START_PTS, VIDEO_PID, buildSyntheticDisc, lpcmStream, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
+import { simpleMenuSegments } from '../../../tests/helpers/ig-builders';
 import { buildClpi, buildIndex, buildMpls } from '../../../tests/helpers/bdmv-builders';
 import { parseClpi } from '../bdmv/clpi-parser';
 import { parseMpls } from '../bdmv/mpls-parser';
@@ -57,6 +58,54 @@ function run(
 async function turns(count: number): Promise<void> {
   for (let i = 0; i < count; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+describe('PlaybackPipeline IG', () => {
+  const menu = (state: 'epochStart' | 'normal' = 'epochStart'): Array<{ pts: number; payload: Uint8Array }> =>
+    simpleMenuSegments({ compositionState: state }).map((payload) => ({ pts: CLIP_START_PTS + 90_000, payload }));
+  async function igSetup(): Promise<PipelineConfig> {
+    const files = buildSyntheticDisc({
+      clips: [syntheticClip('00001', 2, { igStreams: [{ pid: 0x1400, units: menu() }, { pid: 0x1401, units: menu('normal') }] }), syntheticClip('00002', 2, { igStreams: [{ pid: 0x1401, units: menu() }, { pid: 0x1400, units: menu('normal') }] })],
+      playlists: [{ id: '00000', clipIds: ['00001', '00002'] }],
+    });
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    return { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001', '00002']), videoPid: VIDEO_PID, playItems: mpls.playItems, audioStream: null };
+  }
+  async function collect(config: PipelineConfig, setStream?: number | null): Promise<PipelineUnit[]> {
+    const got: PipelineUnit[] = [];
+    let finish: () => void = () => undefined;
+    const done = new Promise<void>((r) => (finish = r));
+    const p = new PlaybackPipeline(config, { video: () => undefined, audio: () => undefined, ig: (u) => got.push(u), isFull: () => false, ended: () => finish(), failed: () => finish() });
+    if (setStream !== undefined) p.setIgStream(setStream);
+    p.start(0);
+    await done;
+    return got;
+  }
+
+  it('delivers units of the selected IG stream only, resolving its PID per play item', async () => {
+    const units = await collect(await igSetup(), 1);
+    // item 1: stream 1 is PID 0x1400 (epoch start); item 2: stream 1 is PID 0x1401 (epoch start)
+    expect(units).toHaveLength(2 * simpleMenuSegments().length);
+    expect(units.every((u) => u.inRange)).toBe(true);
+    const stream2 = await collect(await igSetup(), 2);
+    expect(stream2).toHaveLength(2 * simpleMenuSegments().length); // the 'normal' sets
+    expect(units[0]!.data).not.toEqual(stream2[0]!.data); // epoch-start ICS vs normal ICS
+  });
+
+  it('reads no IG without a stream number or a sink, and for a number the play item does not have', async () => {
+    const config = await igSetup();
+    expect(await collect(config)).toEqual([]);
+    expect(await collect(config, null)).toEqual([]);
+    expect(await collect(config, 3)).toEqual([]);
+    const { got, done } = run({ ...config, igStream: 1 }, 0); // no ig sink
+    await done;
+    expect(got.ended).toBe(1);
+  });
+
+  it('takes the stream number from the config', async () => {
+    expect((await collect({ ...(await igSetup()), igStream: 1 })).length).toBeGreaterThan(0);
+  });
+});
 
 describe('PlaybackPipeline', () => {
   it('reads both play items in order on one continuous timeline', async () => {
