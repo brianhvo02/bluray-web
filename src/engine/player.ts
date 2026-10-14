@@ -13,6 +13,7 @@ import { checkStreamReadable, loadClips, openDisc, playlistPath, type DiscModel 
 import { normalizeDiscPaths } from './disc/paths';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
 import { Navigator, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
+import { lookupSpn } from './nav/packets';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
@@ -122,6 +123,8 @@ export class Player {
   private navItem = 0;
   /** libbluray's next_mark: index of the first play mark after the presentation position, -1 when none is left. */
   private navNextMark = -1;
+  /** Seeks the navigator asked for (PLAY_PI / PLAY_PM) that are queued but have not run: marks are not reported meanwhile. */
+  private navSeeksPending = 0;
   /** Presentation is frozen (still image): the clock and audio output are stopped. */
   private held = false;
   /** The play item whose end was reported to the navigator; reset on an item change and on every seek. */
@@ -179,6 +182,7 @@ export class Player {
           this.close();
           break;
         case 'seek':
+          this.notifySeeked(cmd.timeUs);
           await this.startAt(cmd.timeUs, this.wantPlaying);
           break;
         case 'selectAudio':
@@ -340,14 +344,13 @@ export class Player {
       },
       seekPlayItem: (item) => {
         const s = this.session;
-        if (s && item >= 0 && item < s.timeline.items.length) this.enqueue(async () => this.session === s ? this.startAt(s.timeline.itemStartUs(item), this.wantPlaying) : undefined);
+        if (s && item >= 0 && item < s.timeline.items.length) this.enqueueNavSeek(s, s.timeline.itemStartUs(item));
       },
       seekMark: (mark) => {
         const s = this.session;
         if (!s) return;
         try {
-          const t = s.timeline.markTimeUs(mark);
-          this.enqueue(async () => this.session === s ? this.startAt(t, this.wantPlaying) : undefined);
+          this.enqueueNavSeek(s, s.timeline.markTimeUs(mark));
         } catch (err) {
           if (!(err instanceof RangeError)) throw err;
         }
@@ -361,6 +364,27 @@ export class Player {
       // _update_time_psr_from_stream: the clip time of the presentation position
       currentClipTime45: () => (this.session ? this.session.timeline.locate(this.clock.nowUs()).clipTime45 : undefined),
     };
+  }
+
+  /** A seek the navigator asked for: the target is applied once the queued commands ran. */
+  private enqueueNavSeek(s: Session, timeUs: number): void {
+    this.navSeeksPending++;
+    this.enqueue(async () => {
+      try {
+        if (this.session === s) await this.startAt(timeUs, this.wantPlaying);
+      } finally {
+        this.navSeeksPending--;
+      }
+    });
+  }
+
+  /** A user seek: libbluray's _seek_internal updates the chapter PSR for the packet the target time maps to. */
+  private notifySeeked(targetUs: number): void {
+    const s = this.session;
+    if (!s || !this.navigator) return;
+    const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
+    const at = s.timeline.locate(t);
+    this.navigator.seeked(at.item.index, at.clipTime45);
   }
 
   /** Runs `work` after the queued commands, reporting a failure like a command's. */
@@ -412,11 +436,15 @@ export class Player {
     }
     // _playmark_reached: every mark passed since the last look, ENTRY or LINK, is one chapter PSR update
     let marksReached = false;
-    while (this.navNextMark >= 0 && now > s.timeline.markTimeUs(this.navNextMark)) {
+    // not while a seek of the navigator is still queued: the old position would report marks the program has left behind
+    while (this.navSeeksPending === 0 && this.navNextMark >= 0 && now > s.timeline.markTimeUs(this.navNextMark)) {
       marksReached = true;
       this.navNextMark = this.navNextMark + 1 < s.timeline.markCount ? this.navNextMark + 1 : -1;
     }
-    if (marksReached) nav.markReached(item.index, s.timeline.locate(now).clipTime45);
+    if (marksReached) {
+      const clipTime45 = s.timeline.locate(now).clipTime45;
+      nav.markReached(item.index, lookupSpn(this.disc?.clips.get(s.playItems[item.index]!.clipId), clipTime45, true));
+    }
     const stillMode = s.playItems[item.index]?.stillMode ?? 0;
     if (this.state === 'playing' && stillMode !== 0 && this.navEndReported !== item.index && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
       this.navEndReported = item.index;
@@ -716,7 +744,10 @@ export class Player {
     } else {
       target = [...s.chapters].reverse().find((c) => c.startUs < now - PREV_CHAPTER_RESTART_US)?.startUs ?? 0;
     }
-    if (target !== undefined) await this.startAt(target, this.wantPlaying);
+    if (target !== undefined) {
+      this.notifySeeked(target);
+      await this.startAt(target, this.wantPlaying);
+    }
   }
 
   private onVideoUnit(s: Session, u: PipelineUnit): void {

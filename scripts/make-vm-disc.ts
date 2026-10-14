@@ -104,6 +104,8 @@ const movieObjects = buildMovieObjects([
     resumeIntention: true,
     cmds: [asm.playPl(imm(3)), asm.playPlPi(imm(3), imm(1)), asm.playPlPm(imm(3), imm(1)), asm.playPlPm(imm(3), imm(2)), asm.jumpObject(imm(5))],
   },
+  // 7: title 4, a movie title: start item 1 of a playlist whose second (seamless) item has a chapter mark at its start
+  { cmds: [asm.playPlPi(imm(4), imm(1)), asm.jumpObject(imm(5))] },
 ]);
 
 /** 45 kHz clip time of the first frame. */
@@ -127,6 +129,17 @@ const files = buildSyntheticDisc({
         { playItemRef: 1, time: CLIP_IN + 45_000, type: 1 },
       ],
     },
+    // chapter mark at the start of the seamless (condition 5) second item: libbluray starts that item at packet 0, before
+    // the mark's packet (the first EP map entry), so a start item there is still in the first chapter
+    {
+      id: '00004',
+      clipIds: ['00001', '00002'],
+      marks: [
+        { playItemRef: 0, time: CLIP_IN, type: 1 },
+        { playItemRef: 1, time: CLIP_IN, type: 1 },
+        { playItemRef: 1, time: CLIP_IN + 45_000, type: 1 },
+      ],
+    },
   ],
   movieObjects,
   index: {
@@ -136,6 +149,7 @@ const files = buildSyntheticDisc({
       { kind: 'hdmv', movieObjectId: 2, playbackType: INTERACTIVE },
       { kind: 'hdmv', movieObjectId: 3, playbackType: INTERACTIVE },
       { kind: 'hdmv', movieObjectId: 6, playbackType: 0 },
+      { kind: 'hdmv', movieObjectId: 7, playbackType: 0 },
     ],
   },
 });

@@ -765,6 +765,44 @@ describe('Player with HDMV navigation', () => {
     expect(chapterIds(h)).toEqual(['00000', '00001']);
   });
 
+  type Internals = { navRegs: { psrRead(i: number): number }; navigator: { processHdmvVmEvent(e: unknown): void }; navNextMark: number; session: unknown; syncNavigator(s: unknown): void };
+  const internals = (h: Harness): Internals => h.player as unknown as Internals;
+
+  it('updates the chapter PSR at once on a user seek, backwards too', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
+    await untilPlaying(h);
+    expect(internals(h).navRegs.psrRead(5)).toBe(1);
+    await h.player.handle({ type: 'seek', timeUs: 3_500_000 });
+    expect(internals(h).navRegs.psrRead(5)).toBe(4);
+    await h.player.handle({ type: 'seek', timeUs: 1_500_000 });
+    expect(internals(h).navRegs.psrRead(5)).toBe(2); // not left at the later chapter
+    await h.player.handle({ type: 'prevChapter' });
+    expect(internals(h).navRegs.psrRead(5)).toBe(1);
+    await h.player.handle({ type: 'nextChapter' });
+    expect(internals(h).navRegs.psrRead(5)).toBe(2);
+  });
+
+  it('reports no marks while a seek asked for by the program is still queued', async () => {
+    const reached = vi.spyOn(Navigator.prototype, 'markReached');
+    try {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
+      await untilPlaying(h);
+      await h.play(1300);
+      const me = internals(h);
+      reached.mockClear();
+      me.navNextMark = 1; // as if the old position had a mark due
+      me.navigator.processHdmvVmEvent({ type: 7, param: 0, param2: 0 }); // PLAY_PI 0: queues a seek to the start
+      me.syncNavigator(me.session);
+      expect(reached).not.toHaveBeenCalled();
+      await h.play(100);
+      me.navNextMark = 0; // the clock is back near 0 after the seek, mark 0 is due
+      me.syncNavigator(me.session);
+      expect(reached).toHaveBeenCalled(); // the seek ran, reporting is back
+    } finally {
+      reached.mockRestore();
+    }
+  });
+
   const twoLanguages = [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })];
 
   it('routes a user audio change through PSR1', async () => {

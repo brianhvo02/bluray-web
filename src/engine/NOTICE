@@ -19,6 +19,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     hdmv/uo-mask.ts       from src/libbluray/bdnav/uo_mask.c, uo_mask.h, uo_mask_table.h
     hdmv/vm.ts            from src/libbluray/hdmv/hdmv_vm.c
     nav/timeline.ts      derived from libbluray navigation time math
+    nav/packets.ts       derived from libbluray navigation.c (_fill_clip, _fill_mark) and clpi_parse.c (clpi_lookup_spn)
     nav/navigator.ts      from src/libbluray/bluray.c (HDMV title and navigation parts)
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
   util/byte-reader.ts is an original implementation modelled on libbluray's

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildIndex, buildMpls, type IndexObjectSpec, type MarkSpec, type PlayItemSpec } from '../../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../../tests/helpers/hdmv-builders';
+import type { Clpi } from '../bdmv/clpi-parser';
 import { parseIndex } from '../bdmv/index-parser';
 import { parseMovieObjects } from '../bdmv/mobj-parser';
 import { parseMpls, type Mpls } from '../bdmv/mpls-parser';
@@ -37,6 +38,13 @@ const flush = async (): Promise<void> => { for (let i = 0; i < 5; i++) await Pro
 const item = (extra: Partial<PlayItemSpec> = {}): PlayItemSpec => ({ clipId: '00001', inTime: 0, outTime: 90000, ...extra });
 const idle: ObjectSpec = { cmds: [] };
 
+/** A clip with an EP map entry every 45000 ticks from `inTime` (packet 6 + 100 per entry) and 100 packets after the last. */
+function fakeClip(inTime: number, outTime: number): Clpi {
+  const entries = [];
+  for (let k = 0; inTime + k * 45000 <= outTime; k++) entries.push({ pts: inTime + k * 45000, spn: 6 + k * 100 });
+  return { version: '0200', numSourcePackets: 6 + entries.length * 100, recordingRate: 0, atcSequences: [], programs: [], epMaps: [{ pid: 0x1011, epStreamType: 1, entries }] };
+}
+
 function setup(opts: {
   objects: ObjectSpec[];
   titles?: IndexObjectSpec[];
@@ -52,7 +60,14 @@ function setup(opts: {
   for (const [id, p] of Object.entries(opts.playlists ?? { '00000': { items: [item()] }, '00001': { items: [item()] } })) {
     playlists.set(id, parseMpls(buildMpls({ playItems: p.items, uoMask: p.uoMask, marks: p.marks })));
   }
-  const disc = { index, playlists, movieObjects: parseMovieObjects(buildMovieObjects(opts.objects)) } as unknown as DiscModel;
+  const clips = new Map<string, Clpi>();
+  for (const p of Object.values(opts.playlists ?? { a: { items: [item()] } })) {
+    for (const i of p.items) {
+      const old = clips.get(i.clipId);
+      clips.set(i.clipId, fakeClip(Math.min(i.inTime, old?.epMaps[0]?.entries[0]?.pts ?? i.inTime), Math.max(i.outTime, old ? old.epMaps[0]!.entries.at(-1)!.pts : i.outTime)));
+    }
+  }
+  const disc = { index, playlists, clips, movieObjects: parseMovieObjects(buildMovieObjects(opts.objects)) } as unknown as DiscModel;
   const port = new FakePort();
   const regs = new RegisterFile();
   const events: NavigatorEvent[] = [];
@@ -321,7 +336,7 @@ describe('Navigator UO masks and PSRs', () => {
       regs.onWrite = (w) => { if (w.kind === 'psr' && w.index === PSR.CHAPTER) seen.push(w.value); };
       nav.start();
       nav.playlistStarted('00000', 0);
-      nav.markReached(0, 50000);
+      nav.markReached(0, 120);
       return seen;
     };
     expect(run(0)).toEqual([0xffff, 1, 2]);
@@ -343,9 +358,25 @@ describe('Navigator UO masks and PSRs', () => {
     port.onOpen = (id, at) => nav.playlistStarted(id, at.mark !== undefined ? 1 : at.item ?? 0);
     nav.start();
     expect(writes).toEqual(['5=65535', '7=0', '5=1', '7=1', '5=2']);
-    nav.markReached(1, 10000); // a LINK mark would do the same: PSR5 is written even when unchanged
-    nav.markReached(1, 11000);
+    nav.markReached(1, 50); // a LINK mark would do the same: PSR5 is written even when unchanged
+    nav.markReached(1, 51);
     expect(writes.slice(5)).toEqual(['5=2', '5=2']);
+  });
+
+  it('compares packets: a start item with a seamless connection begins before the first EP entry, so the chapter at its start mark is not reached', () => {
+    const marks = [{ playItemRef: 0, time: 0 }, { playItemRef: 1, time: 0 }];
+    const run = (connectionCondition: number): number => {
+      const { nav, regs, port } = setup({
+        objects: [{ cmds: [asm.playPlPi(imm(0), imm(1))] }],
+        firstPlay: { kind: 'hdmv', movieObjectId: 0, playbackType: 0 },
+        playlists: { '00000': { items: [item(), item({ connectionCondition })], marks } },
+      });
+      port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+      nav.start();
+      return regs.psrRead(PSR.CHAPTER);
+    };
+    expect(run(5)).toBe(1); // start_pkt 0 < the mark's packet 6 (libbluray)
+    expect(run(1)).toBe(2); // start_pkt = the EP entry at the item's IN time = the mark's packet
   });
 
   it('updates the chapter PSR after PLAY_PM and PLAY_PI within the playlist', async () => {

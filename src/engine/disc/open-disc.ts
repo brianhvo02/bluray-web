@@ -34,6 +34,8 @@ export interface DiscModel {
   readonly playlists: ReadonlyMap<string, Mpls>;
   /** The main feature first (libbluray's choice among playable playlists), then the rest longest first, loops last. */
   readonly summaries: readonly PlaylistSummary[];
+  /** CLPI of every clip the playlists use, for the HDMV navigator's packet positions; empty for discs without MovieObject.bdmv. */
+  readonly clips: ReadonlyMap<string, Clpi>;
   /** null when MovieObject.bdmv is missing or damaged. */
   readonly movieObjects: MovieObjects | null;
   /** BDMV/AUXDATA/sound.bdmv (menu sounds); null when absent or damaged. */
@@ -87,13 +89,26 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
     }
   }
 
+  const clips = new Map<string, Clpi>();
+  if (movieObjects) {
+    const clipIds = [...new Set([...playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)))];
+    for (const clipId of clipIds) {
+      if (!source.exists(clipInfoPath(clipId))) continue;
+      try {
+        clips.set(clipId, parseClpi(await readWhole(source, clipInfoPath(clipId))));
+      } catch (err) {
+        if (!(err instanceof ParseError)) throw err;
+      }
+    }
+  }
+
   const all = [...playlists].map(([id, mpls]) => summarize(source, id, mpls));
   const mainId = chooseMainTitle(all.filter((s) => s.playable).map((s) => ({ id: s.id, mpls: playlists.get(s.id) as Mpls })));
   const rank = (s: PlaylistSummary): number => (s.id === mainId ? 0 : s.looped ? 2 : 1);
   const summaries = all.sort((a, b) => rank(a) - rank(b) || b.durationUs - a.durationUs || a.id.localeCompare(b.id));
   const main = summaries.find((s) => s.playable);
   if (main) await checkStreamReadable(source, main.clipIds[0]);
-  return { index, usesBdj: indexUsesBdj(index), playlists, summaries, movieObjects, sounds, warnings };
+  return { index, usesBdj: indexUsesBdj(index), playlists, summaries, clips, movieObjects, sounds, warnings };
 }
 
 function summarize(source: ByteSource, id: string, mpls: Mpls): PlaylistSummary {

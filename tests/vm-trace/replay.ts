@@ -186,9 +186,7 @@ class SimPort implements PlaybackPort {
       reached = this.nextMark;
       this.nextMark = this.nextMark + 1 < this.mpls!.marks.length ? this.nextMark + 1 : -1;
     }
-    // the position is just past the last mark reached, so that mark's time stands for it
-    const mark = reached >= 0 ? this.mpls!.marks[reached]! : null;
-    if (mark) this.navigator.markReached(mark.playItemRef, mark.time);
+    if (reached >= 0) this.navigator.markReached(this.item, Math.floor(this.bytes / 192));
   }
 
   /** `seek`: _seek_internal (restarts mark tracking); otherwise the next clip is simply opened. */

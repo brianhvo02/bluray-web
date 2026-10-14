@@ -5,7 +5,7 @@ Runs a disc through real libbluray and prints what its HDMV VM and navigation do
 - `Dockerfile`: ubuntu 24.04 (pinned by digest, linux/amd64) with libbluray cloned at `448f896`, `trace.patch` applied, built with meson as a static library, and `vm_trace.c` linked statically against it.
 - `trace.patch`: four small changes to libbluray, nothing else.
   - `register.c`: `bd_trace_write_cb` is called after every successful `bd_gpr_write` / `bd_psr_setting_write`, after the PSR callbacks have run.
-  - `bluray.c`: `bd_trace_event_cb` is called for every event put in the event queue, and `bd_trace_finished()` reports that the HDMV program has ended and no playlist is playing.
+  - `bluray.c`: `bd_trace_event_cb` is called for every event put in the event queue, `bd_trace_seek_cb` for every accepted `bd_seek_playitem` / `bd_seek_mark` / `_clip_seek_time` (the `seek` entries), and `bd_trace_finished()` reports that the HDMV program has ended and no playlist is playing.
   - `hdmv_vm.c`: the random state always starts at 1.
   - `util/time.c`: `bd_get_scr()` is a counter that the harness advances by 1800 per read (`bd_trace_tick()`).
 - `vm_trace.c`: the harness. `vm_trace <disc-dir> <script>` prints the trace (`tests/vm-trace/format.ts`) to stdout. libbluray's own log goes to stderr.
@@ -24,5 +24,6 @@ Events (`title`, `playlist`, `playitem`, `chapter`, `menu`, `popup`, `uo`, `soun
 ## Limits
 
 - Item stills (`BD_EVENT_STILL_TIME`) have no trace entry; `still` is the HDMV STILL event only, but the replay logs it from the port's `hold()`, so a disc with item stills would diverge until that is separated.
+- The replay port assumes play items start at packet 0 (first item, seamless connections) and tracks marks by packet like libbluray; other start packets are not modelled there. The Navigator itself derives start packets from the CLPI like `_fill_clip`.
 - Key, mouse and click steps drive libbluray's graphics controller; the replay cannot run them until the graphics controller is ported, and throws if a script uses them (`topmenu` and `play title` work).
 - The IG plane hash is not emitted yet (the overlay callback only keeps the palette plane).

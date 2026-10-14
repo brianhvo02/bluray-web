@@ -1,0 +1,4 @@
+# a start item whose chapter mark sits at the start of a seamless item (libbluray starts it before the mark)
+wait end
+play title 4
+wait end
