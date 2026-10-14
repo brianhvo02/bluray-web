@@ -951,6 +951,46 @@ export class GraphicsController {
 
 ---
 
+### Task 12b: IG menus in sub-paths (preloaded IG)
+
+*Added during execution (controller ruling R17).* TSURUNE carries every IG stream in a sub-path, with STN IG entries of `subPath: true` and no IG PID in any main clip. `mpls-parser.ts` does not parse sub-paths, so as planned its menus would never appear and exit criterion 2 would fail.
+
+**Files:**
+- Modify: `src/engine/bdmv/mpls-parser.ts` (sub-paths and STN sub-path references), `src/engine/nav/navigator.ts`, `src/engine/disc/open-disc.ts`
+- Modify: `tests/helpers/bdmv-builders.ts` and `tests/helpers/synthetic-disc.ts` (sub-paths, IG in a sub-path clip)
+- Tests: `mpls-parser.test.ts`, `navigator.test.ts`, `player.test.ts`
+
+**Port:**
+- `bdnav/mpls_parse.c`: `_parse_subplayitem`, `_parse_subpath` and the sub-path loop in `_parse_playlist`; the STN stream entry's `subpath_id`/`subclip_id` for `stream_type` 2/3/4 (`_parse_stream`, lines ~130-145); `_parse_subpath_extension` only if needed for IG (it is not needed for HDMV IG).
+- `bluray.c`:
+  - `_find_ig_stream`, which finds the PID, sub-path and sub-clip from PSR0 and the STN;
+  - `_preload_ig_subpath` and `_preload_subpaths`, called at playlist open: the whole sub-path clip is read into memory (`_preload_m2ts`);
+  - the sub-path branch of `_init_ig_stream`, which decodes the whole preloaded buffer with no timing gate (`stc = -1`) on every IG initialisation (INIT after a playlist starts, and after a PSR restore).
+
+**Interfaces (produces):**
+```ts
+// mpls-parser.ts
+export interface SubPlayItem { readonly clipId: string; readonly codecId: string; readonly connectionCondition: number; readonly isMultiClip: boolean; readonly stcId: number; readonly inTime: number; readonly outTime: number; readonly syncPlayItemId: number; readonly syncPts: number }
+export interface SubPath { readonly type: number; readonly isRepeat: boolean; readonly items: readonly SubPlayItem[] }
+// Mpls gains: readonly subPaths: readonly SubPath[]
+// StreamEntry gains: readonly subPathId: number; readonly subClipId: number   (0 for main-path entries)
+```
+
+**Behaviour:** the Navigator resolves the IG stream with `_find_ig_stream`.
+- **Sub-path IG:** at playlist open it reads the sub-path clip's `.m2ts` in full through the disc source, demuxes the IG PID into PES units with the existing `M2tsReader`/`PesAssembler`, and stores them. On every IG initialisation it feeds them all to `IgSegmentDecoder` in stream order with no timing gate, then runs `INIT_MENU`, as libbluray does.
+- **Main-path IG:** unchanged; Task 12's pipeline path.
+
+The preloaded buffer is dropped when the playlist closes.
+
+- [ ] **Step 1: Write the failing tests.**
+  - The MPLS parser reads sub-paths and sub-play-items, built with an extended `buildMpls` (`subPaths`), and the STN `subPathId`/`subClipId`. Add a cross-check on TSURUNE in `tests/local` that the IG entry's sub-path resolves to an existing clip.
+  - Navigator: a synthetic disc whose IG lives in a sub-path clip (extend `buildSyntheticDisc` with `subPathIg`) boots into the menu with buttons drawn, and the menu survives a PSR restore.
+  - Player: the same disc, with telemetry `menu` non-null and `buttonsDrawn > 0`.
+- [ ] **Step 2: Run them and check that they fail.** **Step 3: Port and implement.** **Step 4: Run them and check that they pass**, plus `npm run typecheck`, `npm run build` and `npm run test:e2e`. Also check `LOCAL_DISCS`-free behaviour: TSURUNE opened with a headless Chrome script should report `menu` telemetry within 30 s.
+- [ ] **Step 5:** NOTICE entry (mpls sub-path parsing). Commit: `feat(nav): IG menus carried in sub-paths`.
+
+---
+
 ## Phase D: menu traces
 
 ### Task 13: `disc-menu` fixture, graphics traces and the TSURUNE script
