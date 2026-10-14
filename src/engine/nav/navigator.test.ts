@@ -6,12 +6,23 @@ import { parseMovieObjects } from '../bdmv/mobj-parser';
 import { parseMpls, type Mpls } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
 import { PSR, RegisterFile } from '../hdmv/registers';
-import { Navigator, type NavigatorEvent, type PlaybackPort } from './navigator';
+import { Navigator, type NavigatorEvent, type PlaybackPort, type PlayAt } from './navigator';
 
 class FakePort implements PlaybackPort {
   calls: string[] = [];
   missing = new Set<string>();
-  async playPlaylist(id: string, at: { item?: number; mark?: number }) { this.calls.push(`play ${id} ${at.item ?? '-'} ${at.mark ?? '-'}`); return !this.missing.has(id); }
+  lastAt: PlayAt | null = null;
+  clipTime: number | undefined;
+  /** R8 contract: the port reports playlistStarted from inside playPlaylist. */
+  onOpen: ((id: string, at: PlayAt) => void) | null = null;
+  async playPlaylist(id: string, at: PlayAt) {
+    this.calls.push(`play ${id} ${at.item ?? '-'} ${at.mark ?? '-'}`);
+    this.lastAt = at;
+    if (this.missing.has(id)) return false;
+    this.onOpen?.(id, at);
+    return true;
+  }
+  currentClipTime45() { return this.clipTime; }
   seekPlayItem(i: number) { this.calls.push(`item ${i}`); }
   seekMark(m: number) { this.calls.push(`mark ${m}`); }
   stopPlaylist() { this.calls.push('stop'); }
@@ -312,5 +323,88 @@ describe('Navigator UO masks and PSRs', () => {
     };
     expect(run(0)).toBe(2);
     expect(run(1)).toBe(0xffff);
+  });
+});
+
+describe('Navigator review fixes', () => {
+  it('keeps the presentation time across menu call and resume', () => {
+    const { nav, port, regs } = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle],
+      playlists: { '00000': { items: [item({ inTime: 1000, outTime: 91000 })] } },
+    });
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+    nav.start();
+    expect(regs.psrRead(PSR.TIME)).toBe(1000);
+    port.clipTime = 40000;
+    nav.menuCall();
+    expect(port.lastAt).toEqual({ item: 0, clipTime45: 40000 });
+    expect(port.calls).toEqual(['play 00000 - -', 'stop', 'play 00000 0 -']);
+    expect(regs.psrRead(PSR.TIME)).toBe(40000); // playlistStarted does not clobber the restored time
+  });
+
+  it('does not store a position outside the play item', () => {
+    const { nav, port, regs } = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle],
+      playlists: { '00000': { items: [item({ inTime: 1000, outTime: 91000 })] } },
+    });
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+    nav.start();
+    port.clipTime = 500;
+    nav.menuCall();
+    expect(port.lastAt?.clipTime45).toBe(1000);
+    expect(regs.psrRead(PSR.TIME)).toBe(1000);
+  });
+
+  it('opens the first clip before moving to the requested play item', () => {
+    const stream = (lang: string) => [{ pid: 0x1100, codingType: 0x80, lang }];
+    const { nav, regs } = setup({
+      objects: [{ cmds: [asm.playPlPi(imm(0), imm(1))] }],
+      playlists: { '00000': { items: [item({ audio: stream('eng') }), item({ audio: [...stream('eng'), ...stream('jpn')] })] } },
+    });
+    const writes: string[] = [];
+    regs.onWrite = (w) => { if (w.kind === 'psr') writes.push(`${w.index}=${w.value}`); };
+    regs.psrSettingWrite(PSR.AUDIO_LANG, 0x6a706e); // jpn
+    writes.length = 0;
+    const port = (nav as unknown as { deps: { port: FakePort } }).deps.port;
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+    nav.start();
+    const psr7 = writes.filter((w) => w.startsWith('7='));
+    expect(psr7).toEqual(['7=0', '7=1']);
+    // item 0 only has eng, so PSR1 = 1 there; item 1 keeps 1 (valid) as in _update_clip_psrs
+    expect(regs.psrRead(PSR.PRIMARY_AUDIO_ID)).toBe(1);
+    expect(writes.indexOf('1=1')).toBeGreaterThan(writes.indexOf('7=0'));
+  });
+
+  it('orders register writes and UO mask events as libbluray does', () => {
+    const order: string[] = [];
+    const { nav, port, regs } = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))], menuCallMask: true }],
+      playlists: { '00000': { items: [item()], uoMask: [0x10, 0, 0, 0, 0, 0, 0, 0] } },
+    });
+    regs.onWrite = (w) => { if (w.kind === 'psr') order.push(`psr${w.index}`); };
+    (nav as unknown as { deps: { emit: (e: NavigatorEvent) => void } }).deps.emit = (e) => { if (e.type === 'uoMask') order.push(`uo:${[...e.mask].sort().join('+')}`); };
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+    nav.start();
+    // The first _run_hdmv pass returns the pending PLAY_STOP and publishes the object's menu-call mask;
+    // PLAY_PL then opens the playlist: playlist PSRs, play item UO mask, clip PSRs.
+    expect(order).toEqual(['psr4', 'uo:menuCall', 'psr6', 'psr3', 'psr5', 'uo:menuCall+timeSearch', 'psr7', 'psr8']);
+  });
+
+  it('does not seek at every seamless item boundary', () => {
+    const { nav, port } = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }], playlists: { '00000': { items: [item(), item()] } } });
+    nav.start();
+    nav.playItemEnded(0);
+    expect(port.calls).toEqual(['play 00000 - -']);
+  });
+
+  it('ignores a missing-playlist result after a title change', async () => {
+    const { nav, port } = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.playPl(imm(1)), asm.playPl(imm(0))] }, idle],
+    });
+    port.missing = new Set(['00000']);
+    nav.start();
+    nav.playTitle(1);
+    await flush();
+    expect(port.calls).toEqual(['play 00000 - -', 'stop', 'play 00001 - -']);
   });
 });

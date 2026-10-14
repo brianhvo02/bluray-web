@@ -17,13 +17,26 @@ import { combineUoMasks, EMPTY_UO_MASK, parseUoMaskTable, type UoMask, type UoOp
 import { HdmvEventType, HdmvVm, type HdmvEvent } from '../hdmv/vm';
 
 export interface PlaybackPort {
-  /** false if the playlist is missing */
-  playPlaylist(id: string, at: { readonly item?: number; readonly mark?: number }): Promise<boolean>;
+  /**
+   * false if the playlist is missing. Contract (as libbluray's _open_playlist): once the playlist is open the port
+   * calls Navigator.playlistStarted() synchronously from inside this call, before returning, so that PSR and UO mask
+   * updates happen in libbluray's order relative to the rest of the VM step. `clipTime45` asks for a start at that
+   * 45 kHz clip time within `item` (restore after a menu call).
+   */
+  playPlaylist(id: string, at: PlayAt): Promise<boolean>;
   seekPlayItem(item: number): void;
   seekMark(mark: number): void;
   stopPlaylist(): void;
   /** still: freeze presentation (clock stops), keep the frame */
   hold(on: boolean): void;
+  /** 45 kHz clip time of the current presentation position (bd_get_scr-less _update_time_psr_from_stream), if known. */
+  currentClipTime45(): number | undefined;
+}
+
+export interface PlayAt {
+  readonly item?: number;
+  readonly mark?: number;
+  readonly clipTime45?: number;
 }
 
 export type NavigatorEvent =
@@ -99,6 +112,10 @@ export class Navigator {
   private igStill = false;
   private held = false;
   private restorePlaylist = NO_PLAYLIST;
+  private restoreItem = 0;
+  /** A restored PSR8 that the next playlistStarted() must keep. */
+  private keepTime = false;
+  private currentItem = 0;
 
   constructor(private readonly deps: NavigatorDeps) {
     deps.regs.onPsrEvent((e) => this.onPsrEvent(e));
@@ -134,6 +151,7 @@ export class Navigator {
 
   /** bd_menu_call (_try_menu_call) */
   menuCall(): boolean {
+    this.updateTimePsr();
     if (this.titleType === 'undef') return false;
     if (this.uoMaskValue.has('menuCall')) return false;
     if (this.titleType === 'hdmv') this.vm?.suspendPlaylist(); // failure only means no location to store
@@ -155,15 +173,19 @@ export class Navigator {
     this.ended = false;
     this.st0UoMask = EMPTY_UO_MASK;
     this.gcUoMask = EMPTY_UO_MASK;
-    this.updatePlaylistPsrs(playlistId, item);
-    this.openClip(item);
+    // _open_playlist opens the first clip, then bd_seek_playitem / bd_seek_mark moves on
+    this.updatePlaylistPsrs(playlistId, 0);
+    const keepTime = this.keepTime;
+    this.keepTime = false;
+    this.openClip(0, keepTime && item === 0);
+    if (item !== 0) this.openClip(item, keepTime);
   }
 
   /** _open_m2ts for the next play item. */
   playItemChanged(item: number): void {
     this.itemStill = null;
     this.syncHold();
-    this.openClip(item);
+    this.openClip(item, false);
   }
 
   /** _update_chapter_psr; `chapter` is bd_get_current_chapter (0-based). */
@@ -178,7 +200,10 @@ export class Navigator {
     else if (this.playing && !this.ended) this.finishPlaylist();
   }
 
-  /** A play item ran to its end: honour its still mode (_bd_read_locked), else go on or end the playlist. */
+  /**
+   * A play item ran to its end. May be called at every item end: only a still (_bd_read_locked) or the end of the
+   * playlist does anything, a seamless boundary is left to the player.
+   */
   playItemEnded(item: number): void {
     if (!this.playing || this.ended || this.itemStill) return;
     const pi = this.playlist?.playItems[item];
@@ -192,7 +217,7 @@ export class Navigator {
       this.syncHold();
       return;
     }
-    this.afterItem(item);
+    if (this.isLastItem(item)) this.finishPlaylist();
   }
 
   isMasked(op: UoOp): boolean {
@@ -412,7 +437,7 @@ export class Navigator {
   // ---- playlists ----
 
   /** _open_playlist; `done` is skipped when the playlist was superseded meanwhile. */
-  private openPlaylist(num: number, at: { readonly item?: number; readonly mark?: number }, done: (ok: boolean) => void): void {
+  private openPlaylist(num: number, at: PlayAt, done: (ok: boolean) => void): void {
     this.closePlaylist(false);
     const generation = ++this.generation;
     const id = String(num).padStart(5, '0');
@@ -422,6 +447,7 @@ export class Navigator {
     } else {
       this.playlist = this.deps.disc.playlists.get(id) ?? null;
       this.playing = true;
+      this.keepTime = at.clipTime45 !== undefined;
       request = this.deps.port.playPlaylist(id, at);
     }
     request.then(
@@ -445,6 +471,8 @@ export class Navigator {
   /** _close_playlist; the port is only told to stop a playlist that has not ended. */
   private closePlaylist(stopPort: boolean): void {
     this.runGc('RESET');
+    this.keepTime = false;
+    this.generation++; // a pending playPlaylist() result no longer applies
     if (stopPort && this.playing && !this.ended) this.deps.port.stopPlaylist();
     this.playing = false;
     this.ended = false;
@@ -475,9 +503,13 @@ export class Navigator {
     if (still) this.afterItem(still.item);
   }
 
+  private isLastItem(item: number): boolean {
+    return !this.playlist || item >= this.playlist.playItems.length - 1;
+  }
+
+  /** After a still: bd_read_skip_still takes the next clip, or the end of title follows. */
   private afterItem(item: number): void {
-    const last = !this.playlist || item >= this.playlist.playItems.length - 1;
-    if (last) this.finishPlaylist();
+    if (this.isLastItem(item)) this.finishPlaylist();
     else this.deps.port.seekPlayItem(item + 1);
   }
 
@@ -498,12 +530,20 @@ export class Navigator {
       case PSR.PLAYLIST:
         this.restorePlaylist = e.newValue;
         break;
-      case PSR.PLAYITEM: {
+      case PSR.PLAYITEM:
+        this.restoreItem = e.newValue;
+        break;
+      case PSR.TIME: {
         const playlist = this.restorePlaylist;
         this.restorePlaylist = NO_PLAYLIST;
         if (playlist <= 99999) {
-          this.openPlaylist(playlist, { item: e.newValue }, (ok) => {
-            if (!ok) this.fail(`Cannot restore playlist ${playlist}`);
+          this.openPlaylist(playlist, { item: this.restoreItem, clipTime45: e.newValue }, (ok) => {
+            if (!ok) {
+              this.fail(`Cannot restore playlist ${playlist}`);
+              return;
+            }
+            this.initIgStream();
+            this.runGc('INIT_MENU');
           });
         }
         break;
@@ -514,16 +554,25 @@ export class Navigator {
 
   // ---- UO masks ----
 
-  private openClip(item: number): void {
+  /** _update_time_psr: PSR8 follows the presentation position, within the play item's IN and OUT time. */
+  private updateTimePsr(): void {
+    const t = this.deps.port.currentClipTime45();
+    const pi = this.playlist?.playItems[this.currentItem];
+    if (t === undefined || !pi || t < pi.inTime || t > pi.outTime) return;
+    this.deps.regs.psrWrite(PSR.TIME, t);
+  }
+
+  private openClip(item: number, keepTime: boolean): void {
     const pl = this.playlist;
     const pi = pl?.playItems[item];
+    this.currentItem = item;
     if (!pl || !pi) {
       this.updateUoMask();
       return;
     }
     this.st0UoMask = combineUoMasks(parseUoMaskTable(pl.uoMask), parseUoMaskTable(pi.uoMask));
     this.updateUoMask();
-    this.updateClipPsrs(pl, item);
+    this.updateClipPsrs(pl, item, keepTime);
   }
 
   /** _update_uo_mask */
@@ -590,14 +639,14 @@ export class Navigator {
   }
 
   /** _update_clip_psrs */
-  private updateClipPsrs(pl: Mpls, item: number): void {
+  private updateClipPsrs(pl: Mpls, item: number, keepTime: boolean): void {
     const regs = this.deps.regs;
     const pi = pl.playItems[item]!;
     const stn = pi.stn;
     let audioLang = 0;
 
     regs.psrWrite(PSR.PLAYITEM, item);
-    regs.psrWrite(PSR.TIME, pi.inTime);
+    if (!keepTime) regs.psrWrite(PSR.TIME, pi.inTime);
 
     if (stn.audio.length > 0) {
       const v = regs.psrRead(PSR.PRIMARY_AUDIO_ID);
