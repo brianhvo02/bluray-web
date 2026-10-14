@@ -1,7 +1,6 @@
 /*
  * Ported from libbluray src/libbluray/bdnav/sound_parse.c
- * Copyright (C) 2010  hpi1
- * Copyright (C) 2014  Petri Hintukainen <phintuka@users.sourceforge.net>
+ * Copyright (C) 2010-2019  Petri Hintukainen <phintuka@users.sourceforge.net>
  *
  * Ported to TypeScript and modified for bluray-web, 2026.
  *
@@ -63,8 +62,7 @@ export function parseSoundBdmv(bytes: Uint8Array): SoundData {
   for (const [i, idx] of indexes.entries()) {
     const numSamples = idx.numFrames * idx.channels;
     const start = dataStart + idx.dataOffset;
-    // A clip whose data offset lies outside the file is left empty (libbluray sets num_frames = 0).
-    if (start > bytes.length || numSamples === 0) {
+    if (numSamples === 0) {
       clips.push({ channels: idx.channels, sampleRate: 48000, samples: new Int16Array(0) });
       continue;
     }

@@ -24,6 +24,12 @@ describe('parseSoundBdmv', () => {
     expect(() => parseSoundBdmv(bytes)).toThrow(ParseError);
   });
 
+  it('rejects an out-of-range data offset', () => {
+    const bytes = buildSoundBdmv([{ channels: 1, samples: Int16Array.of(1, 2) }]);
+    new DataView(bytes.buffer).setUint32(40 + 6 + 2, 0x10000); // data offset of sound 0
+    expect(() => parseSoundBdmv(bytes)).toThrow(ParseError);
+  });
+
   it('rejects truncated sample data', () => {
     const bytes = buildSoundBdmv([{ channels: 1, samples: Int16Array.of(1, 2, 3, 4) }]);
     expect(() => parseSoundBdmv(bytes.subarray(0, bytes.length - 2))).toThrow(ParseError);
