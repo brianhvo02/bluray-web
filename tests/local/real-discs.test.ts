@@ -111,4 +111,25 @@ describe.skipIf(discs.length === 0)('local discs', () => {
       }
     }, 120_000);
   }
+
+  for (const dir of discs) {
+    it(`resolves the sub-path IG streams of ${basename(dir)} to existing clips`, async () => {
+      const source = new FileSource(normalizeDiscPaths(await directoryEntries(dir)));
+      const disc = await openDisc(source);
+      let subPathIg = 0;
+      for (const [id, mpls] of disc.playlists) {
+        for (const [n, item] of mpls.playItems.entries()) {
+          for (const ig of item.stn.ig.filter((e) => e.subPath)) {
+            subPathIg++;
+            const path = mpls.subPaths[ig.subPathId];
+            expect(path, `${id} item ${n}: sub-path ${ig.subPathId}`).toBeDefined();
+            const clip = path?.items[ig.subClipId];
+            expect(clip, `${id} item ${n}: sub-clip ${ig.subClipId}`).toBeDefined();
+            if (clip) expect(source.exists(streamPath(clip.clipId)), `${id}: ${clip.clipId}.m2ts exists`).toBe(true);
+          }
+        }
+      }
+      console.info(`${basename(dir)}: ${subPathIg} sub-path IG stream entries`);
+    });
+  }
 });

@@ -39,7 +39,7 @@ describe('parseMpls', () => {
     expect(first.codecId).toBe('M2TS');
     expect(first.inTime).toBe(900_000);
     expect(first.outTime).toBe(1_800_000);
-    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', subPath: false }]);
+    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', subPath: false, subPathId: 0, subClipId: 0 }]);
     expect(first.stn.audio.map((a) => [a.pid, a.codingType, a.lang])).toEqual([
       [0x1100, CodingType.LPCM, 'eng'],
       [0x1101, CodingType.AC3, 'fra'],
@@ -146,6 +146,56 @@ describe('parseMpls', () => {
       [0x1100, true],
       [0x1101, true],
     ]);
+  });
+
+  it('parses sub-paths and sub play items, and the sub-path reference of STN entries', () => {
+    const mpls = parseMpls(
+      buildMpls({
+        playItems: [
+          {
+            clipId: '00001',
+            inTime: 0,
+            outTime: 100,
+            video: [VIDEO],
+            ig: [
+              { pid: 0x1400, codingType: CodingType.IG, streamType: 2, subPathId: 1, subClipId: 2 },
+              { pid: 0x1401, codingType: CodingType.IG, streamType: 3, subPathId: 4 },
+              { pid: 0x1402, codingType: CodingType.IG },
+            ],
+          },
+        ],
+        subPaths: [
+          { type: 3, isRepeat: false, items: [{ clipId: '00010', inTime: 10, outTime: 90, syncPlayItemId: 0, syncPts: 5 }] },
+          {
+            type: 8,
+            isRepeat: true,
+            items: [
+              { clipId: '00011', inTime: 1, outTime: 2, connectionCondition: 5, stcId: 3, extraClipIds: ['00012', '00013'] },
+              { clipId: '00014', inTime: 3, outTime: 4, syncPlayItemId: 7, syncPts: 99 },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(mpls.subPaths).toHaveLength(2);
+    expect(mpls.subPaths[0]).toEqual({
+      type: 3,
+      isRepeat: false,
+      items: [{ clipId: '00010', codecId: 'M2TS', connectionCondition: 1, isMultiClip: false, stcId: 0, inTime: 10, outTime: 90, syncPlayItemId: 0, syncPts: 5 }],
+    });
+    expect(mpls.subPaths[1]!.type).toBe(8);
+    expect(mpls.subPaths[1]!.isRepeat).toBe(true);
+    expect(mpls.subPaths[1]!.items[0]).toMatchObject({ clipId: '00011', connectionCondition: 5, isMultiClip: true, stcId: 3, inTime: 1, outTime: 2 });
+    expect(mpls.subPaths[1]!.items[1]).toMatchObject({ clipId: '00014', syncPlayItemId: 7, syncPts: 99 });
+    expect(mpls.playItems[0]!.stn.ig.map((e) => [e.pid, e.subPath, e.subPathId, e.subClipId])).toEqual([
+      [0x1400, true, 1, 2],
+      [0x1401, true, 4, 0],
+      [0x1402, false, 0, 0],
+    ]);
+  });
+
+  it('reports no sub-paths for a playlist without any', () => {
+    expect(parseMpls(buildMpls({ playItems: [{ clipId: '00001', inTime: 0, outTime: 100, video: [VIDEO] }] })).subPaths).toEqual([]);
   });
 
   it('accepts the file versions libbluray accepts (0100, 0200, 0240, 0300) and rejects others', () => {

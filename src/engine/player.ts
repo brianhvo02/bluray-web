@@ -7,12 +7,13 @@ import { Decimator } from './decode/decimator';
 import { UnsupportedCodecError, type DecoderError } from './decode/decoder';
 import { type AudioDecodeResult, type AudioDecoder, type AudioDecoderFactory } from './decode/audio-decoder';
 import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
+import { M2tsReader } from './demux/m2ts-reader';
 import { DiscError } from './disc/byte-source';
 import { FileSource } from './disc/file-source';
-import { checkStreamReadable, loadClips, openDisc, playlistPath, type DiscModel } from './disc/open-disc';
+import { checkStreamReadable, loadClips, openDisc, playlistPath, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
-import { Navigator, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
+import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { lookupSpn } from './nav/packets';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
@@ -22,7 +23,7 @@ import type { AudioTrack, EngineCommand, EngineEvent, NoticeCode, PlaybackState 
 import type { CompositorLike } from './render/compositor';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
-import { ticks45ToUs } from './util/time';
+import { pts90ToUs, ticks45ToUs } from './util/time';
 
 export interface PlayerDeps {
   emit(event: EngineEvent): void;
@@ -55,6 +56,8 @@ const PREV_CHAPTER_RESTART_US = 3_000_000;
 /** A still play item is held this close to its end, so the last frame stays on screen. */
 const STILL_MARGIN_US = 40_000;
 const SCR_PER_MS = 90;
+/** libbluray does not preload sub-path clips larger than this (PRELOAD_SIZE_LIMIT). */
+const PRELOAD_SIZE_LIMIT = 512 * 1024 * 1024;
 const INDEX_ID_NONE = 0xffff;
 
 interface Session {
@@ -295,7 +298,29 @@ export class Player {
       port: this.navigationPort(),
       emit: (e) => this.onNavigatorEvent(e),
       nowScr: () => this.deps.nowMs() * SCR_PER_MS,
+      preloadSubPathIg: (clipId, pid, signal) => this.preloadSubPathIg(clipId, pid, signal),
     });
+  }
+
+  /** _preload_m2ts for an IG sub-path: the whole clip is demuxed into the PES units of `pid`, in stream order. */
+  private async preloadSubPathIg(clipId: string, pid: number, signal: AbortSignal): Promise<IgUnit[]> {
+    const source = this.source;
+    const path = streamPath(clipId);
+    if (!source || !source.exists(path)) throw new DiscError('missing-file', `Missing sub-path clip ${path}`, [path]);
+    if (source.size(path) > PRELOAD_SIZE_LIMIT) throw new DiscError('unreadable-stream', `Sub-path clip ${path} is too large to preload`, [path]);
+    const reader = new M2tsReader({ source, path, startSpn: 0, pids: new Set([pid]) });
+    const cancel = (): void => reader.cancel();
+    signal.addEventListener('abort', cancel, { once: true });
+    const units: IgUnit[] = [];
+    try {
+      for (let pes = await reader.next(); pes !== null; pes = await reader.next()) {
+        for (const p of pes) units.push({ data: p.payload, ptsUs: pts90ToUs(p.pts ?? 0), dtsUs: p.dts === undefined ? undefined : pts90ToUs(p.dts) });
+      }
+    } finally {
+      signal.removeEventListener('abort', cancel);
+    }
+    if (signal.aborted) throw signal.reason;
+    return units;
   }
 
   /** Drops the navigator (and with it the VM and the registers) and releases a hold. */

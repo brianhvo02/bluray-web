@@ -69,8 +69,17 @@ export interface SyntheticPlaylistSpec {
   stills?: Record<number, { mode: number; time?: number }>;
 }
 
+/** An IG stream carried in a sub-path clip (an m2ts of its own with only the IG PID); every playlist references it from its first sub-path. */
+export interface SyntheticSubPathIg {
+  clipId: string;
+  pid?: number;
+  units: Array<{ pts: number; payload: Uint8Array }>;
+}
+
 export interface SyntheticDiscSpec {
   clips: SyntheticClipSpec[];
+  /** The IG streams of the play items become entries of stream_type 2 pointing at this sub-path clip (STN subpath 0, subclip 0). */
+  subPathIg?: SyntheticSubPathIg;
   playlists: SyntheticPlaylistSpec[];
   /** Adds BDMV/MovieObject.bdmv (see buildMovieObjects) and, optionally, a replacement index. */
   movieObjects?: Uint8Array<ArrayBuffer>;
@@ -174,6 +183,18 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
     clips.set(clip.clipId, { inTime: clip.startPts / 2, outTime: endPts / 2, audio: audioSpecs, ig: igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })) });
   }
 
+  const subIg = spec.subPathIg;
+  const subIgPid = subIg?.pid ?? IG_PID;
+  if (subIg) {
+    const { bytes } = muxM2ts(subIg.units.map((u) => ({ pid: subIgPid, streamId: 0xbd, pts: u.pts, payload: u.payload })));
+    const start = Math.min(...subIg.units.map((u) => u.pts));
+    files.set(`BDMV/STREAM/${subIg.clipId}.m2ts`, bytes);
+    files.set(
+      `BDMV/CLIPINF/${subIg.clipId}.clpi`,
+      buildClpi({ numSourcePackets: bytes.length / 192, streams: [{ pid: subIgPid, codingType: CodingType.IG }], presentationStart: start / 2, presentationEnd: start / 2 + 45_000, epMaps: [] }),
+    );
+  }
+
   for (const playlist of spec.playlists) {
     const marks: MarkSpec[] = playlist.marks ? [...playlist.marks] : [];
     const playItems = playlist.clipIds.map((clipId, index) => {
@@ -190,10 +211,10 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         stillTime: playlist.stills?.[index]?.time,
         video: [{ pid: VIDEO_PID, codingType: playlist.videoCodingType ?? CodingType.AVC }],
         audio: clip.audio,
-        ig: clip.ig,
+        ig: subIg ? [{ pid: subIgPid, codingType: CodingType.IG, streamType: 2, subPathId: 0, subClipId: 0 }] : clip.ig,
       };
     });
-    files.set(`BDMV/PLAYLIST/${playlist.id}.mpls`, buildMpls({ playItems, marks, uoMask: playlist.uoMask }));
+    files.set(`BDMV/PLAYLIST/${playlist.id}.mpls`, buildMpls({ playItems, marks, uoMask: playlist.uoMask, subPaths: subIg ? [{ type: 3, items: [{ clipId: subIg.clipId, inTime: 0, outTime: 45_000 }] }] : undefined }));
   }
   return files;
 }

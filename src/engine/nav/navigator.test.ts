@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildIndex, buildMpls, type IndexObjectSpec, type MarkSpec, type PlayItemSpec } from '../../../tests/helpers/bdmv-builders';
+import { buildIndex, buildMpls, type IndexObjectSpec, type MarkSpec, type PlayItemSpec, type SubPathSpec } from '../../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../../tests/helpers/ig-builders';
 import type { Clpi } from '../bdmv/clpi-parser';
@@ -9,7 +9,7 @@ import { parseMpls, type Mpls } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
 import { PSR, RegisterFile } from '../hdmv/registers';
 import { HdmvEventType } from '../hdmv/vm';
-import { Navigator, type NavigatorEvent, type PlaybackPort, type PlayAt } from './navigator';
+import { Navigator, type IgUnit, type NavigatorDeps, type NavigatorEvent, type PlaybackPort, type PlayAt } from './navigator';
 
 class FakePort implements PlaybackPort {
   calls: string[] = [];
@@ -33,7 +33,7 @@ class FakePort implements PlaybackPort {
 }
 
 interface ObjectSpec { cmds: Uint8Array[]; resumeIntention?: boolean; menuCallMask?: boolean; titleSearchMask?: boolean }
-interface PlaylistSpec { items: PlayItemSpec[]; uoMask?: number[]; marks?: MarkSpec[] }
+interface PlaylistSpec { items: PlayItemSpec[]; uoMask?: number[]; marks?: MarkSpec[]; subPaths?: SubPathSpec[] }
 
 const flush = async (): Promise<void> => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 const item = (extra: Partial<PlayItemSpec> = {}): PlayItemSpec => ({ clipId: '00001', inTime: 0, outTime: 90000, ...extra });
@@ -51,6 +51,7 @@ function setup(opts: {
   titles?: IndexObjectSpec[];
   firstPlay?: IndexObjectSpec;
   playlists?: Record<string, PlaylistSpec>;
+  preloadSubPathIg?: NavigatorDeps['preloadSubPathIg'];
 }) {
   const index = parseIndex(buildIndex({
     firstPlay: opts.firstPlay ?? { kind: 'hdmv', movieObjectId: 0 },
@@ -59,7 +60,7 @@ function setup(opts: {
   }));
   const playlists = new Map<string, Mpls>();
   for (const [id, p] of Object.entries(opts.playlists ?? { '00000': { items: [item()] }, '00001': { items: [item()] } })) {
-    playlists.set(id, parseMpls(buildMpls({ playItems: p.items, uoMask: p.uoMask, marks: p.marks })));
+    playlists.set(id, parseMpls(buildMpls({ playItems: p.items, uoMask: p.uoMask, marks: p.marks, subPaths: p.subPaths })));
   }
   const clips = new Map<string, Clpi>();
   for (const p of Object.values(opts.playlists ?? { a: { items: [item()] } })) {
@@ -73,7 +74,7 @@ function setup(opts: {
   const regs = new RegisterFile();
   const events: NavigatorEvent[] = [];
   const clock = { scr: 0 };
-  const nav = new Navigator({ disc, regs, port, emit: (e) => events.push(e), nowScr: () => clock.scr, seed: 1 });
+  const nav = new Navigator({ disc, regs, port, emit: (e) => events.push(e), nowScr: () => clock.scr, seed: 1, preloadSubPathIg: opts.preloadSubPathIg });
   return { nav, port, regs, events, clock };
 }
 
@@ -628,5 +629,131 @@ describe('Navigator interactive graphics', () => {
     nav.tick(0);
     expect(plane.hash()).toBe(cleared);
     expect(plane.hasContent).toBe(false);
+  });
+});
+
+describe('Navigator IG menus in sub-paths', () => {
+  const SUB_IG = { pid: 0x1400, codingType: 0x91, streamType: 2, subPathId: 0, subClipId: 0 };
+  const subPaths: SubPathSpec[] = [{ type: 3, items: [{ clipId: '00002', inTime: 0, outTime: 90000 }] }];
+  const menuUnits = (opts: Parameters<typeof simpleMenuSegments>[0] = {}): IgUnit[] =>
+    simpleMenuSegments(opts).map((data) => ({ data, ptsUs: 9_000_000_000 })); // far beyond the clock: no timing gate applies
+  const flushAll = async (): Promise<void> => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const menuEvents = (events: NavigatorEvent[]) => events.filter((e) => e.type === 'menu');
+
+  function subSetup(preload: NonNullable<NavigatorDeps['preloadSubPathIg']>, objects?: ObjectSpec[]) {
+    const t = setup({
+      objects: objects ?? [{ cmds: [asm.playPl(imm(0))] }],
+      playlists: { '00000': { items: [item({ ig: [SUB_IG] })], subPaths } },
+      preloadSubPathIg: preload,
+    });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    return t;
+  }
+
+  it('preloads the sub-path clip at playlist open and boots into the menu without any tick', async () => {
+    const calls: Array<[string, number]> = [];
+    const t = subSetup(async (clipId, pid) => { calls.push([clipId, pid]); return menuUnits(); });
+    t.nav.start();
+    await flushAll();
+    expect(calls).toEqual([['00002', 0x1400]]);
+    expect(t.nav.igPlane).not.toBeNull();
+    expect(t.nav.igPlane!.hasContent).toBe(true);
+    expect(menuEvents(t.events)).toEqual([{ type: 'menu', active: true }]);
+    expect(t.nav.takeDrawCount()).toBeGreaterThan(0);
+  });
+
+  it('runs the init when the preload settles after the playlist opened', async () => {
+    let resolve!: (u: IgUnit[]) => void;
+    const t = subSetup(() => new Promise<IgUnit[]>((r) => { resolve = r; }));
+    t.nav.start();
+    await flushAll();
+    expect(t.nav.igPlane).toBeNull();
+    resolve(menuUnits());
+    await flushAll();
+    expect(t.nav.igPlane?.hasContent).toBe(true);
+    expect(menuEvents(t.events)).toEqual([{ type: 'menu', active: true }]);
+  });
+
+  it('keeps the menu across a PSR restore (the playlist reopens and the preload runs again)', async () => {
+    let loads = 0;
+    const t = subSetup(async () => { loads++; return menuUnits(); }, [
+      { cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle,
+    ]);
+    t.nav.start();
+    await flushAll();
+    expect(loads).toBe(1);
+    t.nav.menuCall();
+    await flushAll();
+    expect(loads).toBe(2);
+    expect(t.nav.igPlane?.hasContent).toBe(true);
+    expect(menuEvents(t.events).at(-1)).toEqual({ type: 'menu', active: true });
+  });
+
+  it('decodes only up to the first complete display set of the preloaded stream, as gc_decode_ts does', async () => {
+    const shownFor = async (units: IgUnit[]): Promise<string> => {
+      const t = subSetup(async () => units);
+      t.nav.start();
+      await flushAll();
+      return t.nav.igPlane!.hash();
+    };
+    const first = menuUnits({ buttons: 1 });
+    const second = menuUnits({ buttons: 3 });
+    const both = await shownFor([...first, ...second]);
+    expect(both).toBe(await shownFor(first));
+    expect(both).not.toBe(await shownFor(second));
+  });
+
+  it('counts a failed preload as an IG error: no menu, no crash', async () => {
+    const t = subSetup(async () => { throw new Error('read failed'); });
+    t.nav.start();
+    await flushAll();
+    expect(t.nav.igPlane).toBeNull();
+    expect(t.nav.igErrors).toBe(1);
+    expect(t.events.filter((e) => e.type === 'error')).toEqual([]);
+  });
+
+  it('aborts the read and ignores the result when the playlist closes first', async () => {
+    let signal!: AbortSignal;
+    let resolve!: (u: IgUnit[]) => void;
+    const t = subSetup((_c, _p, s) => { signal = s; return new Promise<IgUnit[]>((r) => { resolve = r; }); });
+    t.nav.start();
+    await flushAll();
+    expect(signal.aborted).toBe(false);
+    t.nav.stop();
+    expect(signal.aborted).toBe(true);
+    resolve(menuUnits());
+    await flushAll();
+    expect(t.nav.igPlane).toBeNull();
+    expect(menuEvents(t.events)).toEqual([]);
+  });
+
+  it('treats an abort rejection after close as no error', async () => {
+    const t = subSetup((_c, _p, s) => new Promise<IgUnit[]>((_r, reject) => s.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))));
+    t.nav.start();
+    await flushAll();
+    t.nav.stop();
+    await flushAll();
+    expect(t.nav.igErrors).toBe(0);
+  });
+
+  it('shows no menu when the sub-clip reference is invalid or no loader is injected', async () => {
+    let called = 0;
+    const bad = setup({
+      objects: [{ cmds: [asm.playPl(imm(0))] }],
+      playlists: { '00000': { items: [item({ ig: [{ ...SUB_IG, subClipId: 3 }] })], subPaths } },
+      preloadSubPathIg: async () => { called++; return menuUnits(); },
+    });
+    bad.port.onOpen = (id, at) => bad.nav.playlistStarted(id, at.item ?? 0);
+    bad.nav.start();
+    await flushAll();
+    expect(called).toBe(0);
+    expect(bad.nav.igPlane).toBeNull();
+    const none = subSetup(async () => menuUnits());
+    const t = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }], playlists: { '00000': { items: [item({ ig: [SUB_IG] })], subPaths } } });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    t.nav.start();
+    await flushAll();
+    expect(t.nav.igPlane).toBeNull();
+    none.nav.stop();
   });
 });

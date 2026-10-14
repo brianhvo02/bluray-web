@@ -47,8 +47,30 @@ export interface StreamSpec {
   lang?: string;
   /** 1 = main clip (default), 2/3/4 = sub-path streams. */
   streamType?: number;
+  /** Sub-path reference of a stream_type 2/3/4 entry. */
+  subPathId?: number;
+  /** Sub-clip reference of a stream_type 2 entry. */
+  subClipId?: number;
   /** Extra zero bytes after the attributes, to test length-based skipping. */
   extraAttrBytes?: number;
+}
+
+export interface SubPlayItemSpec {
+  clipId: string;
+  inTime: number;
+  outTime: number;
+  connectionCondition?: number;
+  stcId?: number;
+  syncPlayItemId?: number;
+  syncPts?: number;
+  /** Further clips of a multi-clip sub play item (is_multi_clip is set when this is non-empty). */
+  extraClipIds?: string[];
+}
+
+export interface SubPathSpec {
+  type?: number;
+  isRepeat?: boolean;
+  items: SubPlayItemSpec[];
 }
 
 export interface PlayItemSpec {
@@ -79,6 +101,7 @@ export interface MarkSpec {
 export interface MplsSpec {
   playItems: PlayItemSpec[];
   marks?: MarkSpec[];
+  subPaths?: SubPathSpec[];
   /** 8-byte UO mask table of the playlist. */
   uoMask?: ArrayLike<number>;
 }
@@ -107,8 +130,8 @@ function writeStream(w: ByteWriter, s: StreamSpec): void {
   const streamType = s.streamType ?? 1;
   w.u8(9).u8(streamType);
   if (streamType === 1) w.u16(s.pid).zeros(6);
-  else if (streamType === 2) w.u8(0).u8(0).u16(s.pid).zeros(4);
-  else w.u8(0).u16(s.pid).zeros(5);
+  else if (streamType === 2) w.u8(s.subPathId ?? 0).u8(s.subClipId ?? 0).u16(s.pid).zeros(4);
+  else w.u8(s.subPathId ?? 0).u16(s.pid).zeros(5);
   writeCodingInfo(w, s.codingType, { format: s.format, rate: s.rate, lang: s.lang, extraBytes: s.extraAttrBytes });
 }
 
@@ -144,6 +167,23 @@ function writePlayItem(w: ByteWriter, item: PlayItemSpec): void {
   w.patchU16(start, w.position - start - 2);
 }
 
+function writeSubPath(w: ByteWriter, path: SubPathSpec): void {
+  const start = w.position;
+  w.u32(0).u8(0).u8(path.type ?? 0).bits(15, 0).bits(1, path.isRepeat ? 1 : 0).u8(0).u8(path.items.length);
+  for (const item of path.items) {
+    const itemStart = w.position;
+    const extra = item.extraClipIds ?? [];
+    w.u16(0).ascii(item.clipId).ascii('M2TS').bits(27, 0).bits(4, item.connectionCondition ?? 1).bits(1, extra.length > 0 ? 1 : 0);
+    w.u8(item.stcId ?? 0).u32(item.inTime).u32(item.outTime).u16(item.syncPlayItemId ?? 0).u32(item.syncPts ?? 0);
+    if (extra.length > 0) {
+      w.u8(extra.length + 1);
+      for (const clip of extra) w.ascii(clip).ascii('M2TS').u8(0);
+    }
+    w.patchU16(itemStart, w.position - itemStart - 2);
+  }
+  w.patchU32(start, w.position - start - 4);
+}
+
 export function buildMpls(spec: MplsSpec): Uint8Array<ArrayBuffer> {
   const w = new ByteWriter();
   w.ascii('MPLS').ascii('0200');
@@ -155,8 +195,9 @@ export function buildMpls(spec: MplsSpec): Uint8Array<ArrayBuffer> {
   w.u16(0); // AppInfoPlayList
   w.patchU32(listPosAt, w.position);
   const listStart = w.position;
-  w.u32(0).u16(0).u16(spec.playItems.length).u16(0);
+  w.u32(0).u16(0).u16(spec.playItems.length).u16((spec.subPaths ?? []).length);
   for (const item of spec.playItems) writePlayItem(w, item);
+  for (const path of spec.subPaths ?? []) writeSubPath(w, path);
   w.patchU32(listStart, w.position - listStart - 4);
   const marks = spec.marks ?? [];
   w.patchU32(listPosAt + 4, w.position);

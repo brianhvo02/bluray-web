@@ -21,6 +21,10 @@ export interface StreamEntry {
   readonly lang: string;
   /** True for streams carried in a sub-path clip (stream_type 2–4); M1 plays main-path streams only. */
   readonly subPath: boolean;
+  /** STN subpath_id (stream_type 2, 3, 4); 0 for main-path entries. */
+  readonly subPathId: number;
+  /** STN subclip_id (stream_type 2); 0 otherwise. */
+  readonly subClipId: number;
 }
 
 export interface StnTable {
@@ -47,6 +51,27 @@ export interface PlayItem {
   readonly stn: StnTable;
 }
 
+/** Ported from libbluray mpls_parse.c _parse_subplayitem (MPLS_SUB_PI); only the first clip of a multi-clip item is kept. */
+export interface SubPlayItem {
+  readonly clipId: string;
+  readonly codecId: string;
+  readonly connectionCondition: number;
+  readonly isMultiClip: boolean;
+  readonly stcId: number;
+  /** 45 kHz clip time. */
+  readonly inTime: number;
+  readonly outTime: number;
+  readonly syncPlayItemId: number;
+  readonly syncPts: number;
+}
+
+/** Ported from libbluray mpls_parse.c _parse_subpath (MPLS_SUB). */
+export interface SubPath {
+  readonly type: number;
+  readonly isRepeat: boolean;
+  readonly items: readonly SubPlayItem[];
+}
+
 export interface PlayListMark {
   readonly type: number;
   readonly playItemRef: number;
@@ -61,6 +86,7 @@ export interface Mpls {
   readonly playbackType: number;
   readonly uoMask: Uint8Array;
   readonly playItems: readonly PlayItem[];
+  readonly subPaths: readonly SubPath[];
   readonly marks: readonly PlayListMark[];
 }
 
@@ -89,11 +115,46 @@ export function parseMpls(bytes: Uint8Array): Mpls {
   r.u32(); // length
   r.skip(2);
   const itemCount = r.u16();
-  r.u16(); // sub-path count
+  const subPathCount = r.u16();
   const playItems: PlayItem[] = [];
   for (let i = 0; i < itemCount; i++) playItems.push(readPlayItem(r));
+  const subPaths: SubPath[] = [];
+  for (let i = 0; i < subPathCount; i++) subPaths.push(readSubPath(r));
 
-  return { version, playbackType, uoMask, playItems, marks: readMarks(r, markPos) };
+  return { version, playbackType, uoMask, playItems, subPaths, marks: readMarks(r, markPos) };
+}
+
+function readSubPath(r: ByteReader): SubPath {
+  const length = r.u32();
+  const end = r.position + length;
+  r.skip(1);
+  const type = r.u8();
+  r.skipBits(15);
+  const isRepeat = r.flag();
+  r.skip(1);
+  const count = r.u8();
+  const items: SubPlayItem[] = [];
+  for (let i = 0; i < count; i++) items.push(readSubPlayItem(r));
+  r.seek(end);
+  return { type, isRepeat, items };
+}
+
+function readSubPlayItem(r: ByteReader): SubPlayItem {
+  const length = r.u16();
+  if (length < 24) throw new ParseError(`mpls: sub play item length ${length} is too short`); // as libbluray
+  const start = r.position;
+  const clipId = r.ascii(5);
+  const codecId = r.ascii(4);
+  r.skipBits(27);
+  const connectionCondition = r.bits(4);
+  const isMultiClip = r.flag();
+  const stcId = r.u8();
+  const inTime = r.u32();
+  const outTime = r.u32();
+  const syncPlayItemId = r.u16();
+  const syncPts = r.u32();
+  r.seek(start + length); // the extra clips of a multi-clip item are not used
+  return { clipId, codecId, connectionCondition, isMultiClip, stcId, inTime, outTime, syncPlayItemId, syncPts };
 }
 
 function readPlayItem(r: ByteReader): PlayItem {
@@ -166,17 +227,20 @@ function readStream(r: ByteReader): StreamEntry {
   const entryStart = r.position;
   const streamType = r.u8();
   let pid = 0;
+  let subPathId = 0;
+  let subClipId = 0;
   switch (streamType) {
     case 1:
       pid = r.u16();
       break;
     case 2:
-      r.skip(2);
+      subPathId = r.u8();
+      subClipId = r.u8();
       pid = r.u16();
       break;
     case 3:
     case 4:
-      r.skip(1);
+      subPathId = r.u8();
       pid = r.u16();
       break;
     default:
@@ -204,7 +268,7 @@ function readStream(r: ByteReader): StreamEntry {
     lang = r.ascii(3);
   }
   r.seek(attrStart + attrLength);
-  return { pid, codingType, format, rate, lang, subPath: streamType !== 1 };
+  return { pid, codingType, format, rate, lang, subPath: streamType !== 1, subPathId, subClipId };
 }
 
 function readMarks(r: ByteReader, markPos: number): PlayListMark[] {

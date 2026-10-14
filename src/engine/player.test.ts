@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
-import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec } from '../../tests/helpers/synthetic-disc';
+import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
 import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
@@ -88,13 +88,14 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; igUnits?: Array<{ pts: number; payload: Uint8Array }> } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
     clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
     movieObjects: opts.movieObjects,
+    subPathIg: opts.subPathIg,
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
   const events: EngineEvent[] = [];
@@ -806,6 +807,33 @@ describe('Player with HDMV navigation', () => {
       await untilPlaying(h);
       await h.play(500);
       expect(lastTelemetry(h)?.menu ?? null).toBeNull();
+      expect(h.igDraws).toEqual([]);
+    });
+
+    it('shows a menu whose IG stream lives in a sub-path clip, decoded from the preloaded clip', async () => {
+      const h = await bootMenu({ subPathIg: { clipId: '00009', units: menuAt(0.2) } });
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+      const menu = lastTelemetry(h)!.menu!;
+      expect(menu.selectedButton).toBe(1);
+      expect(menu.buttonsDrawn).toBeGreaterThan(0);
+      expect(menuEvents(h)).toContainEqual({ type: 'menuActive', active: true, popupAvailable: false });
+      expect(lastTelemetry(h)!.igErrors).toBe(0);
+      expect(h.igDraws.length).toBeGreaterThan(0);
+    });
+
+    it('keeps playing without a menu when the sub-path clip cannot be read', async () => {
+      const h = await bootMenu({ subPathIg: { clipId: '00009', units: menuAt(0.2) }, dropFiles: ['BDMV/STREAM/00009.m2ts'] });
+      await untilPlaying(h);
+      await h.play(700);
+      expect(lastState(h)).toBe('playing');
+      expect(lastTelemetry(h)).toMatchObject({ menu: null, igErrors: 1 });
       expect(h.igDraws).toEqual([]);
     });
 
