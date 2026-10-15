@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
+import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { AudioMenu } from './AudioMenu';
 import { formatTime } from './format';
 
+const MASKED_TOOLTIP = "The disc doesn't allow this here";
+
 interface SeekBarProps {
   readonly durationUs: number;
   readonly timeUs: number;
   readonly chapters: readonly Chapter[];
+  /** The disc masks time search here. */
+  readonly disabled: boolean;
   onSeek(timeUs: number): void;
 }
 
@@ -16,7 +21,7 @@ const SEEK_SETTLE_MS = 3000;
 /** The engine time counts as having reached a committed target within this distance. */
 const SEEK_REACHED_US = 1_000_000;
 
-function SeekBar({ durationUs, timeUs, chapters, onSeek }: SeekBarProps): ReactElement {
+function SeekBar({ durationUs, timeUs, chapters, disabled, onSeek }: SeekBarProps): ReactElement {
   // While dragging: the thumb position. After a commit: the target, held until the engine time gets there,
   // so the thumb doesn't jump back to the old time while the seek is in flight.
   const [heldUs, setHeldUs] = useState<number | null>(null);
@@ -64,6 +69,8 @@ function SeekBar({ durationUs, timeUs, chapters, onSeek }: SeekBarProps): ReactE
         type="range"
         aria-label="Seek"
         data-testid="seek"
+        disabled={disabled}
+        title={disabled ? MASKED_TOOLTIP : undefined}
         min={0}
         max={max}
         step={100_000}
@@ -103,17 +110,27 @@ interface ControlBarProps {
 export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onFullscreen, onMenuOpenChange }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
+  const masked = (op: UoOp): boolean => snapshot.uoMask.includes(op);
+  const tip = (op: UoOp): string | undefined => (masked(op) ? MASKED_TOOLTIP : undefined);
+  const pauseMasked = playing && masked('pauseOn');
   return (
     <div className={`control-bar${visible ? '' : ' hidden'}`} data-testid="control-bar">
-      <SeekBar durationUs={snapshot.durationUs} timeUs={snapshot.timeUs} chapters={snapshot.chapters} onSeek={(us) => controller.seek(us)} />
+      <SeekBar durationUs={snapshot.durationUs} timeUs={snapshot.timeUs} chapters={snapshot.chapters} disabled={masked('timeSearch')} onSeek={(us) => controller.seek(us)} />
       <div className="control-row">
-        <button type="button" aria-label="Previous chapter" onClick={() => controller.prevChapter()}>
+        <button type="button" aria-label="Previous chapter" disabled={masked('skipBackToPreviousPoint')} title={tip('skipBackToPreviousPoint')} onClick={() => controller.prevChapter()}>
           ⏮
         </button>
-        <button type="button" aria-label={playing ? 'Pause' : 'Play'} data-testid="play-toggle" onClick={() => controller.togglePlay()}>
+        <button
+          type="button"
+          aria-label={playing ? 'Pause' : 'Play'}
+          data-testid="play-toggle"
+          disabled={pauseMasked}
+          title={pauseMasked ? MASKED_TOOLTIP : undefined}
+          onClick={() => controller.togglePlay()}
+        >
           {playing ? '⏸' : '▶'}
         </button>
-        <button type="button" aria-label="Next chapter" data-testid="next-chapter" onClick={() => controller.nextChapter()}>
+        <button type="button" aria-label="Next chapter" data-testid="next-chapter" disabled={masked('skipToNextPoint')} title={tip('skipToNextPoint')} onClick={() => controller.nextChapter()}>
           ⏭
         </button>
         <span className="time" data-testid="time">
@@ -136,7 +153,13 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
             controller.setVolume(Number(e.target.value));
           }}
         />
-        <AudioMenu tracks={snapshot.audioTracks} selected={snapshot.selectedAudio} onSelect={(i) => controller.selectAudio(i)} onOpenChange={onMenuOpenChange} />
+        <AudioMenu
+          tracks={snapshot.audioTracks}
+          selected={snapshot.selectedAudio}
+          disabledReason={tip('primaryAudioChange')}
+          onSelect={(i) => controller.selectAudio(i)}
+          onOpenChange={onMenuOpenChange}
+        />
         <button type="button" onClick={onOpenPlaylists}>
           Playlists
         </button>

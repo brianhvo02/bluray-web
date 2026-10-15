@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
-import { keyToAction } from './keyboard';
+import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
 import { PlaylistPicker } from './PlaylistPicker';
 
@@ -28,6 +28,12 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   const playing = snapshot.engineState === 'playing';
   const menuActiveRef = useRef(snapshot.menuActive);
   menuActiveRef.current = snapshot.menuActive;
+  /** What the key handler needs to name a key's user operation (keyActionUo). */
+  const uoContextRef = useRef({ playing: false, popupShown: false });
+  uoContextRef.current = {
+    playing: snapshot.engineState === 'playing' || snapshot.engineState === 'buffering',
+    popupShown: snapshot.menuActive && snapshot.popupAvailable,
+  };
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
 
@@ -61,6 +67,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       const action = keyToAction(e.key, { menuActive: menuActiveRef.current });
       if (!action) return;
       e.preventDefault();
+      const op = keyActionUo(action, uoContextRef.current);
+      if (op && !controller.allow(op)) return;
       switch (action.type) {
         case 'togglePlay':
           controller.togglePlay();
@@ -113,6 +121,13 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
     const timer = window.setTimeout(() => controller.dismissNotice('audio-track'), 3000);
     return () => window.clearTimeout(timer);
   }, [controller, trackNotice]);
+
+  const maskedNotice = snapshot.notices.find((n) => n.code === 'uo-masked');
+  useEffect(() => {
+    if (!maskedNotice) return;
+    const timer = window.setTimeout(() => controller.dismissNotice('uo-masked'), 3000);
+    return () => window.clearTimeout(timer);
+  }, [controller, maskedNotice]);
 
   const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
     if (!snapshot.menuActive) return;

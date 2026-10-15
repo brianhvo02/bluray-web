@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { keyToAction } from './keyboard';
+import { keyActionUo, keyToAction } from './keyboard';
 
 describe('keyToAction', () => {
   it('maps the playback keys from the spec', () => {
@@ -44,5 +44,22 @@ describe('keyToAction with a menu shown', () => {
       expect(keyToAction('p', ctx)).toEqual({ type: 'menuKey', key: 'popup' });
       expect(keyToAction('P', ctx)).toEqual({ type: 'menuKey', key: 'popup' });
     }
+  });
+});
+
+describe('keyActionUo', () => {
+  const ctx = { playing: true, popupShown: false };
+  it('names the user operation a key performs', () => {
+    expect(keyActionUo({ type: 'togglePlay' }, ctx)).toBe('pauseOn');
+    expect(keyActionUo({ type: 'togglePlay' }, { ...ctx, playing: false })).toBeNull();
+    expect(keyActionUo({ type: 'seekBy', deltaUs: 1 }, ctx)).toBe('timeSearch');
+    expect(keyActionUo({ type: 'cycleAudio' }, ctx)).toBe('primaryAudioChange');
+    expect(keyActionUo({ type: 'menuKey', key: 'down' }, ctx)).toBe('moveDown');
+    expect(keyActionUo({ type: 'menuKey', key: 'ok' }, ctx)).toBe('activate');
+    expect(keyActionUo({ type: 'menuKey', key: 'topMenu' }, ctx)).toBe('menuCall');
+    expect(keyActionUo({ type: 'menuKey', key: 'popup' }, ctx)).toBe('popupOn');
+    expect(keyActionUo({ type: 'menuKey', key: 'popup' }, { ...ctx, popupShown: true })).toBe('popupOff');
+    expect(keyActionUo({ type: 'menuKey', key: '3' }, ctx)).toBeNull();
+    expect(keyActionUo({ type: 'volumeBy', delta: 0.1 }, ctx)).toBeNull();
   });
 });

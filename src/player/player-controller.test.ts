@@ -296,3 +296,24 @@ describe('menus', () => {
     ]);
   });
 });
+
+describe('UO masks', () => {
+  it('exposes the masked operations', () => {
+    const worker = new FakeWorker();
+    const controller = new PlayerController(worker, new FakeAudio());
+    expect(controller.isMasked('timeSearch')).toBe(false);
+    worker.emit({ type: 'uoMask', masked: ['timeSearch'] });
+    expect(controller.getSnapshot().uoMask).toEqual(['timeSearch']);
+    expect(controller.isMasked('timeSearch')).toBe(true);
+    expect(controller.isMasked('pauseOn')).toBe(false);
+  });
+
+  it('refuses a masked key locally with the same notice, without posting', () => {
+    const worker = new FakeWorker();
+    const controller = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'uoMask', masked: ['timeSearch'] });
+    expect(controller.allow('timeSearch')).toBe(false);
+    expect(controller.getSnapshot().notices).toContainEqual({ code: 'uo-masked', message: "The disc doesn't allow this here." });
+    expect(controller.allow('pauseOn')).toBe(true);
+  });
+});

@@ -1012,6 +1012,62 @@ describe('Player with HDMV navigation', () => {
     expect(selectedAudio(h)).toBe(1);
   });
 
+  describe('UO masks', () => {
+    const masked = (h: Harness) => h.events.filter((e) => e.type === 'notice' && e.code === 'uo-masked');
+    /** First Play plays 00000 with the given 8-byte playlist UO mask table. */
+    const maskedPlaylist = async (uoMask: number[]) => {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { playlists: [{ id: '00000', clipIds: ['00001'], uoMask, chapterEverySeconds: 1 }] });
+      await untilPlaying(h);
+      return h;
+    };
+
+    it('refuses a seek while timeSearch is masked: a notice, no seek, no buffering', async () => {
+      const h = await maskedPlaylist([0x10, 0, 0, 0, 0, 0, 0, 0]);
+      await h.play(500);
+      const before = lastTelemetry(h)!.clockUs;
+      const statesBefore = states(h).length;
+      await h.player.handle({ type: 'seek', timeUs: 3_000_000 });
+      await h.play(600);
+      expect(masked(h)).toEqual([{ type: 'notice', code: 'uo-masked', message: "The disc doesn't allow this here." }]);
+      expect(states(h).slice(statesBefore)).not.toContain('buffering');
+      const after = lastTelemetry(h)!.clockUs;
+      expect(after).toBeGreaterThan(before);
+      expect(after).toBeLessThan(2_500_000);
+    });
+
+    it('refuses pause while pauseOn is masked and keeps playing', async () => {
+      const h = await maskedPlaylist([0, 0x80, 0, 0, 0, 0, 0, 0]);
+      await h.player.handle({ type: 'pause' });
+      expect(masked(h)).toHaveLength(1);
+      expect(lastState(h)).toBe('playing');
+    });
+
+    it('refuses next chapter while skipToNextPoint is masked', async () => {
+      const h = await maskedPlaylist([0x08, 0, 0, 0, 0, 0, 0, 0]);
+      await h.player.handle({ type: 'nextChapter' });
+      expect(masked(h)).toHaveLength(1);
+      expect(internals(h).navRegs.psrRead(5)).toBe(1);
+    });
+
+    it('tells the user when an audio change is refused', async () => {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], {
+        audioStreams: twoLanguages,
+        playlists: [{ id: '00000', clipIds: ['00001'], uoMask: [0, 0, 0x04, 0, 0, 0, 0, 0] }],
+      });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'selectAudio', index: 2 });
+      expect(masked(h)).toHaveLength(1);
+    });
+
+    it('allows everything on a disc without a navigator', async () => {
+      const h = await harness(CodingType.LPCM);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'pause' });
+      expect(masked(h)).toEqual([]);
+    });
+  });
+
   describe('review fixes', () => {
     const noticeCodes = (h: Harness) => h.events.flatMap((e) => (e.type === 'notice' ? [e.code] : []));
 

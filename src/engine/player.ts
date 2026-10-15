@@ -14,6 +14,7 @@ import { checkStreamReadable, loadClips, openDisc, playlistPath, streamPath, typ
 import { normalizeDiscPaths } from './disc/paths';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
+import type { UoOp } from './hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { lookupSpn } from './nav/packets';
 import { Timeline, type Chapter } from './nav/timeline';
@@ -26,6 +27,11 @@ import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
 import { pts90ToUs, ticks45ToUs } from './util/time';
 
+const UO_MASKED_MESSAGE = "The disc doesn't allow this here.";
+/** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
+const MENU_KEY_UO: Partial<Record<MenuKey, UoOp>> = {
+  up: 'moveUp', down: 'moveDown', left: 'moveLeft', right: 'moveRight', ok: 'activate', topMenu: 'menuCall',
+};
 const MENU_KEY_VK: Readonly<Record<Exclude<MenuKey, 'topMenu'>, number>> = {
   up: BdVk.UP, down: BdVk.DOWN, left: BdVk.LEFT, right: BdVk.RIGHT, ok: BdVk.ENTER, popup: BdVk.POPUP,
   '0': BdVk.D0, '1': BdVk.D1, '2': BdVk.D2, '3': BdVk.D3, '4': BdVk.D4, '5': BdVk.D5, '6': BdVk.D6, '7': BdVk.D7, '8': BdVk.D8, '9': BdVk.D9,
@@ -179,9 +185,11 @@ export class Player {
           await this.playPlaylist(cmd.playlistId);
           break;
         case 'playTitle':
+          if (this.refused(cmd.title === 0 ? 'menuCall' : 'titleSearch')) break;
           this.navigator?.playTitle(cmd.title);
           break;
         case 'menuCall':
+          if (this.refused('menuCall')) break;
           this.navigator?.menuCall();
           break;
         case 'menuKey':
@@ -194,12 +202,14 @@ export class Player {
           await this.play();
           break;
         case 'pause':
+          if (this.refused('pauseOn')) break;
           this.pause();
           break;
         case 'close':
           this.close();
           break;
         case 'seek':
+          if (this.refused('timeSearch')) break;
           this.notifySeeked(cmd.timeUs);
           await this.startAt(cmd.timeUs, this.wantPlaying);
           break;
@@ -207,9 +217,11 @@ export class Player {
           await this.selectAudio(cmd.index);
           break;
         case 'nextChapter':
+          if (this.refused('skipToNextPoint')) break;
           await this.skipChapter(1);
           break;
         case 'prevChapter':
+          if (this.refused('skipBackToPreviousPoint')) break;
           await this.skipChapter(-1);
           break;
       }
@@ -351,6 +363,8 @@ export class Player {
   private menuKey(key: MenuKey): void {
     const nav = this.navigator;
     if (!nav) return;
+    const op = MENU_KEY_UO[key] ?? (key === 'popup' ? (this.menuActive && this.popupAvailable ? 'popupOff' : 'popupOn') : undefined);
+    if (op && this.refused(op)) return;
     if (key === 'topMenu') nav.menuCall();
     else nav.userInput(MENU_KEY_VK[key]);
   }
@@ -695,7 +709,7 @@ export class Player {
     const s = this.session;
     if (nav && this.navRegs) {
       // The register change selects (applyAudio); a masked primaryAudioChange refuses the user's request
-      if (nav.isMasked('primaryAudioChange') || !s?.tracks.find((t) => t.index === index)?.playable) return;
+      if (this.refused('primaryAudioChange') || !s?.tracks.find((t) => t.index === index)?.playable) return;
       this.navRegs.psrWrite(PSR.PRIMARY_AUDIO_ID, index);
       await this.applyAudio(index); // the register event queued the same switch behind this command: it finds nothing to do
       return;
@@ -1112,6 +1126,13 @@ export class Player {
         igErrors: this.navigator?.igErrors ?? 0,
       },
     });
+  }
+
+  /** A user operation the disc masks here: refused with a notice. Discs without a navigator mask nothing. */
+  private refused(op: UoOp): boolean {
+    if (!this.navigator?.isMasked(op)) return false;
+    this.notice('uo-masked', UO_MASKED_MESSAGE);
+    return true;
   }
 
   private notice(code: NoticeCode, message: string): void {

@@ -1,3 +1,4 @@
+import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { MenuKey } from '../engine/protocol';
 
 export type KeyAction =
@@ -44,6 +45,25 @@ export function keyToAction(key: string, ctx: KeyContext = { menuActive: false }
     case 'p':
     case 'P':
       return { type: 'menuKey', key: 'popup' };
+    default:
+      return null;
+  }
+}
+
+const MENU_KEY_UO: Partial<Record<MenuKey, UoOp>> = { up: 'moveUp', down: 'moveDown', left: 'moveLeft', right: 'moveRight', ok: 'activate', topMenu: 'menuCall' };
+
+/** The disc user operation (UO) a key action performs, checked against the disc's UO mask before it is sent; null if none. */
+export function keyActionUo(action: KeyAction, ctx: { readonly playing: boolean; readonly popupShown: boolean }): UoOp | null {
+  switch (action.type) {
+    case 'togglePlay':
+      return ctx.playing ? 'pauseOn' : null;
+    case 'seekBy':
+      return 'timeSearch';
+    case 'cycleAudio':
+      return 'primaryAudioChange';
+    case 'menuKey':
+      if (action.key === 'popup') return ctx.popupShown ? 'popupOff' : 'popupOn';
+      return MENU_KEY_UO[action.key] ?? null;
     default:
       return null;
   }

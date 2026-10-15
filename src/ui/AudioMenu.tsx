@@ -5,12 +5,14 @@ import { trackLabel } from '../player/language';
 interface AudioMenuProps {
   readonly tracks: readonly AudioTrack[];
   readonly selected: number | null;
+  /** Set when the disc does not allow changing the audio here: the button is disabled with this tooltip. */
+  readonly disabledReason?: string;
   onSelect(index: number): void;
   /** While open, the player keeps its controls up. */
   onOpenChange(open: boolean): void;
 }
 
-export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMenuProps): ReactElement | null {
+export function AudioMenu({ tracks, selected, disabledReason, onSelect, onOpenChange }: AudioMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -24,8 +26,8 @@ export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMen
   };
 
   useEffect(() => {
-    if (!shown) setOpen(false);
-  }, [shown]);
+    if (!shown || disabledReason) setOpen(false);
+  }, [shown, disabledReason]);
 
   useEffect(() => onOpenChange(open), [open, onOpenChange]);
 
@@ -64,7 +66,7 @@ export function AudioMenu({ tracks, selected, onSelect, onOpenChange }: AudioMen
   if (!shown) return null;
   return (
     <div className="audio-menu" ref={rootRef}>
-      <button ref={buttonRef} type="button" aria-haspopup="menu" aria-expanded={open} data-testid="audio-menu" onClick={() => setOpen((o) => !o)}>
+      <button ref={buttonRef} type="button" aria-haspopup="menu" aria-expanded={open} data-testid="audio-menu" disabled={disabledReason !== undefined} title={disabledReason} onClick={() => setOpen((o) => !o)}>
         Audio
       </button>
       {open && (
