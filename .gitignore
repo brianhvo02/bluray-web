@@ -7,3 +7,4 @@ playwright-report
 .claude/worktrees/
 .cache/
 tools/vm-trace/out/
+.DS_Store
