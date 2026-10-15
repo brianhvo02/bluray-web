@@ -838,8 +838,11 @@ describe('Player with HDMV navigation', () => {
         await h.play(100);
         expect(lastTelemetry(h)?.menu).not.toBeNull();
       }, { timeout: 5000 });
+      expect(lastTelemetry(h)!.soundsPlayed).toBe(0);
       await h.player.handle({ type: 'menuKey', key: 'ok' });
       expect(h.events).toContainEqual({ type: 'soundEffect', id: 1 });
+      await h.play(600);
+      expect(lastTelemetry(h)!.soundsPlayed).toBe(1);
     });
 
     it('emits no sounds for a disc without sound.bdmv', async () => {
@@ -893,6 +896,18 @@ describe('Player with HDMV navigation', () => {
       expect(lastTelemetry(h)!.igErrors).toBe(0);
       expect(h.igDraws.length).toBeGreaterThan(0);
       expect(h.igDraws[0]!.width).toBe(1920);
+    });
+
+    it('shows a menu whose display set is muxed at the very start of the clip', async () => {
+      const h = await bootMenu({ igUnits: menuAt(0) });
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
     });
 
     it('does not show the menu before the clock reaches its PTS', async () => {

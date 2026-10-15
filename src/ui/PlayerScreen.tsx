@@ -14,6 +14,15 @@ interface PlayerScreenProps {
   readonly snapshot: PlayerSnapshot;
 }
 
+/**
+ * What the key handlers need to name a key's user operation (keyActionUo), from the controller's latest snapshot rather
+ * than the last render, so a key pressed right after a menu opens already goes to the menu.
+ */
+function uoContext(controller: PlayerController): { playing: boolean; popupShown: boolean } {
+  const now = controller.getSnapshot();
+  return { playing: now.engineState === 'playing' || now.engineState === 'buffering', popupShown: now.menuActive && now.popupAvailable };
+}
+
 function toggleFullscreen(element: HTMLElement | null): void {
   if (document.fullscreenElement) void document.exitFullscreen();
   else void element?.requestFullscreen();
@@ -29,14 +38,6 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   const [menuOpen, setMenuOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
   const playing = snapshot.engineState === 'playing';
-  const menuActiveRef = useRef(snapshot.menuActive);
-  menuActiveRef.current = snapshot.menuActive;
-  /** What the key handler needs to name a key's user operation (keyActionUo). */
-  const uoContextRef = useRef({ playing: false, popupShown: false });
-  uoContextRef.current = {
-    playing: snapshot.engineState === 'playing' || snapshot.engineState === 'buffering',
-    popupShown: snapshot.menuActive && snapshot.popupAvailable,
-  };
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
 
@@ -67,10 +68,10 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         if (e.key.startsWith('Arrow') && target.dataset.role === 'volume') return;
       }
       if (target instanceof HTMLButtonElement && (e.key === ' ' || e.key === 'Enter')) return;
-      const action = keyToAction(e.key, { menuActive: menuActiveRef.current });
+      const action = keyToAction(e.key, { menuActive: controller.getSnapshot().menuActive });
       if (!action) return;
       e.preventDefault();
-      const op = keyActionUo(action, uoContextRef.current);
+      const op = keyActionUo(action, uoContext(controller));
       if (op && !controller.allow(op)) return;
       switch (action.type) {
         case 'togglePlay':
@@ -157,7 +158,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
 
   /** A menu key from the control bar or the remote: checked against the UO mask like the keyboard. */
   const sendMenuKey = (key: MenuKey): void => {
-    const op = keyActionUo({ type: 'menuKey', key }, uoContextRef.current);
+    const op = keyActionUo({ type: 'menuKey', key }, uoContext(controller));
     if (op && !controller.allow(op)) return;
     controller.menuKey(key);
   };
@@ -178,6 +179,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       data-testid="player"
       data-state={snapshot.engineState}
       data-audio-tracks={snapshot.audioTracks.length}
+      data-menu-active={snapshot.menuActive}
       onPointerMove={wake}
       onPointerDown={() => {
         setPressed(true);

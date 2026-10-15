@@ -2,8 +2,9 @@ import { CodingType } from '../src/engine/bdmv/stream-types';
 import { buildSoundBdmv } from '../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../tests/helpers/hdmv-builders';
 import { endSegment, icsSegment, odsSegment, pdsSegment, type IcsSpec } from '../tests/helpers/ig-builders';
-import { CLIP_START_PTS, buildSyntheticDisc, syntheticClip } from '../tests/helpers/synthetic-disc';
+import { CLIP_START_PTS, buildSyntheticDisc, type SyntheticClipSpec } from '../tests/helpers/synthetic-disc';
 import { writeFixture } from './fixture-dir';
+import { encodeTestVideo } from './x264';
 
 const outDir = process.argv[2];
 if (!outDir) {
@@ -122,14 +123,22 @@ function tone(samples: number, period: number): Int16Array {
   return Int16Array.from({ length: samples }, (_, i) => Math.round(Math.sin((2 * Math.PI * i) / period) * 8000));
 }
 
+/** Real H.264 (x264, IDR every second) so the disc also plays in Chrome (tests/e2e/menus.spec.ts). */
+const aus = encodeTestVideo((8 + 10) * 24);
+const clip = (clipId: string, from: number, seconds: number, igUnits: SyntheticClipSpec['igUnits']): SyntheticClipSpec => ({
+  clipId,
+  videoAus: aus.slice(from * 24, (from + seconds) * 24),
+  keyIndices: Array.from({ length: seconds }, (_, i) => i * 24),
+  startPts: CLIP_START_PTS,
+  audio: CodingType.LPCM,
+  igUnits,
+});
+
 const INTERACTIVE = 1;
 const files = buildSyntheticDisc({
-  clips: [
-    syntheticClip('00001', 8, { audio: CodingType.LPCM, igUnits: igAtStart(popupSegments) }),
-    syntheticClip('00002', 10, { audio: CodingType.LPCM, igUnits: igAtStart(topMenuSegments) }),
-  ],
+  clips: [clip('00001', 0, 8, igAtStart(popupSegments)), clip('00002', 8, 10, igAtStart(topMenuSegments))],
   playlists: [
-    { id: '00000', clipIds: ['00001'], chapterEverySeconds: 2 },
+    { id: '00000', clipIds: ['00001'], chapterEverySeconds: 2, uoMask: [0x10, 0, 0, 0, 0, 0, 0, 0] }, // the feature masks time search
     { id: '00001', clipIds: ['00002'] },
   ],
   movieObjects,

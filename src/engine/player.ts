@@ -113,6 +113,7 @@ function isMediaError(err: unknown): boolean {
 export class Player {
   private source: FileSource | null = null;
   private disc: DiscModel | null = null;
+  private soundsPlayed = 0;
   private session: Session | null = null;
   private state: PlaybackState = 'idle';
   private wantPlaying = false;
@@ -292,6 +293,7 @@ export class Player {
     const disc = await openDisc(source);
     this.source = source;
     this.disc = disc;
+    this.soundsPlayed = 0;
     this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
@@ -420,6 +422,7 @@ export class Player {
         this.setState('idle');
         break;
       case 'sound':
+        this.soundsPlayed++;
         this.deps.emit({ type: 'soundEffect', id: e.id });
         break;
       default:
@@ -1145,6 +1148,7 @@ export class Player {
         leadingPicturesSkipped: s.decoder.openGop.leadingSkipped,
         menu: this.menuActive && this.navRegs ? { page: this.navRegs.psrRead(PSR.MENU_PAGE_ID), selectedButton: this.navRegs.psrRead(PSR.SELECTED_BUTTON_ID), buttonsDrawn: this.igDraws } : null,
         igErrors: this.navigator?.igErrors ?? 0,
+        soundsPlayed: this.soundsPlayed,
       },
     });
   }

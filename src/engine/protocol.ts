@@ -32,6 +32,8 @@ export interface Telemetry {
   readonly menu: { readonly page: number; readonly selectedButton: number; readonly buttonsDrawn: number } | null;
   /** Corrupt IG segments dropped. */
   readonly igErrors: number;
+  /** Menu sound effects asked for since the disc opened. */
+  readonly soundsPlayed: number;
 }
 
 export type ChannelsLabel = 'mono' | 'stereo' | 'multichannel' | '';
