@@ -1,0 +1,15 @@
+# title 1 switches to Japanese with SET_STREAM
+play title 1
+wait playlist 0
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45

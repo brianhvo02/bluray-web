@@ -4,7 +4,7 @@ export type TraceEntry =
   | { k: 'title'; v: number; t?: number } | { k: 'playlist'; v: number; t?: number } | { k: 'playitem'; v: number; t?: number } | { k: 'chapter'; v: number; t?: number }
   | { k: 'menu' | 'popup'; v: 0 | 1; t?: number } | { k: 'uo'; v: string /* hex of libbluray compressed mask */; t?: number } | { k: 'sound'; v: number; t?: number } | { k: 'still'; v: 0 | 1; t?: number }
   | { k: 'seek'; what: 'item' | 'mark' | 'time'; v: number /* play item, mark index, or 45 kHz clip time asked for */; t?: number }
-  | { k: 'step'; n: number; plane?: string /* IG plane hash, Task 13 */ } | { k: 'end'; why: 'eof' | 'error' | 'limit' };
+  | { k: 'step'; n: number; plane?: string /* IG plane hash */; pg?: string /* visible PG plane hash */ } | { k: 'end'; why: 'eof' | 'error' | 'limit' };
 
 export function parseTrace(text: string): TraceEntry[] {
   return text

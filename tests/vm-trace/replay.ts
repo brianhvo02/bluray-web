@@ -14,6 +14,7 @@ import { normalizeDiscPaths } from '../../src/engine/disc/paths';
 import { PSR, RegisterFile, type PsrEvent } from '../../src/engine/hdmv/registers';
 import type { UoMask, UoOp } from '../../src/engine/hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlayAt, type PlaybackPort } from '../../src/engine/nav/navigator';
+import { PgStreamControl } from '../../src/engine/nav/subtitles';
 import { directoryEntries } from '../helpers/file-blob';
 import { dumpIgPages } from './dump-pages';
 import type { TraceEntry } from './format';
@@ -25,6 +26,7 @@ const MAX_READS = 10_000_000;
 const TAIL_READS = 200;
 const NO_CHAPTER = 0xffff;
 const IG_PIDS = new Set(Array.from({ length: 0x20 }, (_, k) => 0x1400 + k)); // IS_HDMV_PID_IG
+const PG_PIDS = new Set(Array.from({ length: 0x20 }, (_, k) => 0x1200 + k)); // IS_HDMV_PID_PG
 const READ_CHUNK = ALIGNED_UNIT_SIZE * 341;
 
 const KEY_VK: Record<KeyName, number> = {
@@ -34,17 +36,17 @@ const KEY_VK: Record<KeyName, number> = {
 
 const pts90ToUs = (pts: number): number => (pts * 1000) / 90;
 
-/** A main-path IG PES and the clip packet that completes it (m2ts_demux hands a PES over with its last packet). */
+/** A main-path graphics (IG or PG) PES and the clip packet that completes it (m2ts_demux hands a PES over with its last packet). */
 interface MainIgUnit {
   readonly endPkt: number;
   readonly unit: IgUnit & { readonly pid: number };
 }
 
 /**
- * The IG PES units of a clip, in stream order, each with the packet that completes it. IG PES declare their length, and
- * like m2ts_demux the assembler hands one over from inside the push of its last packet.
+ * The graphics PES units of a clip (PIDs in `pids`), in stream order, each with the packet that completes it. They declare
+ * their length, and like m2ts_demux the assembler hands one over from inside the push of its last packet.
  */
-async function scanMainIg(source: ByteSource, clipId: string): Promise<MainIgUnit[]> {
+async function scanMainGraphics(source: ByteSource, clipId: string, pids: ReadonlySet<number>): Promise<MainIgUnit[]> {
   const path = streamPath(clipId);
   const units: MainIgUnit[] = [];
   let pkt = 0;
@@ -56,7 +58,7 @@ async function scanMainIg(source: ByteSource, clipId: string): Promise<MainIgUni
     const buf = await source.read(path, offset, READ_CHUNK);
     for (let o = 0; o + SOURCE_PACKET_SIZE <= buf.length; o += SOURCE_PACKET_SIZE) {
       const packet = parseSourcePacket(buf, o);
-      if (!packet || !IG_PIDS.has(packet.pid)) continue;
+      if (!packet || !pids.has(packet.pid)) continue;
       pkt = (offset + o) / SOURCE_PACKET_SIZE;
       assembler.push(packet);
     }
@@ -101,6 +103,7 @@ const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve
  */
 class SimPort implements PlaybackPort {
   navigator!: Navigator;
+  pg!: PgStreamControl;
   held = false;
   private mpls: Mpls | null = null;
   private clips: ReadonlyMap<string, Clpi> = new Map();
@@ -111,8 +114,9 @@ class SimPort implements PlaybackPort {
   /** libbluray's next_mark: the first play mark after the position, -1 when none is left. */
   private nextMark = -1;
 
-  /** Main-path IG units of each clip, by completing packet. */
+  /** Main-path IG and PG units of each clip, by completing packet. */
   mainIg: ReadonlyMap<string, readonly MainIgUnit[]> = new Map();
+  mainPg: ReadonlyMap<string, readonly MainIgUnit[]> = new Map();
 
   constructor(private readonly disc: DiscModel, private readonly regs: RegisterFile, private readonly onHold: (on: boolean) => void) {}
 
@@ -145,6 +149,7 @@ class SimPort implements PlaybackPort {
     this.bytes = pkt * 192;
     this.findNextMark();
     this.navigator.playlistStarted(id, item); // synchronously, as the real player does
+    this.pg.playItemStarted(mpls.playItems[item]!, false); // _open_m2ts: _update_clip_psrs, then _init_pg_stream
     return Promise.resolve(true);
   }
 
@@ -194,6 +199,7 @@ class SimPort implements PlaybackPort {
       this.moveTo(this.item + 1, 0, false);
     }
     this.deliverIg();
+    this.deliverPg();
     this.bytes = Math.min(this.clipBytes(this.item), (Math.floor(this.bytes / READ_SIZE) + 1) * READ_SIZE);
     this.playmarkReached();
   }
@@ -217,6 +223,21 @@ class SimPort implements PlaybackPort {
       }
     }
     if (pushed) this.navigator.tick(Number.MAX_SAFE_INTEGER); // decoded (and INIT_MENU run) inside the read, before play marks
+  }
+
+  /** The PG PES units of st0.pg_pid that complete in this aligned unit: decoded and rendered inside the read (stc -1). */
+  private deliverPg(): void {
+    const pid = this.pg.pid;
+    if (pid === null) return;
+    const pi = this.mpls!.playItems[this.item]!;
+    const first = Math.floor(this.bytes / READ_SIZE) * PACKETS_PER_ALIGNED_UNIT;
+    const end = first + PACKETS_PER_ALIGNED_UNIT;
+    for (const u of this.mainPg.get(pi.clipId) ?? []) {
+      if (u.endPkt >= first && u.endPkt < end && u.unit.pid === pid) {
+        this.pg.push(u.unit);
+        this.pg.tick(Number.MAX_SAFE_INTEGER);
+      }
+    }
   }
 
   private epEntries(item: number): readonly { pts: number; spn: number }[] {
@@ -280,8 +301,12 @@ class SimPort implements PlaybackPort {
     if (seek) {
       this.findNextMark();
       this.navigator.seekGraphics();
+      this.pg.seek(); // GC_CTRL_PG_RESET in _seek_internal
     }
-    if (changed) this.navigator.playItemChanged(item);
+    if (changed) {
+      this.navigator.playItemChanged(item);
+      this.pg.playItemStarted(this.mpls!.playItems[item]!, false);
+    }
   }
 }
 
@@ -301,9 +326,16 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
   for (const pl of disc.playlists.values()) {
     for (const pi of pl.playItems) {
       if (mainIg.has(pi.clipId) || !pi.stn.ig.some((e) => e.streamType !== 2)) continue;
-      const units = await scanMainIg(source, pi.clipId);
+      const units = await scanMainGraphics(source, pi.clipId, IG_PIDS);
       mainIg.set(pi.clipId, units);
       opts.dumpPages?.(`clip ${pi.clipId} (main path):\n${dumpIgPages(units.map((u) => u.unit))}`);
+    }
+  }
+
+  const mainPg = new Map<string, MainIgUnit[]>();
+  for (const pl of disc.playlists.values()) {
+    for (const pi of pl.playItems) {
+      if (!mainPg.has(pi.clipId) && pi.stn.pg.some((e) => e.streamType !== 2)) mainPg.set(pi.clipId, await scanMainGraphics(source, pi.clipId, PG_PIDS));
     }
   }
 
@@ -341,6 +373,7 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
   const port = new SimPort(disc, regs, (on) => trace.push({ k: 'still', v: on ? 1 : 0 }));
   port.setClips(clips);
   port.mainIg = mainIg;
+  port.mainPg = mainPg;
   const preloads = new Set<Promise<IgUnit[]>>();
   const emit = (e: NavigatorEvent): void => {
     switch (e.type) {
@@ -366,6 +399,9 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
   const emptyPlane = new OverlayPlane().hash();
   const planeHash = (): string => navigator.igPlane?.hash() ?? emptyPlane;
   port.navigator = navigator;
+  // the pipeline restart a PID change asks for has no counterpart here: the next read already uses the new PID
+  const pg = new PgStreamControl({ regs, isMasked: (op) => navigator.isMasked(op), pidChanged: () => undefined });
+  port.pg = pg;
 
   /**
    * IG units reach the navigator only as they are read (stc = -1 in libbluray): no time gate beyond that. libbluray reads
@@ -374,6 +410,7 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
   const settle = async (): Promise<void> => {
     for (;;) {
       navigator.tick(Number.MAX_SAFE_INTEGER);
+      pg.tick(Number.MAX_SAFE_INTEGER); // a PSR2 change (SET_STREAM) runs _init_pg_stream at once in libbluray
       await flush();
       if (preloads.size === 0) return;
       const pending = [...preloads];
@@ -401,6 +438,7 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
       case 'play': navigator.playTitle(s.title); break;
       case 'key': navigator.userInput(KEY_VK[s.key]); break;
       case 'mouse': navigator.mouseSelect(s.x, s.y); break;
+      case 'subs': pg.select('off'); break;
       case 'click':
         navigator.mouseSelect(s.x, s.y);
         navigator.userInput(BdVk.MOUSE_ACTIVATE);
@@ -408,6 +446,12 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
       default: break;
     }
   };
+
+  // BLURAY_PLAYER_SETTING_DECODE_PG sets PSR2's display flag before the trace starts
+  const onWrite = regs.onWrite;
+  regs.onWrite = null;
+  regs.psrWriteBits(PSR.PG_STREAM, 0x80000000, 0x80000000);
+  regs.onWrite = onWrite;
 
   navigator.start();
   await flush();
@@ -418,7 +462,7 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
     while (idx < steps.length && !errored && waitMet(steps[idx]!)) {
       run(steps[idx]!);
       await settle();
-      trace.push({ k: 'step', n: idx, plane: planeHash() });
+      trace.push({ k: 'step', n: idx, plane: planeHash(), pg: pg.plane.hash() });
       readsBase = readsDone;
       idx++;
     }

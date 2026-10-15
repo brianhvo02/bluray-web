@@ -15,7 +15,7 @@
     "vm-trace:build": "tools/vm-trace/build.sh",
     "vm-trace:golden": "tools/vm-trace/golden.sh",
     "vm-trace": "tsx tests/vm-trace/run.ts",
-    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu"
+    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu && tsx scripts/make-subs-disc.ts fixtures/synthetic/disc-subs"
   },
   "dependencies": {
     "react": "^19.3.0",

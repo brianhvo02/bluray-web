@@ -1,0 +1,15 @@
+# English on (First Play SET_STREAM); a step every ~0.8 s of the 12 s clip
+wait playlist 0
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait end

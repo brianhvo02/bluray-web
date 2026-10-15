@@ -49,7 +49,7 @@ describe('parseTrace and parseScript', () => {
   });
 
   it('parses every script step and ignores comments', () => {
-    const steps = parseScript(['# boot', 'wait title 2', 'wait end', 'key ok  # select', 'key 7', 'mouse 10 20', 'click 30 40', 'play title 3', 'wait menu', 'wait page 3'].join('\n'));
+    const steps = parseScript(['# boot', 'wait title 2', 'wait end', 'key ok  # select', 'key 7', 'mouse 10 20', 'click 30 40', 'play title 3', 'wait menu', 'wait page 3', 'subs off'].join('\n'));
     expect(steps).toEqual([
       { op: 'wait', what: 'title', n: 2 },
       { op: 'wait', what: 'end' },
@@ -60,11 +60,13 @@ describe('parseTrace and parseScript', () => {
       { op: 'play', title: 3 },
       { op: 'wait', what: 'menu' },
       { op: 'wait', what: 'page', n: 3 },
+      { op: 'subs', what: 'off' },
     ]);
   });
 
   it('rejects unknown steps with the line number', () => {
     expect(() => parseScript('wait end\nkey purple')).toThrow(/line 2/);
     expect(() => parseScript('wait title')).toThrow(/line 1/);
+    expect(() => parseScript('subs on')).toThrow(/line 1/);
   });
 });

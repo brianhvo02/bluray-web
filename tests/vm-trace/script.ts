@@ -6,7 +6,9 @@ export type ScriptStep =
   | { readonly op: 'wait'; readonly what: 'menu' | 'popup' | 'end' }
   | { readonly op: 'key'; readonly key: KeyName }
   | { readonly op: 'mouse' | 'click'; readonly x: number; readonly y: number }
-  | { readonly op: 'play'; readonly title: number };
+  | { readonly op: 'play'; readonly title: number }
+  /** The PG display flag off, stream kept (harness: bd_select_stream(PG_TEXTST, 1, 0)). */
+  | { readonly op: 'subs'; readonly what: 'off' };
 
 const KEYS: readonly string[] = ['up', 'down', 'left', 'right', 'ok', 'topmenu', 'popup', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 
@@ -33,6 +35,10 @@ export function parseScript(text: string): ScriptStep[] {
       case 'mouse':
       case 'click':
         steps.push({ op, x: int(a), y: int(b) });
+        break;
+      case 'subs':
+        if (a !== 'off' || b !== undefined) bad();
+        steps.push({ op: 'subs', what: 'off' });
         break;
       case 'play':
         if (a !== 'title') bad();

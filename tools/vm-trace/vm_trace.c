@@ -107,13 +107,21 @@ static void event_cb(uint32_t event, uint32_t param)
     }
 }
 
-/* ---- IG overlay: a Y,Cr,Cb,T plane with the semantics and hash of src/engine/graphics/overlay-plane.ts ---- */
+/*
+ * ---- overlays: Y,Cr,Cb,T planes with the semantics and hash of src/engine/graphics/overlay-plane.ts ----
+ * IG is immediate. PG is buffered: draw and wipe change pg_back, BD_OVERLAY_FLUSH copies it to pg_plane (the
+ * visible plane), and INIT, CLOSE and CLEAR reset both.
+ */
 
-static uint8_t ig_plane[PLANE_W * PLANE_H * 4];
+#define PLANE_BYTES (PLANE_W * PLANE_H * 4)
 
-static void plane_put(unsigned x, unsigned y, const BD_PG_PALETTE_ENTRY *pe)
+static uint8_t ig_plane[PLANE_BYTES];
+static uint8_t pg_plane[PLANE_BYTES];
+static uint8_t pg_back[PLANE_BYTES];
+
+static void plane_put(uint8_t *plane, unsigned x, unsigned y, const BD_PG_PALETTE_ENTRY *pe)
 {
-    uint8_t *p = &ig_plane[(y * PLANE_W + x) * 4];
+    uint8_t *p = &plane[(y * PLANE_W + x) * 4];
     p[0] = pe ? pe->Y : 0;
     p[1] = pe ? pe->Cr : 0;
     p[2] = pe ? pe->Cb : 0;
@@ -121,7 +129,7 @@ static void plane_put(unsigned x, unsigned y, const BD_PG_PALETTE_ENTRY *pe)
 }
 
 /* OverlayPlane.draw: RLE rows from (x, y); a zero-length element ends the row once it is full, else is skipped */
-static void plane_draw(const struct bd_overlay_s *ov)
+static void plane_draw(uint8_t *plane, const struct bd_overlay_s *ov)
 {
     long row = ov->y, col = 0;
     unsigned i;
@@ -149,7 +157,7 @@ static void plane_draw(const struct bd_overlay_s *ov)
             for (c = col; c < end; c++) {
                 long x = ov->x + c;
                 if (x >= 0 && x < PLANE_W) {
-                    plane_put((unsigned)x, (unsigned)row, &ov->palette[e->color]);
+                    plane_put(plane, (unsigned)x, (unsigned)row, &ov->palette[e->color]);
                 }
             }
         }
@@ -160,40 +168,52 @@ static void plane_draw(const struct bd_overlay_s *ov)
 static void overlay_proc(void *handle, const struct bd_overlay_s * const ov)
 {
     unsigned x, y;
+    int pg;
+    uint8_t *target;
     (void)handle;
 
-    if (!ov || ov->plane != BD_OVERLAY_IG) {
+    if (!ov || (ov->plane != BD_OVERLAY_IG && ov->plane != BD_OVERLAY_PG)) {
         return;
     }
+    pg = ov->plane == BD_OVERLAY_PG;
+    target = pg ? pg_back : ig_plane;
     switch (ov->cmd) {
         case BD_OVERLAY_INIT:
         case BD_OVERLAY_CLOSE:
         case BD_OVERLAY_CLEAR:
-            memset(ig_plane, 0, sizeof(ig_plane));
+            memset(target, 0, PLANE_BYTES);
+            if (pg) {
+                memset(pg_plane, 0, PLANE_BYTES);
+            }
             break;
         case BD_OVERLAY_WIPE:
             for (y = ov->y; y < (unsigned)ov->y + ov->h && y < PLANE_H; y++) {
                 for (x = ov->x; x < (unsigned)ov->x + ov->w && x < PLANE_W; x++) {
-                    plane_put(x, y, NULL);
+                    plane_put(target, x, y, NULL);
                 }
             }
             break;
         case BD_OVERLAY_DRAW:
-            plane_draw(ov);
+            plane_draw(target, ov);
+            break;
+        case BD_OVERLAY_FLUSH:
+            if (pg) {
+                memcpy(pg_plane, pg_back, PLANE_BYTES);
+            }
             break;
         default:
             break;
     }
 }
 
-/* FNV-1a 64 over every byte of the plane, as OverlayPlane.hash() */
-static const char *plane_hash(void)
+/* FNV-1a 64 over every byte of a plane, as OverlayPlane.hash() */
+static const char *plane_hash(const uint8_t *plane)
 {
     static char out[17];
     uint64_t h = 0xcbf29ce484222325ull;
     size_t i;
-    for (i = 0; i < sizeof(ig_plane); i++) {
-        h ^= ig_plane[i];
+    for (i = 0; i < PLANE_BYTES; i++) {
+        h ^= plane[i];
         h *= 0x100000001b3ull;
     }
     snprintf(out, sizeof(out), "%016" PRIx64, h);
@@ -202,7 +222,7 @@ static const char *plane_hash(void)
 
 /* ---- script ---- */
 
-typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_PAGE, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE } step_kind;
+typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_PAGE, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE, S_SUBS_OFF } step_kind;
 typedef struct { step_kind kind; int a, b; } step_t;
 
 static const struct { const char *name; uint32_t vk; } KEYS[] = {
@@ -261,6 +281,8 @@ static int parse_script(const char *path, step_t **out)
             s.kind = w1[0] == 'm' ? S_MOUSE : S_CLICK;
             s.a = atoi(w2);
             s.b = a;
+        } else if (!strcmp(w1, "subs") && !strcmp(w2, "off") && cnt == 2) {
+            s.kind = S_SUBS_OFF;
         } else if (!strcmp(w1, "play") && !strcmp(w2, "title") && cnt >= 3) {
             s.kind = S_PLAY_TITLE;
             s.a = a;
@@ -322,6 +344,8 @@ static void run_step(BLURAY *bd, const step_t *s)
             bd_user_input(bd, -1, BD_VK_MOUSE_ACTIVATE);
             break;
         case S_PLAY_TITLE: bd_play_title(bd, (unsigned)s->a); break;
+        /* the PG display flag off, stream 1 kept (the replay's PgStreamControl.select('off')) */
+        case S_SUBS_OFF: bd_select_stream(bd, BLURAY_PG_TEXTST_STREAM, 1, 0); break;
         default: break;
     }
 }
@@ -356,6 +380,9 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* PG is decoded only with this setting; it also sets PSR2's display flag (bd_set_player_setting) */
+    bd_set_player_setting(bd, BLURAY_PLAYER_SETTING_DECODE_PG, 1);
+
     /* creates the event queue and queues libbluray's initial PSR events, which are not part of the trace */
     bd_get_event(bd, NULL);
     while (bd_get_event(bd, &ev) && ev.event != BD_EVENT_NONE) {
@@ -376,7 +403,8 @@ int main(int argc, char **argv)
         while (idx < nsteps && !errored && wait_met(&steps[idx])) {
             run_step(bd, &steps[idx]);
             settle(bd);
-            printf("{\"k\":\"step\",\"n\":%d,\"plane\":\"%s\"}\n", idx, plane_hash());
+            printf("{\"k\":\"step\",\"n\":%d,\"plane\":\"%s\",", idx, plane_hash(ig_plane));
+            printf("\"pg\":\"%s\"}\n", plane_hash(pg_plane));
             reads_base = reads_done;
             idx++;
         }

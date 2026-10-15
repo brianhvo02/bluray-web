@@ -1,0 +1,15 @@
+# display flag off: only the forced caption (4-6 s) shows
+wait playlist 0
+subs off
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
+wait reads 45
