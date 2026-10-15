@@ -67,8 +67,15 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         // Only the volume slider keeps its native arrow-key stepping; on the seek bar arrows seek by 10 s.
         if (e.key.startsWith('Arrow') && target.dataset.role === 'volume') return;
       }
-      if (target instanceof HTMLButtonElement && (e.key === ' ' || e.key === 'Enter')) return;
-      const action = keyToAction(e.key, { menuActive: controller.getSnapshot().menuActive });
+      const menuActive = controller.getSnapshot().menuActive;
+      if (target instanceof HTMLButtonElement) {
+        // A focused button keeps Space and Enter, except that while a disc menu is shown Enter is the menu's OK: after
+        // clicking Pop-up or Top Menu the focus stays there, and a second click would close or restart the menu.
+        // Dialogs over the player (the picker) keep Enter.
+        if (e.key === ' ') return;
+        if (e.key === 'Enter' && (!menuActive || target.closest('.picker-backdrop'))) return;
+      }
+      const action = keyToAction(e.key, { menuActive });
       if (!action) return;
       e.preventDefault();
       const op = keyActionUo(action, uoContext(controller));

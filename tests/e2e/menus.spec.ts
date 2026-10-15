@@ -111,6 +111,34 @@ test('P opens the pop-up menu during the feature and Enter jumps to mark 1', asy
   await expect.poll(async () => (await menuTelemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(2_000_000);
 });
 
+test('Enter after clicking the Pop-up button activates the pop-up button, not the control again', async ({ page }) => {
+  await openMenuDisc(page);
+  await playTitle1(page);
+  await page.getByTestId('player').hover();
+  await page.getByTestId('play-toggle').click(); // paused: only the button's link to mark 1 can move the clock to 2 s
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
+  const paused = (await menuTelemetry(page))!.clockUs;
+  expect(paused).toBeLessThan(1_900_000);
+  await page.getByTestId('popup').click(); // keyboard focus stays on the control
+  await expectMenu(page, true);
+  await page.keyboard.press('Enter');
+  await expectMenu(page, false);
+  await expect.poll(async () => (await menuTelemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(2_000_000);
+});
+
+test('Enter after clicking the Top Menu button activates the selected menu button', async ({ page }) => {
+  await openMenuDisc(page);
+  await playTitle1(page);
+  await page.getByTestId('player').hover();
+  await page.getByTestId('top-menu').click(); // keyboard focus stays on the control
+  await expectMenu(page, true);
+  await expect.poll(() => menuState(page)).toBe('page 0 button 1');
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(() => menuState(page)).toBe('page 0 button 2');
+  await page.keyboard.press('Enter'); // B opens page 1; clicking Top Menu again would restart on page 0
+  await expect.poll(() => menuState(page)).toBe('page 1 button 3');
+});
+
 test('a control the disc masks is disabled and its key explains why', async ({ page }) => {
   await openMenuDisc(page);
   await playTitle1(page);
