@@ -48,8 +48,8 @@ export class PgStreamControl {
   private shownValue: { readonly objectsShown: number; readonly forced: number } | null = null;
   /** A PSR2 change not yet acted on (handled at the next tick, select or play item start). */
   private psrChanged = false;
-  /** Playlist time of a play item change still ahead of presentation: PG resets when the clock gets there. */
-  private resetAtUs: number | null = null;
+  /** Playlist times of play item changes still ahead of presentation, ascending: PG resets as the clock gets to each. */
+  private resetsAtUs: number[] = [];
 
   constructor(private readonly deps: PgStreamControlDeps) {
     this.renderer = new PgRenderer({ regs: deps.regs, onOverlay: (op) => this.applyOverlay(op) });
@@ -74,7 +74,7 @@ export class PgStreamControl {
     this.psrChanged = false;
     if (startUs !== undefined && (this.sets.length > 0 || this.renderer.open)) {
       this.decoder.reset();
-      this.resetAtUs = startUs;
+      this.resetsAtUs = [...this.resetsAtUs.filter((t) => t < startUs), startUs];
       this.pidValue = this.findPgStream();
     } else {
       this.initPgStream();
@@ -103,12 +103,12 @@ export class PgStreamControl {
   tick(clockUs: number): void {
     this.applyPsrChange();
     while (this.sets.length > 0 && this.sets[0]!.pts <= clockUs) {
-      if (this.resetAtUs !== null && this.sets[0]!.pts >= this.resetAtUs) this.resetRenderer();
+      while (this.resetsAtUs.length > 0 && this.sets[0]!.pts >= this.resetsAtUs[0]!) this.itemReset();
       const ds = this.sets.shift()!;
       const drawn = this.renderer.render(ds); // GC_CTRL_PG_UPDATE
       this.shownValue = { objectsShown: drawn, forced: this.renderer.lastForced };
     }
-    if (this.resetAtUs !== null && clockUs >= this.resetAtUs) this.resetRenderer();
+    while (this.resetsAtUs.length > 0 && clockUs >= this.resetsAtUs[0]!) this.itemReset();
   }
 
   /** A seek: drop queued display sets and reset PG (GC_CTRL_PG_RESET in _seek_internal); the plane clears. */
@@ -217,12 +217,18 @@ export class PgStreamControl {
     this.sets = [];
     this.decoder.reset();
     this.resetRenderer();
+    this.resetsAtUs = [];
   }
 
   private resetRenderer(): void {
     this.renderer.reset();
     this.shownValue = null;
-    this.resetAtUs = null;
+  }
+
+  /** The deferred _init_pg_stream reset of the next play item change, now that presentation has reached it. */
+  private itemReset(): void {
+    this.resetsAtUs.shift();
+    this.resetRenderer();
   }
 
   /** The audio and PG parts of _update_clip_psrs, for discs without a navigator. */

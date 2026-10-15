@@ -233,6 +233,23 @@ describe('PgStreamControl', () => {
     expect(pg.plane.hash()).toBe(EMPTY);
   });
 
+  it('resets at each of two play item boundaries that the reader passes within its read-ahead', () => {
+    const { regs, pg } = setup();
+    showStream1(regs);
+    pg.playItemStarted(item(), false, 0);
+    push(pg, subtitleSegments({ x: 10 }), 1_000_000); // item A: on screen up to its end at 2 s
+    pg.tick(1_000_000);
+    pg.playItemStarted(item(), false, 2_000_000); // a short item B
+    push(pg, subtitleSegments({ x: 300 }), 2_500_000);
+    pg.playItemStarted(item(), false, 3_000_000); // item C, read before presentation reaches B
+    pg.tick(2_000_000);
+    expect(pg.plane.hash()).toBe(EMPTY); // A's subtitle ends with A
+    pg.tick(2_500_000);
+    expect(pg.plane.rgba({ x: 300, y: 900, w: 1, h: 1 })[3]).toBe(255);
+    pg.tick(3_000_000);
+    expect(pg.plane.hash()).toBe(EMPTY); // and B's with B
+  });
+
   it('after a seek starts the item at the target, a subtitle due at the target still shows', () => {
     const { regs, pg } = setup();
     showStream1(regs);
