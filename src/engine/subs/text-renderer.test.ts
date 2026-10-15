@@ -164,6 +164,32 @@ describe('TextSubtitleRenderer', () => {
     expect(new TextSubtitleRenderer([]).render(ctx, 0, VIDEO, OPTS)).toBe(0);
   });
 
+  it('lays out a cue set once: later frames with the same cues, size and rectangle measure nothing', () => {
+    const r = new TextSubtitleRenderer(srt(cue('00:00:01,000', '00:00:03,000', 'a long line of several words that wraps ' + 'word '.repeat(20))));
+    const { ctx, fills } = fakeCtx();
+    let measured = 0;
+    const counting = new Proxy(ctx, {
+      get: (t, p) => {
+        const v = (t as unknown as Record<string | symbol, unknown>)[p];
+        if (p === 'measureText') return (text: string) => { measured++; return (v as (s: string) => TextMetrics)(text); };
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+      set: (t, p, v) => { (t as unknown as Record<string | symbol, unknown>)[p] = v; return true; },
+    });
+    r.render(counting, 1_000_000, VIDEO, OPTS);
+    const first = fills().map((f) => [f.text, f.x, f.y]);
+    expect(measured).toBeGreaterThan(0);
+    measured = 0;
+    r.render(counting, 1_500_000, VIDEO, OPTS);
+    expect(measured).toBe(0);
+    expect(fills().slice(first.length).map((f) => [f.text, f.x, f.y])).toEqual(first); // the same picture
+    r.render(counting, 1_600_000, { ...VIDEO, width: 800 }, OPTS);
+    expect(measured).toBeGreaterThan(0); // another rectangle is another layout
+    measured = 0;
+    r.render(counting, 1_700_000, { ...VIDEO, width: 800 }, { offsetUs: 0, scale: 1.5 });
+    expect(measured).toBeGreaterThan(0); // and so is another size
+  });
+
   it('scales the font', () => {
     const r = new TextSubtitleRenderer(srt(cue('00:00:01,000', '00:00:02,000', 'a')));
     const { ctx, fills } = fakeCtx();

@@ -82,9 +82,23 @@ function merge(segments: readonly Segment[]): Segment[] {
 }
 
 /** TextSubtitleRenderer (the parent spec's SubtitleRenderer) for SRT cues. */
+/** Where each piece of text goes: the layout of one set of cues at one size in one rectangle. */
+interface Layout {
+  readonly cues: readonly TextCue[];
+  readonly scale: number;
+  readonly rect: Rect;
+  readonly size: number;
+  readonly pieces: ReadonlyArray<{ readonly seg: Segment; readonly x: number; readonly y: number }>;
+}
+
+const sameRect = (a: Rect, b: Rect): boolean => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+const sameCues = (a: readonly TextCue[], b: readonly TextCue[]): boolean => a.length === b.length && a.every((c, i) => c === b[i]);
+
 export class TextSubtitleRenderer {
   private lastCues: readonly TextCue[] = [];
   private lastScale = 1;
+  /** The cues on screen keep their layout from frame to frame: wrapping measures every word. */
+  private layoutCache: Layout | null = null;
 
   constructor(private readonly cues: readonly TextCue[]) {}
 
@@ -103,18 +117,29 @@ export class TextSubtitleRenderer {
     this.lastScale = opts.scale;
     if (cues.length === 0 || videoRect.width <= 0 || videoRect.height <= 0) return 0;
 
-    const size = videoRect.height * FONT_SIZE * opts.scale;
-    const lineHeight = size * LINE_HEIGHT;
-    const marginV = videoRect.height * MARGIN;
-    const marginH = videoRect.width * MARGIN;
-    const maxWidth = videoRect.width * MAX_LINE_WIDTH;
-
+    const cached = this.layoutCache;
+    const layout = cached && cached.scale === opts.scale && sameRect(cached.rect, videoRect) && sameCues(cached.cues, cues)
+      ? cached
+      : (this.layoutCache = this.layout(ctx, cues, videoRect, opts.scale));
     ctx.save();
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     ctx.lineJoin = 'round';
-    ctx.lineWidth = size * OUTLINE;
+    ctx.lineWidth = layout.size * OUTLINE;
     ctx.strokeStyle = '#000000';
+    for (const { seg, x, y } of layout.pieces) this.drawSegment(ctx, seg, x, y, layout.size);
+    ctx.restore();
+    return cues.length;
+  }
+
+  private layout(ctx: OffscreenCanvasRenderingContext2D, cues: readonly TextCue[], videoRect: Rect, scale: number): Layout {
+    const size = videoRect.height * FONT_SIZE * scale;
+    const lineHeight = size * LINE_HEIGHT;
+    const marginV = videoRect.height * MARGIN;
+    const marginH = videoRect.width * MARGIN;
+    const maxWidth = videoRect.width * MAX_LINE_WIDTH;
+    const pieces: Array<{ seg: Segment; x: number; y: number }> = [];
+    ctx.save(); // wrap() sets the font to measure
     for (let align = 1; align <= 9; align++) {
       const group = cues.filter((c) => c.align === align);
       if (group.length === 0) continue;
@@ -134,14 +159,14 @@ export class TextSubtitleRenderer {
             : col === 2 ? videoRect.x + videoRect.width - marginH - line.width
               : videoRect.x + (videoRect.width - line.width) / 2;
         for (const seg of line.segments) {
-          this.drawSegment(ctx, seg, x, baseline, size);
+          pieces.push({ seg, x, y: baseline });
           x += seg.width;
         }
         baseline += lineHeight;
       }
     }
     ctx.restore();
-    return cues.length;
+    return { cues, scale, rect: videoRect, size, pieces };
   }
 
   private drawSegment(ctx: OffscreenCanvasRenderingContext2D, seg: Segment, x: number, y: number, size: number): void {
