@@ -96,6 +96,8 @@ const GC_CTRL: Readonly<Record<GcCtrl, GraphicsCtrl>> = {
 const DEFAULT_PLANE_WIDTH = 1920;
 const DEFAULT_PLANE_HEIGHT = 1080;
 const COMPOSITION_ACQUISITION_POINT = 1;
+/** initIgStream(): a sub-path preload is still loading; INIT_MENU waits for it. */
+const IG_INIT_PENDING = -1;
 
 /** A graphics PES payload of the IG stream, in playlist time. */
 export interface IgUnit {
@@ -489,7 +491,7 @@ export class Navigator {
         return;
       }
     }
-    this.runGc('NOP');
+    if (this.gcStatus & GcStatus.ANIMATE) this.runGc('NOP'); // _read_ext: only while animating (effects, buttons, user timeout)
   }
 
   /** _run_hdmv */
@@ -534,8 +536,7 @@ export class Navigator {
           } else {
             this.hdmvNumInvalidPl = 0;
           }
-          this.initIgStream();
-          this.runGc('INIT_MENU');
+          this.initMenu();
         });
         break;
       }
@@ -663,9 +664,17 @@ export class Navigator {
   }
 
   /**
+   * _init_ig_stream, then INIT_MENU, as libbluray runs them after a playlist opens or is restored. libbluray preloads a
+   * sub-path clip synchronously; here a preload still loading defers the INIT_MENU until it settles, so no INIT runs on an
+   * empty controller in between.
+   */
+  private initMenu(): void {
+    if (this.initIgStream() !== IG_INIT_PENDING) this.runGc('INIT_MENU');
+  }
+
+  /**
    * _init_ig_stream. A preloaded sub-path buffer is decoded whenever there is one, with the PID PSR0 names now, even if
    * that entry is a main-path stream. Otherwise a main-path IG stream is decoded from the clip as the pipeline delivers it.
-   * The caller runs INIT_MENU, once.
    */
   private initIgStream(): number {
     this.igReady = false;
@@ -673,9 +682,12 @@ export class Navigator {
     if (!entry) return 0;
     const preload = this.subIg;
     if (preload && !preload.failed) {
-      if (preload.units) this.decodePreloadedIg(preload.units, entry.pid);
-      else preload.initPending = true;
-      return 1;
+      if (preload.units) {
+        this.decodePreloadedIg(preload.units, entry.pid);
+        return 1;
+      }
+      preload.initPending = true;
+      return IG_INIT_PENDING;
     }
     if (entry.streamType !== 2) {
       this.igReady = true;
@@ -709,13 +721,15 @@ export class Navigator {
         if (!preload.initPending) return;
         preload.initPending = false;
         this.decodePreloadedIg(units, this.findIgEntry()?.pid ?? entry.pid);
-        this.runGc('INIT_MENU'); // the caller's INIT came first and found nothing: run it again, once
+        this.runGc('INIT_MENU'); // the INIT deferred by initMenu()
       },
       () => {
         if (!current()) return; // aborted or superseded
         this.subIgErrors++; // a failed preload means no menu, as _close_preload leaves no st_ig clip
         preload.failed = true;
+        if (!preload.initPending) return;
         preload.initPending = false;
+        this.runGc('INIT_MENU'); // the deferred INIT, as libbluray runs it on an empty controller after a failed preload
       },
     );
   }
@@ -853,8 +867,7 @@ export class Navigator {
               this.fail(`Cannot restore playlist ${playlist}`);
               return;
             }
-            this.initIgStream();
-            this.runGc('INIT_MENU');
+            this.initMenu();
           });
         }
         break;

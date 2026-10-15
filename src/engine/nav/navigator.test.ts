@@ -750,6 +750,30 @@ describe('Navigator IG menus in sub-paths', () => {
     expect(menuEvents(t.events).at(-1)).toEqual({ type: 'menu', active: true });
   });
 
+  it('does not flicker the menu while the preload reloads after a restore: INIT waits for it, and NOP runs only while animating', async () => {
+    let resolve: ((u: IgUnit[]) => void) | null = null;
+    const t = subSetup((): Promise<IgUnit[]> => (resolve === null ? Promise.resolve(menuUnits()) : new Promise<IgUnit[]>((r) => { resolve = r; })), [
+      { cmds: [asm.playPl(imm(0))], resumeIntention: true }, { cmds: [asm.resume()] }, idle, idle,
+    ]);
+    t.nav.start();
+    await flushAll();
+    expect(menuEvents(t.events)).toEqual([{ type: 'menu', active: true }]);
+    resolve = (): void => {}; // the next load stays pending until resolved below
+    const writes: string[] = [];
+    t.regs.onWrite = (w): void => { if (w.kind === 'psr' && (w.index === PSR.MENU_PAGE_ID || w.index === PSR.SELECTED_BUTTON_ID)) writes.push(`psr ${w.index}`); };
+    t.nav.menuCall();
+    await flushAll();
+    t.nav.tick(0);
+    t.nav.tick(0);
+    expect(menuEvents(t.events)).toEqual([{ type: 'menu', active: true }]);
+    expect(writes).toEqual([]);
+    resolve!(menuUnits());
+    await flushAll();
+    expect(menuEvents(t.events)).toEqual([{ type: 'menu', active: true }]);
+    expect(writes.length).toBeGreaterThan(0); // the deferred INIT_MENU ran
+    expect(t.nav.igPlane?.hasContent).toBe(true);
+  });
+
   it('decodes only up to the first complete display set of the preloaded stream, as gc_decode_ts does', async () => {
     const shownFor = async (units: IgUnit[]): Promise<string> => {
       const t = subSetup(async () => units);
