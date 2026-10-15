@@ -242,7 +242,7 @@ v1 is delivered as four sequential plans. Each one ends in a working, testable a
 
 1. **Core player:** scaffolding (Vite, COOP/COEP, Vitest, Playwright), `disc/`, `bdmv/` parsers, Navigator and Timeline, demux, WebCodecs video, LPCM audio, MasterClock and AudioWorklet, compositor (video plane only), and a basic UI with a playlist/title list and transport controls. Exit criterion: plays a chosen playlist in sync, with seek and chapters.
 2. **Audio coverage:** the WASM AC-3/E-AC-3 and DTS core decoder (a reproducible build, with `audio.wasm` committed), TrueHD AC-3 core extraction, and audio track switching.
-3. **Menus:** RegisterFile, HDMV VM, the libbluray VM trace harness, IG decoder, GraphicsController, UO masks, menu input routing, and the remote pad.
+3. **Menus:** RegisterFile, HDMV VM, the libbluray VM trace harness, IG decoder, GraphicsController, UO masks, menu input routing, and the remote pad. Done (2026-10-15); details in `2026-10-14-m3-hdmv-menus-design.md`.
 4. **Subtitles:** PGS (including forced subtitles), SRT, the native ASS renderer, subtitle controls, and the ASS golden-image tests.
 
 ## 12. Decisions log

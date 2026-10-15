@@ -15,6 +15,22 @@ what would change that decision.
   are configured with `prefer-software`. Frames come out as woven fields, so motion shows combing. *Revisit if* a
   disc has long interlaced content (a deinterlacing shader in the compositor would fix it).
 
+## Menus (HDMV)
+
+- **Menu sounds are verified on synthetic data only.** `disc-menu` carries a `sound.bdmv`; none of the local discs
+  has one. *Revisit when* a disc with menu sounds is available.
+- **`composition_timeout_pts` and `selection_timeout_pts` are not implemented**, as in libbluray (it only logs them).
+  The user timeout is. *Revisit if* a disc relies on them.
+- **Initial PSRs are libbluray's `bd_psr_init` defaults**, including region B and profile 2, so traces match
+  libbluray. *Revisit if* a disc's program branches on region or profile in a way that matters.
+- **Menu keys are not checked against UO masks at libbluray's default restriction level (RELAXED)** inside the
+  navigator, as in libbluray; the player refuses masked keys and controls one layer up with a notice.
+- **IG in sub-paths is read whole when its playlist opens** (`_preload_ig_subpath`), which reads the whole sub-path
+  clip; clips over the preload limit show no menu. *Revisit if* a disc carries a large IG sub-path.
+- **TSURUNE plays with audio underruns** (57 over the local-disc gate's seeks and track switches; 0 on the other
+  discs), with every sync window within bounds. It is the only disc decoded in software (1080i). *Revisit* when
+  looking at software-decode load.
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,
@@ -27,6 +43,16 @@ what would change that decision.
 - **AC-3 at 44.1 or 32 kHz is ignored** (treated as no sync). Blu-ray AC-3 is always 48 kHz.
 
 ## Resolved (for reference)
+
+- **Milestone 3 real-disc gate passed (2026-10-15).** TSURUNE_TSUNAGARI_1 (HDMV) boots through First Play (a logo,
+  then the 119 min feature); Top Menu opens its menu, Enter starts the feature, and its three LPCM tracks play in
+  sync with 0 decoder errors. `npm run vm-trace` matches libbluray on TSURUNE for menu → feature (113 entries) and
+  pop-up open → close (65 entries), plane hashes included. A_NEW_ERA and RENTAL_FAMILY (BD-J) still open to the
+  picker with their main features, all tracks in sync.
+- **Main-path menus muxed at a clip's start now show.** Playback started the first play item at its first EP map
+  entry, skipping an IG display set muxed ahead of the first keyframe, and a PES was only complete at the next unit
+  start on its PID, so a menu's last segment waited for the end of the clip. Both now follow libbluray (`_fill_clip`
+  packet 0 for first and seamless items; `m2ts_demux` completion by `PES_packet_length`).
 
 - **Decoy playlists are no longer picked as the main feature.** BD-J discs can carry maze playlists that play one
   segment hundreds of times (A_NEW_ERA and RENTAL_FAMILY: `00149`, about 250 min). The main feature is now chosen

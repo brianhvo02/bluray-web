@@ -11,6 +11,12 @@ Client-side Blu-ray (BDMV) player for Chromium. Design: `docs/superpowers/specs/
 - `npm run fixture:synthetic` regenerates `fixtures/synthetic/`. It needs `ffmpeg` on PATH, because the audio fixtures and
   `disc3` use its ac3, eac3, dca and truehd encoders. Their bytes depend on the host ffmpeg version (currently 9.0.2).
   `fixtures/synthetic/disc3` is the four-codec audio disc (LPCM, AC-3 5.1, TrueHD with an AC-3 core, DTS).
+- `scripts/fetch-libbluray.sh` clones libbluray at the commit the engine is ported from into `.cache/libbluray` (gitignored),
+  the reference for every ported function.
+- The libbluray trace harness (`tools/vm-trace/`, Docker): `npm run vm-trace:build` builds patched libbluray and the harness,
+  `npm run vm-trace:golden` regenerates `tests/vm-trace/golden/` from it (never edit those by hand), and
+  `npm run vm-trace -- <disc> <script> [--dump-pages]` runs libbluray and our replay live and prints the first divergence.
+  `npm test` replays the golden traces without Docker.
 - Put your own decrypted discs under `fixtures/local/<name>/BDMV/...` to enable `tests/local`.
   `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome and seeks around it.
 

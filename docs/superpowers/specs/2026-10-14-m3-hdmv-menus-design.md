@@ -36,7 +36,7 @@ All engine code is ported from libbluray at commit `448f896` (the commit already
 |---|---|---|
 | `bdmv/mobj-parser.ts` | `hdmv/mobj_parse.c` | Movie objects: 12-byte navigation commands, resume intention, menu-call and title-search masks |
 | `bdmv/sound-parser.ts` | `bdnav/sound_parse.c` | `sound.bdmv` clips (LPCM) |
-| `hdmv/registers.ts` | `register.c` | `RegisterFile`: GPRs and PSRs with libbluray's initial values, change listeners, save/restore for CALL/RESUME, an optional write-log hook for traces |
+| `hdmv/registers.ts` | `register.c` | `RegisterFile`: GPRs and PSRs with libbluray's initial values (`bd_psr_init`, including region B and profile 2, so traces match libbluray's defaults), change listeners, save/restore for CALL/RESUME, an optional write-log hook for traces |
 | `hdmv/vm.ts` | `hdmv/hdmv_vm.c`, `hdmv_insn.h` | `HdmvVm`: instruction decode and execution in step-budgeted batches; `selectObject`, `setObject`, `run`, `suspendPlaylist`, `resume`, `uoMask`; events `TITLE`, `PLAY_PL`, `PLAY_PL_PI`, `PLAY_PL_PM`, `PLAY_PI`, `PLAY_PM`, `PLAY_STOP`, `STILL`, `SET_BUTTON_PAGE`, `ENABLE_BUTTON`, `DISABLE_BUTTON`, `POPUP_OFF`, `END`, `IG_END` |
 | `graphics/ig-decoder.ts` | `decoders/ig_decode.c` | ICS, PDS, ODS and END segments into display sets: pages, BOGs, buttons, neighbour links, states, commands, timeouts |
 | `graphics/rle.ts`, `graphics/palette.ts` | `decoders/rle.c`, `graphics_processor.c` | RLE objects to RGBA via YCbCr BT.709 palettes |
@@ -49,7 +49,8 @@ Changes to existing code:
 - `PlaybackPipeline` demuxes the selected IG PID as a third sink, with PTS.
 - `Compositor` gains an IG plane above the video.
 - Protocol: events `menuActive`, `uoMask`, `soundEffects` (clips, once per disc), `soundEffect { id }`, `indexTitles` (the `index.bdmv` titles; the existing `titles` event keeps carrying the playlist list); commands `menuKey` (up, down, left, right, ok, 0–9, topMenu, popup), `pointer { kind: move | click, x, y }` in 1920×1080 menu space, `playTitle { title }`.
-- `Telemetry` gains `menu: { page, selectedButton, buttonsDrawn } | null` and `igErrors`.
+- `Telemetry` gains `menu: { page, selectedButton, buttonsDrawn } | null`, `igErrors` and `soundsPlayed`.
+- IG carried in sub-paths (as on TSURUNE) is read whole when its playlist opens, as libbluray's `_preload_ig_subpath`; `mpls-parser.ts` parses sub-paths for it.
 
 Test tool: `tools/vm-trace/` (C source and Docker build; not shipped).
 
@@ -76,11 +77,13 @@ At the end of a playlist, including play-item still handling (infinite, or N sec
 
 ### 3.3 IG timing
 
-Our reader runs up to 2 s ahead of playback, unlike libbluray's paced `bd_read`. IG PES units are therefore queued by playlist PTS, and each tick passes the graphics controller only units whose PTS the master clock has reached. On a seek, the queue and the controller's IG state are reset and decoding resumes at the next epoch start or acquisition point.
+Our reader runs up to 2 s ahead of playback, unlike libbluray's paced `bd_read`. IG PES units are therefore queued by playlist PTS, and each tick passes the graphics controller only units whose PTS the master clock has reached. On a seek, as libbluray's `_seek_internal`, only the queued units not yet due and a half-received display set are dropped; the menu that is shown stays. Closing the playlist resets the graphics controller silently, and display sets are then ignored until an epoch start or acquisition point.
+
+As libbluray's `_fill_clip`, the first play item and seamless ones started from their beginning are read from packet 0, so a display set muxed ahead of the first keyframe is not skipped; a PES that declares its length is handed over as soon as it is complete (`m2ts_demux`).
 
 ### 3.4 Graphics output
 
-Each tick also sends `NOP` (timers and animations). Overlay operations update one 1920×1080 `OffscreenCanvas` (the IG plane). Decoded objects are cached as `ImageBitmap`s keyed by object ID and version. The compositor draws the plane over the video with the same letterboxing, redrawing only when the controller reports a change.
+As `_read_ext`, a tick sends `NOP` only while the controller reports animating (effects, button animations, a user timeout). Overlay operations update an `OverlayPlane` holding one palette entry (Y, Cr, Cb, T) per pixel at the composition's size. The compositor copies the plane's dirty rectangle into an `OffscreenCanvas` and draws that over the video with the same letterboxing; there is no per-object `ImageBitmap` cache, and an empty plane is not drawn.
 
 ### 3.5 Button activation
 
@@ -131,11 +134,11 @@ Canvas pointer events are mapped to 1920×1080 menu space with the compositor's 
 
 ### 5.1 Build
 
-`tools/vm-trace/build.sh` runs in Docker (pinned image digest, `linux/amd64`). It clones libbluray at `448f896`, applies `trace.patch` (about 20 lines in `register.c` that log every GPR and PSR write as `{ reg, index, value }`), builds libbluray statically without BD-J, fonts or XML, and compiles `vm_trace.c`.
+`tools/vm-trace/build.sh` runs in Docker (pinned image digest, `linux/amd64`). It clones libbluray at `448f896`, applies `trace.patch` (register-write, event and seek hooks, a fixed random seed, and a `bd_get_scr()` that advances 1800 ticks per read), builds libbluray statically with meson without BD-J, fonts or XML, and compiles `vm_trace.c`.
 
 ### 5.2 Run
 
-`vm_trace <disc> <script>` plays from First Play through `bd_play` and `bd_read_ext` as fast as it can read (no decoding; libbluray still demuxes IG, so menus load). Scripts are event-driven steps: `wait menu`, `wait playlist NNNNN`, `wait time Ns`, `key up|down|left|right|ok|0-9|topmenu|popup`, `mouse X Y [click]`. Output is JSON lines tagged with media time: register writes; playlist, play item, chapter and title starts; menu and pop-up on/off; UO mask; sound effects; PSR10/11 (selected button and page).
+`vm_trace <disc> <script>` plays from First Play through `bd_play` and `bd_read_ext` as fast as it can read (no decoding; libbluray still demuxes IG, so menus load). Scripts are state-based steps: `wait title N`, `wait playlist N`, `wait page N`, `wait reads N`, `wait menu`, `wait popup`, `wait end`, `key up|down|left|right|ok|0-9|topmenu|popup`, `mouse X Y`, `click X Y`, `play title N`. Output is JSON lines: register writes (PSR 8 excluded, it follows time); title, playlist, play item and chapter changes; accepted seeks; menu and pop-up on/off; UO mask; sound effects; and one `step` entry per script step carrying a hash of the IG plane (both sides apply the overlay operations to the same Y, Cr, Cb, T plane).
 
 ### 5.3 Our side
 
@@ -143,14 +146,14 @@ Canvas pointer events are mapped to 1920×1080 menu space with the compositor's 
 
 ### 5.4 Comparison
 
-Traces are compared in order. Register writes and navigation events must be identical; media times must agree within one frame. The first divergence is printed with context (for example "GPR 12: libbluray 3, ours 2, after key ok at 00001 12.4 s").
+Traces are compared in order. Kinds and values, including the plane hash at every step, must be identical; media times are diagnostic only, since libbluray decodes IG as it reads (`stc = -1`) rather than at its PTS. The first divergence is printed with the script step and five entries of context on each side.
 
 ### 5.5 Where it runs
 
 - Synthetic discs `fixtures/synthetic/disc-vm` (hand-built movie objects: arithmetic, compare, jumps, CALL/RESUME, play at item and mark, stills) and `fixtures/synthetic/disc-menu` (a two-page IG menu with neighbour navigation, a button that plays a playlist, and a pop-up). Their libbluray traces are committed as golden files under `tests/vm-trace/golden/`.
 - CI replays our side against the golden traces on every run (no Docker needed).
 - A path-filtered workflow (`.github/workflows/vm-trace.yml`, triggered by `tools/vm-trace/**` and the two synthetic discs) rebuilds the harness, regenerates the golden traces and fails if they differ.
-- Real discs: `npm run vm-trace -- <disc> <script>` runs both sides live and compares (local only). `tests/vm-trace/scripts/tsurune.keys` covers TSURUNE.
+- Real discs: `npm run vm-trace -- <disc-path> <script-path> [--dump-pages]` runs both sides live and compares (local only); `--dump-pages` prints the menus as our decoder reads them, for writing scripts. `tests/vm-trace/scripts/tsurune.menu-to-feature.keys` and `tsurune.popup.keys` cover TSURUNE.
 
 ## 6. Errors
 
@@ -173,6 +176,6 @@ Traces are compared in order. Register writes and navigation events must be iden
 ## 8. Exit criteria
 
 1. CI is green, including trace replay; the harness-regeneration workflow passes.
-2. TSURUNE_TSUNAGARI_1 in Chrome: boots through First Play to its top menu with buttons drawn; keyboard, mouse and remote can each start the feature from the menu; the feature's pop-up menu opens and closes; masked controls are disabled; `npm run vm-trace` matches libbluray for the scripted sessions menu → feature and pop-up open → close.
+2. TSURUNE_TSUNAGARI_1 in Chrome: boots through First Play (which on this disc plays a logo, then the feature; Top Menu opens the menu) to its top menu with buttons drawn; keyboard, mouse and remote can each start the feature from the menu; the feature's pop-up menu opens and closes; masked controls are disabled; `npm run vm-trace` matches libbluray for the scripted sessions menu → feature and pop-up open → close.
 3. The BD-J discs (A_NEW_ERA, RENTAL_FAMILY) still open to the picker with the correct main feature.
 4. Menu sounds are verified on synthetic data only and recorded as such in `docs/known-issues.md` until a disc with `sound.bdmv` is available.
