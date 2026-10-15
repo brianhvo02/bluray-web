@@ -132,6 +132,21 @@ describe('PgStreamControl', () => {
     expect(pg.shown).toEqual({ objectsShown: 1, forced: 1 });
   });
 
+  it('turning the display off keeps display sets already queued, so a forced caption read ahead still shows', () => {
+    const { regs, pg, pids } = setup();
+    showStream1(regs);
+    pg.playItemStarted(item(), false);
+    push(pg, subtitleSegments({ x: 10 }), 1_000_000);
+    push(pg, subtitleSegments({ x: 20, forced: true }), 3_000_000);
+    pg.tick(1_000_000);
+    expect(pg.plane.rgba({ x: 10, y: 900, w: 1, h: 1 })[3]).toBe(255);
+    expect(pg.select('off')).toBe(true);
+    expect(pg.plane.hash()).toBe(EMPTY);
+    expect(pids).toEqual([]); // same PID, nothing more to show now: no restart
+    pg.tick(3_000_000);
+    expect(pg.plane.rgba({ x: 20, y: 900, w: 1, h: 1 })[3]).toBe(255);
+  });
+
   it('refuses masked changes and leaves PSR2 alone', () => {
     const { regs, pg, masked } = setup({ masked: ['pgChange'] });
     showStream1(regs);

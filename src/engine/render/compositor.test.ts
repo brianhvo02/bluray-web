@@ -95,3 +95,23 @@ describe('Compositor.drawPg', () => {
     expect(calls.map(([n]) => n)).toEqual(['main.drawImage']);
   });
 });
+
+describe('Compositor.drawText', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('hands the renderer the main context and the fitted rectangle of the last frame', () => {
+    const mainCtx = new Proxy({}, { get: () => () => undefined });
+    const main = { width: 1000, height: 1000, getContext: () => mainCtx } as unknown as OffscreenCanvas;
+    const compositor = new Compositor(main, () => ({}) as OffscreenCanvas);
+    const calls: unknown[][] = [];
+    const renderer = { render: (...args: unknown[]) => { calls.push(args); return 1; } };
+    const opts = { offsetUs: 0, scale: 1 };
+    compositor.drawText(renderer, 5, opts);
+    expect(calls).toEqual([]); // no frame yet: no video rectangle
+    compositor.drawVideo({ displayWidth: 1920, displayHeight: 1080 } as VideoFrame);
+    compositor.drawText(renderer, 5, opts);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toBe(mainCtx);
+    expect(calls[0]!.slice(1)).toEqual([5, { x: 0, y: 218, width: 1000, height: 563 }, opts]);
+  });
+});

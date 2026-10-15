@@ -24,11 +24,18 @@ import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-
 import { audioTracks } from './playback/tracks';
 import type { AudioTrack, EngineCommand, EngineEvent, MenuKey, NoticeCode, PlaybackState, SubtitleChoice } from './protocol';
 import type { CompositorLike } from './render/compositor';
+import { activeCues, decodeText, parseSrt, type TextCue } from './subs/srt';
+import { TextSubtitleRenderer, type TextRenderOptions } from './subs/text-renderer';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
 import { pts90ToUs, ticks45ToUs } from './util/time';
 
 const UO_MASKED_MESSAGE = "The disc doesn't allow this here.";
+const NO_SUBTITLES_MESSAGE = 'This file has no subtitles we can read';
+const SOME_SUBTITLES_MESSAGE = 'Some lines of this file could not be read';
+const MAX_TEXT_OFFSET_MS = 600_000;
+const MIN_TEXT_SCALE = 0.5;
+const MAX_TEXT_SCALE = 2;
 /** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
 const MENU_KEY_UO: Partial<Record<MenuKey, UoOp>> = {
   up: 'moveUp', down: 'moveDown', left: 'moveLeft', right: 'moveRight', ok: 'activate', topMenu: 'menuCall',
@@ -158,6 +165,13 @@ export class Player {
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
+  /** The user's subtitle file; it belongs to the open disc (kept across playlists, dropped with the disc). */
+  private textTrack: { readonly name: string; readonly cues: readonly TextCue[]; readonly renderer: TextSubtitleRenderer } | null = null;
+  private textOn = false;
+  private textOffsetMs = 0;
+  private textScale = 1;
+  /** A subtitle setting changed: the next paint redraws even when no frame or plane changed. */
+  private subtitlesDirty = false;
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
@@ -187,6 +201,7 @@ export class Player {
           this.compositor?.resize(cmd.width, cmd.height);
           this.compositor?.drawVideo(this.presenter.current);
           if (this.pg) this.compositor?.drawPg?.(this.pg.plane);
+          if (this.textOn && this.textTrack) this.compositor?.drawText?.(this.textTrack.renderer, this.clock.nowUs(), this.textOptions());
           if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
           break;
         case 'playPlaylist':
@@ -228,6 +243,22 @@ export class Player {
         case 'selectSubtitle':
           this.selectSubtitle(cmd.choice);
           break;
+        case 'addTextSubtitle':
+          this.addTextSubtitle(cmd.name, cmd.bytes, cmd.encoding);
+          break;
+        case 'removeTextSubtitle':
+          this.textTrack = null;
+          this.textOn = false;
+          this.subtitlesChanged();
+          break;
+        case 'setSubtitleOffset':
+          if (Number.isFinite(cmd.ms)) this.textOffsetMs = Math.max(-MAX_TEXT_OFFSET_MS, Math.min(MAX_TEXT_OFFSET_MS, Math.round(cmd.ms)));
+          this.subtitlesChanged();
+          break;
+        case 'setSubtitleScale':
+          if (Number.isFinite(cmd.scale)) this.textScale = Math.max(MIN_TEXT_SCALE, Math.min(MAX_TEXT_SCALE, cmd.scale));
+          this.subtitlesChanged();
+          break;
         case 'nextChapter':
           if (this.refused('skipToNextPoint')) break;
           await this.skipChapter(1);
@@ -253,7 +284,7 @@ export class Player {
     const frame = this.presenter.select(now);
     if (frame && this.state === 'playing') this.offsets.push(now - frame.timestamp);
     this.pg?.tick(now);
-    this.paint(frame);
+    this.paint(frame, now);
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
     if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= (last?.timestamp ?? 0) + 100_000) {
@@ -270,23 +301,29 @@ export class Player {
   }
 
   /**
-   * Video, then the PG plane, then the IG plane. A changed plane repaints the video and the planes under and over it
-   * (an overlay replaces pixels, it does not blend with what it covered).
+   * Video, then the PG plane, the text subtitles and the IG plane. A change to any of them repaints the video and
+   * everything over it (an overlay replaces pixels, it does not blend with what it covered).
    */
-  private paint(frame: VideoFrame | null): void {
+  private paint(frame: VideoFrame | null, nowUs: number): void {
     const nav = this.navigator;
     const pg = this.pg?.plane ?? null;
     const ig = nav?.igPlane ?? null;
+    const text = this.textOn && this.compositor?.drawText ? this.textTrack : null;
+    const textOpts = this.textOptions();
     const pgChanged = pg !== null && pg.dirty() !== null;
     const igChanged = ig !== null && ig.dirty() !== null;
+    const textChanged = this.subtitlesDirty || (text !== null && text.renderer.changed(nowUs, textOpts));
+    this.subtitlesDirty = false;
+    const changed = pgChanged || igChanged || textChanged;
     if (frame) this.compositor?.drawVideo(frame);
-    else if (pgChanged || igChanged) this.compositor?.drawVideo(this.presenter.current);
-    if (!(frame || pgChanged || igChanged)) return;
+    else if (changed) this.compositor?.drawVideo(this.presenter.current);
+    if (!(frame || changed)) return;
     // an empty plane needs no per-frame draw
     if (pg && (pg.hasContent || pgChanged)) {
       if (this.compositor?.drawPg) this.compositor.drawPg(pg);
       else pg.takeDirty();
     }
+    if (text) this.compositor?.drawText?.(text.renderer, nowUs, textOpts);
     if (ig && (ig.hasContent || igChanged)) {
       if (this.compositor?.drawIg) this.compositor.drawIg(ig);
       else ig.takeDirty();
@@ -320,6 +357,8 @@ export class Player {
     this.soundsPlayed = 0;
     this.pgRegs = new RegisterFile();
     this.bindPg(this.pgRegs);
+    this.resetTextSubtitles();
+    this.emitSubtitles();
     this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
@@ -735,7 +774,13 @@ export class Player {
       },
     });
     this.unsubscribePg = regs.onPsrEvent((e) => {
-      if (e.type === 'change' && e.psr === PSR.PG_STREAM) this.emitSubtitles();
+      if (e.type !== 'change' || e.psr !== PSR.PG_STREAM) return;
+      // one subtitle choice at a time: the disc program turning a PG stream on hides the text track
+      if (this.textOn && (e.newValue & 0x80000000) !== 0) {
+        this.textOn = false;
+        this.subtitlesDirty = true;
+      }
+      this.emitSubtitles();
     });
   }
 
@@ -756,23 +801,76 @@ export class Player {
     if (JSON.stringify(pg.tracks()) !== this.sentPgTracks) this.emitSubtitles();
   }
 
+  /**
+   * One choice at a time: a PG stream (the text track hides), the text track (PG's display flag clears, so forced captions
+   * stay), or Off. A change the disc's UO mask refuses changes nothing.
+   */
   private selectSubtitle(choice: SubtitleChoice): void {
     const pg = this.pg;
-    if (!pg) return;
-    // the text track arrives with milestone 4a task 8; until then it is the same as Off
-    const pick = choice.kind === 'pg' ? { pg: choice.stream } : 'off';
-    const valid = pick === 'off' || pg.tracks().some((t) => t.index === pick.pg);
-    if (!pg.select(pick) && valid) this.notice('uo-masked', UO_MASKED_MESSAGE);
+    if (choice.kind === 'text') {
+      if (!this.textTrack) return;
+      if (pg && !pg.select('off')) this.notice('uo-masked', UO_MASKED_MESSAGE);
+      else this.textOn = true;
+    } else if (choice.kind === 'pg') {
+      if (pg?.select({ pg: choice.stream })) this.textOn = false;
+      else if (pg?.tracks().some((t) => t.index === choice.stream)) this.notice('uo-masked', UO_MASKED_MESSAGE);
+    } else if (!pg || pg.select('off')) {
+      this.textOn = false;
+    } else {
+      this.notice('uo-masked', UO_MASKED_MESSAGE);
+    }
+    this.subtitlesChanged();
+  }
+
+  private addTextSubtitle(name: string, bytes: ArrayBuffer, encoding: string | undefined): void {
+    if (!this.disc) return;
+    const decoded = decodeText(new Uint8Array(bytes), encoding);
+    if ('needsEncoding' in decoded) {
+      this.deps.emit({ type: 'subtitleEncodingNeeded', name });
+      return;
+    }
+    const parsed = parseSrt(decoded.text);
+    if (parsed.cues.length === 0) {
+      this.notice('subtitle-file', NO_SUBTITLES_MESSAGE);
+      return;
+    }
+    if (parsed.skipped * 2 > parsed.blocks) this.notice('subtitle-file', SOME_SUBTITLES_MESSAGE);
+    this.textTrack = { name, cues: parsed.cues, renderer: new TextSubtitleRenderer(parsed.cues) };
+    this.selectSubtitle({ kind: 'text' });
+  }
+
+  /** Forgets the text track and its settings (the disc it belongs to is closing). */
+  private resetTextSubtitles(): void {
+    this.textTrack = null;
+    this.textOn = false;
+    this.textOffsetMs = 0;
+    this.textScale = 1;
+    this.subtitlesDirty = true;
+  }
+
+  private textOptions(): TextRenderOptions {
+    return { offsetUs: this.textOffsetMs * 1000, scale: this.textScale };
+  }
+
+  private subtitlesChanged(): void {
+    this.subtitlesDirty = true;
     this.emitSubtitles();
   }
 
   private emitSubtitles(): void {
     const pg = this.pg;
-    if (!pg) return;
-    const tracks = pg.tracks();
+    const tracks = pg?.tracks() ?? [];
     this.sentPgTracks = JSON.stringify(tracks);
-    const { stream, display } = pg.selection;
-    this.deps.emit({ type: 'subtitles', pg: tracks, text: null, selected: display && stream > 0 ? { pg: stream } : 'off', offsetMs: 0, scale: 1 });
+    const { stream, display } = pg?.selection ?? { stream: 0, display: false };
+    const track = this.textTrack;
+    this.deps.emit({
+      type: 'subtitles',
+      pg: tracks,
+      text: track ? { name: track.name, cues: track.cues.length } : null,
+      selected: this.textOn && track ? 'text' : display && stream > 0 ? { pg: stream } : 'off',
+      offsetMs: this.textOffsetMs,
+      scale: this.textScale,
+    });
   }
 
   /** PSR0, the IG stream number, with a navigator; discs without one show no menus. */
@@ -936,6 +1034,8 @@ export class Player {
     this.teardownSession();
     this.stopPg();
     this.pgRegs = null;
+    this.resetTextSubtitles();
+    this.emitSubtitles();
     this.source = null;
     this.disc = null;
     this.setState('idle');
@@ -1250,9 +1350,14 @@ export class Player {
         soundsPlayed: this.soundsPlayed,
         pg: this.pg?.shown ?? null,
         pgErrors: this.pg?.errors ?? 0,
-        textCue: false,
+        textCue: this.textCueVisible(),
       },
     });
+  }
+
+  private textCueVisible(): boolean {
+    const track = this.textTrack;
+    return this.textOn && track !== null && activeCues(track.cues, this.clock.nowUs() - this.textOffsetMs * 1000).length > 0;
   }
 
   /** A user operation the disc masks here: refused with a notice. Discs without a navigator mask nothing. */

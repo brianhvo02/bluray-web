@@ -1205,6 +1205,30 @@ describe('Player with HDMV navigation', () => {
   });
 });
 
+// ---- subtitles ----
+
+const EMPTY = new OverlayPlane().hash();
+const subtitleEvents = (h: Harness) => h.events.flatMap((e) => (e.type === 'subtitles' ? [e] : []));
+const visibleAt = (h: Harness, x: number) => (h.pgDraws.at(-1)?.rgba({ x, y: 900, w: 1, h: 1 })[3] ?? 0) === 255;
+/** The timestamp of the last video frame drawn: the presentation time (telemetry lags by up to 500 ms). */
+const clockUs = (h: Harness) => h.drawn.at(-1) ?? 0;
+/** Steps simulated time one render tick at a time (vi.waitFor would wait 50 ms between ticks) until `done`, at most 10 s. */
+async function stepUntil(h: Harness, done: () => boolean): Promise<void> {
+  for (let ms = 0; !done(); ms += STEP_MS) {
+    if (ms > 10_000) throw new Error('condition not reached within 10 s of playback');
+    await h.play(STEP_MS);
+  }
+}
+const playUntil = (h: Harness, us: number) => stepUntil(h, () => clockUs(h) >= us);
+/** Plays until a telemetry sample taken in [fromUs, toUs) arrives. */
+async function telemetryBetween(h: Harness, fromUs: number, toUs: number): Promise<Telemetry> {
+  await stepUntil(h, () => (lastTelemetry(h)?.clockUs ?? 0) >= fromUs);
+  const t = lastTelemetry(h)!;
+  expect(t.clockUs).toBeLessThan(toUs);
+  return t;
+}
+const pgTelemetryBetween = async (h: Harness, fromUs: number, toUs: number): Promise<Telemetry['pg']> => (await telemetryBetween(h, fromUs, toUs)).pg;
+
 describe('Player PG subtitles', () => {
   const at = (seconds: number, segs: Uint8Array[]) => segs.map((payload) => ({ pts: CLIP_START_PTS + Math.round(seconds * 90_000), payload }));
   /** Stream 1 (eng): 1.0–2.0 s at x 100, a forced caption 2.5–2.9 s at x 200, 3.0–3.5 s at x 300. Stream 2 (jpn): 1.1–3.9 s at x 500. */
@@ -1216,26 +1240,6 @@ describe('Player PG subtitles', () => {
     ] },
     { pid: 0x1201, lang: 'jpn', units: [...at(1.1, subtitleSegments({ x: 500 })), ...at(3.9, clearSegments(1))] },
   ];
-  const EMPTY = new OverlayPlane().hash();
-  const subtitleEvents = (h: Harness) => h.events.flatMap((e) => (e.type === 'subtitles' ? [e] : []));
-  const visibleAt = (h: Harness, x: number) => (h.pgDraws.at(-1)?.rgba({ x, y: 900, w: 1, h: 1 })[3] ?? 0) === 255;
-  /** The timestamp of the last video frame drawn: the presentation time (telemetry lags by up to 500 ms). */
-  const clockUs = (h: Harness) => h.drawn.at(-1) ?? 0;
-  /** Steps simulated time one render tick at a time (vi.waitFor would wait 50 ms between ticks) until `done`, at most 10 s. */
-  async function stepUntil(h: Harness, done: () => boolean): Promise<void> {
-    for (let ms = 0; !done(); ms += STEP_MS) {
-      if (ms > 10_000) throw new Error('condition not reached within 10 s of playback');
-      await h.play(STEP_MS);
-    }
-  }
-  const playUntil = (h: Harness, us: number) => stepUntil(h, () => clockUs(h) >= us);
-  /** Plays until a telemetry sample taken in [fromUs, toUs) arrives; its PG field. */
-  async function pgTelemetryBetween(h: Harness, fromUs: number, toUs: number): Promise<Telemetry['pg']> {
-    await stepUntil(h, () => (lastTelemetry(h)?.clockUs ?? 0) >= fromUs);
-    const t = lastTelemetry(h)!;
-    expect(t.clockUs).toBeLessThan(toUs);
-    return t.pg;
-  }
   async function raw(): Promise<Harness> {
     const h = await harness(CodingType.LPCM, { pgStreams });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
@@ -1322,5 +1326,110 @@ describe('Player PG subtitles', () => {
     const plane = h.pgDraws.at(-1)!;
     await h.player.handle({ type: 'close' });
     expect(plane.hash()).toBe(EMPTY);
+  });
+});
+
+describe('Player text subtitles', () => {
+  /** Cues at 1–2 s and 5–6 s of playlist time. */
+  const SRT = '1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:05,000 --> 00:00:06,000\nLater\n';
+  const bytes = (text: string): ArrayBuffer => new TextEncoder().encode(text).buffer as ArrayBuffer;
+  const notices = (h: Harness) => h.events.filter((e) => e.type === 'notice' && e.code === 'subtitle-file');
+  async function raw(): Promise<Harness> {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    return h;
+  }
+
+  it('loads a file, selects it, and reports a visible cue only during its time', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'addTextSubtitle', name: 'movie.srt', bytes: bytes(SRT) });
+    expect(subtitleEvents(h).at(-1)).toEqual({ type: 'subtitles', pg: [], text: { name: 'movie.srt', cues: 2 }, selected: 'text', offsetMs: 0, scale: 1 });
+    expect((await telemetryBetween(h, 1_000_000, 2_000_000)).textCue).toBe(true);
+    expect((await telemetryBetween(h, 2_000_000, 5_000_000)).textCue).toBe(false);
+  });
+
+  it('asks for an encoding for a file that is not UTF-8 and loads it with the one given', async () => {
+    const h = await raw();
+    const latin = Uint8Array.from([...SRT.replace('Hello', 'Café')].map((c) => c.charCodeAt(0))).buffer as ArrayBuffer;
+    await h.player.handle({ type: 'addTextSubtitle', name: 'latin.srt', bytes: latin.slice(0) });
+    expect(h.events).toContainEqual({ type: 'subtitleEncodingNeeded', name: 'latin.srt' });
+    expect(subtitleEvents(h).at(-1)?.text ?? null).toBeNull();
+    await h.player.handle({ type: 'addTextSubtitle', name: 'latin.srt', bytes: latin, encoding: 'windows-1252' });
+    expect(subtitleEvents(h).at(-1)!.text).toEqual({ name: 'latin.srt', cues: 2 });
+  });
+
+  it('refuses a file without cues with a notice and warns when most blocks are unreadable', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'addTextSubtitle', name: 'empty.srt', bytes: bytes('not subtitles at all') });
+    expect(notices(h)).toEqual([{ type: 'notice', code: 'subtitle-file', message: 'This file has no subtitles we can read' }]);
+    expect(subtitleEvents(h).at(-1)?.text ?? null).toBeNull();
+    await h.player.handle({ type: 'addTextSubtitle', name: 'bad.srt', bytes: bytes('1\nnope\nx\n\n2\nnope\ny\n\n3\n00:00:01,000 --> 00:00:02,000\nok') });
+    expect(notices(h).at(-1)).toEqual({ type: 'notice', code: 'subtitle-file', message: 'Some lines of this file could not be read' });
+    expect(subtitleEvents(h).at(-1)!.text).toEqual({ name: 'bad.srt', cues: 1 });
+  });
+
+  it('shifts cues by the offset and clamps offset and size', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'addTextSubtitle', name: 'movie.srt', bytes: bytes(SRT) });
+    await h.player.handle({ type: 'setSubtitleOffset', ms: 1000 });
+    expect(subtitleEvents(h).at(-1)!.offsetMs).toBe(1000);
+    expect((await telemetryBetween(h, 1_000_000, 2_000_000)).textCue).toBe(false);
+    expect((await telemetryBetween(h, 2_000_000, 3_000_000)).textCue).toBe(true);
+    await h.player.handle({ type: 'setSubtitleOffset', ms: -9_999_999 });
+    expect(subtitleEvents(h).at(-1)!.offsetMs).toBe(-600_000);
+    await h.player.handle({ type: 'setSubtitleScale', scale: 7 });
+    expect(subtitleEvents(h).at(-1)!.scale).toBe(2);
+    await h.player.handle({ type: 'setSubtitleScale', scale: 0.1 });
+    expect(subtitleEvents(h).at(-1)!.scale).toBe(0.5);
+  });
+
+  it('hides the text when a PG stream or Off is picked, and removes the track', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'addTextSubtitle', name: 'movie.srt', bytes: bytes(SRT) });
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'off' } });
+    expect(subtitleEvents(h).at(-1)!.selected).toBe('off');
+    expect((await telemetryBetween(h, 1_000_000, 2_000_000)).textCue).toBe(false);
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'text' } });
+    expect(subtitleEvents(h).at(-1)!.selected).toBe('text');
+    await h.player.handle({ type: 'removeTextSubtitle' });
+    expect(subtitleEvents(h).at(-1)).toMatchObject({ text: null, selected: 'off' });
+  });
+
+  it('a PG pick hides the text track, and picking the text again turns PG\'s display flag off', async () => {
+    const pgStreams: SyntheticPgStream[] = [{ pid: 0x1200, lang: 'eng', units: subtitleSegments({}).map((payload) => ({ pts: CLIP_START_PTS + 3 * 90_000, payload })) }];
+    const h = await harness(CodingType.LPCM, { pgStreams });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'addTextSubtitle', name: 'movie.srt', bytes: bytes(SRT) });
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    expect(subtitleEvents(h).at(-1)!.selected).toEqual({ pg: 1 });
+    expect((await telemetryBetween(h, 1_000_000, 2_000_000)).textCue).toBe(false);
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'text' } });
+    expect(subtitleEvents(h).at(-1)).toMatchObject({ selected: 'text', pg: [{ index: 1, language: 'eng' }] });
+    expect((await telemetryBetween(h, 3_000_000, 4_000_000)).pg).toEqual({ objectsShown: 0, forced: 0 }); // the PG line is not forced
+  });
+
+  it('keeps the track across the program\'s playlists and a raw pick, and drops it with the disc', async () => {
+    const idle = { cmds: [] };
+    const h = await harness(CodingType.LPCM, {
+      playlists: [{ id: '00000', clipIds: ['00001'] }, { id: '00001', clipIds: ['00002'] }],
+      movieObjects: buildMovieObjects([{ cmds: [asm.playPl(imm(0)), asm.playPl(imm(1))] }, idle, idle]),
+    });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'addTextSubtitle', name: 'movie.srt', bytes: bytes(SRT) });
+    await stepUntil(h, () => h.events.some((e) => e.type === 'chapters' && e.playlistId === '00001'));
+    const switched = h.events.length;
+    const sampleAfterSwitch = () => h.events.slice(switched).flatMap((e) => (e.type === 'telemetry' && e.telemetry.clockUs >= 1_000_000 ? [e.telemetry] : []))[0];
+    await stepUntil(h, () => sampleAfterSwitch() !== undefined);
+    expect(sampleAfterSwitch()!.clockUs).toBeLessThan(2_000_000); // the second playlist's own time
+    expect(sampleAfterSwitch()!.textCue).toBe(true);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' }); // a raw pick: same disc
+    expect(subtitleEvents(h).at(-1)!.text).toEqual({ name: 'movie.srt', cues: 2 });
+    await h.player.handle({ type: 'close' });
+    expect(subtitleEvents(h).at(-1)).toMatchObject({ text: null, pg: [] });
+    const other = buildSyntheticDisc({ clips: [syntheticClip('00009', 2)], playlists: [{ id: '00009', clipIds: ['00009'] }] });
+    await h.player.handle({ type: 'open', entries: discEntries(other) });
+    expect(subtitleEvents(h).at(-1)).toMatchObject({ text: null, selected: 'off' });
   });
 });

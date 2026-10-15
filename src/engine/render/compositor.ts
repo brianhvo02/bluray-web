@@ -1,4 +1,5 @@
 import type { OverlayPlane } from '../graphics/overlay-plane';
+import type { TextRenderOptions } from '../subs/text-renderer';
 
 export interface Rect {
   readonly x: number;
@@ -20,8 +21,15 @@ export interface CompositorLike {
   drawVideo(frame: VideoFrame | null): void;
   /** Draws the PG plane over the video just drawn: call it after every drawVideo, before drawIg. */
   drawPg?(plane: OverlayPlane): void;
+  /** Draws text subtitles inside the video rectangle, after drawPg and before drawIg. */
+  drawText?(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void;
   /** Draws the IG plane over the video (and PG) just drawn: call it after every drawVideo. */
   drawIg?(plane: OverlayPlane): void;
+}
+
+/** The part of TextSubtitleRenderer the compositor uses. */
+export interface TextRendererLike {
+  render(ctx: OffscreenCanvasRenderingContext2D, timeUs: number, videoRect: Rect, opts: TextRenderOptions): number;
 }
 
 /** A plane's pixels at plane size, updated from its dirty rects. */
@@ -32,6 +40,8 @@ export class Compositor implements CompositorLike {
   private readonly ctx: OffscreenCanvasRenderingContext2D;
   private pg: PlaneCanvas | null = null;
   private ig: PlaneCanvas | null = null;
+  /** Display size of the last frame drawn: text is laid out in its fitted rectangle. */
+  private frameSize: { readonly width: number; readonly height: number } | null = null;
 
   constructor(
     private readonly canvas: OffscreenCanvas,
@@ -52,6 +62,7 @@ export class Compositor implements CompositorLike {
     this.ctx.fillStyle = '#000';
     this.ctx.fillRect(0, 0, width, height);
     if (!frame) return;
+    this.frameSize = { width: frame.displayWidth, height: frame.displayHeight };
     const r = fitRect(frame.displayWidth, frame.displayHeight, width, height);
     this.ctx.drawImage(frame, r.x, r.y, r.width, r.height);
   }
@@ -62,6 +73,12 @@ export class Compositor implements CompositorLike {
 
   drawIg(plane: OverlayPlane): void {
     this.ig = this.drawPlane(this.ig, plane);
+  }
+
+  drawText(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void {
+    const f = this.frameSize;
+    if (!f) return;
+    renderer.render(this.ctx, timeUs, fitRect(f.width, f.height, this.canvas.width, this.canvas.height), opts);
   }
 
   private drawPlane(held: PlaneCanvas | null, plane: OverlayPlane): PlaneCanvas {

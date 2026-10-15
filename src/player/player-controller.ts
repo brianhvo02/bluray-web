@@ -99,7 +99,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'soundEffect':
       return s; // handed to the audio output by the controller
     case 'subtitles':
-      return s; // shown by the subtitle menu (milestone 4a, task 9)
+    case 'subtitleEncodingNeeded':
+      return s; // shown by the subtitle menu and the encoding prompt (milestone 4a, task 9)
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'indexTitles':

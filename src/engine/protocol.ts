@@ -5,7 +5,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked';
+export type NoticeCode = 'bdj' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file';
 export type ErrorCode = DiscErrorCode | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
 export interface Telemetry {
@@ -77,6 +77,13 @@ export type EngineCommand =
   | { readonly type: 'seek'; readonly timeUs: number }
   | { readonly type: 'selectAudio'; readonly index: number }
   | { readonly type: 'selectSubtitle'; readonly choice: SubtitleChoice }
+  /** An .srt file; `encoding` (a TextDecoder label) is used when the bytes are neither BOM-marked nor UTF-8. */
+  | { readonly type: 'addTextSubtitle'; readonly name: string; readonly bytes: ArrayBuffer; readonly encoding?: string }
+  | { readonly type: 'removeTextSubtitle' }
+  /** Text subtitle timing shift, clamped to ±10 minutes. */
+  | { readonly type: 'setSubtitleOffset'; readonly ms: number }
+  /** Text subtitle size factor, clamped to 0.5–2. */
+  | { readonly type: 'setSubtitleScale'; readonly scale: number }
   | { readonly type: 'nextChapter' }
   | { readonly type: 'prevChapter' }
   /** HDMV discs only: 0 = top menu. */
@@ -102,7 +109,9 @@ export type EngineEvent =
   | { readonly type: 'pointerTarget'; readonly button: number | null }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
-  /** On playlist start, a play item whose PG tracks differ, every PSR2 change and every subtitle command. */
+  /** The file is not UTF-8 and no encoding was given: ask the user, then send addTextSubtitle again with one. */
+  | { readonly type: 'subtitleEncodingNeeded'; readonly name: string }
+  /** On disc open and close, playlist start, a play item whose PG tracks differ, every PSR2 change and every subtitle command. */
   | {
     readonly type: 'subtitles';
     readonly pg: readonly PgTrack[];

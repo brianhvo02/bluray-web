@@ -174,14 +174,20 @@ export class PgStreamControl {
     if (e.type === 'change' && e.psr === PSR.PG_STREAM && this.item) this.psrChanged = true;
   }
 
-  /** The PSR2 branch of _process_psr_change_event: _init_pg_stream, then a pipeline restart when it shows more. */
+  /**
+   * The PSR2 branch of _process_psr_change_event: _init_pg_stream, then a pipeline restart when it shows more. With the
+   * same PID only the plane is reset (libbluray resets the decoder too): queued display sets are decoded snapshots and the
+   * display flag is read when each is rendered, so they stay, and a forced caption already read ahead still shows.
+   */
   private applyPsrChange(): void {
     if (!this.psrChanged) return;
     this.psrChanged = false;
     const oldPid = this.pidValue;
-    this.initPgStream();
+    const pid = this.findPgStream();
+    if (pid === oldPid) this.resetRenderer();
+    else this.initPgStream();
     // the reset dropped the subtitle on screen; re-reading from now brings back the current one
-    if (this.pidValue !== oldPid || (this.pidValue !== null && this.selection.display)) this.deps.pidChanged(this.pidValue);
+    if (pid !== oldPid || (pid !== null && this.selection.display)) this.deps.pidChanged(pid);
   }
 
   /** _init_pg_stream */
