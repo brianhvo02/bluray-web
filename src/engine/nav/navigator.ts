@@ -19,6 +19,7 @@ import { PSR, type PsrEvent, type RegisterFile } from '../hdmv/registers';
 import { combineUoMasks, EMPTY_UO_MASK, parseUoMaskTable, type UoMask, type UoOp } from '../hdmv/uo-mask';
 import { HdmvEventType, HdmvVm, type HdmvEvent } from '../hdmv/vm';
 import { itemPackets, lookupSpn, type ItemPackets } from './packets';
+import { langToUint32, updateStreamPsrByLang } from './stream-psrs';
 
 export interface PlaybackPort {
   /**
@@ -107,11 +108,6 @@ export interface IgUnit {
   readonly ptsUs: number;
   /** Decode time: segments carry it ahead of the ICS's presentation time, and gating follows it (graphics_processor_decode_pes). */
   readonly dtsUs?: number;
-}
-
-/** str_to_uint32(s, 3) */
-function langToUint32(lang: string): number {
-  return (((lang.charCodeAt(0) || 0) << 16) | ((lang.charCodeAt(1) || 0) << 8) | (lang.charCodeAt(2) || 0)) >>> 0;
 }
 
 function sameMask(a: UoMask, b: UoMask): boolean {
@@ -945,23 +941,6 @@ export class Navigator {
 
   // ---- PSRs ----
 
-  /** _update_stream_psr_by_lang; returns the chosen stream's language. */
-  private updateStreamPsrByLang(
-    psrLang: number, psrStream: number, enableFlag: number, streams: readonly StreamEntry[], blacklist: number,
-  ): number {
-    const regs = this.deps.regs;
-    const preferred = regs.psrRead(psrLang);
-    let idx = streams.findIndex((s) => langToUint32(s.lang) === preferred);
-    if (idx < 0) {
-      idx = 0; // preferred language not found: first stream, no subtitles
-      enableFlag = 0;
-    }
-    const lang = langToUint32(streams[idx]!.lang);
-    if (blacklist && blacklist === lang) enableFlag = 0; // no subtitles in the audio language
-    regs.psrWriteBits(psrStream, ((idx + 1) | enableFlag) >>> 0, 0x80000fff);
-    return lang;
-  }
-
   /** _update_playlist_psrs */
   private updatePlaylistPsrs(playlistId: string, item: number): void {
     const regs = this.deps.regs;
@@ -975,10 +954,10 @@ export class Navigator {
       regs.psrWrite(PSR.PLAYITEM, item);
       let audioLang = 0;
       if (pi.stn.audio.length > 0) {
-        audioLang = this.updateStreamPsrByLang(PSR.AUDIO_LANG, PSR.PRIMARY_AUDIO_ID, 0, pi.stn.audio, 0);
+        audioLang = updateStreamPsrByLang(regs, PSR.AUDIO_LANG, PSR.PRIMARY_AUDIO_ID, 0, pi.stn.audio, 0);
       }
       if (pi.stn.pg.length > 0) {
-        this.updateStreamPsrByLang(PSR.PG_AND_SUB_LANG, PSR.PG_STREAM, 0x80000000, pi.stn.pg, audioLang);
+        updateStreamPsrByLang(regs, PSR.PG_AND_SUB_LANG, PSR.PG_STREAM, 0x80000000, pi.stn.pg, audioLang);
       }
     }
   }
@@ -996,7 +975,7 @@ export class Navigator {
     if (stn.audio.length > 0) {
       const v = regs.psrRead(PSR.PRIMARY_AUDIO_ID);
       if (v === 0 || v > stn.audio.length) {
-        audioLang = this.updateStreamPsrByLang(PSR.AUDIO_LANG, PSR.PRIMARY_AUDIO_ID, 0, stn.audio, 0);
+        audioLang = updateStreamPsrByLang(regs, PSR.AUDIO_LANG, PSR.PRIMARY_AUDIO_ID, 0, stn.audio, 0);
       } else {
         audioLang = langToUint32(stn.audio[v - 1]!.lang);
       }
@@ -1004,7 +983,7 @@ export class Navigator {
     if (stn.pg.length > 0) {
       const v = regs.psrRead(PSR.PG_STREAM) & 0xfff;
       if (v === 0 || v > stn.pg.length) {
-        this.updateStreamPsrByLang(PSR.PG_AND_SUB_LANG, PSR.PG_STREAM, 0x80000000, stn.pg, audioLang);
+        updateStreamPsrByLang(regs, PSR.PG_AND_SUB_LANG, PSR.PG_STREAM, 0x80000000, stn.pg, audioLang);
       }
     }
     if (stn.ig.length > 0 && this.titleType !== 'undef') {
