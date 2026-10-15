@@ -146,6 +146,20 @@ describe('OverlayPlane', () => {
     plane.apply({ cmd: 'clear', pts: -1, x: 0, y: 0, w: 0, h: 0 });
     expect(plane.hasContent).toBe(false);
   });
+
+  it('hasContent goes false once wipes cover everything drawn, and stays true while something is left', () => {
+    const plane = new OverlayPlane(16, 8);
+    const draw = (x: number, w: number): OverlayOp => ({ cmd: 'draw', pts: -1, x, y: 0, w, h: 1, palette: palette(), img: [{ len: w, color: 1 }, E] });
+    plane.apply(draw(0, 2));
+    plane.apply(draw(0, 2)); // drawn again in place
+    plane.apply(draw(8, 4));
+    plane.apply({ cmd: 'wipe', pts: -1, x: 0, y: 0, w: 4, h: 2 });
+    expect(plane.hasContent).toBe(true); // the second object is still there
+    plane.apply({ cmd: 'wipe', pts: -1, x: 9, y: 0, w: 2, h: 1 }); // part of it only
+    expect(plane.hasContent).toBe(true);
+    plane.apply({ cmd: 'wipe', pts: -1, x: 8, y: 0, w: 8, h: 1 });
+    expect(plane.hasContent).toBe(false);
+  });
 });
 
 describe('OverlayPlane buffered', () => {
@@ -182,6 +196,16 @@ describe('OverlayPlane buffered', () => {
     plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
     expect(plane.hash()).toBe(empty);
     expect(plane.dirty()).toEqual({ x: 4, y: 4, w: 8, h: 2 });
+  });
+
+  it('hasContent follows the visible buffer: false after a flush commits wipes of everything drawn', () => {
+    const plane = new OverlayPlane(64, 32, { buffered: true });
+    plane.apply(box(4, 4, 8, 2));
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    plane.apply({ cmd: 'wipe', pts: -1, x: 4, y: 4, w: 8, h: 2 });
+    expect(plane.hasContent).toBe(true); // not committed yet
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hasContent).toBe(false);
   });
 
   it('clear empties both buffers', () => {

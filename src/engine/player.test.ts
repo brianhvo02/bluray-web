@@ -1289,6 +1289,19 @@ describe('Player PG subtitles', () => {
     expect(clockUs(h) - switchedAt).toBeLessThan(1_000_000);
   });
 
+  it('stops drawing the PG plane every frame once its subtitle is cleared', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    await playUntil(h, 1_300_000);
+    const shown = h.pgDraws.length;
+    await playUntil(h, 1_800_000);
+    expect(h.pgDraws.length).toBeGreaterThan(shown + 10); // drawn with every frame while it is up
+    await playUntil(h, 2_100_000); // the clear set at 2 s
+    const cleared = h.pgDraws.length;
+    await playUntil(h, 2_450_000);
+    expect(h.pgDraws.length).toBe(cleared);
+  });
+
   it('with subtitles off shows forced captions only', async () => {
     const h = await raw();
     await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'off' } });

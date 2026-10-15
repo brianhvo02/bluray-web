@@ -62,16 +62,16 @@ export class OverlayPlane {
   /** Where draw and wipe write: the back buffer when buffered, else px. */
   private readonly buf: Uint8Array;
   private readonly buffered: boolean;
-  /** Buffered only: the back-buffer area changed since the last flush, and whether it was drawn on. */
+  /** Buffered only: the back-buffer area changed since the last flush. */
   private pending: Rect | null = null;
-  private backHasContent = false;
+  /** Areas drawn in `buf` and not wiped since (a wipe removes the areas it covers whole); what flush makes visible. */
+  private drawnRects: Rect[] = [];
+  private shownRects: Rect[] = [];
   /** The same bytes as one little-endian word per pixel: the key of the colour cache. */
   private readonly words: Uint32Array;
   /** Plane word (Y, Cr, Cb, T) to packed RGBA; menus use a few dozen colours, so this replaces the per-pixel conversion. */
   private readonly rgbaCache = new Map<number, number>();
   private dirtyRect: Rect | null = null;
-  /** False while nothing was drawn since the plane was last cleared (a wipe does not reset it). */
-  hasContent = false;
 
   constructor(width = 1920, height = 1080, opts: { readonly buffered?: boolean } = {}) {
     this.width = width;
@@ -82,6 +82,14 @@ export class OverlayPlane {
     this.words = new Uint32Array(this.px.buffer);
   }
 
+  /**
+   * False when nothing drawn is visible: nothing was drawn since the plane was cleared, or wipes have since covered every
+   * drawn area (a partial wipe leaves it counted). The player stops drawing an empty plane on every frame.
+   */
+  get hasContent(): boolean {
+    return (this.buffered ? this.shownRects : this.drawnRects).length > 0;
+  }
+
   apply(op: OverlayOp): void {
     switch (op.cmd) {
       case 'init':
@@ -89,8 +97,8 @@ export class OverlayPlane {
       case 'clear':
         this.px.fill(0);
         if (this.buffered) this.buf.fill(0);
-        this.hasContent = false;
-        this.backHasContent = false;
+        this.drawnRects = [];
+        this.shownRects = [];
         this.pending = null;
         this.markDirty(0, 0, this.width, this.height);
         break;
@@ -181,7 +189,7 @@ export class OverlayPlane {
   }
 
   private flush(): void {
-    this.hasContent = this.backHasContent;
+    this.shownRects = [...this.drawnRects];
     const r = this.pending;
     if (!r) return;
     this.pending = null;
@@ -207,14 +215,13 @@ export class OverlayPlane {
       const p = (row * this.width + r.x) * 4;
       this.buf.fill(0, p, p + r.w * 4);
     }
+    this.drawnRects = this.drawnRects.filter((d) => !inside(d, r));
     this.changed(r);
   }
 
   private draw(op: OverlayOp): void {
     const { img, palette } = op;
     if (!img || !palette) return;
-    if (this.buffered) this.backHasContent = true;
-    else this.hasContent = true;
     const px = this.buf;
     let row = op.y;
     let col = 0;
@@ -245,8 +252,15 @@ export class OverlayPlane {
       col += e.len;
     }
     const r = this.clip(op.x, op.y, op.w, op.h);
-    if (r) this.changed(r);
+    if (!r) return;
+    this.drawnRects = [...this.drawnRects.filter((d) => !inside(d, r)), r]; // a redraw in place replaces the earlier area
+    this.changed(r);
   }
+}
+
+/** `a` lies wholly inside `b`. */
+function inside(a: Rect, b: Rect): boolean {
+  return a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
 }
 
 function union(a: Rect | null, b: Rect): Rect {
