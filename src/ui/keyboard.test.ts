@@ -19,6 +19,21 @@ describe('keyToAction', () => {
   });
 });
 
+describe('subtitle keys', () => {
+  it('shifts the text subtitles with [ and ] and cycles subtitles with S', () => {
+    expect(keyToAction('[')).toEqual({ type: 'subtitleOffset', deltaMs: -100 });
+    expect(keyToAction(']')).toEqual({ type: 'subtitleOffset', deltaMs: 100 });
+    expect(keyToAction('s')).toEqual({ type: 'cycleSubtitles' });
+    expect(keyToAction('S')).toEqual({ type: 'cycleSubtitles' });
+  });
+
+  it('leaves the UO check of subtitle keys to the controller', () => {
+    const ctx = { playing: true, popupShown: false };
+    expect(keyActionUo({ type: 'subtitleOffset', deltaMs: 100 }, ctx)).toBeNull();
+    expect(keyActionUo({ type: 'cycleSubtitles' }, ctx)).toBeNull();
+  });
+});
+
 describe('keyToAction with a menu shown', () => {
   const menu = { menuActive: true };
   it('sends arrows, Enter and digits to the menu', () => {

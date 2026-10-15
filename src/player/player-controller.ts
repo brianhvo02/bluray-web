@@ -1,7 +1,7 @@
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
-import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, Telemetry } from '../engine/protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PgTrack, PlaybackState, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 
 export interface Notice {
@@ -34,6 +34,28 @@ export interface PlayerSnapshot {
   readonly uoMask: readonly UoOp[];
   /** HDMV discs: the index titles (for the picker) and whether there is a top menu; null otherwise. */
   readonly indexTitles: IndexTitles | null;
+  /** The engine's last 'subtitles' event; null until a disc reports one. */
+  readonly subtitles: SubtitlesState | null;
+  /** A subtitle file that is not UTF-8 waits for the user to pick its encoding. */
+  readonly encodingPrompt: { readonly name: string } | null;
+}
+
+export interface SubtitlesState {
+  readonly pg: readonly PgTrack[];
+  readonly text: { readonly name: string; readonly cues: number } | null;
+  readonly selected: 'off' | 'text' | { readonly pg: number };
+  readonly offsetMs: number;
+  readonly scale: number;
+}
+
+export const MAX_SUBTITLE_OFFSET_MS = 600_000;
+export const MIN_SUBTITLE_SCALE = 0.5;
+export const MAX_SUBTITLE_SCALE = 2;
+
+/** "+0.3 s", "−1.2 s", "0.0 s". */
+export function formatSubtitleOffset(ms: number): string {
+  const s = (Math.abs(ms) / 1000).toFixed(1);
+  return ms > 0 ? `+${s} s` : ms < 0 ? `\u2212${s} s` : `${s} s`;
 }
 
 export interface IndexTitles {
@@ -64,6 +86,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   pointerButton: null,
   uoMask: [],
   indexTitles: null,
+  subtitles: null,
+  encodingPrompt: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -73,7 +97,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
@@ -99,8 +123,9 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'soundEffect':
       return s; // handed to the audio output by the controller
     case 'subtitles':
+      return { ...s, subtitles: { pg: e.pg, text: e.text, selected: e.selected, offsetMs: e.offsetMs, scale: e.scale } };
     case 'subtitleEncodingNeeded':
-      return s; // shown by the subtitle menu and the encoding prompt (milestone 4a, task 9)
+      return { ...s, encodingPrompt: { name: e.name } };
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'indexTitles':
@@ -133,6 +158,8 @@ export class PlayerController {
   private readonly listeners = new Set<() => void>();
   private audioAttached = false;
   private readonly transferredCanvases = new WeakSet<HTMLCanvasElement>();
+  /** The subtitle file whose encoding prompt is open: read again when the user picks one (its bytes were transferred). */
+  private pendingSubtitleFile: File | null = null;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -270,6 +297,74 @@ export class PlayerController {
     if (playable.length < 2) return;
     const at = playable.findIndex((t) => t.index === this.snapshot.selectedAudio);
     this.selectAudio(playable[(at + 1) % playable.length].index);
+  }
+
+  /**
+   * One subtitle choice. Checked against the UO mask like the keys: a change of PG stream is pgChange, turning PG's
+   * display on or off is pgEnableDisable (the engine checks the exact register change itself).
+   */
+  selectSubtitle(choice: SubtitleChoice): void {
+    const subs = this.snapshot.subtitles;
+    const current = subs?.selected ?? 'off';
+    const currentPg = typeof current === 'object' ? current.pg : null;
+    if (choice.kind === 'pg' && choice.stream === currentPg) return;
+    if (choice.kind !== 'pg' && current === (choice.kind === 'text' ? 'text' : 'off')) return;
+    const op: UoOp = choice.kind === 'pg' && currentPg !== null ? 'pgChange' : 'pgEnableDisable';
+    const touchesPg = choice.kind === 'pg' || currentPg !== null;
+    if (touchesPg && !this.allow(op)) return;
+    this.post({ type: 'selectSubtitle', choice });
+    // shown at once so the next S press moves on; the engine's `subtitles` event corrects it if the change is refused
+    if (subs) {
+      const selected = choice.kind === 'pg' ? { pg: choice.stream } : choice.kind === 'text' ? ('text' as const) : ('off' as const);
+      this.update({ ...this.snapshot, subtitles: { ...subs, selected } });
+    }
+  }
+
+  /** The S key: Off → each PG track → the subtitle file → Off. */
+  cycleSubtitles(): void {
+    const subs = this.snapshot.subtitles;
+    if (!subs) return;
+    const order: SubtitleChoice[] = [{ kind: 'off' }, ...subs.pg.map((t): SubtitleChoice => ({ kind: 'pg', stream: t.index })), ...(subs.text ? [{ kind: 'text' } as const] : [])];
+    if (order.length < 2) return;
+    const sel = subs.selected;
+    const at = order.findIndex((c) => (c.kind === 'pg' ? typeof sel === 'object' && sel.pg === c.stream : c.kind === sel));
+    this.selectSubtitle(order[(at + 1) % order.length]!);
+  }
+
+  /** Reads the file and hands its bytes to the engine (transferred); `encoding` answers an encoding prompt. */
+  async loadSubtitleFile(file: File, encoding?: string): Promise<void> {
+    this.pendingSubtitleFile = file;
+    const bytes = await file.arrayBuffer();
+    this.post({ type: 'addTextSubtitle', name: file.name, bytes, ...(encoding !== undefined ? { encoding } : {}) }, [bytes]);
+  }
+
+  /** The encoding prompt's answer; null cancels. */
+  async answerEncoding(encoding: string | null): Promise<void> {
+    const file = this.pendingSubtitleFile;
+    this.pendingSubtitleFile = null;
+    this.update({ ...this.snapshot, encodingPrompt: null });
+    if (encoding !== null && file) await this.loadSubtitleFile(file, encoding);
+  }
+
+  removeSubtitleFile(): void {
+    this.post({ type: 'removeTextSubtitle' });
+  }
+
+  /** [ and ]: moves the subtitle file's cues by `deltaMs`, with a short notice of the new offset. */
+  shiftSubtitles(deltaMs: number): void {
+    const subs = this.snapshot.subtitles;
+    if (!subs?.text) return;
+    const offsetMs = Math.max(-MAX_SUBTITLE_OFFSET_MS, Math.min(MAX_SUBTITLE_OFFSET_MS, subs.offsetMs + deltaMs));
+    this.post({ type: 'setSubtitleOffset', ms: offsetMs });
+    this.update(withNotice({ ...this.snapshot, subtitles: { ...subs, offsetMs } }, { code: 'subtitle-offset', message: `Subtitles ${formatSubtitleOffset(offsetMs)}` }));
+  }
+
+  scaleSubtitles(delta: number): void {
+    const subs = this.snapshot.subtitles;
+    if (!subs?.text) return;
+    const scale = Math.round(Math.max(MIN_SUBTITLE_SCALE, Math.min(MAX_SUBTITLE_SCALE, subs.scale + delta)) * 10) / 10;
+    this.post({ type: 'setSubtitleScale', scale });
+    this.update({ ...this.snapshot, subtitles: { ...subs, scale } });
   }
 
   /** An index title of an HDMV disc (its movie object decides what plays). */

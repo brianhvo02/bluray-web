@@ -7,6 +7,8 @@ export type KeyAction =
   | { readonly type: 'volumeBy'; readonly delta: number }
   | { readonly type: 'fullscreen' }
   | { readonly type: 'cycleAudio' }
+  | { readonly type: 'subtitleOffset'; readonly deltaMs: number }
+  | { readonly type: 'cycleSubtitles' }
   | { readonly type: 'menuKey'; readonly key: MenuKey };
 
 export interface KeyContext {
@@ -16,7 +18,7 @@ export interface KeyContext {
 
 const MENU_ARROWS: Readonly<Record<string, MenuKey>> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Enter: 'ok' };
 
-/** Playback keys (spec §7), A (audio track), M (top menu), P (pop-up), and menu keys while a menu is shown. Subtitle keys come in M4. */
+/** Playback keys (spec §7), A (audio track), S (subtitles), [ and ] (text subtitle timing), M (top menu), P (pop-up), and menu keys while a menu is shown. */
 export function keyToAction(key: string, ctx: KeyContext = { menuActive: false }): KeyAction | null {
   if (ctx.menuActive) {
     const menuKey = MENU_ARROWS[key] ?? (/^[0-9]$/.test(key) ? (key as MenuKey) : undefined);
@@ -39,6 +41,13 @@ export function keyToAction(key: string, ctx: KeyContext = { menuActive: false }
     case 'a':
     case 'A':
       return { type: 'cycleAudio' };
+    case 's':
+    case 'S':
+      return { type: 'cycleSubtitles' };
+    case '[':
+      return { type: 'subtitleOffset', deltaMs: -100 };
+    case ']':
+      return { type: 'subtitleOffset', deltaMs: 100 };
     case 'm':
     case 'M':
       return { type: 'menuKey', key: 'topMenu' };
@@ -61,6 +70,7 @@ export function keyActionUo(action: KeyAction, ctx: { readonly playing: boolean;
       return 'timeSearch';
     case 'cycleAudio':
       return 'primaryAudioChange';
+    // cycleSubtitles: the controller names pgChange or pgEnableDisable once it knows the next choice; the text offset is no disc operation
     case 'menuKey':
       if (action.key === 'popup') return ctx.popupShown ? 'popupOff' : 'popupOn';
       return MENU_KEY_UO[action.key] ?? null;

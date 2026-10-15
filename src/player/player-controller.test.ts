@@ -353,3 +353,82 @@ describe('menu sounds', () => {
     expect(audio.played).toEqual([1]);
   });
 });
+
+describe('subtitles', () => {
+  const subs = (over: Partial<Extract<EngineEvent, { type: 'subtitles' }>> = {}): EngineEvent => ({
+    type: 'subtitles', pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: 'off', offsetMs: 0, scale: 1, ...over,
+  });
+  const posted = (w: FakeWorker) => w.posted as Array<{ type: string } & Record<string, unknown>>;
+
+  it('puts the subtitles state and the encoding prompt in the snapshot; a new disc clears them', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, subs({ selected: { pg: 2 }, offsetMs: 300 }));
+    s = reduceEvent(s, { type: 'subtitleEncodingNeeded', name: 'a.srt' });
+    expect(s.subtitles).toEqual({ pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: { pg: 2 }, offsetMs: 300, scale: 1 });
+    expect(s.encodingPrompt).toEqual({ name: 'a.srt' });
+    s = reduceEvent(s, { type: 'titles', playlists: [summary], usesBdj: false, warnings: [] });
+    expect(s.subtitles).toBeNull();
+    expect(s.encodingPrompt).toBeNull();
+  });
+
+  it('selects, shifts by absolute offsets with a notice, and scales in steps', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit(subs({ text: { name: 'a.srt', cues: 3 }, selected: 'text' }));
+    c.selectSubtitle({ kind: 'pg', stream: 2 });
+    c.shiftSubtitles(100);
+    c.shiftSubtitles(100);
+    c.scaleSubtitles(0.1);
+    c.scaleSubtitles(5);
+    expect(posted(worker)).toEqual([
+      { type: 'selectSubtitle', choice: { kind: 'pg', stream: 2 } },
+      { type: 'setSubtitleOffset', ms: 100 },
+      { type: 'setSubtitleOffset', ms: 200 },
+      { type: 'setSubtitleScale', scale: 1.1 },
+      { type: 'setSubtitleScale', scale: 2 },
+    ]);
+    expect(c.getSnapshot().notices).toContainEqual({ code: 'subtitle-offset', message: 'Subtitles +0.2 s' });
+    c.shiftSubtitles(-500);
+    expect(c.getSnapshot().notices).toContainEqual({ code: 'subtitle-offset', message: 'Subtitles −0.3 s' });
+  });
+
+  it('cycles Off → each PG track → the file → Off', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit(subs({ text: { name: 'a.srt', cues: 3 } }));
+    for (let i = 0; i < 4; i++) c.cycleSubtitles();
+    expect(posted(worker).map((m) => m.choice)).toEqual([{ kind: 'pg', stream: 1 }, { kind: 'pg', stream: 2 }, { kind: 'text' }, { kind: 'off' }]);
+  });
+
+  it('refuses a masked subtitle change with the notice and sends nothing', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit(subs({ selected: { pg: 1 } }));
+    worker.emit({ type: 'uoMask', masked: ['pgChange'] });
+    c.selectSubtitle({ kind: 'pg', stream: 2 });
+    expect(worker.posted).toEqual([]);
+    expect(c.getSnapshot().notices.map((n) => n.code)).toEqual(['uo-masked']);
+    c.selectSubtitle({ kind: 'off' }); // only the display flag: pgEnableDisable is not masked
+    expect(posted(worker)).toEqual([{ type: 'selectSubtitle', choice: { kind: 'off' } }]);
+  });
+
+  it('sends a loaded file\'s bytes, and sends them again with the encoding the user picks', async () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const file = new File([Uint8Array.of(0x63, 0x61, 0x66, 0xe9)], 'latin.srt');
+    await c.loadSubtitleFile(file);
+    const first = posted(worker)[0]!;
+    expect(first).toMatchObject({ type: 'addTextSubtitle', name: 'latin.srt' });
+    expect([...new Uint8Array(first.bytes as ArrayBuffer)]).toEqual([0x63, 0x61, 0x66, 0xe9]);
+    expect(first.encoding).toBeUndefined();
+    worker.emit({ type: 'subtitleEncodingNeeded', name: 'latin.srt' });
+    await c.answerEncoding('windows-1252');
+    expect(c.getSnapshot().encodingPrompt).toBeNull();
+    expect(posted(worker)[1]).toMatchObject({ type: 'addTextSubtitle', name: 'latin.srt', encoding: 'windows-1252' });
+    worker.emit({ type: 'subtitleEncodingNeeded', name: 'latin.srt' });
+    await c.answerEncoding(null);
+    expect(c.getSnapshot().encodingPrompt).toBeNull();
+    expect(worker.posted).toHaveLength(2);
+    c.removeSubtitleFile();
+    expect(posted(worker)[2]).toEqual({ type: 'removeTextSubtitle' });
+  });
+});

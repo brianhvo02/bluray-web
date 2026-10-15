@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
+import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
 import { PlaylistPicker } from './PlaylistPicker';
@@ -8,6 +9,9 @@ import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
 
 const HIDE_CONTROLS_MS = 3000;
+const OFFSET_NOTICE_MS = 2000;
+
+const isSubtitleFile = (file: File): boolean => file.name.toLowerCase().endsWith('.srt');
 
 interface PlayerScreenProps {
   readonly controller: PlayerController;
@@ -61,7 +65,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target;
       if (target instanceof HTMLTextAreaElement) return;
-      if (target instanceof Element && target.closest('.audio-menu-list')) return; // the open audio menu handles its own keys
+      if (target instanceof Element && target.closest('.audio-menu-list')) return; // an open audio or subtitle menu handles its own keys
+      if (controller.getSnapshot().encodingPrompt) return; // the encoding dialog is modal
       if (target instanceof HTMLInputElement) {
         if (target.type !== 'range') return;
         // Only the volume slider keeps its native arrow-key stepping; on the seek bar arrows seek by 10 s.
@@ -95,6 +100,12 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
           break;
         case 'cycleAudio':
           controller.cycleAudio();
+          break;
+        case 'cycleSubtitles':
+          controller.cycleSubtitles();
+          break;
+        case 'subtitleOffset':
+          controller.shiftSubtitles(action.deltaMs);
           break;
         case 'menuKey':
           controller.menuKey(action.key);
@@ -132,6 +143,26 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
     const timer = window.setTimeout(() => controller.dismissNotice('audio-track'), 3000);
     return () => window.clearTimeout(timer);
   }, [controller, trackNotice]);
+
+  const offsetNotice = snapshot.notices.find((n) => n.code === 'subtitle-offset')?.message;
+  useEffect(() => {
+    if (!offsetNotice) return;
+    const timer = window.setTimeout(() => controller.dismissNotice('subtitle-offset'), OFFSET_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [controller, offsetNotice]);
+
+  const answerEncoding = useCallback((encoding: string | null) => void controller.answerEncoding(encoding), [controller]);
+
+  /** A dropped .srt file loads as the subtitle file; other files are ignored (and never open in the tab). */
+  const onDragOver = (e: DragEvent<HTMLDivElement>): void => {
+    if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+  };
+  const onDrop = (e: DragEvent<HTMLDivElement>): void => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    const file = [...e.dataTransfer.files].find(isSubtitleFile);
+    if (file && snapshot.currentPlaylistId !== null) void controller.loadSubtitleFile(file);
+  };
 
   const maskedNotice = snapshot.notices.find((n) => n.code === 'uo-masked');
   useEffect(() => {
@@ -188,6 +219,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
       onPointerMove={wake}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
       onPointerDown={() => {
         setPressed(true);
         wake();
@@ -235,6 +268,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         />
       )}
       {remoteOpen && controlsVisible && snapshot.indexTitles && <RemotePad onKey={sendMenuKey} />}
+      {snapshot.encodingPrompt && <EncodingPrompt fileName={snapshot.encodingPrompt.name} onAnswer={answerEncoding} />}
       <ControlBar
         controller={controller}
         snapshot={snapshot}

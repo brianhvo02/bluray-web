@@ -3,6 +3,7 @@ import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { AudioMenu } from './AudioMenu';
+import { SubtitleMenu } from './SubtitleMenu';
 import { formatTime } from './format';
 
 const MASKED_TOOLTIP = "The disc doesn't allow this here";
@@ -164,6 +165,15 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
           selected={snapshot.selectedAudio}
           disabledReason={tip('primaryAudioChange')}
           onSelect={(i) => controller.selectAudio(i)}
+          onOpenChange={onMenuOpenChange}
+        />
+        <SubtitleMenu
+          subtitles={snapshot.currentPlaylistId !== null ? snapshot.subtitles : null}
+          onSelect={(choice) => controller.selectSubtitle(choice)}
+          onLoadFile={(file) => void controller.loadSubtitleFile(file)}
+          onShift={(ms) => controller.shiftSubtitles(ms)}
+          onScale={(d) => controller.scaleSubtitles(d)}
+          onRemove={() => controller.removeSubtitleFile()}
           onOpenChange={onMenuOpenChange}
         />
         {snapshot.indexTitles?.hasTopMenu && (
