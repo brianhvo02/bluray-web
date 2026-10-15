@@ -100,6 +100,32 @@ describe('activeCues', () => {
     expect(activeCues(cues, 5_000_000)).toEqual([]);
   });
 
+  it('agrees with a brute-force search on random overlapping cues', () => {
+    let seed = 7;
+    const rand = (n: number): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return seed % n;
+    };
+    const cues: TextCue[] = Array.from({ length: 400 }, () => {
+      const startUs = rand(600) * 100_000;
+      return { startUs, endUs: startUs + (1 + rand(rand(10) === 0 ? 3000 : 50)) * 100_000, lines: [], align: 2 as const };
+    }).sort((a, b) => a.startUs - b.startUs);
+    for (let t = 0; t < 400_000_000; t += 1_234_567) {
+      expect(activeCues(cues, t)).toEqual(cues.filter((c) => c.startUs <= t && t < c.endUs));
+    }
+  });
+
+  it('stays fast when one cue lasts the whole film', () => {
+    const cues: TextCue[] = [
+      { startUs: 0, endUs: 30 * 3600 * 1_000_000, lines: [], align: 8 }, // "Subtitles by …" with a typo'd end hour
+      ...Array.from({ length: 50_000 }, (_, i): TextCue => ({ startUs: 1 + i * 2_000_000, endUs: 1 + i * 2_000_000 + 1_500_000, lines: [], align: 2 })),
+    ];
+    expect(activeCues(cues, 2_000_000 * 31_337 + 100_000)).toEqual([cues[0], cues[31_338]]);
+    const t0 = performance.now();
+    for (let i = 0; i < 10_000; i++) activeCues(cues, ((i * 7919) % 100_000) * 1_000_000);
+    expect(performance.now() - t0).toBeLessThan(50);
+  });
+
   it('finds the right cue among 50 000 quickly', () => {
     const blocks = Array.from({ length: 50_000 }, (_, i) => {
       const t = (ms: number) => `${String(Math.floor(ms / 3_600_000)).padStart(2, '0')}:${String(Math.floor(ms / 60_000) % 60).padStart(2, '0')}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`;

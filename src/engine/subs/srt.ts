@@ -144,15 +144,29 @@ function styleLines(raw: readonly string[]): { lines: StyledRun[][]; align: Alig
   return { lines, align };
 }
 
-/** The longest cue of each cue list, so a lookup knows how far back an active cue can start. */
-const longest = new WeakMap<readonly TextCue[], number>();
+/**
+ * A max-end segment tree over the cues (sorted by start), built once per cue list: node i holds the latest end among its
+ * cues, so a lookup skips every subtree in which nothing is still showing.
+ */
+const indexes = new WeakMap<readonly TextCue[], Float64Array>();
 
-/** The cues active at `timeUs` (start ≤ t < end), in start order: a binary search, then a scan back over the longest-cue window. */
+function buildIndex(cues: readonly TextCue[]): Float64Array {
+  const tree = new Float64Array(Math.max(1, 4 * cues.length));
+  const build = (node: number, lo: number, hi: number): number => {
+    const end = hi - lo === 1 ? cues[lo]!.endUs : Math.max(build(2 * node, lo, (lo + hi) >>> 1), build(2 * node + 1, (lo + hi) >>> 1, hi));
+    tree[node] = end;
+    return end;
+  };
+  if (cues.length > 0) build(1, 0, cues.length);
+  return tree;
+}
+
+/** The cues active at `timeUs` (start ≤ t < end), in start order, in O((k + 1) log n) for k active cues. */
 export function activeCues(cues: readonly TextCue[], timeUs: number): TextCue[] {
-  let maxUs = longest.get(cues);
-  if (maxUs === undefined) {
-    maxUs = cues.reduce((m, c) => Math.max(m, c.endUs - c.startUs), 0);
-    longest.set(cues, maxUs);
+  let tree = indexes.get(cues);
+  if (!tree) {
+    tree = buildIndex(cues);
+    indexes.set(cues, tree);
   }
   let lo = 0;
   let hi = cues.length; // first cue starting after timeUs
@@ -161,9 +175,18 @@ export function activeCues(cues: readonly TextCue[], timeUs: number): TextCue[] 
     if (cues[mid]!.startUs <= timeUs) lo = mid + 1;
     else hi = mid;
   }
+  const started = lo;
   const out: TextCue[] = [];
-  for (let i = lo - 1; i >= 0 && cues[i]!.startUs > timeUs - maxUs; i--) {
-    if (cues[i]!.endUs > timeUs) out.push(cues[i]!);
-  }
-  return out.reverse();
+  const visit = (node: number, from: number, to: number): void => {
+    if (from >= started || tree![node]! <= timeUs) return; // every cue here starts later, or has ended
+    if (to - from === 1) {
+      out.push(cues[from]!);
+      return;
+    }
+    const mid = (from + to) >>> 1;
+    visit(2 * node, from, mid);
+    visit(2 * node + 1, mid, to);
+  };
+  if (cues.length > 0) visit(1, 0, cues.length);
+  return out;
 }
