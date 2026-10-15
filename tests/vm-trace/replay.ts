@@ -438,7 +438,7 @@ export async function replay(discDir: URL, scriptText: string, opts: ReplayOptio
       case 'play': navigator.playTitle(s.title); break;
       case 'key': navigator.userInput(KEY_VK[s.key]); break;
       case 'mouse': navigator.mouseSelect(s.x, s.y); break;
-      case 'subs': pg.select('off'); break;
+      case 'subs': pg.select(s.what === 'off' ? 'off' : { pg: s.stream }); break;
       case 'click':
         navigator.mouseSelect(s.x, s.y);
         navigator.userInput(BdVk.MOUSE_ACTIVATE);

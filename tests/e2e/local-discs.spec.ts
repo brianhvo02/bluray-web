@@ -1,12 +1,20 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
+import { scanPg } from '../helpers/pg-scan';
 import { collectWindows, expectInSync, telemetry } from './telemetry';
 
 const LOCAL = 'fixtures/local';
 const SEEK_FRACTIONS = [0.13, 0.31, 0.52, 0.27, 0.74, 0.08, 0.91, 0.45];
 
 const FEATURE_MIN_US = 30 * 60 * 1_000_000;
+const SUBTITLE_SEEKS = [0.1, 0.35, 0.6];
+const SUBTITLE_WAIT_MS = 30_000;
+/** A subtitle is expected after a seek when the disc has one starting this soon after the landing point. */
+const SUBTITLE_EXPECTED_US = 25_000_000;
+
+interface PgTelemetry { pg: { objectsShown: number; forced: number } | null; pgErrors: number }
+const pgTelemetry = async (page: Page): Promise<PgTelemetry | null> => (await telemetry(page)) as unknown as PgTelemetry | null;
 
 const durationUs = async (page: Page): Promise<number> => Number((await page.getByTestId('seek').getAttribute('max').catch(() => '0')) ?? '0');
 const menuShown = async (page: Page): Promise<boolean> => (await page.getByTestId('player').getAttribute('data-menu-active')) === 'true';
@@ -59,7 +67,7 @@ const discs = existsSync(LOCAL) ? readdirSync(LOCAL).filter((name) => existsSync
 for (const name of discs) {
   test(`seeks around ${name} on the browser's decoder without errors`, async ({ page }) => {
     test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
-    test.setTimeout(300_000);
+    test.setTimeout(900_000);
     await page.goto('/?telemetry=1');
     await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
     const first = await firstScreen(page);
@@ -116,9 +124,82 @@ for (const name of discs) {
         console.log(`${name}: ${track.id} ${track.codec} in sync`);
       }
     }
+    await checkPgTracks(page, name);
     const t = await telemetry(page);
     console.log(`${name}: ${JSON.stringify(t)}`);
     expect(t?.decoderErrors).toBe(0);
     expect(t?.audioUnderruns, 'audio underruns').toBe(0);
   });
+}
+
+/**
+ * Every PG track of the feature: picked from the menu, then seeks to 10, 35 and 60 %. Where the disc has a subtitle starting
+ * within 25 s after the landing point (found by decoding the streams in Node, scanPg), it must be drawn within 30 s. Sparse
+ * tracks (foreign-dialogue-only, commentary) often have none near a seek point; those seeks are logged, not failed.
+ */
+async function checkPgTracks(page: Page, name: string): Promise<void> {
+  const scan = await scanPg(join(LOCAL, name), await durationUs(page));
+  if (!scan) throw new Error(`${name}: no playlist with the playing duration`);
+  for (const [stream, s] of Object.entries(scan.streams)) {
+    console.log(`${name}: PG ${stream} (${s.language}) on disc: ${s.objectTimesUs.length} subtitles, ${s.errors} decode errors`);
+    expect(s.errors, `PG ${stream} decode errors on disc`).toBe(0);
+  }
+  const menu = page.getByTestId('subtitle-menu');
+  await page.getByTestId('player').hover();
+  await menu.click();
+  const items = page.locator('[data-testid^="subtitle-pg-"]');
+  const tracks: Array<{ id: string; label: string; disabled: boolean }> = [];
+  for (let i = 0; i < (await items.count()); i++) {
+    const item = items.nth(i);
+    tracks.push({ id: (await item.getAttribute('data-testid')) ?? '', label: (await item.textContent()) ?? '', disabled: await item.isDisabled() });
+  }
+  await page.keyboard.press('Escape');
+  if (tracks.length === 0) {
+    console.log(`${name}: no PG tracks`);
+    return;
+  }
+  const missed: string[] = [];
+  for (const track of tracks) {
+    if (track.disabled) {
+      console.log(`${name}: ${track.id} (${track.label}) not selectable here (UO mask), skipped`);
+      continue;
+    }
+    await page.getByTestId('player').hover();
+    await menu.click();
+    await page.getByTestId(track.id).click();
+    await page.getByTestId('player').hover();
+    await menu.click();
+    await expect(page.getByTestId(track.id)).toHaveAttribute('aria-checked', 'true');
+    await page.keyboard.press('Escape');
+    const seen: string[] = [];
+    for (const fraction of SUBTITLE_SEEKS) {
+      await page.getByTestId('player').hover();
+      const bar = await page.getByTestId('seek').boundingBox();
+      if (!bar) throw new Error('seek bar not found');
+      await page.mouse.click(bar.x + bar.width * fraction, bar.y + bar.height / 2);
+      const targetUs = Number(await page.getByTestId('seek').inputValue()); // where the click put the thumb
+      await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
+      // only samples taken after the seek landed count (the one in the window may predate it)
+      await expect.poll(async () => Math.abs(((await telemetry(page))?.clockUs ?? 0) - targetUs) < 5_000_000, { timeout: 15_000 }).toBe(true);
+      const started = Date.now();
+      let sets = false;
+      let drawn = false;
+      while (!drawn && Date.now() - started < SUBTITLE_WAIT_MS) {
+        const pg = (await pgTelemetry(page))?.pg;
+        sets ||= pg !== null && pg !== undefined;
+        drawn = (pg?.objectsShown ?? 0) > 0;
+        if (!drawn) await page.waitForTimeout(100);
+      }
+      const times = scan.streams[Number(track.id.replace('subtitle-pg-', ''))]?.objectTimesUs ?? [];
+      const expected = times.some((t) => t >= targetUs && t <= targetUs + SUBTITLE_EXPECTED_US);
+      if (expected && !drawn) missed.push(`${track.id} at ${(targetUs / 60e6).toFixed(1)} min`);
+      const result = drawn ? `drawn in ${((Date.now() - started) / 1000).toFixed(1)} s` : sets ? 'only empty display sets' : 'nothing';
+      seen.push(`${result}${expected ? '' : ' (none due)'}`);
+    }
+    console.log(`${name}: ${track.id} (${track.label}): ${seen.join(', ')}`);
+  }
+  const errors = (await pgTelemetry(page))?.pgErrors;
+  console.log(`${name}: pgErrors ${errors}`);
+  expect(errors, 'PG errors').toBe(0);
+  expect(missed, 'subtitles due after a seek but not drawn').toEqual([]);
 }

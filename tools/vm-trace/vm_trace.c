@@ -222,7 +222,7 @@ static const char *plane_hash(const uint8_t *plane)
 
 /* ---- script ---- */
 
-typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_PAGE, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE, S_SUBS_OFF } step_kind;
+typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_PAGE, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE, S_SUBS_OFF, S_SUBS_ON } step_kind;
 typedef struct { step_kind kind; int a, b; } step_t;
 
 static const struct { const char *name; uint32_t vk; } KEYS[] = {
@@ -283,6 +283,9 @@ static int parse_script(const char *path, step_t **out)
             s.b = a;
         } else if (!strcmp(w1, "subs") && !strcmp(w2, "off") && cnt == 2) {
             s.kind = S_SUBS_OFF;
+        } else if (!strcmp(w1, "subs") && cnt == 2 && w2[0] >= '1' && w2[0] <= '9') {
+            s.kind = S_SUBS_ON;
+            s.a = atoi(w2);
         } else if (!strcmp(w1, "play") && !strcmp(w2, "title") && cnt >= 3) {
             s.kind = S_PLAY_TITLE;
             s.a = a;
@@ -346,6 +349,8 @@ static void run_step(BLURAY *bd, const step_t *s)
         case S_PLAY_TITLE: bd_play_title(bd, (unsigned)s->a); break;
         /* the PG display flag off, stream 1 kept (the replay's PgStreamControl.select('off')) */
         case S_SUBS_OFF: bd_select_stream(bd, BLURAY_PG_TEXTST_STREAM, 1, 0); break;
+        /* PG stream N with the display flag (the replay's PgStreamControl.select({ pg: N })) */
+        case S_SUBS_ON: bd_select_stream(bd, BLURAY_PG_TEXTST_STREAM, (uint32_t)s->a, 1); break;
         default: break;
     }
 }
