@@ -1,20 +1,74 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { collectWindows, expectInSync, telemetry } from './telemetry';
 
 const LOCAL = 'fixtures/local';
 const SEEK_FRACTIONS = [0.13, 0.31, 0.52, 0.27, 0.74, 0.08, 0.91, 0.45];
+
+const FEATURE_MIN_US = 30 * 60 * 1_000_000;
+
+const durationUs = async (page: Page): Promise<number> => Number((await page.getByTestId('seek').getAttribute('max').catch(() => '0')) ?? '0');
+const menuShown = async (page: Page): Promise<boolean> => (await page.getByTestId('player').getAttribute('data-menu-active')) === 'true';
+/** A long playlist playing with no menu over it (a top menu can loop a long playlist too). */
+const featurePlaying = async (page: Page): Promise<boolean> =>
+  (await page.getByTestId('player').getAttribute('data-state')) === 'playing' && (await durationUs(page)) > FEATURE_MIN_US && !(await menuShown(page));
+
+/** What a freshly opened disc shows first: the picker (BD-J or no HDMV program), a menu, or playback. */
+async function firstScreen(page: Page): Promise<'picker' | 'menu' | 'playing'> {
+  let seen: 'picker' | 'menu' | 'playing' | null = null;
+  await expect
+    .poll(async () => {
+      if (await page.getByTestId('playlist-picker').isVisible()) seen = 'picker';
+      else if (await menuShown(page)) seen = 'menu';
+      else if ((await page.getByTestId('player').getAttribute('data-state')) === 'playing') seen = 'playing';
+      return seen;
+    }, { timeout: 30_000 })
+    .not.toBeNull();
+  return seen!;
+}
+
+/**
+ * An HDMV disc runs its own program: it boots into a menu, or (like TSURUNE) into the feature. Either way, reach the
+ * menu (Top Menu if needed), then press Enter up to five times until a playlist longer than 30 minutes plays.
+ */
+async function hdmvIntoFeature(page: Page, name: string, first: 'menu' | 'playing'): Promise<void> {
+  if (first === 'playing') {
+    // First Play may show a logo (Menu Call masked) before its program starts the feature
+    await expect.poll(() => featurePlaying(page), { timeout: 120_000 }).toBe(true);
+    console.log(`${name}: HDMV, boots into the feature (${Math.round((await durationUs(page)) / 60e6)} min playlist); opening the top menu`);
+    await page.keyboard.press('m');
+  } else {
+    console.log(`${name}: HDMV, boots into its menu`);
+  }
+  await expect.poll(() => menuShown(page), { timeout: 30_000 }).toBe(true);
+  await expect.poll(async () => (await telemetry(page) as { menu?: unknown } | null)?.menu ?? null, { timeout: 10_000 }).not.toBeNull();
+  for (let presses = 0; presses < 5 && !(await featurePlaying(page)); presses++) {
+    await page.waitForTimeout(3000); // let auto-action pages and in-effects settle
+    if (await featurePlaying(page)) break;
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(2000);
+    console.log(`${name}: Enter ${presses + 1}: menu ${await menuShown(page)}, playlist ${Math.round((await durationUs(page)) / 60e6)} min`);
+  }
+  await expect.poll(() => featurePlaying(page), { timeout: 30_000 }).toBe(true);
+  console.log(`${name}: the menu started the feature`);
+}
 
 const discs = existsSync(LOCAL) ? readdirSync(LOCAL).filter((name) => existsSync(join(LOCAL, name, 'BDMV'))) : [];
 
 for (const name of discs) {
   test(`seeks around ${name} on the browser's decoder without errors`, async ({ page }) => {
     test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
-    test.setTimeout(180_000);
+    test.setTimeout(300_000);
     await page.goto('/?telemetry=1');
     await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
-    await page.locator('button[data-testid^="playlist-"]:not([disabled])').first().click(); // the main feature is listed first
+    const first = await firstScreen(page);
+    if (first === 'picker') {
+      console.log(`${name}: picker (BD-J or no HDMV program)`);
+      await page.locator('button[data-testid^="playlist-"]:not([disabled])').first().click(); // the main feature is listed first
+    } else {
+      await hdmvIntoFeature(page, name, first);
+    }
     await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 30_000 });
 
     for (const fraction of SEEK_FRACTIONS) {
