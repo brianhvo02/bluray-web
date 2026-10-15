@@ -49,6 +49,7 @@ const movieObjects = buildMovieObjects([
   { cmds: [pgOn(1), asm.playPl(imm(0))] }, // 0: First Play, English subtitles on
   { cmds: [] }, // 1: top menu
   { cmds: [pgOn(2), asm.playPl(imm(0))] }, // 2: title 1, Japanese subtitles on
+  { cmds: [asm.playPl(imm(1))] }, // 3: title 2, the feature with subtitle stream changes masked
 ]);
 
 /** Real H.264 (x264, IDR every second) so the disc also plays in Chrome (tests/e2e/subtitles.spec.ts). */
@@ -62,8 +63,16 @@ const files = buildSyntheticDisc({
     audio: CodingType.LPCM,
     pgStreams,
   }],
-  playlists: [{ id: '00000', clipIds: ['00001'], chapterEverySeconds: 4 }],
+  playlists: [
+    { id: '00000', clipIds: ['00001'], chapterEverySeconds: 4 },
+    { id: '00001', clipIds: ['00001'], chapterEverySeconds: 4, uoMask: [0, 0, 0, 0x10, 0, 0, 0, 0] }, // pgChange (bit 27)
+  ],
   movieObjects,
+  index: {
+    firstPlay: { kind: 'hdmv', movieObjectId: 0 },
+    topMenu: { kind: 'hdmv', movieObjectId: 1 },
+    titles: [{ kind: 'hdmv', movieObjectId: 2 }, { kind: 'hdmv', movieObjectId: 3 }],
+  },
 });
 
 writeFixture(outDir, files);

@@ -169,6 +169,7 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
         />
         <SubtitleMenu
           subtitles={snapshot.currentPlaylistId !== null ? snapshot.subtitles : null}
+          isMasked={masked}
           onSelect={(choice) => controller.selectSubtitle(choice)}
           onLoadFile={(file) => void controller.loadSubtitleFile(file)}
           onShift={(ms) => controller.shiftSubtitles(ms)}

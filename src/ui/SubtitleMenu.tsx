@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { SubtitleChoice } from '../engine/protocol';
 import { languageName } from '../player/language';
 import { formatSubtitleOffset, MAX_SUBTITLE_SCALE, MIN_SUBTITLE_SCALE, type SubtitlesState } from '../player/player-controller';
 
 const OFFSET_STEP_MS = 100;
 const SCALE_STEP = 0.1;
+const MASKED_TOOLTIP = "The disc doesn't allow this here";
 
 interface SubtitleMenuProps {
   readonly subtitles: SubtitlesState | null;
+  /** The disc's UO mask: picks it does not allow here are disabled with a tooltip. */
+  isMasked(op: UoOp): boolean;
   onSelect(choice: SubtitleChoice): void;
   onLoadFile(file: File): void;
   onShift(deltaMs: number): void;
@@ -18,7 +22,7 @@ interface SubtitleMenuProps {
 }
 
 /** Disc PG tracks, the user's subtitle file (with timing and size), Off, and loading a file. Keyboard handling as AudioMenu. */
-export function SubtitleMenu({ subtitles, onSelect, onLoadFile, onShift, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
+export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShift, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -76,6 +80,10 @@ export function SubtitleMenu({ subtitles, onSelect, onLoadFile, onShift, onScale
 
   if (!subtitles) return null;
   const { pg, text, selected, offsetMs, scale } = subtitles;
+  const currentPg = typeof selected === 'object' ? selected.pg : null;
+  // moving to another PG stream is pgChange; leaving a shown PG stream for Off or the file turns PG's display off
+  const pgMasked = (stream: number): boolean => currentPg !== null && stream !== currentPg && isMasked('pgChange');
+  const offMasked = currentPg !== null && isMasked('pgEnableDisable');
   return (
     <div className="audio-menu subtitle-menu" ref={rootRef}>
       <button ref={buttonRef} type="button" aria-haspopup="menu" aria-expanded={open} data-testid="subtitle-menu" onClick={() => setOpen((o) => !o)}>
@@ -96,7 +104,7 @@ export function SubtitleMenu({ subtitles, onSelect, onLoadFile, onShift, onScale
       {open && (
         <ul ref={listRef} role="menu" className="audio-menu-list" onKeyDown={moveFocus}>
           <li role="none">
-            <button type="button" role="menuitemradio" aria-checked={selected === 'off'} data-testid="subtitle-off" onClick={() => choose({ kind: 'off' })}>
+            <button type="button" role="menuitemradio" aria-checked={selected === 'off'} data-testid="subtitle-off" disabled={offMasked} title={offMasked ? MASKED_TOOLTIP : undefined} onClick={() => choose({ kind: 'off' })}>
               Off
             </button>
           </li>
@@ -107,6 +115,8 @@ export function SubtitleMenu({ subtitles, onSelect, onLoadFile, onShift, onScale
                 role="menuitemradio"
                 aria-checked={typeof selected === 'object' && selected.pg === t.index}
                 data-testid={`subtitle-pg-${t.index}`}
+                disabled={pgMasked(t.index)}
+                title={pgMasked(t.index) ? MASKED_TOOLTIP : undefined}
                 onClick={() => choose({ kind: 'pg', stream: t.index })}
               >
                 {languageName(t.language) || `Subtitles ${t.index}`}
@@ -115,7 +125,7 @@ export function SubtitleMenu({ subtitles, onSelect, onLoadFile, onShift, onScale
           ))}
           {text && (
             <li role="none">
-              <button type="button" role="menuitemradio" aria-checked={selected === 'text'} data-testid="subtitle-text" title={`${text.cues} subtitles`} onClick={() => choose({ kind: 'text' })}>
+              <button type="button" role="menuitemradio" aria-checked={selected === 'text'} data-testid="subtitle-text" disabled={offMasked} title={offMasked ? MASKED_TOOLTIP : `${text.cues} subtitles`} onClick={() => choose({ kind: 'text' })}>
                 {text.name}
               </button>
             </li>
