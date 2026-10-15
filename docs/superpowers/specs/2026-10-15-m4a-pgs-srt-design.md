@@ -1,7 +1,7 @@
 # Milestone 4a: PGS and SRT Subtitles — Design Spec
 
 Date: 2026-10-15
-Status: Approved design, pending spec review
+Status: Implemented (2026-10-15); plan `docs/superpowers/plans/2026-10-15-m4a-pgs-srt.md`. See §9 for where the implementation differs.
 Parent spec: `2026-10-12-bluray-web-player-design.md` (§6, §7, §9, §11 milestone 4). Builds on `2026-10-14-m3-hdmv-menus-design.md` (graphics stack, trace harness).
 
 ## 1. Goal and scope
@@ -120,3 +120,25 @@ Events:
 2. The real-disc gate passes on A_NEW_ERA, RENTAL_FAMILY and TSURUNE_TSUNAGARI_1.
 3. `npm run vm-trace` matches libbluray for the local PG script.
 4. `docs/known-issues.md` lists what is deferred: ASS (M4b), TextST, sub-path PG, per-disc subtitle memory; SRT is verified on synthetic data only.
+
+## 9. Deviations (recorded during planning and implementation)
+
+Decided while planning:
+
+1. **PG rendering is its own class** (`graphics/pg-renderer.ts`), not part of `GraphicsController`, because PG also plays on discs without a navigator (BD-J, raw playlist picks), where no graphics controller exists. The ported functions are the same; the shared crop step lives in `graphics/composition.ts`. Overlay operations carry no `plane` field: each plane has its own renderer.
+2. **The PG plane is double-buffered.** `OverlayPlane` has a buffered mode (operations change a back buffer, `flush` makes it visible), matching libbluray's overlay contract, where `_render_pg` flushes a subtitle and queues the clear of the same area for the next flush. IG stays immediate, so the M3 goldens did not change.
+3. **The trace harness sets `BLURAY_PLAYER_SETTING_DECODE_PG`**, without which libbluray decodes no PG; the replay repeats its PSR2 write untraced.
+
+Decided while implementing (each is a `Ruling` line in the execution ledger):
+
+4. **Display sets are decoded as they arrive and presented at their PTS.** libbluray decodes PG with no DTS gate as it reads; the order of decoding is the same, so nothing visible changes.
+5. **A seek resets PG fully** (`GC_CTRL_PG_RESET`, as `_seek_internal`), including the epoch.
+6. **Play item changes come from the reader** (a pipeline `itemStarted` callback). The previous item's queued subtitles still show, and the plane resets when presentation reaches the new item; doing it at presentation time would drop the next item's first subtitles, because the reader runs up to 2 s ahead.
+7. **A PSR2 change that keeps the PID** (display flag on or off) only resets the plane and keeps the queued display sets (libbluray's `_init_pg_stream` resets everything). The display flag is read when a set is rendered, so a forced caption read ahead before the user turned subtitles off still shows. Turning the display on, or a new PID, restarts the read at the current time so the current subtitle appears.
+8. **A user's subtitle pick is refused whole** when any part of it is masked (libbluray's `_select_pg_textst_stream` applies the allowed half). The same holds for picking the text track while PG's display flag cannot be cleared.
+9. **PG units outside the play item's IN/OUT time are dropped**, as libbluray's `m2ts_filter` does.
+10. **Unknown SRT tags render as text** (§3.4); override blocks `{\…}` other than `{\anN}` are removed.
+11. **The subtitle menu shows whenever a playlist plays**, not only when there are PG tracks or a text track, so "Load subtitle file…" is always reachable. Masked picks are disabled in it with the usual tooltip.
+12. **`subtitles` is also emitted when a disc opens or closes**, so the UI learns that the text track was dropped with the disc.
+13. **The real-disc gate expects a subtitle after a seek only where the disc has one starting within 25 s of the landing point.** `tests/helpers/pg-scan.ts` decodes every PG stream in Node to find them (and asserts no decode errors). Some real tracks are sparse (A_NEW_ERA's second Spanish and French streams hold 16 and 18 subtitles in 124 minutes), so "drawn within 30 s of every seek" would fail on correct playback.
+14. **Trace scripts gained `subs N`** (stream N with the display flag) next to `subs off`: a disc's own program usually leaves PG off (TSURUNE writes PSR2 = `0x0FFF0001`), so the TSURUNE script turns stream 1 on to compare non-empty planes.

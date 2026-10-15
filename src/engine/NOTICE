@@ -35,6 +35,8 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
+  subs/srt.ts and subs/text-renderer.ts (SubRip subtitles) are original
+  implementations; they contain no libbluray or FFmpeg code.
 
 FFmpeg (https://ffmpeg.org), LGPL-2.1-or-later
   Copyright (c) 2009, 2013 Christian Schmidt (libavcodec/pcm-bluray.c)

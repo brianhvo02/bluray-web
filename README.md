@@ -18,7 +18,16 @@ Client-side Blu-ray (BDMV) player for Chromium. Design: `docs/superpowers/specs/
   `npm run vm-trace -- <disc> <script> [--dump-pages]` runs libbluray and our replay live and prints the first divergence.
   `npm test` replays the golden traces without Docker.
 - Put your own decrypted discs under `fixtures/local/<name>/BDMV/...` to enable `tests/local`.
-  `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome and seeks around it.
+  `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome, seeks around it, switches audio tracks
+  and checks every PG subtitle track. It decodes the PG streams in Node first to know where subtitles are due, and caches
+  that in `fixtures/local/.pgscan-<name>.json`.
+
+## Subtitles
+
+Disc PG subtitles are picked from the Subtitles menu in the control bar. Forced captions show even with subtitles off.
+An `.srt` file can be loaded from the same menu ("Load subtitle file…") or dropped on the player; files that are not
+UTF-8 ask for their encoding. With a file loaded, the menu shifts its timing and changes its size. Keys: `S` cycles
+Off, each disc track and the file; `[` and `]` move the file's subtitles 100 ms earlier or later.
 
 ## CI
 

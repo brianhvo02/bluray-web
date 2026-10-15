@@ -28,6 +28,20 @@ what would change that decision.
 - **IG in sub-paths is read whole when its playlist opens** (`_preload_ig_subpath`), which reads the whole sub-path
   clip; clips over the preload limit show no menu. *Revisit if* a disc carries a large IG sub-path.
 
+## Subtitles
+
+- **ASS/SSA files are not supported yet.** The native ASS renderer is milestone 4b, with its own spec.
+- **HDMV TextST streams (stream type 0x92) are not decoded.** No local disc carries one. *Revisit when* a disc does.
+- **PG carried in sub-paths is not decoded**, as in libbluray (it decodes main-path PG only); such tracks are left out
+  of the subtitle menu. *Revisit if* a disc carries its only subtitles in a sub-path.
+- **After a seek or a stream switch, the subtitle on screen comes back only if its display set lies after the keyframe
+  the read starts at;** otherwise the next subtitle is the first one shown (libbluray behaves the same). *Revisit if*
+  this is noticeable on real discs (reading PG from a few seconds earlier would fix it).
+- **Subtitle files are not remembered per disc**, and a file dropped on the player before a playlist plays is ignored
+  (the file belongs to the open disc).
+- **SRT is verified on synthetic data only** (unit tests and `tests/e2e/subtitles.spec.ts`); no real-world SRT corpus
+  is tested. Encodings other than UTF-8 need the user's choice in the encoding prompt (no detection).
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,
