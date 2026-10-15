@@ -76,6 +76,10 @@ export type EngineEvent =
   | { readonly type: 'indexTitles'; readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>; readonly hasTopMenu: boolean }
   | { readonly type: 'uoMask'; readonly masked: readonly UoOp[] }
   | { readonly type: 'menuActive'; readonly active: boolean; readonly popupAvailable: boolean }
+  /** Once after 'titles', for a disc with BDMV/AUXDATA/sound.bdmv: the menu sound clips (48 kHz, interleaved 16-bit). */
+  | { readonly type: 'soundEffects'; readonly clips: ReadonlyArray<{ readonly channels: 1 | 2; readonly samples: Int16Array }> }
+  /** A menu button asked for a sound clip (an index into soundEffects). */
+  | { readonly type: 'soundEffect'; readonly id: number }
   /** After a pointer move: the menu button under the pointer, for the cursor. */
   | { readonly type: 'pointerTarget'; readonly button: number | null }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }

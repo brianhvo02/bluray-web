@@ -31,6 +31,14 @@ class FakeAudio implements AudioOutputLike {
   setMuted(m: boolean): void {
     this.muted = m;
   }
+  readonly loaded: number[] = [];
+  readonly played: number[] = [];
+  loadEffects(clips: ReadonlyArray<{ channels: 1 | 2; samples: Int16Array }>): void {
+    this.loaded.push(clips.length);
+  }
+  playEffect(id: number): void {
+    this.played.push(id);
+  }
 }
 
 const summary = { id: '00000', durationUs: 8_000_000, chapterCount: 4, clipIds: ['00001'], playable: true, missingPaths: [], looped: false };
@@ -331,5 +339,17 @@ describe('titles and the top menu', () => {
     controller.playTitle(1);
     controller.menuCall();
     expect(worker.posted).toEqual([{ type: 'playTitle', title: 1 }, { type: 'menuCall' }]);
+  });
+});
+
+describe('menu sounds', () => {
+  it('loads the disc sounds into the audio output and plays them by id', () => {
+    const worker = new FakeWorker();
+    const audio = new FakeAudio();
+    new PlayerController(worker, audio);
+    worker.emit({ type: 'soundEffects', clips: [{ channels: 1, samples: new Int16Array(4) }, { channels: 2, samples: new Int16Array(8) }] });
+    worker.emit({ type: 'soundEffect', id: 1 });
+    expect(audio.loaded).toEqual([2]);
+    expect(audio.played).toEqual([1]);
   });
 });

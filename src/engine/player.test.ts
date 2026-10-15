@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { buildSoundBdmv } from '../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
 import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
@@ -88,7 +89,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
@@ -98,6 +99,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     subPathIg: opts.subPathIg,
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
+  for (const [path, bytes] of Object.entries(opts.extraFiles ?? {})) files.set(path, bytes);
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
   const igDraws: OverlayPlane[] = [];
@@ -823,6 +825,27 @@ describe('Player with HDMV navigation', () => {
         },
         { timeout: 5000 },
       );
+
+    it('hands the disc sounds over once and plays a button sound on activation', async () => {
+      const sounds = buildSoundBdmv([{ channels: 1, samples: new Int16Array(480) }, { channels: 2, samples: new Int16Array(960) }]);
+      const segments = simpleMenuSegments({ cmds: [asm.jumpTitle(imm(1))], activatedSound: 1 }).map((payload) => ({ pts: CLIP_START_PTS + 0.2 * 90_000, payload }));
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.playPl(imm(1))] }], { igUnits: segments, extraFiles: { 'BDMV/AUXDATA/sound.bdmv': sounds } });
+      const effects = h.events.filter((e) => e.type === 'soundEffects');
+      expect(effects).toHaveLength(1);
+      expect(effects[0]).toMatchObject({ type: 'soundEffects', clips: [{ channels: 1 }, { channels: 2 }] });
+      await untilPlaying(h);
+      await vi.waitFor(async () => {
+        await h.play(100);
+        expect(lastTelemetry(h)?.menu).not.toBeNull();
+      }, { timeout: 5000 });
+      await h.player.handle({ type: 'menuKey', key: 'ok' });
+      expect(h.events).toContainEqual({ type: 'soundEffect', id: 1 });
+    });
+
+    it('emits no sounds for a disc without sound.bdmv', async () => {
+      const h = await inputMenu();
+      expect(h.events.filter((e) => e.type === 'soundEffects')).toEqual([]);
+    });
 
     it('menu keys move the selection and activate a button', async () => {
       const h = await inputMenu();

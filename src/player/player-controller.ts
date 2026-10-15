@@ -95,6 +95,9 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, menuActive: e.active, popupAvailable: e.popupAvailable, pointerButton: e.active ? s.pointerButton : null };
     case 'pointerTarget':
       return { ...s, pointerButton: e.button };
+    case 'soundEffects':
+    case 'soundEffect':
+      return s; // handed to the audio output by the controller
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'indexTitles':
@@ -115,6 +118,10 @@ export interface AudioOutputLike {
   ensureStarted(): Promise<SharedArrayBuffer>;
   setVolume(volume: number): void;
   setMuted(muted: boolean): void;
+  /** The disc's menu sounds (48 kHz, interleaved 16-bit), replacing earlier ones. */
+  loadEffects(clips: ReadonlyArray<{ readonly channels: 1 | 2; readonly samples: Int16Array }>): void;
+  /** Plays a loaded sound through the volume and mute; an unknown id is ignored. */
+  playEffect(id: number): void;
 }
 
 /** Main-thread facade over the engine worker; an external store for React. */
@@ -128,7 +135,12 @@ export class PlayerController {
     private readonly worker: WorkerLike,
     private readonly audio: AudioOutputLike,
   ) {
-    worker.onmessage = (event: MessageEvent<EngineEvent>) => this.update(reduceEvent(this.snapshot, event.data));
+    worker.onmessage = (event: MessageEvent<EngineEvent>) => {
+      const e = event.data;
+      if (e.type === 'soundEffects') audio.loadEffects(e.clips);
+      else if (e.type === 'soundEffect') audio.playEffect(e.id);
+      else this.update(reduceEvent(this.snapshot, e));
+    };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
     worker.onmessageerror = () => this.reportInternalError('The player engine sent a message that could not be read.');
   }

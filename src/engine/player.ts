@@ -294,6 +294,7 @@ export class Player {
     this.disc = disc;
     this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
+    if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
     if (disc.usesBdj) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
     this.setState('idle');
     if (disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
@@ -418,8 +419,11 @@ export class Player {
         this.deps.emit({ type: 'error', code: 'internal', message: e.message, paths: [] });
         this.setState('idle');
         break;
+      case 'sound':
+        this.deps.emit({ type: 'soundEffect', id: e.id });
+        break;
       default:
-        break; // 'title' and 'sound' are for the menu UI
+        break; // 'title' is for the menu UI
     }
   }
 

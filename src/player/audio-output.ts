@@ -10,6 +10,9 @@ export class AudioOutput implements AudioOutputLike {
   private gain: GainNode | null = null;
   private volume = 1;
   private muted = false;
+  private effectClips: ReadonlyArray<{ readonly channels: 1 | 2; readonly samples: Int16Array }> = [];
+  /** AudioBuffers of effectClips, built on first use (the context exists only after a user gesture). */
+  private effectBuffers = new Map<number, AudioBuffer>();
 
   ensureStarted(): Promise<SharedArrayBuffer> {
     let attempt = this.started;
@@ -36,6 +39,32 @@ export class AudioOutput implements AudioOutputLike {
   setMuted(muted: boolean): void {
     this.muted = muted;
     this.applyGain();
+  }
+
+  loadEffects(clips: ReadonlyArray<{ readonly channels: 1 | 2; readonly samples: Int16Array }>): void {
+    this.effectClips = clips;
+    this.effectBuffers = new Map();
+  }
+
+  playEffect(id: number): void {
+    const context = this.started?.context;
+    const gain = this.gain;
+    const clip = this.effectClips[id];
+    if (!context || !gain || !clip || clip.samples.length < clip.channels) return;
+    let buffer = this.effectBuffers.get(id);
+    if (!buffer) {
+      const frames = Math.floor(clip.samples.length / clip.channels);
+      buffer = context.createBuffer(clip.channels, frames, OUTPUT_SAMPLE_RATE);
+      for (let ch = 0; ch < clip.channels; ch++) {
+        const out = buffer.getChannelData(ch);
+        for (let i = 0; i < frames; i++) out[i] = clip.samples[i * clip.channels + ch]! / 32768;
+      }
+      this.effectBuffers.set(id, buffer);
+    }
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(gain); // through the volume and mute
+    source.start();
   }
 
   private async setUp(context: AudioContext): Promise<SharedArrayBuffer> {
