@@ -138,6 +138,28 @@ describe('Navigator titles', () => {
   });
 });
 
+describe('Navigator startTitle (after a raw playlist pick stopped it)', () => {
+  it('starts a title without running First Play', async () => {
+    const { nav, port, events } = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.playPl(imm(1))] }, idle] });
+    expect(nav.startTitle(1)).toBe(true);
+    await flush();
+    expect(port.calls).toEqual(['play 00001 - -']);
+    expect(events).toContainEqual({ type: 'title', title: 1 });
+  });
+
+  it('starts the top menu for title 0', async () => {
+    const { nav, port } = setup({ objects: [idle, { cmds: [asm.playPl(imm(1))] }, idle, idle] });
+    expect(nav.startTitle(0)).toBe(true);
+    await flush();
+    expect(port.calls).toEqual(['play 00001 - -']);
+  });
+
+  it('refuses a title that does not exist', () => {
+    const { nav } = setup({ objects: [idle, idle, idle, idle] });
+    expect(nav.startTitle(9)).toBe(false);
+  });
+});
+
 describe('Navigator playlists', () => {
   it('resumes the program at the end of the playlist', () => {
     const { nav, port } = setup({ objects: [{ cmds: [asm.playPl(imm(0)), asm.playPl(imm(1))] }] });

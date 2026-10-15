@@ -104,15 +104,21 @@ interface ControlBarProps {
   readonly visible: boolean;
   onOpenPlaylists(): void;
   onFullscreen(): void;
+  /** Top Menu / Pop-up and the remote send menu keys through the same UO check as the keyboard. */
+  onMenuKey(key: 'topMenu' | 'popup'): void;
+  readonly remoteOpen: boolean;
+  onToggleRemote(): void;
   onMenuOpenChange(open: boolean): void;
 }
 
-export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onFullscreen, onMenuOpenChange }: ControlBarProps): ReactElement {
+export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
   const masked = (op: UoOp): boolean => snapshot.uoMask.includes(op);
   const tip = (op: UoOp): string | undefined => (masked(op) ? MASKED_TOOLTIP : undefined);
   const pauseMasked = playing && masked('pauseOn');
+  const popupOp: UoOp = snapshot.menuActive && snapshot.popupAvailable ? 'popupOff' : 'popupOn';
+  const hdmv = snapshot.indexTitles !== null;
   return (
     <div className={`control-bar${visible ? '' : ' hidden'}`} data-testid="control-bar">
       <SeekBar durationUs={snapshot.durationUs} timeUs={snapshot.timeUs} chapters={snapshot.chapters} disabled={masked('timeSearch')} onSeek={(us) => controller.seek(us)} />
@@ -160,8 +166,23 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
           onSelect={(i) => controller.selectAudio(i)}
           onOpenChange={onMenuOpenChange}
         />
-        <button type="button" onClick={onOpenPlaylists}>
-          Playlists
+        {snapshot.indexTitles?.hasTopMenu && (
+          <button type="button" data-testid="top-menu" disabled={masked('menuCall')} title={tip('menuCall')} onClick={() => onMenuKey('topMenu')}>
+            Top Menu
+          </button>
+        )}
+        {snapshot.popupAvailable && (
+          <button type="button" data-testid="popup" disabled={masked(popupOp)} title={tip(popupOp)} onClick={() => onMenuKey('popup')}>
+            Pop-up
+          </button>
+        )}
+        {hdmv && (
+          <button type="button" aria-pressed={remoteOpen} aria-label="Remote" data-testid="remote-toggle" onClick={onToggleRemote}>
+            Remote
+          </button>
+        )}
+        <button type="button" data-testid={hdmv ? 'titles' : undefined} onClick={onOpenPlaylists}>
+          {hdmv ? 'Titles' : 'Playlists'}
         </button>
         <button type="button" aria-label="Fullscreen" onClick={onFullscreen}>
           ⛶

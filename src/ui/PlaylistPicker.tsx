@@ -1,10 +1,14 @@
 import type { ReactElement } from 'react';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
+import type { IndexTitles } from '../player/player-controller';
 import { formatTime } from './format';
 
 interface PlaylistPickerProps {
   readonly playlists: readonly PlaylistSummary[];
   readonly usesBdj: boolean;
+  /** HDMV discs: the index titles, listed above the playlists (picking one runs its movie object). */
+  readonly titles?: IndexTitles['titles'];
+  onPickTitle?(title: number): void;
   /** Current error and unsupported-* messages, shown inline so the backdrop can't hide them. */
   readonly messages?: readonly string[];
   onPick(playlistId: string): void;
@@ -12,7 +16,7 @@ interface PlaylistPickerProps {
   onCloseDisc(): void;
 }
 
-export function PlaylistPicker({ playlists, usesBdj, messages = [], onPick, onClose, onCloseDisc }: PlaylistPickerProps): ReactElement {
+export function PlaylistPicker({ playlists, usesBdj, titles = [], onPickTitle, messages = [], onPick, onClose, onCloseDisc }: PlaylistPickerProps): ReactElement {
   const mainId = playlists.find((p) => p.playable)?.id;
   const missing = playlists.length > 0 && !mainId ? [...new Set(playlists.flatMap((p) => p.missingPaths))] : [];
   return (
@@ -38,6 +42,29 @@ export function PlaylistPicker({ playlists, usesBdj, messages = [], onPick, onCl
           </div>
         )}
         {usesBdj && <p className="hint">This disc uses BD-J menus, which aren't supported. Choose a playlist; the likely main feature is marked.</p>}
+        {titles.length > 0 && (
+          <>
+            <h3>Titles</h3>
+            <ul data-testid="title-list">
+              {titles.map((t) => (
+                <li key={t.number}>
+                  <button
+                    type="button"
+                    className="playlist"
+                    disabled={t.kind === 'bdj'}
+                    title={t.kind === 'bdj' ? 'Needs BD-J, which is not supported' : undefined}
+                    data-testid={`title-${t.number}`}
+                    onClick={() => onPickTitle?.(t.number)}
+                  >
+                    <span>Title {t.number}</span>
+                    {t.kind === 'bdj' && <span className="badge">Needs BD-J</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <h3>Playlists</h3>
+          </>
+        )}
         <ul>
           {playlists.map((p) => (
             <li key={p.id}>

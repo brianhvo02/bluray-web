@@ -186,11 +186,11 @@ export class Player {
           break;
         case 'playTitle':
           if (this.refused(cmd.title === 0 ? 'menuCall' : 'titleSearch')) break;
-          this.navigator?.playTitle(cmd.title);
+          this.playTitle(cmd.title);
           break;
         case 'menuCall':
           if (this.refused('menuCall')) break;
-          this.navigator?.menuCall();
+          this.playTitle(0);
           break;
         case 'menuKey':
           this.menuKey(cmd.key);
@@ -360,12 +360,29 @@ export class Player {
     this.deps.emit({ type: 'uoMask', masked: [] });
   }
 
+  /**
+   * A title, or the top menu for 0 (a menu call). After a raw playlist pick stopped the program, the navigator is rebuilt
+   * and starts the title directly.
+   */
+  private playTitle(title: number): void {
+    const nav = this.navigator;
+    if (nav) {
+      if (title === 0) nav.menuCall();
+      else nav.playTitle(title);
+      return;
+    }
+    const disc = this.disc;
+    if (!disc?.movieObjects || disc.index.firstPlay.kind !== 'hdmv') return;
+    this.navigator = this.createNavigator(disc);
+    if (!this.navigator.startTitle(title)) this.stopNavigator();
+  }
+
   private menuKey(key: MenuKey): void {
     const nav = this.navigator;
     if (!nav) return;
     const op = MENU_KEY_UO[key] ?? (key === 'popup' ? (this.menuActive && this.popupAvailable ? 'popupOff' : 'popupOn') : undefined);
     if (op && this.refused(op)) return;
-    if (key === 'topMenu') nav.menuCall();
+    if (key === 'topMenu') this.playTitle(0);
     else nav.userInput(MENU_KEY_VK[key]);
   }
 

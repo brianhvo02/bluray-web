@@ -32,6 +32,13 @@ export interface PlayerSnapshot {
   readonly pointerButton: number | null;
   /** User operations the disc does not allow at this point (UO mask). */
   readonly uoMask: readonly UoOp[];
+  /** HDMV discs: the index titles (for the picker) and whether there is a top menu; null otherwise. */
+  readonly indexTitles: IndexTitles | null;
+}
+
+export interface IndexTitles {
+  readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>;
+  readonly hasTopMenu: boolean;
 }
 
 export const UO_MASKED_MESSAGE = "The disc doesn't allow this here.";
@@ -56,6 +63,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   popupAvailable: false,
   pointerButton: null,
   uoMask: [],
+  indexTitles: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -65,7 +73,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
@@ -90,7 +98,7 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'indexTitles':
-      return s; // consumed by the menu UI in a later task
+      return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':
       return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
   }
@@ -247,6 +255,18 @@ export class PlayerController {
     if (playable.length < 2) return;
     const at = playable.findIndex((t) => t.index === this.snapshot.selectedAudio);
     this.selectAudio(playable[(at + 1) % playable.length].index);
+  }
+
+  /** An index title of an HDMV disc (its movie object decides what plays). */
+  playTitle(title: number): void {
+    this.startAudio();
+    this.post({ type: 'playTitle', title });
+  }
+
+  /** Top Menu. */
+  menuCall(): void {
+    this.startAudio();
+    this.post({ type: 'menuCall' });
   }
 
   isMasked(op: UoOp): boolean {

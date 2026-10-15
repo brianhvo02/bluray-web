@@ -4,6 +4,8 @@ import { ControlBar } from './ControlBar';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
 import { PlaylistPicker } from './PlaylistPicker';
+import { RemotePad } from './RemotePad';
+import type { MenuKey } from '../engine/protocol';
 
 const HIDE_CONTROLS_MS = 3000;
 
@@ -25,6 +27,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   const [activity, setActivity] = useState(0);
   const [pressed, setPressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [remoteOpen, setRemoteOpen] = useState(false);
   const playing = snapshot.engineState === 'playing';
   const menuActiveRef = useRef(snapshot.menuActive);
   menuActiveRef.current = snapshot.menuActive;
@@ -152,6 +155,13 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
     if (point) controller.pointer('click', point.x, point.y);
   };
 
+  /** A menu key from the control bar or the remote: checked against the UO mask like the keyboard. */
+  const sendMenuKey = (key: MenuKey): void => {
+    const op = keyActionUo({ type: 'menuKey', key }, uoContextRef.current);
+    if (op && !controller.allow(op)) return;
+    controller.menuKey(key);
+  };
+
   const wake = (): void => {
     setIdle(false);
     setActivity((a) => a + 1);
@@ -201,6 +211,11 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         <PlaylistPicker
           playlists={snapshot.playlists}
           usesBdj={snapshot.usesBdj}
+          titles={snapshot.indexTitles?.titles}
+          onPickTitle={(title) => {
+            setPickerOpen(false);
+            controller.playTitle(title);
+          }}
           messages={[...(snapshot.error ? [snapshot.error.message] : []), ...snapshot.notices.filter((n) => n.code.startsWith('unsupported-')).map((n) => n.message)]}
           onPick={(id) => {
             setPickerOpen(false);
@@ -210,12 +225,16 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
           onCloseDisc={() => controller.closeDisc()}
         />
       )}
+      {remoteOpen && controlsVisible && snapshot.indexTitles && <RemotePad onKey={sendMenuKey} />}
       <ControlBar
         controller={controller}
         snapshot={snapshot}
         visible={controlsVisible}
         onOpenPlaylists={() => setPickerOpen(true)}
         onFullscreen={() => toggleFullscreen(rootRef.current)}
+        onMenuKey={sendMenuKey}
+        remoteOpen={remoteOpen}
+        onToggleRemote={() => setRemoteOpen((o) => !o)}
         onMenuOpenChange={setMenuOpen}
       />
     </div>

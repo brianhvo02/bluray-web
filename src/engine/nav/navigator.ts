@@ -251,6 +251,22 @@ export class Navigator {
     return ok;
   }
 
+  /**
+   * A title (0: the top menu) on a navigator that never ran First Play: the player rebuilds the navigator this way after a
+   * raw playlist pick stopped the program (spec 4.3). As bd_play followed by bd_play_title, without First Play's program.
+   */
+  startTitle(title: number): boolean {
+    this.dropVm();
+    this.titleType = 'hdmv';
+    const ok = this.playTitleInternal(title);
+    if (!ok) {
+      this.titleType = 'undef';
+      return false;
+    }
+    this.runVm();
+    return true;
+  }
+
   /** bd_menu_call (_try_menu_call) */
   menuCall(): boolean {
     this.updateTimePsr();

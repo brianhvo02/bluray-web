@@ -317,3 +317,19 @@ describe('UO masks', () => {
     expect(controller.allow('pauseOn')).toBe(true);
   });
 });
+
+describe('titles and the top menu', () => {
+  it('keeps the index titles and whether there is a top menu', () => {
+    const s = reduceEvent(INITIAL_SNAPSHOT, { type: 'indexTitles', titles: [{ number: 1, kind: 'hdmv' }, { number: 2, kind: 'bdj' }], hasTopMenu: true });
+    expect(s.indexTitles).toEqual({ titles: [{ number: 1, kind: 'hdmv' }, { number: 2, kind: 'bdj' }], hasTopMenu: true });
+    expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, warnings: [] }).indexTitles).toBeNull();
+  });
+
+  it('posts playTitle and menuCall', () => {
+    const worker = new FakeWorker();
+    const controller = new PlayerController(worker, new FakeAudio());
+    controller.playTitle(1);
+    controller.menuCall();
+    expect(worker.posted).toEqual([{ type: 'playTitle', title: 1 }, { type: 'menuCall' }]);
+  });
+});

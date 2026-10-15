@@ -776,6 +776,25 @@ describe('Player with HDMV navigation', () => {
     expect(chapterIds(h)).toEqual(['00000', '00001']);
   });
 
+  it('brings the program back for a title or the top menu after a raw playlist pick', async () => {
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, { cmds: [asm.playPl(imm(0))] }, { cmds: [asm.playPl(imm(1))] }]);
+    await untilPlaying(h);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' }); // raw pick: the navigator stops
+    await untilPlaying(h);
+    await h.player.handle({ type: 'playTitle', title: 1 });
+    await vi.waitFor(async () => {
+      await h.play(100);
+      expect(chapterIds(h)).toEqual(['00000', '00000', '00001']);
+    }, { timeout: 5000 });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'menuCall' });
+    await vi.waitFor(async () => {
+      await h.play(100);
+      expect(chapterIds(h)).toEqual(['00000', '00000', '00001', '00001', '00000']);
+    }, { timeout: 5000 });
+  });
+
   describe('menus', () => {
     const menuAt = (seconds: number) => simpleMenuSegments().map((payload) => ({ pts: CLIP_START_PTS + seconds * 90_000, payload }));
     const telemetries = (h: Harness) => h.events.flatMap((e) => (e.type === 'telemetry' ? [e.telemetry] : []));

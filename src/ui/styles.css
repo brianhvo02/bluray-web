@@ -52,3 +52,13 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .audio-menu-list button { display: block; width: 100%; text-align: left; padding: 6px 10px; white-space: nowrap; }
 .audio-menu-list button[aria-checked='true']::before { content: '✓ '; }
 .audio-menu-list button:disabled { opacity: 0.45; cursor: not-allowed; }
+.picker h3 { margin: 12px 0 6px; font-size: 14px; font-weight: 600; opacity: 0.8; }
+.remote-pad { position: absolute; z-index: 15; right: 16px; bottom: 88px; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: rgba(24, 24, 29, 0.92); border-radius: 12px; }
+.remote-arrows { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 36px); gap: 4px; justify-content: center; }
+.remote-arrows .remote-up { grid-column: 2; grid-row: 1; }
+.remote-arrows .remote-left { grid-column: 1; grid-row: 2; }
+.remote-arrows .remote-ok { grid-column: 2; grid-row: 2; }
+.remote-arrows .remote-right { grid-column: 3; grid-row: 2; }
+.remote-arrows .remote-down { grid-column: 2; grid-row: 3; }
+.remote-digits { display: grid; grid-template-columns: repeat(5, 36px); gap: 4px; }
+.remote-menus { display: flex; gap: 4px; justify-content: space-between; }
