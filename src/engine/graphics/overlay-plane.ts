@@ -47,6 +47,11 @@ export interface Rect { readonly x: number; readonly y: number; readonly w: numb
  *  - wipe: set all four bytes of every pixel in the clipped rect to 0; rect becomes dirty.
  *  - hide, flush: no pixel changes (hide only says the plane is empty; clear/wipe precede it).
  *
+ * Buffered planes (overlay.h: changes are committed at BD_OVERLAY_FLUSH): draw and wipe change a back
+ * buffer; flush copies the back buffer's changed area to the visible buffer and marks it dirty; init,
+ * close and clear reset both buffers at once. hash(), rgba(), dirty() and hasContent read the visible
+ * buffer.
+ *
  * hash(): FNV-1a 64-bit (offset basis 0xcbf29ce484222325, prime 0x100000001b3) over the
  * bytes Y, Cr, Cb, T of every pixel in row-major order, printed as 16 lowercase hex digits.
  */
@@ -54,6 +59,12 @@ export class OverlayPlane {
   readonly width: number;
   readonly height: number;
   private readonly px: Uint8Array;
+  /** Where draw and wipe write: the back buffer when buffered, else px. */
+  private readonly buf: Uint8Array;
+  private readonly buffered: boolean;
+  /** Buffered only: the back-buffer area changed since the last flush, and whether it was drawn on. */
+  private pending: Rect | null = null;
+  private backHasContent = false;
   /** The same bytes as one little-endian word per pixel: the key of the colour cache. */
   private readonly words: Uint32Array;
   /** Plane word (Y, Cr, Cb, T) to packed RGBA; menus use a few dozen colours, so this replaces the per-pixel conversion. */
@@ -62,10 +73,12 @@ export class OverlayPlane {
   /** False while nothing was drawn since the plane was last cleared (a wipe does not reset it). */
   hasContent = false;
 
-  constructor(width = 1920, height = 1080) {
+  constructor(width = 1920, height = 1080, opts: { readonly buffered?: boolean } = {}) {
     this.width = width;
     this.height = height;
+    this.buffered = opts.buffered ?? false;
     this.px = new Uint8Array(width * height * 4);
+    this.buf = this.buffered ? new Uint8Array(width * height * 4) : this.px;
     this.words = new Uint32Array(this.px.buffer);
   }
 
@@ -75,7 +88,10 @@ export class OverlayPlane {
       case 'close':
       case 'clear':
         this.px.fill(0);
+        if (this.buffered) this.buf.fill(0);
         this.hasContent = false;
+        this.backHasContent = false;
+        this.pending = null;
         this.markDirty(0, 0, this.width, this.height);
         break;
       case 'draw':
@@ -84,8 +100,10 @@ export class OverlayPlane {
       case 'wipe':
         this.wipe(op.x, op.y, op.w, op.h);
         break;
-      case 'hide':
       case 'flush':
+        if (this.buffered) this.flush();
+        break;
+      case 'hide':
         break;
     }
   }
@@ -153,16 +171,25 @@ export class OverlayPlane {
   }
 
   private markDirty(x: number, y: number, w: number, h: number): void {
-    const d = this.dirtyRect;
-    if (!d) {
-      this.dirtyRect = { x, y, w, h };
-      return;
+    this.dirtyRect = union(this.dirtyRect, { x, y, w, h });
+  }
+
+  /** A change to `buf`: dirty at once when unbuffered, at the next flush when buffered. */
+  private changed(r: Rect): void {
+    if (this.buffered) this.pending = union(this.pending, r);
+    else this.markDirty(r.x, r.y, r.w, r.h);
+  }
+
+  private flush(): void {
+    this.hasContent = this.backHasContent;
+    const r = this.pending;
+    if (!r) return;
+    this.pending = null;
+    for (let row = r.y; row < r.y + r.h; row++) {
+      const p = (row * this.width + r.x) * 4;
+      this.px.set(this.buf.subarray(p, p + r.w * 4), p);
     }
-    const x0 = Math.min(d.x, x);
-    const y0 = Math.min(d.y, y);
-    const x1 = Math.max(d.x + d.w, x + w);
-    const y1 = Math.max(d.y + d.h, y + h);
-    this.dirtyRect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    this.markDirty(r.x, r.y, r.w, r.h);
   }
 
   private clip(x: number, y: number, w: number, h: number): Rect | null {
@@ -178,15 +205,17 @@ export class OverlayPlane {
     if (!r) return;
     for (let row = r.y; row < r.y + r.h; row++) {
       const p = (row * this.width + r.x) * 4;
-      this.px.fill(0, p, p + r.w * 4);
+      this.buf.fill(0, p, p + r.w * 4);
     }
-    this.markDirty(r.x, r.y, r.w, r.h);
+    this.changed(r);
   }
 
   private draw(op: OverlayOp): void {
     const { img, palette } = op;
     if (!img || !palette) return;
-    this.hasContent = true;
+    if (this.buffered) this.backHasContent = true;
+    else this.hasContent = true;
+    const px = this.buf;
     let row = op.y;
     let col = 0;
     for (const e of img) {
@@ -207,15 +236,24 @@ export class OverlayPlane {
           const x = op.x + c;
           if (x < 0 || x >= this.width) continue;
           const p = (row * this.width + x) * 4;
-          this.px[p] = pe ? pe.y : 0;
-          this.px[p + 1] = pe ? pe.cr : 0;
-          this.px[p + 2] = pe ? pe.cb : 0;
-          this.px[p + 3] = pe ? pe.t : 0;
+          px[p] = pe ? pe.y : 0;
+          px[p + 1] = pe ? pe.cr : 0;
+          px[p + 2] = pe ? pe.cb : 0;
+          px[p + 3] = pe ? pe.t : 0;
         }
       }
       col += e.len;
     }
     const r = this.clip(op.x, op.y, op.w, op.h);
-    if (r) this.markDirty(r.x, r.y, r.w, r.h);
+    if (r) this.changed(r);
   }
+}
+
+function union(a: Rect | null, b: Rect): Rect {
+  if (!a) return b;
+  const x0 = Math.min(a.x, b.x);
+  const y0 = Math.min(a.y, b.y);
+  const x1 = Math.max(a.x + a.w, b.x + b.w);
+  const y1 = Math.max(a.y + a.h, b.y + b.h);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }

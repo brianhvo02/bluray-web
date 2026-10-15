@@ -147,3 +147,53 @@ describe('OverlayPlane', () => {
     expect(plane.hasContent).toBe(false);
   });
 });
+
+describe('OverlayPlane buffered', () => {
+  const box = (x: number, y: number, w: number, h: number): OverlayOp => ({
+    cmd: 'draw', pts: 0, x, y, w, h, palette: palette(),
+    img: Array.from({ length: h }, () => [{ len: w, color: 1 }, E]).flat(),
+  });
+
+  it('keeps draws in the back buffer until a flush', () => {
+    const plane = new OverlayPlane(64, 32, { buffered: true });
+    const empty = plane.hash();
+    plane.apply(box(4, 4, 8, 2));
+    expect(plane.hash()).toBe(empty);
+    expect(plane.dirty()).toBeNull();
+    expect(plane.hasContent).toBe(false);
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hash()).not.toBe(empty);
+    expect(plane.dirty()).toEqual({ x: 4, y: 4, w: 8, h: 2 });
+    expect(plane.hasContent).toBe(true);
+    expect(plane.rgba({ x: 4, y: 4, w: 1, h: 1 })[3]).toBe(255);
+  });
+
+  it('shows a wipe after the flush only at the next flush', () => {
+    const plane = new OverlayPlane(64, 32, { buffered: true });
+    const empty = plane.hash();
+    plane.apply(box(4, 4, 8, 2));
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    const shown = plane.hash();
+    plane.takeDirty();
+    plane.apply({ cmd: 'wipe', pts: -1, x: 4, y: 4, w: 8, h: 2 });
+    plane.apply({ cmd: 'hide', pts: -1, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hash()).toBe(shown);
+    expect(plane.dirty()).toBeNull();
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hash()).toBe(empty);
+    expect(plane.dirty()).toEqual({ x: 4, y: 4, w: 8, h: 2 });
+  });
+
+  it('clear empties both buffers', () => {
+    const plane = new OverlayPlane(64, 32, { buffered: true });
+    const empty = plane.hash();
+    plane.apply(box(0, 0, 4, 4));
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    plane.apply(box(10, 10, 4, 4));
+    plane.apply({ cmd: 'clear', pts: -1, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hash()).toBe(empty);
+    plane.apply({ cmd: 'flush', pts: 0, x: 0, y: 0, w: 0, h: 0 });
+    expect(plane.hash()).toBe(empty);
+    expect(plane.hasContent).toBe(false);
+  });
+});

@@ -11,9 +11,9 @@
 import type { MobjCmd } from '../bdmv/mobj-parser';
 import { EMPTY_UO_MASK, type UoMask } from '../hdmv/uo-mask';
 import { PSR, type PsrEvent, type RegisterFile } from '../hdmv/registers';
+import { compositionObjectOp } from './composition';
 import type { IgButton, IgComposition, IgDisplaySet, IgEffect, IgEffectSequence, IgPage } from './ig-decoder';
 import type { OverlayCmd, OverlayOp } from './overlay-plane';
-import { cropRle } from './rle';
 import type { PgCompositionObject, PgObject, PgPalette } from './segments';
 
 /** keys.h bd_vk_key_e (the keys the graphics controller handles) */
@@ -405,25 +405,8 @@ export class GraphicsController {
 
   /** _render_composition_object */
   private renderCompositionObject(pts: number, cobj: PgCompositionObject, object: PgObject, palette: PgPalette, paletteUpdateFlag: boolean): void {
-    let img: OverlayOp['img'] = object.img.length ? object.img : undefined;
-    let w = object.width;
-    let h = object.height;
-
-    if (cobj.cropFlag) {
-      if (cobj.cropX || cobj.cropY || cobj.cropW !== object.width) {
-        // rle_crop_object() fails without an image: "Error cropping PG object"
-        if (!img) return;
-        img = cropRle(img, object.width, cobj.cropX, cobj.cropY, cobj.cropW, cobj.cropH);
-      }
-      w = cobj.cropW;
-      h = cobj.cropH;
-    }
-
-    this.deps.onOverlay({
-      cmd: 'draw', pts, x: cobj.x, y: cobj.y, w, h, palette: palette.entries,
-      ...(img ? { img } : {}),
-      paletteUpdate: paletteUpdateFlag,
-    });
+    const op = compositionObjectOp(pts, cobj, object, palette, paletteUpdateFlag);
+    if (op) this.deps.onOverlay(op);
   }
 
   /*
