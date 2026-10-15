@@ -17,11 +17,12 @@ import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
 import type { UoOp } from './hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { lookupSpn } from './nav/packets';
+import { PgStreamControl } from './nav/subtitles';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
 import { audioTracks } from './playback/tracks';
-import type { AudioTrack, EngineCommand, EngineEvent, MenuKey, NoticeCode, PlaybackState } from './protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, MenuKey, NoticeCode, PlaybackState, SubtitleChoice } from './protocol';
 import type { CompositorLike } from './render/compositor';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
@@ -151,6 +152,12 @@ export class Player {
   private popupAvailable = false;
   /** Bumped by every playlist open and by navigator teardown, so a superseded open stops early. */
   private openGeneration = 0;
+  /** PG subtitles of the open disc, on the navigator's registers or, without a navigator, on pgRegs. */
+  private pg: PgStreamControl | null = null;
+  private pgRegs: RegisterFile | null = null;
+  private unsubscribePg: (() => void) | null = null;
+  /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
+  private sentPgTracks = '';
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
@@ -179,6 +186,7 @@ export class Player {
         case 'resize':
           this.compositor?.resize(cmd.width, cmd.height);
           this.compositor?.drawVideo(this.presenter.current);
+          if (this.pg) this.compositor?.drawPg?.(this.pg.plane);
           if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
           break;
         case 'playPlaylist':
@@ -217,6 +225,9 @@ export class Player {
         case 'selectAudio':
           await this.selectAudio(cmd.index);
           break;
+        case 'selectSubtitle':
+          this.selectSubtitle(cmd.choice);
+          break;
         case 'nextChapter':
           if (this.refused('skipToNextPoint')) break;
           await this.skipChapter(1);
@@ -241,6 +252,7 @@ export class Player {
     const now = this.clock.nowUs();
     const frame = this.presenter.select(now);
     if (frame && this.state === 'playing') this.offsets.push(now - frame.timestamp);
+    this.pg?.tick(now);
     this.paint(frame);
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
@@ -257,16 +269,28 @@ export class Player {
     this.maybeEmitTelemetry(s);
   }
 
-  /** Video, then the IG plane over it. A changed plane repaints the video under it too (the overlay replaces pixels, it does not blend with what it covered). */
+  /**
+   * Video, then the PG plane, then the IG plane. A changed plane repaints the video and the planes under and over it
+   * (an overlay replaces pixels, it does not blend with what it covered).
+   */
   private paint(frame: VideoFrame | null): void {
     const nav = this.navigator;
-    const plane = nav?.igPlane ?? null;
-    const igChanged = plane !== null && plane.dirty() !== null;
+    const pg = this.pg?.plane ?? null;
+    const ig = nav?.igPlane ?? null;
+    const pgChanged = pg !== null && pg.dirty() !== null;
+    const igChanged = ig !== null && ig.dirty() !== null;
     if (frame) this.compositor?.drawVideo(frame);
-    else if (igChanged) this.compositor?.drawVideo(this.presenter.current);
-    if (!plane || !(frame || igChanged) || !(plane.hasContent || igChanged)) return; // an empty plane needs no per-frame draw
-    if (this.compositor?.drawIg) this.compositor.drawIg(plane);
-    else plane.takeDirty();
+    else if (pgChanged || igChanged) this.compositor?.drawVideo(this.presenter.current);
+    if (!(frame || pgChanged || igChanged)) return;
+    // an empty plane needs no per-frame draw
+    if (pg && (pg.hasContent || pgChanged)) {
+      if (this.compositor?.drawPg) this.compositor.drawPg(pg);
+      else pg.takeDirty();
+    }
+    if (ig && (ig.hasContent || igChanged)) {
+      if (this.compositor?.drawIg) this.compositor.drawIg(ig);
+      else ig.takeDirty();
+    }
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
   }
 
@@ -294,6 +318,8 @@ export class Player {
     this.source = source;
     this.disc = disc;
     this.soundsPlayed = 0;
+    this.pgRegs = new RegisterFile();
+    this.bindPg(this.pgRegs);
     this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
@@ -316,6 +342,7 @@ export class Player {
     const regs = new RegisterFile();
     regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
     this.navRegs = regs;
+    this.bindPg(regs);
     this.menuActive = false;
     this.popupAvailable = false;
     this.igDraws = 0;
@@ -358,6 +385,7 @@ export class Player {
     this.navRegs = null;
     this.openGeneration++;
     nav.stop();
+    if (this.pgRegs) this.bindPg(this.pgRegs);
     this.setHold(false);
     this.updateMenuState(false, false);
     this.deps.emit({ type: 'uoMask', masked: [] });
@@ -634,6 +662,13 @@ export class Player {
           // units of a superseded session or a torn-down navigator are dropped
           if (ref.current && ref.current === this.session) this.navigator?.pushIg(u);
         },
+        pg: (u) => {
+          // outside the play item's IN/OUT time PG is filtered out, as libbluray's m2ts_filter does
+          if (ref.current && ref.current === this.session && u.inRange) this.pg?.push(u);
+        },
+        itemStarted: (index, startUs) => {
+          if (ref.current) this.pgItemStarted(ref.current, index, startUs);
+        },
         isFull: () => ref.current !== null && this.isFull(ref.current),
         ended: () => {
           if (ref.current) this.onPipelineEnded(ref.current);
@@ -678,10 +713,66 @@ export class Player {
     this.session = session;
     this.audioDecodeErrors = 0;
     this.audioCodec = null;
+    this.sentPgTracks = '';
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
     await this.startAt(startUs, true);
     return true;
+  }
+
+  /** PG follows PSR2 of `regs`: the navigator's, or the disc's private registers when there is no navigator. */
+  private bindPg(regs: RegisterFile): void {
+    this.stopPg();
+    this.pg = new PgStreamControl({
+      regs,
+      isMasked: (op) => this.navigator?.isMasked(op) ?? false,
+      pidChanged: () => {
+        // like an audio switch: re-read from now with the new PID, so the current subtitle shows without waiting for the next
+        const s = this.session;
+        if (s) this.enqueue(async () => {
+          if (this.session === s) await this.startAt(this.clock.nowUs(), this.wantPlaying);
+        });
+      },
+    });
+    this.unsubscribePg = regs.onPsrEvent((e) => {
+      if (e.type === 'change' && e.psr === PSR.PG_STREAM) this.emitSubtitles();
+    });
+  }
+
+  private stopPg(): void {
+    this.unsubscribePg?.();
+    this.unsubscribePg = null;
+    this.pg?.stop();
+    this.pg = null;
+  }
+
+  /** The reader opened a play item: _init_pg_stream, the PID for this item, and the track list when it changed. */
+  private pgItemStarted(s: Session, index: number, startUs: number): void {
+    const pg = this.pg;
+    const item = s.playItems[index];
+    if (!pg || !item || this.session !== s) return;
+    pg.playItemStarted(item, this.navRegs === null, startUs);
+    s.pipeline.setPgStream(pg.pid);
+    if (JSON.stringify(pg.tracks()) !== this.sentPgTracks) this.emitSubtitles();
+  }
+
+  private selectSubtitle(choice: SubtitleChoice): void {
+    const pg = this.pg;
+    if (!pg) return;
+    // the text track arrives with milestone 4a task 8; until then it is the same as Off
+    const pick = choice.kind === 'pg' ? { pg: choice.stream } : 'off';
+    const valid = pick === 'off' || pg.tracks().some((t) => t.index === pick.pg);
+    if (!pg.select(pick) && valid) this.notice('uo-masked', UO_MASKED_MESSAGE);
+    this.emitSubtitles();
+  }
+
+  private emitSubtitles(): void {
+    const pg = this.pg;
+    if (!pg) return;
+    const tracks = pg.tracks();
+    this.sentPgTracks = JSON.stringify(tracks);
+    const { stream, display } = pg.selection;
+    this.deps.emit({ type: 'subtitles', pg: tracks, text: null, selected: display && stream > 0 ? { pg: stream } : 'off', offsetMs: 0, scale: 1 });
   }
 
   /** PSR0, the IG stream number, with a navigator; discs without one show no menus. */
@@ -714,6 +805,7 @@ export class Player {
     this.deps.emit({ type: 'playlistCleared' });
     this.seekGeneration++;
     s.pipeline.stop();
+    this.pg?.seek();
     s.decoder.close();
     for (const d of s.audioDecoders.values()) d.close();
     s.audioDecoders.clear();
@@ -762,6 +854,7 @@ export class Player {
     this.navNextMark = this.nextMarkAfter(s.timeline, t);
     s.pipeline.stop();
     this.navigator?.seekGraphics(); // queued units from the old read position are dropped; the menu stays
+    this.pg?.seek(); // GC_CTRL_PG_RESET in _seek_internal: the subtitle on screen goes
     if (s.videoState === 'configured') s.decoder.reset();
     s.pendingVideo = [];
     s.decimator?.reset();
@@ -841,6 +934,8 @@ export class Player {
   private close(): void {
     this.stopNavigator();
     this.teardownSession();
+    this.stopPg();
+    this.pgRegs = null;
     this.source = null;
     this.disc = null;
     this.setState('idle');
@@ -1153,6 +1248,9 @@ export class Player {
         menu: this.menuActive && this.navRegs ? { page: this.navRegs.psrRead(PSR.MENU_PAGE_ID), selectedButton: this.navRegs.psrRead(PSR.SELECTED_BUTTON_ID), buttonsDrawn: this.igDraws } : null,
         igErrors: this.navigator?.igErrors ?? 0,
         soundsPlayed: this.soundsPlayed,
+        pg: this.pg?.shown ?? null,
+        pgErrors: this.pg?.errors ?? 0,
+        textCue: false,
       },
     });
   }

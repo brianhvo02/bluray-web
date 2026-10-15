@@ -34,7 +34,22 @@ export interface Telemetry {
   readonly igErrors: number;
   /** Menu sound effects asked for since the disc opened. */
   readonly soundsPlayed: number;
+  /** The last PG display set shown: composition objects drawn and how many of them were forced; null before any (and after a reset). */
+  readonly pg: { readonly objectsShown: number; readonly forced: number } | null;
+  /** Corrupt PG segments dropped. */
+  readonly pgErrors: number;
+  /** A text subtitle cue is on screen. */
+  readonly textCue: boolean;
 }
+
+export interface PgTrack {
+  /** PG stream number (PSR2), 1-based. */
+  readonly index: number;
+  /** ISO 639-2 code from the STN, or ''. */
+  readonly language: string;
+}
+
+export type SubtitleChoice = { readonly kind: 'pg'; readonly stream: number } | { readonly kind: 'text' } | { readonly kind: 'off' };
 
 export type ChannelsLabel = 'mono' | 'stereo' | 'multichannel' | '';
 
@@ -61,6 +76,7 @@ export type EngineCommand =
   | { readonly type: 'pause' }
   | { readonly type: 'seek'; readonly timeUs: number }
   | { readonly type: 'selectAudio'; readonly index: number }
+  | { readonly type: 'selectSubtitle'; readonly choice: SubtitleChoice }
   | { readonly type: 'nextChapter' }
   | { readonly type: 'prevChapter' }
   /** HDMV discs only: 0 = top menu. */
@@ -86,6 +102,15 @@ export type EngineEvent =
   | { readonly type: 'pointerTarget'; readonly button: number | null }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
+  /** On playlist start, a play item whose PG tracks differ, every PSR2 change and every subtitle command. */
+  | {
+    readonly type: 'subtitles';
+    readonly pg: readonly PgTrack[];
+    readonly text: { readonly name: string; readonly cues: number } | null;
+    readonly selected: 'off' | 'text' | { readonly pg: number };
+    readonly offsetMs: number;
+    readonly scale: number;
+  }
   | { readonly type: 'state'; readonly state: PlaybackState }
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }

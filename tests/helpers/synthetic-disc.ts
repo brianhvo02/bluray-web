@@ -53,6 +53,14 @@ export interface SyntheticClipSpec {
   igStreams?: Array<{ pid: number; units: Array<{ pts: number; payload: Uint8Array }> }>;
   /** Replaces `audio` when set: each stream on its own PID, listed in this order in the CLPI and STN. */
   audioStreams?: SyntheticAudioStream[];
+  /** PG streams (segments, see pg-builders), each on its own PID, listed in this order in the CLPI and the STN pg table. */
+  pgStreams?: SyntheticPgStream[];
+}
+
+export interface SyntheticPgStream {
+  pid: number;
+  lang: string;
+  units: Array<{ pts: number; payload: Uint8Array }>;
 }
 
 export interface SyntheticPlaylistSpec {
@@ -122,7 +130,7 @@ export function dummyAudioStream(pid: number, codingType: number, seconds: numbe
 }
 
 /** A clip of fake AVC units (IDR every `keyEvery` frames), optionally with audio. */
-export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number; audioMuxLag90k?: number; frameBytes?: number; audioStreams?: SyntheticAudioStream[]; igUnits?: SyntheticClipSpec['igUnits']; igStreams?: SyntheticClipSpec['igStreams'] } = {},
+export function syntheticClip(clipId: string, seconds: number, opts: { audio?: number; keyEvery?: number; startPts?: number; corruptAudioPesIndex?: number; audioMuxLag90k?: number; frameBytes?: number; audioStreams?: SyntheticAudioStream[]; igUnits?: SyntheticClipSpec['igUnits']; igStreams?: SyntheticClipSpec['igStreams']; pgStreams?: SyntheticPgStream[] } = {},
 ): SyntheticClipSpec {
   const keyEvery = opts.keyEvery ?? 24;
   const frames = seconds * 24;
@@ -133,14 +141,14 @@ export function syntheticClip(clipId: string, seconds: number, opts: { audio?: n
     if (idr) keyIndices.push(i);
     videoAus.push(avcAu({ idr, fill: opts.frameBytes ?? 300 }));
   }
-  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, audioMuxLag90k: opts.audioMuxLag90k, audioStreams: opts.audioStreams, igUnits: opts.igUnits, igStreams: opts.igStreams };
+  return { clipId, videoAus, keyIndices, startPts: opts.startPts ?? CLIP_START_PTS, audio: opts.audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, audioMuxLag90k: opts.audioMuxLag90k, audioStreams: opts.audioStreams, igUnits: opts.igUnits, igStreams: opts.igStreams, pgStreams: opts.pgStreams };
 }
 
 export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Array<ArrayBuffer>> {
   const files = new Map<string, Uint8Array<ArrayBuffer>>();
   files.set('BDMV/index.bdmv', buildIndex(spec.index ?? { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [{ kind: 'hdmv', movieObjectId: 2 }] }));
   if (spec.movieObjects) files.set('BDMV/MovieObject.bdmv', spec.movieObjects);
-  const clips = new Map<string, { inTime: number; outTime: number; audio: StreamSpec[]; ig: StreamSpec[] }>();
+  const clips = new Map<string, { inTime: number; outTime: number; audio: StreamSpec[]; ig: StreamSpec[]; pg: StreamSpec[] }>();
 
   for (const clip of spec.clips) {
     const endPts = (clip.pts ? Math.max(...clip.pts) : clip.startPts + (clip.videoAus.length - 1) * FRAME_TICKS_90K) + FRAME_TICKS_90K;
@@ -160,6 +168,8 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
     }
     const igStreams = clip.igStreams ?? (clip.igUnits ? [{ pid: IG_PID, units: clip.igUnits }] : []);
     for (const stream of igStreams) for (const u of stream.units) units.push({ pid: stream.pid, streamId: 0xbd, pts: u.pts, payload: u.payload });
+    const pgStreams = clip.pgStreams ?? [];
+    for (const stream of pgStreams) for (const u of stream.units) units.push({ pid: stream.pid, streamId: 0xbd, pts: u.pts, payload: u.payload });
     const lag = clip.audioMuxLag90k ?? 0;
     const isAudio = (u: MuxUnit): boolean => u.pid !== VIDEO_PID;
     const muxKey = (u: MuxUnit): number => (u.dts ?? u.pts) + (isAudio(u) ? lag : 0);
@@ -174,13 +184,14 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
       { pid: VIDEO_PID, codingType: CodingType.AVC },
       ...audioSpecs.map(({ pid, codingType }) => ({ pid, codingType })),
       ...igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })),
+      ...pgStreams.map((g) => ({ pid: g.pid, codingType: CodingType.PG })),
     ];
     files.set(`BDMV/STREAM/${clip.clipId}.m2ts`, bytes);
     files.set(
       `BDMV/CLIPINF/${clip.clipId}.clpi`,
       buildClpi({ numSourcePackets: bytes.length / 192, streams, presentationStart: clip.startPts / 2, presentationEnd: endPts / 2, epMaps: [{ pid: VIDEO_PID, entries }] }),
     );
-    clips.set(clip.clipId, { inTime: clip.startPts / 2, outTime: endPts / 2, audio: audioSpecs, ig: igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })) });
+    clips.set(clip.clipId, { inTime: clip.startPts / 2, outTime: endPts / 2, audio: audioSpecs, ig: igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })), pg: pgStreams.map((g) => ({ pid: g.pid, codingType: CodingType.PG, lang: g.lang })) });
   }
 
   const subIg = spec.subPathIg;
@@ -211,6 +222,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         stillTime: playlist.stills?.[index]?.time,
         video: [{ pid: VIDEO_PID, codingType: playlist.videoCodingType ?? CodingType.AVC }],
         audio: clip.audio,
+        pg: clip.pg,
         ig: subIg ? [{ pid: subIgPid, codingType: CodingType.IG, streamType: 2, subPathId: 0, subClipId: 0 }] : clip.ig,
       };
     });

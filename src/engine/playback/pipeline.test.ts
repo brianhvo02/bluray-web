@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CLIP_START_PTS, VIDEO_PID, buildSyntheticDisc, lpcmStream, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
 import { endSegment, odsSegment, simpleMenuSegments } from '../../../tests/helpers/ig-builders';
+import { subtitleSegments } from '../../../tests/helpers/pg-builders';
 import { buildClpi, buildIndex, buildMpls } from '../../../tests/helpers/bdmv-builders';
 import { parseClpi } from '../bdmv/clpi-parser';
 import { parseMpls } from '../bdmv/mpls-parser';
@@ -58,6 +59,64 @@ function run(
 async function turns(count: number): Promise<void> {
   for (let i = 0; i < count; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+describe('PlaybackPipeline PG', () => {
+  const subs = (x: number) => subtitleSegments({ x }).map((payload) => ({ pts: CLIP_START_PTS + 90_000, payload }));
+  async function pgSetup(): Promise<PipelineConfig> {
+    const files = buildSyntheticDisc({
+      clips: [
+        syntheticClip('00001', 2, { pgStreams: [{ pid: 0x1200, lang: 'eng', units: subs(10) }, { pid: 0x1201, lang: 'jpn', units: subs(20) }] }),
+        syntheticClip('00002', 2, { pgStreams: [{ pid: 0x1201, lang: 'eng', units: subs(30) }, { pid: 0x1200, lang: 'jpn', units: subs(40) }] }),
+      ],
+      playlists: [{ id: '00000', clipIds: ['00001', '00002'] }],
+    });
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    return { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001', '00002']), videoPid: VIDEO_PID, playItems: mpls.playItems, audioStream: null };
+  }
+  /** `pidFor(item)` is what the PG stream control answers when the pipeline opens that play item. */
+  async function collect(config: PipelineConfig, pidFor: (item: number) => number | null, fromUs = 0) {
+    const got: PipelineUnit[] = [];
+    const items: Array<[number, number]> = [];
+    let finish: () => void = () => undefined;
+    const done = new Promise<void>((r) => (finish = r));
+    const p: PlaybackPipeline = new PlaybackPipeline(config, {
+      video: () => undefined, audio: () => undefined, pg: (u) => got.push(u), isFull: () => false, ended: () => finish(), failed: () => finish(),
+      itemStarted: (index, startUs) => {
+        items.push([index, startUs]);
+        p.setPgStream(pidFor(index));
+      },
+    });
+    p.start(fromUs);
+    await done;
+    return { got, items };
+  }
+
+  it('delivers units of the selected PID only, asking for it as each play item opens', async () => {
+    const { got, items } = await collect(await pgSetup(), (i) => (i === 0 ? 0x1200 : 0x1201));
+    expect(items).toEqual([[0, 0], [1, 2_000_000]]);
+    const n = subtitleSegments({}).length;
+    expect(got).toHaveLength(2 * n);
+    expect(got[0]!.ptsUs).toBe(1_000_000);
+    expect(got[n]!.ptsUs).toBe(3_000_000);
+    // the PCS carries the object position: x 10 in item 1, x 30 in item 2
+    const x = (u: PipelineUnit) => (u.data[3 + 11 + 4]! << 8) | u.data[3 + 11 + 5]!;
+    expect([x(got[0]!), x(got[n]!)]).toEqual([10, 30]);
+  });
+
+  it('reads no PG for a null PID or without a sink', async () => {
+    const config = await pgSetup();
+    expect((await collect(config, () => null)).got).toEqual([]);
+    const { got, done } = run(config, 0);
+    await done;
+    expect(got.ended).toBe(1);
+  });
+
+  it('reports the play item a seek starts in with the seek target', async () => {
+    const { items } = await collect(await pgSetup(), () => 0x1200, 2_500_000);
+    expect(items).toEqual([[1, 2_500_000]]);
+  });
+});
 
 describe('PlaybackPipeline IG', () => {
   const menu = (state: 'epochStart' | 'normal' = 'epochStart'): Array<{ pts: number; payload: Uint8Array }> =>

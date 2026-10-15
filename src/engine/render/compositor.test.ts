@@ -63,3 +63,35 @@ describe('Compositor.drawIg', () => {
     expect(calls.map(([n]) => n)).toEqual(['main.drawImage']);
   });
 });
+
+describe('Compositor.drawPg', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('copies the dirty rect into its own canvas, separate from the IG one, and draws it fitted', () => {
+    const calls: Array<[string, ...unknown[]]> = [];
+    const ctx = (name: string) => new Proxy({}, { get: (_t, prop: string) => (...args: unknown[]) => calls.push([`${name}.${prop}`, ...args]) });
+    const canvases: OffscreenCanvas[] = [];
+    const main = { width: 1000, height: 1000, getContext: () => ctx('main') } as unknown as OffscreenCanvas;
+    vi.stubGlobal('ImageData', class { constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {} });
+    const compositor = new Compositor(main, () => {
+      const name = `c${canvases.length}`;
+      const c = { getContext: () => ctx(name) } as unknown as OffscreenCanvas;
+      canvases.push(c);
+      return c;
+    });
+    const pg = new OverlayPlane();
+    pg.apply({ cmd: 'draw', pts: -1, x: 10, y: 900, w: 4, h: 1, palette: [{ y: 0, cr: 0, cb: 0, t: 0 }, { y: 100, cr: 128, cb: 128, t: 255 }], img: [{ color: 1, len: 4 }] });
+    const ig = new OverlayPlane();
+    ig.apply({ cmd: 'draw', pts: -1, x: 0, y: 0, w: 2, h: 1, palette: [{ y: 0, cr: 0, cb: 0, t: 0 }, { y: 100, cr: 128, cb: 128, t: 255 }], img: [{ color: 1, len: 2 }] });
+    compositor.drawPg(pg);
+    compositor.drawIg(ig);
+    expect(canvases).toHaveLength(2);
+    const puts = calls.filter(([n]) => n.endsWith('.putImageData'));
+    expect(puts.map(([n]) => n)).toEqual(['c0.putImageData', 'c1.putImageData']);
+    expect(puts[0]!.slice(2)).toEqual([10, 900]);
+    expect(calls.filter(([n]) => n === 'main.drawImage')).toEqual([['main.drawImage', canvases[0], 0, 218, 1000, 563], ['main.drawImage', canvases[1], 0, 218, 1000, 563]]);
+    calls.length = 0;
+    compositor.drawPg(pg);
+    expect(calls.map(([n]) => n)).toEqual(['main.drawImage']);
+  });
+});

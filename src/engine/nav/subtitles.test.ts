@@ -182,6 +182,29 @@ describe('PgStreamControl', () => {
     expect(pg.pid).toBe(0x1201);
   });
 
+  it('refuses a selection as a whole when any part of it is masked', () => {
+    const { regs, pg } = setup({ masked: ['pgChange'] });
+    pg.playItemStarted(item(), true); // stream 1, display off
+    expect(pg.select({ pg: 2 })).toBe(false); // would turn the display on (allowed) and change the stream (masked)
+    expect(regs.psrRead(PSR.PG_STREAM) & 0x80000fff).toBe(1);
+  });
+
+  it('keeps the previous play item\'s queued display sets until presentation reaches the next item', () => {
+    const { regs, pg, pids } = setup();
+    showStream1(regs);
+    pg.playItemStarted(item(), false, 0);
+    push(pg, subtitleSegments({ x: 10 }), 1_000_000);
+    pg.playItemStarted(item(), false, 2_000_000); // the reader opened the next item while 1 s is still ahead
+    push(pg, subtitleSegments({ x: 300 }), 2_500_000);
+    pg.tick(1_000_000);
+    expect(pg.plane.rgba({ x: 10, y: 900, w: 1, h: 1 })[3]).toBe(255);
+    pg.tick(2_000_000);
+    expect(pg.plane.hash()).toBe(EMPTY); // _init_pg_stream at the item change
+    pg.tick(2_500_000);
+    expect(pg.plane.rgba({ x: 300, y: 900, w: 1, h: 1 })[3]).toBe(255);
+    expect(pids).toEqual([]);
+  });
+
   it('gives no PID for a sub-path stream', () => {
     const { regs, pg } = setup();
     showStream1(regs);

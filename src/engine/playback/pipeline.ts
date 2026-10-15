@@ -27,6 +27,13 @@ export interface PipelineSinks {
   audio(unit: PipelineAudioUnit): void;
   /** Graphics units of the selected IG stream (main path); without this sink no IG PID is read. */
   ig?(unit: PipelineUnit): void;
+  /** Units of the PG PID set with setPgStream (main path); without this sink no PG PID is read. */
+  pg?(unit: PipelineUnit): void;
+  /**
+   * A play item is about to be read, from `startUs` (playlist time: its start, or the seek target). Called before its
+   * PIDs are chosen, so a setPgStream made here applies to this item.
+   */
+  itemStarted?(index: number, startUs: number): void;
   /** Backpressure: reading pauses while this returns true. */
   isFull(): boolean;
   ended(): void;
@@ -55,6 +62,7 @@ export class PlaybackPipeline {
   private current: M2tsReader | null = null;
   private audioStream: number | null;
   private igStream: number | null;
+  private pgPid: number | null = null;
 
   constructor(
     private readonly config: PipelineConfig,
@@ -68,6 +76,11 @@ export class PlaybackPipeline {
   /** Takes effect on the next start(). */
   setIgStream(stream: number | null): void {
     this.igStream = stream;
+  }
+
+  /** Takes effect on the next play item read (or start()). */
+  setPgStream(pid: number | null): void {
+    this.pgPid = pid;
   }
 
   /** Takes effect on the next start(). */
@@ -110,11 +123,15 @@ export class PlaybackPipeline {
       if (item.outTime <= item.inTime) continue;
       const clip = clips.get(item.clipId);
       if (!clip) throw new DiscError('missing-file', `Missing clip info for ${item.clipId}`, [clipInfoPath(item.clipId)]);
+      this.sinks.itemStarted?.(i, i === startPos.item.index ? fromUs : timeline.itemStartUs(i));
+      if (gen !== this.generation) return;
+      const pgPid = this.sinks.pg ? this.pgPid : null;
       const audioEntry = audioEntryFor(playItems[i], audioStream);
       const pids = new Set([videoPid]);
       if (audioEntry) pids.add(audioEntry.pid);
       const igEntry = igEntryFor(playItems[i], igStream);
       if (igEntry) pids.add(igEntry.pid);
+      if (pgPid !== null) pids.add(pgPid);
       const ep = clip.epMaps.find((m) => m.pid === videoPid) ?? clip.epMaps[0];
       const target = i === startPos.item.index ? startPos.clipTime45 : item.inTime;
       // PTS can restart inside a clip; only this item's STC sequence is meaningful (libbluray clpi_lookup_spn).
@@ -146,6 +163,7 @@ export class PlaybackPipeline {
           const { us, inRange } = timeline.toPlaylistUs(i, pes.pts);
           if (pes.pid === videoPid) this.sinks.video({ data: pes.payload, ptsUs: us, inRange });
           else if (igEntry && pes.pid === igEntry.pid) this.sinks.ig?.({ data: pes.payload, ptsUs: us, dtsUs: pes.dts === undefined ? undefined : timeline.toPlaylistUs(i, pes.dts).us, inRange });
+          else if (pgPid !== null && pes.pid === pgPid) this.sinks.pg?.({ data: pes.payload, ptsUs: us, dtsUs: pes.dts === undefined ? undefined : timeline.toPlaylistUs(i, pes.dts).us, inRange });
           else if (audioEntry && pes.pid === audioEntry.pid) {
             this.sinks.audio({ data: pes.payload, ptsUs: us, inRange, codingType: audioEntry.codingType, streamIdExtension: pes.streamIdExtension });
           }

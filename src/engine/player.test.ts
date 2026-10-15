@@ -2,12 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildSoundBdmv } from '../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
-import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
+import { clearSegments, subtitleSegments } from '../../tests/helpers/pg-builders';
+import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPgStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
 import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
-import type { OverlayPlane } from './graphics/overlay-plane';
+import { OverlayPlane } from './graphics/overlay-plane';
 import { Navigator } from './nav/navigator';
 import { Player } from './player';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
@@ -51,6 +52,8 @@ interface Harness {
   drawn: number[];
   /** The IG planes handed to drawIg, one entry per call. */
   igDraws: OverlayPlane[];
+  /** The PG planes handed to drawPg, one entry per call. */
+  pgDraws: OverlayPlane[];
   /** Callbacks the engine registered with requestFrame. */
   frames: Array<() => void>;
   /** Whether the engine has the ring in its playing state. */
@@ -89,11 +92,11 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[] } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
+    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits, pgStreams: opts.pgStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
     movieObjects: opts.movieObjects,
     subPathIg: opts.subPathIg,
@@ -103,6 +106,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
   const igDraws: OverlayPlane[] = [];
+  const pgDraws: OverlayPlane[] = [];
   const frames: Array<() => void> = [];
   const clock = { ms: 1000 };
   const player = new Player({
@@ -121,6 +125,10 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
         igDraws.push(plane);
         plane.takeDirty();
       },
+      drawPg: (plane) => {
+        pgDraws.push(plane);
+        plane.takeDirty();
+      },
     }),
   });
   const ring = createRing(48_000, 2);
@@ -135,6 +143,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     events,
     drawn,
     igDraws,
+    pgDraws,
     frames,
     ringPlaying: () => Atomics.load(views.control, Control.Playing) === 1,
     async play(ms, opts = {}) {
@@ -1193,5 +1202,125 @@ describe('Player with HDMV navigation', () => {
       expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
       expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
     });
+  });
+});
+
+describe('Player PG subtitles', () => {
+  const at = (seconds: number, segs: Uint8Array[]) => segs.map((payload) => ({ pts: CLIP_START_PTS + Math.round(seconds * 90_000), payload }));
+  /** Stream 1 (eng): 1.0–2.0 s at x 100, a forced caption 2.5–2.9 s at x 200, 3.0–3.5 s at x 300. Stream 2 (jpn): 1.1–3.9 s at x 500. */
+  const pgStreams: SyntheticPgStream[] = [
+    { pid: 0x1200, lang: 'eng', units: [
+      ...at(1, subtitleSegments({ x: 100 })), ...at(2, clearSegments(1)),
+      ...at(2.5, subtitleSegments({ x: 200, forced: true, compositionNumber: 2 })), ...at(2.9, clearSegments(3)),
+      ...at(3, subtitleSegments({ x: 300, compositionNumber: 4 })), ...at(3.5, clearSegments(5)),
+    ] },
+    { pid: 0x1201, lang: 'jpn', units: [...at(1.1, subtitleSegments({ x: 500 })), ...at(3.9, clearSegments(1))] },
+  ];
+  const EMPTY = new OverlayPlane().hash();
+  const subtitleEvents = (h: Harness) => h.events.flatMap((e) => (e.type === 'subtitles' ? [e] : []));
+  const visibleAt = (h: Harness, x: number) => (h.pgDraws.at(-1)?.rgba({ x, y: 900, w: 1, h: 1 })[3] ?? 0) === 255;
+  /** The timestamp of the last video frame drawn: the presentation time (telemetry lags by up to 500 ms). */
+  const clockUs = (h: Harness) => h.drawn.at(-1) ?? 0;
+  /** Steps simulated time one render tick at a time (vi.waitFor would wait 50 ms between ticks) until `done`, at most 10 s. */
+  async function stepUntil(h: Harness, done: () => boolean): Promise<void> {
+    for (let ms = 0; !done(); ms += STEP_MS) {
+      if (ms > 10_000) throw new Error('condition not reached within 10 s of playback');
+      await h.play(STEP_MS);
+    }
+  }
+  const playUntil = (h: Harness, us: number) => stepUntil(h, () => clockUs(h) >= us);
+  /** Plays until a telemetry sample taken in [fromUs, toUs) arrives; its PG field. */
+  async function pgTelemetryBetween(h: Harness, fromUs: number, toUs: number): Promise<Telemetry['pg']> {
+    await stepUntil(h, () => (lastTelemetry(h)?.clockUs ?? 0) >= fromUs);
+    const t = lastTelemetry(h)!;
+    expect(t.clockUs).toBeLessThan(toUs);
+    return t.pg;
+  }
+  async function raw(): Promise<Harness> {
+    const h = await harness(CodingType.LPCM, { pgStreams });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    return h;
+  }
+
+  it('shows a picked stream at its time on a disc without a navigator, and lists the tracks', async () => {
+    const h = await raw();
+    expect(subtitleEvents(h).at(-1)).toEqual({ type: 'subtitles', pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: 'off', offsetMs: 0, scale: 1 });
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    expect(subtitleEvents(h).at(-1)!.selected).toEqual({ pg: 1 });
+    expect(await pgTelemetryBetween(h, 1_000_000, 2_000_000)).toEqual({ objectsShown: 1, forced: 0 });
+    await playUntil(h, 1_300_000);
+    expect(visibleAt(h, 100)).toBe(true);
+    await playUntil(h, 2_050_000);
+    expect(h.pgDraws.at(-1)!.hash()).toBe(EMPTY);
+    expect(await pgTelemetryBetween(h, 2_000_000, 2_500_000)).toEqual({ objectsShown: 0, forced: 0 });
+    expect(lastTelemetry(h)!.pgErrors).toBe(0);
+  });
+
+  it('a seek clears the subtitle at once and the next one after the target appears', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    await playUntil(h, 1_300_000);
+    expect(visibleAt(h, 100)).toBe(true);
+    await h.player.handle({ type: 'seek', timeUs: 2_050_000 });
+    await h.play(STEP_MS);
+    expect(h.pgDraws.at(-1)!.hash()).toBe(EMPTY);
+    await untilPlaying(h);
+    await playUntil(h, 3_100_000);
+    expect(visibleAt(h, 300)).toBe(true);
+    expect(visibleAt(h, 100)).toBe(false);
+  });
+
+  it('switching streams drops the old subtitle at once and shows the new stream\'s current one', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    await playUntil(h, 1_300_000);
+    expect(visibleAt(h, 100)).toBe(true);
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 2 } });
+    await h.play(STEP_MS);
+    expect(h.pgDraws.at(-1)!.hash()).toBe(EMPTY);
+    expect(subtitleEvents(h).at(-1)!.selected).toEqual({ pg: 2 });
+    const switchedAt = clockUs(h);
+    await stepUntil(h, () => visibleAt(h, 500));
+    expect(clockUs(h) - switchedAt).toBeLessThan(1_000_000);
+  });
+
+  it('with subtitles off shows forced captions only', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'off' } });
+    expect(await pgTelemetryBetween(h, 1_000_000, 2_000_000)).toEqual({ objectsShown: 0, forced: 0 });
+    expect(visibleAt(h, 100)).toBe(false);
+    expect(await pgTelemetryBetween(h, 2_500_000, 2_900_000)).toEqual({ objectsShown: 1, forced: 1 });
+    await playUntil(h, 2_600_000);
+    expect(visibleAt(h, 200)).toBe(true);
+    await playUntil(h, 3_200_000);
+    expect(visibleAt(h, 300)).toBe(false);
+  });
+
+  it('follows the disc program\'s registers with a navigator and refuses a masked change', async () => {
+    const idle = { cmds: [] };
+    const h = await harness(CodingType.LPCM, {
+      pgStreams,
+      movieObjects: buildMovieObjects([{ cmds: [asm.playPl(imm(0))] }, idle, idle]),
+      playlists: [{ id: '00000', clipIds: ['00001'], uoMask: [0, 0, 0, 0x10, 0, 0, 0, 0] }],
+    });
+    await untilPlaying(h);
+    expect(subtitleEvents(h).at(-1)!.selected).toBe('off');
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 2 } });
+    expect(h.events).toContainEqual({ type: 'notice', code: 'uo-masked', message: "The disc doesn't allow this here." });
+    expect(subtitleEvents(h).at(-1)!.selected).toBe('off');
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } }); // only the display flag: allowed
+    expect(subtitleEvents(h).at(-1)!.selected).toEqual({ pg: 1 });
+    await playUntil(h, 1_300_000);
+    expect(visibleAt(h, 100)).toBe(true);
+  });
+
+  it('clears the plane and forgets the stream when the disc is closed', async () => {
+    const h = await raw();
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    await playUntil(h, 1_300_000);
+    const plane = h.pgDraws.at(-1)!;
+    await h.player.handle({ type: 'close' });
+    expect(plane.hash()).toBe(EMPTY);
   });
 });

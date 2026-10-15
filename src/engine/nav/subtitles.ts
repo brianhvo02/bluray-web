@@ -48,6 +48,8 @@ export class PgStreamControl {
   private shownValue: { readonly objectsShown: number; readonly forced: number } | null = null;
   /** A PSR2 change not yet acted on (handled at the next tick, select or play item start). */
   private psrChanged = false;
+  /** Playlist time of a play item change still ahead of presentation: PG resets when the clock gets there. */
+  private resetAtUs: number | null = null;
 
   constructor(private readonly deps: PgStreamControlDeps) {
     this.renderer = new PgRenderer({ regs: deps.regs, onOverlay: (op) => this.applyOverlay(op) });
@@ -59,12 +61,22 @@ export class PgStreamControl {
     return this.planeValue;
   }
 
-  /** _init_pg_stream after a play item opens; with `ownPsrs`, first the PG part of _update_clip_psrs. */
-  playItemStarted(item: PlayItem, ownPsrs: boolean): void {
+  /**
+   * _init_pg_stream after the reader opens a play item; with `ownPsrs`, first the PG part of _update_clip_psrs.
+   * `startUs` is where reading starts in playlist time: display sets of the previous item still queued before it are
+   * shown first, and the reset of the plane waits until presentation reaches it.
+   */
+  playItemStarted(item: PlayItem, ownPsrs: boolean, startUs?: number): void {
     this.item = item;
     if (ownPsrs) this.updateClipPsrs(item);
     this.psrChanged = false;
-    this.initPgStream();
+    if (startUs !== undefined && this.sets.length > 0) {
+      this.decoder.reset();
+      this.resetAtUs = startUs;
+      this.pidValue = this.findPgStream();
+    } else {
+      this.initPgStream();
+    }
   }
 
   /** The PID to demux now, or null. */
@@ -89,10 +101,12 @@ export class PgStreamControl {
   tick(clockUs: number): void {
     this.applyPsrChange();
     while (this.sets.length > 0 && this.sets[0]!.pts <= clockUs) {
+      if (this.resetAtUs !== null && this.sets[0]!.pts >= this.resetAtUs) this.resetRenderer();
       const ds = this.sets.shift()!;
       const drawn = this.renderer.render(ds); // GC_CTRL_PG_UPDATE
       this.shownValue = { objectsShown: drawn, forced: this.renderer.lastForced };
     }
+    if (this.resetAtUs !== null && clockUs >= this.resetAtUs) this.resetRenderer();
   }
 
   /** A seek: drop queued display sets and reset PG (GC_CTRL_PG_RESET in _seek_internal); the plane clears. */
@@ -107,26 +121,22 @@ export class PgStreamControl {
     const enable = choice !== 'off';
     if (choice !== 'off' && !(choice.pg >= 1 && choice.pg <= (this.item?.stn.pg.length ?? 0))) return false;
 
+    // Unlike libbluray, which applies the unmasked half, a user's pick is refused whole when any part of it is masked
     let value = 0;
     let mask = 0;
-    let refused = false;
     if (enable !== ((initial & DISPLAY_FLAG) !== 0)) {
-      if (this.deps.isMasked('pgEnableDisable')) refused = true;
-      else {
-        value |= enable ? DISPLAY_FLAG : 0;
-        mask |= DISPLAY_FLAG;
-      }
+      if (this.deps.isMasked('pgEnableDisable')) return false;
+      value |= enable ? DISPLAY_FLAG : 0;
+      mask |= DISPLAY_FLAG;
     }
     if (streamId !== (initial & 0xfff)) {
-      if (this.deps.isMasked('pgChange')) refused = true;
-      else {
-        value |= streamId & 0xfff;
-        mask |= 0xfff;
-      }
+      if (this.deps.isMasked('pgChange')) return false;
+      value |= streamId & 0xfff;
+      mask |= 0xfff;
     }
     if (mask) this.deps.regs.psrWriteBits(PSR.PG_STREAM, value >>> 0, mask >>> 0);
     this.applyPsrChange();
-    return !refused;
+    return true;
   }
 
   /** PG tracks of the current play item (index = PSR2 stream number); sub-path streams are left out. */
@@ -198,8 +208,13 @@ export class PgStreamControl {
   private resetPg(): void {
     this.sets = [];
     this.decoder.reset();
+    this.resetRenderer();
+  }
+
+  private resetRenderer(): void {
     this.renderer.reset();
     this.shownValue = null;
+    this.resetAtUs = null;
   }
 
   /** The audio and PG parts of _update_clip_psrs, for discs without a navigator. */

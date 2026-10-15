@@ -18,15 +18,20 @@ export function fitRect(srcW: number, srcH: number, dstW: number, dstH: number):
 export interface CompositorLike {
   resize(width: number, height: number): void;
   drawVideo(frame: VideoFrame | null): void;
-  /** Draws the IG plane over the video just drawn: call it after every drawVideo. */
+  /** Draws the PG plane over the video just drawn: call it after every drawVideo, before drawIg. */
+  drawPg?(plane: OverlayPlane): void;
+  /** Draws the IG plane over the video (and PG) just drawn: call it after every drawVideo. */
   drawIg?(plane: OverlayPlane): void;
 }
 
-/** Draws planes onto the transferred canvas: video, then the IG overlay (PG/text arrive in M4). */
+/** A plane's pixels at plane size, updated from its dirty rects. */
+interface PlaneCanvas { readonly canvas: OffscreenCanvas; readonly ctx: OffscreenCanvasRenderingContext2D; readonly plane: OverlayPlane }
+
+/** Draws planes onto the transferred canvas: video, then the PG overlay, then the IG overlay. */
 export class Compositor implements CompositorLike {
   private readonly ctx: OffscreenCanvasRenderingContext2D;
-  /** Holds the IG plane's pixels (plane size), updated from its dirty rects. */
-  private ig: { readonly canvas: OffscreenCanvas; readonly ctx: OffscreenCanvasRenderingContext2D; readonly plane: OverlayPlane } | null = null;
+  private pg: PlaneCanvas | null = null;
+  private ig: PlaneCanvas | null = null;
 
   constructor(
     private readonly canvas: OffscreenCanvas,
@@ -51,15 +56,22 @@ export class Compositor implements CompositorLike {
     this.ctx.drawImage(frame, r.x, r.y, r.width, r.height);
   }
 
+  drawPg(plane: OverlayPlane): void {
+    this.pg = this.drawPlane(this.pg, plane);
+  }
+
   drawIg(plane: OverlayPlane): void {
-    let ig = this.ig;
-    if (!ig || ig.plane !== plane) {
+    this.ig = this.drawPlane(this.ig, plane);
+  }
+
+  private drawPlane(held: PlaneCanvas | null, plane: OverlayPlane): PlaneCanvas {
+    let pc = held;
+    if (!pc || pc.plane !== plane) {
       const canvas = this.createCanvas(plane.width, plane.height);
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('2D canvas context is unavailable');
-      ig = { canvas, ctx, plane };
-      this.ig = ig;
-      if (!plane.dirty()) ig.ctx.putImageData(new ImageData(plane.rgba({ x: 0, y: 0, w: plane.width, h: plane.height }), plane.width, plane.height), 0, 0);
+      pc = { canvas, ctx, plane };
+      if (!plane.dirty()) pc.ctx.putImageData(new ImageData(plane.rgba({ x: 0, y: 0, w: plane.width, h: plane.height }), plane.width, plane.height), 0, 0);
     }
     const rect = plane.takeDirty();
     if (rect) {
@@ -67,10 +79,11 @@ export class Compositor implements CompositorLike {
       const y = Math.max(0, rect.y);
       const w = Math.min(plane.width, rect.x + rect.w) - x;
       const h = Math.min(plane.height, rect.y + rect.h) - y;
-      if (w > 0 && h > 0) ig.ctx.putImageData(new ImageData(plane.rgba({ x, y, w, h }), w, h), x, y);
+      if (w > 0 && h > 0) pc.ctx.putImageData(new ImageData(plane.rgba({ x, y, w, h }), w, h), x, y);
     }
     const { width, height } = this.canvas;
     const r = fitRect(plane.width, plane.height, width, height);
-    this.ctx.drawImage(ig.canvas, r.x, r.y, r.width, r.height);
+    this.ctx.drawImage(pc.canvas, r.x, r.y, r.width, r.height);
+    return pc;
   }
 }
