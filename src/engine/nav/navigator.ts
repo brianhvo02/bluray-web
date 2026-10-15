@@ -12,7 +12,7 @@
 import type { IndexObject } from '../bdmv/index-parser';
 import { MarkType, type Mpls, type StreamEntry } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
-import { GraphicsController, GcStatus, type GcCtrl as GraphicsCtrl } from '../graphics/graphics-controller';
+import { BdVk, GraphicsController, GcStatus, type GcCtrl as GraphicsCtrl } from '../graphics/graphics-controller';
 import { IgSegmentDecoder, type IgDisplaySet } from '../graphics/ig-decoder';
 import { OverlayPlane, type OverlayOp } from '../graphics/overlay-plane';
 import { PSR, type PsrEvent, type RegisterFile } from '../hdmv/registers';
@@ -86,11 +86,11 @@ const NO_PLAYLIST = 0xffff;
 
 type TitleType = 'undef' | 'hdmv' | 'bdj';
 /** gc_ctrl_e values the navigator sends to the graphics controller. */
-type GcCtrl = 'INIT_MENU' | 'ENABLE_BUTTON' | 'DISABLE_BUTTON' | 'SET_BUTTON_PAGE' | 'POPUP' | 'IG_END' | 'NOP';
+type GcCtrl = 'INIT_MENU' | 'ENABLE_BUTTON' | 'DISABLE_BUTTON' | 'SET_BUTTON_PAGE' | 'POPUP' | 'IG_END' | 'NOP' | 'VK_KEY' | 'MOUSE_MOVE';
 
 const GC_CTRL: Readonly<Record<GcCtrl, GraphicsCtrl>> = {
   INIT_MENU: 'initMenu', ENABLE_BUTTON: 'enableButton', DISABLE_BUTTON: 'disableButton',
-  SET_BUTTON_PAGE: 'setButtonPage', POPUP: 'popup', IG_END: 'igEnd', NOP: 'nop',
+  SET_BUTTON_PAGE: 'setButtonPage', POPUP: 'popup', IG_END: 'igEnd', NOP: 'nop', VK_KEY: 'vkKey', MOUSE_MOVE: 'mouseMove',
 };
 
 const DEFAULT_PLANE_WIDTH = 1920;
@@ -258,6 +258,22 @@ export class Navigator {
     const ok = this.playTitleInternal(TITLE_TOP_MENU);
     this.runVm();
     return ok;
+  }
+
+  /**
+   * bd_user_input for a key press (BdVk). ROOT_MENU is a menu call. At libbluray's default UO restriction level (RELAXED)
+   * no key is checked against the UO mask here; enforcement for the UI is the player's.
+   */
+  userInput(key: number): number {
+    if (key === BdVk.ROOT_MENU) return this.menuCall() ? 0 : -1;
+    this.updateTimePsr(); // _set_scr(bd, -1)
+    return this.titleType === 'hdmv' ? this.runGc('VK_KEY', key) : -1;
+  }
+
+  /** bd_mouse_select: (x, y) in the IG plane. */
+  mouseSelect(x: number, y: number): number {
+    this.updateTimePsr();
+    return this.titleType === 'hdmv' ? this.runGc('MOUSE_MOVE', ((x << 16) | (y & 0xffff)) >>> 0) : -1;
   }
 
   /**

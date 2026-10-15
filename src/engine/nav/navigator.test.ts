@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildIndex, buildMpls, type IndexObjectSpec, type MarkSpec, type PlayItemSpec, type SubPathSpec } from '../../../tests/helpers/bdmv-builders';
-import { asm, buildMovieObjects, imm } from '../../../tests/helpers/hdmv-builders';
+import { asm, buildMovieObjects, imm, reg } from '../../../tests/helpers/hdmv-builders';
 import { endSegment, icsSegment, odsSegment, pdsSegment, simpleMenuSegments } from '../../../tests/helpers/ig-builders';
 import type { Clpi } from '../bdmv/clpi-parser';
 import { parseIndex } from '../bdmv/index-parser';
@@ -8,6 +8,7 @@ import { parseMovieObjects } from '../bdmv/mobj-parser';
 import { parseMpls, type Mpls } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
 import { PSR, RegisterFile } from '../hdmv/registers';
+import { BdVk } from '../graphics/graphics-controller';
 import { HdmvEventType } from '../hdmv/vm';
 import { Navigator, type IgUnit, type NavigatorDeps, type NavigatorEvent, type PlaybackPort, type PlayAt } from './navigator';
 
@@ -629,6 +630,66 @@ describe('Navigator interactive graphics', () => {
     nav.tick(0);
     expect(plane.hash()).toBe(cleared);
     expect(plane.hasContent).toBe(false);
+  });
+});
+
+describe('Navigator user input', () => {
+  const IG = { pid: 0x1400, codingType: 0x91 };
+  /** First Play plays 00000, whose always-on menu has buttons 1 and 2 (button 1 selected); activating one sets GPR 5 to 42. */
+  async function menuSetup() {
+    const t = setup({ objects: [{ cmds: [asm.playPl(imm(0))] }, idle], playlists: { '00000': { items: [item({ ig: [IG] })] } } });
+    t.port.onOpen = (id, at) => t.nav.playlistStarted(id, at.item ?? 0);
+    t.nav.start();
+    await flush();
+    for (const data of simpleMenuSegments({ cmds: [asm.set('move', reg(5), imm(42))] })) t.nav.pushIg({ data, ptsUs: 0 });
+    t.nav.tick(0);
+    return t;
+  }
+
+  /** The activated state is drawn first; its commands come with a later NOP and the VM runs them on the next _read_ext. */
+  async function settle(nav: Navigator): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      nav.tick(0);
+      await flush();
+    }
+  }
+
+  it('moves the selection with arrow keys (bd_user_input -> GC_CTRL_VK_KEY)', async () => {
+    const { nav, regs } = await menuSetup();
+    expect(regs.psrRead(PSR.SELECTED_BUTTON_ID)).toBe(1);
+    nav.userInput(BdVk.DOWN);
+    expect(regs.psrRead(PSR.SELECTED_BUTTON_ID)).toBe(2);
+    nav.userInput(BdVk.UP);
+    expect(regs.psrRead(PSR.SELECTED_BUTTON_ID)).toBe(1);
+  });
+
+  it('runs the selected button commands on ENTER', async () => {
+    const { nav, regs } = await menuSetup();
+    nav.userInput(BdVk.ENTER);
+    await settle(nav);
+    expect(regs.gprRead(5)).toBe(42);
+  });
+
+  it('selects the button under the mouse and activates it with MOUSE_ACTIVATE', async () => {
+    const { nav, regs } = await menuSetup();
+    nav.mouseSelect(104, 202); // button 2: 8x4 at (100, 200)
+    expect(regs.psrRead(PSR.SELECTED_BUTTON_ID)).toBe(2);
+    nav.userInput(BdVk.MOUSE_ACTIVATE);
+    await settle(nav);
+    expect(regs.gprRead(5)).toBe(42);
+  });
+
+  it('treats ROOT_MENU as a menu call', async () => {
+    const { nav, events } = await menuSetup();
+    events.length = 0;
+    nav.userInput(BdVk.ROOT_MENU);
+    expect(events).toContainEqual({ type: 'title', title: 0 });
+  });
+
+  it('ignores input before start() without throwing', () => {
+    const t = setup({ objects: [idle] });
+    expect(t.nav.userInput(BdVk.ENTER)).toBe(-1);
+    expect(t.nav.mouseSelect(10, 10)).toBe(-1);
   });
 });
 
