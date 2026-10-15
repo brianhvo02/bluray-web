@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CLIP_START_PTS, VIDEO_PID, buildSyntheticDisc, lpcmStream, syntheticClip, syntheticSource } from '../../../tests/helpers/synthetic-disc';
-import { simpleMenuSegments } from '../../../tests/helpers/ig-builders';
+import { endSegment, odsSegment, simpleMenuSegments } from '../../../tests/helpers/ig-builders';
 import { buildClpi, buildIndex, buildMpls } from '../../../tests/helpers/bdmv-builders';
 import { parseClpi } from '../bdmv/clpi-parser';
 import { parseMpls } from '../bdmv/mpls-parser';
@@ -100,6 +100,22 @@ describe('PlaybackPipeline IG', () => {
     const { got, done } = run({ ...config, igStream: 1 }, 0); // no ig sink
     await done;
     expect(got.ended).toBe(1);
+  });
+
+  it('reads a play item started from its beginning from packet 0, so graphics muxed before the first keyframe arrive (_fill_clip)', async () => {
+    // a menu whose segments fill several aligned units ahead of the first IDR (the EP map's first entry)
+    const big = odsSegment(500, 0, 400, 200, Array.from({ length: 200 }, (_, y) => Array.from({ length: 400 }, (_, x) => ((x * 7 + y * 13) % 250) + 1)));
+    const segments = [...simpleMenuSegments().slice(0, -1), ...big, endSegment()];
+    const files = buildSyntheticDisc({
+      clips: [syntheticClip('00001', 2, { igUnits: segments.map((payload) => ({ pts: CLIP_START_PTS, payload })) })],
+      playlists: [{ id: '00000', clipIds: ['00001'] }],
+    });
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const clips = await loadClips(source, ['00001']);
+    expect(clips.get('00001')!.epMaps[0]!.entries[0]!.spn).toBeGreaterThan(64); // the IDR is past the first two aligned units
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips, videoPid: VIDEO_PID, playItems: mpls.playItems, audioStream: null };
+    expect(await collect(config, 1)).toHaveLength(segments.length);
   });
 
   it('takes the stream number from the config', async () => {

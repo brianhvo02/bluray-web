@@ -120,7 +120,11 @@ export class PlaybackPipeline {
       // PTS can restart inside a clip; only this item's STC sequence is meaningful (libbluray clpi_lookup_spn).
       const range = stcSpnRange(clip, item.stcId);
       const rangeEnd = Number.isFinite(range.endSpn) ? range.endSpn : undefined;
-      const startSpn = ep ? (findEpBefore(ep, target, range)?.spn ?? range.startSpn) : range.startSpn;
+      // _fill_clip: the first play item and seamless ones (connection 5, 6) start at packet 0, so data muxed ahead of the
+      // first keyframe (an IG display set at the clip start) is read; a seek inside the item starts at its keyframe.
+      const cc = playItems[i]?.connectionCondition;
+      const fromClipStart = target <= item.inTime && (i === 0 || cc === 5 || cc === 6);
+      const startSpn = fromClipStart || !ep ? range.startSpn : (findEpBefore(ep, target, range)?.spn ?? range.startSpn);
       const endSpn = ep ? (findEpAfter(ep, item.outTime, range)?.spn ?? rangeEnd) : rangeEnd;
       const reader = new M2tsReader({ source, path: streamPath(item.clipId), startSpn, endSpn, pids });
       this.current?.cancel();
