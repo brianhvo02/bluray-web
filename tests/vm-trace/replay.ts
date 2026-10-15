@@ -40,13 +40,16 @@ interface MainIgUnit {
   readonly unit: IgUnit & { readonly pid: number };
 }
 
-/** The IG PES units of a clip, in stream order, each with the packet that completes it. */
+/**
+ * The IG PES units of a clip, in stream order, each with the packet that completes it. IG PES declare their length, and
+ * like m2ts_demux the assembler hands one over from inside the push of its last packet.
+ */
 async function scanMainIg(source: ByteSource, clipId: string): Promise<MainIgUnit[]> {
   const path = streamPath(clipId);
   const units: MainIgUnit[] = [];
-  const lastPkt = new Map<number, number>();
+  let pkt = 0;
   const assembler = new PesAssembler((pes) => {
-    units.push({ endPkt: lastPkt.get(pes.pid)!, unit: { pid: pes.pid, data: pes.payload, ptsUs: pts90ToUs(pes.pts ?? 0), dtsUs: pes.dts === undefined ? undefined : pts90ToUs(pes.dts) } });
+    units.push({ endPkt: pkt, unit: { pid: pes.pid, data: pes.payload, ptsUs: pts90ToUs(pes.pts ?? 0), dtsUs: pes.dts === undefined ? undefined : pts90ToUs(pes.dts) } });
   });
   const size = source.size(path);
   for (let offset = 0; offset < size; offset += READ_CHUNK) {
@@ -54,8 +57,8 @@ async function scanMainIg(source: ByteSource, clipId: string): Promise<MainIgUni
     for (let o = 0; o + SOURCE_PACKET_SIZE <= buf.length; o += SOURCE_PACKET_SIZE) {
       const packet = parseSourcePacket(buf, o);
       if (!packet || !IG_PIDS.has(packet.pid)) continue;
+      pkt = (offset + o) / SOURCE_PACKET_SIZE;
       assembler.push(packet);
-      if (packet.hasPayload) lastPkt.set(packet.pid, (offset + o) / SOURCE_PACKET_SIZE);
     }
   }
   assembler.flush();

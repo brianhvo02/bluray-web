@@ -16,6 +16,10 @@ interface PidState {
   size: number;
   lastCc: number;
   broken: boolean;
+  /** 6 + PES_packet_length when the header declares one (0: unbounded, ends at the next unit start). */
+  expected: number;
+  /** Handed over once complete; later packets until the next unit start are ignored. */
+  done: boolean;
 }
 
 /** Stream ids whose PES packets carry no optional header (ISO 13818-1 Table 2-21). */
@@ -25,7 +29,10 @@ export function readTimestamp(d: Uint8Array, o: number): number {
   return ((d[o] >> 1) & 0x07) * 0x40000000 + ((d[o + 1] << 22) | ((d[o + 2] >> 1) << 15) | (d[o + 3] << 7) | (d[o + 4] >> 1));
 }
 
-/** Reassembles PES packets per PID. A PES completes at the next unit start on its PID, or on flush(). */
+/**
+ * Reassembles PES packets per PID. A PES whose header declares its length completes as soon as that many bytes arrived
+ * (as libbluray's m2ts_demux); an unbounded one (length 0, usual for video) at the next unit start on its PID, or on flush().
+ */
 export class PesAssembler {
   continuityErrors = 0;
   private readonly states = new Map<number, PidState>();
@@ -40,8 +47,12 @@ export class PesAssembler {
         state.broken = true; // tail packets of the previous PES were lost
         this.continuityErrors++;
       }
-      if (state) this.emit(packet.pid, state);
-      this.states.set(packet.pid, { chunks: [packet.payload], size: packet.payload.length, lastCc: packet.continuityCounter, broken: false });
+      if (state && !state.done) this.emit(packet.pid, state);
+      const p = packet.payload;
+      const declared = p.length >= 6 ? (p[4]! << 8) | p[5]! : 0;
+      const next: PidState = { chunks: [p], size: p.length, lastCc: packet.continuityCounter, broken: false, expected: declared > 0 ? 6 + declared : 0, done: false };
+      this.states.set(packet.pid, next);
+      this.completeIfWhole(packet.pid, next);
       return;
     }
     if (!state) return; // joined mid-PES (after a seek); wait for the next unit start
@@ -51,12 +62,22 @@ export class PesAssembler {
       this.continuityErrors++;
     }
     state.lastCc = packet.continuityCounter;
+    if (state.done) return;
     state.chunks.push(packet.payload);
     state.size += packet.payload.length;
+    this.completeIfWhole(packet.pid, state);
+  }
+
+  /** A PES with a declared length is handed over once that many bytes arrived. */
+  private completeIfWhole(pid: number, state: PidState): void {
+    if (state.expected === 0 || state.size < state.expected) return;
+    state.done = true;
+    this.emit(pid, state);
+    state.chunks = [];
   }
 
   flush(): void {
-    for (const [pid, state] of this.states) this.emit(pid, state);
+    for (const [pid, state] of this.states) if (!state.done) this.emit(pid, state);
     this.states.clear();
   }
 

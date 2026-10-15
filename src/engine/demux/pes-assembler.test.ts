@@ -27,16 +27,27 @@ const units: MuxUnit[] = [
 ];
 
 describe('PesAssembler', () => {
+  it('hands over a PES with a declared length once it is complete, without waiting for the next unit start (m2ts_demux)', () => {
+    const out: PesPacket[] = [];
+    const asm = new PesAssembler((p) => out.push(p));
+    const ig: MuxUnit = { pid: 0x1400, streamId: 0xbd, pts: 900_000, payload: new Uint8Array(400).fill(7) };
+    for (const p of packetsOf(muxM2ts([ig]).bytes)) asm.push(p);
+    expect(out.map((p) => [p.pid, p.pts, p.payload.length])).toEqual([[0x1400, 900_000, 400]]);
+    asm.flush();
+    expect(out).toHaveLength(1); // not emitted twice
+  });
+
+
   it('reassembles PES packets per PID with PTS and DTS', () => {
     const out: PesPacket[] = [];
     const asm = new PesAssembler((p) => out.push(p));
     for (const p of packetsOf(muxM2ts(units).bytes)) asm.push(p);
     asm.flush();
-    // Video 1 completes when video 2 starts; flush() then emits per PID in first-seen order (video, audio).
+    // Every PES here declares its length, so each one is handed over with its last packet, in stream order.
     expect(out.map((p) => [p.pid, p.pts, p.dts, p.payload.length, p.payload[0]])).toEqual([
       [0x1011, 903_600, 900_000, 500, 1],
-      [0x1011, 907_200, undefined, 10, 3],
       [0x1100, 900_000, undefined, 40, 2],
+      [0x1011, 907_200, undefined, 10, 3],
     ]);
   });
 
@@ -58,7 +69,7 @@ describe('PesAssembler', () => {
     for (const p of packets.slice(3)) asm.push(p);
     asm.flush();
     expect(asm.continuityErrors).toBe(1);
-    expect(out.map((p) => p.pts)).toEqual([907_200, 900_000]);
+    expect(out.map((p) => p.pts)).toEqual([900_000, 907_200]); // the broken video PES is dropped; the rest in completion order
   });
 
   it('discards a PES whose last packet is lost before the next unit start', () => {
