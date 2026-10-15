@@ -58,6 +58,22 @@ describe('audio ring', () => {
     expect(writer.underruns()).toBe(1);
   });
 
+  it('does not count the silence after the end of a stream as underruns, until playback restarts', () => {
+    const views = ringViews(createRing(48_000, 1));
+    const writer = new RingWriter(views);
+    writer.writeAt(0, stereo(64, 0.25));
+    writer.setPlaying(true);
+    writer.setDraining(true); // everything the stream has is written
+    quantum(views);
+    quantum(views);
+    expect(writer.readFrames()).toBe(256); // the clock keeps running through the silence
+    expect(writer.underruns()).toBe(0);
+    writer.setPlaying(false);
+    writer.setPlaying(true); // a seek or the next playlist: running dry counts again
+    quantum(views);
+    expect(writer.underruns()).toBe(1);
+  });
+
   it('writeAt fills gaps with silence, trims overlap and late samples, and refuses when full', () => {
     const views = ringViews(createRing(1000, 1)); // capacity 1000 frames
     const writer = new RingWriter(views);

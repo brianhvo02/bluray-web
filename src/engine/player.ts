@@ -1098,7 +1098,11 @@ export class Player {
       s.audioStalledBeat = beat;
       return;
     }
-    if (!s.eof && ring.buffered() === 0 && !this.readerBlocked(s)) {
+    if (s.eof && (this.audioWriter?.queuedChunks ?? 0) === 0) {
+      // Audio is decoded as it arrives, so after EOF everything is in the ring: the video may still need a few frames
+      // and the output keeps running (and the clock with it) through silence that is no underrun.
+      ring.setDraining(true);
+    } else if (!s.eof && ring.buffered() === 0 && !this.readerBlocked(s)) {
       ring.setPlaying(false);
       this.setState('buffering');
     }

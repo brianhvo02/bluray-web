@@ -469,6 +469,15 @@ describe('Player', () => {
     expect(lastState(h)).toBe('ended');
   });
 
+  it('counts no underruns when the audio runs out at the end of the playlist', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(9000);
+    expect(lastState(h)).toBe('ended');
+    expect(lastTelemetry(h)?.audioUnderruns).toBe(0);
+  });
+
   it('reports unsupported video instead of hanging in buffering', async () => {
     const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.VC1 });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });

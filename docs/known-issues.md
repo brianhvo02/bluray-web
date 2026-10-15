@@ -27,9 +27,6 @@ what would change that decision.
   navigator, as in libbluray; the player refuses masked keys and controls one layer up with a notice.
 - **IG in sub-paths is read whole when its playlist opens** (`_preload_ig_subpath`), which reads the whole sub-path
   clip; clips over the preload limit show no menu. *Revisit if* a disc carries a large IG sub-path.
-- **TSURUNE plays with audio underruns** (57 over the local-disc gate's seeks and track switches; 0 on the other
-  discs), with every sync window within bounds. It is the only disc decoded in software (1080i). *Revisit* when
-  looking at software-decode load.
 
 ## Audio
 
@@ -43,6 +40,12 @@ what would change that decision.
 - **AC-3 at 44.1 or 32 kHz is ignored** (treated as no sync). Blu-ray AC-3 is always 48 kHz.
 
 ## Resolved (for reference)
+
+- **"Underruns" at the end of a playlist were the stream ending, not dropouts.** The output keeps running until the
+  last video frame (plus 100 ms) so the clock can finish the picture, and every silent quantum after the audio ran out
+  counted as an underrun (about 50 per playlist end; TSURUNE showed 57 from its First Play logo ending). Once all of
+  a stream's audio is written the ring is marked draining and that silence is not counted; starting playback clears
+  it. The local-disc gate now requires 0 underruns.
 
 - **Milestone 3 real-disc gate passed (2026-10-15).** TSURUNE_TSUNAGARI_1 (HDMV) boots through First Play (a logo,
   then the 119 min feature); Top Menu opens its menu, Enter starts the feature, and its three LPCM tracks play in

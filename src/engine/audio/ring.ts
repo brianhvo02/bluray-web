@@ -10,6 +10,8 @@ export const Control = {
   Underruns: 4,
   Capacity: 5,
   SampleRate: 6,
+  /** 1 once the engine has written all of the stream's audio: running dry then is its end, not an underrun. */
+  Draining: 7,
 } as const;
 
 const CONTROL_SLOTS = 8;
@@ -68,7 +70,7 @@ export function renderQuantum(views: RingViews, left: Float32Array, right: Float
   }
   left.fill(0, available);
   right.fill(0, available);
-  if (available < frames) Atomics.add(control, Control.Underruns, 1);
+  if (available < frames && Atomics.load(control, Control.Draining) !== 1) Atomics.add(control, Control.Underruns, 1);
   Atomics.store(counters, COUNTER_READ, BigInt(read + frames));
 }
 
@@ -111,8 +113,15 @@ export class RingWriter {
     return Atomics.load(this.views.control, Control.Underruns);
   }
 
+  /** Starting playback (a new stream, or after a seek) ends any draining. */
   setPlaying(on: boolean): void {
+    if (on) Atomics.store(this.views.control, Control.Draining, 0);
     Atomics.store(this.views.control, Control.Playing, on ? 1 : 0);
+  }
+
+  /** All of the stream's audio is written; the silence that follows is the end of the stream, not an underrun. */
+  setDraining(on: boolean): void {
+    Atomics.store(this.views.control, Control.Draining, on ? 1 : 0);
   }
 
   /**

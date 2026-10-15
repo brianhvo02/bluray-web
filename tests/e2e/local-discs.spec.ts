@@ -119,5 +119,6 @@ for (const name of discs) {
     const t = await telemetry(page);
     console.log(`${name}: ${JSON.stringify(t)}`);
     expect(t?.decoderErrors).toBe(0);
+    expect(t?.audioUnderruns, 'audio underruns').toBe(0);
   });
 }
