@@ -1,0 +1,6 @@
+# Title 1's pop-up menu: once it is available, open it and activate its button (pop-up off, then link to mark 1).
+play title 1
+wait playlist 0
+wait popup
+key popup
+key ok

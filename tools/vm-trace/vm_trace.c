@@ -27,13 +27,14 @@ extern int bd_trace_finished(BLURAY *bd);
 #define TAIL_READS  200
 #define MAX_SETTLE  100000
 #define PSR_TIME    8
+#define PSR_PAGE    11
 #define PLANE_W     1920
 #define PLANE_H     1080
 
 /* ---- state seen through the trace callbacks ---- */
 
 static int tracing;
-static long last_title = -1, last_playlist = -1;
+static long last_title = -1, last_playlist = -1, last_page = -1;
 static int menu_open, popup_open, errored, ended;
 static long reads_done, reads_base;
 
@@ -44,6 +45,9 @@ static void emit_value(const char *kind, uint32_t v)
 
 static void write_cb(int psr, int reg, uint32_t val)
 {
+    if (psr && reg == PSR_PAGE) {
+        last_page = val;
+    }
     if (!tracing || (psr && reg == PSR_TIME)) {
         return;
     }
@@ -103,15 +107,59 @@ static void event_cb(uint32_t event, uint32_t param)
     }
 }
 
-/* ---- IG overlay: kept as an 8-bit palette-index plane (hashed by Task 13) ---- */
+/* ---- IG overlay: a Y,Cr,Cb,T plane with the semantics and hash of src/engine/graphics/overlay-plane.ts ---- */
 
-static uint8_t ig_plane[PLANE_W * PLANE_H];
-static BD_PG_PALETTE_ENTRY ig_palette[256];
-static int ig_open;
+static uint8_t ig_plane[PLANE_W * PLANE_H * 4];
+
+static void plane_put(unsigned x, unsigned y, const BD_PG_PALETTE_ENTRY *pe)
+{
+    uint8_t *p = &ig_plane[(y * PLANE_W + x) * 4];
+    p[0] = pe ? pe->Y : 0;
+    p[1] = pe ? pe->Cr : 0;
+    p[2] = pe ? pe->Cb : 0;
+    p[3] = pe ? pe->T : 0;
+}
+
+/* OverlayPlane.draw: RLE rows from (x, y); a zero-length element ends the row once it is full, else is skipped */
+static void plane_draw(const struct bd_overlay_s *ov)
+{
+    long row = ov->y, col = 0;
+    unsigned i;
+
+    if (!ov->img || !ov->palette) {
+        return;
+    }
+    for (i = 0;; i++) {
+        const BD_PG_RLE_ELEM *e = &ov->img[i];
+        long c, end;
+        if (row >= (long)ov->y + ov->h) {
+            break;
+        }
+        if (e->len == 0) {
+            if (col >= ov->w) {
+                row++;
+                col = 0;
+                continue;
+            }
+            /* libbluray terminates img with an end-of-line after the last row; an early zero is skipped */
+            continue;
+        }
+        end = col + e->len < ov->w ? col + e->len : ov->w;
+        if (row >= 0 && row < PLANE_H) {
+            for (c = col; c < end; c++) {
+                long x = ov->x + c;
+                if (x >= 0 && x < PLANE_W) {
+                    plane_put((unsigned)x, (unsigned)row, &ov->palette[e->color]);
+                }
+            }
+        }
+        col += e->len;
+    }
+}
 
 static void overlay_proc(void *handle, const struct bd_overlay_s * const ov)
 {
-    unsigned x, y, i, n;
+    unsigned x, y;
     (void)handle;
 
     if (!ov || ov->plane != BD_OVERLAY_IG) {
@@ -119,53 +167,42 @@ static void overlay_proc(void *handle, const struct bd_overlay_s * const ov)
     }
     switch (ov->cmd) {
         case BD_OVERLAY_INIT:
-            memset(ig_plane, 0xff, sizeof(ig_plane));
-            ig_open = 1;
-            break;
         case BD_OVERLAY_CLOSE:
-            ig_open = 0;
-            break;
         case BD_OVERLAY_CLEAR:
-            memset(ig_plane, 0xff, sizeof(ig_plane));
+            memset(ig_plane, 0, sizeof(ig_plane));
             break;
         case BD_OVERLAY_WIPE:
             for (y = ov->y; y < (unsigned)ov->y + ov->h && y < PLANE_H; y++) {
                 for (x = ov->x; x < (unsigned)ov->x + ov->w && x < PLANE_W; x++) {
-                    ig_plane[y * PLANE_W + x] = 0xff;
+                    plane_put(x, y, NULL);
                 }
             }
             break;
         case BD_OVERLAY_DRAW:
-            if (ov->palette) {
-                memcpy(ig_palette, ov->palette, sizeof(ig_palette));
-            }
-            if (ov->img) {
-                x = ov->x;
-                y = ov->y;
-                n = 0;
-                for (i = 0; n < (unsigned)ov->w * ov->h; i++) {
-                    unsigned run = ov->img[i].len;
-                    if (!run) {
-                        break;
-                    }
-                    while (run--) {
-                        unsigned px = x + n % ov->w, py = y + n / ov->w;
-                        if (px < PLANE_W && py < PLANE_H) {
-                            ig_plane[py * PLANE_W + px] = (uint8_t)ov->img[i].color;
-                        }
-                        n++;
-                    }
-                }
-            }
+            plane_draw(ov);
             break;
         default:
             break;
     }
 }
 
+/* FNV-1a 64 over every byte of the plane, as OverlayPlane.hash() */
+static const char *plane_hash(void)
+{
+    static char out[17];
+    uint64_t h = 0xcbf29ce484222325ull;
+    size_t i;
+    for (i = 0; i < sizeof(ig_plane); i++) {
+        h ^= ig_plane[i];
+        h *= 0x100000001b3ull;
+    }
+    snprintf(out, sizeof(out), "%016" PRIx64, h);
+    return out;
+}
+
 /* ---- script ---- */
 
-typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE } step_kind;
+typedef enum { S_WAIT_TITLE, S_WAIT_PLAYLIST, S_WAIT_READS, S_WAIT_PAGE, S_WAIT_MENU, S_WAIT_POPUP, S_WAIT_END, S_KEY, S_MOUSE, S_CLICK, S_PLAY_TITLE } step_kind;
 typedef struct { step_kind kind; int a, b; } step_t;
 
 static const struct { const char *name; uint32_t vk; } KEYS[] = {
@@ -199,6 +236,7 @@ static int parse_script(const char *path, step_t **out)
             if (!strcmp(w2, "title")) { s.kind = S_WAIT_TITLE; s.a = a; }
             else if (!strcmp(w2, "playlist")) { s.kind = S_WAIT_PLAYLIST; s.a = a; }
             else if (!strcmp(w2, "reads")) { s.kind = S_WAIT_READS; s.a = a; }
+            else if (!strcmp(w2, "page")) { s.kind = S_WAIT_PAGE; s.a = a; }
             else if (!strcmp(w2, "menu")) s.kind = S_WAIT_MENU;
             else if (!strcmp(w2, "popup")) s.kind = S_WAIT_POPUP;
             else if (!strcmp(w2, "end")) s.kind = S_WAIT_END;
@@ -252,6 +290,7 @@ static int wait_met(const step_t *s)
         case S_WAIT_TITLE: return last_title == s->a;
         case S_WAIT_PLAYLIST: return last_playlist == s->a;
         case S_WAIT_READS: return reads_done - reads_base >= s->a;
+        case S_WAIT_PAGE: return last_page == s->a;
         case S_WAIT_MENU: return menu_open;
         case S_WAIT_POPUP: return popup_open;
         case S_WAIT_END: return ended;
@@ -337,7 +376,7 @@ int main(int argc, char **argv)
         while (idx < nsteps && !errored && wait_met(&steps[idx])) {
             run_step(bd, &steps[idx]);
             settle(bd);
-            printf("{\"k\":\"step\",\"n\":%d}\n", idx);
+            printf("{\"k\":\"step\",\"n\":%d,\"plane\":\"%s\"}\n", idx, plane_hash());
             reads_base = reads_done;
             idx++;
         }

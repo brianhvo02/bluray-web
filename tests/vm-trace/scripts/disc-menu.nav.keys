@@ -1,0 +1,9 @@
+# Top menu by keys: A -> B (animated selection), B opens page 1, C goes back to page 0 on B, B -> A, A plays title 1.
+wait menu
+key down
+key ok
+wait menu
+key ok
+key down
+key ok
+wait playlist 0

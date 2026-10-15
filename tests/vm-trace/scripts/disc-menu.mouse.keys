@@ -1,0 +1,7 @@
+# Top menu by mouse: buttons are 64x32 at (200, 200) A, (200, 300) B, page 1 (200, 400) C.
+wait menu
+mouse 232 316
+click 232 316
+click 232 416
+click 232 216
+wait playlist 0

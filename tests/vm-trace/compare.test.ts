@@ -49,7 +49,7 @@ describe('parseTrace and parseScript', () => {
   });
 
   it('parses every script step and ignores comments', () => {
-    const steps = parseScript(['# boot', 'wait title 2', 'wait end', 'key ok  # select', 'key 7', 'mouse 10 20', 'click 30 40', 'play title 3', 'wait menu'].join('\n'));
+    const steps = parseScript(['# boot', 'wait title 2', 'wait end', 'key ok  # select', 'key 7', 'mouse 10 20', 'click 30 40', 'play title 3', 'wait menu', 'wait page 3'].join('\n'));
     expect(steps).toEqual([
       { op: 'wait', what: 'title', n: 2 },
       { op: 'wait', what: 'end' },
@@ -59,6 +59,7 @@ describe('parseTrace and parseScript', () => {
       { op: 'click', x: 30, y: 40 },
       { op: 'play', title: 3 },
       { op: 'wait', what: 'menu' },
+      { op: 'wait', what: 'page', n: 3 },
     ]);
   });
 

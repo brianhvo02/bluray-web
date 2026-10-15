@@ -17,7 +17,7 @@ A client-side Blu-ray (BDMV) player for desktop Chromium: a TypeScript port of l
   - Nightly drift test: `npx tsx scripts/make-fixture-disc.ts fixtures/local/long-disc --seconds-per-clip 300`, then `NIGHTLY=1 npx playwright test -g "ten minutes"`.
 - `npm run fixture:synthetic`: regenerates the committed discs in `fixtures/synthetic/` from `scripts/` (the scripts build on `tests/helpers/`). Rerun it after changing the builders or muxer, and commit the output. It needs `ffmpeg` on PATH for the audio fixtures (disc3).
 - `npm run wasm:build`: rebuilds `src/wasm/audio/audio.wasm` in Docker (pinned emsdk). CI (`.github/workflows/wasm.yml`) rebuilds it and fails on any diff.
-- `npm run vm-trace:build` / `vm-trace:golden` / `vm-trace -- <disc> <script>`: the libbluray trace harness (`tools/vm-trace/`, Docker). `tests/vm-trace/` compares our HDMV VM and Navigator against golden traces from patched libbluray; `vm-trace:golden` regenerates the golden files (never edit them by hand) and CI fails on any diff (`.github/workflows/vm-trace.yml`).
+- `npm run vm-trace:build` / `vm-trace:golden` / `vm-trace -- <disc> <script> [--dump-pages]`: the libbluray trace harness (`tools/vm-trace/`, Docker; `<disc>` may be a path such as `fixtures/local/<name>`, `<script>` a `.keys` path). `tests/vm-trace/` compares our HDMV VM and Navigator against golden traces from patched libbluray; `vm-trace:golden` regenerates the golden files (never edit them by hand) and CI fails on any diff (`.github/workflows/vm-trace.yml`).
 - CI (`.github/workflows/ci.yml`) runs Node 24 and needs npm ≥ 11.19 because `package.json` uses `allowScripts`. `scripts/ci-audio.sh` sets up a PulseAudio null sink for the sync tests.
 
 ## Architecture

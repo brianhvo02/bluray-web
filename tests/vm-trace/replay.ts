@@ -1,21 +1,76 @@
 import { fileURLToPath } from 'node:url';
 import type { Mpls } from '../../src/engine/bdmv/mpls-parser';
 import type { Clpi } from '../../src/engine/bdmv/clpi-parser';
+import { ALIGNED_UNIT_SIZE, PACKETS_PER_ALIGNED_UNIT, SOURCE_PACKET_SIZE } from '../../src/engine/demux/constants';
+import { M2tsReader } from '../../src/engine/demux/m2ts-reader';
+import { PesAssembler } from '../../src/engine/demux/pes-assembler';
+import { parseSourcePacket } from '../../src/engine/demux/ts-packet';
+import type { ByteSource } from '../../src/engine/disc/byte-source';
 import { FileSource } from '../../src/engine/disc/file-source';
-import { loadClips, openDisc, type DiscModel } from '../../src/engine/disc/open-disc';
+import { loadClips, openDisc, streamPath, type DiscModel } from '../../src/engine/disc/open-disc';
+import { BdVk } from '../../src/engine/graphics/graphics-controller';
+import { OverlayPlane } from '../../src/engine/graphics/overlay-plane';
 import { normalizeDiscPaths } from '../../src/engine/disc/paths';
 import { PSR, RegisterFile, type PsrEvent } from '../../src/engine/hdmv/registers';
 import type { UoMask, UoOp } from '../../src/engine/hdmv/uo-mask';
-import { Navigator, type NavigatorEvent, type PlayAt, type PlaybackPort } from '../../src/engine/nav/navigator';
+import { Navigator, type IgUnit, type NavigatorEvent, type PlayAt, type PlaybackPort } from '../../src/engine/nav/navigator';
 import { directoryEntries } from '../helpers/file-blob';
+import { dumpIgPages } from './dump-pages';
 import type { TraceEntry } from './format';
-import { parseScript, type ScriptStep } from './script';
+import { parseScript, type KeyName, type ScriptStep } from './script';
 
 const READ_SIZE = 6144;
 const SCR_PER_READ = 1800;
 const MAX_READS = 10_000_000;
 const TAIL_READS = 200;
 const NO_CHAPTER = 0xffff;
+const IG_PIDS = new Set(Array.from({ length: 0x20 }, (_, k) => 0x1400 + k)); // IS_HDMV_PID_IG
+const READ_CHUNK = ALIGNED_UNIT_SIZE * 341;
+
+const KEY_VK: Record<KeyName, number> = {
+  up: BdVk.UP, down: BdVk.DOWN, left: BdVk.LEFT, right: BdVk.RIGHT, ok: BdVk.ENTER, topmenu: BdVk.ROOT_MENU, popup: BdVk.POPUP,
+  '0': BdVk.D0, '1': BdVk.D1, '2': BdVk.D2, '3': BdVk.D3, '4': BdVk.D4, '5': BdVk.D5, '6': BdVk.D6, '7': BdVk.D7, '8': BdVk.D8, '9': BdVk.D9,
+};
+
+const pts90ToUs = (pts: number): number => (pts * 1000) / 90;
+
+/** A main-path IG PES and the clip packet that completes it (m2ts_demux hands a PES over with its last packet). */
+interface MainIgUnit {
+  readonly endPkt: number;
+  readonly unit: IgUnit & { readonly pid: number };
+}
+
+/** The IG PES units of a clip, in stream order, each with the packet that completes it. */
+async function scanMainIg(source: ByteSource, clipId: string): Promise<MainIgUnit[]> {
+  const path = streamPath(clipId);
+  const units: MainIgUnit[] = [];
+  const lastPkt = new Map<number, number>();
+  const assembler = new PesAssembler((pes) => {
+    units.push({ endPkt: lastPkt.get(pes.pid)!, unit: { pid: pes.pid, data: pes.payload, ptsUs: pts90ToUs(pes.pts ?? 0), dtsUs: pes.dts === undefined ? undefined : pts90ToUs(pes.dts) } });
+  });
+  const size = source.size(path);
+  for (let offset = 0; offset < size; offset += READ_CHUNK) {
+    const buf = await source.read(path, offset, READ_CHUNK);
+    for (let o = 0; o + SOURCE_PACKET_SIZE <= buf.length; o += SOURCE_PACKET_SIZE) {
+      const packet = parseSourcePacket(buf, o);
+      if (!packet || !IG_PIDS.has(packet.pid)) continue;
+      assembler.push(packet);
+      if (packet.hasPayload) lastPkt.set(packet.pid, (offset + o) / SOURCE_PACKET_SIZE);
+    }
+  }
+  assembler.flush();
+  return units;
+}
+
+/** _preload_m2ts for an IG sub-path, as Player.preloadSubPathIg. */
+async function preloadSubPathIg(source: ByteSource, clipId: string): Promise<IgUnit[]> {
+  const reader = new M2tsReader({ source, path: streamPath(clipId), startSpn: 0, pids: IG_PIDS });
+  const units: IgUnit[] = [];
+  for (let pes = await reader.next(); pes !== null; pes = await reader.next()) {
+    for (const p of pes) units.push({ pid: p.pid, data: p.payload, ptsUs: pts90ToUs(p.pts ?? 0), dtsUs: p.dts === undefined ? undefined : pts90ToUs(p.dts) });
+  }
+  return units;
+}
 
 /** bd_event_e BLURAY_UO_* bits of libbluray's _compressed_mask (playFirstPlay and pauseOff have none). */
 const UO_BIT: Partial<Record<UoOp, number>> = {
@@ -53,7 +108,10 @@ class SimPort implements PlaybackPort {
   /** libbluray's next_mark: the first play mark after the position, -1 when none is left. */
   private nextMark = -1;
 
-  constructor(private readonly disc: DiscModel, private readonly onHold: (on: boolean) => void) {}
+  /** Main-path IG units of each clip, by completing packet. */
+  mainIg: ReadonlyMap<string, readonly MainIgUnit[]> = new Map();
+
+  constructor(private readonly disc: DiscModel, private readonly regs: RegisterFile, private readonly onHold: (on: boolean) => void) {}
 
   setClips(clips: ReadonlyMap<string, Clpi>): void {
     this.clips = clips;
@@ -132,8 +190,30 @@ class SimPort implements PlaybackPort {
       if (this.held || this.mpls !== mpls || this.ended) return;
       this.moveTo(this.item + 1, 0, false);
     }
+    this.deliverIg();
     this.bytes = Math.min(this.clipBytes(this.item), (Math.floor(this.bytes / READ_SIZE) + 1) * READ_SIZE);
     this.playmarkReached();
+  }
+
+  /**
+   * _read_block reads the whole aligned unit around the position and gc_decode_ts demuxes all of it: the IG PES units of
+   * the PID PSR0 names (st0.ig_pid, main path only) that complete in this unit go to the navigator.
+   */
+  private deliverIg(): void {
+    const pi = this.mpls!.playItems[this.item]!;
+    const stream = this.regs.psrRead(PSR.IG_STREAM_ID);
+    const entry = stream > 0 ? pi.stn.ig[stream - 1] : undefined;
+    if (!entry || entry.streamType === 2) return;
+    const first = Math.floor(this.bytes / READ_SIZE) * PACKETS_PER_ALIGNED_UNIT;
+    const end = first + PACKETS_PER_ALIGNED_UNIT;
+    let pushed = false;
+    for (const u of this.mainIg.get(pi.clipId) ?? []) {
+      if (u.endPkt >= first && u.endPkt < end && u.unit.pid === entry.pid) {
+        this.navigator.pushIg(u.unit);
+        pushed = true;
+      }
+    }
+    if (pushed) this.navigator.tick(Number.MAX_SAFE_INTEGER); // decoded (and INIT_MENU run) inside the read, before play marks
   }
 
   private epEntries(item: number): readonly { pts: number; spn: number }[] {
@@ -194,22 +274,41 @@ class SimPort implements PlaybackPort {
     const changed = item !== this.item;
     this.item = item;
     this.bytes = pkt * 192;
-    if (seek) this.findNextMark();
+    if (seek) {
+      this.findNextMark();
+      this.navigator.seekGraphics();
+    }
     if (changed) this.navigator.playItemChanged(item);
   }
 }
 
 /** Runs the disc in `discDir` (a BDMV folder tree) through our Navigator, driven by a trace script. */
-export async function replay(discDir: URL, scriptText: string): Promise<TraceEntry[]> {
+export interface ReplayOptions {
+  /** Receives a description of every IG menu the replay reads (main-path clips up front, sub-path clips as they preload). */
+  readonly dumpPages?: (text: string) => void;
+}
+
+export async function replay(discDir: URL, scriptText: string, opts: ReplayOptions = {}): Promise<TraceEntry[]> {
   const steps = parseScript(scriptText);
   const source = new FileSource(normalizeDiscPaths(await directoryEntries(fileURLToPath(discDir))));
   const disc = await openDisc(source);
   const clipIds = [...new Set([...disc.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)))];
   const clips = await loadClips(source, clipIds);
+  const mainIg = new Map<string, MainIgUnit[]>();
+  for (const pl of disc.playlists.values()) {
+    for (const pi of pl.playItems) {
+      if (mainIg.has(pi.clipId) || !pi.stn.ig.some((e) => e.streamType !== 2)) continue;
+      const units = await scanMainIg(source, pi.clipId);
+      mainIg.set(pi.clipId, units);
+      opts.dumpPages?.(`clip ${pi.clipId} (main path):\n${dumpIgPages(units.map((u) => u.unit))}`);
+    }
+  }
 
   const trace: TraceEntry[] = [];
   const regs = new RegisterFile();
+  let lastPage = -1;
   regs.onWrite = (w): void => {
+    if (w.kind === 'psr' && w.index === PSR.MENU_PAGE_ID) lastPage = w.value;
     if (w.kind === 'psr' && w.index === PSR.TIME) return;
     trace.push({ k: w.kind, i: w.index, v: w.value });
   };
@@ -236,8 +335,10 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
   let scr = 0;
   let readsDone = 0;
   let readsBase = 0;
-  const port = new SimPort(disc, (on) => trace.push({ k: 'still', v: on ? 1 : 0 }));
+  const port = new SimPort(disc, regs, (on) => trace.push({ k: 'still', v: on ? 1 : 0 }));
   port.setClips(clips);
+  port.mainIg = mainIg;
+  const preloads = new Set<Promise<IgUnit[]>>();
   const emit = (e: NavigatorEvent): void => {
     switch (e.type) {
       case 'uoMask': trace.push({ k: 'uo', v: compressedMask(e.mask).toString(16) }); break;
@@ -249,12 +350,34 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
       default: break; // title events come from the PSR listener above
     }
   };
-  const navigator = new Navigator({ disc, regs, port, emit, nowScr: () => scr, seed: 1 });
+  const navigator = new Navigator({ disc, regs, port, emit, nowScr: () => scr, seed: 1,
+    preloadSubPathIg: (clipId) => {
+      const load = preloadSubPathIg(source, clipId).then((units) => {
+        opts.dumpPages?.(`clip ${clipId} (sub-path):\n${dumpIgPages(units)}`);
+        return units;
+      });
+      preloads.add(load);
+      return load;
+    },
+  });
+  const emptyPlane = new OverlayPlane().hash();
+  const planeHash = (): string => navigator.igPlane?.hash() ?? emptyPlane;
   port.navigator = navigator;
 
+  /**
+   * IG units reach the navigator only as they are read (stc = -1 in libbluray): no time gate beyond that. libbluray reads
+   * a sub-path IG clip synchronously when the playlist opens (_preload_m2ts), so settling waits for preloads in flight.
+   */
   const settle = async (): Promise<void> => {
-    navigator.tick(0);
-    await flush();
+    for (;;) {
+      navigator.tick(Number.MAX_SAFE_INTEGER);
+      await flush();
+      if (preloads.size === 0) return;
+      const pending = [...preloads];
+      preloads.clear();
+      await Promise.allSettled(pending);
+      await flush(); // the deferred INIT_MENU may leave the VM runnable: tick again, as the harness polls until quiet
+    }
   };
   /** bd_trace_finished: the program has ended and no playlist is playing. */
   const finished = (): boolean => !navigator.vmRunning && !port.active;
@@ -264,6 +387,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
       case 'title': return lastTitle === s.n;
       case 'playlist': return lastPlaylist === s.n;
       case 'reads': return readsDone - readsBase >= s.n;
+      case 'page': return lastPage === s.n;
       case 'menu': return menuOpen;
       case 'popup': return popupOpen;
       case 'end': return finished();
@@ -272,13 +396,12 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
   const run = (s: ScriptStep): void => {
     switch (s.op) {
       case 'play': navigator.playTitle(s.title); break;
-      case 'key':
-        if (s.key !== 'topmenu') throw new Error(`replay: key ${s.key} needs the graphics controller (Task 12)`);
-        navigator.menuCall();
-        break;
-      case 'mouse':
+      case 'key': navigator.userInput(KEY_VK[s.key]); break;
+      case 'mouse': navigator.mouseSelect(s.x, s.y); break;
       case 'click':
-        throw new Error(`replay: ${s.op} needs the graphics controller (Task 12)`);
+        navigator.mouseSelect(s.x, s.y);
+        navigator.userInput(BdVk.MOUSE_ACTIVATE);
+        break;
       default: break;
     }
   };
@@ -292,7 +415,7 @@ export async function replay(discDir: URL, scriptText: string): Promise<TraceEnt
     while (idx < steps.length && !errored && waitMet(steps[idx]!)) {
       run(steps[idx]!);
       await settle();
-      trace.push({ k: 'step', n: idx });
+      trace.push({ k: 'step', n: idx, plane: planeHash() });
       readsBase = readsDone;
       idx++;
     }
