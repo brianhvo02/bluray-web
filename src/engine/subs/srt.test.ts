@@ -60,6 +60,11 @@ describe('parseSrt', () => {
     expect(texts(cues[0]!)).toEqual(['y<span>s</span> <3']);
   });
 
+  it('ignores a font colour that is no CSS hex colour', () => {
+    const { cues } = parseSrt('1\n00:00:01,000 --> 00:00:02,000\n<font color="#ff00f">a</font><font color="#ABC">b</font>');
+    expect(cues[0]!.lines[0]!.map((r) => r.color)).toEqual([null, '#abc']);
+  });
+
   it('skips and counts a block with a malformed time line and a cue that ends before it starts', () => {
     const { cues, skipped, blocks } = parseSrt('1\n00:00:01,000 -> 00:00:02,000\nbad\n\n2\n00:00:05,000 --> 00:00:04,000\nbackwards\n\n3\n00:00:06,000 --> 00:00:07,000\ngood');
     expect(blocks).toBe(3);

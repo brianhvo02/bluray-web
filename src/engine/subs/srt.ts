@@ -92,7 +92,8 @@ export function parseSrt(text: string): SrtParse {
 
 /** <i> <b> <u> <font …> (open or close), or an override block {\…}; anything else is text. */
 const TAG = /<(\/?)(i|b|u|font)\b([^>]*)>|\{\\([^}]*)\}/gi;
-const COLOR_ATTR = /color\s*=\s*["']?(#[0-9a-f]{3,8}|[a-z]+)\b/i;
+/** A CSS hex colour (#rgb, #rgba, #rrggbb, #rrggbbaa) or a word; other values are ignored. */
+const COLOR_ATTR = /color\s*=\s*["']?(#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{4}|[0-9a-f]{3})(?![0-9a-f])|[a-z]+\b)/i;
 
 function decodeEntities(s: string): string {
   return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');

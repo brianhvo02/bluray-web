@@ -220,6 +220,32 @@ describe('PgStreamControl', () => {
     expect(pids).toEqual([]);
   });
 
+  it('keeps a subtitle on screen until presentation reaches the next play item, even with nothing queued', () => {
+    const { regs, pg } = setup();
+    showStream1(regs);
+    pg.playItemStarted(item(), false, 0);
+    push(pg, subtitleSegments({ x: 10 }), 1_000_000); // its clear set lies past OUT (dropped) or in the next clip
+    pg.tick(1_000_000);
+    pg.playItemStarted(item(), false, 2_000_000); // the reader opens the next item 1 s ahead, queue empty
+    pg.tick(1_500_000);
+    expect(pg.plane.rgba({ x: 10, y: 900, w: 1, h: 1 })[3]).toBe(255);
+    pg.tick(2_000_000);
+    expect(pg.plane.hash()).toBe(EMPTY);
+  });
+
+  it('after a seek starts the item at the target, a subtitle due at the target still shows', () => {
+    const { regs, pg } = setup();
+    showStream1(regs);
+    pg.playItemStarted(item(), false, 0);
+    push(pg, subtitleSegments({ x: 10 }), 1_000_000);
+    pg.tick(1_000_000);
+    pg.seek();
+    pg.playItemStarted(item(), false, 5_500_000); // the read starts at the keyframe before 5.5 s
+    push(pg, subtitleSegments({ x: 40 }), 5_200_000);
+    pg.tick(5_500_000);
+    expect(pg.plane.rgba({ x: 40, y: 900, w: 1, h: 1 })[3]).toBe(255);
+  });
+
   it('gives no PID for a sub-path stream', () => {
     const { regs, pg } = setup();
     showStream1(regs);

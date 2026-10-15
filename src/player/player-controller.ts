@@ -49,6 +49,8 @@ export interface SubtitlesState {
 }
 
 export const MAX_SUBTITLE_OFFSET_MS = 600_000;
+/** Far beyond any subtitle file (a feature's SRT is well under 1 MB); larger picks are refused before reading them. */
+export const MAX_SUBTITLE_FILE_BYTES = 32 * 1024 * 1024;
 export const MIN_SUBTITLE_SCALE = 0.5;
 export const MAX_SUBTITLE_SCALE = 2;
 
@@ -333,6 +335,10 @@ export class PlayerController {
 
   /** Reads the file and hands its bytes to the engine (transferred); `encoding` answers an encoding prompt. */
   async loadSubtitleFile(file: File, encoding?: string): Promise<void> {
+    if (file.size > MAX_SUBTITLE_FILE_BYTES) {
+      this.update(withNotice(this.snapshot, { code: 'subtitle-file', message: 'This file is too large to be a subtitle file' }));
+      return;
+    }
     this.pendingSubtitleFile = file;
     const bytes = await file.arrayBuffer();
     this.post({ type: 'addTextSubtitle', name: file.name, bytes, ...(encoding !== undefined ? { encoding } : {}) }, [bytes]);

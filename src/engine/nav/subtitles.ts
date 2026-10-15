@@ -64,13 +64,15 @@ export class PgStreamControl {
   /**
    * _init_pg_stream after the reader opens a play item; with `ownPsrs`, first the PG part of _update_clip_psrs.
    * `startUs` is where reading starts in playlist time: display sets of the previous item still queued before it are
-   * shown first, and the reset of the plane waits until presentation reaches it.
+   * shown first, and the reset of the plane waits until presentation reaches it (also with nothing queued while a
+   * subtitle is on screen: its clear set may lie past OUT or in the next clip). After a seek the overlay is closed and
+   * nothing is queued, so the reset is immediate.
    */
   playItemStarted(item: PlayItem, ownPsrs: boolean, startUs?: number): void {
     this.item = item;
     if (ownPsrs) this.updateClipPsrs(item);
     this.psrChanged = false;
-    if (startUs !== undefined && this.sets.length > 0) {
+    if (startUs !== undefined && (this.sets.length > 0 || this.renderer.open)) {
       this.decoder.reset();
       this.resetAtUs = startUs;
       this.pidValue = this.findPgStream();

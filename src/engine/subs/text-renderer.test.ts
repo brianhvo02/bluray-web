@@ -115,6 +115,26 @@ describe('TextSubtitleRenderer', () => {
     expect(rects[0]!.w).toBeCloseTo(2 * SIZE * 0.5);
   });
 
+  it('fills a run whose colour the canvas rejects in white, not in the colour left over from before', () => {
+    const r = new TextSubtitleRenderer(srt(cue('00:00:01,000', '00:00:02,000', '<font color="nosuchcolour">x</font>')));
+    const { ctx, fills } = fakeCtx();
+    // a canvas ignores a fillStyle it cannot parse and keeps the old one (here the compositor's black)
+    (ctx as unknown as { fillStyle: string }).fillStyle = '#000000';
+    const guarded = new Proxy(ctx, {
+      set: (t, p, v) => {
+        if (p === 'fillStyle' && v === 'nosuchcolour') return true;
+        (t as unknown as Record<string | symbol, unknown>)[p] = v;
+        return true;
+      },
+      get: (t, p) => {
+        const v = (t as unknown as Record<string | symbol, unknown>)[p];
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    r.render(guarded, 1_000_000, VIDEO, OPTS);
+    expect(fills()[0]).toMatchObject({ text: 'x', style: '#ffffff' });
+  });
+
   it('reports changes at cue boundaries only and applies the offset', () => {
     const r = new TextSubtitleRenderer(srt(cue('00:00:01,000', '00:00:02,000', 'a')));
     const { ctx } = fakeCtx();

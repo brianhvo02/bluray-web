@@ -151,7 +151,9 @@ export class TextSubtitleRenderer {
     ctx.shadowOffsetY = size * SHADOW;
     ctx.strokeText(seg.text, x, y);
     ctx.shadowColor = 'transparent';
-    ctx.fillStyle = seg.run.color ?? '#ffffff';
+    // a colour the canvas cannot parse is ignored by it, which would leave the previous fill (often black): white first
+    ctx.fillStyle = '#ffffff';
+    if (seg.run.color) ctx.fillStyle = seg.run.color;
     ctx.fillText(seg.text, x, y);
     if (seg.run.underline) ctx.fillRect(x, y + size * 0.1, seg.width, Math.max(1, size * 0.06));
   }

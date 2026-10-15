@@ -411,6 +411,17 @@ describe('subtitles', () => {
     expect(posted(worker)).toEqual([{ type: 'selectSubtitle', choice: { kind: 'off' } }]);
   });
 
+  it('refuses a file far too large to be subtitles with a notice, without reading it', async () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    let read = false;
+    const huge = { name: 'movie.mkv', size: 4 * 1024 ** 3, arrayBuffer: async () => { read = true; return new ArrayBuffer(0); } } as unknown as File;
+    await c.loadSubtitleFile(huge);
+    expect(read).toBe(false);
+    expect(worker.posted).toEqual([]);
+    expect(c.getSnapshot().notices).toContainEqual({ code: 'subtitle-file', message: 'This file is too large to be a subtitle file' });
+  });
+
   it('sends a loaded file\'s bytes, and sends them again with the encoding the user picks', async () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());

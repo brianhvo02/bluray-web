@@ -29,6 +29,11 @@ export class PgRenderer {
 
   constructor(private readonly deps: PgRendererDeps) {}
 
+  /** The PG overlay is open (pg_open): something was drawn since the last reset. */
+  get open(): boolean {
+    return this.pgOpen;
+  }
+
   /** Forced objects drawn by the last render (for telemetry). */
   get lastForced(): number {
     return this.forced;
