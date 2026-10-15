@@ -262,3 +262,37 @@ describe('audio tracks', () => {
     expect(c.getSnapshot().selectedAudio).toBe(3);
   });
 });
+
+describe('menus', () => {
+  const make = () => {
+    const worker = new FakeWorker();
+    const controller = new PlayerController(worker, new FakeAudio());
+    return { worker, controller };
+  };
+
+  it('tracks whether a menu is shown and whether a pop-up is available', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'menuActive', active: true, popupAvailable: true });
+    expect(s).toMatchObject({ menuActive: true, popupAvailable: true });
+    s = reduceEvent(s, { type: 'menuActive', active: false, popupAvailable: false });
+    expect(s).toMatchObject({ menuActive: false, popupAvailable: false });
+  });
+
+  it('tracks the button under the pointer and forgets it when the menu closes', () => {
+    let s = reduceEvent({ ...INITIAL_SNAPSHOT, menuActive: true }, { type: 'pointerTarget', button: 3 });
+    expect(s.pointerButton).toBe(3);
+    s = reduceEvent(s, { type: 'menuActive', active: false, popupAvailable: false });
+    expect(s.pointerButton).toBeNull();
+  });
+
+  it('posts menu keys and pointer moves and clicks', () => {
+    const { worker, controller } = make();
+    controller.menuKey('ok');
+    controller.pointer('move', 10, 20);
+    controller.pointer('click', 30, 40);
+    expect(worker.posted).toEqual([
+      { type: 'menuKey', key: 'ok' },
+      { type: 'pointer', kind: 'move', x: 10, y: 20 },
+      { type: 'pointer', kind: 'click', x: 30, y: 40 },
+    ]);
+  });
+});

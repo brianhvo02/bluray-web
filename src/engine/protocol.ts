@@ -46,6 +46,9 @@ export interface AudioTrack {
   readonly playable: boolean;
 }
 
+/** Remote-control keys for disc menus (BD_VK_*); topMenu is a menu call. */
+export type MenuKey = 'up' | 'down' | 'left' | 'right' | 'ok' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'topMenu' | 'popup';
+
 export type EngineCommand =
   | { readonly type: 'open'; readonly entries: ReadonlyArray<readonly [string, Blob]> }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
@@ -61,6 +64,9 @@ export type EngineCommand =
   /** HDMV discs only: 0 = top menu. */
   | { readonly type: 'playTitle'; readonly title: number }
   | { readonly type: 'menuCall' }
+  | { readonly type: 'menuKey'; readonly key: MenuKey }
+  /** In the 1920×1080 menu space. */
+  | { readonly type: 'pointer'; readonly kind: 'move' | 'click'; readonly x: number; readonly y: number }
   /** Forget the open disc ("Open another disc"). */
   | { readonly type: 'close' };
 
@@ -70,6 +76,8 @@ export type EngineEvent =
   | { readonly type: 'indexTitles'; readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>; readonly hasTopMenu: boolean }
   | { readonly type: 'uoMask'; readonly masked: readonly UoOp[] }
   | { readonly type: 'menuActive'; readonly active: boolean; readonly popupAvailable: boolean }
+  /** After a pointer move: the menu button under the pointer, for the cursor. */
+  | { readonly type: 'pointerTarget'; readonly button: number | null }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
   | { readonly type: 'state'; readonly state: PlaybackState }

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
 import { keyToAction } from './keyboard';
+import { toMenuSpace } from './pointer';
 import { PlaylistPicker } from './PlaylistPicker';
 
 const HIDE_CONTROLS_MS = 3000;
@@ -25,6 +26,10 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
   const [pressed, setPressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const playing = snapshot.engineState === 'playing';
+  const menuActiveRef = useRef(snapshot.menuActive);
+  menuActiveRef.current = snapshot.menuActive;
+  /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
+  const pendingMove = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -53,7 +58,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         if (e.key.startsWith('Arrow') && target.dataset.role === 'volume') return;
       }
       if (target instanceof HTMLButtonElement && (e.key === ' ' || e.key === 'Enter')) return;
-      const action = keyToAction(e.key);
+      const action = keyToAction(e.key, { menuActive: menuActiveRef.current });
       if (!action) return;
       e.preventDefault();
       switch (action.type) {
@@ -71,6 +76,9 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
           break;
         case 'cycleAudio':
           controller.cycleAudio();
+          break;
+        case 'menuKey':
+          controller.menuKey(action.key);
           break;
       }
     };
@@ -106,6 +114,29 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
     return () => window.clearTimeout(timer);
   }, [controller, trackNotice]);
 
+  const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
+    if (!snapshot.menuActive) return;
+    const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
+    if (!point) return;
+    const first = pendingMove.current === null;
+    pendingMove.current = point;
+    if (!first) return;
+    requestAnimationFrame(() => {
+      const p = pendingMove.current;
+      pendingMove.current = null;
+      if (p) controller.pointer('move', p.x, p.y);
+    });
+  };
+
+  const onCanvasClick = (e: MouseEvent<HTMLCanvasElement>): void => {
+    if (!snapshot.menuActive) {
+      controller.togglePlay();
+      return;
+    }
+    const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
+    if (point) controller.pointer('click', point.x, point.y);
+  };
+
   const wake = (): void => {
     setIdle(false);
     setActivity((a) => a + 1);
@@ -128,7 +159,13 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         wake();
       }}
     >
-      <canvas ref={canvasRef} className="player-canvas" data-testid="video-canvas" onClick={() => controller.togglePlay()} />
+      <canvas
+        ref={canvasRef}
+        className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
+        data-testid="video-canvas"
+        onPointerMove={onCanvasPointerMove}
+        onClick={onCanvasClick}
+      />
       <div className="notices">
         {snapshot.error && (
           <div className="error-banner" role="alert" data-testid="error">

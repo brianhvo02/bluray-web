@@ -278,6 +278,11 @@ export class Navigator {
     return this.titleType === 'hdmv' ? this.runGc('MOUSE_MOVE', ((x << 16) | (y & 0xffff)) >>> 0) : -1;
   }
 
+  /** The button of the shown menu page at (x, y) in the IG plane, or null. */
+  hitTest(x: number, y: number): number | null {
+    return this.gc.hitTest(x, y);
+  }
+
   /**
    * The VM part of _read_ext, plus the play-item still timer of bd_read_skip_still. IG units whose PTS the playlist
    * clock (`clockUs`) has reached are decoded first (spec 3.3), as _read_ext decodes a block before it runs the VM.

@@ -1,6 +1,6 @@
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { Chapter } from '../engine/nav/timeline';
-import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, PlaybackState, Telemetry } from '../engine/protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 
 export interface Notice {
@@ -24,6 +24,11 @@ export interface PlayerSnapshot {
   readonly muted: boolean;
   readonly audioTracks: readonly AudioTrack[];
   readonly selectedAudio: number | null;
+  /** A disc menu is shown (arrows, Enter, digits and the pointer go to it). */
+  readonly menuActive: boolean;
+  readonly popupAvailable: boolean;
+  /** The menu button under the pointer, after the last pointer move. */
+  readonly pointerButton: number | null;
 }
 
 export const INITIAL_SNAPSHOT: PlayerSnapshot = {
@@ -42,6 +47,9 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   muted: false,
   audioTracks: [],
   selectedAudio: null,
+  menuActive: false,
+  popupAvailable: false,
+  pointerButton: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -69,9 +77,12 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, error: { code: e.code, message: e.message, paths: e.paths } };
     case 'telemetry':
       return { ...s, telemetry: e.telemetry };
+    case 'menuActive':
+      return { ...s, menuActive: e.active, popupAvailable: e.popupAvailable, pointerButton: e.active ? s.pointerButton : null };
+    case 'pointerTarget':
+      return { ...s, pointerButton: e.button };
     case 'indexTitles':
     case 'uoMask':
-    case 'menuActive':
       return s; // consumed by the menu UI in a later task
     case 'playlistCleared':
       return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
@@ -229,6 +240,15 @@ export class PlayerController {
     if (playable.length < 2) return;
     const at = playable.findIndex((t) => t.index === this.snapshot.selectedAudio);
     this.selectAudio(playable[(at + 1) % playable.length].index);
+  }
+
+  menuKey(key: MenuKey): void {
+    this.post({ type: 'menuKey', key });
+  }
+
+  /** (x, y) in the 1920×1080 menu space. */
+  pointer(kind: 'move' | 'click', x: number, y: number): void {
+    this.post({ type: 'pointer', kind, x, y });
   }
 
   dismissNotice(code: string): void {

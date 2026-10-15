@@ -12,6 +12,7 @@ import { DiscError } from './disc/byte-source';
 import { FileSource } from './disc/file-source';
 import { checkStreamReadable, loadClips, openDisc, playlistPath, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
+import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { lookupSpn } from './nav/packets';
@@ -19,11 +20,16 @@ import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
 import { audioTracks } from './playback/tracks';
-import type { AudioTrack, EngineCommand, EngineEvent, NoticeCode, PlaybackState } from './protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, MenuKey, NoticeCode, PlaybackState } from './protocol';
 import type { CompositorLike } from './render/compositor';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
 import { pts90ToUs, ticks45ToUs } from './util/time';
+
+const MENU_KEY_VK: Readonly<Record<Exclude<MenuKey, 'topMenu'>, number>> = {
+  up: BdVk.UP, down: BdVk.DOWN, left: BdVk.LEFT, right: BdVk.RIGHT, ok: BdVk.ENTER, popup: BdVk.POPUP,
+  '0': BdVk.D0, '1': BdVk.D1, '2': BdVk.D2, '3': BdVk.D3, '4': BdVk.D4, '5': BdVk.D5, '6': BdVk.D6, '7': BdVk.D7, '8': BdVk.D8, '9': BdVk.D9,
+};
 
 export interface PlayerDeps {
   emit(event: EngineEvent): void;
@@ -177,6 +183,12 @@ export class Player {
           break;
         case 'menuCall':
           this.navigator?.menuCall();
+          break;
+        case 'menuKey':
+          this.menuKey(cmd.key);
+          break;
+        case 'pointer':
+          this.pointer(cmd.kind, cmd.x, cmd.y);
           break;
         case 'play':
           await this.play();
@@ -334,6 +346,24 @@ export class Player {
     this.setHold(false);
     this.updateMenuState(false, false);
     this.deps.emit({ type: 'uoMask', masked: [] });
+  }
+
+  private menuKey(key: MenuKey): void {
+    const nav = this.navigator;
+    if (!nav) return;
+    if (key === 'topMenu') nav.menuCall();
+    else nav.userInput(MENU_KEY_VK[key]);
+  }
+
+  /** A move selects the button under the pointer (bd_mouse_select) and reports it; a click also activates it. */
+  private pointer(kind: 'move' | 'click', x: number, y: number): void {
+    const nav = this.navigator;
+    if (!nav) return;
+    const px = Math.max(0, Math.min(0xffff, Math.round(x)));
+    const py = Math.max(0, Math.min(0xffff, Math.round(y)));
+    nav.mouseSelect(px, py);
+    if (kind === 'click') nav.userInput(BdVk.MOUSE_ACTIVATE);
+    else this.deps.emit({ type: 'pointerTarget', button: nav.hitTest(px, py) });
   }
 
   private onNavigatorEvent(e: NavigatorEvent): void {

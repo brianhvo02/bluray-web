@@ -782,6 +782,57 @@ describe('Player with HDMV navigation', () => {
     const menuEvents = (h: Harness) => h.events.flatMap((e) => (e.type === 'menuActive' ? [e] : []));
     const bootMenu = (extra: Parameters<typeof harness>[1] = {}) => nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { igUnits: menuAt(0.2), ...extra });
 
+    /** Buttons 1 and 2 (8x4 at (100, 100) and (100, 200)) jump to title 1, which plays 00001. */
+    const inputMenu = async () => {
+      const segments = simpleMenuSegments({ cmds: [asm.jumpTitle(imm(1))] }).map((payload) => ({ pts: CLIP_START_PTS + 0.2 * 90_000, payload }));
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.playPl(imm(1))] }], { igUnits: segments });
+      await untilPlaying(h);
+      await vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(lastTelemetry(h)?.menu).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+      return h;
+    };
+    const untilPlaylist = async (h: Harness, id: string) =>
+      vi.waitFor(
+        async () => {
+          await h.play(100);
+          expect(chapterIds(h)).toContain(id);
+        },
+        { timeout: 5000 },
+      );
+
+    it('menu keys move the selection and activate a button', async () => {
+      const h = await inputMenu();
+      await h.player.handle({ type: 'menuKey', key: 'down' });
+      await h.play(600); // one telemetry interval
+      expect(lastTelemetry(h)!.menu!.selectedButton).toBe(2);
+      await h.player.handle({ type: 'menuKey', key: 'ok' });
+      await untilPlaylist(h, '00001');
+    });
+
+    it('a pointer move reports the button under it and selects it; a click activates it', async () => {
+      const h = await inputMenu();
+      await h.player.handle({ type: 'pointer', kind: 'move', x: 104, y: 202 });
+      expect(h.events.at(-1)).toEqual({ type: 'pointerTarget', button: 2 });
+      await h.play(600);
+      expect(lastTelemetry(h)!.menu!.selectedButton).toBe(2);
+      await h.player.handle({ type: 'pointer', kind: 'move', x: 500, y: 500 });
+      expect(h.events.filter((e) => e.type === 'pointerTarget').at(-1)).toEqual({ type: 'pointerTarget', button: null });
+      await h.player.handle({ type: 'pointer', kind: 'click', x: 104, y: 102 });
+      await untilPlaylist(h, '00001');
+    });
+
+    it('ignores menu keys and pointer input without a navigator', async () => {
+      const h = await harness(CodingType.LPCM);
+      await h.player.handle({ type: 'menuKey', key: 'ok' });
+      await h.player.handle({ type: 'pointer', kind: 'click', x: 1, y: 1 });
+      expect(h.events.filter((e) => e.type === 'pointerTarget')).toEqual([]);
+    });
+
     it('boots into a menu: telemetry carries the page and the buttons drawn, and menuActive is emitted', async () => {
       const h = await bootMenu();
       await untilPlaying(h);
