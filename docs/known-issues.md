@@ -8,6 +8,13 @@ what would change that decision.
 - **Rejected: demux PID peek.** Skipping unwanted PIDs before parsing measured
   103 ms vs 105 ms per 400 MB, which is no gain, so it was not kept.
 
+## Video
+
+- **Interlaced H.264 (1080i) is decoded in software and shown without deinterlacing.** Chrome's hardware decoders
+  fail on streams with `frame_mbs_only_flag` 0 ("Decoding error"; TSURUNE's 1080i logo is MBAFF), so those streams
+  are configured with `prefer-software`. Frames come out as woven fields, so motion shows combing. *Revisit if* a
+  disc has long interlaced content (a deinterlacing shader in the compositor would fix it).
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,

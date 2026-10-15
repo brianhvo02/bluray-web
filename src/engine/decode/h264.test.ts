@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { TEST_SPS, avcAu } from '../../../tests/helpers/h264-units';
+import { INTERLACED_SPS, PROGRESSIVE_SPS, TEST_SPS, avcAu } from '../../../tests/helpers/h264-units';
 import { ParseError } from '../util/byte-reader';
-import { analyzeAvc, avcCodecString } from './h264';
+import { analyzeAvc, avcCodecString, avcIsInterlaced } from './h264';
 import { splitAnnexB } from './nal';
 
 describe('H.264 analysis', () => {
@@ -41,5 +41,17 @@ describe('H.264 analysis', () => {
   it('returns the original buffer when there is nothing to strip', () => {
     const au = avcAu({ idr: true });
     expect(analyzeAvc(au).data).toBe(au);
+  });
+
+  it('reads frame_mbs_only_flag: an interlaced (MBAFF) SPS', () => {
+    expect(avcIsInterlaced(INTERLACED_SPS)).toBe(true);
+  });
+
+  it('reads frame_mbs_only_flag: a progressive SPS', () => {
+    expect(avcIsInterlaced(PROGRESSIVE_SPS)).toBe(false);
+  });
+
+  it('treats an SPS too short to read the flag as progressive', () => {
+    expect(avcIsInterlaced(TEST_SPS)).toBe(false);
   });
 });

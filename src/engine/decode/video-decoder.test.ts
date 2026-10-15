@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { avcAu } from '../../../tests/helpers/h264-units';
+import { INTERLACED_SPS, PROGRESSIVE_SPS, avcAu } from '../../../tests/helpers/h264-units';
 import { CodingType } from '../bdmv/stream-types';
 import { DecoderError, UnsupportedCodecError } from './decoder';
 import { WebCodecsVideoDecoder, type VideoCodecApi, type VideoDecoderLike } from './video-decoder';
@@ -94,6 +94,20 @@ describe('WebCodecsVideoDecoder', () => {
     expect(checked).toEqual([{ codec: 'avc1.640028' }]);
     expect(created[0].config?.codec).toBe('avc1.640028');
     expect(dec.codec).toBe('avc1.640028');
+  });
+
+  it('asks for software decoding for interlaced AVC, which Chrome hardware decoders reject', async () => {
+    const { api, created, checked } = setup();
+    const dec = new WebCodecsVideoDecoder(api);
+    await dec.configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true, spsNal: INTERLACED_SPS }) });
+    expect(checked).toEqual([{ codec: 'avc1.640029', hardwareAcceleration: 'prefer-software' }]);
+    expect(created[0].config?.hardwareAcceleration).toBe('prefer-software');
+  });
+
+  it('leaves the acceleration preference alone for progressive AVC', async () => {
+    const { api, checked } = setup();
+    await new WebCodecsVideoDecoder(api).configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true, spsNal: PROGRESSIVE_SPS }) });
+    expect(checked).toEqual([{ codec: 'avc1.640029' }]);
   });
 
   it('rejects unsupported codecs', async () => {

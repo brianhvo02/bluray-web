@@ -1,6 +1,6 @@
 import { CodingType, codingName } from '../bdmv/stream-types';
 import { DecoderError, UnsupportedCodecError, type Decoder, type StreamConfig } from './decoder';
-import { analyzeAvc, avcCodecString, type AccessUnitInfo } from './h264';
+import { analyzeAvc, avcCodecString, avcIsInterlaced, type AccessUnitInfo } from './h264';
 import { analyzeHevc, hevcCodecString } from './hevc';
 
 export interface VideoUnit {
@@ -35,10 +35,12 @@ export const browserVideoCodecApi: VideoCodecApi = {
 interface CodecOps {
   analyze(data: Uint8Array): AccessUnitInfo;
   codecString(sps: Uint8Array): string;
+  /** Chrome's hardware decoders reject interlaced streams ("Decoding error"); its software decoder handles them. */
+  needsSoftware?(sps: Uint8Array): boolean;
 }
 
 const CODECS: ReadonlyMap<number, CodecOps> = new Map<number, CodecOps>([
-  [CodingType.AVC, { analyze: analyzeAvc, codecString: avcCodecString }],
+  [CodingType.AVC, { analyze: analyzeAvc, codecString: avcCodecString, needsSoftware: avcIsInterlaced }],
   [CodingType.HEVC, { analyze: analyzeHevc, codecString: hevcCodecString }],
 ]);
 
@@ -103,6 +105,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     const info = ops.analyze(config.firstUnit);
     if (!info.sps) throw new Error('first video access unit has no SPS');
     const vdc: VideoDecoderConfig = { codec: ops.codecString(info.sps) };
+    if (ops.needsSoftware?.(info.sps)) vdc.hardwareAcceleration = 'prefer-software';
     this.closed = false;
     const support = await this.api.isConfigSupported(vdc);
     if (this.closed) return; // closed while support was being checked: don't open a decoder nobody owns
