@@ -215,6 +215,11 @@ describe('/jdk/', () => {
 });
 
 describe('paths', () => {
+  it('finds nothing at relative or empty paths', () => {
+    const { vfs } = make();
+    expect([vfs.stat(''), vfs.stat('tmp'), vfs.list(''), vfs.open('', 'r'), vfs.open('tmp/x', 'w')]).toEqual([null, null, null, null, null]);
+  });
+
   it('canonicalizes and confines to the mounts', () => {
     const { vfs } = make();
     expect(vfs.canonicalize('/tmp/a/../b//c/.')).toBe('/tmp/b/c');

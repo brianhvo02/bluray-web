@@ -375,6 +375,7 @@ export class Vfs {
   }
 
   private resolve(path: string): { mount: string | null; rest: string[] } | null {
+    if (!path.startsWith('/')) return null;
     const parts = this.canonicalize(path).split('/').filter(Boolean);
     if (parts.length === 0) return { mount: null, rest: [] };
     const mount = parts[0]!;

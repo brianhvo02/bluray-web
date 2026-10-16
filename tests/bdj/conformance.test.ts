@@ -6,6 +6,7 @@ import { Vfs } from '../../src/engine/bdj/jvm/vfs';
 import { ZipArchive } from '../../src/engine/bdj/jvm/zip';
 import type { JArray, JObject, JValue } from '../../src/engine/bdj/jvm/values';
 import { assembleClass, storedZip } from '../helpers/jvm-asm';
+import type { AsmMethod } from '../helpers/jvm-asm';
 import { syntheticSource } from '../helpers/synthetic-disc';
 import { byteArray } from '../../src/engine/bdj/jvm/natives/util';
 import { deflateSync, gzipSync } from 'node:zlib';
@@ -26,8 +27,13 @@ function bootedJvm(
   stderr: (s: string) => void = () => {},
   bootJars = BOOT_JARS,
   discFiles?: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+  failRead?: (path: string) => boolean,
 ): Jvm {
   const disc = discFiles ? syntheticSource(discFiles) : null;
+  if (disc && failRead) {
+    const read = disc.read.bind(disc);
+    disc.read = (path, offset, length, signal) => (failRead(path) ? Promise.reject(new Error('file was removed')) : read(path, offset, length, signal));
+  }
   return new Jvm({
     bootJars,
     nowMs: () => Date.now(),
@@ -271,7 +277,7 @@ describe('I/O and zip on the JDK class path alone', () => {
     await jvm.boot();
   }, 60_000);
 
-  it.each(['Io', 'Zip'])(
+  it.each(['Io', 'Zip', 'Threads'])(
     '%s prints what HotSpot prints',
     async (name) => {
       await runCapturing(jvm, io, `conformance/${name}`);
@@ -405,47 +411,88 @@ describe('java.util.zip streams', () => {
   }, 60_000);
 });
 
-describe('java.io paths', () => {
-  it('resolves relative paths against user.dir and reports directories as the JDK does', async () => {
-    const jvm = bootedJvm(() => {}, () => {}, [RT]);
+describe('java.io paths and failures', () => {
+  const ASTORE_1 = 0x4c, ALOAD_1 = 0x2b, POP = 0x57, ARETURN = 0xb0, LDC_W = 0x13, IRETURN = 0xac;
+  const m = (c: string, n: string, d: string): { c: ['method', string, string, string] } => ({ c: ['method', c, n, d] });
+  const caught = [ASTORE_1, ALOAD_1, INVOKEVIRTUAL, m('java/lang/Throwable', 'toString', '()Ljava/lang/String;'), ARETURN];
+  const fileTest = (name: string): AsmMethod => ({
+    name,
+    desc: '(Ljava/lang/String;)Z',
+    code: [NEW, { c: ['class', 'java/io/File'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/File', '<init>', '(Ljava/lang/String;)V'),
+      INVOKEVIRTUAL, m('java/io/File', name, '()Z'), IRETURN],
+  });
+  const probe = assembleClass('FsProbe', [
+    {
+      // try { new FileInputStream(path); return "opened"; } catch (FileNotFoundException e) { return e.getMessage(); }
+      name: 'open',
+      desc: '(Ljava/lang/String;)Ljava/lang/String;',
+      code: [
+        NEW, { c: ['class', 'java/io/FileInputStream'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/FileInputStream', '<init>', '(Ljava/lang/String;)V'), POP,
+        LDC_W, { c: ['string', 'opened'] }, ARETURN,
+        ASTORE_1, ALOAD_1, INVOKEVIRTUAL, m('java/lang/Throwable', 'getMessage', '()Ljava/lang/String;'), ARETURN,
+      ],
+      handlers: [[0, 9, 13, 'java/io/FileNotFoundException']],
+    },
+    {
+      // try { new FileInputStream(path).read(); return "read"; } catch (IOException e) { return e.toString(); }
+      name: 'read',
+      desc: '(Ljava/lang/String;)Ljava/lang/String;',
+      code: [
+        NEW, { c: ['class', 'java/io/FileInputStream'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/FileInputStream', '<init>', '(Ljava/lang/String;)V'),
+        INVOKEVIRTUAL, m('java/io/FileInputStream', 'read', '()I'), POP, LDC_W, { c: ['string', 'read'] }, ARETURN, ...caught,
+      ],
+      handlers: [[0, 12, 16, 'java/io/IOException']],
+    },
+    {
+      // try { new ZipFile(path); return "opened"; } catch (IOException e) { return e.toString(); }
+      name: 'zip',
+      desc: '(Ljava/lang/String;)Ljava/lang/String;',
+      code: [
+        NEW, { c: ['class', 'java/util/zip/ZipFile'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/util/zip/ZipFile', '<init>', '(Ljava/lang/String;)V'), POP,
+        LDC_W, { c: ['string', 'opened'] }, ARETURN, ...caught,
+      ],
+      handlers: [[0, 9, 13, 'java/io/IOException']],
+    },
+    fileTest('isDirectory'),
+    fileTest('exists'),
+  ]);
+
+  async function probing(discFiles?: ReadonlyMap<string, Uint8Array<ArrayBuffer>>, failRead?: (path: string) => boolean) {
+    const jvm = bootedJvm(() => {}, () => {}, [RT], discFiles, failRead);
     await jvm.boot();
-    const ASTORE_1 = 0x4c, ALOAD_1 = 0x2b, POP = 0x57, ARETURN = 0xb0, LDC_W = 0x13, IRETURN = 0xac;
-    const m = (c: string, n: string, d: string): { c: ['method', string, string, string] } => ({ c: ['method', c, n, d] });
-    jvm.loader.define(
-      'FsProbe',
-      assembleClass('FsProbe', [
-        {
-          // try { new FileInputStream(path); return "opened"; } catch (FileNotFoundException e) { return e.getMessage(); }
-          name: 'open',
-          desc: '(Ljava/lang/String;)Ljava/lang/String;',
-          code: [
-            NEW, { c: ['class', 'java/io/FileInputStream'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/FileInputStream', '<init>', '(Ljava/lang/String;)V'), POP,
-            LDC_W, { c: ['string', 'opened'] }, ARETURN,
-            ASTORE_1, ALOAD_1, INVOKEVIRTUAL, m('java/lang/Throwable', 'getMessage', '()Ljava/lang/String;'), ARETURN,
-          ],
-          handlers: [[0, 9, 13, 'java/io/FileNotFoundException']],
-        },
-        {
-          name: 'isDirectory',
-          desc: '(Ljava/lang/String;)Z',
-          code: [
-            NEW, { c: ['class', 'java/io/File'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/File', '<init>', '(Ljava/lang/String;)V'),
-            INVOKEVIRTUAL, m('java/io/File', 'isDirectory', '()Z'), IRETURN,
-          ],
-        },
-      ]),
-      null,
-      null,
-    );
-    const str = (v: JValue | undefined): string | null => jvm.heap.jsString(v as JObject | null);
-    const open = async (p: string): Promise<string | null> => str(await jvm.callStatic('FsProbe', 'open', '(Ljava/lang/String;)Ljava/lang/String;', [jvm.heap.newString(p)]));
-    const isDir = (p: string): Promise<JValue | undefined> => jvm.callStatic('FsProbe', 'isDirectory', '(Ljava/lang/String;)Z', [jvm.heap.newString(p)]);
-    expect(await open('/tmp')).toBe('/tmp (Is a directory)');
-    expect(await open('/tmp/none')).toBe('/tmp/none (No such file or directory)');
-    expect(await open('jdk/lib/currency.data')).toBe('opened');
-    expect(await isDir('tmp')).toBe(1);
-    expect(await isDir('jdk/lib')).toBe(1);
-    expect(await isDir('nope')).toBe(0);
+    jvm.loader.define('FsProbe', probe, null, null);
+    const call = async (fn: string, p: string): Promise<JValue | string | null | undefined> => {
+      const desc = fn === 'isDirectory' || fn === 'exists' ? '(Ljava/lang/String;)Z' : '(Ljava/lang/String;)Ljava/lang/String;';
+      const r = await jvm.callStatic('FsProbe', fn, desc, [jvm.heap.newString(p)]);
+      return desc.endsWith('Z') ? r : jvm.heap.jsString(r as JObject | null);
+    };
+    return call;
+  }
+
+  it('resolves relative paths against user.dir and reports directories and the empty path as the JDK does', async () => {
+    const call = await probing();
+    expect(await call('open', '/tmp')).toBe('/tmp (Is a directory)');
+    expect(await call('open', '/tmp/none')).toBe('/tmp/none (No such file or directory)');
+    expect(await call('open', '')).toBe(' (No such file or directory)');
+    expect(await call('open', 'jdk/lib/currency.data')).toBe('opened');
+    expect(await call('isDirectory', 'tmp')).toBe(1);
+    expect(await call('isDirectory', 'jdk/lib')).toBe(1);
+    expect(await call('isDirectory', 'nope')).toBe(0);
+    expect(await call('exists', '')).toBe(0);
+    expect(await call('isDirectory', '')).toBe(0);
+  }, 60_000);
+
+  it('turns a failed disc read into an IOException in the reading thread', async () => {
+    const files = new Map([
+      ['BDMV/JAR/00000.JAR', new Uint8Array(file('./conformance.jar'))],
+      ['BDMV/JAR/00001.JAR', new Uint8Array(file('./conformance.jar'))],
+    ]);
+    const call = await probing(files, (p) => p.endsWith('00001.JAR'));
+    expect(await call('read', '/disc/BDMV/JAR/00001.jar')).toBe('java.io.IOException: file was removed');
+    // rt-bdj.jar has no ZipException, so ZipFile's errors are its superclass IOException.
+    expect(await call('zip', '/disc/BDMV/JAR/00001.jar')).toBe('java.io.IOException: file was removed');
+    expect(await call('read', '/disc/BDMV/JAR/00000.jar')).toBe('read');
+    expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
   }, 60_000);
 });
 

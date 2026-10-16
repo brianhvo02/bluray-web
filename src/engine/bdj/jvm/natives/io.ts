@@ -8,10 +8,11 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import { Suspend } from '../interpreter';
+import { Suspend, ThrowResult } from '../interpreter';
 import type { NativeResult } from '../interpreter';
 import type { Jvm } from '../jvm';
 import type { Vfs, VfsHandle, VfsMode } from '../vfs';
+import { JavaThrowable } from '../values';
 import type { JArray, JObject, JValue } from '../values';
 import type { NativeContext, NativeTable } from './index';
 import { offHeap } from './unsafe';
@@ -32,7 +33,7 @@ function fdTable(jvm: Jvm): FdTable {
 }
 
 /** A path as the process sees it, with user.dir (/) as the working directory. */
-export const absolute = (path: string): string => (path.startsWith('/') ? path : `/${path}`);
+export const absolute = (path: string): string => (path === '' || path.startsWith('/') ? path : `/${path}`);
 
 function canonicalize(path: string): string {
   const out: string[] = [];
@@ -121,10 +122,32 @@ function checkBounds(jvm: Jvm, b: JValue, off: number, len: number): NativeResul
   return null;
 }
 
+/**
+ * Suspends on a host read; a rejection (a removed file, an abort) becomes a Java exception of class `cls` in the
+ * calling thread rather than a failure of the whole runtime.
+ */
+export function suspendRead<T>(jvm: Jvm, read: Promise<T>, cls: string, k: (v: T) => NativeResult): Suspend {
+  let value: T;
+  let failure: unknown = null;
+  let failed = false;
+  return new Suspend(
+    read.then(
+      (v) => void (value = v),
+      (e: unknown) => void ((failed = true), (failure = e)),
+    ),
+    (r) => {
+      if (r instanceof ThrowResult) return r;
+      if (!failed) return k(value);
+      if (failure instanceof JavaThrowable) return new ThrowResult(failure.obj);
+      return jvm.throwNew(cls, failure instanceof Error ? failure.message : String(failure));
+    },
+  );
+}
+
 /** read(2) into `out`; -1 at end of file. Disc reads suspend the thread. */
-function readHandle(jvm: Jvm, h: VfsHandle, out: Uint8Array, off: number, len: number): number | Suspend {
+function readHandle(jvm: Jvm, h: VfsHandle, out: Uint8Array, off: number, len: number, k: (n: number) => NativeResult = (n) => n): NativeResult {
   const r = vfsOf(jvm)!.read(h, out, off, len);
-  return typeof r === 'number' ? r : new Suspend(r);
+  return typeof r === 'number' ? k(r) : suspendRead(jvm, r, 'java/io/IOException', k);
 }
 
 function readBytes(ctx: NativeContext, self: JValue, b: JValue, off: JValue, len: JValue): NativeResult {
@@ -142,9 +165,7 @@ function readByte(ctx: NativeContext, self: JValue): NativeResult {
   const h = handleOf(jvm, self);
   if (!h) return jvm.throwNew('java/io/IOException', 'Stream Closed');
   const one = new Uint8Array(1);
-  const r = readHandle(jvm, h, one, 0, 1);
-  if (typeof r === 'number') return r <= 0 ? -1 : one[0]!;
-  return new Suspend(r.promise.then((n) => ((n as number) <= 0 ? -1 : one[0]!)));
+  return readHandle(jvm, h, one, 0, 1, (n) => (n <= 0 ? -1 : one[0]!));
 }
 
 /** Writes to fd 1 and 2 go to the host's stdout and stderr, decoded as UTF-8 across write boundaries. */

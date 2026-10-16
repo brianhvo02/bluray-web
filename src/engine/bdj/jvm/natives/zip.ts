@@ -9,7 +9,6 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import { Suspend, ThrowResult } from '../interpreter';
 import type { NativeResult } from '../interpreter';
 import type { Jvm } from '../jvm';
 import type { Vfs } from '../vfs';
@@ -19,7 +18,7 @@ import type { JArray, JObject, JValue } from '../values';
 import type { NativeContext, NativeTable } from './index';
 import { offHeap } from './unsafe';
 import { byteArray, jsStr, none } from './util';
-import { absolute } from './io';
+import { absolute, suspendRead } from './io';
 
 interface ZipHandle {
   readonly archive: ZipArchive;
@@ -254,6 +253,15 @@ class ZDeflater {
   }
 }
 
+/** rt-bdj.jar lacks ZipException (no disc path needed it); its superclass IOException stands in then. */
+function zipExceptionClass(jvm: Jvm): string {
+  return jvm.loader.loadBoot('java/util/zip/ZipException') ? 'java/util/zip/ZipException' : 'java/io/IOException';
+}
+
+function zipException(jvm: Jvm, message: string): NativeResult {
+  return jvm.throwNew(zipExceptionClass(jvm), message);
+}
+
 function zipOf(ctx: NativeContext, h: JValue): ZipHandle | null {
   return handles(ctx.jvm).zips.get(h as bigint) ?? null;
 }
@@ -283,26 +291,21 @@ export function registerZipNatives(natives: NativeTable): void {
       if (name === null) return jvm.throwNew('java/lang/NullPointerException');
       const data = jvm.opts.vfs ? readWhole(jvm.opts.vfs, absolute(jsStr(jvm, name))) : null;
       const open = (bytes: Uint8Array | null): NativeResult => {
-        if (bytes === null) return jvm.throwNew('java/util/zip/ZipException', 'No such file or directory');
-        if (bytes.length === 0) return jvm.throwNew('java/util/zip/ZipException', 'zip file is empty');
+        if (bytes === null) return zipException(jvm, 'No such file or directory');
+        if (bytes.length === 0) return zipException(jvm, 'zip file is empty');
         let archive: ZipArchive;
         try {
           archive = ZipArchive.open(bytes);
         } catch (e) {
           if (!(e instanceof ZipError)) throw e;
-          return jvm.throwNew('java/util/zip/ZipException', e.message.includes('end of central directory') ? 'zip END header not found' : 'invalid CEN header (bad signature)');
+          return zipException(jvm, e.message.includes('end of central directory') ? 'zip END header not found' : 'invalid CEN header (bad signature)');
         }
         const h = handles(jvm);
         const id = h.next++;
         h.zips.set(id, { archive, byName: null });
         return id;
       };
-      if (!(data instanceof Promise)) return open(data);
-      let bytes: Uint8Array | null = null;
-      return new Suspend(
-        data.then((b) => void (bytes = b)),
-        (r) => (r instanceof ThrowResult ? r : open(bytes)),
-      );
+      return data instanceof Promise ? suspendRead(jvm, data, zipExceptionClass(jvm), open) : open(data);
     },
     'java/util/zip/ZipFile.getTotal(J)I': (ctx, h) => zipOf(ctx, h)?.archive.list.length ?? 0,
     'java/util/zip/ZipFile.startsWithLOC(J)Z': (ctx, h) => (zipOf(ctx, h)?.archive.startsWithLoc ? 1 : 0),
@@ -342,16 +345,16 @@ export function registerZipNatives(natives: NativeTable): void {
       const z = zipOf(ctx, h);
       const bad = checkRange(ctx.jvm, b, off as number, len as number);
       if (bad) return bad;
-      if (!z) return ctx.jvm.throwNew('java/util/zip/ZipException', 'ZipFile closed');
+      if (!z) return zipException(ctx.jvm, 'ZipFile closed');
       let raw: Uint8Array;
       try {
         raw = z.archive.raw(entryOf(ctx, e));
       } catch (err) {
-        if (err instanceof ZipError) return ctx.jvm.throwNew('java/util/zip/ZipException', 'invalid LOC header (bad signature)');
+        if (err instanceof ZipError) return zipException(ctx.jvm, 'invalid LOC header (bad signature)');
         throw err;
       }
       const p = Number(pos as bigint);
-      if (p < 0 || p > raw.length - 1) return ctx.jvm.throwNew('java/util/zip/ZipException', 'ZIP_Read: specified offset out of range');
+      if (p < 0 || p > raw.length - 1) return zipException(ctx.jvm, 'ZIP_Read: specified offset out of range');
       const n = Math.min(len as number, raw.length - p);
       bytesOf(b).set(raw.subarray(p, p + n), off as number);
       return n;
