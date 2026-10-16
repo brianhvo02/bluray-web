@@ -38,14 +38,34 @@ export async function replayBdj(discDir: URL | string, opts: { until?: string; t
     },
     log: () => {},
   });
-  const timeout = setTimeout(() => rt.jvm.threads.halt(), opts.timeoutMs ?? 120_000);
+  const ac = new AbortController();
+  let booted = false;
+  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const timeout = setTimeout(() => {
+    ac.abort();
+    if (!booted) rt.jvm.threads.halt();
+  }, timeoutMs);
+  const calls = (): number => host?.trace.length ?? 0;
   try {
     const t0 = performance.now();
-    await rt.boot();
+    const bootTimeout = (cause: string): Error => new Error(`replayBdj: boot timed out after ${timeoutMs} ms${cause}`);
+    try {
+      await rt.boot();
+    } catch (e) {
+      if (ac.signal.aborted) throw bootTimeout(` (${String(e)})`);
+      throw e;
+    }
+    if (ac.signal.aborted) throw bootTimeout('');
+    booted = true;
     const bootMs = performance.now() - t0;
     rt.start(FIRST_PLAY);
     const until = opts.until;
-    await rt.run(until === undefined ? {} : { until: (e) => e.call === until });
+    const outcome = await rt.run(until === undefined ? { signal: ac.signal } : { signal: ac.signal, until: (e) => e.call === until });
+    if (until !== undefined && outcome !== 'until') {
+      throw new Error(
+        `replayBdj: run ended '${outcome}' before ${until} (timed out: ${ac.signal.aborted}, exit status ${rt.exitStatus ?? 'none'}, ${calls()} calls traced)`,
+      );
+    }
     return { trace: [...(host?.trace ?? [])], bootMs, untilMs: performance.now() - t0 };
   } finally {
     clearTimeout(timeout);

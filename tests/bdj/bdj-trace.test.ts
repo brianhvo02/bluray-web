@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { describe, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { compareBdjTraces } from './compare';
 import { parseBdjTrace } from './format';
 import { replayBdj } from './replay';
@@ -10,5 +10,13 @@ describe('BD-J trace parity', () => {
     const { trace, bootMs, untilMs } = await replayBdj('fixtures/synthetic/disc-bdj', { until: 'selectPlaylistN' });
     console.log(`disc-bdj replay: boot ${bootMs.toFixed(0)} ms, until selectPlaylistN ${untilMs.toFixed(0)} ms`);
     compareBdjTraces(golden, trace);
+  }, 120_000);
+
+  it('reports a timed-out run explicitly', async () => {
+    await expect(replayBdj('fixtures/synthetic/disc-bdj', { until: 'selectPlaylistN', timeoutMs: 1 })).rejects.toThrow(/timed out after 1 ms|ended 'aborted' before selectPlaylistN \(timed out: true/);
+  }, 120_000);
+
+  it('reports a run that ends before the until call explicitly', async () => {
+    await expect(replayBdj('fixtures/synthetic/disc-bdj', { until: 'noSuchCallN' })).rejects.toThrow(/run ended '(idle|deadlock)' before noSuchCallN \(timed out: false, exit status none, \d+ calls traced\)/);
   }, 120_000);
 });

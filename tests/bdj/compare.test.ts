@@ -16,7 +16,7 @@ describe('compareBdjTraces', () => {
 
   it('names the index, call and both entries of a different argument', () => {
     const ours = [base[0]!, base[1]!, { ...base[2]!, args: [1, -1, -1, '-1'] }];
-    expect(() => compareBdjTraces(base, ours)).toThrow(/control call 1 \(selectPlaylistN\)[\s\S]*"args":\[0,-1,-1,"-1"\][\s\S]*"args":\[1,-1,-1,"-1"\]/);
+    expect(() => compareBdjTraces(base, ours)).toThrow(/control call 1 \(selectPlaylistN; golden has 2 control calls, ours \d\)[\s\S]*"args":\[0,-1,-1,"-1"\][\s\S]*"args":\[1,-1,-1,"-1"\]/);
   });
 
   it('ignores diagnostic calls such as readRegN counts', () => {
@@ -25,7 +25,7 @@ describe('compareBdjTraces', () => {
   });
 
   it('fails on a missing control call and ignores extra trailing ones', () => {
-    expect(() => compareBdjTraces(base, base.slice(0, 1))).toThrow(/control call 1 \(selectPlaylistN\)[\s\S]*\(missing\)/);
+    expect(() => compareBdjTraces(base, base.slice(0, 1))).toThrow(/control call 1 \(selectPlaylistN; golden has 2 control calls, ours \d\)[\s\S]*\(missing\)/);
     expect(() => compareBdjTraces(base, [...base, { call: 'seekN', args: [5], ret: 0 }])).not.toThrow();
   });
 });

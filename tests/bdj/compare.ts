@@ -13,7 +13,7 @@ export function compareBdjTraces(golden: readonly TraceEntry[], ours: readonly T
     const a = g[i]!;
     const b = o[i];
     if (!b || a.call !== b.call || !isDeepStrictEqual(a.args, b.args) || !isDeepStrictEqual(a.ret, b.ret)) {
-      throw new Error(`BD-J trace diverges at control call ${i} (${a.call}):\n  golden: ${show(a)}\n  ours:   ${show(b)}`);
+      throw new Error(`BD-J trace diverges at control call ${i} (${a.call}; golden has ${g.length} control calls, ours ${o.length}):\n  golden: ${show(a)}\n  ours:   ${show(b)}`);
     }
   }
 }
