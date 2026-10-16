@@ -17,6 +17,7 @@ In scope:
 - Drawing with Canvas2D in the engine worker, including `\frx`/`\fry` (not flat).
 - A libass trace harness (`tools/ass-trace/`) producing layout traces and golden PNGs, compared in CI and on local files.
 - Integration into M4a's text track: protocol, `Player`, subtitle menu, drag and drop, telemetry.
+- Episode subtitle sets (SRT and ASS): several files loaded at once, each placed at an episode's start in a multi-episode playlist, switching automatically (§3.5).
 
 Out of scope: loading `.mkv` files to extract subtitles and attachments, and installed system fonts via `queryLocalFonts()` (both a later milestone); rendering SRT through the ASS engine; a style override option; `Comment`, `Picture`, `Sound`, `Movie` and `Command` events; the legacy `Effect` field effects (`Banner`, `Scroll up`, `Scroll down`), which move into scope if a corpus file uses them; JASSUB (see §6.4).
 
@@ -31,6 +32,7 @@ Decisions taken during brainstorming:
 | Fonts | The subtitle file plus font files picked or dropped with it, and `[Fonts]`. MKV extraction and `queryLocalFonts()` are a later milestone |
 | Corpus | The developer's real files in gitignored `fixtures/local/ass/`; committed synthetic files for CI |
 | Verification | Layout trace plus golden PNGs from a pinned libass in Docker, like vm-trace |
+| Multi-episode titles | A set of subtitle files, each placed at an episode start (auto-placed on play items, or chosen from chapters), switching automatically (added after the spec was first approved) |
 
 ## 2. Components
 
@@ -64,7 +66,7 @@ Ported code comes from libass at release 0.17.5 (commit `4a05d8127f525943ebf45fd
 - Layout runs in script coordinates. They are scaled to the fitted video rectangle as libass scales to its frame size: PlayResX/Y to the rectangle, with the storage aspect from LayoutResX/Y when present and the video's coded size otherwise, so anamorphic scripts behave as in libass.
 - Drawing happens at the display size of the video rectangle, so text stays sharp at any window size. Goldens are compared at 1920×1080.
 - The user's size scale maps to libass's `ass_set_font_scale`: it scales font sizes, borders and shadows, and leaves `\pos`, `\move`, `\org`, clips and drawings in place.
-- The user's offset shifts event times, as for SRT.
+- The user's offset shifts event times, as for SRT; in a set, each file has its own (§3.5).
 
 ### 3.3 Drawing
 
@@ -86,26 +88,42 @@ Per event, in libass's order (shadow, then border, then fill, per glyph run, the
 - `changed(timeUs)` is true when the set of active events changes or any active event is animated, so the compositor redraws only then.
 - Collision memory follows libass: positions of events already shown are kept so a later event does not push an earlier one, and it is cleared on seek.
 
+### 3.5 Episode subtitle sets
+
+Applies to SRT and ASS alike; it replaces M4a's single text track with a set of 1–64 files (a single file at the playlist start behaves exactly as before).
+
+- **Files.** Each file has a start (a playlist time, or not placed) and its own offset. A placed file is shown only from its start until the next placed file's start (the last until the playlist ends). Inside that window its event times are `playlist time − start − offset`. Files may mix SRT and ASS; the ASS files of a set share one font collection, so fonts picked once serve every file, and missing families are reported once for the set.
+- **Order.** Files are sorted by name with numeric collation (`Intl.Collator(undefined, { numeric: true })`), so `ep2` precedes `ep10`.
+- **Automatic placement.** Episode starts are the playlist times of play items lasting at least 5 minutes; if no play item does, every play item counts (short discs). When the number of files equals the number of episode starts, file *n* is placed at episode start *n*. Otherwise the first file is placed at the playlist start, the others are not placed, and the notice `Place each subtitle file at its episode's start in the subtitle menu` appears.
+- **Per playlist.** Starts are remembered per playlist ID. When another playlist plays, its remembered starts apply, or automatic placement runs for it.
+- **Manual placement.** A file can be placed at any episode start, any chapter, the current position, or not placed. Two files may not share a start: placing a file where another one is unplaces the other.
+- **Offset keys.** `[` and `]` shift the file whose window contains the current time (no change, and no notice, when none does).
+- **Loading.** A pick or drop of subtitle files replaces the whole set. The encoding prompt appears once per load, and its choice applies to every file of the load that is not UTF-8. A file with no readable events is left out with the notice `<name>: this file has no subtitles we can read`; when none is readable, the existing set stays.
+
 ## 4. Protocol
 
 Commands:
 
-- `addTextSubtitle { name; bytes; encoding?; fonts?: readonly { name: string; bytes: ArrayBuffer }[] }`: the fonts are transferred with the file.
+- `addTextSubtitles { files: readonly { name: string; bytes: ArrayBuffer }[]; encoding?; fonts?: readonly { name: string; bytes: ArrayBuffer }[] }` replaces M4a's `addTextSubtitle`: the set and its fonts, transferred together.
+- `setSubtitleStart { file: number; startUs: number | null }`: places a file of the set (index in name order) or unplaces it.
+- `setSubtitleOffset { file: number; ms: number }`: gains the file index.
 - `addSubtitleFonts { fonts: readonly { name: string; bytes: ArrayBuffer }[] }`: adds fonts to the loaded ASS track; ignored with no ASS track.
 
 Events:
 
-- `subtitles.text` becomes `{ name; cues; format: 'srt' | 'ass'; missingFonts: readonly string[] } | null` (`cues` counts events for ASS).
+- `subtitles.text` becomes `{ files: readonly { name; format: 'srt' | 'ass'; cues; startUs: number | null; offsetMs }[]; missingFonts: readonly string[]; episodeStarts: readonly number[] } | null` (`cues` counts events for ASS), and the event's top-level `offsetMs` goes (it is per file now). Chapters reach the UI through the existing `chapters` event.
+- `subtitleEncodingNeeded` gains `names: readonly string[]` (the files of the load that need it).
 - `NoticeCode` gains `subtitle-fonts`: missing families or unreadable font files.
 
 Telemetry gains `ass: { events: number; animated: number; renderMs: number; overBudget: number } | null`. `renderMs` is the time of the last subtitle draw. `overBudget` counts frames over 8 ms.
 
 ## 5. UI
 
-- "Load subtitle file…" accepts `.srt .ass .ssa .ttf .otf .ttc .woff .woff2` with multiple selection. The first subtitle file in the pick is used, the rest of the pick's subtitle files are ignored with a notice, and font files go with it.
-- Dropping files works the same way. A dropped folder is walked (one level of subfolders) for one subtitle file and its fonts.
+- "Load subtitle files…" accepts `.srt .ass .ssa .ttf .otf .ttc .woff .woff2` with multiple selection. Every subtitle file of the pick joins the set (§3.5), and font files go with them.
+- Dropping files works the same way. A dropped folder is walked (one level of subfolders) for subtitle files and fonts.
+- The menu lists the set's files, each with its start ("0:23:41 · Chapter 6", "Episode 2", or "Not placed"), a start picker (episode starts, chapters, "Current position", "Not placed") and offset − / + with its value. The file showing now is marked.
 - With an ASS track loaded, the subtitle menu shows "Add fonts…" and, when families are missing, a warning line naming them.
-- The offset and size controls apply to ASS as described in §3.2.
+- The offset and size controls apply to ASS as described in §3.2; size is one setting for the set.
 
 ## 6. Verification
 
@@ -137,7 +155,7 @@ If, after porting, a real file still fails the pixel comparison for a reason tha
 ### 6.5 Other tests
 
 - Unit tests: parsing edge cases (missing sections, reordered `Format:`, v4 styles, comments, BOM), uudecode, font name tables and matching, each tag's parsing and interpolation, drawing commands, wrapping per WrapStyle, collision stacking, the cache's static/animated split, format detection.
-- E2E (`tests/e2e/subtitles.spec.ts`): an ASS file with fonts loaded through the menu and by drag and drop shows its event at the right time (telemetry `ass.events`); a missing font produces the notice and the menu warning; "Add fonts…" clears it; the offset shifts events; the A/V sync test still passes with an animated ASS track on.
+- E2E (`tests/e2e/subtitles.spec.ts`): an ASS file with fonts loaded through the menu and by drag and drop shows its event at the right time (telemetry `ass.events`); a missing font produces the notice and the menu warning; "Add fonts…" clears it; the offset shifts events; a two-file set on a two-item playlist is placed automatically, shows file 1's event in item 1 and file 2's in item 2, and re-placing file 2 on a chapter moves it; the A/V sync test still passes with an animated ASS track on.
 
 ## 7. Performance
 
@@ -156,7 +174,7 @@ Delivered phase by phase on main:
 3. **Tags and timing:** `tags.ts`, including `\t`, karaoke, `\move`, `\fad`/`\fade`, `\r`.
 4. **Layout:** `drawing.ts` and `layout.ts`, compared against layout traces.
 5. **Raster:** `raster.ts` and `renderer.ts`, compared against golden PNGs.
-6. **Integration:** protocol, `Player`, menu, drag and drop, fonts, telemetry, E2E.
+6. **Integration:** episode subtitle sets, protocol, `Player`, menu, drag and drop, fonts, telemetry, E2E.
 7. **Real-corpus gate and performance tuning.**
 
 ## 9. Exit criteria

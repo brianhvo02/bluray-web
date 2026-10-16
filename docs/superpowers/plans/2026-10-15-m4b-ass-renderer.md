@@ -4,7 +4,7 @@
 
 **Goal:** User-loaded `.ass`/`.ssa` files, with their fonts, rendered on the player canvas close to libass, including full fansub typesetting, verified against a pinned libass by layout traces and golden images.
 
-**Architecture:** libass 0.17.5's parser (`ass.c`), override-tag engine (`ass_parse.c`), drawing parser (`ass_drawing.c`), font matching (`ass_fontselect.c`, metrics from `ass_font.c`) and the layout half of `ass_render.c` are ported to TypeScript under `src/engine/ass/`. Glyph shaping and rasterization are the browser's (Canvas2D in the engine worker, fonts registered as `FontFace`s); the compositing rules of `render_and_combine_glyphs` are ported on top. A Docker harness built from patched libass writes JSON layout traces and PNG goldens; Playwright compares our layout and pixels in Chrome. `AssRenderer` plugs into M4a's text track.
+**Architecture:** libass 0.17.5's parser (`ass.c`), override-tag engine (`ass_parse.c`), drawing parser (`ass_drawing.c`), font matching (`ass_fontselect.c`, metrics from `ass_font.c`) and the layout half of `ass_render.c` are ported to TypeScript under `src/engine/ass/`. Glyph shaping and rasterization are the browser's (Canvas2D in the engine worker, fonts registered as `FontFace`s); the compositing rules of `render_and_combine_glyphs` are ported on top. A Docker harness built from patched libass writes JSON layout traces and PNG goldens; Playwright compares our layout and pixels in Chrome. `AssRenderer` plugs into M4a's text track, which becomes a set of files placed at episode starts (`subs/text-set.ts`).
 
 **Tech Stack:** TypeScript (strict), React 19, Vite 8, Vitest 5, Playwright 1.64 (Chrome), `pixelmatch` (dev only); C (libass 0.17.5, FreeType, HarfBuzz, FriBidi from Ubuntu 24.04) in Docker for the harness.
 
@@ -37,7 +37,9 @@ As in M3 and M4a, port tasks name the exact libass functions to translate; that 
 - Pixel comparison budget: differing pixels ≤ 0.5% of the event box area of the frame's events, and never more than `max(64, that)`; `pixelmatch` threshold 0.1, `includeAA: false`. Layout position tolerance: 0.5 px.
 - Performance: static frames under 1 ms; the 95th percentile of animated frames under 8 ms (`ass.overBudget` counts frames over 8 ms).
 - Size caps (UI): a subtitle file at most `MAX_SUBTITLE_FILE_BYTES` (existing); fonts at most 64 MiB each and 256 MiB per load, with the notice `Fonts over the size limit were skipped: <names>`.
-- Notices (exact text): missing families `Some fonts are missing and were replaced: <families joined by ", ">`; unreadable fonts `Some font files could not be read: <file names>`; several subtitle files in one pick `Only one subtitle file can be loaded at a time; using <name>`.
+- Large files: 50 000 events parse in under 2 s; a frame looks only at active events (interval index); the static cache is an LRU of 64 events.
+- Episode sets: at most 64 subtitle files; episode starts are play items of at least 5 minutes (`MIN_EPISODE_US`), or every item when none is; numeric name order (`Intl.Collator(undefined, { numeric: true })`).
+- Notices (exact text): placement `Place each subtitle file at its episode's start in the subtitle menu`; unreadable file in a set `<name>: this file has no subtitles we can read`; too many files `Only the first 64 subtitle files were loaded`; missing families `Some fonts are missing and were replaced: <families joined by ", ">`; unreadable fonts `Some font files could not be read: <file names>`.
 - Existing behaviour stays: every existing test keeps passing; SRT rendering is unchanged.
 
 ### Deviations from the spec (decided while planning)
@@ -53,10 +55,10 @@ As in M3 and M4a, port tasks name the exact libass functions to translate; that 
 ## Review Focus
 
 1. **A seek, offset change or rectangle resize while an animated sign is on screen.** The sign is redrawn for the new time at once; collision memory is cleared on seek so a dialogue line does not stay shifted by an event that is no longer shown. Task 14 has a test.
-2. **A file whose styles name fonts the user did not supply.** The track still loads and draws in the fallback, `missingFonts` lists each family once (case-insensitive), the notice appears once, and "Add fonts…" with the right file clears it and redraws in the right face. Tasks 5, 16 and 18 have tests.
+2. **A file whose styles name fonts the user did not supply.** The track still loads and draws in the fallback, `missingFonts` lists each family once (case-insensitive), the notice appears once, and "Add fonts…" with the right file clears it and redraws in the right face. Tasks 5, 17 and 19 have tests.
 3. **Malformed real-world input**: a `[Events]` `Format:` with reordered or missing fields, a style named in an event that does not exist, unclosed `{`, `\t` with no tags, `\pos` given twice, `\clip` with 3 numbers, negative or huge `\fs`/`\bord`, an event with an empty text. No exception; libass's result. Tasks 3 and 6 have tests.
-4. **A very large file** (50 000 events, a 10 MB karaoke file with hundreds of syllables per line). Loading stays under 2 s, a frame looks at only the active events (an interval index, not a scan), and the static cache is bounded (LRU of 64 events). Tasks 3 and 14 have tests.
-5. **Switching subtitle files or closing the disc while fonts are still loading.** The late fonts and track are discarded; nothing from the old file is drawn or reported. Task 16 has a test.
+4. **A set whose files outnumber the episode starts, or a playlist change mid-set.** Only the first file is placed, the notice says how to place the rest, and playing another playlist and coming back restores the user's placements for each. Tasks 16 and 17 have tests.
+5. **Switching subtitle files or closing the disc while fonts are still loading.** The late fonts and track are discarded; nothing from the old file is drawn or reported. Task 17 has a test.
 
 ---
 
@@ -82,11 +84,12 @@ As in M3 and M4a, port tasks name the exact libass functions to translate; that 
 | `src/engine/ass/warp.ts` | create | 13 |
 | `src/engine/ass/renderer.ts` | create | 14 |
 | `tests/ass-trace/pixels.spec.ts` | create | 15 |
-| `src/engine/protocol.ts`, `src/engine/player.ts`, `src/engine/render/compositor.ts`, `src/engine/subs/text-renderer.ts`, `src/engine/worker.ts` | modify | 16 |
-| `src/player/player-controller.ts`, `src/ui/SubtitleMenu.tsx`, `src/ui/PlayerScreen.tsx`, `src/ui/drop-files.ts` | modify / create | 17 |
-| `tests/e2e/subtitles.spec.ts`, `tests/e2e/fixtures/*.ass` | modify / create | 18 |
-| `tests/ass-trace/local.spec.ts`, `tests/ass-trace/times.ts` | create | 19 |
-| docs, `src/engine/NOTICE`, `CLAUDE.md` | modify | 20 |
+| `src/engine/subs/text-set.ts` | create | 16 |
+| `src/engine/protocol.ts`, `src/engine/player.ts`, `src/engine/render/compositor.ts`, `src/engine/subs/text-renderer.ts`, `src/engine/worker.ts` | modify | 17 |
+| `src/player/player-controller.ts`, `src/ui/SubtitleMenu.tsx`, `src/ui/EncodingPrompt.tsx`, `src/ui/PlayerScreen.tsx`, `src/ui/drop-files.ts`, `src/ui/subtitle-starts.ts` | modify / create | 18 |
+| `tests/e2e/subtitles.spec.ts`, `tests/e2e/fixtures/*.ass`, `tests/helpers/font-rename.ts` | modify / create | 19 |
+| `tests/ass-trace/local.spec.ts`, `tests/ass-trace/times.ts` | create | 20 |
+| docs, `src/engine/NOTICE`, `CLAUDE.md` | modify | 21 |
 
 ---
 
@@ -1012,63 +1015,202 @@ Behaviour: `t = round((timeUs − offsetUs) / 1000)`. `RenderSettings` come from
 
 ## Phase F: integration
 
-### Task 16: Protocol and player
+### Task 16: Episode subtitle sets
 
-**Files:** Modify `src/engine/protocol.ts`, `src/engine/player.ts`, `src/engine/worker.ts` (production `FontLoader` over `self.fonts`, default font fetch, canvas measurer), `src/engine/render/compositor.ts` (`storage` from the last frame's `codedWidth`/`codedHeight`), `src/player/player-controller.ts` (`reduceEvent` for the new fields). Test: `src/engine/player.test.ts`, `src/player/player-controller.test.ts`.
+**Files:** Create `src/engine/subs/text-set.ts`. Test: `src/engine/subs/text-set.test.ts`.
+
+Original code (spec §3.5): which file of a set shows at a playlist time, at what local time, and the automatic placement. Pure: no renderer, no protocol.
 
 **Interfaces (produces):**
 ```ts
+export interface SetFile<R> { readonly name: string; readonly format: 'srt' | 'ass'; readonly cues: number; readonly renderer: R }
+export interface Placement { readonly startUs: number | null; readonly offsetMs: number }
+export const MIN_EPISODE_US = 5 * 60 * 1_000_000;
+/** Play item starts lasting ≥ MIN_EPISODE_US; every item start when none does. Playlist time, sorted. */
+export function episodeStarts(items: readonly { readonly startUs: number; readonly durationUs: number }[]): number[];
+/** Name order with numeric collation (ep2 before ep10). */
+export function sortByName<T extends { readonly name: string }>(files: readonly T[]): T[];
+/** File n at episode start n when the counts match (placed: true); else the first file at 0 and the rest unplaced (placed: false). */
+export function autoPlace(fileCount: number, starts: readonly number[]): { readonly placements: Placement[]; readonly placed: boolean };
+export class TextSet<R> {
+  constructor(files: readonly SetFile<R>[]);           // already sorted
+  readonly files: readonly SetFile<R>[];
+  /** Placements for a playlist: remembered ones, else autoPlace (its `placed` is returned so the player can notify). */
+  usePlaylist(playlistId: string, starts: readonly number[]): { readonly placed: boolean };
+  placements(): readonly Placement[];
+  /** Placing a file at another file's start unplaces that other file. */
+  setStart(file: number, startUs: number | null): void;
+  setOffset(file: number, ms: number): void;              // clamped to ±10 minutes as today
+  /** The file whose window [start, next placed start) contains `playlistUs`, and its local time (µs) after the offset; null when none. */
+  at(playlistUs: number): { readonly file: number; readonly renderer: R; readonly localUs: number } | null;
+  /** The next window boundary after `playlistUs` (so the player knows when the shown file changes), or null. */
+  nextBoundary(playlistUs: number): number | null;
+}
+```
+
+- [ ] **Step 1: Write the failing tests:**
+  ```ts
+  import { describe, expect, it } from 'vitest';
+  import { autoPlace, episodeStarts, MIN_EPISODE_US, sortByName, TextSet } from './text-set';
+
+  const MIN = 60_000_000;
+  const file = (name: string) => ({ name, format: 'ass' as const, cues: 1, renderer: name });
+
+  describe('episodeStarts', () => {
+    it('keeps play items of at least five minutes', () => {
+      expect(episodeStarts([{ startUs: 0, durationUs: 30_000_000 }, { startUs: 30_000_000, durationUs: 24 * MIN }, { startUs: 30_000_000 + 24 * MIN, durationUs: 24 * MIN }])).toEqual([30_000_000, 30_000_000 + 24 * MIN]);
+    });
+    it('uses every item when none is that long', () => {
+      expect(episodeStarts([{ startUs: 0, durationUs: 2_000_000 }, { startUs: 2_000_000, durationUs: 2_000_000 }])).toEqual([0, 2_000_000]);
+      expect(MIN_EPISODE_US).toBe(5 * MIN);
+    });
+  });
+
+  describe('sortByName', () => {
+    it('orders numbers numerically', () => {
+      expect(sortByName([file('ep10.ass'), file('ep2.ass'), file('ep1.ass')]).map((f) => f.name)).toEqual(['ep1.ass', 'ep2.ass', 'ep10.ass']);
+    });
+  });
+
+  describe('autoPlace', () => {
+    it('places file n at start n when the counts match', () => {
+      expect(autoPlace(2, [0, 24 * MIN])).toEqual({ placements: [{ startUs: 0, offsetMs: 0 }, { startUs: 24 * MIN, offsetMs: 0 }], placed: true });
+    });
+    it('places only the first file at 0 otherwise', () => {
+      expect(autoPlace(3, [0, 24 * MIN])).toEqual({ placements: [{ startUs: 0, offsetMs: 0 }, { startUs: null, offsetMs: 0 }, { startUs: null, offsetMs: 0 }], placed: false });
+    });
+    it('treats one file as placed at the playlist start', () => {
+      expect(autoPlace(1, [0, 24 * MIN]).placed).toBe(true);
+    });
+  });
+
+  describe('TextSet', () => {
+    const set = () => { const s = new TextSet([file('ep1'), file('ep2')]); s.usePlaylist('00000', [0, 24 * MIN]); return s; };
+    it('shows each file in its window, with local time from its start', () => {
+      const s = set();
+      expect(s.at(MIN)).toEqual({ file: 0, renderer: 'ep1', localUs: MIN });
+      expect(s.at(25 * MIN)).toEqual({ file: 1, renderer: 'ep2', localUs: MIN });
+    });
+    it('hides a file past the next start even if its events run longer', () => {
+      expect(set().at(24 * MIN)!.file).toBe(1);
+    });
+    it('applies each file its own offset', () => {
+      const s = set();
+      s.setOffset(1, 500);
+      expect(s.at(25 * MIN)!.localUs).toBe(MIN - 500_000);
+      expect(s.at(MIN)!.localUs).toBe(MIN);
+    });
+    it('unplaces a file whose start is taken by another', () => {
+      const s = set();
+      s.setStart(1, 0);
+      expect(s.placements().map((p) => p.startUs)).toEqual([null, 0]);
+      expect(s.at(25 * MIN)!.file).toBe(1);
+    });
+    it('shows nothing before the first placed start', () => {
+      const s = set();
+      s.setStart(0, null);
+      expect(s.at(MIN)).toBeNull();
+      expect(s.nextBoundary(MIN)).toBe(24 * MIN);
+    });
+    it('remembers placements per playlist', () => {
+      const s = set();
+      s.setStart(1, 20 * MIN);
+      expect(s.usePlaylist('00001', [0]).placed).toBe(false);
+      s.usePlaylist('00000', [0, 24 * MIN]);
+      expect(s.placements()[1]!.startUs).toBe(20 * MIN);
+    });
+  });
+  ```
+- [ ] **Step 2–4:** fail, implement, pass.
+- [ ] **Step 5: Commit.** `git commit -m "feat(subs): episode subtitle sets"`
+
+### Task 17: Protocol and player
+
+**Files:** Modify `src/engine/protocol.ts`, `src/engine/player.ts`, `src/engine/worker.ts` (production `FontLoader` over `self.fonts`, default font fetch, canvas measurer), `src/engine/render/compositor.ts` (`storage` from the last frame's `codedWidth`/`codedHeight`), `src/player/player-controller.ts` (`reduceEvent` for the new fields). Test: `src/engine/player.test.ts`, `src/player/player-controller.test.ts`.
+
+**Interfaces:**
+- Consumes: `TextSet`, `sortByName`, `episodeStarts` (Task 16), `AssRenderer` (Task 14), `AssFonts`, `FontLoader` (Task 5), `looksLikeAss`, `parseAss` (Task 3).
+- Produces:
+```ts
 // protocol.ts
 export type NoticeCode = 'bdj' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts';
-export interface FontFileData { readonly name: string; readonly bytes: ArrayBuffer }
-// EngineCommand
-  | { readonly type: 'addTextSubtitle'; readonly name: string; readonly bytes: ArrayBuffer; readonly encoding?: string; readonly fonts?: readonly FontFileData[] }
-  | { readonly type: 'addSubtitleFonts'; readonly fonts: readonly FontFileData[] }
-// EngineEvent 'subtitles'
-  readonly text: { readonly name: string; readonly cues: number; readonly format: 'srt' | 'ass'; readonly missingFonts: readonly string[] } | null;
+export interface FileData { readonly name: string; readonly bytes: ArrayBuffer }
+export interface TextFileInfo { readonly name: string; readonly format: 'srt' | 'ass'; readonly cues: number; readonly startUs: number | null; readonly offsetMs: number }
+// EngineCommand (addTextSubtitle is replaced)
+  | { readonly type: 'addTextSubtitles'; readonly files: readonly FileData[]; readonly encoding?: string; readonly fonts?: readonly FileData[] }
+  | { readonly type: 'addSubtitleFonts'; readonly fonts: readonly FileData[] }
+  | { readonly type: 'setSubtitleStart'; readonly file: number; readonly startUs: number | null }
+  | { readonly type: 'setSubtitleOffset'; readonly file: number; readonly ms: number }
+// EngineEvent
+  | { readonly type: 'subtitleEncodingNeeded'; readonly names: readonly string[] }
+  | { readonly type: 'subtitles'; readonly pg: readonly PgTrack[];
+      readonly text: { readonly files: readonly TextFileInfo[]; readonly missingFonts: readonly string[]; readonly episodeStarts: readonly number[] } | null;
+      readonly selected: 'off' | 'text' | { readonly pg: number }; readonly scale: number }   // top-level offsetMs removed
 // Telemetry
   readonly ass: { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number } | null;
+  readonly textFile: number | null;   // index of the set's file showing now
 // PlayerDeps (player.ts)
   readonly createAssDeps?: () => Promise<{ readonly loader: FontLoader; readonly defaultFont: FontFile; readonly measurer: GlyphMeasurer; readonly createCanvas: (w: number, h: number) => OffscreenCanvas; readonly Path2D: typeof Path2D }>;
 ```
-`Player.addTextSubtitle` becomes async: decode text (encoding prompt as before), `looksLikeAss` → `parseAss`; no events → the existing "no subtitles" notice; more than half the Dialogue lines skipped → the existing partial notice. Then build `AssFonts` (`createAssDeps` once per worker), add the picked fonts and the track's `[Fonts]`, resolve every family named by a style and every `\fn` in the events (a regex scan of override blocks), `await fonts.ready()`. A load generation number taken at the start is checked after every `await`: if the disc closed or another file was added meanwhile, the fonts are disposed and nothing changes (Review Focus 5). Then the track is installed (`format: 'ass'`, `renderer: AssRenderer` with `colorMatrix: 'video'`) and selected; notices for `missingFamilies()` and unreadable files. `addSubtitleFonts` adds, re-resolves, awaits, calls `renderer.fontsChanged()`, re-emits `subtitles`. Seeks and offset changes call `renderer.reset()` for ASS. Telemetry `ass` from `renderer.stats()` while an ASS track is selected, else null; `textCue` uses `renderer.visible`.
+`Player.addTextSubtitles` is async. It decodes every file (BOM, strict UTF-8, then the command's `encoding`); if any file needs an encoding and none was given, it emits `subtitleEncodingNeeded { names }` and stops (the UI resends the whole load with one). Each file is parsed as ASS (`looksLikeAss`) or SRT; files without events are left out with the notice `<name>: this file has no subtitles we can read`; the partial-parse notice is per file. If no file is left, the old set stays. When any ASS file is present: one `AssFonts` for the set (`createAssDeps` once per worker), add the picked fonts and every ASS file's `[Fonts]`, resolve every family named by a style or an `\fn` of every ASS file, `await fonts.ready()`. A load generation number taken at the start is checked after every `await`: if the disc closed or another load started meanwhile, the fonts are disposed and nothing changes (Review Focus 5). Then the set is built (`sortByName`, a renderer per file: `TextSubtitleRenderer` or `AssRenderer` with `colorMatrix: 'video'`), `usePlaylist(currentPlaylistId, episodeStarts(timeline items))` runs (the placement notice when `placed` is false), the text choice is selected, and the fonts notices are sent.
 
-- [ ] **Step 1: Write the failing tests** in `player.test.ts` with fake ASS deps: an ASS file with a picked font loads, `subtitles.text` has `format: 'ass'`, `missingFonts: []`; a missing family produces `missingFonts: ['Fancy']` and one `subtitle-fonts` notice with the exact message; `addSubtitleFonts` with the right font clears it and emits `subtitles` again; an unreadable font gives the unreadable notice; closing the disc while the fake loader's promise is pending installs nothing and emits nothing about that file afterwards; loading a second file while the first's fonts are pending keeps only the second; an SRT still loads as before with `format: 'srt'`; telemetry `ass` is null with SRT. In `player-controller.test.ts`: `reduceEvent` copies `format` and `missingFonts`.
-- [ ] **Step 2–4:** fail, implement, pass. Run `npm run typecheck && npm test`.
-- [ ] **Step 5: Commit.** `git commit -m "feat(ass): ASS tracks in the player with font loading"`
+Drawing: `TextSet.at(playlistUs)` picks the file and local time; the compositor draws that file's renderer at `localUs` with offset 0 (the set has applied it). `changed` is also true when `nextBoundary` is crossed. On every playlist start the set's `usePlaylist` runs for it. Seeks call `reset()` on every ASS renderer of the set. `[`/`]` (`setSubtitleOffset` from the UI) target the file showing. `addSubtitleFonts` adds, re-resolves, awaits, calls `fontsChanged()` on the ASS renderers, re-emits `subtitles`. Telemetry `ass` from the showing ASS renderer's `stats()`, else null; `textCue` uses its `visible`; `textFile` is `at(now)?.file ?? null`.
 
-### Task 17: UI
+- [ ] **Step 1: Write the failing tests** in `player.test.ts` with fake ASS deps:
+  - an ASS file with a picked font loads: `subtitles.text.files[0]` has `format: 'ass'`, `startUs: 0`; `missingFonts: []`;
+  - a missing family produces `missingFonts: ['Fancy']` and one `subtitle-fonts` notice with the exact message; `addSubtitleFonts` with the right font clears it and emits `subtitles` again; an unreadable font gives the unreadable notice;
+  - closing the disc while the fake loader's promise is pending installs nothing and emits nothing about that load afterwards; a second load while the first's fonts are pending keeps only the second;
+  - two files on a playlist with two play items are placed at the two item starts; telemetry `textFile` is 0 in item 1 and 1 in item 2; three files on that playlist place only the first and send the placement notice;
+  - `setSubtitleStart { file: 1, startUs: <chapter 3's start> }` moves it and `subtitles` reports it; `setSubtitleOffset { file: 1, ms: 200 }` changes only file 1;
+  - a set where one file is not UTF-8 emits `subtitleEncodingNeeded { names: [that file] }`; resending with an encoding loads both;
+  - an SRT alone still loads as in M4a (`format: 'srt'`, `startUs: 0`); telemetry `ass` is null with SRT.
+  In `player-controller.test.ts`: `reduceEvent` copies the new `text` shape.
+- [ ] **Step 2–4:** fail, implement, pass. Update existing M4a tests to the new command and event shapes. Run `npm run typecheck && npm test`.
+- [ ] **Step 5: Commit.** `git commit -m "feat(subs): subtitle sets with ASS tracks and font loading in the player"`
 
-**Files:** Modify `src/player/player-controller.ts` (`loadSubtitleFiles(files: readonly File[], encoding?: string)`, `addSubtitleFonts(files: readonly File[])`, the pending files for the encoding prompt keep the fonts), `src/ui/SubtitleMenu.tsx` (`accept=".srt,.ass,.ssa,.ttf,.otf,.ttc,.woff,text/plain"`, `multiple`; "Add fonts…" item and the missing-fonts line when `text.format === 'ass'`), `src/ui/PlayerScreen.tsx` (drop handler uses `drop-files.ts`). Create `src/ui/drop-files.ts`. Test: `src/player/player-controller.test.ts`, `src/ui/drop-files.test.ts`.
+### Task 18: UI
+
+**Files:** Modify `src/player/player-controller.ts` (`loadSubtitleFiles(files: readonly File[], encoding?: string)` replaces `loadSubtitleFile`, `addSubtitleFonts(files: readonly File[])`, `setSubtitleStart(file: number, startUs: number | null)`, `shiftSubtitles` sends the showing file's index from telemetry `textFile`, the encoding prompt keeps the whole pending load), `src/ui/SubtitleMenu.tsx` (`accept=".srt,.ass,.ssa,.ttf,.otf,.ttc,.woff,text/plain"`, `multiple`; "Load subtitle files…"; the per-file list of spec §5; "Add fonts…" and the missing-fonts line when any file is ASS), `src/ui/EncodingPrompt.tsx` (lists the names), `src/ui/PlayerScreen.tsx` (drop handler uses `drop-files.ts`). Create `src/ui/drop-files.ts`, `src/ui/subtitle-starts.ts`. Test: `src/player/player-controller.test.ts`, `src/ui/drop-files.test.ts`, `src/ui/subtitle-starts.test.ts`.
 
 **Interfaces (produces):**
 ```ts
 // drop-files.ts
 export const SUBTITLE_EXTENSIONS: readonly string[]; // .srt .ass .ssa
 export const FONT_EXTENSIONS: readonly string[];     // .ttf .otf .ttc .woff
-export function splitPick(files: readonly File[]): { readonly subtitle: File | null; readonly extraSubtitles: readonly File[]; readonly fonts: readonly File[] };
+export function splitPick(files: readonly File[]): { readonly subtitles: readonly File[]; readonly fonts: readonly File[] };
 /** Files of a drop: plain files, and for dropped folders their files one level of subfolders deep (webkitGetAsEntry). */
 export function collectDroppedFiles(items: DataTransferItemList): Promise<File[]>;
+// subtitle-starts.ts: the start picker's choices and the label of a placement
+export interface StartChoice { readonly label: string; readonly startUs: number | null }
+/** "Episode n · 0:23:41" for each episode start, "Chapter n · 0:23:41" for each chapter, "Current position · <time>", "Not placed". */
+export function startChoices(episodeStarts: readonly number[], chapters: readonly Chapter[], nowUs: number): StartChoice[];
+/** "0:23:41 · Chapter 6", "0:23:41 · Episode 2" (an episode start that is also a chapter says Episode), "0:12:05", or "Not placed". */
+export function startLabel(startUs: number | null, episodeStarts: readonly number[], chapters: readonly Chapter[]): string;
 ```
-`loadSubtitleFiles` applies the size caps of Global Constraints (notice for skipped fonts), the "only one subtitle file" notice when `extraSubtitles` is not empty, then posts `addTextSubtitle` with `fonts` (all buffers transferred). A pick of only fonts with an ASS track loaded calls `addSubtitleFonts`.
+`loadSubtitleFiles` applies the size caps of Global Constraints (notice for skipped fonts) and a cap of 64 subtitle files (the rest are skipped with the notice `Only the first 64 subtitle files were loaded`), then posts `addTextSubtitles` with the files and fonts (all buffers transferred). A pick of only fonts with an ASS file in the set calls `addSubtitleFonts`.
 
-- [ ] **Step 1: Write the failing tests:** `splitPick` with `[b.ass, a.srt, x.ttf, y.OTF, readme.txt]` returns `b.ass`, `[a.srt]`, `[x.ttf, y.OTF]`; `loadSubtitleFiles` posts one `addTextSubtitle` with two fonts and transfers three buffers; a 70 MiB font is skipped with the exact notice; fonts only, with an ASS track → `addSubtitleFonts`; the encoding prompt answer resends the fonts too; `collectDroppedFiles` with a fake folder entry of two files and a nested folder of one file returns three files, and ignores a second level.
+- [ ] **Step 1: Write the failing tests:** `splitPick` with `[b.ass, a.srt, x.ttf, y.OTF, readme.txt]` returns subtitles `[b.ass, a.srt]` and fonts `[x.ttf, y.OTF]`; `loadSubtitleFiles` posts one `addTextSubtitles` with two files and two fonts and transfers four buffers; a 70 MiB font is skipped with the exact notice; 65 subtitle files load 64 with the notice; fonts only, with an ASS file in the set → `addSubtitleFonts`; the encoding prompt answer resends the whole load; `shiftSubtitles` targets telemetry's `textFile` and does nothing when it is null; `startChoices` lists episodes, then chapters, then current position, then Not placed with the exact labels; `startLabel` prefers "Episode" when a start is both; `collectDroppedFiles` with a fake folder entry of two files and a nested folder of one file returns three files, and ignores a second level.
 - [ ] **Step 2–4:** fail, implement, pass.
-- [ ] **Step 5: Commit.** `git commit -m "feat(ui): load ASS files with fonts by menu or drop"`
+- [ ] **Step 5: Commit.** `git commit -m "feat(ui): subtitle sets with episode placement, ASS fonts by menu or drop"`
 
-### Task 18: End-to-end
+### Task 19: End-to-end
 
-**Files:** Modify `tests/e2e/subtitles.spec.ts`. Create `tests/e2e/fixtures/sign.ass` (a dialogue line and an animated sign with `\move`, `\t` and `\clip`, fonts DejaVu Sans and DejaVu Serif, times inside the synthetic disc's duration), `tests/e2e/fixtures/missing-font.ass` (style font `Fancy`).
+**Files:** Modify `tests/e2e/subtitles.spec.ts` (M4a's SRT tests move to the new menu label and command). Create `tests/e2e/fixtures/sign.ass` (a dialogue line and an animated sign with `\move`, `\t` and `\clip`, fonts DejaVu Sans and DejaVu Serif, times inside the synthetic disc's duration), `tests/e2e/fixtures/missing-font.ass` (style font `Fancy`), `tests/e2e/fixtures/ep1.ass` and `ep2.ass` (one event each, from 0.5 s to 1.5 s local time, different text).
 
-- [ ] **Step 1: Write the failing tests:** loading `sign.ass` with `DejaVuSans.ttf` and `DejaVuSerif.ttf` through the menu's file input (multi-file) shows events at their time (telemetry `ass.events ≥ 1`, `textCue`), animated count 1 while the sign is up; the same by dropping the three files; `missing-font.ass` alone shows the notice text `Some fonts are missing and were replaced: Fancy` and the menu line; "Add fonts…" with a font whose family is `Fancy` (generate one in the test by renaming DejaVu Sans's name records, with a helper in `tests/helpers/font-rename.ts`) clears both; `]` moves the event by 100 ms; the A/V sync assertions of `playback.spec.ts`'s steady-state test hold with `sign.ass` on (reuse its helper), and `ass.overBudget` is 0.
+- [ ] **Step 1: Write the failing tests:**
+  - `sign.ass` with `DejaVuSans.ttf` and `DejaVuSerif.ttf` through the menu's file input (multi-file) shows events at their time (telemetry `ass.events ≥ 1`, `textCue`), animated count 1 while the sign is up; the same by dropping the three files;
+  - `missing-font.ass` alone shows the notice `Some fonts are missing and were replaced: Fancy` and the menu line; "Add fonts…" with a font whose family is `Fancy` (generated in the test by renaming DejaVu Sans's name records, helper `tests/helpers/font-rename.ts`) clears both;
+  - `]` moves the showing file's event by 100 ms;
+  - on `fixtures/synthetic/disc1` playlist 00000 (two play items, first check its item durations in `scripts/make-fixture-disc.ts`), loading `ep2.ass` and `ep1.ass` together places `ep1` at item 1's start and `ep2` at item 2's (menu labels), telemetry `textFile` is 0 then 1 as playback crosses into item 2, with `textCue` at 0.5–1.5 s after each start; choosing a chapter for `ep2` in the start picker moves where it shows;
+  - the A/V sync assertions of `playback.spec.ts`'s steady-state test hold with `sign.ass` on (reuse its helper), and `ass.overBudget` is 0.
 - [ ] **Step 2–4:** fail, fix, pass: `npm run test:e2e -- subtitles`.
-- [ ] **Step 5: Commit.** `git commit -m "test(e2e): ASS subtitles with fonts"`
+- [ ] **Step 5: Commit.** `git commit -m "test(e2e): ASS subtitles, fonts and episode sets"`
 
 ---
 
 ## Phase G: real corpus, performance, docs
 
-### Task 19: Local corpus gate and performance
+### Task 20: Local corpus gate and performance
 
 **Files:** Create `tests/ass-trace/times.ts`, `tests/ass-trace/local.spec.ts`. Test: `tests/ass-trace/times.test.ts`.
 
@@ -1084,13 +1226,13 @@ export function localFixtures(): AssFixture[];  // fixtures/local/ass/<name>/: t
 - [ ] **Step 1: Write the failing test** `times.test.ts`: an event 1000–3000 gives 1000, 2000, 2999; an animated event adds a frame every 41 ms; `times.txt` replaces sampling.
 - [ ] **Step 2–4:** fail, implement, pass.
 - [ ] **Step 5: Ask the user for the corpus.** Stop and ask the user to put their files in `fixtures/local/ass/<name>/` (the `.ass` plus its fonts). Do not continue the gate without them.
-- [ ] **Step 6: Run the gate.** `ASS_LOCAL=1 npm run test:ass -- local`. Fix porting bugs until it passes; anything that remains is a raster difference to record (Task 20) and report to the user with its diff images, per spec §6.4.
+- [ ] **Step 6: Run the gate.** `ASS_LOCAL=1 npm run test:ass -- local`. Fix porting bugs until it passes; anything that remains is a raster difference to record (Task 21) and report to the user with its diff images, per spec §6.4.
 - [ ] **Step 7: Commit.** `git commit -m "test(ass): local corpus gate with performance budget"`
 
-### Task 20: Docs
+### Task 21: Docs
 
 **Files:** Modify `docs/known-issues.md`, `src/engine/NOTICE`, `CLAUDE.md`, `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md` (§11 milestone 4 line), `docs/superpowers/specs/2026-10-15-m4b-ass-renderer-design.md` (Status line and a §10 Deviations section listing the seven planning deviations above and any decided while implementing).
 
-- [ ] **Step 1:** `known-issues.md`: replace "ASS/SSA files are not supported yet" with what is deferred (MKV extraction, `queryLocalFonts()`, WOFF2, legacy `Effect` effects, mixed-direction text across style runs, line breaking without libunibreak) and any corpus exceptions from Task 19 with their causes. `NOTICE`: libass's ISC notice and every ported file with its libass sources; DejaVu's licence for `default-font.ttf`. `CLAUDE.md`: M4b done; the `ass-trace` commands next to `vm-trace`; `npm run test:ass`; `ASS_LOCAL=1`; the `ass/` module in Architecture.
+- [ ] **Step 1:** `known-issues.md`: replace "ASS/SSA files are not supported yet" with what is deferred (MKV extraction, `queryLocalFonts()`, WOFF2, legacy `Effect` effects, mixed-direction text across style runs, line breaking without libunibreak) and any corpus exceptions from Task 20 with their causes. `NOTICE`: libass's ISC notice and every ported file with its libass sources; DejaVu's licence for `default-font.ttf`. `CLAUDE.md`: M4b done; the `ass-trace` commands next to `vm-trace`; `npm run test:ass`; `ASS_LOCAL=1`; the `ass/` module in Architecture.
 - [ ] **Step 2: Verify.** `npm run typecheck && npm test && npm run test:e2e && npm run test:ass`, and `npm run ass-trace:golden && git diff --exit-code tests/ass-trace/golden/`.
 - [ ] **Step 3: Commit.** `git commit -m "docs: M4b native ASS renderer"`
