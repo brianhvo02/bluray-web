@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BUILT_IN_SETS, missingLabel, parseInputConf, resolveSets } from './shader-sets';
+import { BUILT_IN_SETS, importedName, missingLabel, parseInputConf, resolveSets } from './shader-sets';
 
 const HQ_A = [
   'Anime4K_Clamp_Highlights.glsl',
@@ -69,6 +69,20 @@ describe('resolveSets', () => {
     const r = resolveSets([{ name: 'dup', files: HQ_A, origin: 'imported' }, other], new Set(HQ_A));
     expect(r.some((e) => e.name === 'dup')).toBe(false);
     expect(r.at(-1)).toMatchObject({ name: 'mine', available: false, missing: ['m.glsl'] });
+  });
+});
+
+describe('importedName', () => {
+  it('suffixes a set named like a built-in with a different list', () => {
+    expect(importedName({ name: 'Anime4K: Mode A (HQ)', files: ['x.glsl'], origin: 'imported' }).name).toBe('Anime4K: Mode A (HQ) (imported)');
+  });
+  it('keeps other names, and a built-in name with the same list', () => {
+    expect(importedName({ name: 'Mine', files: ['x.glsl'], origin: 'imported' }).name).toBe('Mine');
+    expect(importedName({ name: 'Anime4K: Mode A (HQ)', files: HQ_A, origin: 'imported' }).name).toBe('Anime4K: Mode A (HQ)');
+  });
+  it('is stable on an already renamed set', () => {
+    const once = importedName({ name: 'Anime4K: Mode A (HQ)', files: ['x.glsl'], origin: 'imported' });
+    expect(importedName(once)).toEqual(once);
   });
 });
 

@@ -62,6 +62,12 @@ function sameFiles(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((f, i) => f === b[i]);
 }
 
+/** An imported set named like a built-in with a different list is renamed `<name> (imported)` so names stay unique. */
+export function importedName(def: ShaderSetDef): ShaderSetDef {
+  const clash = BUILT_IN_SETS.some((b) => b.name === def.name && !sameFiles(b.files, def.files));
+  return clash ? { ...def, name: `${def.name} (imported)` } : def;
+}
+
 function entry(def: ShaderSetDef, library: ReadonlySet<string>): SetEntry {
   const missing = def.files.filter((f) => !library.has(f));
   return { ...def, missing, available: missing.length === 0 };

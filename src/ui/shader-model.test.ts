@@ -201,4 +201,27 @@ describe('ShaderModel', () => {
     expect(apply).toHaveBeenCalledTimes(1);
     expect(apply.mock.calls[0]![0]!.files.map((f) => f.name)).toEqual(['Anime4K_Restore_CNN_M.glsl']);
   });
+
+  it('renames an imported set named like a built-in; select applies its own list and cycle passes both', async () => {
+    const { model, apply, lib } = setup();
+    await model.add([...modeAFiles(), fixture('input.conf', `K glsl-shaders set "${MODE_A_FILES[0]}"; show-text "${MODE_A}"\n`)]);
+    const renamed = `${MODE_A} (imported)`;
+    expect(model.getSnapshot().imported).toEqual([renamed]);
+    expect((await lib.importedSets()).map((s) => s.name)).toEqual([renamed]);
+    const names = model.getSnapshot().sets.map((s) => s.name);
+    expect(new Set(names).size).toBe(names.length);
+
+    await model.select(renamed);
+    expect(apply.mock.calls.at(-1)![0]!.files.map((f) => f.name)).toEqual([MODE_A_FILES[0]]);
+    await model.select(MODE_A);
+    expect(apply.mock.calls.at(-1)![0]!.files.map((f) => f.name)).toEqual(MODE_A_FILES);
+
+    await model.select(null);
+    const seen: (string | null)[] = [];
+    for (let i = 0; i < 4; i++) {
+      await model.cycle();
+      seen.push(model.getSnapshot().selected);
+    }
+    expect(seen).toEqual([MODE_A, renamed, null, MODE_A]);
+  });
 });

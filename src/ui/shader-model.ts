@@ -1,7 +1,7 @@
 import { validateShaderFile } from '../engine/shaders/parse';
 import type { ShaderSetData } from '../engine/protocol';
 import type { ShaderLibrary, StoredShaderFile } from './shader-library';
-import { parseInputConf, resolveSets, type SetEntry, type ShaderSetDef } from './shader-sets';
+import { importedName, parseInputConf, resolveSets, type SetEntry, type ShaderSetDef } from './shader-sets';
 
 export interface AddReport {
   readonly added: readonly string[];
@@ -78,7 +78,10 @@ export class ShaderModel {
       for (const file of files) {
         const name = baseName(file.name);
         if (name === 'input.conf') {
-          for (const s of parseInputConf(await file.text())) sets.set(s.name, s);
+          for (const parsed of parseInputConf(await file.text())) {
+            const s = importedName(parsed);
+            sets.set(s.name, s);
+          }
         } else if (name.toLowerCase().endsWith('.glsl')) {
           // Oversize files are rejected before their text is read.
           const source = file.size > 4 * 1024 * 1024 ? '' : await file.text();

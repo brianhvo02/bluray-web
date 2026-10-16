@@ -108,7 +108,7 @@ The player carries Anime4K v4's mode lists from `md/Template/GLSL_*/input.conf` 
 
 ### 4.3 `input.conf` import
 
-Each binding whose command contains `glsl-shaders set "<list>"` (or `change-list glsl-shaders set`) becomes a set. Its file list is the `:`-separated (`;` also accepted) paths reduced to base names (`~~/shaders/Anime4K_Clamp_Highlights.glsl` → `Anime4K_Clamp_Highlights.glsl`). Its name is the text of a `show-text "…"` in the same command, else the key name. `glsl-shaders clr` lines are ignored. An imported set whose file list equals a built-in one is not duplicated. Importing again replaces sets of the same name.
+Each binding whose command contains `glsl-shaders set "<list>"` (or `change-list glsl-shaders set`) becomes a set. Its file list is the `:`-separated (`;` also accepted) paths reduced to base names (`~~/shaders/Anime4K_Clamp_Highlights.glsl` → `Anime4K_Clamp_Highlights.glsl`). Its name is the text of a `show-text "…"` in the same command, else the key name. `glsl-shaders clr` lines are ignored. An imported set whose file list equals a built-in one is not duplicated; one that only shares a built-in's name is stored as `<name> (imported)`, so set names stay unique. Importing again replaces sets of the same name.
 
 ### 4.4 Persistence
 
