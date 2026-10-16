@@ -13,7 +13,8 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdmv/clpi-parser.ts   from src/libbluray/bdnav/clpi_parse.c
     bdmv/index-parser.ts  from src/libbluray/bdnav/index_parse.c
     bdmv/mobj-parser.ts   from src/libbluray/hdmv/mobj_parse.c
-    bdmv/version.ts       from src/libbluray/bdnav/bdmv_parse.c (bdmv_parse_header)
+    bdmv/bdjo-parser.ts   from src/libbluray/bdj/bdjo_parse.c
+    bdmv/version.ts      from src/libbluray/bdnav/bdmv_parse.c (bdmv_parse_header)
     bdmv/sound-parser.ts  from src/libbluray/bdnav/sound_parse.c
     hdmv/registers.ts     from src/libbluray/register.c
     hdmv/uo-mask.ts       from src/libbluray/bdnav/uo_mask.c, uo_mask.h, uo_mask_table.h
