@@ -27,6 +27,8 @@ export interface FrameEvent {
   readonly animated: boolean;
   /** Per glyph (same order as layout.text.glyphs): calc_transform_matrix, null for skipped glyphs. */
   readonly matrices: readonly (Mat3 | null)[];
+  /** How far collision handling moved the event (px): its images are drawn moved by this (shift_event). */
+  readonly shiftY: number;
 }
 
 export interface FrameLayout { readonly t: number; readonly events: readonly FrameEvent[] }
@@ -106,7 +108,7 @@ export class FrameBuilder {
       this.memory.clear(); // ass_reconfigure bumps render_id
       this.lastSettings = settings;
     }
-    const events: FrameEvent[] = [];
+    const events: (Omit<FrameEvent, 'shiftY'> & { top0: number })[] = [];
     for (const i of this.index.active(t)) {
       const ev = this.track.events[i]!;
       if (ev.style >= this.track.styles.length) continue;
@@ -134,7 +136,7 @@ export class FrameBuilder {
         detectCollisions: s.detectCollisions,
         shiftDirection: valign === VALIGN_SUB ? -1 : 1,
       };
-      events.push({ index: i, layout: l, box, animated: this.isAnimated(i), matrices });
+      events.push({ index: i, layout: l, box, animated: this.isAnimated(i), matrices, top0: box.top });
     }
     events.sort((a, b) => this.track.events[a.index]!.layer - this.track.events[b.index]!.layer || this.track.events[a.index]!.readOrder - this.track.events[b.index]!.readOrder);
     for (let from = 0; from < events.length; ) {
@@ -144,6 +146,6 @@ export class FrameBuilder {
       this.memory.fix(events.slice(from, to).map((e) => e.box));
       from = to;
     }
-    return { t, events };
+    return { t, events: events.map(({ top0, ...e }) => ({ ...e, shiftY: e.box.top - top0 })) };
   }
 }

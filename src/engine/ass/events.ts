@@ -73,6 +73,8 @@ export interface GlyphInfo {
   emPx: number;
   metrics: GlyphMetrics | null;
   drawing: Drawing | null;
+  /** A ligature root: the characters of its cluster, drawn together (null for a single character). */
+  clusterText: string | null;
 }
 
 export interface EventText { readonly glyphs: GlyphInfo[]; readonly state: RenderState; readonly now: number }
@@ -111,7 +113,7 @@ function glyphFrom(s: RenderState, code: number, drawingText: string | null): Gl
     fade: s.fade, shapeRunId: 0, posX: 0, posY: 0, offsetX: 0, offsetY: 0, advanceX: 0, advanceY: 0,
     clusterAdvanceX: 0, clusterAdvanceY: 0, shiftX: 0, shiftY: 0, next: null,
     bboxXMin: 0, bboxYMin: 0, bboxXMax: 0, bboxYMax: 0, trScaleX: 1, trScaleY: 1, trOffsetX: 0, trOffsetY: 0,
-    emPx: 0, metrics: null, drawing: null,
+    emPx: 0, metrics: null, drawing: null, clusterText: null,
   };
   if (drawingText === null) {
     g.hspacingScaled = doubleToD6((g.hspacing * s.screenScaleX / s.parScaleX) * g.scaleX);

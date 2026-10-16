@@ -43,6 +43,10 @@ describe('FrameBuilder', () => {
     const two = b.build(1500, SETTINGS).events.map((e) => e.box.top);
     expect(two[0]).toBe(one);
     expect(two[1]).toBeLessThan(one);
+    // the collision move is what drawing must shift the event's images by (libass's shift_event)
+    const moved = b.build(1500, SETTINGS).events[1]!;
+    expect(moved.shiftY).toBeLessThan(0);
+    expect(b.build(1500, SETTINGS).events[0]!.shiftY).toBe(0);
   });
 
   it('marks animated events', () => {

@@ -3,6 +3,7 @@ import { readFontFile } from '../../../src/engine/ass/font-tables';
 import { AssFonts, createFontFaceLoader } from '../../../src/engine/ass/fonts';
 import { FrameBuilder } from '../../../src/engine/ass/frame';
 import { createCanvasMeasurer } from '../../../src/engine/ass/measure';
+import { drawEvent, type RasterContext } from '../../../src/engine/ass/raster';
 import { parseAss } from '../../../src/engine/ass/parse';
 import type { RenderSettings } from '../../../src/engine/ass/state';
 import { frameToTrace } from '../../../src/engine/ass/trace';
@@ -12,7 +13,7 @@ import type { AssTracePage } from './types';
 const bytesOf = async (url: string): Promise<Uint8Array> => new Uint8Array(await (await fetch(url)).arrayBuffer());
 
 const page: AssTracePage = {
-  async run(scriptUrl, fontUrls, times, _pixels, storage) {
+  async run(scriptUrl, fontUrls, times, pixels, storage) {
     const track = parseAss(new TextDecoder().decode(await bytesOf(scriptUrl)));
     const defaultFont = await readFontFile('DejaVuSans.ttf', await bytesOf('/fixtures/ass/fonts/DejaVuSans.ttf'));
     const fonts = new AssFonts(createFontFaceLoader(document.fonts), defaultFont);
@@ -26,8 +27,24 @@ const page: AssTracePage = {
     for (const t of times) probe.build(t, settings);
     await fonts.ready();
     const builder = new FrameBuilder(track, fonts, createCanvasMeasurer(measureCtx));
-    const events = times.flatMap((t) => frameToTrace(builder.build(t, settings), fonts));
-    return { trace: formatTrace(events), frames: [], missingFamilies: [...fonts.missingFamilies()] };
+    const rc: RasterContext = { createCanvas: (w, h) => new OffscreenCanvas(w, h), Path2D };
+    const events = [];
+    const frames: string[] = [];
+    for (const t of times) {
+      const frame = builder.build(t, settings);
+      events.push(...frameToTrace(frame, fonts));
+      if (!pixels) continue;
+      const canvas = new OffscreenCanvas(1920, 1080);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = '#808080';
+      ctx.fillRect(0, 0, 1920, 1080);
+      for (const ev of frame.events) drawEvent(ctx, rc, ev, { width: 1920, height: 1080 });
+      const rgba = ctx.getImageData(0, 0, 1920, 1080).data;
+      let bin = '';
+      for (let i = 0; i < rgba.length; i += 0x8000) bin += String.fromCharCode(...rgba.subarray(i, i + 0x8000));
+      frames.push(btoa(bin));
+    }
+    return { trace: formatTrace(events), frames, missingFamilies: [...fonts.missingFamilies()] };
   },
 };
 

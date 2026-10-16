@@ -106,6 +106,9 @@ function shape(e: EventText, fonts: AssFonts, measurer: GlyphMeasurer): void {
     const clusters = first.hspacing === 0 ? face.face.clusters(cps) : cps.map((_, k) => k);
     const clusterPx = new Map<number, number>();
     clusters.forEach((root, k) => clusterPx.set(root, (clusterPx.get(root) ?? 0) + metrics[k]!.advance));
+    clusters.forEach((root, k) => {
+      if (root !== k) runGlyphs[root]!.clusterText = (runGlyphs[root]!.clusterText ?? String.fromCodePoint(cps[root]!)) + String.fromCodePoint(cps[k]!);
+    });
     runGlyphs.forEach((info, k) => {
       if (clusters[k] !== k) {
         // a ligature component: its root draws it
