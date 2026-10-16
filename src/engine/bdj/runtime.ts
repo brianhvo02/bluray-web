@@ -35,6 +35,8 @@ export interface ClassLibrarySource {
 export interface BdjRuntimeDeps {
   /** The disc, with its normalised file list (FileSource.paths()) for the VFS. */
   readonly disc: ByteSource & { paths(): Iterable<string> };
+  /** bdj_open's bdj_disc_id: the disc's CERTIFICATE/id.bdmv disc ID (DiscModel.bdid); none or '' passes 32 zeros. */
+  readonly discId?: string | null;
   readonly classLibrary: ClassLibrarySource;
   /** The runtime passes its own start, and a hook it uses to watch the host's trace. */
   readonly host: (startTitle: (title: number) => void, onTrace: (e: TraceEntry) => void) => BdjHost;
@@ -143,7 +145,7 @@ export class BdjRuntime {
       const heap = this.jvm.heap;
       await this.call('init', '(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V', [
         1n,
-        heap.newString(NO_DISC_ID),
+        heap.newString(this.deps.discId || NO_DISC_ID),
         heap.newString(DISC_ROOT),
         heap.newString(PERSISTENT_ROOT),
         heap.newString(BUDA_ROOT),

@@ -143,6 +143,20 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(lines).toContain("Libbluray:0: INFO: Using Java 1.8 (5b) from '/jdk'");
   }, 60_000);
 
+  it("passes the disc's id.bdmv disc ID to Libbluray.init, or 32 zeros without one, as _bdj_init does", async () => {
+    const currentDisc = async (rt: BdjRuntime): Promise<string | null> => {
+      const dm = (await rt.jvm.callStatic('org/bluray/ti/DiscManager', 'getDiscManager', '()Lorg/bluray/ti/DiscManager;')) as JObject;
+      const field = dm.cls.findField('discId', 'Ljava/lang/String;')!;
+      return rt.jvm.heap.jsString(dm.fields[field.slot] as JObject | null);
+    };
+    const withId = runtime({ discId: '88000000000000000000000000139561' }).rt;
+    await withId.boot();
+    expect(await currentDisc(withId)).toBe('88000000000000000000000000139561');
+    const without = runtime().rt;
+    await without.boot();
+    expect(await currentDisc(without)).toBe('00000000000000000000000000000000');
+  }, 60_000);
+
   it('starts First Play and makes the control calls libbluray makes, up to the first selectPlaylistN', async () => {
     const { rt, lines, trace } = runtime();
     const t0 = performance.now();

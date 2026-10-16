@@ -1,3 +1,4 @@
+import { parseBdid, type BdidData } from '../bdmv/bdid-parser';
 import { parseClpi, type Clpi } from '../bdmv/clpi-parser';
 import { indexUsesBdj, parseIndex, type IndexBdmv } from '../bdmv/index-parser';
 import { parseMovieObjects, type MovieObjects } from '../bdmv/mobj-parser';
@@ -12,6 +13,8 @@ import { chooseMainTitle, hasRepeatedSegments } from './main-title';
 const INDEX_PATH = 'BDMV/INDEX.BDMV';
 const MOVIE_OBJECT_PATH = 'BDMV/MOVIEOBJECT.BDMV';
 const SOUND_PATH = 'BDMV/AUXDATA/SOUND.BDMV';
+/** bdid_get: id.bdmv, then its backup. */
+const BDID_PATHS = ['CERTIFICATE/ID.BDMV', 'CERTIFICATE/BACKUP/ID.BDMV'];
 
 export const playlistPath = (id: string): string => `BDMV/PLAYLIST/${id}.MPLS`;
 export const clipInfoPath = (clipId: string): string => `BDMV/CLIPINF/${clipId}.CLPI`;
@@ -40,6 +43,8 @@ export interface DiscModel {
   readonly movieObjects: MovieObjects | null;
   /** BDMV/AUXDATA/sound.bdmv (menu sounds); null when absent or damaged. */
   readonly sounds: SoundData | null;
+  /** CERTIFICATE/id.bdmv of a BD-J disc (_fill_disc_info's bdj_org_id and bdj_disc_id); null otherwise or when unreadable. */
+  readonly bdid: BdidData | null;
   readonly warnings: readonly string[];
 }
 
@@ -89,6 +94,9 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
     }
   }
 
+  const usesBdj = indexUsesBdj(index);
+  const bdid = usesBdj ? await readBdid(source) : null;
+
   const clips = new Map<string, Clpi>();
   if (movieObjects) {
     const clipIds = [...new Set([...playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)))];
@@ -108,7 +116,20 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
   const summaries = all.sort((a, b) => rank(a) - rank(b) || b.durationUs - a.durationUs || a.id.localeCompare(b.id));
   const main = summaries.find((s) => s.playable);
   if (main) await checkStreamReadable(source, main.clipIds[0]);
-  return { index, usesBdj: indexUsesBdj(index), playlists, summaries, clips, movieObjects, sounds, warnings };
+  return { index, usesBdj, playlists, summaries, clips, movieObjects, sounds, bdid, warnings };
+}
+
+/** bdid_get: the first of id.bdmv and its backup that parses. */
+async function readBdid(source: ByteSource): Promise<BdidData | null> {
+  for (const path of BDID_PATHS) {
+    if (!source.exists(path)) continue;
+    try {
+      return parseBdid(await readWhole(source, path));
+    } catch (err) {
+      if (!(err instanceof ParseError)) throw err;
+    }
+  }
+  return null;
 }
 
 function summarize(source: ByteSource, id: string, mpls: Mpls): PlaylistSummary {

@@ -129,6 +129,25 @@ describe('openDisc', () => {
     expect(model.warnings[0]).toMatch(/^MovieObject\.bdmv/);
   });
 
+  it("reads a BD-J disc's id.bdmv, falling back to the backup copy, as bdid_get does", async () => {
+    const id = (last: number): Uint8Array<ArrayBuffer> => {
+      const b = new Uint8Array(104);
+      b.set([...'BDID0200'].map((c) => c.charCodeAt(0)));
+      b.set([0x7f, 0xff, 0x55, 0x53], 40);
+      b[59] = last;
+      return b;
+    };
+    const files = baseFiles();
+    files['Movie/BDMV/index.bdmv'] = buildIndex({ firstPlay: { kind: 'bdj', name: '00000' }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [] });
+    files['Movie/CERTIFICATE/id.bdmv'] = id(1);
+    files['Movie/CERTIFICATE/BACKUP/id.bdmv'] = id(2);
+    expect((await openDisc(disc(files))).bdid).toEqual({ orgId: '7fff5553', discId: '00000000000000000000000000000001' });
+    files['Movie/CERTIFICATE/id.bdmv'] = new Uint8Array([0x42]);
+    expect((await openDisc(disc(files))).bdid?.discId).toBe('00000000000000000000000000000002');
+    // only BD-J discs have it read
+    expect((await openDisc(disc({ ...baseFiles(), 'Movie/CERTIFICATE/id.bdmv': id(1) }))).bdid).toBeNull();
+  });
+
   it('has no sounds and no warning when AUXDATA is absent', async () => {
     const model = await openDisc(disc(baseFiles()));
     expect(model.sounds).toBeNull();
