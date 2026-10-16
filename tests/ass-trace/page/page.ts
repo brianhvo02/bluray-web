@@ -4,6 +4,7 @@ import { AssFonts, createFontFaceLoader } from '../../../src/engine/ass/fonts';
 import { FrameBuilder } from '../../../src/engine/ass/frame';
 import { createCanvasMeasurer } from '../../../src/engine/ass/measure';
 import { drawEvent, type RasterContext } from '../../../src/engine/ass/raster';
+import { drawWarped } from '../../../src/engine/ass/warp';
 import { parseAss } from '../../../src/engine/ass/parse';
 import type { RenderSettings } from '../../../src/engine/ass/state';
 import { frameToTrace } from '../../../src/engine/ass/trace';
@@ -27,7 +28,7 @@ const page: AssTracePage = {
     for (const t of times) probe.build(t, settings);
     await fonts.ready();
     const builder = new FrameBuilder(track, fonts, createCanvasMeasurer(measureCtx));
-    const rc: RasterContext = { createCanvas: (w, h) => new OffscreenCanvas(w, h), Path2D };
+    const rc: RasterContext = { createCanvas: (w, h) => new OffscreenCanvas(w, h), Path2D, warp: drawWarped };
     const events = [];
     const frames: string[] = [];
     for (const t of times) {

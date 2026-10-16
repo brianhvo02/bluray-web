@@ -282,8 +282,13 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
   const bx26 = (64 * s.borderScaleX * first.borderX) / s.parScaleX;
   const by26 = 64 * s.borderScaleY * first.borderY;
   const m0 = mats[0]!;
-  const rx = Math.hypot(m0[0] * bx26, m0[3] * bx26) / 64;
-  const ry = Math.hypot(m0[1] * by26, m0[4] * by26) / 64;
+  // the projection's derivative at the glyph origin (m is normalized: m[8] = 1)
+  const jxx = m0[0] - m0[2] * m0[6];
+  const jxy = m0[1] - m0[2] * m0[7];
+  const jyx = m0[3] - m0[5] * m0[6];
+  const jyy = m0[4] - m0[5] * m0[7];
+  const rx = Math.hypot(jxx * bx26, jyx * bx26) / 64;
+  const ry = Math.hypot(jxy * by26, jyy * by26) / 64;
   const r2x = blurVariance(first.blur, s.blurScaleX);
   const r2y = blurVariance(first.blur, s.blurScaleY);
   const sigma = Math.sqrt((r2x + r2y) / 2 + 0.5 * first.be);
@@ -320,33 +325,71 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
   const fctx = fillCanvas.getContext('2d')!;
   fctx.fillStyle = '#fff';
   fctx.strokeStyle = '#fff';
-  const affine = mats.every(isAffine);
-  if (affine || !rc.warp) {
+  const affine = mats.every(isAffine) || !rc.warp;
+  let fill: Uint8Array;
+  let border: Uint8Array | null = null;
+  if (affine) {
     glyphs.forEach((g, k) => {
       const t = glyphAffine(mats[k]!, g);
       fctx.setTransform(t[0], t[1], t[2], t[3], t[4] - ox, t[5] - oy);
       drawGlyph(fctx, g, rc);
     });
+    fill = readAlpha(fctx, w, h);
+    if (!(flags & FILTER_BORDER_STYLE_3) && flags & FILTER_NONZERO_BORDER) border = dilate(fill, w, h, rx, ry);
   } else {
-    // 3D rotation: draw in layout space around the first glyph, then warp to the frame
-    const lw = Math.ceil(w * 2 + 64);
-    const layout = rc.createCanvas(lw, lw);
+    // 3D rotation: fill and border in layout space around the first glyph (libass strokes before the
+    // transform), then both warped to the frame
+    const lrx = bx26 / 64;
+    const lry = by26 / 64;
+    let lx0 = Infinity;
+    let ly0 = Infinity;
+    let lx1 = -Infinity;
+    let ly1 = -Infinity;
+    for (const g of glyphs) {
+      const dx = (g.shiftX - first.shiftX) / 64;
+      const dy = (g.shiftY - first.shiftY) / 64;
+      lx0 = Math.min(lx0, dx + g.bboxXMin / 64); lx1 = Math.max(lx1, dx + g.bboxXMax / 64);
+      ly0 = Math.min(ly0, dy + g.bboxYMin / 64); ly1 = Math.max(ly1, dy + g.bboxYMax / 64);
+    }
+    const lpad = Math.ceil(Math.max(lrx, lry) + 3);
+    const lox = Math.floor(lx0) - lpad;
+    const loy = Math.floor(ly0) - lpad;
+    const lw = Math.ceil(lx1) + lpad - lox;
+    const lh = Math.ceil(ly1) + lpad - loy;
+    const layout = rc.createCanvas(lw, lh);
     const lctx = layout.getContext('2d')!;
     lctx.fillStyle = '#fff';
     lctx.strokeStyle = '#fff';
-    const half = lw / 2;
-    glyphs.forEach((g) => {
+    for (const g of glyphs) {
       const dx = (g.shiftX - first.shiftX) / 64;
       const dy = (g.shiftY - first.shiftY) / 64;
-      lctx.setTransform(g.trScaleX, 0, 0, g.trScaleY, half + dx + g.trOffsetX / 64, half + dy + g.trOffsetY / 64);
+      lctx.setTransform(g.trScaleX, 0, 0, g.trScaleY, dx + g.trOffsetX / 64 - lox, dy + g.trOffsetY / 64 - loy);
       drawGlyph(lctx, g, rc);
-    });
-    const shifted: Mat3 = [m0[0], m0[1], m0[2] - 64 * half * m0[0] - 64 * half * m0[1], m0[3], m0[4], m0[5] - 64 * half * m0[3] - 64 * half * m0[4], m0[6], m0[7], m0[8] - 64 * half * m0[6] - 64 * half * m0[7]];
-    rc.warp(fctx, layout, shifted, ox, oy);
+    }
+    // layout canvas px (u, v) is layout 26.6 (64(u + lox), 64(v + loy)) relative to the first glyph
+    const tx = 64 * lox;
+    const ty = 64 * loy;
+    const shifted: Mat3 = [m0[0], m0[1], m0[2] + tx * m0[0] + ty * m0[1], m0[3], m0[4], m0[5] + tx * m0[3] + ty * m0[4], m0[6], m0[7], m0[8] + tx * m0[6] + ty * m0[7]];
+    rc.warp!(fctx, layout, shifted, ox, oy);
+    fill = readAlpha(fctx, w, h);
+    if (!(flags & FILTER_BORDER_STYLE_3) && flags & FILTER_NONZERO_BORDER) {
+      const lfill = readAlpha(lctx, lw, lh);
+      const lborder = dilate(lfill, lw, lh, lrx, lry);
+      const lb = rc.createCanvas(lw, lh);
+      const lbctx = lb.getContext('2d')!;
+      const img = lbctx.createImageData(lw, lh);
+      for (let i = 0; i < lborder.length; i++) {
+        img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = 255;
+        img.data[4 * i + 3] = lborder[i]!;
+      }
+      lbctx.putImageData(img, 0, 0);
+      const bc = rc.createCanvas(w, h);
+      const bctx = bc.getContext('2d')!;
+      rc.warp!(bctx, lb, shifted, ox, oy);
+      border = readAlpha(bctx, w, h);
+    }
   }
-  let fill = readAlpha(fctx, w, h);
 
-  let border: Uint8Array | null = null;
   if (flags & FILTER_BORDER_STYLE_3) {
     if (flags & (FILTER_NONZERO_BORDER | FILTER_NONZERO_SHADOW)) {
       const bc = rc.createCanvas(w, h);
@@ -364,8 +407,6 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
       });
       border = readAlpha(bctx, w, h);
     }
-  } else if (flags & FILTER_NONZERO_BORDER) {
-    border = dilate(fill, w, h, rx, ry);
   }
 
   // ass_synth_blur: the fill only without a border (or for the opaque box), the border always
