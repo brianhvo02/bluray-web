@@ -1,7 +1,7 @@
 # Milestone 5b: BD-J JVM Core — Design Spec
 
 Date: 2026-10-15
-Status: Draft, awaiting review.
+Status: Implemented (2026-10-16); plan `docs/superpowers/plans/2026-10-15-m5b-bdj-jvm-core.md`. See §9 for where the implementation differs.
 Parent spec: `2026-10-12-bluray-web-player-design.md` (which lists BD-J as "Not planned"; this milestone series changes
 that, and the parent spec and `docs/known-issues.md` are updated once milestone 4b has merged). Evidence:
 `2026-10-15-bdj-spike-findings.md`.
@@ -193,8 +193,8 @@ implementations in `org_videolan_Libbluray.c` exactly (the `long np` handle is d
 - `selectTitle` does what libbluray's `_play_title` does. For a BD-J title it returns success and queues
   `BdjRuntime.start(title)` to run after the native returns (`_play_bdj`, then `bdj_process_event(BDJ_EVENT_START)`);
   the Java side stops the old title's xlets itself. For an HDMV title it returns success and the run ends, since 5b
-  has no HDMV handoff. Both local discs need this: First Play selects a BD-J title (6 on A_NEW_ERA, 2 on
-  RENTAL_FAMILY) before their first playlist.
+  has no HDMV handoff. (The original draft claimed that First Play selects a BD-J title before the first playlist on
+  both local discs; that is wrong, see §9 item 4.)
 - Every other playback call returns libbluray's success value; `tellTime` returns 0; `getAacsData` returns null
   (decrypted discs); `updateGraphic` is counted, not drawn.
 - Each call is appended to a trace in the format of §6.3.
@@ -309,3 +309,19 @@ After milestone 4b merges:
   (skipping it for main-feature choice remains right).
 - Add `npm run bdj-classlib:build`, `bdj-trace` and `bdj-trace:golden` to `CLAUDE.md`, and the new licence boundary
   (`src/bdj-classlib/`) to its constraints.
+
+## 9. Deviations (recorded during planning and implementation)
+
+1. **Mounts.** `/tmp/` (java.io.tmpdir, where libbluray's CacheDir lives) and `/buda/` replace `/cache/`; `/app/` (read-only, test jars) is added. `Libbluray.init` takes a BUDA root, not a cache root.
+2. **Disc ID** comes from `CERTIFICATE/id.bdmv` (then `BACKUP/`), as libbluray's `bdid_get` does; 32 zeros when absent.
+3. **`BdjHost` return types** are the JNI types of the `native` declarations (int is a number, long a bigint), not the booleans of the §3.6 sketch. Builder-driven additions: `getTitleInfos` null entries, a `videoStreams` array, `StreamInfo.charCode`, a log error flag, an optional `record()`.
+4. **Title selection.** libbluray's Java calls `selectTitleN` only for HDMV titles (`BDJLoader` to `Libbluray.selectHdmvTitle`); BD-J to BD-J title changes stay in Java. §3.6's sentence that First Play selects title 6 (A_NEW_ERA) or 2 (RENTAL_FAMILY) before the first playlist is wrong: real libbluray makes no `selectTitleN` call before the first playlist on either disc. `RecordingHost.selectTitle` follows `bdpriv_play_title_internal`.
+5. **Constructor and deps.** `RecordingHost(disc, clips, opts)` needs the CLPI data. `BdjRuntimeDeps` has no `model`; `deps.host` is `(startTitle, onTrace) => BdjHost`; `deps.disc` is a `ByteSource` with `paths()` (a `FileSource`).
+6. **Events are serialised**: one Java thread per event, and the next starts when the previous returns, as `bdj_process_event` is synchronous. Event threads share the `main` `java.lang.Thread` (libbluray attaches a fresh one).
+7. **Class library sources.** Three classes come from the JDK's `jsse.jar` and `jce.jar` (the same OpenJDK GPLv2+CPE package). `classes.txt` also lists VM-internal error classes the interpreter throws.
+8. **Natives that call Java** return an `Invoke` continuation. LambdaForms are interpreted (`LambdaForm.compileToBytecode` is replaced by a native); BoundMethodHandle species classes are still spun by the JDK's factory (they are data holders).
+9. **`Scheduler.run()`** returns `'idle'` while timers are pending; `BdjRuntime.run` loops until truly idle.
+10. **The golden trace holds control calls only**, because `cacheBdRomFileN` carries a random cache directory name.
+11. **The synthetic disc is BD-J only** (no HDMV title), so it does not exercise `selectTitleN`.
+12. **Maths.** `StrictMath` is bit-exact for `exp` and `IEEEremainder` (fdlibm ports); other functions use JS `Math`. `sun.reflect.inflationThreshold=2147483647`, so no generated reflection accessors.
+13. **`RecordingHost` also applies libbluray's UHD/3D player profile switch** (`register.c` `psr_init_UHD`/`psr_init_3D`) and the harness's player settings (country us, languages eng) for parity.

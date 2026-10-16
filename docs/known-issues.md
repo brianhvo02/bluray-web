@@ -113,6 +113,25 @@ what would change that decision.
 - **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
   (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
 
+## BD-J (milestone 5b)
+
+- **5b timings (Node, one machine).** A_NEW_ERA boots in about 180 ms and reaches its first `selectPlaylistN(833)` in
+  about 26 s; RENTAL_FAMILY boots in about 175 ms and reaches `selectPlaylistN(1611)` in about 1.9 s. The target is
+  15 s. About 18.6 s of A_NEW_ERA's time is its first menu draw: roughly 100M interpreted calls in libbluray's
+  per-pixel compositing (`BDGraphicsBase.applyComposite` about 20.5M, the `DirectColorModel` getters). *Revisit in*
+  5d/5e: a JS intrinsic for the compositing paths, or a fast path for trivial methods.
+- **Open on purpose in the JVM core.** Weak and soft references hold strongly, reference queues stay empty and
+  finalizers never run. `long` is a `bigint`. A failed `invokedynamic` call site re-links on each execution (JDK 8
+  behaviour, not JVMS §5.4.3). Deep method-handle nesting (about 60k) can overflow the JS stack. `rt-bdj.jar` has no
+  socket implementation, so sockets fail with `NoClassDefFoundError` (5e decides network). `SecureRandom` has no
+  entropy source (no `/dev/urandom`), so its first use fails. JAR signatures are not verified on the j2se stack path
+  we run; whether libbluray checks them elsewhere was not examined.
+- **`RecordingHost` shortcuts that 5c's real host must not copy.** It writes no playback PSRs (3, 6, 7, 8), returns
+  `listBdFilesN` sorted (libbluray uses readdir order), and loads sound effects lazily.
+- **Player: the HDMV Navigator lacks libbluray's UHD/3D player-profile switch** (`register.c` `psr_init_UHD` and
+  `psr_init_3D`, via `_fill_disc_info`). This already affects UHD/3D HDMV discs. 5c's BD-J host must also carry the
+  disc-ID and profile handling that 5b put in `RecordingHost`.
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,
@@ -157,8 +176,10 @@ what would change that decision.
   start on its PID, so a menu's last segment waited for the end of the clip. Both now follow libbluray (`_fill_clip`
   packet 0 for first and seamless items; `m2ts_demux` completion by `PES_packet_length`).
 
-- **Decoy playlists are no longer picked as the main feature.** BD-J discs can carry maze playlists that play one
-  segment hundreds of times (A_NEW_ERA and RENTAL_FAMILY: `00149`, about 250 min). The main feature is now chosen
+- **Looping playlists are no longer picked as the main feature.** BD-J discs can carry playlists that play one
+  segment hundreds of times (A_NEW_ERA and RENTAL_FAMILY: `00149`, about 250 min). That one is the BD-J menu's
+  background loop (seen in the BD-J spike and the 5b traces), not a decoy maze as first assumed; skipping it for the
+  main feature remains right. The main feature is now chosen
   as libbluray's title list does (`disc/main-title.ts`, from `navigation.c`): loops (any segment more than twice)
   and exact duplicates are skipped, then chapters, video, HD audio, duration and stream count decide. The main
   feature is listed first, loops last. Differences: HD audio is judged by coding type (libbluray compares the
