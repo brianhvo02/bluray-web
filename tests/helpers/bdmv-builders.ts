@@ -9,16 +9,19 @@ export interface IndexSpec {
   firstPlay: IndexObjectSpec;
   topMenu: IndexObjectSpec;
   titles: IndexObjectSpec[];
+  version?: string;
+  appInfo?: { initialOutputModePreference: number; contentExistFlag: boolean };
 }
 
 export function buildIndex(spec: IndexSpec): Uint8Array<ArrayBuffer> {
   const w = new ByteWriter();
-  w.ascii('INDX').ascii('0200');
+  w.ascii('INDX').ascii(spec.version ?? '0200');
   const indexesStartAt = w.position;
   w.u32(0); // indexes_start_address (patched)
   w.u32(0); // extension_data_start_address
   w.zeros(24);
-  w.u32(34).zeros(34); // AppInfoBDMV
+  const app = spec.appInfo;
+  w.u32(34).bits(1, 0).bits(1, app?.initialOutputModePreference ?? 0).bits(1, app?.contentExistFlag ? 1 : 0).bits(5, 0).zeros(33); // AppInfoBDMV
   w.patchU32(indexesStartAt, w.position);
   const lengthAt = w.position;
   w.u32(0);
@@ -84,6 +87,10 @@ export interface PlayItemSpec {
   pg?: StreamSpec[];
   ig?: StreamSpec[];
   pipPg?: StreamSpec[];
+  /** Secondary audio entries with their primary audio references. */
+  secondaryAudio?: Array<{ stream: StreamSpec; primaryAudioRefs: number[] }>;
+  /** Secondary video entries with their secondary audio and PiP PG references. */
+  secondaryVideo?: Array<{ stream: StreamSpec; secondaryAudioRefs: number[]; pipPgRefs: number[] }>;
   angleClipIds?: string[];
   /** 0 none, 1 time, 2 infinite. */
   stillMode?: number;
@@ -135,6 +142,13 @@ function writeStream(w: ByteWriter, s: StreamSpec): void {
   writeCodingInfo(w, s.codingType, { format: s.format, rate: s.rate, lang: s.lang, extraBytes: s.extraAttrBytes });
 }
 
+/** A reference list: count, reserved byte, the ids, and a padding byte when the count is odd. */
+function writeRefs(w: ByteWriter, refs: readonly number[]): void {
+  w.u8(refs.length).u8(0);
+  for (const r of refs) w.u8(r);
+  if (refs.length % 2) w.u8(0);
+}
+
 function writeUoMask(w: ByteWriter, mask: ArrayLike<number> | undefined): void {
   for (let i = 0; i < 8; i++) w.u8(mask?.[i] ?? 0);
 }
@@ -160,9 +174,20 @@ function writePlayItem(w: ByteWriter, item: PlayItemSpec): void {
   const pg = item.pg ?? [];
   const ig = item.ig ?? [];
   const pipPg = item.pipPg ?? [];
+  const secondaryAudio = item.secondaryAudio ?? [];
+  const secondaryVideo = item.secondaryVideo ?? [];
   w.u8(video.length).u8(audio.length).u8(pg.length).u8(ig.length);
-  w.u8(0).u8(0).u8(pipPg.length).zeros(5);
+  w.u8(secondaryAudio.length).u8(secondaryVideo.length).u8(pipPg.length).zeros(5);
   for (const s of [...video, ...audio, ...pg, ...pipPg, ...ig]) writeStream(w, s);
+  for (const a of secondaryAudio) {
+    writeStream(w, a.stream);
+    writeRefs(w, a.primaryAudioRefs);
+  }
+  for (const v of secondaryVideo) {
+    writeStream(w, v.stream);
+    writeRefs(w, v.secondaryAudioRefs);
+    writeRefs(w, v.pipPgRefs);
+  }
   w.patchU16(stnStart, w.position - stnStart - 2);
   w.patchU16(start, w.position - start - 2);
 }

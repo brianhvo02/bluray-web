@@ -1,0 +1,18 @@
+runnable ran
+static-ref ABC!
+bound-ref inst:x
+unbound-ref 4
+ctor-ref [a]
+stream [n1, n9, n25, n49, n81]
+stream-sum 55 5
+stream-join [1,2,3,4,5,6,7,8,9,10]
+stream-sorted [c, b, a]
+capture 103
+capture-mutate 2
+default hello world
+default-override overridden anon
+join x, y, z p/q
+optional v! false
+map-lambda {a=6, b=7}
+removeIf [3, 6, 9]
+forEach ran369

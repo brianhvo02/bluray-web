@@ -1,0 +1,30 @@
+sb abc1x2.5truenull7 17
+sb-rev 7lluneurt5.2x1cba<<
+sb-edit Zl 1
+format  3.14|ff|hi
+format2 00000042|ab    |+5|q|true|1.234568e+04
+format3 1,234,567|10| 1.230e-04|%
+intern false true true
+constant-fold true
+hash 294156071 0 97
+split [a, b, c, d]
+split2 [a, b, , c] [a, b, , c, , ]
+split3 [one, two, three]
+replace bbbbbb x/y/z heLo
+upper-sharp-s STRASSE 223
+upper-i TITLE
+utf8 3 9 true
+utf16 6 101 229
+latin1 4 233
+utf8-hex e697a5e69cace8aa9e
+surrogate 2 128512 4
+valueOf-chars hello ell 3.0 null
+misc trim me|2|4|-1|true|true
+chars b 98 true 201 true
+join a-b-c
+regex true
+matcher true bob example 5
+parse -123 127 1000.0 11111111
+concat-types 12c1.5nulltrue
+compare-ignore 1
+tochararray yz

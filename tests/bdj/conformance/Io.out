@@ -1,0 +1,23 @@
+root-exists-before false
+mkdir true true false
+mkdir-again false
+mkdirs true true
+length 257 exists=true file=true dir=false
+read 0 10 10 skipped=100 rest=146 eof=-1
+raf 200 127 257 10 13 len=257
+raf-rw 2 8
+raf-trunc 2
+line1 8 101 108
+line2 12 111 26085
+line3 5 100 116
+append-length 35
+list [a, data.bin, rw.bin, text.txt]
+list-file true list-missing true
+rename true false true 257
+delete true false false
+delete-nonempty false
+rel-path /bdjweb-conformance-io/renamed.bin renamed.bin /bdjweb-conformance-io
+canwrite true true
+fnfe <root>/missing.txt (No such file or directory)
+createNewFile true false
+cleaned false

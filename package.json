@@ -14,12 +14,17 @@
     "test:ass": "playwright test -c playwright.ass.config.ts",
     "wasm:build": "src/wasm/audio/build.sh",
     "vm-trace:build": "tools/vm-trace/build.sh",
+    "bdj-trace:build": "tools/bdj-trace/build.sh",
+    "bdj-classlib:build": "tools/bdj-classlib/build.sh",
+    "bdj-classlib:collect": "tools/bdj-classlib/collect.sh",
     "vm-trace:golden": "tools/vm-trace/golden.sh",
+    "bdj-trace:golden": "tools/bdj-trace/golden.sh",
     "vm-trace": "tsx tests/vm-trace/run.ts",
+    "bdj-trace": "tsx tests/bdj/run.ts",
     "ass-trace:build": "tools/ass-trace/build.sh",
     "ass-trace:golden": "tools/ass-trace/golden.sh",
     "ass-trace": "tsx tests/ass-trace/run.ts",
-    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu && tsx scripts/make-subs-disc.ts fixtures/synthetic/disc-subs"
+    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu && tsx scripts/make-subs-disc.ts fixtures/synthetic/disc-subs && tsx scripts/make-bdj-disc.ts fixtures/synthetic/disc-bdj"
   },
   "dependencies": {
     "react": "^19.3.0",

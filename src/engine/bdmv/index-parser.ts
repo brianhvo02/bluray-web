@@ -21,8 +21,15 @@ export interface IndexTitle {
   readonly accessType: number;
 }
 
+/** INDX_APP_INFO, the fields the player reads (_fill_disc_info's 3D profile switch). */
+export interface IndexAppInfo {
+  readonly initialOutputModePreference: number;
+  readonly contentExistFlag: boolean;
+}
+
 export interface IndexBdmv {
   readonly version: string;
+  readonly appInfo: IndexAppInfo;
   readonly firstPlay: IndexObject;
   readonly topMenu: IndexObject;
   readonly titles: readonly IndexTitle[];
@@ -38,6 +45,7 @@ export function parseIndex(bytes: Uint8Array): IndexBdmv {
   if (signature !== 'INDX') throw new ParseError(`index.bdmv: bad signature "${signature}"`);
   checkVersion('index.bdmv', version);
   const indexesStart = r.u32();
+  const appInfo = parseAppInfo(r);
   r.seek(indexesStart);
   const length = r.u32();
   if (length > r.remaining) throw new ParseError('index.bdmv: truncated indexes section');
@@ -57,7 +65,20 @@ export function parseIndex(bytes: Uint8Array): IndexBdmv {
     r.skipBits(28);
     titles.push({ object: readObject(r, objectType), accessType });
   }
-  return { version, firstPlay, topMenu, titles };
+  return { version, appInfo, firstPlay, topMenu, titles };
+}
+
+const APP_INFO_START = 40;
+
+/** _parse_app_info (the length is not checked, as libbluray only logs a mismatch). */
+function parseAppInfo(r: ByteReader): IndexAppInfo {
+  r.seek(APP_INFO_START);
+  r.u32(); // length
+  r.skipBits(1);
+  const initialOutputModePreference = r.bits(1);
+  const contentExistFlag = r.flag();
+  r.skipBits(5);
+  return { initialOutputModePreference, contentExistFlag };
 }
 
 function readObject(r: ByteReader, objectType: number): IndexObject {

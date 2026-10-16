@@ -1,0 +1,11 @@
+zip-starts 80 75 3 4
+entry dir/stored.txt method=0 len=17 crc=c7ec4fb7 head=stored entr
+entry deflated.txt method=8 len=2200 crc=e8547b84 head=deflate me 
+crc32 cbf43926
+crc32-byte d3d99e8b
+adler32 91e01de
+deflate-in 102400 smaller=true
+inflate 102400 same=true
+round-crc ccb7b859
+dataformat incorrect header check
+gzip 2200

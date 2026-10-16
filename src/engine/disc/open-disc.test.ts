@@ -4,7 +4,7 @@ import { asm, buildMovieObjects } from '../../../tests/helpers/hdmv-builders';
 import { CodingType } from '../bdmv/stream-types';
 import { DiscError } from './byte-source';
 import { FileSource } from './file-source';
-import { checkStreamReadable, loadClips, openDisc } from './open-disc';
+import { checkStreamReadable, loadClips, openDisc, readBdid } from './open-disc';
 import { normalizeDiscPaths } from './paths';
 
 const VIDEO = [{ pid: 0x1011, codingType: CodingType.AVC }];
@@ -129,10 +129,52 @@ describe('openDisc', () => {
     expect(model.warnings[0]).toMatch(/^MovieObject\.bdmv/);
   });
 
+  it('opens a BD-J disc without reading id.bdmv, even when it cannot be read', async () => {
+    const files = baseFiles();
+    files['Movie/BDMV/index.bdmv'] = buildIndex({ firstPlay: { kind: 'bdj', name: '00000' }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [] });
+    files['Movie/CERTIFICATE/id.bdmv'] = new Uint8Array(104);
+    const source = disc(files);
+    const read = source.read.bind(source);
+    source.read = (path, offset, length, signal) =>
+      path === 'CERTIFICATE/ID.BDMV' ? Promise.reject(new Error('unreadable')) : read(path, offset, length, signal);
+    const model = await openDisc(source);
+    expect(model.usesBdj).toBe(true);
+    expect('bdid' in model).toBe(false);
+  });
+
   it('has no sounds and no warning when AUXDATA is absent', async () => {
     const model = await openDisc(disc(baseFiles()));
     expect(model.sounds).toBeNull();
     expect(model.movieObjects).toBeNull();
     expect(model.warnings).toEqual([]);
+  });
+});
+
+describe('readBdid', () => {
+  const id = (last: number): Uint8Array<ArrayBuffer> => {
+    const b = new Uint8Array(104);
+    b.set([...'BDID0200'].map((c) => c.charCodeAt(0)));
+    b.set([0x7f, 0xff, 0x55, 0x53], 40);
+    b[59] = last;
+    return b;
+  };
+
+  it('reads id.bdmv first, then the backup copy when it does not parse, as bdid_get does', async () => {
+    const files = { ...baseFiles(), 'Movie/CERTIFICATE/id.bdmv': id(1), 'Movie/CERTIFICATE/BACKUP/id.bdmv': id(2) };
+    expect(await readBdid(disc(files))).toEqual({ orgId: '7fff5553', discId: '00000000000000000000000000000001' });
+    files['Movie/CERTIFICATE/id.bdmv'] = new Uint8Array([0x42]);
+    expect((await readBdid(disc(files)))?.discId).toBe('00000000000000000000000000000002');
+  });
+
+  it('falls back to the backup when reading id.bdmv rejects, and is null when neither file reads', async () => {
+    const source = disc({ ...baseFiles(), 'Movie/CERTIFICATE/id.bdmv': id(1), 'Movie/CERTIFICATE/BACKUP/id.bdmv': id(2) });
+    const read = source.read.bind(source);
+    const failing = new Set(['CERTIFICATE/ID.BDMV']);
+    source.read = (path, offset, length, signal) =>
+      failing.has(path) ? Promise.reject(new Error('unreadable')) : read(path, offset, length, signal);
+    expect((await readBdid(source))?.discId).toBe('00000000000000000000000000000002');
+    failing.add('CERTIFICATE/BACKUP/ID.BDMV');
+    expect(await readBdid(source)).toBeNull();
+    expect(await readBdid(disc(baseFiles()))).toBeNull();
   });
 });

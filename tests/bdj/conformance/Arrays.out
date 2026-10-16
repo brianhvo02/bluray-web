@@ -1,0 +1,22 @@
+multi 3 4 5 7
+jagged true [[I
+long2d 1099511627776 0
+overlap-fwd [1, 2, 1, 2, 3, 4, 5, 6]
+overlap-back [3, 4, 5, 6, 7, 8, 7, 8]
+copy-oob null
+copy-store null
+store java.lang.Integer
+aioobe 3
+aioobe-neg -1
+negsize null
+npe-length
+clone 3 99 true
+clone-shallow true
+sort-int [-1, 0, 3, 3, 5, 7, 9]
+sort-obj [apple, banana, fig, pear]
+sort-cmp [fig, pear, apple, banana]
+sort-big 0 500 999
+binsearch 5
+equals true 994
+fill xxx
+types [B [[Ljava.lang.String;

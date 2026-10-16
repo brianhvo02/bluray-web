@@ -3,7 +3,7 @@ import type { PlayItem, StreamEntry } from '../bdmv/mpls-parser';
 import { CodingType } from '../bdmv/stream-types';
 import { audioEntryFor, chooseStreams, igEntryFor } from './stream-selection';
 
-const entry = (pid: number, codingType: number, subPath = false): StreamEntry => ({ pid, codingType, format: 0, rate: 0, lang: 'eng', subPath, streamType: subPath ? 2 : 1, subPathId: 0, subClipId: 0 });
+const entry = (pid: number, codingType: number, subPath = false): StreamEntry => ({ pid, codingType, format: 0, rate: 0, lang: 'eng', subPath, streamType: subPath ? 2 : 1, charCode: 0, subPathId: 0, subClipId: 0 });
 
 describe('chooseStreams', () => {
   it('picks the first main-path video and the first playable audio, with its stream number', () => {
@@ -12,6 +12,9 @@ describe('chooseStreams', () => {
       audio: [entry(0x1100, CodingType.EAC3_SECONDARY), entry(0x1101, CodingType.AC3), entry(0x1102, CodingType.LPCM)],
       pg: [],
       ig: [],
+      pipPg: [],
+      secondaryAudio: [],
+      secondaryVideo: [],
     });
     expect(choice.video?.pid).toBe(0x1011);
     expect(choice.audio?.pid).toBe(0x1101);
@@ -20,7 +23,7 @@ describe('chooseStreams', () => {
   });
 
   it('plays TrueHD and DTS-HD (through their cores)', () => {
-    const choice = chooseStreams({ video: [], audio: [entry(0x1100, CodingType.TRUEHD), entry(0x1101, CodingType.DTSHD_MASTER)], pg: [], ig: [] });
+    const choice = chooseStreams({ video: [], audio: [entry(0x1100, CodingType.TRUEHD), entry(0x1101, CodingType.DTSHD_MASTER)], pg: [], ig: [], pipPg: [], secondaryAudio: [], secondaryVideo: [] });
     expect(choice.audio?.codingType).toBe(CodingType.TRUEHD);
   });
 
@@ -30,6 +33,9 @@ describe('chooseStreams', () => {
       audio: [entry(0x1100, CodingType.EAC3_SECONDARY), entry(0x1101, CodingType.DTSHD_SECONDARY)],
       pg: [],
       ig: [],
+      pipPg: [],
+      secondaryAudio: [],
+      secondaryVideo: [],
     });
     expect(choice.audio).toBeNull();
     expect(choice.audioIndex).toBeNull();
@@ -37,13 +43,13 @@ describe('chooseStreams', () => {
   });
 
   it('handles playlists without audio or video', () => {
-    expect(chooseStreams({ video: [], audio: [], pg: [], ig: [] })).toEqual({ video: null, audio: null, audioIndex: null, unsupportedAudio: [] });
+    expect(chooseStreams({ video: [], audio: [], pg: [], ig: [], pipPg: [], secondaryAudio: [], secondaryVideo: [] })).toEqual({ video: null, audio: null, audioIndex: null, unsupportedAudio: [] });
   });
 });
 
 describe('audioEntryFor', () => {
   const item = {
-    stn: { video: [], audio: [entry(0x1100, CodingType.LPCM), entry(0x1101, CodingType.AC3), entry(0x1102, CodingType.AC3, true)], pg: [], ig: [] },
+    stn: { video: [], audio: [entry(0x1100, CodingType.LPCM), entry(0x1101, CodingType.AC3), entry(0x1102, CodingType.AC3, true)], pg: [], ig: [], pipPg: [], secondaryAudio: [], secondaryVideo: [] },
   } as unknown as PlayItem;
 
   it('returns the main-path entry for a stream number, or null', () => {

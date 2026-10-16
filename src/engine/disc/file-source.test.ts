@@ -23,6 +23,10 @@ describe('FileSource', () => {
     expect(s.list('AACS')).toEqual([]);
   });
 
+  it('reports its normalised paths', () => {
+    expect(source().paths().sort()).toEqual(['BDMV/INDEX.BDMV', 'BDMV/PLAYLIST/00000.MPLS', 'BDMV/PLAYLIST/00001.MPLS', 'BDMV/PLAYLIST/SUB/IGNORED.MPLS']);
+  });
+
   it('reads byte ranges and clamps at end of file', async () => {
     const s = source();
     expect(Array.from(await s.read('BDMV/INDEX.BDMV', 1, 2))).toEqual([2, 3]);

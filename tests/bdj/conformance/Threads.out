@@ -1,0 +1,12 @@
+main-name main
+counter 20000
+alive-after-join false false
+handoff 99
+sleeper InterruptedException flag=false
+interrupted-flag true false
+latch 0 3
+executor 42
+terminated true
+threadlocal 6 5
+daemon true true
+end

@@ -12,6 +12,11 @@ export class FileSource implements ByteSource {
     return this.get(path).size;
   }
 
+  /** The normalised (upper-case) paths of every file. */
+  paths(): string[] {
+    return [...this.files.keys()];
+  }
+
   list(dir: string): string[] {
     const prefix = `${dir.toUpperCase().replace(/\/$/, '')}/`;
     const names: string[] = [];

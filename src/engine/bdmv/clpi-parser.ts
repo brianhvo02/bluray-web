@@ -32,6 +32,8 @@ export interface ProgramStream {
   readonly format: number;
   readonly rate: number;
   readonly lang: string;
+  /** Video aspect ratio code; 0 for other streams. */
+  readonly aspect: number;
 }
 
 export interface ProgramInfo {
@@ -136,9 +138,11 @@ function readProgramInfo(r: ByteReader, start: number): ProgramInfo[] {
       let format = 0;
       let rate = 0;
       let lang = '';
+      let aspect = 0;
       if (isVideoCoding(codingType)) {
         format = r.bits(4);
         rate = r.bits(4);
+        aspect = r.bits(4);
       } else if (isAudioCoding(codingType)) {
         format = r.bits(4);
         rate = r.bits(4);
@@ -151,7 +155,7 @@ function readProgramInfo(r: ByteReader, start: number): ProgramInfo[] {
         lang = r.ascii(3);
       }
       r.seek(attrStart + length);
-      streams.push({ pid, codingType, format, rate, lang });
+      streams.push({ pid, codingType, format, rate, lang, aspect });
     }
     programs.push({ spnProgramSequenceStart, programMapPid, streams });
   }
