@@ -73,6 +73,21 @@ libass 0.17.5 (https://github.com/libass/libass, commit 4a05d81), ISC License
   subs/text-set.ts are original implementations; they contain no libass,
   libbluray or FFmpeg code.
 
+libplacebo (https://code.videolan.org/videolan/libplacebo), LGPL-2.1-or-later:
+semantics followed, not ported
+  The mpv user shader support in shaders/ is original code written from
+  libplacebo's behaviour; it contains no libplacebo code. It follows:
+    shaders/rpn.ts        src/shaders/custom_mpv.c (WIDTH/HEIGHT/WHEN RPN evaluation)
+    shaders/parse.ts      src/shaders/custom_mpv.c (hook block directives)
+    shaders/plan.ts       src/shaders/custom_mpv.c (hook_hook, lookup_tex), src/renderer.c (hook stages)
+    shaders/codegen.ts    src/shaders/custom_mpv.c (bind_pass_tex texture macros, HOOKED aliases)
+
+Anime4K (https://github.com/bloc97/Anime4K, commit 7684e95), MIT License
+  Copyright (c) 2019 bloc97
+  The built-in Anime4K mode lists are copied from md/Template/GLSL_*/input.conf.
+  fixtures/shaders/anime4k/ holds unmodified copies of its shaders, with its
+  LICENSE next to them.
+
 DejaVu fonts 2.37 (https://dejavu-fonts.github.io), Bitstream Vera / DejaVu licence
   ass/default-font.ttf is DejaVu Sans, unmodified; its licence is in
   ass/LICENSE-DejaVu.txt.
