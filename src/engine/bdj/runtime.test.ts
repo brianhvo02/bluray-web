@@ -122,7 +122,6 @@ describe('BdjRuntime on disc-bdj', () => {
     };
     const rt = new BdjRuntime({
       disc: source,
-      model: disc,
       classLibrary: CLASSES,
       host: (startTitle, onTrace) => {
         recording = new RecordingHost(disc, clips, { startTitle, onTrace });
@@ -156,6 +155,30 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(lines.some((l) => l.endsWith(': FirstPlayXlet: start'))).toBe(true);
     expect(lines.some((l) => l.endsWith(': TitleXlet: start'))).toBe(true);
     expect(lines).toContain(`bdj_process_event(START,${FIRST_PLAY})`);
+  }, 60_000);
+
+  it('runs events one at a time: an event starts only after the previous one has returned', async () => {
+    const { rt, trace } = runtime();
+    await rt.boot();
+    const threads = rt.jvm.threads;
+    const events: JThread[] = [];
+    let overlapped = false;
+    const spawn = threads.spawn.bind(threads);
+    threads.spawn = (javaThread, m, args) => {
+      const isEvent = m.name === 'processEvent';
+      if (isEvent && events.some((t) => t.state !== 'terminated')) overlapped = true;
+      const t = spawn(javaThread, m, args);
+      if (isEvent) events.push(t);
+      return t;
+    };
+    rt.start(FIRST_PLAY);
+    rt.processEvent(BdjEvent.PSR102, 7);
+    rt.processEvent(BdjEvent.VK_KEY, 0x80000010);
+    expect(events).toHaveLength(1);
+    expect(await rt.run({ until: isSelectPlaylist })).toBe('until');
+    expect(events).toHaveLength(3);
+    expect(overlapped).toBe(false);
+    expect(trace().filter((e) => CONTROL_CALLS.has(e.call)).map((e) => JSON.stringify(e))).toEqual(GOLDEN);
   }, 60_000);
 
   it('rejects run() with an internal error when the host throws, with the Java stack at fault', async () => {
@@ -200,6 +223,8 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(err).toBeInstanceOf(BdjError);
     expect((err as BdjError).code).toBe('class-not-found');
     expect((err as BdjError).message).toContain('org/videolan/Libbluray');
+    expect(rt.jvm.threads.live).toEqual([]);
+    expect(rt.jvm.threads.isHalted).toBe(true);
   }, 60_000);
 
   it('logs an uncaught exception in another Java thread and keeps running', async () => {

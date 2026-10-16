@@ -305,6 +305,31 @@ describe('time slicing', () => {
     expect(await jvm.threads.run(AbortSignal.abort())).toBe('aborted');
   });
 
+  it('preempt() also stops a native Invoke chain before its next native', async () => {
+    const { jvm } = setup();
+    jvm.loader.define('Q', assembleClass('Q', [
+      { name: 'a', desc: '()V' },
+      { name: 'b', desc: '()V' },
+      { name: 'go', desc: '()V', code: [INVOKESTATIC, method('Q', 'a', '()V'), RETURN] },
+    ]), null, null);
+    const q = jvm.loader.loadBoot('Q')!;
+    let bRan = 0;
+    const abort = new AbortController();
+    jvm.natives.register({
+      'Q.a()V': () => {
+        jvm.threads.preempt();
+        abort.abort();
+        return new Invoke(q.methods.get('b()V')!, [], () => undefined);
+      },
+      'Q.b()V': () => void bRan++,
+    });
+    const t = jvm.threads.spawn(null, q.methods.get('go()V')!, []);
+    expect(await jvm.threads.run(abort.signal)).toBe('aborted');
+    expect(bRan).toBe(0);
+    expect(await jvm.threads.run()).toBe('idle');
+    expect([bRan, t.state]).toEqual([1, 'terminated']);
+  });
+
   it('callStatic returns once its own thread ends while another thread spins (R20)', async () => {
     const { jvm, spawn, get } = setup();
     const spinner = spawn('spin');

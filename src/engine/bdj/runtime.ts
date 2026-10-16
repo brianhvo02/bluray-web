@@ -11,7 +11,6 @@
  */
 
 import type { ByteSource } from '../disc/byte-source';
-import type { DiscModel } from '../disc/open-disc';
 import { BdjError } from './errors';
 import type { BdjErrorCode } from './errors';
 import type { BdjHost, TraceEntry } from './host';
@@ -36,7 +35,6 @@ export interface ClassLibrarySource {
 export interface BdjRuntimeDeps {
   /** The disc, with its normalised file list (FileSource.paths()) for the VFS. */
   readonly disc: ByteSource & { paths(): Iterable<string> };
-  readonly model: DiscModel;
   readonly classLibrary: ClassLibrarySource;
   /** The runtime passes its own start, and a hook it uses to watch the host's trace. */
   readonly host: (startTitle: (title: number) => void, onTrace: (e: TraceEntry) => void) => BdjHost;
@@ -105,6 +103,10 @@ export class BdjRuntime {
   /** Aborts the drive in progress (run, or stop's). */
   private driving: AbortController | null = null;
   private active: Promise<unknown> | null = null;
+  private readonly events: [number, number][] = [];
+  private eventThread: JThread | null = null;
+  /** The drive in progress checks whether it is done. */
+  private settle: (() => void) | null = null;
 
   constructor(private readonly deps: BdjRuntimeDeps) {
     const inner = deps.host(
@@ -138,17 +140,19 @@ export class BdjRuntime {
   private async open(): Promise<void> {
     try {
       await this.jvm.boot();
+      const heap = this.jvm.heap;
+      await this.call('init', '(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V', [
+        1n,
+        heap.newString(NO_DISC_ID),
+        heap.newString(DISC_ROOT),
+        heap.newString(PERSISTENT_ROOT),
+        heap.newString(BUDA_ROOT),
+      ]);
     } catch (e) {
+      // bdj_open closes the VM when _bdj_init fails
+      this.jvm.threads.halt();
       throw this.bootError(e);
     }
-    const heap = this.jvm.heap;
-    await this.call('init', '(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V', [
-      1n,
-      heap.newString(NO_DISC_ID),
-      heap.newString(DISC_ROOT),
-      heap.newString(PERSISTENT_ROOT),
-      heap.newString(BUDA_ROOT),
-    ]);
     this.booted = true;
   }
 
@@ -166,11 +170,45 @@ export class BdjRuntime {
     }
   }
 
-  /** bdj_process_event: Libbluray.processEvent on a fresh Java thread, which the next run() executes. */
+  /**
+   * bdj_process_event: queues Libbluray.processEvent, which the next run() executes on a fresh Java thread. Events
+   * run one at a time in order, as libbluray's synchronous calls under bd->mutex do.
+   */
   processEvent(ev: number, param: number): void {
     this.checkRunning();
     this.logEvent(ev, param);
-    this.spawn('processEvent', '(II)Z', [ev | 0, param | 0]);
+    this.events.push([ev | 0, param | 0]);
+    this.pump();
+  }
+
+  /** Starts the next queued event once the previous one has returned. */
+  private pump(): void {
+    while (this.eventThread === null && this.events.length > 0) {
+      if (this.jvm.threads.isHalted) {
+        this.events.length = 0;
+        return;
+      }
+      const [ev, param] = this.events.shift()!;
+      const t = this.spawn('processEvent', '(II)Z', [ev, param]);
+      const finished = (): void => {
+        if (t.uncaught) this.deps.log(`bdj_process_event(${ev >>> 0},${param >>> 0}) failed (uncaught exception): ${this.jvm.describe(t.uncaught)}`);
+      };
+      if (t.state === 'terminated') {
+        finished();
+        continue;
+      }
+      this.eventThread = t;
+      t.onTerminate = () => {
+        this.eventThread = null;
+        finished();
+        this.pump();
+        this.settle?.();
+      };
+    }
+  }
+
+  private get eventsDone(): boolean {
+    return this.eventThread === null && this.events.length === 0;
   }
 
   private logEvent(ev: number, param: number): void {
@@ -188,14 +226,17 @@ export class BdjRuntime {
       this.until = opts.until ?? null;
       this.matched = false;
       try {
-        return await this.drive(opts.signal, null);
+        return await this.drive(opts.signal, () => this.matched);
       } finally {
         this.until = null;
       }
     });
   }
 
-  /** _stop_bdj, then bdj_close (Libbluray.shutdown); threads still running after `timeoutMs` are halted. */
+  /**
+   * _stop_bdj behind any queued events, then bdj_close (Libbluray.shutdown); threads still running after `timeoutMs`
+   * are halted.
+   */
   async stop(timeoutMs = STOP_TIMEOUT_MS): Promise<void> {
     this.driving?.abort();
     await this.exclusive(async () => {
@@ -203,9 +244,13 @@ export class BdjRuntime {
       const expired = new AbortController();
       const cancel = this.deps.setTimer(timeoutMs, () => expired.abort());
       try {
-        this.logEvent(BdjEvent.STOP, 0);
-        await this.drive(expired.signal, this.spawn('processEvent', '(II)Z', [BdjEvent.STOP, 0]));
-        if (!expired.signal.aborted) await this.drive(expired.signal, this.spawn('shutdown', '()V', []));
+        this.processEvent(BdjEvent.STOP, 0);
+        await this.drive(expired.signal, () => this.eventsDone);
+        if (!expired.signal.aborted) {
+          const t = this.spawnWatched('shutdown', '()V', []);
+          await this.drive(expired.signal, () => t.state === 'terminated');
+          if (t.uncaught) this.deps.log(`Failed to shutdown BD-J (uncaught exception): ${this.jvm.describe(t.uncaught)}`);
+        }
       } finally {
         cancel();
         this.jvm.threads.halt();
@@ -253,6 +298,13 @@ export class BdjRuntime {
     return t;
   }
 
+  /** A call whose end the drive in progress has to notice. */
+  private spawnWatched(name: string, desc: string, args: readonly JValue[]): JThread {
+    const t = this.spawn(name, desc, args);
+    t.onTerminate = () => this.settle?.();
+    return t;
+  }
+
   private method(name: string, desc: string): JMethod {
     const cls = this.jvm.loader.loadBoot(LIBBLURAY);
     if (!cls) throw new BdjError('class-not-found', `${LIBBLURAY} is missing from the boot class path (needed by bdj_open)`);
@@ -263,8 +315,8 @@ export class BdjRuntime {
 
   /** _bdj_init's CallStaticVoidMethod: runs until its thread ends; an uncaught exception fails the boot. */
   private async call(name: string, desc: string, args: readonly JValue[]): Promise<void> {
-    const t = this.withJava(() => this.spawn(name, desc, args));
-    await this.drive(undefined, t);
+    const t = this.withJava(() => this.spawnWatched(name, desc, args));
+    await this.drive(undefined, () => t.state === 'terminated');
     if (this.jvm.exitStatus !== null) throw new BdjError('internal', `the JVM halted with status ${this.jvm.exitStatus} during ${name}`);
     if (t.uncaught) throw this.javaError(t.uncaught, `Failed to initialize BD-J (uncaught exception): `);
     if (t.state !== 'terminated') throw new BdjError('internal', `${externalName(LIBBLURAY)}.${name} did not finish`);
@@ -320,20 +372,21 @@ export class BdjRuntime {
   }
 
   /**
-   * Runs the scheduler until `target` ends (or, without one, `until` matches), an abort, a deadlock or true
-   * idleness: Scheduler.run returns 'idle' while threads sleep, so this waits for the next timer and goes on
-   * (rulings R19/R20).
+   * Runs the scheduler until `done` (checked when a watched thread ends), an abort, a deadlock or true idleness:
+   * Scheduler.run returns 'idle' while threads sleep, so this waits for the next timer and goes on (rulings R19/R20).
    */
-  private async drive(signal: AbortSignal | undefined, target: JThread | null): Promise<RunOutcome> {
+  private async drive(signal: AbortSignal | undefined, done: () => boolean): Promise<RunOutcome> {
     const threads = this.jvm.threads;
     const ac = new AbortController();
     const onAbort = (): void => ac.abort();
     signal?.addEventListener('abort', onAbort);
     if (signal?.aborted) ac.abort();
-    const done = (): boolean => (target ? target.state === 'terminated' : this.matched);
-    if (target) target.onTerminate = onAbort;
     this.driving = ac;
+    this.settle = () => {
+      if (done()) ac.abort();
+    };
     try {
+      if (done()) return 'until';
       for (;;) {
         let outcome: Awaited<ReturnType<typeof threads.run>>;
         try {
@@ -357,7 +410,7 @@ export class BdjRuntime {
       }
     } finally {
       if (this.driving === ac) this.driving = null;
-      if (target) target.onTerminate = null;
+      this.settle = null;
       signal?.removeEventListener('abort', onAbort);
     }
   }

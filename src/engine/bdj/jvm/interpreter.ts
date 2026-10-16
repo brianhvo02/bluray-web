@@ -122,6 +122,10 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
       const inv = r;
       const m = inv.method;
       if (m.isNative) {
+        if (jvm.threads.preempted) {
+          jvm.threads.later(t, inv);
+          return;
+        }
         const lock = m.isSynchronized ? (m.isStatic ? jvm.mirror(m.cls) : (inv.args[0] as JObject)) : null;
         if (lock && !jvm.threads.monitorEnter(t, lock)) {
           jvm.threads.later(t, inv);
