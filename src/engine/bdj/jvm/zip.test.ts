@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
-import { crc32 as nodeCrc, deflateRawSync } from 'node:zlib';
+import { crc32 as nodeCrc, deflateRawSync, deflateSync, inflateRawSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { ZipArchive, ZipError, crc32, inflateAll, inflateRaw } from './zip';
+import { DeflateEncoder, ZipArchive, ZipError, adler32, crc32, inflateAll, inflateRaw } from './zip';
 
 const JARS = [
   '../../../bdj-classlib/rt-bdj.jar',
@@ -250,5 +250,67 @@ describe('ZipArchive', () => {
         expect(data?.length).toBe(z.entries.get(n)!.size);
       }
     }
+  });
+});
+
+describe('DeflateEncoder', () => {
+  const periodic = new Uint8Array(100 * 1024).map((_, i) => (i * 31 + (i >> 8)) % 251);
+  const inputs: [string, Uint8Array][] = [
+    ['empty', new Uint8Array(0)],
+    ['one byte', new Uint8Array([7])],
+    ['text', new TextEncoder().encode('deflate me '.repeat(200))],
+    ['periodic', periodic],
+    ['random', new Uint8Array(randomBytes(70_000))],
+  ];
+
+  function encode(level: number, chunks: readonly Uint8Array[], flushes = false): Uint8Array {
+    const enc = new DeflateEncoder(level);
+    const parts: number[] = [];
+    const drain = (): void => {
+      const buf = new Uint8Array(333);
+      for (let n; (n = enc.read(buf, 0, buf.length)) > 0; ) parts.push(...buf.subarray(0, n));
+    };
+    for (const c of chunks) {
+      enc.write(c);
+      if (flushes) enc.flush();
+      drain();
+    }
+    enc.finish();
+    drain();
+    expect(enc.done).toBe(true);
+    return new Uint8Array(parts);
+  }
+
+  it.each(inputs)('writes DEFLATE that zlib and inflateAll both read back (%s)', (_name, data) => {
+    for (const level of [0, 1, 9]) {
+      const z = encode(level, [data]);
+      expect(new Uint8Array(inflateRawSync(z))).toEqual(data);
+      expect(inflateAll(z)).toEqual(data);
+    }
+  });
+
+  it('compresses repetitive data, including matches of distance 8962', () => {
+    expect(encode(9, [periodic]).length).toBeLessThan(periodic.length / 10);
+  });
+
+  it('flushes to a byte-aligned point after each chunk', () => {
+    const chunks = [new TextEncoder().encode('abcabcabc'), new Uint8Array(0), periodic.subarray(0, 5000)];
+    const z = encode(6, chunks, true);
+    expect(new Uint8Array(inflateRawSync(z))).toEqual(new Uint8Array([...chunks[0]!, ...chunks[2]!]));
+  });
+});
+
+/** zlib's Adler-32: the trailer of a zlib stream. */
+const nodeAdler = (data: Uint8Array): number => {
+  const z = deflateSync(data);
+  return new DataView(z.buffer, z.byteOffset + z.length - 4, 4).getUint32(0);
+};
+
+describe('adler32', () => {
+  it('matches zlib, also across large inputs and with a seed', () => {
+    const big = new Uint8Array(randomBytes(200_000));
+    expect(adler32(new TextEncoder().encode('123456789'))).toBe(0x091e01de);
+    expect(adler32(big)).toBe(nodeAdler(big));
+    expect(adler32(big, 100_000, 200_000, adler32(big, 0, 100_000))).toBe(nodeAdler(big));
   });
 });

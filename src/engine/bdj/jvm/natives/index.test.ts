@@ -4,21 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from './index';
 import { fdlibmExp, fdlibmRemainder } from './strictmath';
 
-/** Packages whose natives later tasks implement (Task 12: I/O, zip, net, AWT, security; Task 13: libbluray). */
-const LATER = [
-  'java/io/',
-  'java/util/zip/',
-  'java/util/jar/',
-  'java/net/',
-  'sun/nio/',
-  'java/awt/',
-  'sun/awt/',
-  'sun/java2d/',
-  'java/security/',
-  'sun/security/',
-  'org/videolan/',
-];
-const NOW = ['java/security/AccessController.', 'java/io/FileDescriptor.initIDs'];
+/** What Task 13 implements: libbluray's own natives. */
+const LATER = ['org/videolan/', 'java/awt/BDFontMetrics', 'java/awt/BDGraphicsBase'];
 
 function table(): NativeTable {
   const t = new NativeTable();
@@ -29,12 +16,12 @@ function table(): NativeTable {
 }
 
 describe('JDK natives', () => {
-  it('implements every native natives.txt lists, except those of packages later tasks own', () => {
+  it('implements every native natives.txt lists, except libbluray\'s', () => {
     const listed = readFileSync(fileURLToPath(new URL('../../../../../tests/bdj/natives.txt', import.meta.url)), 'utf8')
       .split('\n')
       .filter((l) => l !== '');
     const keys = new Set(table().keys);
-    const missing = listed.filter((k) => !keys.has(k) && (NOW.some((p) => k.startsWith(p)) || !LATER.some((p) => k.startsWith(p))));
+    const missing = listed.filter((k) => !keys.has(k) && !LATER.some((p) => k.startsWith(p)));
     const byPackage: Record<string, string[]> = {};
     for (const k of missing) (byPackage[k.slice(0, k.lastIndexOf('/'))] ??= []).push(k);
     expect(byPackage).toEqual({});

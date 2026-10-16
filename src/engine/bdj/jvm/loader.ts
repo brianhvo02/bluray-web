@@ -559,8 +559,10 @@ export class Loader {
 
   private link(file: ClassFile, loader: JObject | null, protectionDomain: JObject | null, key = file.name): JClass {
     const name = file.name;
-    const busy = loader === null ? key : `${this.jvm.heap.identityHash(loader)}:${key}`;
-    if (this.defining.has(busy)) throw this.error('java/lang/ClassCircularityError', externalName(name));
+    // Per thread, as HotSpot's placeholders are: another thread may be defining the same class at the same time.
+    const thread = this.jvm.currentThread?.id ?? -1;
+    const busy = `${thread}:${loader === null ? '' : this.jvm.heap.identityHash(loader)}:${key}`;
+    if (this.defining.has(busy)) throw this.error('java/lang/ClassCircularityError', name);
     this.defining.add(busy);
     let superClass: JClass | null = null;
     let interfaces: JClass[];
@@ -578,9 +580,16 @@ export class Loader {
         }
         return i;
       });
-    } finally {
+    } catch (e) {
+      // The class stays busy while its loader fetches a supertype, so a chain that comes back to it is circular.
+      if (e instanceof LoadPending) {
+        const done = (): void => void this.defining.delete(busy);
+        throw new LoadPending(andThen(e.work, (r) => (done(), r), (x) => (done(), new ThrowResult(x))));
+      }
       this.defining.delete(busy);
+      throw e;
     }
+    this.defining.delete(busy);
     const isInterface = (file.access & ACC_INTERFACE) !== 0;
     const objectClass = name === 'java/lang/Object' ? null : this.objectClass();
     return new JClass({

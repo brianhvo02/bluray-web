@@ -340,6 +340,40 @@ export class Vfs {
 
   close(_h: VfsHandle): void {}
 
+  /** The path is on a writable (memory) mount, below its root. */
+  writable(path: string): boolean {
+    const r = this.resolve(path);
+    return r !== null && r.mount !== null && r.rest.length > 0 && this.backings.get(r.mount)!.type === 'mem';
+  }
+
+  /** Sets a memory file's or directory's modification time; false elsewhere or when it is missing. */
+  setMtime(path: string, ms: number): boolean {
+    const r = this.resolve(path);
+    if (!r || r.mount === null) return false;
+    const b = this.backings.get(r.mount)!;
+    if (b.type !== 'mem') return false;
+    const node = this.walk(b.root, r.rest);
+    if (!node) return false;
+    node.mtimeMs = ms;
+    return true;
+  }
+
+  /** Cuts or zero-extends a writable handle's file to `length` bytes; the position moves back to the end if beyond it. */
+  truncate(h: VfsHandle, length: number): boolean {
+    const handle = h as Handle;
+    const file = handle.node;
+    if (!file || !handle.writable) return false;
+    if (length > file.buf.length) {
+      const grown = new Uint8Array(length);
+      grown.set(file.buf.subarray(0, file.len));
+      file.buf = grown;
+    } else if (length > file.len) file.buf.fill(0, file.len, length);
+    file.len = length;
+    if (handle.position > length) handle.position = length;
+    file.mtimeMs = this.nowMs();
+    return true;
+  }
+
   private resolve(path: string): { mount: string | null; rest: string[] } | null {
     const parts = this.canonicalize(path).split('/').filter(Boolean);
     if (parts.length === 0) return { mount: null, rest: [] };

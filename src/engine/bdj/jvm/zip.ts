@@ -10,12 +10,20 @@ export class ZipError extends Error {}
 
 export interface ZipEntry {
   readonly name: string;
-  readonly method: 0 | 8;
+  readonly nameBytes: Uint8Array;
+  /** 0 (stored) and 8 (deflated) can be read; others are listed but read() rejects them. */
+  readonly method: number;
+  /** The general-purpose bit flag. */
+  readonly flag: number;
   readonly compressedSize: number;
   readonly size: number;
   readonly crc: number;
   readonly localHeaderOffset: number;
   readonly time: number;
+  /** MS-DOS date and time, (date << 16) | time, unsigned. */
+  readonly dosTime: number;
+  readonly extra: Uint8Array;
+  readonly comment: Uint8Array;
 }
 
 const CRC_TABLE = (() => {
@@ -27,6 +35,21 @@ const CRC_TABLE = (() => {
   }
   return t;
 })();
+
+export function adler32(data: Uint8Array, start = 0, end = data.length, seed = 1): number {
+  let a = seed & 0xffff;
+  let b = seed >>> 16;
+  for (let i = start; i < end; ) {
+    const stop = Math.min(end, i + 3800);
+    for (; i < stop; i++) {
+      a += data[i]!;
+      b += a;
+    }
+    a %= 65521;
+    b %= 65521;
+  }
+  return ((b << 16) | a) >>> 0;
+}
 
 export function crc32(data: Uint8Array, start = 0, end = data.length, seed = 0): number {
   let c = ~seed;
@@ -360,7 +383,21 @@ export class ZipArchive {
     private readonly bytes: Uint8Array,
     readonly entries: ReadonlyMap<string, ZipEntry>,
     readonly names: readonly string[],
+    /** Every central-directory record in order, duplicates included. */
+    readonly list: readonly ZipEntry[],
+    readonly comment: Uint8Array,
   ) {}
+
+  /** The archive starts with a local file header (not, for example, a self-extracting stub). */
+  get startsWithLoc(): boolean {
+    return this.bytes.length >= 4 && new DataView(this.bytes.buffer, this.bytes.byteOffset, 4).getUint32(0, true) === SIG_LOC;
+  }
+
+  /** The entry's stored bytes (compressed when deflated). */
+  raw(entry: ZipEntry): Uint8Array {
+    const start = this.dataOffset(entry);
+    return this.bytes.subarray(start, start + entry.compressedSize);
+  }
 
   static open(bytes: Uint8Array): ZipArchive {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
@@ -380,6 +417,7 @@ export class ZipArchive {
     const decoder = new TextDecoder('utf-8');
     const entries = new Map<string, ZipEntry>();
     const names: string[] = [];
+    const list: ZipEntry[] = [];
     let p = cdOffset;
     for (let i = 0; i < count; i++) {
       if (p + 46 > eocd || view.getUint32(p, true) !== SIG_CEN) throw new ZipError('zip: bad central directory record');
@@ -389,24 +427,31 @@ export class ZipArchive {
       const commentLen = view.getUint16(p + 32, true);
       const next = p + 46 + nameLen + extraLen + commentLen;
       if (next > eocd) throw new ZipError('zip: central directory record out of range');
-      if (method !== 0 && method !== 8) throw new ZipError(`zip: unsupported compression method ${method}`);
       const dosTime = view.getUint16(p + 12, true);
       const dosDate = view.getUint16(p + 14, true);
-      const name = decoder.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+      const nameBytes = bytes.subarray(p + 46, p + 46 + nameLen);
+      const name = decoder.decode(nameBytes);
       const entry: ZipEntry = {
         name,
+        nameBytes,
         method,
+        flag: view.getUint16(p + 8, true),
         compressedSize: view.getUint32(p + 20, true),
         size: view.getUint32(p + 24, true),
         crc: view.getUint32(p + 16, true),
         localHeaderOffset: view.getUint32(p + 42, true),
         time: Date.UTC(1980 + (dosDate >> 9), Math.max(0, ((dosDate >> 5) & 15) - 1), dosDate & 31 || 1, dosTime >> 11, (dosTime >> 5) & 63, (dosTime & 31) * 2),
+        dosTime: ((dosDate << 16) | dosTime) >>> 0,
+        extra: bytes.subarray(p + 46 + nameLen, p + 46 + nameLen + extraLen),
+        comment: bytes.subarray(p + 46 + nameLen + extraLen, next),
       };
+      list.push(entry);
       if (!entries.has(name)) names.push(name);
       entries.set(name, entry);
       p = next;
     }
-    return new ZipArchive(bytes, entries, names);
+    const commentLen = Math.min(view.getUint16(eocd + 20, true), bytes.length - eocd - 22);
+    return new ZipArchive(bytes, entries, names, list, bytes.subarray(eocd + 22, eocd + 22 + commentLen));
   }
 
   dataOffset(entry: ZipEntry): number {
@@ -422,10 +467,188 @@ export class ZipArchive {
   read(name: string): Uint8Array | null {
     const entry = this.entries.get(name);
     if (!entry) return null;
-    const start = this.dataOffset(entry);
-    const raw = this.bytes.subarray(start, start + entry.compressedSize);
+    if (entry.method !== 0 && entry.method !== 8) throw new ZipError(`zip: unsupported compression method ${entry.method}`);
+    const raw = this.raw(entry);
     const data = entry.method === 0 ? raw.slice() : inflateAll(raw, entry.size);
     if (data.length !== entry.size || crc32(data) !== entry.crc) throw new ZipError(`zip: CRC mismatch in ${name}`);
     return data;
+  }
+}
+
+function reverseBits(code: number, len: number): number {
+  let r = 0;
+  for (let i = 0; i < len; i++, code >>= 1) r = (r << 1) | (code & 1);
+  return r;
+}
+
+const WINDOW = 32768;
+
+/**
+ * A raw DEFLATE (RFC 1951) encoder. Level 0 writes stored blocks; other levels find LZ77 matches through hash chains
+ * and code them with the fixed Huffman tables. Input is buffered until a flush or finish.
+ */
+export class DeflateEncoder {
+  private out = new Uint8Array(1024);
+  private outStart = 0;
+  private outEnd = 0;
+  private bitbuf = 0;
+  private bitcnt = 0;
+  private pending: Uint8Array[] = [];
+  private ended = false;
+
+  constructor(public level: number) {}
+
+  /** Copies `data` to be encoded. */
+  write(data: Uint8Array): void {
+    if (this.ended) throw new ZipError('deflate: write after finish');
+    if (data.length > 0) this.pending.push(data.slice());
+  }
+
+  /** Encodes everything written so far, then an empty stored block, so the output so far is byte-aligned and decodable. */
+  flush(): void {
+    if (this.ended) return;
+    if (this.pending.length > 0) this.encode(this.take(), false);
+    this.bits(0, 3);
+    this.align();
+    for (const b of [0, 0, 0xff, 0xff]) this.byte(b);
+  }
+
+  finish(): void {
+    if (this.ended) return;
+    this.encode(this.take(), true);
+    this.align();
+    this.ended = true;
+  }
+
+  /** Encoded bytes not yet read. */
+  get available(): number {
+    return this.outEnd - this.outStart;
+  }
+
+  /** finish() was called and every encoded byte has been read. */
+  get done(): boolean {
+    return this.ended && this.available === 0;
+  }
+
+  read(out: Uint8Array, offset: number, length: number): number {
+    const n = Math.min(length, this.available);
+    out.set(this.out.subarray(this.outStart, this.outStart + n), offset);
+    this.outStart += n;
+    if (this.outStart === this.outEnd) this.outStart = this.outEnd = 0;
+    return n;
+  }
+
+  private take(): Uint8Array {
+    const total = this.pending.reduce((n, c) => n + c.length, 0);
+    const d = new Uint8Array(total);
+    let p = 0;
+    for (const c of this.pending) {
+      d.set(c, p);
+      p += c.length;
+    }
+    this.pending = [];
+    return d;
+  }
+
+  private byte(b: number): void {
+    if (this.outEnd === this.out.length) {
+      const live = this.outEnd - this.outStart;
+      const grown = new Uint8Array(Math.max(1024, live * 2));
+      grown.set(this.out.subarray(this.outStart, this.outEnd));
+      this.out = grown;
+      this.outStart = 0;
+      this.outEnd = live;
+    }
+    this.out[this.outEnd++] = b;
+  }
+
+  private bits(v: number, n: number): void {
+    this.bitbuf |= v << this.bitcnt;
+    this.bitcnt += n;
+    while (this.bitcnt >= 8) {
+      this.byte(this.bitbuf & 0xff);
+      this.bitbuf >>>= 8;
+      this.bitcnt -= 8;
+    }
+  }
+
+  private align(): void {
+    if (this.bitcnt > 0) this.byte(this.bitbuf & 0xff);
+    this.bitbuf = 0;
+    this.bitcnt = 0;
+  }
+
+  private encode(d: Uint8Array, last: boolean): void {
+    if (this.level === 0) this.stored(d, last);
+    else this.fixed(d, last);
+  }
+
+  private stored(d: Uint8Array, last: boolean): void {
+    let p = 0;
+    do {
+      const n = Math.min(65535, d.length - p);
+      this.bits(last && p + n === d.length ? 1 : 0, 3);
+      this.align();
+      for (const b of [n & 0xff, n >> 8, ~n & 0xff, (~n >> 8) & 0xff]) this.byte(b);
+      for (let i = 0; i < n; i++) this.byte(d[p + i]!);
+      p += n;
+    } while (p < d.length);
+  }
+
+  private symbol(sym: number): void {
+    if (sym < 144) this.bits(reverseBits(0x30 + sym, 8), 8);
+    else if (sym < 256) this.bits(reverseBits(0x190 + sym - 144, 9), 9);
+    else if (sym < 280) this.bits(reverseBits(sym - 256, 7), 7);
+    else this.bits(reverseBits(0xc0 + sym - 280, 8), 8);
+  }
+
+  private fixed(d: Uint8Array, last: boolean): void {
+    this.bits(last ? 1 : 0, 1);
+    this.bits(1, 2);
+    const n = d.length;
+    const maxChain = this.level >= 6 || this.level < 0 ? 256 : 32;
+    const head = new Int32Array(1 << 15).fill(-1);
+    const prev = new Int32Array(n);
+    const hash = (i: number): number => ((d[i]! << 10) ^ (d[i + 1]! << 5) ^ d[i + 2]!) & 0x7fff;
+    const insert = (i: number): void => {
+      if (i + 2 >= n) return;
+      const h = hash(i);
+      prev[i] = head[h]!;
+      head[h] = i;
+    };
+    for (let i = 0; i < n; ) {
+      let bestLen = 0;
+      let bestDist = 0;
+      if (i + 2 < n) {
+        const max = Math.min(258, n - i);
+        for (let cand = head[hash(i)]!, chain = maxChain; cand >= 0 && i - cand <= WINDOW && chain > 0; cand = prev[cand]!, chain--) {
+          if (d[cand + bestLen] !== d[i + bestLen]) continue;
+          let l = 0;
+          while (l < max && d[cand + l] === d[i + l]) l++;
+          if (l > bestLen) {
+            bestLen = l;
+            bestDist = i - cand;
+            if (l === max) break;
+          }
+        }
+        insert(i);
+      }
+      if (bestLen < 3) {
+        this.symbol(d[i]!);
+        i++;
+        continue;
+      }
+      let li = LEN_BASE.length - 1;
+      while (LEN_BASE[li]! > bestLen) li--;
+      this.symbol(257 + li);
+      if (LEN_EXTRA[li]! > 0) this.bits(bestLen - LEN_BASE[li]!, LEN_EXTRA[li]!);
+      let di = DIST_BASE.length - 1;
+      while (DIST_BASE[di]! > bestDist) di--;
+      this.bits(reverseBits(di, 5), 5);
+      if (DIST_EXTRA[di]! > 0) this.bits(bestDist - DIST_BASE[di]!, DIST_EXTRA[di]!);
+      for (let k = 1; k < bestLen; k++) insert(i + k);
+      i += bestLen;
+    }
+    this.symbol(256);
   }
 }

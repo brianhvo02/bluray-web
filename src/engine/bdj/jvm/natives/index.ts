@@ -11,13 +11,16 @@ import type { JMethod } from '../loader';
 import type { JThread } from '../threads';
 import type { Jvm } from '../jvm';
 import type { NativeResult } from '../interpreter';
+import { registerAwtNatives } from './awt';
 import { registerInvokeNatives } from './invoke';
 import { registerIoNatives } from './io';
 import { registerLangNatives } from './lang';
 import { registerMiscNatives } from './misc';
+import { registerNetNatives } from './net';
 import { registerReflectNatives } from './reflect';
 import { registerStrictMathNatives } from './strictmath';
 import { registerUnsafeNatives } from './unsafe';
+import { registerZipNatives } from './zip';
 
 export interface NativeContext {
   readonly jvm: Jvm;
@@ -86,7 +89,7 @@ export function registerSchedulerNatives(table: NativeTable): void {
   });
 }
 
-/** The JDK's natives: java.lang, java.lang.invoke, reflection, Unsafe, sun.misc (later tasks add io, zip, security, net, awt). */
+/** The JDK's natives: java.lang, java.lang.invoke, reflection, Unsafe, sun.misc, java.io and sun.nio, zip, net and AWT. */
 export function registerJdkNatives(table: NativeTable): void {
   registerLangNatives(table);
   registerInvokeNatives(table);
@@ -95,4 +98,7 @@ export function registerJdkNatives(table: NativeTable): void {
   registerReflectNatives(table);
   registerUnsafeNatives(table);
   registerMiscNatives(table);
+  registerZipNatives(table);
+  registerNetNatives(table);
+  registerAwtNatives(table);
 }

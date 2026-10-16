@@ -48,7 +48,8 @@ function memory(jvm: Jvm): { blocks: Map<bigint, Block>; next: bigint } {
   return m;
 }
 
-function blockAt(jvm: Jvm, address: bigint, size: number): { view: DataView; offset: number } | null {
+/** The off-heap block holding `size` bytes at `address`, and the offset of the address in it. */
+export function offHeap(jvm: Jvm, address: bigint, size: number): { view: DataView; offset: number } | null {
   for (const b of memory(jvm).blocks.values()) {
     if (address >= b.base && address + BigInt(size) <= b.base + BigInt(b.view.byteLength)) return { view: b.view, offset: Number(address - b.base) };
   }
@@ -108,7 +109,7 @@ function byteView(a: JArray): DataView {
 
 function get(jvm: Jvm, o: JValue, offset: bigint, k: Kind): JValue {
   if (o === null) {
-    const b = blockAt(jvm, offset, SIZES[k]);
+    const b = offHeap(jvm, offset, SIZES[k]);
     if (!b) throw new Error(`Unsafe: bad address ${offset}`);
     return readView(b.view, b.offset, k);
   }
@@ -125,7 +126,7 @@ function get(jvm: Jvm, o: JValue, offset: bigint, k: Kind): JValue {
 
 function put(jvm: Jvm, o: JValue, offset: bigint, k: Kind, v: JValue): undefined {
   if (o === null) {
-    const b = blockAt(jvm, offset, SIZES[k]);
+    const b = offHeap(jvm, offset, SIZES[k]);
     if (!b) throw new Error(`Unsafe: bad address ${offset}`);
     writeView(b.view, b.offset, k, v);
     return undefined;

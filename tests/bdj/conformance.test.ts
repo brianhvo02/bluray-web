@@ -4,8 +4,11 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { Jvm } from '../../src/engine/bdj/jvm/jvm';
 import { Vfs } from '../../src/engine/bdj/jvm/vfs';
 import { ZipArchive } from '../../src/engine/bdj/jvm/zip';
-import type { JObject, JValue } from '../../src/engine/bdj/jvm/values';
-import { assembleClass } from '../helpers/jvm-asm';
+import type { JArray, JObject, JValue } from '../../src/engine/bdj/jvm/values';
+import { assembleClass, storedZip } from '../helpers/jvm-asm';
+import { syntheticSource } from '../helpers/synthetic-disc';
+import { byteArray } from '../../src/engine/bdj/jvm/natives/util';
+import { deflateSync, gzipSync } from 'node:zlib';
 
 const file = (rel: string): Uint8Array => readFileSync(fileURLToPath(new URL(rel, import.meta.url)));
 
@@ -18,7 +21,13 @@ const T_INT = 10;
 const GETSTATIC = 0xb2, ISTORE_1 = 0x3c, ILOAD_1 = 0x1b, IFLE = 0x9e, IINC = 0x84, GOTO = 0xa7;
 const ACC_PUBLIC = 0x0001;
 
-function bootedJvm(stdout: (s: string) => void = () => {}, stderr: (s: string) => void = () => {}, bootJars = BOOT_JARS): Jvm {
+function bootedJvm(
+  stdout: (s: string) => void = () => {},
+  stderr: (s: string) => void = () => {},
+  bootJars = BOOT_JARS,
+  discFiles?: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+): Jvm {
+  const disc = discFiles ? syntheticSource(discFiles) : null;
   return new Jvm({
     bootJars,
     nowMs: () => Date.now(),
@@ -28,7 +37,7 @@ function bootedJvm(stdout: (s: string) => void = () => {}, stderr: (s: string) =
     },
     stdout,
     stderr,
-    vfs: new Vfs({ disc: null, jdkLib: ZipArchive.open(RT), nowMs: () => Date.now() }),
+    vfs: new Vfs({ disc, discPaths: disc?.paths(), jdkLib: ZipArchive.open(RT), nowMs: () => Date.now() }),
     systemProperties: new Map([['awt.toolkit', 'java.awt.BDToolkit']]),
   });
 }
@@ -239,6 +248,204 @@ describe('on the JDK class path alone', () => {
     expect(spun('java/lang/invoke/BoundMethodHandle$Species_')).toEqual(
       ['L3', 'L4', 'LL'].map((s) => `java/lang/invoke/BoundMethodHandle$Species_${s}`),
     );
+  }, 60_000);
+});
+
+/** Runs `main` of a class, returning what it printed; failures carry the output so far. */
+async function runCapturing(jvm: Jvm, io: { out: string; err: string }, cls: string, name = 'main', desc = '([Ljava/lang/String;)V', args?: JValue[]): Promise<JValue | undefined> {
+  io.out = '';
+  io.err = '';
+  try {
+    return await jvm.callStatic(cls, name, desc, args ?? [jvm.heap.newArray(jvm.loader.arrayOf(jvm.bootClass('java/lang/String')), 0)]);
+  } catch (e) {
+    throw new Error(`${(e as Error).message}\nstdout so far:\n${io.out}\nstderr:\n${io.err}`);
+  }
+}
+
+describe('I/O and zip on the JDK class path alone', () => {
+  const io = { out: '', err: '' };
+  let jvm: Jvm;
+
+  beforeAll(async () => {
+    jvm = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT, file('./conformance.jar')]);
+    await jvm.boot();
+  }, 60_000);
+
+  it.each(['Io', 'Zip'])(
+    '%s prints what HotSpot prints',
+    async (name) => {
+      await runCapturing(jvm, io, `conformance/${name}`);
+      expect(io.out).toBe(new TextDecoder().decode(file(`./conformance/${name}.out`)));
+    },
+    60_000,
+  );
+});
+
+describe('URLClassLoader', () => {
+  const io = { out: '', err: '' };
+  let jvm: Jvm;
+  let urlLoad: Uint8Array;
+
+  function put(path: string, bytes: Uint8Array): void {
+    const vfs = jvm.opts.vfs!;
+    const h = vfs.open(path, 'w')!;
+    expect(vfs.write(h, bytes, 0, bytes.length)).toBe(true);
+    vfs.close(h);
+  }
+
+  beforeAll(async () => {
+    jvm = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT]);
+    await jvm.boot();
+    const LDC_W = 0x13, ANEWARRAY = 0xbd, AASTORE = 0x53, POP = 0x57, IF_ACMPNE = 0xa6, IRETURN = 0xac;
+    const ALOAD_1 = 0x2b, ASTORE_2 = 0x4d, ALOAD_2 = 0x2c, ASTORE_3 = 0x4e, ALOAD_3 = 0x2d;
+    const m = (c: string, n: string, d: string): { c: ['method', string, string, string] } => ({ c: ['method', c, n, d] });
+    urlLoad = assembleClass('UrlLoad', [
+        {
+          name: 'go',
+          desc: '(Ljava/lang/String;Ljava/lang/String;)Z',
+          maxStack: 10,
+          // URLClassLoader l = new URLClassLoader(new URL[] { new URL(url) });
+          // Class c = l.loadClass(name); c.getMethod("main", String[].class).invoke(null, new Object[] { new String[0] });
+          // return c.getClassLoader() == l;
+          code: [
+            NEW, { c: ['class', 'java/net/URLClassLoader'] }, DUP, ICONST_1, ANEWARRAY, { c: ['class', 'java/net/URL'] }, DUP, ICONST_0,
+            NEW, { c: ['class', 'java/net/URL'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/net/URL', '<init>', '(Ljava/lang/String;)V'),
+            AASTORE, INVOKESPECIAL, m('java/net/URLClassLoader', '<init>', '([Ljava/net/URL;)V'), ASTORE_2,
+            ALOAD_2, ALOAD_1, INVOKEVIRTUAL, m('java/lang/ClassLoader', 'loadClass', '(Ljava/lang/String;)Ljava/lang/Class;'), ASTORE_3,
+            ALOAD_3, LDC_W, { c: ['string', 'main'] }, ICONST_1, ANEWARRAY, { c: ['class', 'java/lang/Class'] }, DUP, ICONST_0,
+            LDC_W, { c: ['class', '[Ljava/lang/String;'] }, AASTORE,
+            INVOKEVIRTUAL, m('java/lang/Class', 'getMethod', '(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;'),
+            ACONST_NULL, ICONST_1, ANEWARRAY, { c: ['class', 'java/lang/Object'] }, DUP, ICONST_0, ICONST_0, ANEWARRAY, { c: ['class', 'java/lang/String'] }, AASTORE,
+            INVOKEVIRTUAL, m('java/lang/reflect/Method', 'invoke', '(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;'), POP,
+            ALOAD_3, INVOKEVIRTUAL, m('java/lang/Class', 'getClassLoader', '()Ljava/lang/ClassLoader;'), ALOAD_2, IF_ACMPNE, 0, 5, ICONST_1, IRETURN, ICONST_0, IRETURN,
+          ],
+        },
+      ]);
+    jvm.loader.define('UrlLoad', urlLoad, null, null);
+  }, 60_000);
+
+  const go = (url: string, name: string): Promise<JValue | undefined> =>
+    runCapturing(jvm, io, 'UrlLoad', 'go', '(Ljava/lang/String;Ljava/lang/String;)Z', [jvm.heap.newString(url), jvm.heap.newString(name)]);
+
+  it('loads classes from a jar in /tmp/, defines them itself and runs them as HotSpot does', async () => {
+    put('/tmp/loaded.jar', file('./conformance.jar'));
+    for (const name of ['Init', 'Exceptions']) {
+      expect(await go('file:/tmp/loaded.jar', `conformance.${name}`)).toBe(1);
+      expect(io.out).toBe(new TextDecoder().decode(file(`./conformance/${name}.out`)));
+    }
+  }, 120_000);
+
+  it('throws ClassCircularityError for a class that is its own superclass through the loader', async () => {
+    put('/tmp/circular.jar', storedZip([
+      ['circ/A.class', assembleClass('circ/A', [], [], 'circ/B')],
+      ['circ/B.class', assembleClass('circ/B', [], [], 'circ/A')],
+    ]));
+    await expect(go('file:/tmp/circular.jar', 'circ.A')).rejects.toThrow(/^java\.lang\.ClassCircularityError: circ\/A$/m);
+  }, 60_000);
+
+  it('reads a jar on the disc, whose reads suspend the thread', async () => {
+    const disc = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT], new Map([['BDMV/JAR/00000.JAR', new Uint8Array(file('./conformance.jar'))]]));
+    await disc.boot();
+    disc.loader.define('UrlLoad', urlLoad, null, null);
+    const same = await runCapturing(disc, io, 'UrlLoad', 'go', '(Ljava/lang/String;Ljava/lang/String;)Z', [
+      disc.heap.newString('file:/disc/BDMV/JAR/00000.jar'),
+      disc.heap.newString('conformance.Arith'),
+    ]);
+    expect(same).toBe(1);
+    expect(io.out).toBe(new TextDecoder().decode(file('./conformance/Arith.out')));
+  }, 60_000);
+});
+
+describe('java.util.zip streams', () => {
+  it('inflate zlib and gzip data fed seven bytes at a time, as zlib produced it', async () => {
+    const jvm = bootedJvm(() => {}, () => {}, [RT]);
+    await jvm.boot();
+    const BIPUSH = 0x10, NEWARRAY = 0xbc, T_BYTE = 8, ASTORE_1 = 0x4c, ALOAD_1 = 0x2b, ASTORE_2 = 0x4d, ALOAD_2 = 0x2c;
+    const ISTORE_3 = 0x3e, ILOAD_3 = 0x1d, IFLE = 0x9e, GOTO = 0xa7, ARETURN = 0xb0;
+    const m = (c: string, n: string, d: string): { c: ['method', string, string, string] } => ({ c: ['method', c, n, d] });
+    const k = (c: string): { c: ['class', string] } => ({ c: ['class', c] });
+    const bais = [NEW, k('java/io/ByteArrayInputStream'), DUP, ALOAD_0, INVOKESPECIAL, m('java/io/ByteArrayInputStream', '<init>', '([B)V')];
+    jvm.loader.define(
+      'Streams',
+      assembleClass('Streams', [
+        {
+          // new InflaterInputStream(new ByteArrayInputStream(b), new Inflater(), 7)
+          name: 'zlib',
+          desc: '([B)Ljava/io/InputStream;',
+          code: [NEW, k('java/util/zip/InflaterInputStream'), DUP, ...bais, NEW, k('java/util/zip/Inflater'), DUP, INVOKESPECIAL, m('java/util/zip/Inflater', '<init>', '()V'),
+            BIPUSH, 7, INVOKESPECIAL, m('java/util/zip/InflaterInputStream', '<init>', '(Ljava/io/InputStream;Ljava/util/zip/Inflater;I)V'), ARETURN],
+        },
+        {
+          // new GZIPInputStream(new ByteArrayInputStream(b), 7)
+          name: 'gzip',
+          desc: '([B)Ljava/io/InputStream;',
+          code: [NEW, k('java/util/zip/GZIPInputStream'), DUP, ...bais, BIPUSH, 7, INVOKESPECIAL, m('java/util/zip/GZIPInputStream', '<init>', '(Ljava/io/InputStream;I)V'), ARETURN],
+        },
+        {
+          // ByteArrayOutputStream out = new ...; byte[] buf = new byte[13]; int n; while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+          name: 'drain',
+          desc: '(Ljava/io/InputStream;)[B',
+          code: [NEW, k('java/io/ByteArrayOutputStream'), DUP, INVOKESPECIAL, m('java/io/ByteArrayOutputStream', '<init>', '()V'), ASTORE_1,
+            BIPUSH, 13, NEWARRAY, T_BYTE, ASTORE_2,
+            ALOAD_0, ALOAD_2, INVOKEVIRTUAL, m('java/io/InputStream', 'read', '([B)I'), DUP, ISTORE_3, IFLE, 0, 13,
+            ALOAD_1, ALOAD_2, ICONST_0, ILOAD_3, INVOKEVIRTUAL, m('java/io/ByteArrayOutputStream', 'write', '([BII)V'), GOTO, 0xff, 0xef,
+            ALOAD_1, INVOKEVIRTUAL, m('java/io/ByteArrayOutputStream', 'toByteArray', '()[B'), ARETURN],
+        },
+      ]),
+      null,
+      null,
+    );
+    const data = new Uint8Array(40_000);
+    for (let i = 0, x = 1; i < data.length; i++) data[i] = i % 3000 < 1500 ? (x = (x * 1103515245 + 12345) >>> 0) >>> 24 : 65 + (i % 7);
+    for (const [name, packed] of [['zlib', deflateSync(data)], ['gzip', gzipSync(data)]] as const) {
+      const stream = await jvm.callStatic('Streams', name, '([B)Ljava/io/InputStream;', [byteArray(jvm, packed)]);
+      const out = (await jvm.callStatic('Streams', 'drain', '(Ljava/io/InputStream;)[B', [stream!])) as JArray;
+      expect(new Uint8Array((out.data as Int8Array).buffer)).toEqual(data);
+    }
+  }, 60_000);
+});
+
+describe('java.io paths', () => {
+  it('resolves relative paths against user.dir and reports directories as the JDK does', async () => {
+    const jvm = bootedJvm(() => {}, () => {}, [RT]);
+    await jvm.boot();
+    const ASTORE_1 = 0x4c, ALOAD_1 = 0x2b, POP = 0x57, ARETURN = 0xb0, LDC_W = 0x13, IRETURN = 0xac;
+    const m = (c: string, n: string, d: string): { c: ['method', string, string, string] } => ({ c: ['method', c, n, d] });
+    jvm.loader.define(
+      'FsProbe',
+      assembleClass('FsProbe', [
+        {
+          // try { new FileInputStream(path); return "opened"; } catch (FileNotFoundException e) { return e.getMessage(); }
+          name: 'open',
+          desc: '(Ljava/lang/String;)Ljava/lang/String;',
+          code: [
+            NEW, { c: ['class', 'java/io/FileInputStream'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/FileInputStream', '<init>', '(Ljava/lang/String;)V'), POP,
+            LDC_W, { c: ['string', 'opened'] }, ARETURN,
+            ASTORE_1, ALOAD_1, INVOKEVIRTUAL, m('java/lang/Throwable', 'getMessage', '()Ljava/lang/String;'), ARETURN,
+          ],
+          handlers: [[0, 9, 13, 'java/io/FileNotFoundException']],
+        },
+        {
+          name: 'isDirectory',
+          desc: '(Ljava/lang/String;)Z',
+          code: [
+            NEW, { c: ['class', 'java/io/File'] }, DUP, ALOAD_0, INVOKESPECIAL, m('java/io/File', '<init>', '(Ljava/lang/String;)V'),
+            INVOKEVIRTUAL, m('java/io/File', 'isDirectory', '()Z'), IRETURN,
+          ],
+        },
+      ]),
+      null,
+      null,
+    );
+    const str = (v: JValue | undefined): string | null => jvm.heap.jsString(v as JObject | null);
+    const open = async (p: string): Promise<string | null> => str(await jvm.callStatic('FsProbe', 'open', '(Ljava/lang/String;)Ljava/lang/String;', [jvm.heap.newString(p)]));
+    const isDir = (p: string): Promise<JValue | undefined> => jvm.callStatic('FsProbe', 'isDirectory', '(Ljava/lang/String;)Z', [jvm.heap.newString(p)]);
+    expect(await open('/tmp')).toBe('/tmp (Is a directory)');
+    expect(await open('/tmp/none')).toBe('/tmp/none (No such file or directory)');
+    expect(await open('jdk/lib/currency.data')).toBe('opened');
+    expect(await isDir('tmp')).toBe(1);
+    expect(await isDir('jdk/lib')).toBe(1);
+    expect(await isDir('nope')).toBe(0);
   }, 60_000);
 });
 

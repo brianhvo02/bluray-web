@@ -156,6 +156,26 @@ describe('memory mounts', () => {
     expect(vfs.read(h, out, 0, 1)).toBe(-1);
   });
 
+  it('truncates and zero-extends, sets mtimes, and says which paths are writable', () => {
+    const { vfs } = make();
+    writeFile(vfs, '/tmp/t', 'abcdef');
+    const h = vfs.open('/tmp/t', 'rw')!;
+    h.position = 5;
+    expect(vfs.truncate(h, 2)).toBe(true);
+    expect(h.position).toBe(2);
+    expect(readAll(vfs, '/tmp/t')).toBe('ab');
+    expect(vfs.truncate(h, 4)).toBe(true);
+    expect(readAll(vfs, '/tmp/t')).toBe('ab\0\0');
+    expect(vfs.truncate(vfs.open('/tmp/t', 'r')!, 0)).toBe(false);
+    expect(vfs.setMtime('/tmp/t', 42)).toBe(true);
+    expect(vfs.stat('/tmp/t')?.mtimeMs).toBe(42);
+    expect(vfs.setMtime('/tmp/missing', 42)).toBe(false);
+    expect(vfs.setMtime('/jdk/lib/currency.data', 42)).toBe(false);
+    expect([vfs.writable('/tmp/x'), vfs.writable('/persistent/a/b'), vfs.writable('/tmp'), vfs.writable('/disc/BDMV'), vfs.writable('/jdk/x'), vfs.writable('/x')]).toEqual([
+      true, true, false, false, false, false,
+    ]);
+  });
+
   it('lists sorted, renames across directories, refuses non-empty deletes', () => {
     const { vfs } = make();
     vfs.mkdir('/tmp/d1');

@@ -191,3 +191,38 @@ export async function runWithClock(jvm: Runnable, clock: VirtualClock, signal?: 
     clock.advanceToNext();
   }
 }
+
+/** A zip of stored entries (no compression), enough for a class loader to read. */
+export function storedZip(entries: readonly (readonly [name: string, data: Uint8Array])[]): Uint8Array {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (d: Uint8Array): number => {
+    let c = ~0;
+    for (const b of d) c = crcTable[(c ^ b) & 0xff]! ^ (c >>> 8);
+    return ~c >>> 0;
+  };
+  const local: number[] = [];
+  const central: number[] = [];
+  const le = (out: number[], v: number, n: number): void => {
+    for (let i = 0; i < n; i++) out.push((v >>> (8 * i)) & 0xff);
+  };
+  for (const [name, data] of entries) {
+    const nb = new TextEncoder().encode(name);
+    const offset = local.length;
+    const c = crc(data);
+    le(local, 0x04034b50, 4); le(local, 10, 2); le(local, 0, 2); le(local, 0, 2); le(local, 0, 4);
+    le(local, c, 4); le(local, data.length, 4); le(local, data.length, 4); le(local, nb.length, 2); le(local, 0, 2);
+    local.push(...nb, ...data);
+    le(central, 0x02014b50, 4); le(central, 20, 2); le(central, 10, 2); le(central, 0, 2); le(central, 0, 2); le(central, 0, 4);
+    le(central, c, 4); le(central, data.length, 4); le(central, data.length, 4); le(central, nb.length, 2);
+    le(central, 0, 2); le(central, 0, 2); le(central, 0, 2); le(central, 0, 2); le(central, 0, 4); le(central, offset, 4);
+    central.push(...nb);
+  }
+  const end: number[] = [];
+  le(end, 0x06054b50, 4); le(end, 0, 4); le(end, entries.length, 2); le(end, entries.length, 2);
+  le(end, central.length, 4); le(end, local.length, 4); le(end, 0, 2);
+  return new Uint8Array([...local, ...central, ...end]);
+}
