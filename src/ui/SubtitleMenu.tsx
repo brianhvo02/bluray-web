@@ -4,7 +4,7 @@ import type { Chapter } from '../engine/nav/timeline';
 import type { SubtitleChoice } from '../engine/protocol';
 import { languageName } from '../player/language';
 import { formatSubtitleOffset, MAX_SUBTITLE_SCALE, MIN_SUBTITLE_SCALE, type SubtitlesState } from '../player/player-controller';
-import { FONT_EXTENSIONS, SUBTITLE_EXTENSIONS } from './drop-files';
+import { FONT_EXTENSIONS, SUBTITLE_EXTENSIONS } from '../player/drop-files';
 import { startChoices, startLabel } from './subtitle-starts';
 
 const OFFSET_STEP_MS = 100;
@@ -163,7 +163,7 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, isMasked
             </li>
           )}
           {text?.files.map((f, i) => (
-            <li key={f.name} role="none" className="subtitle-file" aria-current={showingFile === i ? 'true' : undefined} data-testid={`subtitle-file-${i}`}>
+            <li key={`${i}:${f.name}`} role="none" className="subtitle-file" aria-current={showingFile === i ? 'true' : undefined} data-testid={`subtitle-file-${i}`}>
               <span className="subtitle-file-name">{showingFile === i ? '▶ ' : ''}{f.name}</span>
               <select
                 aria-label={`Start of ${f.name}`}

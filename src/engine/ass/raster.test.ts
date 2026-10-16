@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   blurVariance, dilate, FILTER_BORDER_STYLE_3, FILTER_FILL_IN_BORDER, FILTER_FILL_IN_SHADOW, FILTER_NONZERO_BORDER,
-  FILTER_NONZERO_SHADOW, fixOutline, gaussianBlur, quantizePositions, quantizeShadow, runFlags,
+  FILTER_NONZERO_SHADOW, fixOutline, gaussianBlur, layerKey, quantizePositions, quantizeShadow, runFlags,
 } from './raster';
 
 const glyph = (over: Record<string, number | number[]> = {}) => ({
@@ -116,5 +116,16 @@ describe('quantizePositions (quantize_transform)', () => {
     expect(ink![2]).toBe(4); // as if it came first: the space before it sets no offset
     expect(space![2]).toBe(0); // its own centre (3 26.6 = 0.375 grid) rounded
     expect(p).toEqual([...persp]);
+  });
+});
+
+describe('layerKey', () => {
+  it('tells apart runs that differ only in colour, karaoke or shadow offset', () => {
+    const base = layerKey('m', [1, 2, 3, 4], 0, 0, 64, 64);
+    expect(layerKey('m', [1, 2, 3, 4], 0, 0, 64, 64)).toBe(base);
+    expect(layerKey('m', [1, 2, 3, 5], 0, 0, 64, 64)).not.toBe(base);
+    expect(layerKey('m', [1, 2, 3, 4], 0, 1, 64, 64)).not.toBe(base);
+    expect(layerKey('m', [1, 2, 3, 4], 0, 0, 128, 64)).not.toBe(base); // \xshad changed, same masks
+    expect(layerKey('m', [1, 2, 3, 4], 0, 0, 64, -64)).not.toBe(base);
   });
 });

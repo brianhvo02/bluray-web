@@ -37,12 +37,13 @@ const SEEK_MS = 1000;
 const ANIMATION_STEP_MS = 40;
 const MASK_CACHE_BYTES = 64 * 1024 * 1024;
 const LAYER_CACHE_BYTES = 128 * 1024 * 1024;
+const EVENT_CACHE_BYTES = 128 * 1024 * 1024;
 
 /** Least recently used values within a byte budget (libass bounds its bitmap caches the same way). */
 class SizedLru<V> {
   private readonly map = new Map<string, { value: V; bytes: number }>();
   private bytes = 0;
-  constructor(private readonly budget: number, private readonly sizeOf: (v: V) => number) {}
+  constructor(private readonly budget: number, private readonly sizeOf: (v: V) => number, private readonly maxEntries = Infinity) {}
   get(key: string): V | undefined {
     const e = this.map.get(key);
     if (!e) return undefined;
@@ -57,7 +58,7 @@ class SizedLru<V> {
     this.map.delete(key);
     this.map.set(key, { value, bytes });
     this.bytes += bytes;
-    while (this.bytes > this.budget && this.map.size > 1) {
+    while ((this.bytes > this.budget || this.map.size > this.maxEntries) && this.map.size > 1) {
       const [k, e] = this.map.entries().next().value!;
       this.map.delete(k);
       this.bytes -= e.bytes;
@@ -67,9 +68,13 @@ class SizedLru<V> {
     this.map.clear();
     this.bytes = 0;
   }
+  get size(): number {
+    return this.map.size;
+  }
 }
 
 const maskBytes = (m: RunMasks): number => m.fill.length + (m.border?.length ?? 0) + (m.shadow?.length ?? 0);
+const eventBytes = (r: RenderedEvent | null): number => (r ? 4 * r.canvas.width * r.canvas.height || 0 : 0);
 const layerBytes = (l: CachedLayers): number => [l.shadow, l.border, l.fill].reduce((n, x) => n + (x ? 4 * x.w * x.h : 0), 0);
 
 const BT601 = { kr: 0.299, kb: 0.114 };
@@ -98,7 +103,8 @@ const sameSettings = (a: RenderSettings | null, b: RenderSettings): boolean =>
 export class AssRenderer implements TextRendererLike {
   private builder: FrameBuilder;
   private readonly rc: RasterContext;
-  private readonly cache = new Map<number, RenderedEvent | null>();
+  /** Static events, composited (null: nothing to draw). */
+  private readonly cache = new SizedLru<RenderedEvent | null>(EVENT_CACHE_BYTES, eventBytes, CACHE_SIZE);
   private readonly masks = new SizedLru<RunMasks>(MASK_CACHE_BYTES, maskBytes);
   private readonly layers = new SizedLru<CachedLayers>(LAYER_CACHE_BYTES, layerBytes);
   private cacheSettings: RenderSettings | null = null;
@@ -191,15 +197,10 @@ export class AssRenderer implements TextRendererLike {
         animated++;
         r = draw(this.rc, ev, size);
       } else {
-        r = this.cache.get(ev.index);
+        r = this.cache.get(String(ev.index));
         if (r === undefined) {
           r = draw(this.rc, ev, size);
-          this.cache.set(ev.index, r);
-          if (this.cache.size > CACHE_SIZE) this.cache.delete(this.cache.keys().next().value!);
-        } else {
-          // most recently used last
-          this.cache.delete(ev.index);
-          this.cache.set(ev.index, r);
+          this.cache.set(String(ev.index), r);
         }
       }
       if (r) ctx.drawImage(r.canvas, r.x, r.y + ev.shiftY);

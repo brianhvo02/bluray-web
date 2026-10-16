@@ -39,7 +39,7 @@ function fakeCtx() {
   return { ctx, draws };
 }
 
-function renderer(track = script([ev('0:00:01.00', '0:00:03.00', 'static'), ev('0:00:01.00', '0:00:03.00', '{\\move(0,0,100,100)}moving')]), colorMatrix: 'video' | 'none' = 'none') {
+function renderer(track = script([ev('0:00:01.00', '0:00:03.00', 'static'), ev('0:00:01.00', '0:00:03.00', '{\\move(0,0,100,100)}moving')]), colorMatrix: 'video' | 'none' = 'none', canvas = {} as OffscreenCanvas) {
   const rendered: number[] = [];
   const r = new AssRenderer(track, fonts, {
     measurer: createFixedMeasurer(0.5),
@@ -47,7 +47,7 @@ function renderer(track = script([ev('0:00:01.00', '0:00:03.00', 'static'), ev('
     nowMs: () => 0,
     Path2D: class {} as unknown as typeof Path2D,
     colorMatrix,
-    renderEvent: (_rc, e): RenderedEvent => { rendered.push(e.index); return { canvas: {} as OffscreenCanvas, x: 0, y: 0 }; },
+    renderEvent: (_rc, e): RenderedEvent => { rendered.push(e.index); return { canvas, x: 0, y: 0 }; },
   });
   return { r, rendered };
 }
@@ -93,6 +93,14 @@ describe('AssRenderer', () => {
     const { ctx } = fakeCtx();
     for (let i = 0; i < 100; i++) r.render(ctx, (i < 60 ? i : 60 + (i - 60)) * 1_000_000 + 100_000, RECT, OPTS);
     expect(r.cacheSize()).toBeLessThanOrEqual(64);
+  });
+
+  it('bounds the cached events by their pixels too (128 MiB)', () => {
+    const lines = Array.from({ length: 5 }, (_, i) => ev(`0:00:0${i}.00`, `0:00:0${i}.50`, `line ${i}`));
+    const { r } = renderer(script(lines), 'none', { width: 4096, height: 4096 } as OffscreenCanvas); // 64 MiB each
+    const { ctx } = fakeCtx();
+    for (let i = 0; i < 5; i++) r.render(ctx, i * 1_000_000 + 100_000, RECT, OPTS);
+    expect(r.cacheSize()).toBe(2);
   });
 
   it('applies the offset and reports what is visible', () => {

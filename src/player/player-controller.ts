@@ -1,4 +1,4 @@
-import { splitPick } from '../ui/drop-files';
+import { splitPick } from './drop-files';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';

@@ -518,7 +518,7 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   const type = first.effectType;
   const kTiming = first.effectTiming;
   const colorKey = rc.layers
-    ? `${key}#${c.join(',')}#${type}#${type === EF_KARAOKE_KF ? kfBreak(glyphs, mats, first, s.parScaleX) - ox : kTiming > 0 ? 1 : 0}`
+    ? layerKey(key, c, type, type === EF_KARAOKE_KF ? kfBreak(glyphs, mats, first, s.parScaleX) - ox : kTiming > 0 ? 1 : 0, shadow26X, shadow26Y)
     : '';
   const hit = rc.layers?.get(colorKey);
   if (hit) {
@@ -777,6 +777,14 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
 }
 
 /** Everything that shapes a run's masks, positions relative to its canvas origin. */
+/**
+ * The key of a run's coloured layers: its masks' key plus what colours and places them (colours after fade, the
+ * karaoke state, and the shadow offset, which the cached shadow layer carries).
+ */
+export function layerKey(maskKey: string, colors: readonly number[], effectType: number, karaoke: number, shadow26X: number, shadow26Y: number): string {
+  return `${maskKey}#${colors.join(',')}#${effectType}#${karaoke}#${shadow26X},${shadow26Y}`;
+}
+
 function maskKey(glyphs: readonly GlyphInfo[], mats: readonly Mat3[], ox: number, oy: number, w: number, h: number, flags: number, bx26: number, by26: number, sigma: number, s: RenderState, ss: number): string {
   const r = (v: number): number => Math.round(v * 1e6) / 1e6;
   const parts: (string | number)[] = [ss, w, h, flags, r(bx26), r(by26), r(sigma)];
