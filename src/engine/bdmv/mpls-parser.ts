@@ -19,6 +19,8 @@ export interface StreamEntry {
   readonly format: number;
   readonly rate: number;
   readonly lang: string;
+  /** Text subtitle character code (coding type 0x92); 0 otherwise. */
+  readonly charCode: number;
   /** True for streams carried in a sub-path clip (stream_type 2–4); M1 plays main-path streams only. */
   readonly subPath: boolean;
   /** STN stream_type: 1 main clip, 2 sub-path clip, 3 and 4 other sub-path streams. libbluray's IG lookup treats only 2 as a sub-path IG. */
@@ -34,6 +36,9 @@ export interface StnTable {
   readonly audio: readonly StreamEntry[];
   readonly pg: readonly StreamEntry[];
   readonly ig: readonly StreamEntry[];
+  readonly pipPg: readonly StreamEntry[];
+  readonly secondaryAudio: readonly StreamEntry[];
+  readonly secondaryVideo: readonly StreamEntry[];
 }
 
 export interface PlayItem {
@@ -49,6 +54,8 @@ export interface PlayItem {
   readonly stillMode: number;
   readonly stillTime: number;
   readonly isMultiAngle: boolean;
+  /** pi->angle_count: 1 for single-angle items. */
+  readonly angleCount: number;
   readonly angleClipIds: readonly string[];
   readonly stn: StnTable;
 }
@@ -176,8 +183,9 @@ function readPlayItem(r: ByteReader): PlayItem {
   const stillMode = r.u8();
   const stillTimeField = r.u16();
   const angleClipIds: string[] = [];
+  let angleCount = 1;
   if (isMultiAngle) {
-    const angleCount = r.u8();
+    angleCount = Math.max(1, r.u8());
     r.skip(1);
     for (let a = 1; a < angleCount; a++) {
       angleClipIds.push(r.ascii(5));
@@ -197,6 +205,7 @@ function readPlayItem(r: ByteReader): PlayItem {
     stillMode,
     stillTime: stillMode === 1 ? stillTimeField : 0,
     isMultiAngle,
+    angleCount,
     angleClipIds,
     stn,
   };
@@ -210,18 +219,32 @@ function readStn(r: ByteReader): StnTable {
   const audioCount = r.u8();
   const pgCount = r.u8();
   const igCount = r.u8();
-  r.u8(); // secondary audio count (not used by M1)
-  r.u8(); // secondary video count (not used by M1)
+  const secondaryAudioCount = r.u8();
+  const secondaryVideoCount = r.u8();
   const pipPgCount = r.u8();
-  r.skip(5); // reserved
-  const readMany = (n: number): StreamEntry[] => Array.from({ length: n }, () => readStream(r));
+  r.skip(5); // num_dv, reserved
+  const readMany = (n: number, extra?: () => void): StreamEntry[] =>
+    Array.from({ length: n }, () => {
+      const s = readStream(r);
+      extra?.();
+      return s;
+    });
+  const refs = (): void => {
+    const n = r.u8();
+    r.skip(1 + n + (n % 2));
+  };
   const video = readMany(videoCount);
   const audio = readMany(audioCount);
   const pg = readMany(pgCount);
-  readMany(pipPgCount); // PiP PG entries follow the PG entries and are skipped (PiP is out of scope)
+  const pipPg = readMany(pipPgCount);
   const ig = readMany(igCount);
+  const secondaryAudio = readMany(secondaryAudioCount, refs);
+  const secondaryVideo = readMany(secondaryVideoCount, () => {
+    refs();
+    refs();
+  });
   r.seek(start + length);
-  return { video, audio, pg, ig };
+  return { video, audio, pg, ig, pipPg, secondaryAudio, secondaryVideo };
 }
 
 function readStream(r: ByteReader): StreamEntry {
@@ -256,6 +279,7 @@ function readStream(r: ByteReader): StreamEntry {
   let format = 0;
   let rate = 0;
   let lang = '';
+  let charCode = 0;
   if (isVideoCoding(codingType)) {
     format = r.bits(4);
     rate = r.bits(4);
@@ -266,11 +290,11 @@ function readStream(r: ByteReader): StreamEntry {
   } else if (codingType === CodingType.PG || codingType === CodingType.IG) {
     lang = r.ascii(3);
   } else if (codingType === CodingType.TEXT_SUBTITLE) {
-    r.skip(1);
+    charCode = r.u8();
     lang = r.ascii(3);
   }
   r.seek(attrStart + attrLength);
-  return { pid, codingType, format, rate, lang, subPath: streamType !== 1, streamType, subPathId, subClipId };
+  return { pid, codingType, format, rate, lang, charCode, subPath: streamType !== 1, streamType, subPathId, subClipId };
 }
 
 function readMarks(r: ByteReader, markPos: number): PlayListMark[] {

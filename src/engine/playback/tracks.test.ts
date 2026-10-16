@@ -3,7 +3,7 @@ import type { StreamEntry } from '../bdmv/mpls-parser';
 import { CodingType } from '../bdmv/stream-types';
 import { audioTracks, channelsLabel } from './tracks';
 
-const entry = (codingType: number, format: number, lang: string, subPath = false): StreamEntry => ({ pid: 0x1100, codingType, format, rate: 1, lang, subPath, streamType: subPath ? 2 : 1, subPathId: 0, subClipId: 0 });
+const entry = (codingType: number, format: number, lang: string, subPath = false): StreamEntry => ({ pid: 0x1100, codingType, format, rate: 1, lang, subPath, streamType: subPath ? 2 : 1, charCode: 0, subPathId: 0, subClipId: 0 });
 
 describe('audioTracks', () => {
   it('lists every STN audio entry with its 1-based number and playability', () => {
@@ -12,6 +12,9 @@ describe('audioTracks', () => {
       audio: [entry(CodingType.LPCM, 3, 'jpn'), entry(CodingType.DTSHD_MASTER, 6, 'eng'), entry(CodingType.DTSHD_SECONDARY, 3, 'eng'), entry(CodingType.AC3, 6, 'fra', true)],
       pg: [],
       ig: [],
+      pipPg: [],
+      secondaryAudio: [],
+      secondaryVideo: [],
     });
     expect(tracks).toEqual([
       { index: 1, codec: 'LPCM', language: 'jpn', channels: 'stereo', playable: true },

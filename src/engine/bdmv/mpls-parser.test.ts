@@ -39,7 +39,7 @@ describe('parseMpls', () => {
     expect(first.codecId).toBe('M2TS');
     expect(first.inTime).toBe(900_000);
     expect(first.outTime).toBe(1_800_000);
-    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', subPath: false, streamType: 1, subPathId: 0, subClipId: 0 }]);
+    expect(first.stn.video).toEqual([{ pid: 0x1011, codingType: CodingType.AVC, format: 6, rate: 1, lang: '', charCode: 0, subPath: false, streamType: 1, subPathId: 0, subClipId: 0 }]);
     expect(first.stn.audio.map((a) => [a.pid, a.codingType, a.lang])).toEqual([
       [0x1100, CodingType.LPCM, 'eng'],
       [0x1101, CodingType.AC3, 'fra'],
@@ -86,6 +86,7 @@ describe('parseMpls', () => {
     );
     expect(mpls.playItems[0].isMultiAngle).toBe(true);
     expect(mpls.playItems[0].angleClipIds).toEqual(['00002', '00003']);
+    expect(mpls.playItems[0].angleCount).toBe(3);
     expect(mpls.playItems[0].stn.video).toHaveLength(1);
   });
 
@@ -107,6 +108,7 @@ describe('parseMpls', () => {
     );
     const item = mpls.playItems[0];
     expect(item.stn.pg.map((p) => p.pid)).toEqual([0x1200]);
+    expect(item.stn.pipPg.map((p) => p.pid)).toEqual([0x1a00]);
     expect(item.stn.ig).toHaveLength(1);
     expect(item.stn.ig[0].pid).toBe(0x1400);
     expect(item.stn.ig[0].codingType).toBe(CodingType.IG);

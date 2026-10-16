@@ -16,8 +16,9 @@ function item(clipId: string, inTime: number, outTime: number): PlayItem {
     stillMode: 0,
     stillTime: 0,
     isMultiAngle: false,
+    angleCount: 1,
     angleClipIds: [],
-    stn: { video: [], audio: [], pg: [], ig: [] },
+    stn: { video: [], audio: [], pg: [], ig: [], pipPg: [], secondaryAudio: [], secondaryVideo: [] },
   };
 }
 
