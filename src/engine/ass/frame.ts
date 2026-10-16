@@ -87,6 +87,11 @@ export class FrameBuilder {
     this.index = new IntervalIndex(track);
   }
 
+  /** Indices (track order) of the events active at t. */
+  activeIndices(t: number): number[] {
+    return this.index.active(t);
+  }
+
   /** Forget collision memory (a seek; libass forgets it when reconfigured). */
   reset(): void {
     this.memory.clear();

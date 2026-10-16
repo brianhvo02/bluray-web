@@ -197,4 +197,11 @@ describe('TextSubtitleRenderer', () => {
     expect(fills()[0]!.font).toBe(`${SIZE * 2}px sans-serif`);
     expect(r.changed(1_000_000, { offsetUs: 0, scale: 1 })).toBe(true); // another size is another picture
   });
+
+  it('reports whether a cue shows at a time, with the offset', () => {
+    const r = new TextSubtitleRenderer(srt(cue('00:00:01,000', '00:00:02,000', 'a')));
+    expect(r.visible(1_500_000, OPTS)).toBe(true);
+    expect(r.visible(2_500_000, OPTS)).toBe(false);
+    expect(r.visible(2_500_000, { ...OPTS, offsetUs: 1_000_000 })).toBe(true);
+  });
 });

@@ -204,6 +204,12 @@ export class AssFonts {
     await Promise.all(pending);
   }
 
+  /** Faces resolved but not registered yet: layout measured them with a fallback until ready() completes. */
+  hasPending(): boolean {
+    for (const state of this.fonts.values()) for (const f of state.faces) if (!this.loaded.has(this.entryOf.get(f)!.uid)) return true;
+    return false;
+  }
+
   /** Requested families no supplied face matched by name, in first-request order, case-insensitively unique. */
   missingFamilies(): readonly string[] {
     return [...this.missing.values()];

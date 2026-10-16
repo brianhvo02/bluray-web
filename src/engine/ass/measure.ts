@@ -20,6 +20,8 @@ export interface GlyphMetrics {
 export interface GlyphMeasurer {
   /** Metrics of each code point of `codepoints` shaped as one run in `cssFamily` at `emPx`. */
   measureRun(cssFamily: string, emPx: number, codepoints: readonly number[], kerning: boolean): readonly GlyphMetrics[];
+  /** Forget cached measurements (fonts finished loading). */
+  reset?(): void;
 }
 
 /** For Node tests: every code point advances `ratio × emPx`, ink fills the advance, 0.7 em up and 0.2 em down. */
@@ -64,5 +66,6 @@ export function createCanvasMeasurer(ctx: OffscreenCanvasRenderingContext2D): Gl
       cache.set(key, out);
       return out;
     },
+    reset: () => cache.clear(),
   };
 }

@@ -149,7 +149,12 @@ export interface RasterContext {
   readonly Path2D: typeof Path2D;
   /** Draws `source` (laid out in layout space, origin at the run's first glyph) onto `target` through `m`; `origin` is where target's (0,0) is on the frame. */
   warp?(target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number): void;
+  /** Maps a 0xRRGGBBAA colour before drawing (the player's colour-matrix conversion). */
+  mapColor?(c: number): number;
 }
+
+/** An event composited into one canvas; drawn at (x, y + the event's collision shift). */
+export interface RenderedEvent { readonly canvas: OffscreenCanvas; readonly x: number; readonly y: number }
 
 interface Layer { x: number; y: number; w: number; h: number; data: ImageData }
 interface RunLayers { shadow: Layer | null; border: Layer | null; fill: Layer | null }
@@ -276,7 +281,7 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
   const mats = idx.map((i) => normalize(ev.matrices[i]!));
   const first = glyphs[0]!;
   const flags = runFlags(first);
-  const c = first.c.map((v) => applyFade(v, first.fade));
+  const c = first.c.map((v) => { const f = applyFade(v, first.fade); return rc.mapColor ? rc.mapColor(f) : f; });
 
   // border ellipse in layout 26.6 (get_bitmap_glyph), mapped to device px by the first glyph's matrix
   const bx26 = (64 * s.borderScaleX * first.borderX) / s.parScaleX;
@@ -507,26 +512,35 @@ function applyClip(ctx: OffscreenCanvasRenderingContext2D, rc: RasterContext, ev
   }
 }
 
-/** Draws one laid-out event onto ctx (device px, frame origin at 0,0): shadows, then borders, then fills. */
-export function drawEvent(ctx: OffscreenCanvasRenderingContext2D, rc: RasterContext, ev: FrameEvent, frame: { readonly width: number; readonly height: number }): void {
+/** Composites an event's runs into one canvas: shadows, then borders, then fills, clipped; null when nothing shows. */
+export function renderEvent(rc: RasterContext, ev: FrameEvent, frame: { readonly width: number; readonly height: number }): RenderedEvent | null {
   const runs = eventRuns(ev).map((idx) => renderRun(rc, ev, idx));
-  ctx.save();
-  // collision handling moves the finished images, clip included (shift_event)
-  ctx.translate(0, ev.shiftY);
+  const layers: Layer[] = [];
+  if (ev.layout.text.state.borderStyle !== 4) for (const r of runs) if (r.shadow) layers.push(r.shadow);
+  for (const r of runs) if (r.border) layers.push(r.border);
+  for (const r of runs) if (r.fill) layers.push(r.fill);
+  if (!layers.length) return null;
+  const x0 = Math.floor(Math.min(...layers.map((l) => l.x)));
+  const y0 = Math.floor(Math.min(...layers.map((l) => l.y)));
+  const x1 = Math.ceil(Math.max(...layers.map((l) => l.x + l.w)));
+  const y1 = Math.ceil(Math.max(...layers.map((l) => l.y + l.h)));
+  const out = rc.createCanvas(x1 - x0, y1 - y0);
+  const ctx = out.getContext('2d')!;
+  ctx.translate(-x0, -y0);
   applyClip(ctx, rc, ev, frame);
-  const scratch: { canvas: OffscreenCanvas | null } = { canvas: null };
-  const put = (layer: Layer | null): void => {
-    if (!layer) return;
-    if (!scratch.canvas || scratch.canvas.width < layer.w || scratch.canvas.height < layer.h) {
-      scratch.canvas = rc.createCanvas(Math.max(layer.w, scratch.canvas?.width ?? 0), Math.max(layer.h, scratch.canvas?.height ?? 0));
-    }
-    const sctx = scratch.canvas.getContext('2d')!;
+  let scratch: OffscreenCanvas | null = null;
+  for (const layer of layers) {
+    if (!scratch || scratch.width < layer.w || scratch.height < layer.h) scratch = rc.createCanvas(Math.max(layer.w, scratch?.width ?? 0), Math.max(layer.h, scratch?.height ?? 0));
+    const sctx = scratch.getContext('2d')!;
     sctx.clearRect(0, 0, layer.w, layer.h);
     sctx.putImageData(layer.data, 0, 0);
-    ctx.drawImage(scratch.canvas, 0, 0, layer.w, layer.h, layer.x, layer.y, layer.w, layer.h);
-  };
-  if (ev.layout.text.state.borderStyle !== 4) for (const r of runs) put(r.shadow);
-  for (const r of runs) put(r.border);
-  for (const r of runs) put(r.fill);
-  ctx.restore();
+    ctx.drawImage(scratch, 0, 0, layer.w, layer.h, layer.x, layer.y, layer.w, layer.h);
+  }
+  return { canvas: out, x: x0, y: y0 };
+}
+
+/** Draws one laid-out event onto ctx (device px, frame origin at 0,0), moved by its collision shift (shift_event). */
+export function drawEvent(ctx: OffscreenCanvasRenderingContext2D, rc: RasterContext, ev: FrameEvent, frame: { readonly width: number; readonly height: number }): void {
+  const r = renderEvent(rc, ev, frame);
+  if (r) ctx.drawImage(r.canvas, r.x, r.y + ev.shiftY);
 }

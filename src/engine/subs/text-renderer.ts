@@ -14,6 +14,8 @@ export interface TextRenderOptions {
   readonly offsetUs: number;
   /** Font size factor, 0.5–2. */
   readonly scale: number;
+  /** The video's storage size (its coded picture), which ASS layout can depend on; null when unknown. */
+  readonly storage?: { readonly width: number; readonly height: number } | null;
 }
 
 const FONT_SIZE = 0.055; // of the video height
@@ -108,6 +110,11 @@ export class TextSubtitleRenderer {
     if (now.length !== this.lastCues.length) return true;
     if (now.length > 0 && opts.scale !== this.lastScale) return true;
     return now.some((c, i) => c !== this.lastCues[i]);
+  }
+
+  /** Whether any cue shows at `timeUs`. */
+  visible(timeUs: number, opts: TextRenderOptions): boolean {
+    return activeCues(this.cues, timeUs - opts.offsetUs).length > 0;
   }
 
   /** Draws the visible cues inside `videoRect`; returns how many were drawn. */

@@ -27,9 +27,14 @@ export interface CompositorLike {
   drawIg?(plane: OverlayPlane): void;
 }
 
-/** The part of TextSubtitleRenderer the compositor uses. */
+/** A text subtitle renderer (SRT or ASS) as the player and compositor use it. */
 export interface TextRendererLike {
+  /** Draws inside `videoRect`; returns how many cues or events were drawn. */
   render(ctx: OffscreenCanvasRenderingContext2D, timeUs: number, videoRect: Rect, opts: TextRenderOptions): number;
+  /** Whether a render at `timeUs` would differ from the last one. */
+  changed(timeUs: number, opts: TextRenderOptions): boolean;
+  /** Whether anything shows at `timeUs`. */
+  visible(timeUs: number, opts: TextRenderOptions): boolean;
 }
 
 /** A plane's pixels at plane size, updated from its dirty rects. */
@@ -42,6 +47,8 @@ export class Compositor implements CompositorLike {
   private ig: PlaneCanvas | null = null;
   /** Display size of the last frame drawn: text is laid out in its fitted rectangle. */
   private frameSize: { readonly width: number; readonly height: number } | null = null;
+  /** Storage (coded, visible) size of the last frame: ASS layout follows it for anamorphic video. */
+  private storageSize: { readonly width: number; readonly height: number } | null = null;
 
   constructor(
     private readonly canvas: OffscreenCanvas,
@@ -63,6 +70,7 @@ export class Compositor implements CompositorLike {
     this.ctx.fillRect(0, 0, width, height);
     if (!frame) return;
     this.frameSize = { width: frame.displayWidth, height: frame.displayHeight };
+    this.storageSize = { width: frame.visibleRect?.width ?? frame.codedWidth, height: frame.visibleRect?.height ?? frame.codedHeight };
     const r = fitRect(frame.displayWidth, frame.displayHeight, width, height);
     this.ctx.drawImage(frame, r.x, r.y, r.width, r.height);
   }
@@ -78,7 +86,7 @@ export class Compositor implements CompositorLike {
   drawText(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void {
     const f = this.frameSize;
     if (!f) return;
-    renderer.render(this.ctx, timeUs, fitRect(f.width, f.height, this.canvas.width, this.canvas.height), opts);
+    renderer.render(this.ctx, timeUs, fitRect(f.width, f.height, this.canvas.width, this.canvas.height), { ...opts, storage: opts.storage ?? this.storageSize });
   }
 
   private drawPlane(held: PlaneCanvas | null, plane: OverlayPlane): PlaneCanvas {

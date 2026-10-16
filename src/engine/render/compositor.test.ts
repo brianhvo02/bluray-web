@@ -104,14 +104,15 @@ describe('Compositor.drawText', () => {
     const main = { width: 1000, height: 1000, getContext: () => mainCtx } as unknown as OffscreenCanvas;
     const compositor = new Compositor(main, () => ({}) as OffscreenCanvas);
     const calls: unknown[][] = [];
-    const renderer = { render: (...args: unknown[]) => { calls.push(args); return 1; } };
+    const renderer = { render: (...args: unknown[]) => { calls.push(args); return 1; }, changed: () => false, visible: () => false };
     const opts = { offsetUs: 0, scale: 1 };
     compositor.drawText(renderer, 5, opts);
     expect(calls).toEqual([]); // no frame yet: no video rectangle
-    compositor.drawVideo({ displayWidth: 1920, displayHeight: 1080 } as VideoFrame);
+    compositor.drawVideo({ displayWidth: 1920, displayHeight: 1080, codedWidth: 1440, codedHeight: 1088, visibleRect: { width: 1440, height: 1080 } } as unknown as VideoFrame);
     compositor.drawText(renderer, 5, opts);
     expect(calls).toHaveLength(1);
     expect(calls[0]![0]).toBe(mainCtx);
-    expect(calls[0]!.slice(1)).toEqual([5, { x: 0, y: 218, width: 1000, height: 563 }, opts]);
+    // the frame's visible coded size goes along as the storage size (anamorphic ASS layout)
+    expect(calls[0]!.slice(1)).toEqual([5, { x: 0, y: 218, width: 1000, height: 563 }, { ...opts, storage: { width: 1440, height: 1080 } }]);
   });
 });
