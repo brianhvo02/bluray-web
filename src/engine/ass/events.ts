@@ -9,7 +9,9 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later AND ISC
  */
 
+import type { Drawing } from './drawing';
 import type { FontRequest, ResolvedFace } from './fonts';
+import type { GlyphMetrics } from './measure';
 import { DECO_ROTATE, EF_KARAOKE_KF, EF_NONE, initRenderState, type RenderSettings, type RenderState } from './state';
 import { nextChar, parseTags } from './tags';
 import type { AssEvent, AssTrack } from './types';
@@ -63,6 +65,14 @@ export interface GlyphInfo {
   shiftX: number; shiftY: number;
   /** Next glyph of a cluster (filled by layout). */
   next: GlyphInfo | null;
+  // filled by layout (get_outline_glyph): the outline's box after the transform below, 26.6
+  bboxXMin: number; bboxYMin: number; bboxXMax: number; bboxYMax: number;
+  /** ASS_Transform: outline units to layout units. */
+  trScaleX: number; trScaleY: number; trOffsetX: number; trOffsetY: number;
+  /** The em size in px the glyph's outline is at (font_size 256 through ass_face_set_size). */
+  emPx: number;
+  metrics: GlyphMetrics | null;
+  drawing: Drawing | null;
 }
 
 export interface EventText { readonly glyphs: GlyphInfo[]; readonly state: RenderState; readonly now: number }
@@ -100,6 +110,8 @@ function glyphFrom(s: RenderState, code: number, drawingText: string | null): Gl
     flags: s.flags | (s.fontRequest.vertical && code >= VERTICAL_LOWER_BOUND ? DECO_ROTATE : 0),
     fade: s.fade, shapeRunId: 0, posX: 0, posY: 0, offsetX: 0, offsetY: 0, advanceX: 0, advanceY: 0,
     clusterAdvanceX: 0, clusterAdvanceY: 0, shiftX: 0, shiftY: 0, next: null,
+    bboxXMin: 0, bboxYMin: 0, bboxXMax: 0, bboxYMax: 0, trScaleX: 1, trScaleY: 1, trOffsetX: 0, trOffsetY: 0,
+    emPx: 0, metrics: null, drawing: null,
   };
   if (drawingText === null) {
     g.hspacingScaled = doubleToD6((g.hspacing * s.screenScaleX / s.parScaleX) * g.scaleX);
