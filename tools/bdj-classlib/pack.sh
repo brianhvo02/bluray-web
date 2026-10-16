@@ -84,11 +84,19 @@ $MK $OUT/rt-bdj.jar "$T/stage" -
 cp /usr/share/common-licenses/GPL-2 $OUT/LICENSE
 sed -n '/^"CLASSPATH" EXCEPTION TO THE GPL$/,/^OpenJDK Trademark Notice/p' \
   /usr/share/doc/openjdk-8-jre-headless/copyright | sed '$d' | sed '$d' > $OUT/ASSEMBLY_EXCEPTION
+SRC_PKG="$(dpkg-query -W -f='${source:Package}' openjdk-8-jre-headless)"
+SRC_VER="$(dpkg-query -W -f='${source:Version}' openjdk-8-jre-headless)"
+SNAPSHOT=20261015T000000Z
 {
   echo "rt-bdj.jar holds classes and files of the OpenJDK 8 runtime (GPLv2 with the Classpath Exception; see LICENSE and"
-  echo "ASSEMBLY_EXCEPTION), unmodified, selected by tools/bdj-classlib/classes.txt and resources.txt."
+  echo "ASSEMBLY_EXCEPTION), unmodified, selected by src/bdj-classlib/classes.txt and tools/bdj-classlib/resources.txt."
   echo
-  echo "OpenJDK package: $(dpkg-query -W openjdk-8-jre-headless)"
-  echo "Apt snapshot:    20261015T000000Z (ubuntu 24.04)"
-  echo "libbluray:       448f896 (libbluray-j2se.jar and libbluray-awt-j2se.jar are its BD-J Java stack, LGPL-2.1)"
+  echo "OpenJDK binary package: $(dpkg-query -W openjdk-8-jre-headless)"
+  echo "Corresponding source:   Ubuntu source package $SRC_PKG $SRC_VER,"
+  echo "  https://snapshot.ubuntu.com/ubuntu/$SNAPSHOT/pool/universe/${SRC_PKG:0:1}/$SRC_PKG/${SRC_PKG}_${SRC_VER#*:}.dsc"
+  echo "Apt snapshot:           $SNAPSHOT (ubuntu 24.04)"
+  echo
+  echo "libbluray-j2se.jar and libbluray-awt-j2se.jar are libbluray's BD-J Java stack, LGPL-2.1-or-later (the license"
+  echo "text is in src/engine/LICENSE), built from libbluray commit 448f896,"
+  echo "https://code.videolan.org/videolan/libbluray (source: https://code.videolan.org/videolan/libbluray/-/tree/448f896)."
 } > $OUT/NOTICE
