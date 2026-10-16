@@ -42,7 +42,8 @@ const lineTexts = (l: LaidOutEvent): string[] => {
   const out: string[] = [''];
   for (const g of l.text.glyphs) {
     if (g.linebreak) out.push('');
-    if (!g.skip) out[out.length - 1] += String.fromCodePoint(g.symbol);
+    // ligature components are skipped but still part of the text
+    if (!g.isTrimmedWhitespace && g.symbol !== 10) out[out.length - 1] += String.fromCodePoint(g.symbol);
   }
   return out.map((s) => s.trim());
 };
@@ -118,6 +119,22 @@ describe('layoutEvent', () => {
     const small = lay('{\\pos(100,100)\\an7}x', { playRes: [640, 360] });
     expect(small.deviceX).toBeCloseTo(300, 6);
     expect(big.deviceX).toBeCloseTo(100, 6);
+  });
+
+  it('rounds advances to whole pixels at the 256 px outline size, as FreeType does', () => {
+    const g = shown(lay('ab'));
+    // the fixed measurer gives 0.5 em; at 256 px that is a fraction of a pixel, rounded before scaling down
+    const em = g[0]!.emPx;
+    expect(g[0]!.advanceX).toBe(Math.round(Math.round(0.5 * em) * 64 * g[0]!.scaleX));
+    expect(Math.round(0.5 * em)).not.toBe(0.5 * em);
+  });
+
+  it('merges ligature clusters: the first character draws the ligature, the rest are skipped', () => {
+    const g = shown(lay('first'));
+    expect(g.map((x) => String.fromCodePoint(x.symbol)).join('')).toBe('frst');
+    const em = g[0]!.emPx;
+    expect(g[0]!.advanceX).toBe(Math.round(Math.round(2 * 0.5 * em) * 64 * g[0]!.scaleX));
+    expect(shown(lay('{\\fsp5}first')).map((x) => String.fromCodePoint(x.symbol)).join('')).toBe('first'); // no ligatures with spacing
   });
 
   it('measures a drawing by its control box', () => {

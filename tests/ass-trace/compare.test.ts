@@ -44,9 +44,27 @@ describe('compareTraces', () => {
     expect(compareTraces([expected], [{ ...actual, runs: [{ ...actual.runs[0]!, font: 'Other|DejaVuSans' }] }], { tolerance: 0.5, missingFamilies: new Set(['fancy']) }).map((d) => d.path)).toEqual(['runs[0].font']);
   });
 
-  it('compares matrices relatively', () => {
-    const m = (v: number) => ev({ runs: [{ ...run, matrix: [1, 0, v, 0, 1, 0, 0, 0, 1] }] });
-    expect(compareTraces([m(51576)], [m(51579)], opts)).toEqual([]);
+  it('compares matrix translations (26.6) with the position tolerance, the rest relatively', () => {
+    const m = (v: number, a = 1) => ev({ runs: [{ ...run, matrix: [a, 0, v, 0, 1, 0, 0, 0, 1] }] });
+    expect(compareTraces([m(51576)], [m(51600)], opts)).toEqual([]);
     expect(compareTraces([m(51576)], [m(51700)], opts).map((d) => d.path)).toEqual(['runs[0].matrix[2]']);
+    expect(compareTraces([m(0, 1)], [m(0, 1.001)], opts).map((d) => d.path)).toEqual(['runs[0].matrix[0]']);
+  });
+
+  it('compares \\k timings (26.6) with the position tolerance and \\kf (px) with the pixel one', () => {
+    const k = (type: number, v: number) => ev({ runs: [{ ...run, karaoke: [type, v] }] });
+    expect(compareTraces([k(1, -100007792)], [k(1, -100007820)], opts)).toEqual([]);
+    expect(compareTraces([k(2, 900)], [k(2, 901)], opts).map((d) => d.path)).toEqual(['runs[0].karaoke[1]']);
+  });
+
+  it('compares perspective matrices more loosely than affine ones', () => {
+    const m = (a: number, p: number) => ev({ runs: [{ ...run, matrix: [a, 0, 0, 0, 1, 0, p, 0, 1] }] });
+    expect(compareTraces([m(3.9108, 1e-4)], [m(3.91129, 1e-4)], opts)).toEqual([]);
+    expect(compareTraces([m(3.9108, 0)], [m(3.91129, 0)], opts).map((d) => d.path)).toEqual(['runs[0].matrix[0]']);
+  });
+
+  it('allows integer boxes to differ by one pixel (libass truncates them)', () => {
+    expect(compareTraces([ev()], [ev({ box: [891, 940, 80, 80] })], opts)).toEqual([]);
+    expect(compareTraces([ev()], [ev({ box: [892, 940, 80, 80] })], opts).map((d) => d.path)).toEqual(['box[0]']);
   });
 });

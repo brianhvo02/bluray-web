@@ -9,8 +9,9 @@ export interface CompareOptions {
   readonly missingFamilies: ReadonlySet<string>;
 }
 
-const ANGLE = 1e-6;
+const ANGLE = 1e-5; // %.6f in C rounds halves to even, toFixed does not
 const MATRIX = 1e-4;
+const MATRIX_PERSPECTIVE = 2e-3;
 
 type Push = (path: string, expected: unknown, actual: unknown) => void;
 
@@ -48,8 +49,16 @@ function run(push: Push, p: string, e: TraceRun, a: TraceRun, opts: CompareOptio
   nums(push, `${p}.scale`, e.scale, a.scale, (x, y) => near(x, y, ANGLE));
   nums(push, `${p}.border`, e.border, a.border, (x, y) => near(x, y, tol));
   nums(push, `${p}.shadow`, e.shadow, a.shadow, (x, y) => near(x, y, tol));
-  if (!near(e.karaoke[1], a.karaoke[1], 1)) push(`${p}.karaoke[1]`, e.karaoke[1], a.karaoke[1]);
-  nums(push, `${p}.matrix`, e.matrix, a.matrix, (x, y) => nearRel(x, y, MATRIX));
+  // \kf (type 2) is a pixel position; the other karaoke types are a 26.6 distance from the glyph
+  const kTol = e.karaoke[0] === 2 ? tol : 64 * tol;
+  if (!near(e.karaoke[1], a.karaoke[1], kTol)) push(`${p}.karaoke[1]`, e.karaoke[1], a.karaoke[1]);
+  // the translation terms are the glyph position in 26.6: compare them like positions
+  e.matrix.forEach((v, i) => {
+    // perspective amplifies sub-pixel position differences into the other terms
+    const rel = e.matrix[6] !== 0 || e.matrix[7] !== 0 ? MATRIX_PERSPECTIVE : MATRIX;
+    const ok = i === 2 || i === 5 ? near(v, a.matrix[i]!, 64 * tol) : nearRel(v, a.matrix[i]!, rel);
+    if (!ok) push(`${p}.matrix[${i}]`, v, a.matrix[i]);
+  });
   if (e.glyphs.length === a.glyphs.length) {
     e.glyphs.forEach((g, i) => {
       const o = a.glyphs[i]!;
@@ -62,7 +71,8 @@ function event(push: Push, e: TraceEvent, a: TraceEvent, opts: CompareOptions): 
   if (e.layer !== a.layer) push('layer', e.layer, a.layer);
   if (e.lines !== a.lines) push('lines', e.lines, a.lines);
   const anyMissing = e.runs.some((r) => opts.missingFamilies.has(r.font.split('|')[0]!.toLowerCase()));
-  if (!anyMissing) nums(push, 'box', e.box, a.box, (x, y) => near(x, y, opts.tolerance));
+  // libass truncates the box to integers, so a sub-pixel difference can move it by one
+  if (!anyMissing) nums(push, 'box', e.box, a.box, (x, y) => near(x, y, Math.max(1, opts.tolerance)));
   clip(push, e.clip, a.clip, opts.tolerance);
   if (e.runs.length !== a.runs.length) push('runs.length', e.runs.length, a.runs.length);
   else e.runs.forEach((r, i) => run(push, `runs[${i}]`, r, a.runs[i]!, opts));

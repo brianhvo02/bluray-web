@@ -27,6 +27,7 @@ const ASS_JUSTIFY_LEFT = 1;
 const ASS_JUSTIFY_CENTER = 2;
 const ASS_JUSTIFY_RIGHT = 3;
 const NEWLINE = 0x0a;
+const NO_INK = { advance: 0, inkLeft: 0, inkRight: 0, inkTop: 0, inkBottom: 0 } as const;
 const SPACE = 0x20;
 
 export interface LineInfo { asc: number; desc: number }
@@ -99,14 +100,25 @@ function shape(e: EventText, fonts: AssFonts, measurer: GlyphMeasurer): void {
     const first = runGlyphs[0]!;
     const face = first.face ?? fonts.resolve(first.font);
     const em = emSize(face.face, first.fontSize);
-    const metrics = measurer.measureRun(face.cssFamily, em, runGlyphs.map((x) => (x.symbol === NEWLINE ? SPACE : x.symbol)), kerning);
+    const cps = runGlyphs.map((x) => (x.symbol === NEWLINE ? SPACE : x.symbol));
+    const metrics = measurer.measureRun(face.cssFamily, em, cps, kerning);
+    // HarfBuzz merges ligatures into one cluster (liga and clig are off with \fsp)
+    const clusters = first.hspacing === 0 ? face.face.clusters(cps) : cps.map((_, k) => k);
+    const clusterPx = new Map<number, number>();
+    clusters.forEach((root, k) => clusterPx.set(root, (clusterPx.get(root) ?? 0) + metrics[k]!.advance));
     runGlyphs.forEach((info, k) => {
+      if (clusters[k] !== k) {
+        // a ligature component: its root draws it
+        Object.assign(info, { skip: true, face: info.face ?? face, emPx: em, metrics: NO_INK, advanceX: 0, advanceY: 0, clusterAdvanceX: 0, clusterAdvanceY: 0 });
+        return;
+      }
       const m = metrics[k]!;
       info.face ??= face;
       info.skip = false;
       info.emPx = em;
       info.metrics = m;
-      let adv = isIgnorable(info.symbol) || info.symbol === NEWLINE ? 0 : Math.round(m.advance * 64);
+      // FreeType's advances are whole pixels at the outline size (256 px), HarfBuzz uses them as they are
+      let adv = isIgnorable(info.symbol) || info.symbol === NEWLINE ? 0 : Math.round(clusterPx.get(k)!) * 64;
       if (info.flags & DECO_ROTATE) adv = Math.round(info.fontSize * 64); // vertical advance ≈ the face height at REAL_DIM size
       info.offsetX = 0;
       info.offsetY = 0;

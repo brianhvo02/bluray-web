@@ -10,6 +10,8 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later AND ISC
  */
 
+import { ligatureClusters, readLigatureLookups, scriptTag } from './gsub';
+
 export interface FaceInfo {
   readonly file: string;
   /** Face index inside a collection (0 otherwise). */
@@ -33,6 +35,10 @@ export interface FaceInfo {
   readonly strikeoutPosition: number;
   readonly strikeoutSize: number;
   hasGlyph(codepoint: number): boolean;
+  /** The cmap's glyph id, 0 when missing. */
+  glyphId(codepoint: number): number;
+  /** Per character of a run, the index of the character whose ligature cluster it joins (GSUB liga/clig/rlig). */
+  clusters(codepoints: readonly number[]): number[];
 }
 
 export interface FontFile { readonly name: string; readonly bytes: Uint8Array; readonly faces: readonly FaceInfo[] }
@@ -137,9 +143,9 @@ function readNames(t: Uint8Array): NameRecord[] {
   return out;
 }
 
-/** A cmap lookup: the subtable libass's ass_charmap_magic selects (formats 4, 12 and 0 understood). */
-function readCmap(t: Uint8Array | undefined): (cp: number) => boolean {
-  if (!t || t.length < 4) return () => false;
+/** A cmap lookup to glyph ids: the subtable libass's ass_charmap_magic selects (formats 4, 12 and 0 understood). */
+function readCmap(t: Uint8Array | undefined): (cp: number) => number {
+  if (!t || t.length < 4) return () => 0;
   const v = view(t);
   const n = v.getUint16(2);
   const records = Array.from({ length: n }, (_, i) => ({ platform: v.getUint16(4 + 8 * i), encoding: v.getUint16(6 + 8 * i), offset: v.getUint32(8 + 8 * i) }))
@@ -147,13 +153,13 @@ function readCmap(t: Uint8Array | undefined): (cp: number) => boolean {
   const ms = records.filter((r) => r.platform === 3);
   const pick = ms.find((r) => r.encoding === 10) ?? ms.find((r) => r.encoding === 1) ?? ms[0]
     ?? records.find((r) => r.platform === 0 && (r.encoding === 4 || r.encoding === 6)) ?? records.find((r) => r.platform === 0) ?? records[0];
-  if (!pick) return () => false;
+  if (!pick) return () => 0;
   const lookup = subtable(t, pick.offset);
   if (pick.platform === 3 && pick.encoding === 0) return (cp) => lookup(cp) || lookup(0xf000 | cp); // symbol fonts
   return lookup;
 }
 
-function subtable(t: Uint8Array, at: number): (cp: number) => boolean {
+function subtable(t: Uint8Array, at: number): (cp: number) => number {
   const v = view(t);
   const format = v.getUint16(at);
   if (format === 4) {
@@ -162,26 +168,26 @@ function subtable(t: Uint8Array, at: number): (cp: number) => boolean {
     const starts = ends + segX2 + 2;
     const deltas = starts + segX2;
     const rangeOffsets = deltas + segX2;
-    if (rangeOffsets + segX2 > t.length) return () => false;
+    if (rangeOffsets + segX2 > t.length) return () => 0;
     return (cp) => {
-      if (cp > 0xffff) return false;
+      if (cp > 0xffff) return 0;
       for (let s = 0; s < segX2; s += 2) {
         if (cp > v.getUint16(ends + s)) continue;
         const start = v.getUint16(starts + s);
-        if (cp < start) return false;
+        if (cp < start) return 0;
         const ro = v.getUint16(rangeOffsets + s);
-        if (ro === 0) return ((cp + v.getInt16(deltas + s)) & 0xffff) !== 0;
+        if (ro === 0) return (cp + v.getInt16(deltas + s)) & 0xffff;
         const g = rangeOffsets + s + ro + 2 * (cp - start);
-        if (g + 2 > t.length) return false;
+        if (g + 2 > t.length) return 0;
         const glyph = v.getUint16(g);
-        return glyph !== 0 && ((glyph + v.getInt16(deltas + s)) & 0xffff) !== 0;
+        return glyph === 0 ? 0 : (glyph + v.getInt16(deltas + s)) & 0xffff;
       }
-      return false;
+      return 0;
     };
   }
   if (format === 12) {
     const groups = v.getUint32(at + 12);
-    if (at + 16 + 12 * groups > t.length) return () => false;
+    if (at + 16 + 12 * groups > t.length) return () => 0;
     return (cp) => {
       let lo = 0;
       let hi = groups - 1;
@@ -190,13 +196,13 @@ function subtable(t: Uint8Array, at: number): (cp: number) => boolean {
         const g = at + 16 + 12 * mid;
         if (cp < v.getUint32(g)) hi = mid - 1;
         else if (cp > v.getUint32(g + 4)) lo = mid + 1;
-        else return v.getUint32(g + 8) + (cp - v.getUint32(g)) !== 0;
+        else return v.getUint32(g + 8) + (cp - v.getUint32(g));
       }
-      return false;
+      return 0;
     };
   }
-  if (format === 0) return (cp) => cp < 256 && at + 6 + cp < t.length && t[at + 6 + cp] !== 0;
-  return () => false;
+  if (format === 0) return (cp) => (cp < 256 && at + 6 + cp < t.length ? t[at + 6 + cp]! : 0);
+  return () => 0;
 }
 
 /** ass_face_get_weight */
@@ -254,6 +260,9 @@ function faceInfo(file: string, index: number, tables: Tables): FaceInfo {
     }
   }
 
+  const glyphId = readCmap(tables.get('cmap'));
+  const gsub = tables.get('GSUB');
+  const ligatureLookups = new Map<string, ReturnType<typeof readLigatureLookups>>();
   return {
     file, index, families, fullNames: msNames(4), postscriptName: ps?.text ?? null,
     weight: weightOf(usWeightClass, bold), italic, bold,
@@ -263,7 +272,18 @@ function faceInfo(file: string, index: number, tables: Tables): FaceInfo {
     underlineThickness: post && post.length >= 12 ? view(post).getInt16(10) : 0,
     strikeoutSize: os2 && os2.length >= 30 ? view(os2).getInt16(26) : 0,
     strikeoutPosition: os2 && os2.length >= 30 ? view(os2).getInt16(28) : 0,
-    hasGlyph: readCmap(tables.get('cmap')),
+    hasGlyph: (cp) => glyphId(cp) !== 0,
+    glyphId,
+    clusters(cps) {
+      if (cps.length < 2) return cps.map((_, i) => i);
+      const script = scriptTag(cps);
+      let lookups = ligatureLookups.get(script);
+      if (!lookups) {
+        lookups = readLigatureLookups(gsub, script);
+        ligatureLookups.set(script, lookups);
+      }
+      return lookups.length ? ligatureClusters(cps.map(glyphId), lookups) : cps.map((_, i) => i);
+    },
   };
 }
 

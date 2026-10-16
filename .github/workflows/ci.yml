@@ -42,6 +42,8 @@ jobs:
         env:
           # Linux containers measured up to 19 ms mean / 41 ms max offset against the 20/50 ms bounds; 1.5 gives headroom.
           SYNC_TOLERANCE_SCALE: '1.5'
+      # the native ASS renderer against the libass goldens (layout traces and frames)
+      - run: npm run test:ass
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

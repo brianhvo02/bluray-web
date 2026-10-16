@@ -53,8 +53,9 @@ export function parseTrace(jsonl: string): TraceEvent[] {
   return jsonl.split('\n').filter((l) => l.trim() !== '').map((l) => JSON.parse(l) as TraceEvent);
 }
 
+/** As the harness prints doubles (%.6f). */
 const round = (v: number): number => {
-  const r = Math.round(v * 64) / 64;
+  const r = Number(v.toFixed(6));
   return Object.is(r, -0) ? 0 : r;
 };
 
@@ -76,7 +77,7 @@ function run(r: TraceRun): TraceRun {
   };
 }
 
-/** One line per event, keys in the order of TraceEvent, numbers rounded to 1/64; ends with a newline. */
+/** One line per event, keys in the order of TraceEvent, numbers rounded to 6 decimals; ends with a newline. */
 export function formatTrace(events: readonly TraceEvent[]): string {
   return events.map((e) => JSON.stringify({ t: e.t, event: e.event, layer: e.layer, box: nums(e.box), lines: e.lines, clip: clip(e.clip), runs: e.runs.map(run) }) + '\n').join('');
 }
