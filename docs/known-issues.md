@@ -87,6 +87,29 @@ what would change that decision.
 - **The local corpus gate needs Docker and the developer's files**, so CI runs only the synthetic fixtures. *Revisit*
   if a freely licensed real-world script with fonts becomes available to commit.
 
+## Video shaders
+
+- **The final scaler is bilinear (the canvas draw), not mpv's Lanczos.** Anime4K does the real upscaling; what is
+  left is a small resize to the window. *Revisit if* the difference is visible.
+- **PREKERNEL runs in gamma light**, as the video is delivered; mpv's linear-light option is not implemented.
+- **Shaders are compiled as GLSL ES 3.00, which rejects desktop-GLSL habits** such as implicit int to float
+  conversion, so some non-Anime4K shaders fail to compile (the error shows in the menu). *Revisit if* a wanted
+  shader needs a rewrite pass.
+- **Unsupported directives are rejected or skipped:** `COMPUTE` shaders, `SAVE` of a non-float format, more than 16
+  `BIND`s per pass, and shader files over 4 MiB.
+- **No in-memory fallback when IndexedDB is unavailable:** the menu opens but sets cannot be chosen that session
+  (errors are logged). Chrome's private windows still provide IndexedDB, so this is rare. *Revisit if* users with
+  blocked site storage need shaders.
+- **A pass skipped for an error mid-chain lets later passes bind a same-named texture saved earlier by another
+  file,** where libplacebo fails the whole hook. Not reachable with Anime4K.
+- **A transient render error (for example a closed `VideoFrame`) turns the set to `error` until it is selected
+  again,** instead of costing one frame. *Revisit if* it shows up in practice (treat `InvalidStateError` as per-frame).
+- **Real GitHub CI WebGL support is unconfirmed.** Docker (SwiftShader) and a local GPU pass; the shader E2E tests
+  skip with a logged reason when WebGL2 float render targets are missing, and the Anime4K and sync tests need
+  `SHADERS_GPU=1`.
+- **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
+  (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,

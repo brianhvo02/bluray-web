@@ -1,7 +1,7 @@
 # Video Shaders (mpv user shaders, Anime4K) — Design Spec
 
 Date: 2026-10-15
-Status: Draft, awaiting review.
+Status: Implemented (2026-10-16); plan docs/superpowers/plans/2026-10-15-video-shaders.md. Real-disc gate pending.
 Parent spec: `2026-10-12-bluray-web-player-design.md` (§6 rendering). Independent of M5 (BD-J).
 
 ## 1. Goal and scope
@@ -167,3 +167,10 @@ From the brainstorming recon (2026-10-15):
 Internal structure of the runner (texture pooling, how output is handed to the 2D context: drawing the GL canvas directly or `transferToImageBitmap`, `preserveDrawingBuffer`), the folder-picker vs file-input details, exact menu styling, and the telemetry window mechanics.
 
 Settled during review (my calls): `recent-discs.ts` and `shader-library.ts` share one `openDb` so the version-3 upgrade happens in one place; the compiled-set cache lives for the page, not the per-playlist `Session`; changing the set while paused re-renders the current frame; a saved set that is unavailable on startup shows as an error in the menu instead of switching silently to Off.
+
+## Deviations
+
+- Anime4K is pinned to commit 7684e95 (not v4.0.1, which lacks `md/Template/` and several files).
+- `NAME_texOff` uses libplacebo's `vec2(off)`, because GLSL ES 3.00 rejects vec2 times int.
+- File pickers are hidden `<input type="file">` elements (`webkitdirectory` for folders), not `showDirectoryPicker`.
+- Context loss and stale sets have their own error classes (`ShaderContextLostError` and a stale-set error).
