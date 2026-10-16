@@ -8,7 +8,7 @@
 import type { ShaderSetData, ShaderState } from '../protocol';
 import { parseShaderFile, ShaderFileError, type ShaderPass } from './parse';
 import type { Size } from './plan';
-import { ShaderContextLostError, type CompiledSet, type ShaderBackend } from './webgl-backend';
+import { ShaderContextLostError, ShaderSetStaleError, type CompiledSet, type ShaderBackend } from './webgl-backend';
 
 export interface ShaderStatus {
   readonly state: ShaderState;
@@ -130,7 +130,10 @@ export class ShaderStage {
   process(frame: VideoFrame, output: Size): OffscreenCanvas | null {
     const entry = this.active;
     const backend = this.backend;
-    if (!entry?.compiled || !backend || this.lost) return null;
+    if (!entry?.compiled || !backend || this.lost) {
+      this.lastStats = null;
+      return null;
+    }
     const last = this.last;
     if (last && last.entry === entry && last.frame === frame && last.width === output.width && last.height === output.height) return last.image;
     try {
@@ -140,16 +143,21 @@ export class ShaderStage {
       return result.image;
     } catch (err) {
       this.last = null;
+      this.lastStats = null;
       if (err instanceof ShaderContextLostError) {
         this.markLost();
-      } else if (err instanceof Error && err.constructor === Error) {
-        // the set is disposed or belongs to an earlier context: compile it again if it is still wanted
+        return null;
+      }
+      this.setActive(null);
+      if (err instanceof ShaderSetStaleError) {
+        // disposed, or compiled on an earlier context: compile it again if it is still wanted
         this.cache.delete(entry.key);
         entry.compiled.dispose();
-        this.setActive(null);
         if (this.selected?.key === entry.key) this.compile(this.selected);
+      } else if (this.selected?.key === entry.key) {
+        // the set cannot run (a GL failure): stay unshaded rather than recompiling into the same failure
+        this.onStatus({ state: 'error', set: entry.name, error: err instanceof Error ? err.message : String(err) });
       }
-      // anything else (a frame that cannot be uploaded) costs this frame only
       return null;
     }
   }

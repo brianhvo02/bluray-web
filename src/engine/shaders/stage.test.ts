@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ShaderSetData, ShaderState } from '../protocol';
 import type { ShaderPass } from './parse';
 import { ShaderStage } from './stage';
-import { ShaderCompileError, ShaderContextLostError, type CompiledSet, type RenderResult, type ShaderBackend } from './webgl-backend';
+import { ShaderCompileError, ShaderContextLostError, ShaderSetStaleError, type CompiledSet, type RenderResult, type ShaderBackend } from './webgl-backend';
 
 const PASS = '//!HOOK MAIN\n//!BIND HOOKED\nvec4 hook() { return HOOKED_tex(HOOKED_pos); }\n';
 
@@ -260,8 +260,9 @@ describe('ShaderStage', () => {
     t.stage.setSet(set('A'));
     t.compiles[0]!.resolve();
     await settle();
-    t.state.renderError = new Error('shader set is disposed or was compiled on a lost WebGL context');
+    t.state.renderError = new ShaderSetStaleError();
     expect(t.stage.process(frame(), OUT)).toBeNull();
+    expect(t.stage.stats).toBeNull();
     t.state.renderError = null;
     expect(t.compiles).toHaveLength(2);
     expect(t.statuses.at(-1)).toEqual({ state: 'compiling', set: 'A', error: null });
@@ -270,15 +271,21 @@ describe('ShaderStage', () => {
     expect(t.stage.process(frame(), OUT)).toBe(t.imageOf(t.compiles[1]!.set));
   });
 
-  it('draws the raw frame for a frame that cannot be uploaded, keeping the set', async () => {
+  it('stays unshaded with an error, without recompiling, when the set fails to render', async () => {
     const t = setup();
     t.stage.setSet(set('A'));
     t.compiles[0]!.resolve();
     await settle();
-    t.state.renderError = new DOMException('The VideoFrame is closed', 'InvalidStateError');
+    expect(t.stage.process(frame(), OUT)).not.toBeNull();
+    expect(t.stage.stats).not.toBeNull();
+    t.state.renderError = new Error('WebGL: createFramebuffer failed');
     expect(t.stage.process(frame(), OUT)).toBeNull();
-    t.state.renderError = null;
+    expect(t.statuses.at(-1)).toEqual({ state: 'error', set: 'A', error: 'WebGL: createFramebuffer failed' });
+    expect(t.stage.stats).toBeNull();
+    for (let i = 0; i < 3; i++) expect(t.stage.process(frame(), OUT)).toBeNull();
+    await settle();
     expect(t.compiles).toHaveLength(1);
-    expect(t.stage.process(frame(), OUT)).toBe(t.imageOf(t.compiles[0]!.set));
+    expect(t.renders).toHaveLength(2);
+    expect(t.statuses.at(-1)!.state).toBe('error');
   });
 });

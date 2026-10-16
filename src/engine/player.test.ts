@@ -1645,6 +1645,26 @@ describe('Player video shaders', () => {
     expect(lastTelemetry(h)!.shader).toBeNull();
   });
 
+  it('activates a set whose compile finishes after the disc closed, and shades the next disc', async () => {
+    const shaders = fakeShaders();
+    const h = await harness(CodingType.LPCM, { createShaderBackend: shaders.createShaderBackend });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'setVideoShaders', set: setA });
+    await h.player.handle({ type: 'close' });
+    await shaders.finish(); // no session, no current frame
+    expect(shaderStatuses(h.events).at(-1)).toMatchObject({ state: 'active', set: 'A' });
+    h.order.length = 0;
+    expect(() => h.player.tick()).not.toThrow();
+    expect(h.order).toEqual([]);
+    await h.player.handle({ type: 'open', entries: h.entries });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(600);
+    expect(h.order.some((o) => o !== 'video:null')).toBe(true);
+    expect(lastTelemetry(h)!.shader).toEqual({ set: 'A', passesRun: 1, gpuMs: null });
+  });
+
   it('repaints the paused frame and its overlays once the set is ready', async () => {
     const shaders = fakeShaders();
     const at = (seconds: number, segs: Uint8Array[]) => segs.map((payload) => ({ pts: CLIP_START_PTS + Math.round(seconds * 90_000), payload }));

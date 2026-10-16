@@ -40,6 +40,14 @@ export class ShaderContextLostError extends Error {
   }
 }
 
+/** The set was disposed or compiled on an earlier (lost) context; compile it again. */
+export class ShaderSetStaleError extends Error {
+  constructor() {
+    super('shader set is disposed or was compiled on a lost WebGL context');
+    this.name = 'ShaderSetStaleError';
+  }
+}
+
 export interface ShaderBackend {
   /**
    * Compiles one program per (pass, firing stage). Rejects with ShaderCompileError when a pass fails to compile or
@@ -48,7 +56,7 @@ export interface ShaderBackend {
   compile(passes: readonly ShaderPass[]): Promise<CompiledSet>;
   /**
    * Runs the set on `frame` and draws the result at `output` size into the returned canvas (the same canvas every call).
-   * Throws ShaderContextLostError while the context is lost; throws a plain Error for a set that was disposed or
+   * Throws ShaderContextLostError while the context is lost; throws ShaderSetStaleError for a set that was disposed or
    * compiled on an earlier (lost) context, and passes through errors from the upload of `frame` (a closed VideoFrame).
    */
   render(set: CompiledSet, frame: VideoFrame, output: Size): RenderResult;
@@ -281,7 +289,7 @@ class WebGlBackend implements ShaderBackend {
     const gl = this.gl;
     if (!(set instanceof WebGlSet) || set.generation !== this.generation || !this.sets.has(set)) {
       if (this.gl.isContextLost()) throw new ShaderContextLostError();
-      throw new Error('shader set is disposed or was compiled on a lost WebGL context');
+      throw new ShaderSetStaleError();
     }
     if (gl.isContextLost() || !this.final || !this.frameTexture) throw new ShaderContextLostError();
     const final = this.final;
