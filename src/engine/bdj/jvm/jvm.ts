@@ -11,11 +11,13 @@ import { ZipArchive } from './zip';
 import { Heap } from './heap';
 import { ClassPath, Loader, externalName } from './loader';
 import type { JClass, JMethod } from './loader';
-import { ThrowResult } from './interpreter';
+import { Invoke, ThrowResult, andThen } from './interpreter';
+import type { NativeResult } from './interpreter';
 import { JThread, Scheduler } from './threads';
-import { NativeTable, registerBootstrapNatives, registerSchedulerNatives } from './natives/index';
+import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from './natives/index';
 import { JavaThrowable } from './values';
-import type { JObject, JValue } from './values';
+import type { JArray, JObject, JValue } from './values';
+import type { Vfs } from './vfs';
 
 export interface JvmOptions {
   readonly bootJars: readonly Uint8Array[];
@@ -23,6 +25,9 @@ export interface JvmOptions {
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   readonly stdout: (s: string) => void;
   readonly stderr: (s: string) => void;
+  readonly vfs?: Vfs;
+  /** Added to the JDK's own (initProperties), as the runtime's -D options are. */
+  readonly systemProperties?: ReadonlyMap<string, string>;
 }
 
 /** A Throwable's stack, innermost first, kept in its nativeData. */
@@ -42,6 +47,11 @@ export class Jvm {
   readonly natives: NativeTable;
   /** The thread the interpreter is running, if any. */
   currentThread: JThread | null = null;
+  /** The `main` java.lang.Thread boot() creates; threads callStatic starts run as it, like a JNI-attached thread. */
+  mainThread: JObject | null = null;
+  /** Set by Runtime.halt (Shutdown.halt0). */
+  exitStatus: number | null = null;
+  private statusSlot = -1;
 
   constructor(readonly opts: JvmOptions) {
     this.heap = new Heap(this);
@@ -49,6 +59,7 @@ export class Jvm {
     this.natives = new NativeTable();
     registerBootstrapNatives(this.natives);
     registerSchedulerNatives(this.natives);
+    registerJdkNatives(this.natives);
     this.threads = new Scheduler(this, { slice: TIME_SLICE, nowMs: opts.nowMs, setTimer: opts.setTimer });
   }
 
@@ -60,24 +71,101 @@ export class Jvm {
       if (!c) throw new Error(`java.lang.NoClassDefFoundError: ${cls}`);
       const m = c.methods.get(name + desc);
       if (!m?.isStatic) throw new Error(`java.lang.NoSuchMethodError: ${externalName(cls)}.${name}${desc}`);
-      t = this.threads.spawn(null, m, args);
+      t = this.threads.spawn(this.mainThread, m, args);
+      if (this.mainThread) this.mainThread.nativeData = t;
     } catch (e) {
       if (e instanceof JavaThrowable) throw new Error(this.describe(e.obj));
       throw e;
     }
+    await this.drive(t, `${externalName(cls)}.${name}`);
+    return t.result;
+  }
+
+  /** Runs the scheduler until `t` ends; rejects with its uncaught exception's toString(). */
+  private async drive(t: JThread, what: string): Promise<void> {
     let outcome = await this.threads.run();
     while (outcome === 'idle' && t.state !== 'terminated' && this.threads.timersPending) {
       await this.threads.nextTimer();
       outcome = await this.threads.run();
     }
     if (t.uncaught) throw new Error(this.describe(t.uncaught));
-    if (t.state !== 'terminated') throw new Error(`${externalName(cls)}.${name} did not finish (${outcome})`);
-    return t.result;
+    if (t.state !== 'terminated') throw new Error(`${what} did not finish (${outcome})`);
   }
 
-  /** JDK startup: System.initializeSystemClass and the main thread group. */
-  boot(): Promise<void> {
-    return Promise.reject(new Error('Jvm.boot is not implemented yet'));
+  /**
+   * JDK startup as HotSpot's Threads::create_vm does it: initialise String, System and ThreadGroup, create the system
+   * and main thread groups and the `main` Thread (create_initial_thread_group, create_initial_thread), initialise
+   * Class, then run System.initializeSystemClass.
+   */
+  async boot(): Promise<void> {
+    const cls = (name: string): JClass => {
+      const c = this.loader.loadBoot(name);
+      if (!c) throw new Error(`${name} is not on the boot class path`);
+      return c;
+    };
+    const method = (c: JClass, key: string): JMethod => {
+      const m = c.methods.get(key);
+      if (!m) throw new Error(`${c.name}.${key} is missing`);
+      return m;
+    };
+    const threadGroup = cls('java/lang/ThreadGroup');
+    const thread = cls('java/lang/Thread');
+    const system = cls('java/lang/System');
+    const t = this.threads.spawnWith(null, (t) => {
+      const init = (names: readonly string[], k: () => NativeResult): NativeResult =>
+        names.length === 0 ? k() : this.withInit(t, cls(names[0]!), () => init(names.slice(1), k));
+      return init(['java/lang/String', 'java/lang/System', 'java/lang/ThreadGroup'], () => {
+        const systemGroup = this.heap.newObject(threadGroup);
+        const mainGroup = this.heap.newObject(threadGroup);
+        return new Invoke(method(threadGroup, '<init>()V'), [systemGroup], () =>
+          new Invoke(method(threadGroup, '<init>(Ljava/lang/ThreadGroup;Ljava/lang/String;)V'), [mainGroup, systemGroup, this.heap.intern('main')], () =>
+            init(['java/lang/Thread'], () => {
+              const main = this.heap.newObject(thread);
+              this.setField(main, 'priority', 'I', 5);
+              t.javaThread = main;
+              main.nativeData = t;
+              this.mainThread = main;
+              return new Invoke(method(thread, '<init>(Ljava/lang/ThreadGroup;Ljava/lang/String;)V'), [main, mainGroup, this.heap.intern('main')], () => {
+                this.setField(main, 'threadStatus', 'I', 5);
+                return init(['java/lang/Class'], () => new Invoke(method(system, 'initializeSystemClass()V'), [], () => undefined));
+              });
+            }),
+          ),
+        );
+      });
+    });
+    await this.drive(t, 'System.initializeSystemClass');
+  }
+
+  /** Runs `k` once `c` is initialised for thread `t` (JVM §5.5), waiting for or running its initialisers first. */
+  withInit(t: JThread, c: JClass, k: () => NativeResult): NativeResult {
+    const r = this.loader.initialize(t, c);
+    return r === null ? k() : andThen(r, () => this.withInit(t, c, k));
+  }
+
+  /** The slot of java.lang.Thread.threadStatus. */
+  get threadStatusSlot(): number {
+    if (this.statusSlot < 0) this.statusSlot = this.loader.loadBoot('java/lang/Thread')!.declaredField('threadStatus', 'I')!.slot;
+    return this.statusSlot;
+  }
+
+  /** The class a java.lang.Class instance stands for. */
+  classOf(mirror: JObject): JClass {
+    return mirror.nativeData as JClass;
+  }
+
+  /** A new array of `component` holding `items`. */
+  newArray(component: JClass, items: readonly JValue[]): JArray {
+    const arr = this.heap.newArray(this.loader.arrayOf(component), items.length);
+    for (let i = 0; i < items.length; i++) (arr.data as JValue[])[i] = items[i]!;
+    return arr;
+  }
+
+  /** A boot class that must exist. */
+  bootClass(name: string): JClass {
+    const c = this.loader.loadBoot(name);
+    if (!c) throw new Error(`${name} is not on the boot class path`);
+    return c;
   }
 
   /** Allocates a Throwable without running Java constructors, as HotSpot's own exceptions are. */

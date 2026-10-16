@@ -8,7 +8,7 @@
  */
 
 import type { CpEntry } from './classfile';
-import { ACC_ABSTRACT, ACC_PRIVATE, externalName, selectMethod } from './loader';
+import { ACC_ABSTRACT, ACC_PRIVATE, LoadPending, externalName, selectMethod } from './loader';
 import type { JClass, JField, JMethod } from './loader';
 import { JavaThrowable, isWide } from './values';
 import type { JArray, JObject, JValue } from './values';
@@ -245,7 +245,11 @@ function findHandler(jvm: Jvm, f: JFrame, exc: JObject): number {
       type = resolveClass(jvm, f.method.cls, h.catchType);
     } catch (e) {
       if (e instanceof JavaThrowable) continue;
-      throw e;
+      if (!(e instanceof LoadPending)) throw e;
+      // The frame's loader has not loaded the catch type yet; the exception's own superclasses decide by name.
+      const name = utf8(f.method.cls, (cpEntry(f.method.cls, h.catchType) as { name: number }).name);
+      for (let c: JClass | null = exc.cls; c; c = c.superClass) if (c.name === name) return h.handlerPc;
+      continue;
     }
     if (exc.cls.isSubclassOf(type)) return h.handlerPc;
   }
@@ -1304,6 +1308,14 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
         }
       }
     } catch (e) {
+      if (e instanceof LoadPending) {
+        // A Java class loader must load a class first; the instruction runs again afterwards.
+        f.sp = sp;
+        f.nextPc = f.pc;
+        f.wideResult = false;
+        complete(jvm, t, andThen(e.work, () => undefined));
+        continue outer;
+      }
       let exc: JObject;
       if (e instanceof PendingThrow) exc = jvm.throwNew(e.cls, e.message).exception;
       else if (e instanceof JavaThrowable) exc = e.obj;

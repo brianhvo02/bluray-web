@@ -109,6 +109,8 @@ export class JClass {
   readonly vtable: JMethod[];
   readonly methods: ReadonlyMap<string, JMethod>;
   mirror: JObject | null = null;
+  /** Class.setSigners. */
+  signers: JObject | null = null;
   readonly componentType: JClass | null;
   readonly isInterface: boolean;
   readonly isPrimitive: boolean;
@@ -365,13 +367,34 @@ export class ClassPath {
   }
 }
 
+/**
+ * Thrown by class resolution from a class a Java class loader defined, when that loader has not loaded the name yet:
+ * the caller runs `work` (the loader's loadClass) and then retries what it was doing.
+ */
+export class LoadPending {
+  constructor(readonly work: NativeResult) {}
+}
+
+/** Runs `fn`, and again after each class load it has to wait for. */
+export function retrying(fn: () => NativeResult): NativeResult {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof LoadPending) return andThen(e.work, () => retrying(fn));
+    throw e;
+  }
+}
+
 const PRIMITIVE_NAMES = { I: 'int', J: 'long', F: 'float', D: 'double', Z: 'boolean', B: 'byte', C: 'char', S: 'short', V: 'void' } as const;
 type PrimitiveCode = keyof typeof PRIMITIVE_NAMES;
 
 export class Loader {
   private readonly boot = new Map<string, JClass>();
+  /** Per Java class loader, the classes it defined or initiated loading of (JVM §5.3). */
+  private readonly byLoader = new Map<JObject, Map<string, JClass>>();
   private readonly defining = new Set<string>();
   private readonly primitives = new Map<string, JClass>();
+  private anonymousCount = 0;
 
   constructor(
     private readonly jvm: Jvm,
@@ -397,52 +420,156 @@ export class Loader {
     return desc.length === 1 && desc in PRIMITIVE_NAMES && desc !== 'V' ? this.primitive(desc as PrimitiveCode) : null;
   }
 
-  /** Resolves a class name as seen from `from` (JVM §5.4.3.1); throws NoClassDefFoundError. */
+  /**
+   * Resolves a class name as seen from `from` (JVM §5.4.3.1); throws NoClassDefFoundError, or LoadPending when
+   * `from`'s Java class loader has to be asked first.
+   */
   resolveClass(from: JClass, name: string): JClass {
-    if (from.loader !== null) throw new Error('class loading through Java class loaders is not implemented');
-    const c = this.loadBoot(name);
-    if (!c) throw this.error('java/lang/NoClassDefFoundError', name);
-    return c;
+    return this.resolveIn(from.loader, name);
   }
 
+  /** The class `loader` has defined or loaded under `name`, if any; arrays of such classes too. */
+  findLoaded(loader: JObject | null, name: string): JClass | null {
+    if (loader === null) return this.boot.get(name) ?? null;
+    if (name.charCodeAt(0) === 0x5b) {
+      const component = this.componentIn(loader, name.slice(1), false);
+      return component ? this.arrayOf(component) : null;
+    }
+    return this.byLoader.get(loader)?.get(name) ?? null;
+  }
+
+  /** Resolution in a given loader's name space (null: the bootstrap loader). */
+  resolveIn(loader: JObject | null, name: string): JClass {
+    if (loader === null) {
+      const c = this.loadBoot(name);
+      if (!c) throw this.error('java/lang/NoClassDefFoundError', name);
+      return c;
+    }
+    if (name.charCodeAt(0) === 0x5b) return this.arrayOf(this.componentIn(loader, name.slice(1), true)!);
+    const hit = this.byLoader.get(loader)?.get(name);
+    if (hit) return hit;
+    throw new LoadPending(this.loadVia(loader, name, true));
+  }
+
+  private componentIn(loader: JObject, desc: string, resolve: boolean): JClass | null {
+    const c = desc.charCodeAt(0);
+    if (c === 0x4c) {
+      const inner = desc.slice(1, -1);
+      return resolve ? this.resolveIn(loader, inner) : this.findLoaded(loader, inner);
+    }
+    if (c === 0x5b) return resolve ? this.resolveIn(loader, desc) : this.findLoaded(loader, desc);
+    if (desc.length === 1 && desc in PRIMITIVE_NAMES && desc !== 'V') return this.primitive(desc as PrimitiveCode);
+    throw this.error('java/lang/NoClassDefFoundError', `[${desc}`);
+  }
+
+  /**
+   * Asks a Java class loader for a class (`loader.loadClass(name)`) and records the loader as an initiating loader of
+   * the result. For resolution, a ClassNotFoundException becomes NoClassDefFoundError, as in HotSpot.
+   */
+  loadVia(loader: JObject, name: string, forResolution: boolean): NativeResult {
+    const base = this.loadBoot('java/lang/ClassLoader')!.methods.get('loadClass(Ljava/lang/String;)Ljava/lang/Class;')!;
+    const target = loader.cls.vtable[base.vtableIndex] ?? base;
+    return new Invoke(
+      target,
+      [loader, this.jvm.heap.newString(externalName(name))],
+      (ret) => {
+        if (ret === null || ret === undefined) return this.jvm.throwNew('java/lang/NoClassDefFoundError', name);
+        this.record(loader, name, (ret as JObject).nativeData as JClass);
+        return ret;
+      },
+      (e) => {
+        const cnfe = this.loadBoot('java/lang/ClassNotFoundException');
+        if (forResolution && cnfe && e.cls.isSubclassOf(cnfe)) {
+          const ncdfe = this.jvm.throwNew('java/lang/NoClassDefFoundError', name);
+          this.jvm.setField(ncdfe.exception, 'cause', 'Ljava/lang/Throwable;', e);
+          return ncdfe;
+        }
+        return new ThrowResult(e);
+      },
+    );
+  }
+
+  private record(loader: JObject, name: string, c: JClass): void {
+    let map = this.byLoader.get(loader);
+    if (!map) this.byLoader.set(loader, (map = new Map()));
+    map.set(name, c);
+  }
+
+  /** Defines a class; the superclass and interfaces are resolved through `loader`, so this may throw LoadPending. */
   define(name: string, bytes: Uint8Array, loader: JObject | null, protectionDomain: JObject | null): JClass {
-    let file: ClassFile;
+    const file = this.parse(name, bytes);
+    if (file.name !== name) throw this.error('java/lang/NoClassDefFoundError', `${name} (wrong name: ${file.name})`);
+    if (this.findDefined(loader, name)) throw this.error('java/lang/LinkageError', `duplicate class definition for name: "${name}"`);
+    const cls = this.link(file, loader, protectionDomain);
+    if (loader === null) this.boot.set(name, cls);
+    else this.record(loader, name, cls);
+    this.setConstants(cls);
+    return cls;
+  }
+
+  /**
+   * Unsafe.defineAnonymousClass: a class no loader finds by name, in the host's loader; `patches` replace
+   * constant-pool entries (for a String entry the object ldc pushes, for a Class entry a mirror).
+   */
+  defineAnonymous(host: JClass, bytes: Uint8Array, patches: readonly (JObject | null)[] | null): JClass {
+    const file = this.parse('anonymous class', bytes);
+    const cls = this.link(file, host.loader, host.protectionDomain, `${file.name}/${++this.anonymousCount}`);
+    for (let i = 0; patches && i < patches.length; i++) {
+      const p = patches[i];
+      if (!p) continue;
+      cls.resolved[i] = file.cp[i]?.tag === 'class' && p.cls.name === 'java/lang/Class' ? p.nativeData : p;
+    }
+    this.setConstants(cls);
+    return cls;
+  }
+
+  /** The name a class file declares; ClassFormatError if it does not parse. */
+  className(bytes: Uint8Array): string {
+    return this.parse('class', bytes).name;
+  }
+
+  private findDefined(loader: JObject | null, name: string): JClass | undefined {
+    const c = loader === null ? this.boot.get(name) : this.byLoader.get(loader)?.get(name);
+    return c && c.loader === loader ? c : undefined;
+  }
+
+  private parse(name: string, bytes: Uint8Array): ClassFile {
     try {
-      file = parseClassFile(bytes);
+      return parseClassFile(bytes);
     } catch (e) {
       if (e instanceof UnsupportedClassVersionError) throw this.error('java/lang/UnsupportedClassVersionError', `${name}: ${e.message}`);
       if (e instanceof ClassFormatError) throw this.error('java/lang/ClassFormatError', `${e.message} in class file ${name}`);
       throw e;
     }
-    if (file.name !== name) throw this.error('java/lang/NoClassDefFoundError', `${name} (wrong name: ${file.name})`);
-    if (loader !== null) throw new Error('class definition by Java class loaders is not implemented');
-    if (this.boot.has(name)) throw this.error('java/lang/LinkageError', `duplicate class definition for name: "${name}"`);
-    if (this.defining.has(name)) throw this.error('java/lang/ClassCircularityError', externalName(name));
-    this.defining.add(name);
+  }
+
+  private link(file: ClassFile, loader: JObject | null, protectionDomain: JObject | null, key = file.name): JClass {
+    const name = file.name;
+    const busy = loader === null ? key : `${this.jvm.heap.identityHash(loader)}:${key}`;
+    if (this.defining.has(busy)) throw this.error('java/lang/ClassCircularityError', externalName(name));
+    this.defining.add(busy);
     let superClass: JClass | null = null;
     let interfaces: JClass[];
     try {
       if (file.superName !== null) {
-        superClass = this.loadBoot(file.superName);
-        if (!superClass) throw this.error('java/lang/NoClassDefFoundError', file.superName);
+        superClass = this.resolveIn(loader, file.superName);
         if (superClass.isInterface) {
           throw this.error('java/lang/IncompatibleClassChangeError', `class ${externalName(name)} has interface ${externalName(superClass.name)} as super class`);
         }
       }
       interfaces = file.interfaces.map((n) => {
-        const i = this.loadBoot(n);
-        if (!i) throw this.error('java/lang/NoClassDefFoundError', n);
+        const i = this.resolveIn(loader, n);
         if (!i.isInterface) {
           throw this.error('java/lang/IncompatibleClassChangeError', `class ${externalName(name)} can not implement ${externalName(n)}, because it is not an interface`);
         }
         return i;
       });
     } finally {
-      this.defining.delete(name);
+      this.defining.delete(busy);
     }
     const isInterface = (file.access & ACC_INTERFACE) !== 0;
     const objectClass = name === 'java/lang/Object' ? null : this.objectClass();
-    const cls = new JClass({
+    return new JClass({
       name,
       file,
       superClass: isInterface ? null : superClass,
@@ -453,12 +580,14 @@ export class Loader {
       primitive: false,
       objectClass,
     });
-    this.boot.set(name, cls);
+  }
+
+  private setConstants(cls: JClass): void {
+    const file = cls.file!;
     for (const f of file.fields) {
       const field = cls.declaredField(f.name, f.desc);
       if (field?.isStatic && f.constantValue !== null) cls.staticValues[field.slot] = this.constant(cls, f.constantValue);
     }
-    return cls;
   }
 
   private constant(cls: JClass, index: number): JValue {

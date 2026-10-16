@@ -46,6 +46,10 @@ export interface MemberInfo {
   readonly constantValue: number | null;
   readonly exceptions: readonly string[];
   readonly signature: string | null;
+  /** Raw RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations and AnnotationDefault, as reflection wants them. */
+  readonly annotations: Uint8Array | null;
+  readonly parameterAnnotations: Uint8Array | null;
+  readonly annotationDefault: Uint8Array | null;
 }
 
 export interface BootstrapMethod {
@@ -72,6 +76,9 @@ export interface ClassFile {
     readonly access: number;
   }[];
   readonly signature: string | null;
+  readonly annotations: Uint8Array | null;
+  /** EnclosingMethod: the class and the NameAndType index (0 when not in a method). */
+  readonly enclosingMethod: { readonly cls: string; readonly nat: number } | null;
 }
 
 export class ClassFormatError extends Error {}
@@ -225,6 +232,9 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
       let constantValue: number | null = null;
       let exceptions: string[] = [];
       let signature: string | null = null;
+      let annotations: Uint8Array | null = null;
+      let parameterAnnotations: Uint8Array | null = null;
+      let annotationDefault: Uint8Array | null = null;
       for (let a = r.u2(); a > 0; a--) {
         const aname = utf8(r.u2());
         const len = r.u4();
@@ -236,9 +246,12 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
           exceptions = [];
           for (let k = r.u2(); k > 0; k--) exceptions.push(className(r.u2()));
         } else if (aname === 'Signature') signature = utf8(r.u2());
+        else if (aname === 'RuntimeVisibleAnnotations') annotations = r.slice(len);
+        else if (aname === 'RuntimeVisibleParameterAnnotations') parameterAnnotations = r.slice(len);
+        else if (aname === 'AnnotationDefault') annotationDefault = r.slice(len);
         r.pos = end;
       }
-      list.push({ access: macc, name: mname, desc, code, constantValue, exceptions, signature });
+      list.push({ access: macc, name: mname, desc, code, constantValue, exceptions, signature, annotations, parameterAnnotations, annotationDefault });
     }
     return list;
   };
@@ -267,6 +280,8 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
   const innerClasses: { inner: string; outer: string | null; name: string | null; access: number }[] = [];
   let sourceFile: string | null = null;
   let signature: string | null = null;
+  let annotations: Uint8Array | null = null;
+  let enclosingMethod: { cls: string; nat: number } | null = null;
   for (let a = r.u2(); a > 0; a--) {
     const aname = utf8(r.u2());
     const len = r.u4();
@@ -274,6 +289,8 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
     if (end > bytes.length) throw new ClassFormatError('truncated class file');
     if (aname === 'SourceFile') sourceFile = utf8(r.u2());
     else if (aname === 'Signature') signature = utf8(r.u2());
+    else if (aname === 'RuntimeVisibleAnnotations') annotations = r.slice(len);
+    else if (aname === 'EnclosingMethod') enclosingMethod = { cls: className(r.u2()), nat: r.u2() };
     else if (aname === 'BootstrapMethods') {
       for (let n = r.u2(); n > 0; n--) {
         const ref = r.u2();
@@ -292,5 +309,5 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
     r.pos = end;
   }
 
-  return { major, minor, cp, access, name, superName, interfaces, fields, methods, bootstrapMethods, sourceFile, innerClasses, signature };
+  return { major, minor, cp, access, name, superName, interfaces, fields, methods, bootstrapMethods, sourceFile, innerClasses, signature, annotations, enclosingMethod };
 }

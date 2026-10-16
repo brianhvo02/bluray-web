@@ -24,17 +24,68 @@ export type ThreadState =
   | 'suspended-native'
   | 'terminated';
 
+/** java.lang.Thread.threadStatus values (JVMTI state bits), as HotSpot's java_lang_Thread::ThreadStatus sets them. */
+const STATUS_RUNNABLE = 0x0005;
+const STATUS_BLOCKED = 0x0401;
+const STATUS_WAIT = 0x0191;
+const STATUS_TIMED_WAIT = 0x01a1;
+const STATUS_SLEEPING = 0x00e1;
+const STATUS_PARKED = 0x0291;
+const STATUS_PARKED_TIMED = 0x02a1;
+const STATUS_TERMINATED = 0x0002;
+
 export class JThread {
   readonly frames: Frame[] = [];
-  state: ThreadState = 'runnable';
+  private current: ThreadState = 'runnable';
   interrupted = false;
   uncaught: JObject | null = null;
   /** What the thread's first method returned. */
   result: JValue | undefined = undefined;
+  /** The slot of java.lang.Thread.threadStatus in `javaThread`, when the scheduler keeps it in sync; else -1. */
+  statusSlot = -1;
+  /** A 'sleeping' thread that only yielded, which Java sees as RUNNABLE. */
+  yielding = false;
+  parkTimed = false;
   constructor(
     readonly id: number,
     public javaThread: JObject | null,
   ) {}
+
+  get state(): ThreadState {
+    return this.current;
+  }
+
+  set state(s: ThreadState) {
+    this.current = s;
+    if (s !== 'sleeping') this.yielding = false;
+    if (this.statusSlot >= 0 && this.javaThread) this.javaThread.fields[this.statusSlot] = this.status();
+  }
+
+  /** Starts keeping `javaThread`'s threadStatus field in sync with the scheduler's state. */
+  syncStatus(slot: number): void {
+    this.statusSlot = slot;
+    this.state = this.current;
+  }
+
+  private status(): number {
+    switch (this.current) {
+      case 'runnable':
+      case 'suspended-native':
+        return STATUS_RUNNABLE;
+      case 'blocked-monitor':
+        return STATUS_BLOCKED;
+      case 'waiting':
+        return STATUS_WAIT;
+      case 'timed-waiting':
+        return STATUS_TIMED_WAIT;
+      case 'sleeping':
+        return this.yielding ? STATUS_RUNNABLE : STATUS_SLEEPING;
+      case 'parked':
+        return this.parkTimed ? STATUS_PARKED_TIMED : STATUS_PARKED;
+      case 'terminated':
+        return STATUS_TERMINATED;
+    }
+  }
 }
 
 export interface Monitor {
@@ -107,18 +158,25 @@ export class Scheduler {
 
   /** A static method's class is initialised first, as invokestatic would. */
   spawn(javaThread: JObject | null, method: JMethod, args: readonly JValue[]): JThread {
+    return this.spawnWith(javaThread, (t) => {
+      const call = (): Invoke =>
+        new Invoke(method, args, (ret) => {
+          t.result = ret;
+          return undefined;
+        });
+      const start = (): NativeResult => {
+        const init = method.isStatic ? this.jvm.loader.initialize(t, method.cls) : null;
+        return init === null ? call() : andThen(init, start);
+      };
+      return start();
+    });
+  }
+
+  /** A new thread whose work is `start`'s result, usually an Invoke chain. */
+  spawnWith(javaThread: JObject | null, start: (t: JThread) => NativeResult): JThread {
     const t = new JThread(this.nextId++, javaThread);
     this.threads.push(t);
-    const call = (): Invoke =>
-      new Invoke(method, args, (ret) => {
-        t.result = ret;
-        return undefined;
-      });
-    const start = (): NativeResult => {
-      const init = method.isStatic ? this.jvm.loader.initialize(t, method.cls) : null;
-      return init === null ? call() : andThen(init, start);
-    };
-    this.inThread(t, () => complete(this.jvm, t, start()));
+    this.inThread(t, () => complete(this.jvm, t, start(t)));
     if (t.state === 'runnable') this.enqueue(t);
     return t;
   }
@@ -161,6 +219,15 @@ export class Scheduler {
   notify(o: JObject, all: boolean, t: JThread): void {
     const m = o.monitor;
     if (m?.owner !== t) throw this.illegalMonitorState();
+    this.wakeWaiters(m, all);
+  }
+
+  /** notifyAll by the VM itself, as HotSpot's ensure_join does on a terminating thread's Thread object. */
+  notifyAllFromVm(o: JObject): void {
+    if (o.monitor) this.wakeWaiters(o.monitor, true);
+  }
+
+  private wakeWaiters(m: Monitor, all: boolean): void {
     const waiters = m.waitSet.filter((w) => this.waiting.get(w)!.count > 0);
     for (const w of all ? waiters : waiters.slice(0, 1)) this.endWait(w, () => undefined);
   }
@@ -176,6 +243,7 @@ export class Scheduler {
 
   /** Thread.yield: the thread goes to the back of the run queue. */
   yield(t: JThread): NativeResult {
+    t.yielding = true;
     t.state = 'sleeping';
     this.pending.set(t, () => undefined);
     this.yielded.push(t);
@@ -194,6 +262,7 @@ export class Scheduler {
     } else if (time > 0n) {
       ms = Math.max(1, Math.ceil(Number(time) / 1e6));
     }
+    t.parkTimed = ms > 0;
     t.state = 'parked';
     if (ms > 0) this.after(t, ms, () => this.resume(t, () => undefined));
     return blocked();
@@ -264,6 +333,11 @@ export class Scheduler {
   /** The thread, already blocked, does `r` when it next runs. */
   later(t: JThread, r: NativeResult): void {
     this.pending.set(t, () => r);
+  }
+
+  /** The thread, already blocked, computes its result with `fn` when it next runs (to retry a monitor entry). */
+  onWake(t: JThread, fn: () => NativeResult): void {
+    this.pending.set(t, fn);
   }
 
   /**

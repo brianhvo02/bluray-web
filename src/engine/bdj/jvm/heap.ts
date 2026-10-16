@@ -90,6 +90,21 @@ export class Heap {
     return str;
   }
 
+  /** String.intern: the interned string equal to `str`, which becomes the interned one if there is none yet. */
+  internObject(str: JObject): JObject {
+    const s = this.jsString(str)!;
+    const hit = this.interned.get(s);
+    if (hit) return hit;
+    this.interned.set(s, str);
+    return str;
+  }
+
+  /** Object.clone: a shallow copy with a fresh monitor and identity hash. */
+  clone(o: JObject): JObject {
+    if ('data' in o) return new Arr(o.cls, (o as JArray).data.slice());
+    return new Obj(o.cls, o.fields.slice());
+  }
+
   jsString(str: JObject | null): string | null {
     if (str === null) return null;
     this.stringClass();

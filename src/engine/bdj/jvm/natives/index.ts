@@ -11,6 +11,11 @@ import type { JMethod } from '../loader';
 import type { JThread } from '../threads';
 import type { Jvm } from '../jvm';
 import type { NativeResult } from '../interpreter';
+import { registerLangNatives } from './lang';
+import { registerMiscNatives } from './misc';
+import { registerReflectNatives } from './reflect';
+import { registerStrictMathNatives } from './strictmath';
+import { registerUnsafeNatives } from './unsafe';
 
 export interface NativeContext {
   readonly jvm: Jvm;
@@ -66,4 +71,13 @@ export function registerSchedulerNatives(table: NativeTable): void {
     'java/lang/Thread.sleep(J)V': (ctx, ms) => ctx.jvm.threads.sleep(ctx.thread, Number(ms as bigint)),
     'java/lang/Thread.yield()V': (ctx) => ctx.jvm.threads.yield(ctx.thread),
   });
+}
+
+/** The JDK's natives: java.lang, reflection, Unsafe, sun.misc (later tasks add invoke, io, zip, security, net, awt). */
+export function registerJdkNatives(table: NativeTable): void {
+  registerLangNatives(table);
+  registerStrictMathNatives(table);
+  registerReflectNatives(table);
+  registerUnsafeNatives(table);
+  registerMiscNatives(table);
 }
