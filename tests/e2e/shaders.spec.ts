@@ -245,6 +245,23 @@ test('paused switch repaints', async ({ page }) => {
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
 });
 
+test('Manage dialog takes focus and gives it back to the Shaders button', async ({ page }) => {
+  await openDisc1(page);
+  await page.getByTestId('player').hover();
+  await page.getByTestId('shader-menu').click();
+  await page.getByTestId('shader-manage').click();
+  const dialog = page.getByRole('dialog', { name: 'Manage shaders' });
+  await expect(dialog).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId('shader-menu')).toBeFocused();
+  await page.getByTestId('player').hover();
+  await page.getByTestId('shader-menu').click();
+  await page.getByTestId('shader-manage').click();
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(page.getByTestId('shader-menu')).toBeFocused();
+});
+
 test.describe('on a GPU', () => {
   test.skip(!GPU, 'set SHADERS_GPU=1 to run the Anime4K and sync tests');
 

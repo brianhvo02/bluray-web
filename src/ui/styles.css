@@ -82,6 +82,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .shader-warning-mark { color: #ffcf66; }
 .shader-report, .shader-dialog { position: absolute; bottom: calc(100% + 8px); right: 0; min-width: 280px; max-width: 420px; padding: 8px 12px; background: rgba(30, 30, 36, 0.96); border-radius: 8px; font-size: 0.9em; }
 .shader-report > button { float: right; }
+.shader-dialog:focus { outline: none; }
 .shader-dialog h3 { margin: 8px 0 4px; font-size: 1em; }
 .shader-dialog ul { margin: 0; padding: 0; list-style: none; max-height: 30vh; overflow: auto; }
 .shader-dialog li { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 2px 0; }

@@ -24,11 +24,16 @@ export function ShaderMenu({ model, state, status, dropWarning, onOpenChange }: 
   const listRef = useRef<HTMLUListElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
   const filesRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const unavailable = status.state === 'unavailable';
 
   const playableItems = (): HTMLButtonElement[] => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
   const close = (refocus: boolean): void => {
     setOpen(false);
+    if (refocus) buttonRef.current?.focus();
+  };
+  const closeManage = (refocus: boolean): void => {
+    setManageOpen(false);
     if (refocus) buttonRef.current?.focus();
   };
 
@@ -41,6 +46,10 @@ export function ShaderMenu({ model, state, status, dropWarning, onOpenChange }: 
   }, [open]);
 
   useEffect(() => {
+    if (manageOpen) dialogRef.current?.focus();
+  }, [manageOpen]);
+
+  useEffect(() => {
     if (!open && !manageOpen) return;
     const outside = (e: PointerEvent): void => {
       if (rootRef.current?.contains(e.target as Node)) return;
@@ -49,7 +58,7 @@ export function ShaderMenu({ model, state, status, dropWarning, onOpenChange }: 
     };
     const escape = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
-      if (manageOpen) setManageOpen(false);
+      if (manageOpen) closeManage(true);
       else close(true);
     };
     window.addEventListener('pointerdown', outside);
@@ -196,7 +205,7 @@ export function ShaderMenu({ model, state, status, dropWarning, onOpenChange }: 
         </div>
       )}
       {manageOpen && (
-        <div role="dialog" aria-label="Manage shaders" className="shader-dialog">
+        <div ref={dialogRef} tabIndex={-1} role="dialog" aria-label="Manage shaders" className="shader-dialog">
           <h3>Files</h3>
           {state.files.length === 0 && <p>No shader files.</p>}
           <ul>
@@ -221,7 +230,7 @@ export function ShaderMenu({ model, state, status, dropWarning, onOpenChange }: 
               </li>
             ))}
           </ul>
-          <button type="button" onClick={() => setManageOpen(false)}>
+          <button type="button" onClick={() => closeManage(true)}>
             Close
           </button>
         </div>
