@@ -13,6 +13,7 @@ import { encodePng } from './png';
 const WIDTH = 1920;
 const HEIGHT = 1080;
 
+/** Raw .rgba frames (older harness builds) to PNG. */
 export function convertFrames(inDir: string, outDir: string): void {
   mkdirSync(outDir, { recursive: true });
   for (const f of readdirSync(inDir).filter((n) => n.endsWith('.rgba'))) {
@@ -22,10 +23,8 @@ export function convertFrames(inDir: string, outDir: string): void {
 
 /** Runs the harness on a script; returns the normalized trace and leaves PNG frames in `outDir`. */
 export function traceScript(script: string, fonts: string, times: string, outDir: string, storage?: string): string {
-  const raw = join(outDir, 'raw');
-  mkdirSync(raw, { recursive: true });
-  const stdout = execFileSync('tools/ass-trace/run.sh', [script, fonts, times, raw, ...(storage ? [storage] : [])], { encoding: 'utf8', maxBuffer: 1 << 30 });
-  convertFrames(raw, outDir);
+  mkdirSync(outDir, { recursive: true });
+  const stdout = execFileSync('tools/ass-trace/run.sh', [script, fonts, times, outDir, ...(storage ? [storage] : [])], { encoding: 'utf8', maxBuffer: 1 << 30 });
   const trace = formatTrace(parseTrace(stdout));
   writeFileSync(join(outDir, 'trace.jsonl'), trace);
   return trace;

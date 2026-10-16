@@ -1,11 +1,12 @@
 /*
  * libass trace harness for bluray-web: renders an ASS script at given times with the settings our renderer uses,
- * prints one JSON line per event shown (via the trace.patch hook) and writes each frame as raw RGBA on #808080.
+ * prints one JSON line per event shown (via the trace.patch hook) and writes each frame as a PNG (RGBA on #808080).
  *
  * usage: ass_trace <file.ass> <fonts dir> <times file> <out dir> [<storage w>x<storage h>]
  */
 #include <ass/ass.h>
 #include <stdint.h>
+#include <zlib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,52 @@ static void blend(uint8_t *frame, const ASS_Image *img)
             }
         }
     }
+}
+
+static void put32(unsigned char *p, uint32_t v)
+{
+    p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
+}
+
+static int write_chunk(FILE *f, const char *type, const unsigned char *data, uint32_t len)
+{
+    unsigned char head[8];
+    put32(head, len);
+    memcpy(head + 4, type, 4);
+    uLong crc = crc32(0, (const Bytef *) type, 4);
+    if (len) crc = crc32(crc, data, len);
+    unsigned char tail[4];
+    put32(tail, (uint32_t) crc);
+    return fwrite(head, 1, 8, f) == 8 && (!len || fwrite(data, 1, len, f) == len) && fwrite(tail, 1, 4, f) == 4;
+}
+
+/* 8-bit RGBA, filter 0 on every row: what tests/ass-trace/png.ts reads. */
+static int write_png(const char *path, const uint8_t *rgba)
+{
+    size_t row = (size_t) WIDTH * 4 + 1;
+    size_t raw_len = row * HEIGHT;
+    unsigned char *raw = malloc(raw_len);
+    uLongf z_len = compressBound(raw_len);
+    unsigned char *z = malloc(z_len);
+    if (!raw || !z)
+        return 0;
+    for (int y = 0; y < HEIGHT; y++) {
+        raw[y * row] = 0;
+        memcpy(raw + y * row + 1, rgba + (size_t) y * WIDTH * 4, (size_t) WIDTH * 4);
+    }
+    int ok = compress2(z, &z_len, raw, raw_len, 6) == Z_OK;
+    FILE *f = ok ? fopen(path, "wb") : NULL;
+    static const unsigned char sig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    unsigned char ihdr[13];
+    put32(ihdr, WIDTH);
+    put32(ihdr + 4, HEIGHT);
+    ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+    ok = f && fwrite(sig, 1, 8, f) == 8 && write_chunk(f, "IHDR", ihdr, 13) && write_chunk(f, "IDAT", z, (uint32_t) z_len) && write_chunk(f, "IEND", NULL, 0);
+    if (f && fclose(f))
+        ok = 0;
+    free(raw);
+    free(z);
+    return ok;
 }
 
 int main(int argc, char **argv)
@@ -114,9 +161,8 @@ int main(int argc, char **argv)
         }
         blend(frame, img);
         char path[4096];
-        snprintf(path, sizeof(path), "%s/%lld.rgba", argv[4], t);
-        FILE *out = fopen(path, "wb");
-        if (!out || fwrite(frame, 1, (size_t) WIDTH * HEIGHT * 4, out) != (size_t) WIDTH * HEIGHT * 4 || fclose(out)) {
+        snprintf(path, sizeof(path), "%s/%lld.png", argv[4], t);
+        if (!write_png(path, frame)) {
             fprintf(stderr, "cannot write %s\n", path);
             return 1;
         }

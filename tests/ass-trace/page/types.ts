@@ -12,3 +12,20 @@ export interface AssTraceRun {
 export interface AssTracePage {
   run(scriptUrl: string, fontUrls: readonly string[], times: readonly number[], pixels: boolean, storage: readonly [number, number] | null): Promise<AssTraceRun>;
 }
+
+/** One compared frame of a session step: libass's golden against ours. `actual` (base64 RGBA) only for failures. */
+export interface FrameResult { readonly t: number; readonly differing: number; readonly budget: number; readonly pass: boolean; readonly actual?: string }
+
+/** A long script compared in steps (window.assSession): layout and collision memory carry over between steps. */
+export interface AssSessionPage {
+  open(scriptUrl: string, fontUrls: readonly string[], storage: readonly [number, number] | null): Promise<{ readonly missingFamilies: readonly string[] }>;
+  /**
+   * Lays out and draws `times`; when `goldenBase` is given, compares each frame with `${goldenBase}/${t}.png` using
+   * `boxes[t]` for the budget, skipping the times in `skip`.
+   */
+  step(times: readonly number[], goldenBase: string | null, boxes: Readonly<Record<number, readonly (readonly [number, number, number, number])[]>>, skip: readonly number[]): Promise<{
+    readonly trace: string;
+    readonly results: readonly FrameResult[];
+    readonly renderMs: readonly { readonly t: number; readonly ms: number; readonly animated: boolean }[];
+  }>;
+}

@@ -23,4 +23,4 @@ RUN cd /src/libass \
 
 COPY ass_trace.c /src/ass_trace.c
 RUN gcc -O1 -Wall -Wextra -Werror /src/ass_trace.c -o /usr/local/bin/ass_trace \
-      $(PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig pkg-config --static --cflags --libs libass) -lm
+      $(PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/aarch64-linux-gnu/pkgconfig pkg-config --static --cflags --libs libass) -lz -lm
