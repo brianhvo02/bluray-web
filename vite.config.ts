@@ -13,7 +13,7 @@ export default defineConfig({
   preview: { headers: crossOriginIsolation },
   worker: { format: 'es' },
   test: {
-    include: ['src/**/*.test.ts', 'tests/local/**/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'tests/local/**/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts'],
     environment: 'node',
     passWithNoTests: true,
   },
