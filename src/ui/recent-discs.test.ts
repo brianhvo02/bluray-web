@@ -42,4 +42,31 @@ describe('recent discs', () => {
     } as unknown as RecentDisc;
     await expect(reopenRecentDisc(disc)).resolves.toBeNull();
   });
+
+  it('upgrades a version 2 database to 3, keeping its recent discs', async () => {
+    const factory = new IDBFactory();
+    await new Promise<void>((resolve, reject) => {
+      const req = factory.open('bluray-web', 2);
+      req.onupgradeneeded = () => req.result.createObjectStore('recent-discs-v2', { keyPath: 'id', autoIncrement: true });
+      req.onsuccess = () => {
+        const tx = req.result.transaction('recent-discs-v2', 'readwrite');
+        tx.objectStore('recent-discs-v2').put({ name: 'Old', handle: { kind: 'directory', name: 'Old' }, openedAt: 5 });
+        tx.oncomplete = () => {
+          req.result.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      req.onerror = () => reject(req.error);
+    });
+    expect((await listRecentDiscs(factory)).map((d) => d.name)).toEqual(['Old']);
+    const db = await new Promise<IDBDatabase>((res, rej) => {
+      const r = factory.open('bluray-web');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    expect(db.version).toBe(3);
+    expect([...db.objectStoreNames].sort()).toEqual(['recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
+    db.close();
+  });
 });

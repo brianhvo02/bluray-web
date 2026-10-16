@@ -1,9 +1,9 @@
-const DB_NAME = 'bluray-web';
-const DB_VERSION = 2;
-/** v1 keyed discs by folder name, so two discs opened via folders named "BDMV" overwrote each other. */
-const LEGACY_STORE = 'recent-discs';
-const STORE = 'recent-discs-v2';
+import { STORES, withStore as withDbStore } from './db';
+
 const MAX_RECENT = 5;
+
+const withStore = <T>(factory: IDBFactory, mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T> | void) =>
+  withDbStore<T>(factory, STORES.recentDiscs, mode, run);
 
 export interface RecentDisc {
   readonly id: number;
@@ -16,34 +16,6 @@ export interface RecentDisc {
 export type SameFolder = (a: FileSystemDirectoryHandle, b: FileSystemDirectoryHandle) => Promise<boolean>;
 
 const isSameFolder: SameFolder = (a, b) => a.isSameEntry(b);
-
-function openDb(factory: IDBFactory): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = factory.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (db.objectStoreNames.contains(LEGACY_STORE)) db.deleteObjectStore(LEGACY_STORE);
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function withStore<T>(factory: IDBFactory, mode: IDBTransactionMode, run: (store: IDBObjectStore) => IDBRequest<T> | void): Promise<T | undefined> {
-  const db = await openDb(factory);
-  try {
-    return await new Promise<T | undefined>((resolve, reject) => {
-      const tx = db.transaction(STORE, mode);
-      const req = run(tx.objectStore(STORE));
-      tx.oncomplete = () => resolve(req ? req.result : undefined);
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error ?? new DOMException('Recent-discs transaction aborted', 'AbortError'));
-    });
-  } finally {
-    db.close();
-  }
-}
 
 export async function listRecentDiscs(factory: IDBFactory = indexedDB): Promise<RecentDisc[]> {
   const all = (await withStore<RecentDisc[]>(factory, 'readonly', (store) => store.getAll() as IDBRequest<RecentDisc[]>)) ?? [];
