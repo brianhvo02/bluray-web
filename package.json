@@ -20,6 +20,7 @@
     "vm-trace:golden": "tools/vm-trace/golden.sh",
     "bdj-trace:golden": "tools/bdj-trace/golden.sh",
     "vm-trace": "tsx tests/vm-trace/run.ts",
+    "bdj-trace": "tsx tests/bdj/run.ts",
     "ass-trace:build": "tools/ass-trace/build.sh",
     "ass-trace:golden": "tools/ass-trace/golden.sh",
     "ass-trace": "tsx tests/ass-trace/run.ts",
