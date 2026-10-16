@@ -77,7 +77,7 @@ Per event, in libass's order (shadow, then border, then fill, per glyph run, the
 - **Clips.** Rectangle and vector `\clip` become canvas clip paths; `\iclip` uses the even-odd rule over the frame rectangle plus the clip path.
 - **Drawings.** `\p` paths are filled, stroked and shadowed like glyphs.
 - **Karaoke.** `\k`/`\K`/`\kf`/`\ko` switch or sweep between primary and secondary colours per syllable; `\kf` sweeps by clipping each glyph run at the progress point, as libass does.
-- **Colour.** Colours are converted from the script's YCbCr Matrix to the video's, as libass does when told the video matrix (BT.709 for Blu-ray), or left untouched for `None`.
+- **Colour.** libass does not convert colours for the script's `YCbCr Matrix`; players do. In the player, `AssRenderer` converts BT.601 scripts (`TV.601`, `PC.601`, and `Default`/missing as VSFilter assumes) to the BT.709 video, as mpv does, and leaves `None` and BT.709 scripts untouched. Golden comparisons render without conversion.
 
 ### 3.4 Caching and redraws
 
