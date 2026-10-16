@@ -71,6 +71,12 @@ what would change that decision.
   `ASS_LOCAL=1`). The 15 committed synthetic fixtures cover the tag set. *Revisit* by adding scripts to
   `fixtures/local/ass/`.
 
+- **`src/engine/ass/trace.ts` imports its types from `tests/ass-trace/format.ts`.** The import is type-only and the
+  module is used only by the trace page, so nothing from `tests/` reaches the player bundle. *Revisit if* the trace
+  format moves into the engine (it would then belong in `src/engine/ass/`).
+- **The local corpus gate needs Docker and the developer's files**, so CI runs only the synthetic fixtures. *Revisit*
+  if a freely licensed real-world script with fonts becomes available to commit.
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,
@@ -84,6 +90,16 @@ what would change that decision.
 
 ## Resolved (for reference)
 
+- **M4b porting bugs found by the TSURUNE gate (fixed in the port, 2026-10-15).** Runs were snapped to 1/8 px by
+  each glyph origin instead of libass's rounding of the first inked glyph's box centre; TrueType fonts that force an
+  integer ppem had their ascender and outline size rounded too (only hinted advances are), which put whole lines
+  1/32 px high; a fade counted as a shape change, sending the first opaque frame through the 1× direct path. The gate
+  went from 66 layout and 112 pixel failures to only the auto-hinter exception above.
+- **M4b review fixes (2026-10-15).** The cached coloured layers left the shadow offset out of their key, so two runs
+  differing only in `\shad`/`\xshad` (or a `\t` on the shadow distance) drew the shadow at the first one's offset;
+  the static event cache was bounded by count only (64 full-frame drawings could hold ~530 MB) and is now also
+  bounded to 128 MiB; the controller imported its file sorting from `src/ui` (moved to `src/player/drop-files.ts`);
+  subtitle rows were keyed by file name, which collides for same-named files from different folders.
 - **ASS rendering differences from Chrome's canvas, found by the TSURUNE gate.** Canvases created with
   `willReadFrequently` (CPU) approximate `blur()` with box passes: deviations under 0.8 px do nothing and larger ones
   step, so mask blurs are a Gaussian in JS. Both CPU and GPU canvases snap the baseline of text under ~256 px to whole
