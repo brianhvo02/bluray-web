@@ -551,8 +551,10 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
    * and whose shadow takes the whole shape: no ass_fix_outline is needed, so no pixels are read back.
    */
   function directLayers(): RunLayers {
-    // text supersampled on the GPU past the glyph cache's baseline snapping, then scaled down (and blurred) there
-    const dss = textSupersampling(1, glyphs, mats);
+    // text supersampled on the GPU past the glyph cache's baseline snapping, then scaled down (and blurred) there;
+    // a power of two, halved step by step: a bilinear 2:1 step is the 2×2 box filter of `supersampled` on CPU and
+    // GPU canvases alike, where 'high' smoothing filters differently on each (and failed the libass budget on CPU)
+    const dss = 2 ** Math.ceil(Math.log2(textSupersampling(1, glyphs, mats)));
     const shapes = (borderWidthOf: ((k: number) => number) | null, blurred: boolean): OffscreenCanvas => {
       const draw = (ctx: OffscreenCanvasRenderingContext2D, scale: number): void => {
         ctx.fillStyle = '#fff';
@@ -573,9 +575,16 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
         draw(ctx, 1);
         return canvas;
       }
-      const big = rc.createCanvas(w * dss, h * dss);
+      let big = rc.createCanvas(w * dss, h * dss);
       draw(big.getContext('2d')!, dss);
-      ctx.imageSmoothingQuality = 'high';
+      for (let f = dss / 2; f > 1; f /= 2) {
+        const half = rc.createCanvas(w * f, h * f);
+        const hctx = half.getContext('2d')!;
+        hctx.imageSmoothingQuality = 'low';
+        hctx.drawImage(big, 0, 0, w * f, h * f);
+        big = half;
+      }
+      ctx.imageSmoothingQuality = 'low';
       ctx.filter = filter;
       ctx.drawImage(big, 0, 0, w, h);
       return canvas;
