@@ -13,6 +13,7 @@ A client-side Blu-ray (BDMV) player for desktop Chromium: a TypeScript port of l
 - `npm test`: Vitest, all unit tests (`src/**/*.test.ts` plus `tests/local/**`). Run one file with `npx vitest run src/engine/demux/ts-packet.test.ts` and filter by name with `-t "<name>"`.
 - `npm run test:e2e`: Playwright against a production build on port 4173 (`npm run build && npm run preview`). It needs installed Google Chrome (`channel: 'chrome'`) and a working audio output, because the A/V sync tests measure the real AudioWorklet clock. Run one test with `npx playwright test playback -g "<title>"`.
   - `SYNC_TOLERANCE_SCALE=2` widens the 20 ms mean / 50 ms max A/V offset bounds. CI uses 1.5. Keep local runs at the default.
+  - `ASS_BUDGET_SCALE=8` widens the share of animated ASS draws allowed over the renderer's 8 ms budget from 5% to 40% (`ass-subtitles.spec.ts`). CI uses 8 because its runners miss the budget on 26–29% of draws. Keep local runs at the default.
   - `LOCAL_DISCS=1 npx playwright test local-discs` plays every disc under `fixtures/local/` and seeks around in it.
   - Nightly drift test: `npx tsx scripts/make-fixture-disc.ts fixtures/local/long-disc --seconds-per-clip 300`, then `NIGHTLY=1 npx playwright test -g "ten minutes"`.
 - `npm run fixture:synthetic`: regenerates the committed discs in `fixtures/synthetic/` from `scripts/` (the scripts build on `tests/helpers/`). Rerun it after changing the builders or muxer, and commit the output. It needs `ffmpeg` on PATH for the audio fixtures (disc3).

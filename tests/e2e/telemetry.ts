@@ -6,6 +6,11 @@ if (!(SYNC_SCALE >= 1)) throw new Error(`SYNC_TOLERANCE_SCALE must be a number >
 export const SYNC_TOLERANCE_US = 20_000 * SYNC_SCALE;
 export const MAX_ABS_TOLERANCE_US = 50_000 * SYNC_SCALE;
 
+/** Widens the share of ASS draws allowed over the engine's 8 ms budget on machines without a GPU (e.g. ASS_BUDGET_SCALE=8 on CI); the default keeps the spec's 5%. */
+const ASS_BUDGET_SCALE = Number(process.env.ASS_BUDGET_SCALE ?? 1);
+if (!(ASS_BUDGET_SCALE >= 1)) throw new Error(`ASS_BUDGET_SCALE must be a number >= 1, got ${process.env.ASS_BUDGET_SCALE}`);
+export const ASS_OVER_BUDGET_SHARE = Math.min(1, 0.05 * ASS_BUDGET_SCALE);
+
 export interface TelemetrySample {
   clockUs: number;
   clockMode: string;

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { collectWindows, expectInSync } from './telemetry';
+import { ASS_OVER_BUDGET_SHARE, collectWindows, expectInSync } from './telemetry';
 
 // fixtures/synthetic/disc1: playlist 00000 is two 4 s play items (an "episode" each here) with chapters every 2 s.
 const DISC = 'fixtures/synthetic/disc1';
@@ -144,9 +144,9 @@ test('keeps A/V sync with an animated ASS sign on screen', async ({ page }) => {
   await page.keyboard.press('Escape');
   const windows = await collectWindows(page, 7_000_000);
   expectInSync(windows.filter((w) => w.clockUs > 1_000_000));
-  // the spec's budget: 95% of the sign's draws under 8 ms (its first draws build masks and caches)
+  // the spec's budget: 95% of the sign's draws under 8 ms (its first draws build masks and caches); ASS_BUDGET_SCALE widens the share
   const ass = (await telemetry(page))!.ass!;
   console.log(`ass draws: ${ass.renders}, over 8 ms: ${ass.overBudget}`);
   expect(ass.renders).toBeGreaterThan(20);
-  expect(ass.overBudget / ass.renders).toBeLessThanOrEqual(0.05);
+  expect(ass.overBudget / ass.renders).toBeLessThanOrEqual(ASS_OVER_BUDGET_SHARE);
 });
