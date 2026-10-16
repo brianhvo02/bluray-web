@@ -52,3 +52,31 @@ jobs:
             test-results/
             playwright-report/
           retention-days: 7
+
+  deploy:
+    name: Deploy to Cloudflare Pages
+    needs: [check, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # a newer push to main must not cancel an upload halfway; deploys queue instead
+    concurrency:
+      group: deploy-pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11.19.0
+      - run: npm ci
+      - run: npm run build
+      # dist/_headers carries COOP/COEP; without them SharedArrayBuffer is unavailable
+      - run: test -f dist/_headers
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=bluray-web --branch=main
