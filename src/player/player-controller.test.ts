@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import type { AudioTrack, EngineEvent } from '../engine/protocol';
+import type { AudioTrack, EngineEvent, Telemetry } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
 
 class FakeWorker implements WorkerLike {
   readonly posted: unknown[] = [];
+  readonly transfers: unknown[][] = [];
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror: ((event: MessageEvent) => void) | null = null;
-  postMessage(message: unknown): void {
+  postMessage(message: unknown, transfer: unknown[] = []): void {
     this.posted.push(message);
+    this.transfers.push(transfer);
   }
   emit(event: EngineEvent): void {
     this.onmessage?.({ data: event } as MessageEvent);
@@ -444,5 +446,62 @@ describe('subtitles', () => {
     expect(worker.posted).toHaveLength(2);
     c.removeSubtitleFile();
     expect(posted(worker)[2]).toEqual({ type: 'removeTextSubtitle' });
+  });
+
+  describe('subtitle sets', () => {
+    const file = (name: string, size = 3) => ({ name, size, arrayBuffer: async () => new ArrayBuffer(size) }) as unknown as File;
+    const twoFiles = { files: [{ name: 'ep1.ass', format: 'ass' as const, cues: 3, startUs: 0, offsetMs: 0 }, { name: 'ep2.ass', format: 'ass' as const, cues: 3, startUs: 1_000_000, offsetMs: 0 }], missingFonts: [], episodeStarts: [0, 1_000_000] };
+
+    it('sends the subtitle files and fonts of a pick in one load, transferring every buffer', async () => {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      await c.loadSubtitleFiles([file('a.ass'), file('b.srt'), file('x.ttf'), file('y.otf')]);
+      const sent = posted(worker)[0]!;
+      expect(sent.type).toBe('addTextSubtitles');
+      expect((sent.files as { name: string }[]).map((f) => f.name)).toEqual(['a.ass', 'b.srt']);
+      expect((sent.fonts as { name: string }[]).map((f) => f.name)).toEqual(['x.ttf', 'y.otf']);
+      expect(worker.transfers.at(-1)).toHaveLength(4);
+    });
+
+    it('skips fonts over the size limit and subtitle files past 64, with notices', async () => {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      const many = Array.from({ length: 65 }, (_, i) => file(`ep${i}.srt`));
+      await c.loadSubtitleFiles([...many, file('huge.ttf', 70 * 1024 * 1024), file('ok.ttf')]);
+      const sent = posted(worker)[0]!;
+      expect((sent.files as unknown[]).length).toBe(64);
+      expect((sent.fonts as { name: string }[]).map((f) => f.name)).toEqual(['ok.ttf']);
+      expect(c.getSnapshot().notices).toContainEqual({ code: 'subtitle-fonts', message: 'Fonts over the size limit were skipped: huge.ttf' });
+      expect(c.getSnapshot().notices).toContainEqual({ code: 'subtitle-file', message: 'Only the first 64 subtitle files were loaded' });
+    });
+
+    it('sends a pick of fonts alone as more fonts for an ASS set', async () => {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      worker.emit(subs({ text: twoFiles, selected: 'text' }));
+      await c.loadSubtitleFiles([file('x.ttf')]);
+      expect(posted(worker)[0]).toMatchObject({ type: 'addSubtitleFonts' });
+    });
+
+    it('resends the whole load with the encoding the user picks', async () => {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      await c.loadSubtitleFiles([file('a.srt'), file('x.ttf')]);
+      worker.emit({ type: 'subtitleEncodingNeeded', names: ['a.srt'] });
+      await c.answerEncoding('windows-1252');
+      expect(posted(worker)[1]).toMatchObject({ type: 'addTextSubtitles', encoding: 'windows-1252' });
+      expect((posted(worker)[1]!.fonts as unknown[]).length).toBe(1);
+    });
+
+    it('places a file and shifts the one showing now', () => {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      worker.emit(subs({ text: twoFiles, selected: 'text' }));
+      c.setSubtitleStart(1, 2_000_000);
+      c.shiftSubtitles(100); // nothing showing: no telemetry yet, two files
+      worker.emit({ type: 'telemetry', telemetry: { textFile: 1 } as unknown as Telemetry });
+      c.shiftSubtitles(100);
+      expect(posted(worker)).toEqual([{ type: 'setSubtitleStart', file: 1, startUs: 2_000_000 }, { type: 'setSubtitleOffset', file: 1, ms: 100 }]);
+    });
   });
 });

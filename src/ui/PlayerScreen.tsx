@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
+import { collectDroppedFiles, splitPick } from './drop-files';
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
@@ -11,7 +12,6 @@ import type { MenuKey } from '../engine/protocol';
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
 
-const isSubtitleFile = (file: File): boolean => file.name.toLowerCase().endsWith('.srt');
 
 interface PlayerScreenProps {
   readonly controller: PlayerController;
@@ -153,15 +153,19 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
 
   const answerEncoding = useCallback((encoding: string | null) => void controller.answerEncoding(encoding), [controller]);
 
-  /** A dropped .srt file loads as the subtitle file; other files are ignored (and never open in the tab). */
+  /** Dropped subtitle files and fonts (or folders of them) load as the subtitle set; nothing opens in the tab. */
   const onDragOver = (e: DragEvent<HTMLDivElement>): void => {
     if (e.dataTransfer.types.includes('Files')) e.preventDefault();
   };
   const onDrop = (e: DragEvent<HTMLDivElement>): void => {
     if (!e.dataTransfer.types.includes('Files')) return;
     e.preventDefault();
-    const file = [...e.dataTransfer.files].find(isSubtitleFile);
-    if (file && snapshot.currentPlaylistId !== null) void controller.loadSubtitleFile(file);
+    if (snapshot.currentPlaylistId === null) return;
+    // read synchronously: the item list is unusable once the event returns
+    void collectDroppedFiles(e.dataTransfer.items).then((files) => {
+      const { subtitles, fonts } = splitPick(files);
+      if (subtitles.length || fonts.length) void controller.loadSubtitleFiles([...subtitles, ...fonts]);
+    });
   };
 
   const maskedNotice = snapshot.notices.find((n) => n.code === 'uo-masked');

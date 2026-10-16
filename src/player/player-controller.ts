@@ -1,3 +1,4 @@
+import { splitPick } from '../ui/drop-files';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
@@ -46,6 +47,9 @@ export type SubtitlesState = Omit<Extract<EngineEvent, { type: 'subtitles' }>, '
 export const MAX_SUBTITLE_OFFSET_MS = 600_000;
 /** Far beyond any subtitle file (a feature's SRT is well under 1 MB); larger picks are refused before reading them. */
 export const MAX_SUBTITLE_FILE_BYTES = 32 * 1024 * 1024;
+export const MAX_SUBTITLE_FILES = 64;
+const MAX_FONT_BYTES = 64 * 1024 * 1024;
+const MAX_FONTS_BYTES = 256 * 1024 * 1024;
 export const MIN_SUBTITLE_SCALE = 0.5;
 export const MAX_SUBTITLE_SCALE = 2;
 
@@ -155,8 +159,8 @@ export class PlayerController {
   private readonly listeners = new Set<() => void>();
   private audioAttached = false;
   private readonly transferredCanvases = new WeakSet<HTMLCanvasElement>();
-  /** The subtitle file whose encoding prompt is open: read again when the user picks one (its bytes were transferred). */
-  private pendingSubtitleFile: File | null = null;
+  /** The load whose encoding prompt is open: read again when the user picks one (its bytes were transferred). */
+  private pendingSubtitleLoad: readonly File[] | null = null;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -328,23 +332,73 @@ export class PlayerController {
     this.selectSubtitle(order[(at + 1) % order.length]!);
   }
 
-  /** Reads the file and hands its bytes to the engine (transferred); `encoding` answers an encoding prompt. */
+  /** One subtitle file (the M4a entry point). */
   async loadSubtitleFile(file: File, encoding?: string): Promise<void> {
-    if (file.size > MAX_SUBTITLE_FILE_BYTES) {
+    await this.loadSubtitleFiles([file], encoding);
+  }
+
+  /**
+   * A pick or drop: its subtitle files become the set (sent with its fonts, every buffer transferred); a pick of
+   * fonts alone adds them to an ASS set. `encoding` answers an encoding prompt.
+   */
+  async loadSubtitleFiles(files: readonly File[], encoding?: string): Promise<void> {
+    const split = splitPick(files);
+    const fonts = split.fonts;
+    // nothing recognised by name: the files are subtitles (the engine detects SRT or ASS by content)
+    const subtitles = split.subtitles.length || fonts.length ? split.subtitles : files;
+    if (!subtitles.length) {
+      if (fonts.length && this.snapshot.subtitles?.text?.files.some((f) => f.format === 'ass')) await this.addSubtitleFonts(fonts);
+      return;
+    }
+    if (subtitles.some((f) => f.size > MAX_SUBTITLE_FILE_BYTES)) {
       this.update(withNotice(this.snapshot, { code: 'subtitle-file', message: 'This file is too large to be a subtitle file' }));
       return;
     }
-    this.pendingSubtitleFile = file;
-    const bytes = await file.arrayBuffer();
-    this.post({ type: 'addTextSubtitles', files: [{ name: file.name, bytes }], ...(encoding !== undefined ? { encoding } : {}) }, [bytes]);
+    let picked = subtitles;
+    if (picked.length > MAX_SUBTITLE_FILES) {
+      picked = picked.slice(0, MAX_SUBTITLE_FILES);
+      this.update(withNotice(this.snapshot, { code: 'subtitle-file', message: `Only the first ${MAX_SUBTITLE_FILES} subtitle files were loaded` }));
+    }
+    const fontData = await this.readFonts(fonts);
+    this.pendingSubtitleLoad = [...picked, ...fonts];
+    const fileData = await Promise.all(picked.map(async (f) => ({ name: f.name, bytes: await f.arrayBuffer() })));
+    const transfer = [...fileData, ...fontData].map((d) => d.bytes);
+    this.post({ type: 'addTextSubtitles', files: fileData, ...(fontData.length ? { fonts: fontData } : {}), ...(encoding !== undefined ? { encoding } : {}) }, transfer);
+  }
+
+  /** More fonts for the set's ASS files. */
+  async addSubtitleFonts(files: readonly File[]): Promise<void> {
+    const fonts = await this.readFonts(splitPick(files).fonts);
+    if (fonts.length) this.post({ type: 'addSubtitleFonts', fonts }, fonts.map((f) => f.bytes));
+  }
+
+  /** Font files within the size limits; the rest are skipped with a notice naming them. */
+  private async readFonts(files: readonly File[]): Promise<{ name: string; bytes: ArrayBuffer }[]> {
+    const kept: File[] = [];
+    const skipped: string[] = [];
+    let total = 0;
+    for (const f of files) {
+      if (f.size > MAX_FONT_BYTES || total + f.size > MAX_FONTS_BYTES) skipped.push(f.name);
+      else {
+        kept.push(f);
+        total += f.size;
+      }
+    }
+    if (skipped.length) this.update(withNotice(this.snapshot, { code: 'subtitle-fonts', message: `Fonts over the size limit were skipped: ${skipped.join(', ')}` }));
+    return Promise.all(kept.map(async (f) => ({ name: f.name, bytes: await f.arrayBuffer() })));
+  }
+
+  /** Places a file of the set at a playlist time (null: not placed). */
+  setSubtitleStart(file: number, startUs: number | null): void {
+    this.post({ type: 'setSubtitleStart', file, startUs });
   }
 
   /** The encoding prompt's answer; null cancels. */
   async answerEncoding(encoding: string | null): Promise<void> {
-    const file = this.pendingSubtitleFile;
-    this.pendingSubtitleFile = null;
+    const load = this.pendingSubtitleLoad;
+    this.pendingSubtitleLoad = null;
     this.update({ ...this.snapshot, encodingPrompt: null });
-    if (encoding !== null && file) await this.loadSubtitleFile(file, encoding);
+    if (encoding !== null && load) await this.loadSubtitleFiles(load, encoding);
   }
 
   removeSubtitleFile(): void {
@@ -357,8 +411,15 @@ export class PlayerController {
     const text = subs?.text;
     if (!subs || !text) return;
     const file = this.snapshot.telemetry?.textFile ?? (text.files.length === 1 ? 0 : null);
-    const current = file === null ? undefined : text.files[file];
-    if (file === null || !current) return;
+    if (file !== null) this.shiftSubtitleFile(file, deltaMs);
+  }
+
+  /** Moves one file of the set by `deltaMs`, with a short notice of its new offset. */
+  shiftSubtitleFile(file: number, deltaMs: number): void {
+    const subs = this.snapshot.subtitles;
+    const text = subs?.text;
+    const current = text?.files[file];
+    if (!subs || !text || !current) return;
     const offsetMs = Math.max(-MAX_SUBTITLE_OFFSET_MS, Math.min(MAX_SUBTITLE_OFFSET_MS, current.offsetMs + deltaMs));
     this.post({ type: 'setSubtitleOffset', file, ms: offsetMs });
     const files = text.files.map((f, i) => (i === file ? { ...f, offsetMs } : f));

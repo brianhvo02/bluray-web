@@ -1,33 +1,48 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import type { UoOp } from '../engine/hdmv/uo-mask';
+import type { Chapter } from '../engine/nav/timeline';
 import type { SubtitleChoice } from '../engine/protocol';
 import { languageName } from '../player/language';
 import { formatSubtitleOffset, MAX_SUBTITLE_SCALE, MIN_SUBTITLE_SCALE, type SubtitlesState } from '../player/player-controller';
+import { FONT_EXTENSIONS, SUBTITLE_EXTENSIONS } from './drop-files';
+import { startChoices, startLabel } from './subtitle-starts';
 
 const OFFSET_STEP_MS = 100;
 const SCALE_STEP = 0.1;
 const MASKED_TOOLTIP = "The disc doesn't allow this here";
+const PICK_ACCEPT = [...SUBTITLE_EXTENSIONS, ...FONT_EXTENSIONS].join(',');
 
 interface SubtitleMenuProps {
   readonly subtitles: SubtitlesState | null;
   /** The disc's UO mask: picks it does not allow here are disabled with a tooltip. */
   isMasked(op: UoOp): boolean;
+  /** The playlist's chapters and the playback time, for the start picker. */
+  readonly chapters: readonly Chapter[];
+  readonly nowUs: number;
+  /** Index of the set's file showing now, or null. */
+  readonly showingFile: number | null;
   onSelect(choice: SubtitleChoice): void;
-  onLoadFile(file: File): void;
-  onShift(deltaMs: number): void;
+  onLoadFiles(files: readonly File[]): void;
+  onAddFonts(files: readonly File[]): void;
+  onShift(file: number, deltaMs: number): void;
+  onStart(file: number, startUs: number | null): void;
   onScale(delta: number): void;
   onRemove(): void;
   /** While open, the player keeps its controls up. */
   onOpenChange(open: boolean): void;
 }
 
-/** Disc PG tracks, the user's subtitle file (with timing and size), Off, and loading a file. Keyboard handling as AudioMenu. */
-export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShift, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
+/**
+ * Disc PG tracks, the user's subtitle files (each placed at an episode start, with its own timing), size, fonts,
+ * Off, and loading files. Keyboard handling as AudioMenu.
+ */
+export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, isMasked, onSelect, onLoadFiles, onAddFonts, onShift, onStart, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const fontRef = useRef<HTMLInputElement>(null);
   const shown = subtitles !== null;
 
   const items = (): HTMLButtonElement[] => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
@@ -80,7 +95,9 @@ export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShif
 
   if (!subtitles) return null;
   const { pg, text, selected, scale } = subtitles;
-  const offsetMs = text?.files[0]?.offsetMs ?? 0;
+  const hasAss = text?.files.some((f) => f.format === 'ass') ?? false;
+  // file 0 keeps the single-file test ids
+  const tid = (name: string, i: number): string => (i === 0 ? name : `${name}-${i}`);
   const currentPg = typeof selected === 'object' ? selected.pg : null;
   // moving to another PG stream is pgChange; leaving a shown PG stream for Off or the file turns PG's display off
   const pgMasked = (stream: number): boolean => currentPg !== null && stream !== currentPg && isMasked('pgChange');
@@ -93,13 +110,27 @@ export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShif
       <input
         ref={fileRef}
         type="file"
-        accept=".srt,text/plain"
+        accept={PICK_ACCEPT}
+        multiple
         hidden
         data-testid="subtitle-file-input"
         onChange={(e) => {
-          const file = e.target.files?.[0];
-          e.target.value = ''; // the same file can be picked again
-          if (file) onLoadFile(file);
+          const files = [...(e.target.files ?? [])];
+          e.target.value = ''; // the same files can be picked again
+          if (files.length) onLoadFiles(files);
+        }}
+      />
+      <input
+        ref={fontRef}
+        type="file"
+        accept={FONT_EXTENSIONS.join(',')}
+        multiple
+        hidden
+        data-testid="subtitle-font-input"
+        onChange={(e) => {
+          const files = [...(e.target.files ?? [])];
+          e.target.value = '';
+          if (files.length) onAddFonts(files);
         }}
       />
       {open && (
@@ -127,19 +158,46 @@ export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShif
           {text && (
             <li role="none">
               <button type="button" role="menuitemradio" aria-checked={selected === 'text'} data-testid="subtitle-text" disabled={offMasked} title={offMasked ? MASKED_TOOLTIP : `${text.files.reduce((n, f) => n + f.cues, 0)} subtitles`} onClick={() => choose({ kind: 'text' })}>
-                {text.files.map((f) => f.name).join(', ')}
+                {text.files.length === 1 ? text.files[0]!.name : `${text.files.length} subtitle files`}
               </button>
             </li>
           )}
-          {text && (
-            <li role="none" className="subtitle-adjust">
-              <span>Timing</span>
-              <button type="button" aria-label="Show subtitles earlier" data-testid="subtitle-offset-minus" onClick={() => onShift(-OFFSET_STEP_MS)}>
-                −
-              </button>
-              <output data-testid="subtitle-offset">{formatSubtitleOffset(offsetMs)}</output>
-              <button type="button" aria-label="Show subtitles later" data-testid="subtitle-offset-plus" onClick={() => onShift(OFFSET_STEP_MS)}>
-                +
+          {text?.files.map((f, i) => (
+            <li key={f.name} role="none" className="subtitle-file" aria-current={showingFile === i ? 'true' : undefined} data-testid={`subtitle-file-${i}`}>
+              <span className="subtitle-file-name">{showingFile === i ? '▶ ' : ''}{f.name}</span>
+              <select
+                aria-label={`Start of ${f.name}`}
+                data-testid={`subtitle-start-${i}`}
+                value={f.startUs === null ? '' : String(f.startUs)}
+                onChange={(e) => onStart(i, e.target.value === '' ? null : Number(e.target.value))}
+              >
+                {f.startUs !== null && !startChoices(text.episodeStarts, chapters, nowUs).some((c) => c.startUs === f.startUs) && (
+                  <option value={String(f.startUs)}>{startLabel(f.startUs, text.episodeStarts, chapters)}</option>
+                )}
+                {startChoices(text.episodeStarts, chapters, nowUs).map((c) => (
+                  <option key={c.label} value={c.startUs === null ? '' : String(c.startUs)}>{c.label}</option>
+                ))}
+              </select>
+              <span className="subtitle-adjust">
+                <button type="button" aria-label={`Show ${f.name} earlier`} data-testid={tid('subtitle-offset-minus', i)} onClick={() => onShift(i, -OFFSET_STEP_MS)}>
+                  −
+                </button>
+                <output data-testid={tid('subtitle-offset', i)}>{formatSubtitleOffset(f.offsetMs)}</output>
+                <button type="button" aria-label={`Show ${f.name} later`} data-testid={tid('subtitle-offset-plus', i)} onClick={() => onShift(i, OFFSET_STEP_MS)}>
+                  +
+                </button>
+              </span>
+            </li>
+          ))}
+          {text && text.missingFonts.length > 0 && (
+            <li role="none" className="subtitle-warning" data-testid="subtitle-missing-fonts">
+              Missing fonts: {text.missingFonts.join(', ')}
+            </li>
+          )}
+          {hasAss && (
+            <li role="none">
+              <button type="button" role="menuitem" data-testid="subtitle-add-fonts" onClick={() => { close(false); fontRef.current?.click(); }}>
+                Add fonts…
               </button>
             </li>
           )}
@@ -158,13 +216,13 @@ export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShif
           {text && (
             <li role="none">
               <button type="button" role="menuitem" data-testid="subtitle-remove" onClick={() => { close(true); onRemove(); }}>
-                Remove subtitle file
+                Remove subtitle files
               </button>
             </li>
           )}
           <li role="none">
             <button type="button" role="menuitem" data-testid="subtitle-load" onClick={() => { close(false); fileRef.current?.click(); }}>
-              Load subtitle file…
+              Load subtitle files…
             </button>
           </li>
         </ul>
