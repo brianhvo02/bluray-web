@@ -90,6 +90,8 @@ export interface RenderState {
   screenScaleX: number; screenScaleY: number;
   borderScaleX: number; borderScaleY: number;
   blurScaleX: number; blurScaleY: number;
+  /** ASS_Renderer.par_scale_x of ass_start_frame. */
+  parScaleX: number;
 }
 
 /** ass_event_has_hard_overrides: \pos, \move, \clip, \iclip, \org, \pbo or \p inside an override block. */
@@ -112,6 +114,15 @@ export function layoutRes(track: AssTrack, settings: RenderSettings): { x: numbe
   if (track.layoutResX > 0 && track.layoutResY > 0) return { x: track.layoutResX, y: track.layoutResY };
   if (settings.storageWidth > 0 && settings.storageHeight > 0) return { x: settings.storageWidth, y: settings.storageHeight };
   return { x: track.playResX, y: track.playResY };
+}
+
+/** The pixel aspect correction of ass_start_frame: frame aspect over layout-resolution aspect. */
+export function parScale(track: AssTrack, settings: RenderSettings): number {
+  if (settings.frameWidth > 0 && settings.frameHeight > 0) {
+    const lr = layoutRes(track, settings);
+    return settings.frameWidth / settings.frameHeight / (lr.x / lr.y);
+  }
+  return 1;
 }
 
 /** init_font_scale (use_margins off, no selective overrides: the font scale always applies). */
@@ -201,6 +212,7 @@ export function initRenderState(track: AssTrack, event: AssEvent, settings: Rend
     effectType: EF_NONE, effectTiming: 0, effectSkipTiming: 0, resetEffect: false,
     wrapStyle: track.wrapStyle, fontEncoding: 0, explicit: hasHardOverrides(event.text),
     screenScaleX: 1, screenScaleY: 1, borderScaleX: 1, borderScaleY: 1, blurScaleX: 1, blurScaleY: 1,
+    parScaleX: parScale(track, settings),
   };
   resetRenderState(s, null);
   s.alignment = s.style.alignment;
