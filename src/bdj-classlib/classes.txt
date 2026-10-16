@@ -98,6 +98,7 @@ java/awt/color/ICC_Profile$1
 java/awt/color/ICC_ProfileRGB
 java/awt/dnd/peer/DragSourceContextPeer
 java/awt/event/AWTEventListener
+java/awt/event/AWTEventListenerProxy
 java/awt/event/ActionEvent
 java/awt/event/ActionListener
 java/awt/event/AdjustmentListener
