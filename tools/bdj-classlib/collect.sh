@@ -22,8 +22,9 @@ for d in "${DISCS[@]}"; do
   # HotSpot prints -verbose output on stdout, between the trace lines
   tools/bdj-trace/run.sh "$d" --until selectPlaylistN --jvm-option -verbose:class --jvm-option -verbose:jni \
     > "$T/out" 2> "$T/err" || true
-  # classes of rt.jar ("shared objects file" is the CDS archive, also built from rt.jar)
-  { grep -E '^\[Loaded [^ ]+ from (/usr/lib/jvm/[^]]*/rt\.jar|shared objects file)\]' "$T/out" || true; } \
+  # classes of rt.jar ("shared objects file" is the CDS archive, also built from rt.jar), jsse.jar and jce.jar (the
+  # JAR signature check's providers and javax.crypto); pack.sh takes them from the same three jars
+  { grep -E '^\[Loaded [^ ]+ from (/usr/lib/jvm/[^]]*/(rt|jsse|jce)\.jar|shared objects file)\]' "$T/out" || true; } \
     | sed -E 's/^\[Loaded ([^ ]+) from .*/\1/' | tr . / >> "$T/loaded"
   { grep -E '^\[(Dynamic-linking native method [^ ]+ \.\.\. JNI|Registering JNI native method [^ ]+)\]' "$T/out" || true; } \
     | sed -E 's/^\[(Dynamic-linking native method|Registering JNI native method) ([^] ]+).*/\2/' >> "$T/natives"

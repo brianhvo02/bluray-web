@@ -42,23 +42,24 @@ mkdir "$T/harness"
 javac -nowarn -source 1.8 -target 1.8 -cp tests/bdj/conformance.jar -d "$T/harness" tests/bdj/conformance/harness/*.java
 run_twice harness.BareMain "tests/bdj/conformance.jar:$T/harness" tests/bdj/conformance/Bare.out
 
-# classes.txt plus every nested class of each listed class (X$*.class)
-unzip -Z1 "$JRE/lib/rt.jar" | grep '\.class$' | LC_ALL=C sort > "$T/rt-entries"
-LC_ALL=C awk -v listfile=$OUT/classes.txt '
-  BEGIN { while ((getline l < listfile) > 0) if (l != "") want[l] = 1 }
-  { n = $0; sub(/\.class$/, "", n)
-    keep = (n in want)
-    p = n
-    while (!keep && (i = match(p, /\$[^$]*$/)) > 0) { p = substr(p, 1, i - 1); if (p in want) keep = 1 }
-    if (keep) print $0 }' "$T/rt-entries" > "$T/names"
-echo "$(wc -l < "$T/names") class entries" >&2
-# every listed class must exist in rt.jar
-sed 's/$/.class/' $OUT/classes.txt | LC_ALL=C sort | comm -23 - "$T/rt-entries" > "$T/absent"
-if [ -s "$T/absent" ]; then echo "classes.txt names not in rt.jar:" >&2; head "$T/absent" >&2; exit 1; fi
-
-# the classes, then the resources (symlinks followed), staged into one tree
+# classes.txt plus every nested class of each listed class (X$*.class), from rt.jar and the other JRE jars whose
+# classes HotSpot loads on the local discs (jsse.jar: the Sun and SunRsaSign providers; jce.jar: javax.crypto); the
+# classes, then the resources (symlinks followed), are staged into one tree
+JARS="rt jsse jce"
+: > "$T/all-entries"
 mkdir "$T/stage"
-python3 -I - "$JRE/lib/rt.jar" "$T/stage" "$T/names" <<'PY'
+for j in $JARS; do
+  unzip -Z1 "$JRE/lib/$j.jar" | grep '\.class$' | LC_ALL=C sort > "$T/$j-entries"
+  cat "$T/$j-entries" >> "$T/all-entries"
+  LC_ALL=C awk -v listfile=$OUT/classes.txt '
+    BEGIN { while ((getline l < listfile) > 0) if (l != "") want[l] = 1 }
+    { n = $0; sub(/\.class$/, "", n)
+      keep = (n in want)
+      p = n
+      while (!keep && (i = match(p, /\$[^$]*$/)) > 0) { p = substr(p, 1, i - 1); if (p in want) keep = 1 }
+      if (keep) print $0 }' "$T/$j-entries" > "$T/$j-names"
+  echo "$(wc -l < "$T/$j-names") class entries from $j.jar" >&2
+  python3 -I - "$JRE/lib/$j.jar" "$T/stage" "$T/$j-names" <<'PY'
 import sys, zipfile
 jar, dest, names = sys.argv[1:4]
 z = zipfile.ZipFile(jar)
@@ -66,6 +67,12 @@ for n in open(names).read().split('\n'):
     if n:
         z.extract(n, dest)
 PY
+done
+# every listed class must exist in one of the jars
+LC_ALL=C sort -u "$T/all-entries" > "$T/entries"
+sed 's/$/.class/' $OUT/classes.txt | LC_ALL=C sort | comm -23 - "$T/entries" > "$T/absent"
+if [ -s "$T/absent" ]; then echo "classes.txt names not in $JARS:" >&2; head "$T/absent" >&2; exit 1; fi
+
 while read -r r; do
   [ -n "$r" ] || continue
   mkdir -p "$T/stage/$(dirname "$r")"

@@ -1129,6 +1129,7 @@ java/util/zip/ZipOutputStream
 java/util/zip/ZipOutputStream$XEntry
 java/util/zip/ZipUtils
 javax/accessibility/Accessible
+javax/crypto/SecretKey
 javax/net/ssl/TrustManager
 javax/security/auth/Destroyable
 javax/security/auth/x500/X500Principal
@@ -1480,6 +1481,7 @@ sun/security/provider/PolicyParser$GrantEntry
 sun/security/provider/PolicyParser$ParsingException
 sun/security/provider/PolicyParser$PermissionEntry
 sun/security/provider/SHA
+sun/security/provider/Sun
 sun/security/provider/SunEntries
 sun/security/provider/SunEntries$1
 sun/security/provider/X509Factory
@@ -1496,6 +1498,7 @@ sun/security/rsa/RSASignature$SHA1withRSA
 sun/security/rsa/RSAUtil
 sun/security/rsa/RSAUtil$1
 sun/security/rsa/RSAUtil$KeyType
+sun/security/rsa/SunRsaSign
 sun/security/rsa/SunRsaSignEntries
 sun/security/util/AbstractAlgorithmConstraints
 sun/security/util/AbstractAlgorithmConstraints$1
