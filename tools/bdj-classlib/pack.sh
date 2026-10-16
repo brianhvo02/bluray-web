@@ -19,6 +19,19 @@ javac -nowarn -source 1.3 -target 1.3 \
   -d "$T/xlets" tests/bdj/xlets/src/bdjweb/test/*.java
 $MK tests/bdj/xlets/00000.jar "$T/xlets" -
 
+# the JVM conformance programs (package conformance) and HotSpot's stdout for each class with a main; every program runs
+# twice and the outputs must match
+mkdir "$T/conf"
+javac -nowarn -source 1.8 -target 1.8 -d "$T/conf" tests/bdj/conformance/*.java
+$MK tests/bdj/conformance.jar "$T/conf" -
+for src in tests/bdj/conformance/*.java; do
+  name="$(basename "$src" .java)"
+  grep -q 'static void main' "$src" || continue
+  java -Xint -cp tests/bdj/conformance.jar "conformance.$name" > "tests/bdj/conformance/$name.out"
+  java -Xint -cp tests/bdj/conformance.jar "conformance.$name" > "$T/$name.again"
+  cmp "tests/bdj/conformance/$name.out" "$T/$name.again" || { echo "conformance.$name output differs between runs" >&2; exit 1; }
+done
+
 # classes.txt plus every nested class of each listed class (X$*.class)
 unzip -Z1 "$JRE/lib/rt.jar" | grep '\.class$' | LC_ALL=C sort > "$T/rt-entries"
 LC_ALL=C awk -v listfile=$OUT/classes.txt '

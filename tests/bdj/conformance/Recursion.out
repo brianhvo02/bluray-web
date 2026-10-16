@@ -1,0 +1,4 @@
+caught true
+after-overflow 1000
+caught-again java.lang.StackOverflowError
+depth 1000

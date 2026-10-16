@@ -1,0 +1,21 @@
+forName conformance.Reflect$Target Target true
+super java.lang.Object public static
+cnfe conformance.DoesNotExist
+methods [add, fail, hidden, secret, stat]
+fields [label:java.lang.String, secret:int]
+ctors 2
+invoke 7 int 2
+invoke-static static:x true
+invoke-private hidden
+invoke-throws java.lang.IllegalStateException: boom
+nsme conformance.Reflect$Target.nope()
+ctor made 5
+field-set 77 77 private
+field-pub relabeled
+proxy hello bob 42 true true
+array-names [I [[Ljava.lang.String; [Ljava.lang.Object; long[]
+array-class true java.lang.String true
+array-reflect 3 9
+assignable true false true
+instanceof true false
+prims int int void

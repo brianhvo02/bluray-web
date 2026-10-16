@@ -1,0 +1,16 @@
+order 1 try,finally,
+finally-return 42
+nested abc:innerde:outer
+rethrow wrapped cause=from thrower java.lang.IllegalStateException
+trace-top thrower conformance.Exceptions
+trace-caller main
+print-first java.lang.IllegalStateException: from thrower
+npe-field java.lang.NullPointerException
+cce java.lang.String cannot be cast to java.lang.Integer
+cce-array [Ljava.lang.Integer; cannot be cast to [Ljava.lang.String;
+npe-call
+throwable java.lang.Error: custom error
+nfe For input string: "12x"
+sioobe java.lang.StringIndexOutOfBoundsException
+tostring java.lang.RuntimeException: top | java.lang.IllegalStateException: root
+catch-super true

@@ -1,0 +1,17 @@
+first java.lang.ExceptionInInitializerError cause=java.lang.IllegalStateException:clinit failed
+second java.lang.NoClassDefFoundError
+third java.lang.NoClassDefFoundError
+new java.lang.NoClassDefFoundError
+before derived
+init Base.b
+init Derived.d
+Base()
+Derived()
+after derived
+const-no-init 5
+init Face.NONCONST
+nonconst 6
+lazy-const 10
+init Lazy
+lazy-boxed 11
+done
