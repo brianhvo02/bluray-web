@@ -109,6 +109,17 @@ describe('inflateAll', () => {
     const src = text('abcabcabcabc short');
     expect(inflateAll(new Uint8Array(deflateRawSync(src, { strategy: 4 })))).toEqual(src);
   });
+  it('handles an empty deflated entry with an expected size of 0', () => {
+    expect(inflateAll(new Uint8Array([0x03, 0x00]), 0)).toEqual(new Uint8Array(0));
+  });
+  for (const strategy of [2, 4]) {
+    it(`finishes when output ends exactly at the ring pause point (strategy ${strategy})`, () => {
+      const src = new Uint8Array(randomBytes(64512));
+      const comp = new Uint8Array(deflateRawSync(src, { strategy }));
+      expect(inflateAll(comp, src.length)).toEqual(src);
+      expect(inflateAll(comp)).toEqual(src);
+    });
+  }
   it('rejects garbage', () => {
     expect(() => inflateAll(new Uint8Array([0xff, 0xff, 0xff]))).toThrow();
   });
@@ -128,6 +139,37 @@ describe('inflateRaw', () => {
     n += inf.pull(out, n, out.length - n);
     expect(inf.finished).toBe(true);
     expect(out.subarray(0, n)).toEqual(src);
+  });
+  it('keeps needsInput implying remaining 0, and counts the tail after the end', () => {
+    const src = new Uint8Array(randomBytes(3000));
+    const comp = new Uint8Array(deflateRawSync(src));
+    const stream = new Uint8Array([...comp, 9, 9, 9]);
+    const inf = inflateRaw();
+    const out = new Uint8Array(src.length);
+    let n = 0;
+    let pushed = 0;
+    for (let i = 0; i < stream.length && !inf.finished; i++) {
+      inf.push(stream.subarray(i, i + 1));
+      pushed++;
+      n += inf.pull(out, n, out.length - n);
+      if (inf.needsInput) expect(inf.remaining).toBe(0);
+    }
+    expect(inf.finished).toBe(true);
+    expect(out).toEqual(src);
+    expect(pushed - inf.remaining).toBe(comp.length);
+  });
+  it('does not alias the pushed array', () => {
+    const src = text('alias check '.repeat(100));
+    const comp = new Uint8Array(deflateRawSync(src));
+    const half = comp.length >> 1;
+    const inf = inflateRaw();
+    const buf = comp.slice(0, half);
+    inf.push(buf);
+    buf.fill(0);
+    inf.push(comp.subarray(half));
+    const out = new Uint8Array(src.length);
+    inf.pull(out, 0, out.length);
+    expect(out).toEqual(src);
   });
   it('reports the unconsumed tail', () => {
     const comp = new Uint8Array(deflateRawSync(text('tail test')));
@@ -166,6 +208,17 @@ describe('ZipArchive', () => {
     for (const e of entries) expect(z.read(e.name)).toEqual(e.data);
     expect(z.read('missing')).toBeNull();
     expect(z.entries.get('a.txt')?.time).toBeGreaterThan(0);
+  });
+  it('reads an empty deflated entry and a pause-point sized one', () => {
+    const big = new Uint8Array(randomBytes(64512));
+    const z = ZipArchive.open(
+      buildZip([
+        { name: 'empty', data: new Uint8Array(0), method: 8 },
+        { name: 'big', data: big, method: 8 },
+      ]),
+    );
+    expect(z.read('empty')).toEqual(new Uint8Array(0));
+    expect(z.read('big')).toEqual(big);
   });
   it('finds the EOCD behind a comment', () => {
     expect(ZipArchive.open(buildZip(entries, 'x'.repeat(1000))).names.length).toBe(3);

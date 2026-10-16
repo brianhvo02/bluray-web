@@ -229,11 +229,6 @@ export function inflateRaw(): InflateCoroutine {
       const litTable = lit.table;
       const litMask = lit.mask;
       for (;;) {
-        if (wpos - rpos >= PAUSE_AT) {
-          waiting = false;
-          yield;
-          continue;
-        }
         while (bitcnt <= 24 && inPos < inLen) {
           bitbuf |= inBuf[inPos++]! << bitcnt;
           bitcnt += 8;
@@ -249,11 +244,16 @@ export function inflateRaw(): InflateCoroutine {
         bitbuf >>>= l;
         bitcnt -= l;
         const sym = e >> 4;
+        if (sym === 256) break;
+        // Pausing only once a symbol that writes output is decoded, so end-of-block is never held back by a full ring.
+        while (wpos - rpos >= PAUSE_AT) {
+          waiting = false;
+          yield;
+        }
         if (sym < 256) {
           ring[wpos++ & RING_MASK] = sym;
           continue;
         }
-        if (sym === 256) break;
         if (sym > 285) throw new ZipError('inflate: invalid length symbol');
         const li = sym - 257;
         const lx = LEN_EXTRA[li]!;
@@ -282,7 +282,7 @@ export function inflateRaw(): InflateCoroutine {
         merged.set(inBuf.subarray(inPos, inLen));
         merged.set(input, inLen - inPos);
         inBuf = merged;
-      } else inBuf = input;
+      } else inBuf = input.slice(); // callers such as the JDK Inflater refill their buffer after push
       inPos = 0;
       inLen = inBuf.length;
       waiting = false;
@@ -319,7 +319,9 @@ export function inflateRaw(): InflateCoroutine {
       return !done && waiting && wpos === rpos;
     },
     get remaining() {
-      return inLen - inPos + (bitcnt >> 3);
+      // Like zlib's avail_in: prefetched whole bytes count as consumed until the stream ends, then those
+      // from the current chunk are handed back (earlier chunks cannot be unread).
+      return done ? inLen - inPos + Math.min(bitcnt >> 3, inPos) : inLen - inPos;
     },
   };
 }
@@ -332,6 +334,7 @@ export function inflateAll(data: Uint8Array, expectedSize?: number): Uint8Array 
   for (;;) {
     if (n === out.length) {
       if (expectedSize !== undefined) {
+        inf.pull(out, n, 0); // lets the decoder reach end-of-stream; produced output would leave it unfinished
         if (inf.finished) break;
         throw new ZipError('inflate: output larger than expected');
       }
