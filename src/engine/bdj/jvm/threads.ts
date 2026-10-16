@@ -442,7 +442,7 @@ export class Scheduler {
         let r: NativeResult;
         try {
           const v = result();
-          r = k && !(v instanceof Invoke) && !(v instanceof Suspend) ? k(v) : v;
+          r = !k ? v : v instanceof Invoke || v instanceof Suspend ? andThen(v, k, (e) => k(new ThrowResult(e))) : k(v);
         } catch (e) {
           if (!(e instanceof JavaThrowable)) throw e;
           r = new ThrowResult(e.obj);

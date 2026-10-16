@@ -35,7 +35,7 @@ export interface ClassLibrarySource {
 export interface BdjRuntimeDeps {
   /** The disc, with its normalised file list (FileSource.paths()) for the VFS. */
   readonly disc: ByteSource & { paths(): Iterable<string> };
-  /** bdj_open's bdj_disc_id: the disc's CERTIFICATE/id.bdmv disc ID (DiscModel.bdid); none or '' passes 32 zeros. */
+  /** bdj_open's bdj_disc_id: the disc's CERTIFICATE/id.bdmv disc ID (readBdid); none or '' passes 32 zeros. */
   readonly discId?: string | null;
   readonly classLibrary: ClassLibrarySource;
   /** The runtime passes its own start, and a hook it uses to watch the host's trace. */

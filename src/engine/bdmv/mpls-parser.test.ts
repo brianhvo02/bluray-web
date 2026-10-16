@@ -114,6 +114,42 @@ describe('parseMpls', () => {
     expect(item.stn.ig[0].codingType).toBe(CodingType.IG);
   });
 
+  it('reads secondary audio and video entries past their reference lists, odd counts padded', () => {
+    const sa = (pid: number): { pid: number; codingType: number } => ({ pid, codingType: CodingType.EAC3_SECONDARY });
+    const sv = (pid: number): { pid: number; codingType: number } => ({ pid, codingType: CodingType.AVC });
+    const mpls = parseMpls(
+      buildMpls({
+        playItems: [
+          {
+            clipId: '00001',
+            inTime: 0,
+            outTime: 100,
+            video: [VIDEO],
+            audio: [{ pid: 0x1100, codingType: CodingType.AC3, lang: 'eng' }],
+            secondaryAudio: [
+              { stream: sa(0x1a00), primaryAudioRefs: [0, 1, 2] },
+              { stream: sa(0x1a01), primaryAudioRefs: [0, 1] },
+            ],
+            secondaryVideo: [
+              { stream: sv(0x1b00), secondaryAudioRefs: [0], pipPgRefs: [0, 1, 2] },
+              { stream: sv(0x1b01), secondaryAudioRefs: [1], pipPgRefs: [] },
+            ],
+          },
+        ],
+      }),
+    );
+    const { stn } = mpls.playItems[0];
+    expect(stn.secondaryAudio.map((s) => [s.pid, s.codingType])).toEqual([
+      [0x1a00, CodingType.EAC3_SECONDARY],
+      [0x1a01, CodingType.EAC3_SECONDARY],
+    ]);
+    expect(stn.secondaryVideo.map((s) => [s.pid, s.codingType])).toEqual([
+      [0x1b00, CodingType.AVC],
+      [0x1b01, CodingType.AVC],
+    ]);
+    expect(stn.audio.map((s) => s.pid)).toEqual([0x1100]);
+  });
+
   it('rejects a bad signature', () => {
     const bytes = buildMpls({ playItems: [] });
     bytes[1] = 0x41;

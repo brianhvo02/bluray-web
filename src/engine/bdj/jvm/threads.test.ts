@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { Invoke, Suspend } from './interpreter';
 import { Jvm } from './jvm';
+import { withMonitor } from './natives/util';
 import type { JMethod } from './loader';
 import type { JThread } from './threads';
 import type { JValue } from './values';
@@ -120,6 +121,7 @@ const T_METHODS: AsmMethod[] = [
   { name: 'viaInvoke', desc: '()V' },
   { name: 'outer', desc: '()I' },
   { name: 'inner', desc: '()I' },
+  { name: 'callOuter', desc: '()V', code: [INVOKESTATIC, method('T', 'outer', '()I'), PUTSTATIC, done, RETURN] },
 ];
 
 function setup(): { jvm: Jvm; clock: VirtualClock; spawn: (name: string, desc?: string) => JThread; get: (f: string) => JValue } {
@@ -202,6 +204,25 @@ describe('suspension', () => {
       'T.outer()I': (ctx) => new Invoke(ctx.method.cls.methods.get('inner()I')!, [], (v) => (v as number) + 1),
     });
     expect(await jvm.callStatic('T', 'outer', '()I')).toBe(42);
+  });
+  it("a contended monitor reached through an Invoke chain still runs the caller's continuation", async () => {
+    const { jvm, clock, spawn, get } = setup();
+    const t = jvm.loader.loadBoot('T')!;
+    const lock = jvm.mirror(t);
+    jvm.natives.register({
+      'T.inner()I': (ctx) =>
+        withMonitor(ctx.jvm, ctx.thread, lock, () =>
+          new Invoke(t.methods.get('getX()I')!, [], (v) => {
+            ctx.jvm.threads.monitorExit(ctx.thread, lock);
+            return v;
+          })),
+      'T.outer()I': (ctx) => new Invoke(ctx.method.cls.methods.get('inner()I')!, [], (v) => (v as number) + 1),
+    });
+    spawn('holdAndScale');
+    const b = spawn('callOuter');
+    expect(await runWithClock(jvm, clock)).toBe('idle');
+    expect(b.uncaught).toBeNull();
+    expect(get('done')).toBe(6);
   });
 });
 

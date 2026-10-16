@@ -2,9 +2,8 @@
 
 Date: 2026-10-15
 Status: Implemented (2026-10-16); plan `docs/superpowers/plans/2026-10-15-m5b-bdj-jvm-core.md`. See §9 for where the implementation differs.
-Parent spec: `2026-10-12-bluray-web-player-design.md` (which lists BD-J as "Not planned"; this milestone series changes
-that, and the parent spec and `docs/known-issues.md` are updated once milestone 4b has merged). Evidence:
-`2026-10-15-bdj-spike-findings.md`.
+Parent spec: `2026-10-12-bluray-web-player-design.md` (which listed BD-J as "Not planned"; this milestone series changes
+that, and Task 17 updated the parent spec and `docs/known-issues.md`). Evidence: `2026-10-15-bdj-spike-findings.md`.
 
 ## 1. Goal and scope
 
@@ -216,8 +215,8 @@ them, and do not stop the runtime. `System.out` and `System.err` go to the host'
 - `npm run bdj-classlib:build` runs `tools/bdj-classlib/build.sh` in Docker (ubuntu 24.04 pinned by digest,
   `linux/amd64` as `tools/vm-trace` uses; OpenJDK 8 pinned by package version; libbluray at `448f896`; DoppioJVM is
   not part of the build).
-- It builds libbluray's jars with meson (`-Dbdj_jar=enabled`), then writes `rt-bdj.jar` from the JDK's `rt.jar` with
-  exactly the classes in `classes.txt` plus `lib/` resources. Entries are sorted and timestamps fixed, so the output
+- It builds libbluray's jars with meson (`-Dbdj_jar=enabled`), then writes `rt-bdj.jar` from the JDK's `rt.jar`, plus
+  three classes from `jsse.jar` and `jce.jar`, with exactly the classes in `classes.txt` plus `lib/` resources. Entries are sorted and timestamps fixed, so the output
   is byte-identical across runs.
 - `tools/bdj-classlib/collect.sh` regenerates `classes.txt` and `tests/bdj/natives.txt` by running real libbluray with
   `-verbose:class` and `-verbose:jni` on the synthetic BD-J disc and, when present, the local discs. Local runs add
@@ -302,7 +301,7 @@ when no BD-J disc is present.
 
 ## 8. Follow-ups outside this spec
 
-After milestone 4b merges:
+All done in Task 17:
 
 - Change the parent spec's BD-J row from "Not planned" to the milestone 5 series.
 - Correct `docs/known-issues.md`: `00149` on both local BD-J discs is the menu's background loop, not a decoy maze

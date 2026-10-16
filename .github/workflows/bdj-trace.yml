@@ -10,6 +10,8 @@ on:
       - 'tests/bdj/xlets/**'
       - 'tests/bdj/golden/**'
       - 'tests/helpers/bdjo-builder.ts'
+      - 'tests/helpers/bdmv-builders.ts'
+      - 'tests/helpers/synthetic-disc.ts'
       - '.github/workflows/bdj-trace.yml'
   pull_request:
     paths:
@@ -19,6 +21,8 @@ on:
       - 'tests/bdj/xlets/**'
       - 'tests/bdj/golden/**'
       - 'tests/helpers/bdjo-builder.ts'
+      - 'tests/helpers/bdmv-builders.ts'
+      - 'tests/helpers/synthetic-disc.ts'
       - '.github/workflows/bdj-trace.yml'
 
 permissions:

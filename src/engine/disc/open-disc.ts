@@ -43,8 +43,6 @@ export interface DiscModel {
   readonly movieObjects: MovieObjects | null;
   /** BDMV/AUXDATA/sound.bdmv (menu sounds); null when absent or damaged. */
   readonly sounds: SoundData | null;
-  /** CERTIFICATE/id.bdmv of a BD-J disc (_fill_disc_info's bdj_org_id and bdj_disc_id); null otherwise or when unreadable. */
-  readonly bdid: BdidData | null;
   readonly warnings: readonly string[];
 }
 
@@ -95,7 +93,6 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
   }
 
   const usesBdj = indexUsesBdj(index);
-  const bdid = usesBdj ? await readBdid(source) : null;
 
   const clips = new Map<string, Clpi>();
   if (movieObjects) {
@@ -116,17 +113,17 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
   const summaries = all.sort((a, b) => rank(a) - rank(b) || b.durationUs - a.durationUs || a.id.localeCompare(b.id));
   const main = summaries.find((s) => s.playable);
   if (main) await checkStreamReadable(source, main.clipIds[0]);
-  return { index, usesBdj, playlists, summaries, clips, movieObjects, sounds, bdid, warnings };
+  return { index, usesBdj, playlists, summaries, clips, movieObjects, sounds, warnings };
 }
 
-/** bdid_get: the first of id.bdmv and its backup that parses. */
-async function readBdid(source: ByteSource): Promise<BdidData | null> {
+/** bdid_get: the first of id.bdmv and its backup that reads and parses (bdj_org_id and bdj_disc_id); null when neither does. */
+export async function readBdid(source: ByteSource): Promise<BdidData | null> {
   for (const path of BDID_PATHS) {
     if (!source.exists(path)) continue;
     try {
       return parseBdid(await readWhole(source, path));
-    } catch (err) {
-      if (!(err instanceof ParseError)) throw err;
+    } catch {
+      // libbluray's _bdid_get returns NULL on any failure and bdid_get tries the next file
     }
   }
   return null;

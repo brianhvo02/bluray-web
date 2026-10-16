@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { directoryEntries } from '../helpers/file-blob';
 import { normalizeDiscPaths } from '../../src/engine/disc/paths';
 import { FileSource } from '../../src/engine/disc/file-source';
-import { loadClips, openDisc } from '../../src/engine/disc/open-disc';
+import { loadClips, openDisc, readBdid } from '../../src/engine/disc/open-disc';
 import { RecordingHost } from '../../src/engine/bdj/host';
 import { PSR } from '../../src/engine/hdmv/registers';
 import type { RegisterFile } from '../../src/engine/hdmv/registers';
@@ -47,7 +47,7 @@ export async function replayBdj(
   let host: RecordingHost | null = null;
   const rt = new BdjRuntime({
     disc: source,
-    discId: disc.bdid?.discId ?? null,
+    discId: (await readBdid(source))?.discId ?? null,
     classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
     host: (startTitle, onTrace) => {
       host = new RecordingHost(disc, clips, { startTitle, onTrace });

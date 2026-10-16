@@ -3,16 +3,41 @@ name: BD-J class library
 on:
   push:
     branches: [main]
-    paths: ['tools/bdj-classlib/**', 'tools/bdj-trace/**', 'src/bdj-classlib/**']
+    paths:
+      - 'tools/bdj-classlib/**'
+      - 'tools/bdj-trace/**'
+      - 'src/bdj-classlib/**'
+      - 'tests/bdj/conformance/**'
+      - 'tests/bdj/conformance.jar'
+      - 'tests/bdj/xlets/**'
+      - 'fixtures/synthetic/disc-bdj/BDMV/JAR/**'
+      - '.github/workflows/bdj-classlib.yml'
   pull_request:
-    paths: ['tools/bdj-classlib/**', 'tools/bdj-trace/**', 'src/bdj-classlib/**']
+    paths:
+      - 'tools/bdj-classlib/**'
+      - 'tools/bdj-trace/**'
+      - 'src/bdj-classlib/**'
+      - 'tests/bdj/conformance/**'
+      - 'tests/bdj/conformance.jar'
+      - 'tests/bdj/xlets/**'
+      - 'fixtures/synthetic/disc-bdj/BDMV/JAR/**'
+      - '.github/workflows/bdj-classlib.yml'
+
+permissions:
+  contents: read
 
 jobs:
   reproducible:
-    name: rt-bdj.jar and the libbluray jars match their source
+    name: The class library, conformance outputs and xlet jar match their source
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: tools/bdj-trace/build.sh && tools/bdj-classlib/build.sh
-      - run: git diff --exit-code src/bdj-classlib/
+      # pack.sh writes all of these; an untracked file (an .out never committed) fails too
+      - run: |
+          OUT='src/bdj-classlib tests/bdj/conformance tests/bdj/conformance.jar tests/bdj/xlets/00000.jar'
+          git diff --exit-code $OUT
+          test -z "$(git status --porcelain $OUT)"
+      # fixture:synthetic (scripts/make-bdj-disc.ts) copies the xlet jar into the synthetic disc unchanged
+      - run: cmp tests/bdj/xlets/00000.jar fixtures/synthetic/disc-bdj/BDMV/JAR/00000.jar
