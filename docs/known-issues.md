@@ -95,8 +95,8 @@ what would change that decision.
 - **Shaders are compiled as GLSL ES 3.00, which rejects desktop-GLSL habits** such as implicit int to float
   conversion, so some non-Anime4K shaders fail to compile (the error shows in the menu). *Revisit if* a wanted
   shader needs a rewrite pass.
-- **Unsupported directives are rejected or skipped:** `COMPUTE` shaders, `SAVE` of a non-float format, more than 16
-  `BIND`s per pass, and shader files over 4 MiB.
+- **Unsupported directives are rejected when the file is added:** `COMPUTE`, `TEXTURE`, `PARAM`, `BUFFER` and
+  `OFFSET` (the Anime4K files use none of them), more than 16 `BIND`s per pass, and files over 4 MiB.
 - **No in-memory fallback when IndexedDB is unavailable:** the menu opens but sets cannot be chosen that session
   (errors are logged). Chrome's private windows still provide IndexedDB, so this is rare. *Revisit if* users with
   blocked site storage need shaders.
