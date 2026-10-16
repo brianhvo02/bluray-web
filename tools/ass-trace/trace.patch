@@ -1,0 +1,259 @@
+--- a/libass/ass_render.c	2026-10-15 17:57:23
++++ b/libass/ass_render.c	2026-10-15 17:57:31
+@@ -21,6 +21,8 @@
+ 
+ #include <assert.h>
+ #include <math.h>
++#include <stdarg.h>
++#include <stdio.h>
+ #include <string.h>
+ #include <stdbool.h>
+ 
+@@ -1394,6 +1396,7 @@
+     double m1[3][3], m2[3][3], m[3][3];
+     const ASS_Transform *tr = &info->transform;
+     calc_transform_matrix(state, info, m1);
++    memcpy(info->trace_m, m1, sizeof(m1));
+     for (int i = 0; i < 3; i++) {
+         m2[i][0] = m1[i][0] * tr->scale.x;
+         m2[i][1] = m1[i][1] * tr->scale.y;
+@@ -2789,6 +2792,179 @@
+     }
+ }
+ 
++void (*ass_trace_sink)(const char *line) = NULL;
++
++typedef struct {
++    char *s;
++    size_t len, cap;
++} TraceBuf;
++
++static void trace_put(TraceBuf *b, const char *fmt, ...)
++{
++    for (;;) {
++        va_list ap;
++        va_start(ap, fmt);
++        int n = vsnprintf(b->s ? b->s + b->len : NULL, b->s ? b->cap - b->len : 0, fmt, ap);
++        va_end(ap);
++        if (n < 0)
++            abort();
++        if (b->s && b->len + n < b->cap) {
++            b->len += n;
++            return;
++        }
++        b->cap = (b->cap + n + 1) * 2;
++        b->s = realloc(b->s, b->cap);
++        if (!b->s)
++            abort();
++    }
++}
++
++static void trace_num(TraceBuf *b, double v)
++{
++    trace_put(b, "%.6f", v == 0 ? 0.0 : v);
++}
++
++static void trace_json_char(TraceBuf *b, unsigned ch)
++{
++    if (ch == '"' || ch == '\\')
++        trace_put(b, "\\%c", (char) ch);
++    else if (ch < 0x20)
++        trace_put(b, "\\u%04x", ch);
++    else {
++        char utf8[5] = {0};
++        ass_utf8_put_char(utf8, ch);
++        trace_put(b, "%s", utf8);
++    }
++}
++
++static void trace_glyph_list(TraceBuf *b, GlyphInfo *start, GlyphInfo *end, bool text)
++{
++    bool first = true;
++    for (GlyphInfo *g = start; g < end; g++) {
++        if (g->skip)
++            continue;
++        for (GlyphInfo *info = g; info; info = info->next) {
++            if (info->symbol == '\n' || info->symbol == 0)
++                continue;
++            if (text) {
++                trace_json_char(b, info->symbol);
++                continue;
++            }
++            trace_put(b, first ? "{\"x\":" : ",{\"x\":");
++            trace_num(b, d6_to_double(info->pos.x));
++            trace_put(b, ",\"y\":");
++            trace_num(b, d6_to_double(info->pos.y));
++            trace_put(b, ",\"adv\":");
++            trace_num(b, d6_to_double(info->cluster_advance.x));
++            trace_put(b, ",\"ch\":%u}", info->symbol);
++            first = false;
++        }
++    }
++}
++
++// The event's fields of a trace line, from "lines" on; runs split as render_and_combine_glyphs splits them.
++static char *trace_event(RenderContext *state)
++{
++    TextInfo *text_info = &state->text_info;
++    TraceBuf b = {0};
++    trace_put(&b, "\"lines\":%d,\"clip\":", text_info->n_lines);
++    if (state->clip_drawing_text.str) {
++        trace_put(&b, "{\"vector\":\"");
++        for (size_t i = 0; i < state->clip_drawing_text.len; i++)
++            trace_json_char(&b, (unsigned char) state->clip_drawing_text.str[i]);
++        trace_put(&b, "\",\"scale\":%d,\"inverse\":%s}", state->clip_drawing_scale,
++                  state->clip_drawing_mode ? "true" : "false");
++    } else {
++        trace_put(&b, "{\"rect\":[%d,%d,%d,%d],\"inverse\":%s}", state->clip_x0, state->clip_y0,
++                  state->clip_x1, state->clip_y1, state->clip_mode ? "true" : "false");
++    }
++    trace_put(&b, ",\"runs\":[");
++    unsigned run = 0;
++    bool new_run = true;
++    GlyphInfo *run_start = NULL;
++    for (int i = 0; i <= text_info->length; i++) {
++        GlyphInfo *info = i < text_info->length ? text_info->glyphs + i : NULL;
++        if (info && info->starts_new_run)
++            new_run = true;
++        if (info && info->skip)
++            continue;
++        if (!info || new_run) {
++            if (run_start) {
++                GlyphInfo *g = run_start;
++                CombinedBitmapInfo *cb = run - 1 < text_info->n_bitmaps ? &text_info->combined_bitmaps[run - 1] : NULL;
++                uint32_t c[4];
++                for (int k = 0; k < 4; k++) {
++                    c[k] = g->c[k];
++                    ass_apply_fade(&c[k], g->fade);
++                }
++                trace_put(&b, "%s{\"text\":\"", run > 1 ? "," : "");
++                trace_glyph_list(&b, run_start, info ? info : text_info->glyphs + text_info->length, true);
++                trace_put(&b, "\",\"font\":\"");
++                const char *family = g->font ? g->font->desc.family.str : "";
++                size_t family_len = g->font ? g->font->desc.family.len : 0;
++                for (size_t k = 0; k < family_len; k++)
++                    trace_json_char(&b, (unsigned char) family[k]);
++                trace_put(&b, "|");
++                const char *ps = g->font && g->font->faces[g->face_index] ?
++                    FT_Get_Postscript_Name(g->font->faces[g->face_index]) : NULL;
++                for (const char *p = ps; p && *p; p++)
++                    trace_json_char(&b, (unsigned char) *p);
++                trace_put(&b, "\",\"size\":");
++                trace_num(&b, g->font_size);
++                trace_put(&b, ",\"scale\":[");
++                trace_num(&b, g->scale_x);
++                trace_put(&b, ",");
++                trace_num(&b, g->scale_y);
++                trace_put(&b, "],\"hspacing\":");
++                trace_num(&b, g->hspacing);
++                trace_put(&b, ",\"colors\":[\"%08X\",\"%08X\",\"%08X\",\"%08X\"],\"border\":[", c[0], c[1], c[2], c[3]);
++                trace_num(&b, g->border_x);
++                trace_put(&b, ",");
++                trace_num(&b, g->border_y);
++                trace_put(&b, "],\"shadow\":[");
++                trace_num(&b, g->shadow_x);
++                trace_put(&b, ",");
++                trace_num(&b, g->shadow_y);
++                trace_put(&b, "],\"blur\":");
++                trace_num(&b, g->blur);
++                trace_put(&b, ",\"be\":%d,\"rot\":[", g->be);
++                trace_num(&b, g->frx);
++                trace_put(&b, ",");
++                trace_num(&b, g->fry);
++                trace_put(&b, ",");
++                trace_num(&b, g->frz);
++                trace_put(&b, "],\"shear\":[");
++                trace_num(&b, g->fax);
++                trace_put(&b, ",");
++                trace_num(&b, g->fay);
++                trace_put(&b, "],\"borderStyle\":%d,\"flags\":%d,\"bold\":%u,\"italic\":%u,\"karaoke\":[%d,%d],\"drawing\":%s,\"matrix\":[",
++                          g->border_style, g->flags, g->bold, g->italic,
++                          cb ? (int) cb->effect_type : (int) g->effect_type,
++                          cb ? (int) cb->effect_timing : (int) g->effect_timing,
++                          g->drawing_text.str ? "true" : "false");
++                double norm = g->trace_m[2][2] ? g->trace_m[2][2] : 1;
++                for (int r = 0; r < 3; r++)
++                    for (int k = 0; k < 3; k++) {
++                        if (r || k)
++                            trace_put(&b, ",");
++                        trace_num(&b, g->trace_m[r][k] / norm);
++                    }
++                trace_put(&b, "],\"glyphs\":[");
++                trace_glyph_list(&b, run_start, info ? info : text_info->glyphs + text_info->length, false);
++                trace_put(&b, "]}");
++            }
++            if (!info)
++                break;
++            run_start = info;
++            run++;
++            new_run = false;
++        }
++    }
++    trace_put(&b, "]}");
++    return b.s;
++}
++
++
+ /**
+  * \brief Main ass rendering function, glues everything together
+  * \param event event to render
+@@ -3009,6 +3185,9 @@
+     if (state->border_style == 4)
+         add_background(state, event_images);
+ 
++    if (ass_trace_sink)
++        event_images->trace = trace_event(state);
++
+     ass_shaper_cleanup(state->shaper, text_info);
+     free_render_context(state);
+ 
+@@ -3407,6 +3586,26 @@
+         }
+     if (cnt > 0)
+         fix_collisions(priv, last, priv->eimg + cnt - last);
++
++    for (int i = 0; i < cnt; i++) {
++        EventImages *ei = priv->eimg + i;
++        if (!ei->trace)
++            continue;
++        if (ass_trace_sink) {
++            char head[160];
++            snprintf(head, sizeof(head), "{\"t\":%lld,\"event\":%d,\"layer\":%d,\"box\":[%d,%d,%d,%d],",
++                     now, (int) (ei->event - track->events), ei->event->Layer, ei->left, ei->top, ei->width, ei->height);
++            size_t n = strlen(head) + strlen(ei->trace) + 1;
++            char *line = malloc(n);
++            if (!line)
++                abort();
++            snprintf(line, n, "%s%s", head, ei->trace);
++            ass_trace_sink(line);
++            free(line);
++        }
++        free(ei->trace);
++        ei->trace = NULL;
++    }
+ 
+     // concat lists, removing fully transparent bitmaps
+     ASS_Image **tail = &priv->images_root;
+--- a/libass/ass_render.h	2026-10-15 17:57:23
++++ b/libass/ass_render.h	2026-10-15 17:57:24
+@@ -86,8 +86,12 @@
+     int detect_collisions;
+     int shift_direction;
+     ASS_Event *event;
++    char *trace;                // bluray-web trace: the event's JSON fields, set when ass_trace_sink is
+ } EventImages;
+ 
++// bluray-web trace hook: when set, ass_render_frame passes it one JSON line per event shown
++extern void (*ass_trace_sink)(const char *line);
++
+ typedef enum {
+     EF_NONE = 0,
+     EF_KARAOKE,
+@@ -175,6 +179,7 @@
+ 
+     ASS_Vector shift;
+     Bitmap *bm, *bm_o;
++    double trace_m[3][3];       // bluray-web trace: calc_transform_matrix's result
+ 
+     // next glyph in this cluster
+     struct glyph_info *next;

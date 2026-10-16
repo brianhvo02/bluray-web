@@ -8,3 +8,4 @@ playwright-report
 .cache/
 tools/vm-trace/out/
 .DS_Store
+tools/ass-trace/out/

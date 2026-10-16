@@ -1,0 +1,40 @@
+name: ASS trace
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/ass-trace/**'
+      - 'fixtures/ass/**'
+      - 'tests/ass-trace/golden/**'
+      - 'tests/ass-trace/run.ts'
+      - 'tests/ass-trace/format.ts'
+      - 'tests/ass-trace/png.ts'
+      - '.github/workflows/ass-trace.yml'
+  pull_request:
+    paths:
+      - 'tools/ass-trace/**'
+      - 'fixtures/ass/**'
+      - 'tests/ass-trace/golden/**'
+      - 'tests/ass-trace/run.ts'
+      - 'tests/ass-trace/format.ts'
+      - 'tests/ass-trace/png.ts'
+      - '.github/workflows/ass-trace.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  golden:
+    name: Golden traces and images match libass
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11.19.0 # allowScripts in package.json needs npm 11.19
+      - run: npm ci
+      - run: npm run ass-trace:build && npm run ass-trace:golden && git diff --exit-code tests/ass-trace/golden/
