@@ -19,6 +19,22 @@ function baseName(path: string): string {
   return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1);
 }
 
+/** `;` separates when present, else `:`; a colon after a lone drive letter before `/` or `\\` stays in the path. */
+function splitList(list: string): string[] {
+  if (list.includes(';')) return list.split(';');
+  const parts = list.split(':');
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const next = parts[i + 1];
+    if (/^[A-Za-z]$/.test(parts[i]!) && next !== undefined && /^[/\\]/.test(next)) {
+      out.push(`${parts[i]}:${next}`);
+      i++;
+    } else out.push(parts[i]!);
+  }
+  return out;
+}
+
+// Only double-quoted lists are recognized.
 /** Reads the `glsl-shaders set` lines of an mpv input.conf (`:` or `;` separated lists). */
 export function parseInputConf(text: string): ShaderSetDef[] {
   const sets: ShaderSetDef[] = [];
@@ -27,8 +43,7 @@ export function parseInputConf(text: string): ShaderSetDef[] {
     if (line === '' || line.startsWith('#')) continue;
     const m = SET_RE.exec(line);
     if (!m) continue;
-    const files = m[1]!
-      .split(/[:;]/)
+    const files = splitList(m[1]!)
       .map((f) => baseName(f.trim()))
       .filter((f) => f !== '');
     if (files.length === 0) continue;

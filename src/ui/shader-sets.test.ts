@@ -37,6 +37,13 @@ describe('parseInputConf', () => {
       { name: 'F1', files: ['a.glsl', 'b.glsl'], origin: 'imported' },
     ]);
   });
+  it('handles Windows drive paths', () => {
+    const files = (l: string) => parseInputConf(`F3 glsl-shaders set "${l}"`)[0]!.files;
+    expect(files('C:/mpv/shaders/a.glsl;C:/mpv/shaders/b.glsl')).toEqual(['a.glsl', 'b.glsl']);
+    expect(files('C:\\mpv\\shaders\\a.glsl;C:\\mpv\\shaders\\b.glsl')).toEqual(['a.glsl', 'b.glsl']);
+    expect(files('C:/x/a.glsl')).toEqual(['a.glsl']);
+    expect(files('C:/x/a.glsl:C:/x/b.glsl')).toEqual(['a.glsl', 'b.glsl']);
+  });
   it('accepts set without change-list', () => {
     expect(parseInputConf('F2 glsl-shaders set "~~/shaders/x.glsl"')[0]!.files).toEqual(['x.glsl']);
   });
