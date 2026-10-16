@@ -16,7 +16,7 @@ import { Navigator } from './nav/navigator';
 import { Player, type PlayerDeps } from './player';
 import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
 import { ShaderStage } from './shaders/stage';
-import type { CompiledSet, ShaderBackend } from './shaders/webgl-backend';
+import { UNAVAILABLE, type CompiledSet, type ShaderBackend } from './shaders/webgl-backend';
 
 const decoders: FakeDecoder[] = [];
 
@@ -1618,6 +1618,17 @@ describe('Player video shaders', () => {
     const h = await harness(CodingType.LPCM, { createShaderBackend: () => 'no WebGL2 here' });
     await h.player.handle({ type: 'setVideoShaders', set: setA });
     expect(shaderStatuses(h.events)).toEqual([{ type: 'shaderStatus', state: 'unavailable', set: 'A', error: 'no WebGL2 here' }]);
+  });
+
+  it('reports unavailable when the backend factory throws', async () => {
+    const h = await harness(CodingType.LPCM, {
+      createShaderBackend: () => {
+        throw new Error('OffscreenCanvas failed');
+      },
+    });
+    await h.player.handle({ type: 'setVideoShaders', set: setA });
+    expect(shaderStatuses(h.events)).toEqual([{ type: 'shaderStatus', state: 'unavailable', set: 'A', error: UNAVAILABLE }]);
+    expect(h.events.some((e) => e.type === 'state' && e.state === 'error')).toBe(false);
   });
 
   it('reports unavailable without a backend factory', async () => {

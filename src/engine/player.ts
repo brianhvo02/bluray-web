@@ -32,7 +32,7 @@ import type { AssTrack } from './ass/types';
 import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
-import type { ShaderBackend } from './shaders/webgl-backend';
+import { UNAVAILABLE, type ShaderBackend } from './shaders/webgl-backend';
 import { decodeText, parseSrt } from './subs/srt';
 import { TextSubtitleRenderer, type TextRenderOptions } from './subs/text-renderer';
 import { episodeStarts, sortByName, TextSet, TextSetRenderer, type SetFile } from './subs/text-set';
@@ -391,7 +391,12 @@ export class Player {
         this.deps.emit({ type: 'shaderStatus', state: 'off', set: null, error: null });
         return;
       }
-      const backend = this.deps.createShaderBackend?.({ lost: () => this.shaderStage?.contextLost(), restored: () => this.shaderStage?.contextRestored() });
+      let backend: ShaderBackend | string | undefined;
+      try {
+        backend = this.deps.createShaderBackend?.({ lost: () => this.shaderStage?.contextLost(), restored: () => this.shaderStage?.contextRestored() });
+      } catch {
+        backend = UNAVAILABLE; // e.g. OffscreenCanvas or getContext throwing: report unavailable rather than failing playback
+      }
       this.shaderStage = new ShaderStage(
         backend ?? NO_SHADER_BACKEND_MESSAGE,
         (status) => this.deps.emit({ type: 'shaderStatus', ...status }),
