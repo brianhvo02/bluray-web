@@ -505,3 +505,65 @@ describe('subtitles', () => {
     });
   });
 });
+
+describe('shaders', () => {
+  const tel = (presented: number, dropped: number): Telemetry => ({ framesPresented: presented, framesDropped: dropped }) as unknown as Telemetry;
+  const setup = (): { c: PlayerController; worker: FakeWorker; t: { now: number }; feed: (sec: number, rate: number) => void } => {
+    const worker = new FakeWorker();
+    const t = { now: 0 };
+    const c = new PlayerController(worker, new FakeAudio(), { nowMs: () => t.now });
+    let presented = 0;
+    let dropped = 0;
+    const feed = (sec: number, rate: number): void => {
+      for (let i = 0; i < sec; i++) {
+        t.now += 1000;
+        dropped += Math.round(120 * rate);
+        presented += 120 - Math.round(120 * rate);
+        worker.emit({ type: 'telemetry', telemetry: tel(presented, dropped) });
+      }
+    };
+    return { c, worker, t, feed };
+  };
+
+  it('maps shaderStatus into the snapshot', () => {
+    expect(INITIAL_SNAPSHOT.shaders).toEqual({ state: 'off', set: null, error: null });
+    const s = reduceEvent(INITIAL_SNAPSHOT, { type: 'shaderStatus', state: 'error', set: 'A', error: 'bad' });
+    expect(s.shaders).toEqual({ state: 'error', set: 'A', error: 'bad' });
+  });
+
+  it('posts setVideoShaders', () => {
+    const { c, worker } = setup();
+    c.setShaderSet(null);
+    const set = { name: 'A', files: [{ name: 'a.glsl', source: 'x' }] };
+    c.setShaderSet(set);
+    expect(worker.posted).toEqual([
+      { type: 'setVideoShaders', set: null },
+      { type: 'setVideoShaders', set },
+    ]);
+  });
+
+  it('warns above 5 % drops while active, not at 2 %', () => {
+    const { c, worker, feed } = setup();
+    worker.emit({ type: 'shaderStatus', state: 'active', set: 'A', error: null });
+    feed(6, 0.2);
+    expect(c.getSnapshot().shaderDropWarning).toBeCloseTo(0.2, 5);
+    const b = setup();
+    b.worker.emit({ type: 'shaderStatus', state: 'active', set: 'A', error: null });
+    b.feed(6, 0.02);
+    expect(b.c.getSnapshot().shaderDropWarning).toBeNull();
+  });
+
+  it('never warns without an active set, and off clears the warning and the meter', () => {
+    const { c, worker, feed } = setup();
+    feed(6, 0.2);
+    expect(c.getSnapshot().shaderDropWarning).toBeNull();
+    worker.emit({ type: 'shaderStatus', state: 'active', set: 'A', error: null });
+    feed(6, 0.2);
+    expect(c.getSnapshot().shaderDropWarning).not.toBeNull();
+    worker.emit({ type: 'shaderStatus', state: 'off', set: null, error: null });
+    expect(c.getSnapshot().shaderDropWarning).toBeNull();
+    worker.emit({ type: 'shaderStatus', state: 'active', set: 'A', error: null });
+    feed(1, 0.2); // under 1 s of fresh samples
+    expect(c.getSnapshot().shaderDropWarning).toBeNull();
+  });
+});

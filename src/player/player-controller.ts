@@ -2,8 +2,9 @@ import { splitPick } from './drop-files';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
-import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, SubtitleChoice, Telemetry } from '../engine/protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
+import { DROP_WARN_RATE, DropMeter } from './drop-meter';
 
 export interface Notice {
   readonly code: string;
@@ -39,6 +40,10 @@ export interface PlayerSnapshot {
   readonly subtitles: SubtitlesState | null;
   /** Subtitle files that are not UTF-8 wait for the user to pick their encoding. */
   readonly encodingPrompt: { readonly names: readonly string[] } | null;
+  /** The video shader set: its state, name and the error that explains 'error' and 'unavailable'. */
+  readonly shaders: { readonly state: ShaderState; readonly set: string | null; readonly error: string | null };
+  /** Drop rate while a set is active and the rate is above DROP_WARN_RATE; else null. */
+  readonly shaderDropWarning: number | null;
 }
 
 /** The engine's last 'subtitles' event. */
@@ -89,6 +94,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   indexTitles: null,
   subtitles: null,
   encodingPrompt: null,
+  shaders: { state: 'off', set: null, error: null },
+  shaderDropWarning: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -134,7 +141,7 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'playlistCleared':
       return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
     case 'shaderStatus':
-      return s; // the snapshot has no shader state yet
+      return { ...s, shaders: { state: e.state, set: e.set, error: e.error }, shaderDropWarning: e.state === 'active' ? s.shaderDropWarning : null };
   }
 }
 
@@ -164,18 +171,38 @@ export class PlayerController {
   /** The load whose encoding prompt is open: read again when the user picks one (its bytes were transferred). */
   private pendingSubtitleLoad: readonly File[] | null = null;
 
+  private readonly dropMeter = new DropMeter();
+
   constructor(
     private readonly worker: WorkerLike,
     private readonly audio: AudioOutputLike,
+    private readonly options: { readonly nowMs?: () => number } = {},
   ) {
     worker.onmessage = (event: MessageEvent<EngineEvent>) => {
       const e = event.data;
       if (e.type === 'soundEffects') audio.loadEffects(e.clips);
       else if (e.type === 'soundEffect') audio.playEffect(e.id);
-      else this.update(reduceEvent(this.snapshot, e));
+      else this.update(this.withDropWarning(reduceEvent(this.snapshot, e), e));
     };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
     worker.onmessageerror = () => this.reportInternalError('The player engine sent a message that could not be read.');
+  }
+
+  /** Feeds the drop meter from telemetry while a shader set is active; any shader status change starts a new window. */
+  private withDropWarning(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
+    if (e.type === 'shaderStatus') {
+      this.dropMeter.reset();
+      return s;
+    }
+    if (e.type !== 'telemetry') return s;
+    if (s.shaders.state !== 'active') {
+      this.dropMeter.reset();
+      return s;
+    }
+    this.dropMeter.push((this.options.nowMs ?? (() => performance.now()))(), e.telemetry.framesPresented, e.telemetry.framesDropped);
+    const rate = this.dropMeter.rate();
+    const warning = rate !== null && rate > DROP_WARN_RATE ? rate : null;
+    return warning === s.shaderDropWarning ? s : { ...s, shaderDropWarning: warning };
   }
 
   /** Surfaces a failure of the engine worker itself (it can no longer report through events). */
@@ -434,6 +461,11 @@ export class PlayerController {
     const scale = Math.round(Math.max(MIN_SUBTITLE_SCALE, Math.min(MAX_SUBTITLE_SCALE, subs.scale + delta)) * 10) / 10;
     this.post({ type: 'setSubtitleScale', scale });
     this.update({ ...this.snapshot, subtitles: { ...subs, scale } });
+  }
+
+  /** Applies a shader set to the video; null turns shaders off. */
+  setShaderSet(set: ShaderSetData | null): void {
+    this.post({ type: 'setVideoShaders', set });
   }
 
   /** An index title of an HDMV disc (its movie object decides what plays). */
