@@ -122,7 +122,7 @@ describe('ShaderModel', () => {
     await lib.putFiles([{ name: MODE_A_FILES[0]!, source: readFileSync(`${DIR}/${MODE_A_FILES[0]}`, 'utf8'), addedAt: 1 }]);
     lib.sel.v = MODE_A;
     await model.load();
-    expect(apply).not.toHaveBeenCalled();
+    expect(apply.mock.calls.every(([a]) => a === null)).toBe(true);
     expect(model.getSnapshot().selected).toBe(MODE_A);
     expect(model.getSnapshot().selectedMissing).toBe(true);
   });
@@ -168,5 +168,37 @@ describe('ShaderModel', () => {
     model.dismissReport();
     expect(l).not.toHaveBeenCalled();
   });
-});
 
+  it('a select issued while add is pending wins everywhere', async () => {
+    const { model, apply, lib } = setup();
+    await model.add(modeAFiles());
+    await model.select(MODE_A);
+    await model.add([fixture('input.conf', 'K set glsl-shaders set "a.glsl"; show-text "Mine"\n')]);
+    const slow = { name: 'Anime4K_Clamp_Highlights.glsl', size: 10, text: () => new Promise<string>((r) => setTimeout(() => r(readFileSync(`${DIR}/Anime4K_Clamp_Highlights.glsl`, 'utf8')), 20)) };
+    const adding = model.add([slow]);
+    const selecting = model.select('Mine');
+    await Promise.all([adding, selecting]);
+    expect(model.getSnapshot().selected).toBe('Mine');
+    expect(lib.sel.v).toBe('Mine');
+    expect(apply).toHaveBeenLastCalledWith(null);
+  });
+
+  it('two un-awaited cycles advance two steps', async () => {
+    const { model } = setup();
+    await model.add(modeAFiles());
+    const available = model.getSnapshot().sets.filter((s) => s.available).map((s) => s.name);
+    await Promise.all([model.cycle(), model.cycle()]);
+    expect(model.getSnapshot().selected).toBe(available[1] ?? null);
+  });
+
+  it('re-importing an input.conf that redefines the active set re-applies it', async () => {
+    const { model, apply } = setup();
+    await model.add([fixture('input.conf', 'K set glsl-shaders set "a.glsl"; show-text "Mine"\n'), fixture('Anime4K_Clamp_Highlights.glsl'), fixture('Anime4K_Restore_CNN_M.glsl')]);
+    await model.add([fixture('input.conf', 'K set glsl-shaders set "Anime4K_Clamp_Highlights.glsl"; show-text "Mine"\n')]);
+    await model.select('Mine');
+    apply.mockClear();
+    await model.add([fixture('input.conf', 'K set glsl-shaders set "Anime4K_Restore_CNN_M.glsl"; show-text "Mine"\n')]);
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(apply.mock.calls[0]![0]!.files.map((f) => f.name)).toEqual(['Anime4K_Restore_CNN_M.glsl']);
+  });
+});

@@ -32,7 +32,8 @@ export class ShaderModel {
   private state: ShaderModelState = { sets: [], files: [], imported: [], selected: null, selectedMissing: false, report: null };
   private sources = new Map<string, string>();
   private importedDefs: ShaderSetDef[] = [];
-  private applied = false;
+  private appliedKey: string | null = null;
+  private queue: Promise<void> = Promise.resolve();
   private readonly listeners = new Set<() => void>();
 
   constructor(
@@ -48,78 +49,90 @@ export class ShaderModel {
 
   getSnapshot = (): ShaderModelState => this.state;
 
-  async load(): Promise<void> {
-    const selected = await this.library.selected();
-    await this.refresh(selected, null);
-    this.applySelection();
+  load(): Promise<void> {
+    return this.enqueue(async () => {
+      const selected = await this.library.selected();
+      await this.refresh(selected);
+      this.applySelection(true);
+    });
   }
 
-  async select(name: string | null): Promise<void> {
-    await this.library.setSelected(name);
-    this.set({ selected: name });
-    this.recompute();
-    this.applySelection();
+  select(name: string | null): Promise<void> {
+    return this.enqueue(() => this.selectNow(name));
   }
 
-  async cycle(): Promise<void> {
-    const available = this.state.sets.filter((s) => s.available).map((s) => s.name);
-    const i = this.state.selected === null ? -1 : available.indexOf(this.state.selected);
-    const next = i + 1 < available.length ? available[i + 1]! : null;
-    await this.select(next);
+  cycle(): Promise<void> {
+    return this.enqueue(() => {
+      const available = this.state.sets.filter((s) => s.available).map((s) => s.name);
+      const i = this.state.selected === null ? -1 : available.indexOf(this.state.selected);
+      return this.selectNow(i + 1 < available.length ? available[i + 1]! : null);
+    });
   }
 
-  async add(files: readonly PickedFile[]): Promise<void> {
-    const added: string[] = [];
-    const rejected: { name: string; reason: string }[] = [];
-    const stored: StoredShaderFile[] = [];
-    const sets = new Map<string, ShaderSetDef>();
-    for (const file of files) {
-      const name = baseName(file.name);
-      if (name === 'input.conf') {
-        for (const s of parseInputConf(await file.text())) sets.set(s.name, s);
-      } else if (name.toLowerCase().endsWith('.glsl')) {
-        // Oversize files are rejected before their text is read.
-        const source = file.size > 4 * 1024 * 1024 ? '' : await file.text();
-        const reason = validateShaderFile(name, source, file.size);
-        if (reason === null) {
-          stored.push({ name, source, addedAt: this.now() });
-          added.push(name);
-        } else rejected.push({ name, reason });
+  add(files: readonly PickedFile[]): Promise<void> {
+    return this.enqueue(async () => {
+      const added: string[] = [];
+      const rejected: { name: string; reason: string }[] = [];
+      const stored: StoredShaderFile[] = [];
+      const sets = new Map<string, ShaderSetDef>();
+      for (const file of files) {
+        const name = baseName(file.name);
+        if (name === 'input.conf') {
+          for (const s of parseInputConf(await file.text())) sets.set(s.name, s);
+        } else if (name.toLowerCase().endsWith('.glsl')) {
+          // Oversize files are rejected before their text is read.
+          const source = file.size > 4 * 1024 * 1024 ? '' : await file.text();
+          const reason = validateShaderFile(name, source, file.size);
+          if (reason === null) {
+            stored.push({ name, source, addedAt: this.now() });
+            added.push(name);
+          } else rejected.push({ name, reason });
+        }
       }
-    }
-    await this.library.putFiles(stored);
-    await this.library.putImportedSets([...sets.values()]);
-    const before = this.state.selected;
-    const changedActive = this.activeFiles().some((f) => added.includes(f));
-    await this.refresh(before, { added, rejected, importedSets: sets.size });
-    if (changedActive) this.applySelection();
+      await this.library.putFiles(stored);
+      await this.library.putImportedSets([...sets.values()]);
+      await this.refresh(this.state.selected, { added, rejected, importedSets: sets.size });
+      this.applySelection(false);
+    });
   }
 
-  async removeFile(name: string): Promise<void> {
-    const wasActive = this.activeFiles().includes(name);
-    await this.library.removeFile(name);
-    await this.refresh(this.state.selected, this.state.report);
-    if (wasActive) this.applySelection();
+  removeFile(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      await this.library.removeFile(name);
+      await this.refresh(this.state.selected, this.state.report);
+      this.applySelection(false);
+    });
   }
 
-  async removeSet(name: string): Promise<void> {
-    const wasSelected = this.state.selected === name;
-    await this.library.removeImportedSet(name);
-    if (wasSelected) await this.library.setSelected(null);
-    await this.refresh(wasSelected ? null : this.state.selected, this.state.report);
-    if (wasSelected) this.applySelection();
+  removeSet(name: string): Promise<void> {
+    return this.enqueue(async () => {
+      const wasSelected = this.state.selected === name;
+      await this.library.removeImportedSet(name);
+      if (wasSelected) await this.library.setSelected(null);
+      await this.refresh(wasSelected ? null : this.state.selected, this.state.report);
+      this.applySelection(false);
+    });
   }
 
   dismissReport(): void {
     if (this.state.report !== null) this.set({ report: null });
   }
 
-  private activeFiles(): readonly string[] {
-    const sel = this.state.selected;
-    return sel === null ? [] : (this.state.sets.find((s) => s.name === sel)?.files ?? []);
+  /** Runs mutating work one task at a time, reading state inside the task; a failure rejects its caller but not the chain. */
+  private enqueue(task: () => Promise<void> | void): Promise<void> {
+    const run = this.queue.then(task);
+    this.queue = run.catch(() => undefined);
+    return run;
   }
 
-  private async refresh(selected: string | null, report: AddReport | null): Promise<void> {
+  private async selectNow(name: string | null): Promise<void> {
+    await this.library.setSelected(name);
+    this.set({ selected: name });
+    this.recompute();
+    this.applySelection(true);
+  }
+
+  private async refresh(selected: string | null, report: AddReport | null = this.state.report): Promise<void> {
     const [files, imported] = await Promise.all([this.library.files(), this.library.importedSets()]);
     this.sources = new Map(files.map((f) => [f.name, f.source]));
     this.importedDefs = imported;
@@ -139,17 +152,17 @@ export class ShaderModel {
     });
   }
 
-  /** Applies the selected set; Off or a selection missing files applies null, but only if a set is running. */
-  private applySelection(): void {
+  /** Applies the selected set, or null for Off or a selection missing files. Unless forced, only when that differs from what was last applied. */
+  private applySelection(force: boolean): void {
     const { selected, selectedMissing, sets } = this.state;
     const entry = selected === null || selectedMissing ? undefined : sets.find((s) => s.name === selected);
-    if (!entry) {
-      if (this.applied) this.apply(null);
-      this.applied = false;
-      return;
-    }
-    this.applied = true;
-    this.apply({ name: entry.name, files: entry.files.map((name) => ({ name, source: this.sources.get(name)! })) });
+    const data: ShaderSetData | null = entry
+      ? { name: entry.name, files: entry.files.map((name) => ({ name, source: this.sources.get(name)! })) }
+      : null;
+    const key = data === null ? null : JSON.stringify(data);
+    if (!force && key === this.appliedKey) return;
+    this.appliedKey = key;
+    this.apply(data);
   }
 
   private set(patch: Partial<ShaderModelState>): void {

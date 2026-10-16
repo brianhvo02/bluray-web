@@ -69,4 +69,25 @@ describe('recent discs', () => {
     expect([...db.objectStoreNames].sort()).toEqual(['recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
     db.close();
   });
+
+  it('upgrades a version 1 database (legacy store only) to 3, dropping the legacy store', async () => {
+    const factory = new IDBFactory();
+    await new Promise<void>((resolve, reject) => {
+      const req = factory.open('bluray-web', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('recent-discs', { keyPath: 'name' });
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    expect(await listRecentDiscs(factory)).toEqual([]);
+    const db = await new Promise<IDBDatabase>((res, rej) => {
+      const r = factory.open('bluray-web');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    expect([...db.objectStoreNames].sort()).toEqual(['recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
+    db.close();
+  });
 });
