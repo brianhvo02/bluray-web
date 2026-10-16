@@ -173,6 +173,7 @@ java/io/DataInputStream
 java/io/DataOutput
 java/io/DataOutputStream
 java/io/DefaultFileSystem
+java/io/EOFException
 java/io/ExpiringCache
 java/io/ExpiringCache$1
 java/io/ExpiringCache$Entry
@@ -197,6 +198,7 @@ java/io/Flushable
 java/io/IOException
 java/io/InputStream
 java/io/InputStreamReader
+java/io/InterruptedIOException
 java/io/ObjectInput
 java/io/ObjectInputStream
 java/io/ObjectInputStream$1
@@ -237,6 +239,7 @@ java/io/StreamTokenizer
 java/io/StringReader
 java/io/StringWriter
 java/io/SyncFailedException
+java/io/UTFDataFormatException
 java/io/UnixFileSystem
 java/io/UnsupportedEncodingException
 java/io/Writer
@@ -472,6 +475,7 @@ java/lang/reflect/WeakCache$Value
 java/math/BigInteger
 java/math/MutableBigInteger
 java/math/RoundingMode
+java/net/ConnectException
 java/net/Inet4Address
 java/net/Inet6Address
 java/net/Inet6Address$Inet6AddressHolder
@@ -488,6 +492,7 @@ java/net/NetPermission
 java/net/Parts
 java/net/ServerSocket
 java/net/Socket
+java/net/SocketException
 java/net/SocketImplFactory
 java/net/SocketPermission
 java/net/SocketPermissionCollection
@@ -504,6 +509,7 @@ java/net/URLConnection
 java/net/URLPermission
 java/net/URLStreamHandler
 java/net/URLStreamHandlerFactory
+java/net/UnknownHostException
 java/nio/Bits
 java/nio/Bits$1
 java/nio/Buffer
@@ -996,6 +1002,7 @@ java/util/function/ToLongFunction
 java/util/jar/Attributes
 java/util/jar/Attributes$Name
 java/util/jar/JarEntry
+java/util/jar/JarException
 java/util/jar/JarFile
 java/util/jar/JarFile$JarEntryIterator
 java/util/jar/JarFile$JarFileEntry
@@ -1109,6 +1116,8 @@ java/util/zip/ZStreamRef
 java/util/zip/ZipCoder
 java/util/zip/ZipConstants
 java/util/zip/ZipEntry
+java/util/zip/ZipError
+java/util/zip/ZipException
 java/util/zip/ZipFile
 java/util/zip/ZipFile$1
 java/util/zip/ZipFile$ZipEntryIterator
