@@ -26,7 +26,7 @@ export function App(): ReactElement {
   const [shaders] = useState(() => getShaderModel(controller));
   const shaderState = useSyncExternalStore(shaders.subscribe, shaders.getSnapshot);
   useEffect(() => {
-    // Without IndexedDB (private mode) the menu still works for the session.
+    // Without IndexedDB the menu still opens, but sets cannot be chosen that session (docs/known-issues.md).
     shaders.load().catch((e) => console.error('shader library failed to load', e));
   }, [shaders]);
   return (
