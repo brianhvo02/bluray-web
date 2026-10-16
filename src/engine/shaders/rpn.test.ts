@@ -31,10 +31,13 @@ describe('evalRpn', () => {
   it('returns null for unknown textures', () => {
     expect(evalRpn('FOO.w 2 *', std)).toBeNull();
   });
+  it('returns null for a non-finite result', () => {
+    expect(evalRpn('1 0 /', std)).toBeNull();
+    expect(evalRpn('MAIN.w 0 /', std)).toBeNull();
+  });
   it('throws on malformed text', () => {
     expect(() => evalRpn('1 +', std)).toThrow(RpnError);
     expect(() => evalRpn('1 2', std)).toThrow(RpnError);
     expect(() => evalRpn('1 bogus', std)).toThrow(RpnError);
-    expect(() => evalRpn('1 0 /', std)).toThrow(RpnError);
   });
 });

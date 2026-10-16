@@ -18,7 +18,7 @@ const TEX = /^(.+)\.(w|width|h|height)$/;
 
 /**
  * Throws RpnError on malformed text (stack underflow, leftovers, unknown
- * token, non-finite result). Returns null when a texture name is unknown.
+ * token). Returns null when a texture name is unknown or a result is non-finite.
  */
 export function evalRpn(expr: string, lookup: SizeLookup): number | null {
   const stack: number[] = [];
@@ -46,11 +46,13 @@ export function evalRpn(expr: string, lookup: SizeLookup): number | null {
         case '%': r = a % b; break; // fmodf
         case '>': r = a > b ? 1 : 0; break;
         case '<': r = a < b ? 1 : 0; break;
+        // Negative operands make the tolerance negative (as in libplacebo).
         // libplacebo: res = fabsf(op1 - op2) <= 1e-6 * fmaxf(op1, op2)
         default: r = Math.abs(a - b) <= 1e-6 * Math.max(a, b) ? 1 : 0;
       }
-      // libplacebo: "Illegal operation in RPN expression" when !isfinite(res)
-      if (!Number.isFinite(r)) throw new RpnError('illegal operation');
+      // libplacebo: "Illegal operation" when !isfinite(res). Data-dependent
+      // (e.g. a zero texture size), not malformed text, so the pass is skipped.
+      if (!Number.isFinite(r)) return null;
       stack.push(r);
       continue;
     }
