@@ -1,0 +1,6 @@
+rt-bdj.jar holds classes and files of the OpenJDK 8 runtime (GPLv2 with the Classpath Exception; see LICENSE and
+ASSEMBLY_EXCEPTION), unmodified, selected by tools/bdj-classlib/classes.txt and resources.txt.
+
+OpenJDK package: openjdk-8-jre-headless:amd64	8u504-ga-1ubuntu1~24.04.3
+Apt snapshot:    20261015T000000Z (ubuntu 24.04)
+libbluray:       448f896 (libbluray-j2se.jar and libbluray-awt-j2se.jar are its BD-J Java stack, LGPL-2.1)

@@ -1,0 +1,14 @@
+lib/currency.data
+lib/tzdb.dat
+lib/calendars.properties
+lib/content-types.properties
+lib/logging.properties
+lib/net.properties
+lib/security/java.security
+lib/security/blacklisted.certs
+lib/security/cacerts
+lib/flavormap.properties
+lib/psfont.properties.ja
+lib/psfontj2d.properties
+lib/sound.properties
+lib/meta-index

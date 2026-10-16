@@ -15,6 +15,8 @@
     "wasm:build": "src/wasm/audio/build.sh",
     "vm-trace:build": "tools/vm-trace/build.sh",
     "bdj-trace:build": "tools/bdj-trace/build.sh",
+    "bdj-classlib:build": "tools/bdj-classlib/build.sh",
+    "bdj-classlib:collect": "tools/bdj-classlib/collect.sh",
     "vm-trace:golden": "tools/vm-trace/golden.sh",
     "vm-trace": "tsx tests/vm-trace/run.ts",
     "ass-trace:build": "tools/ass-trace/build.sh",
