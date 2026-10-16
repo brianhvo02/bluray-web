@@ -46,6 +46,20 @@ describe('planFrame', () => {
     expect(plan.final).toBe(combine2!.out);
   });
 
+  it('skips a pass whose size is not finite', () => {
+    const plan = planFrame(basic('invert'), size(Infinity, 360), size(640, 360));
+    expect(plan.passes).toEqual([]);
+  });
+
+  it('skips a pass larger than the max texture size', () => {
+    const set = [...basic('nearest-x2'), ...basic('invert')];
+    const capped = planFrame(set, size(640, 360), size(1280, 720), 1000);
+    expect(capped.passes.map((p) => p.pass.desc)).toEqual(['invert']);
+    expect(capped.passes[0]!.out).toMatchObject({ width: 640, height: 360 });
+    const exact = planFrame(set, size(640, 360), size(1280, 720), 1280);
+    expect(exact.passes.map((p) => p.pass.desc)).toEqual(['nearest x2', 'invert']);
+  });
+
   it('missing BIND skips', () => {
     const passes = inline('//!HOOK MAIN\n//!BIND HOOKED\n//!BIND NOPE\n//!DESC nope\nvec4 hook() { return HOOKED_tex(HOOKED_pos); }\n');
     const plan = planFrame([...passes, ...basic('invert')], size(640, 360), size(640, 360));

@@ -145,6 +145,7 @@ export function createWebGlBackend(
 class WebGlBackend implements ShaderBackend {
   private generation = 0;
   private parallel = false;
+  private maxTextureSize = Infinity;
   private timer: object | null = null;
   private vertex: WebGLShader | null = null;
   private final: Program | null = null;
@@ -177,6 +178,7 @@ class WebGlBackend implements ShaderBackend {
     const gl = this.gl;
     gl.getExtension('EXT_color_buffer_float');
     this.parallel = gl.getExtension('KHR_parallel_shader_compile') !== null;
+    this.maxTextureSize = (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number | null) ?? Infinity;
     this.timer = gl.getExtension('EXT_disjoint_timer_query_webgl2');
     this.vertex = this.shader(gl.VERTEX_SHADER, VERTEX_SHADER);
     const fs = this.shader(gl.FRAGMENT_SHADER, FINAL_FRAGMENT);
@@ -319,7 +321,7 @@ class WebGlBackend implements ShaderBackend {
         width: frame.visibleRect?.width ?? frame.codedWidth,
         height: frame.visibleRect?.height ?? frame.codedHeight,
       };
-      const plan = planFrame(set.passes, source, output);
+      const plan = planFrame(set.passes, source, output, this.maxTextureSize);
       passesRun = plan.passes.length;
 
       for (const step of plan.passes) {

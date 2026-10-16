@@ -61,7 +61,8 @@ function evaluate(expr: string, lookup: SizeLookup): number | null {
   }
 }
 
-export function planFrame(passes: readonly ShaderPass[], source: Size, output: Size): FramePlan {
+/** A pass whose output would be non-finite, empty or larger than `maxTextureSize` on either side is skipped. */
+export function planFrame(passes: readonly ShaderPass[], source: Size, output: Size, maxTextureSize = Infinity): FramePlan {
   const frame: TexRef = { id: 0, width: source.width, height: source.height, components: 4 };
   const table = new Map<string, TexRef>([
     ['NATIVE', frame],
@@ -108,7 +109,8 @@ export function planFrame(passes: readonly ShaderPass[], source: Size, output: S
       if (w === null || h === null) continue;
       const width = Math.round(w);
       const height = Math.round(h);
-      if (width <= 0 || height <= 0) continue;
+      if (!Number.isFinite(width) || !Number.isFinite(height)) continue;
+      if (width <= 0 || height <= 0 || width > maxTextureSize || height > maxTextureSize) continue;
 
       const components = pass.components === null ? hooked.components : pass.components === 3 ? 4 : pass.components;
       const out: TexRef = { id: nextId++, width, height, components };
