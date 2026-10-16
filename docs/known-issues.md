@@ -122,7 +122,8 @@ what would change that decision.
   and GPU canvases (`anim` at 2500/2999 ms gave 736 and 526 differing pixels against 326 and 381 with
   `--disable-gpu`, plus the spin at 5000/5500 ms). The factor is now a power of two halved in bilinear 2:1 steps,
   the same 2×2 box filter as the mask path, so all fixtures pass with and without the GPU on macOS Chrome. The
-  `ass` CI job still does not gate the deploy; `ASS_BUDGET_SCALE=8` still covers the runners' draw time.
+  `ass` CI job passes on the Linux runners and gates the deploy again; `ASS_BUDGET_SCALE=8` still covers the runners'
+  draw time.
 - **M4b porting bugs found by the TSURUNE gate (fixed in the port, 2026-10-15).** Runs were snapped to 1/8 px by
   each glyph origin instead of libass's rounding of the first inked glyph's box centre; TrueType fonts that force an
   integer ppem had their ascender and outline size rounded too (only hinted advances are), which put whole lines
