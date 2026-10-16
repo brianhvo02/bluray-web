@@ -2,26 +2,26 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from './index';
+import type { BdjHost } from '../../host';
+import { registerLibblurayNatives } from './libbluray';
 import { fdlibmExp, fdlibmRemainder } from './strictmath';
-
-/** What Task 13 implements: libbluray's own natives. */
-const LATER = ['org/videolan/', 'java/awt/BDFontMetrics', 'java/awt/BDGraphicsBase'];
 
 function table(): NativeTable {
   const t = new NativeTable();
   registerBootstrapNatives(t);
   registerSchedulerNatives(t);
   registerJdkNatives(t);
+  registerLibblurayNatives(t, {} as BdjHost);
   return t;
 }
 
 describe('JDK natives', () => {
-  it('implements every native natives.txt lists, except libbluray\'s', () => {
+  it('implements every native natives.txt lists', () => {
     const listed = readFileSync(fileURLToPath(new URL('../../../../../tests/bdj/natives.txt', import.meta.url)), 'utf8')
       .split('\n')
       .filter((l) => l !== '');
     const keys = new Set(table().keys);
-    const missing = listed.filter((k) => !keys.has(k) && !LATER.some((p) => k.startsWith(p)));
+    const missing = listed.filter((k) => !keys.has(k));
     const byPackage: Record<string, string[]> = {};
     for (const k of missing) (byPackage[k.slice(0, k.lastIndexOf('/'))] ??= []).push(k);
     expect(byPackage).toEqual({});

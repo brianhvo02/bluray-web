@@ -43,3 +43,12 @@ export function parseUoMaskTable(bytes: Uint8Array, offset = 0): UoMask {
 export function combineUoMasks(a: UoMask, b: UoMask): UoMask {
   return new Set<UoOp>([...a, ...b]);
 }
+
+/** bdpriv_get_uo_mask: the BD_UO_MASK bit-field struct read as a uint64 (field i is bit i). */
+export function uoMaskBits(mask: UoMask): bigint {
+  let bits = 0n;
+  UO_BITS.forEach((op, i) => {
+    if (op !== null && mask.has(op)) bits |= 1n << BigInt(i);
+  });
+  return bits;
+}

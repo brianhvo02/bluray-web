@@ -81,7 +81,7 @@ function openFailure(vfs: Vfs | null, path: string, write: boolean): string {
 }
 
 /** Opens `path` into the owner's FileDescriptor, or throws FileNotFoundException as the JDK's fileOpen does. */
-function openInto(ctx: NativeContext, owner: JValue, name: JValue, mode: VfsMode): NativeResult {
+export function openInto(ctx: NativeContext, owner: JValue, name: JValue, mode: VfsMode): NativeResult {
   const jvm = ctx.jvm;
   if (name === null) return jvm.throwNew('java/lang/NullPointerException');
   const path = jsStr(jvm, name);
@@ -150,7 +150,7 @@ function readHandle(jvm: Jvm, h: VfsHandle, out: Uint8Array, off: number, len: n
   return typeof r === 'number' ? k(r) : suspendRead(jvm, r, 'java/io/IOException', k);
 }
 
-function readBytes(ctx: NativeContext, self: JValue, b: JValue, off: JValue, len: JValue): NativeResult {
+export function readBytes(ctx: NativeContext, self: JValue, b: JValue, off: JValue, len: JValue): NativeResult {
   const jvm = ctx.jvm;
   const bad = checkBounds(jvm, b, off as number, len as number);
   if (bad) return bad;
@@ -197,7 +197,7 @@ const ACCESS_WRITE = 0x02;
 const SPACE_TOTAL = 0;
 const O_RDWR = 2;
 
-function closeStream(ctx: NativeContext, self: JValue): number {
+export function closeStream(ctx: NativeContext, self: JValue): number {
   closeFd(ctx.jvm, fdObject(ctx.jvm, self));
   return 0;
 }
@@ -285,8 +285,6 @@ export function registerIoNatives(natives: NativeTable): void {
       return Math.max(0, Math.min(0x7fffffff, h.size() - h.position));
     },
     'java/io/FileInputStream.close0()V': (ctx, self) => void closeStream(ctx, self),
-    // libbluray's FileInputStream declares close0 as returning int.
-    'java/io/FileInputStream.close0()I': closeStream,
 
     'java/io/FileOutputStream.initIDs()V': none,
     'java/io/FileOutputStream.open0(Ljava/lang/String;Z)V': (ctx, self, name, append) => openInto(ctx, self, name, append ? 'a' : 'w'),

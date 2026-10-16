@@ -9,7 +9,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
   Copyright (C) 2009-2010  John Stebbins
   Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
   Derived files:
-    bdmv/mpls-parser.ts   from src/libbluray/bdnav/mpls_parse.c (including _parse_subpath, _parse_subplayitem and the STN subpath_id/subclip_id)
+    bdmv/mpls-parser.ts   from src/libbluray/bdnav/mpls_parse.c (including _parse_subpath, _parse_subplayitem, the STN subpath_id/subclip_id, char_code and the PiP PG, secondary audio and secondary video entries)
     bdmv/clpi-parser.ts   from src/libbluray/bdnav/clpi_parse.c
     bdmv/index-parser.ts  from src/libbluray/bdnav/index_parse.c
     bdmv/mobj-parser.ts   from src/libbluray/hdmv/mobj_parse.c
@@ -34,6 +34,16 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     graphics/composition.ts from src/libbluray/decoders/graphics_controller.c (_render_composition_object)
     graphics/rle.ts       from src/libbluray/decoders/rle.c (rle_crop_object)
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
+    bdj/host.ts           from src/libbluray/bluray.c (RecordingHost: bdpriv_play_playlist_at, bdpriv_play_title_internal
+                          and _play_title, bdpriv_seek, bdpriv_reg_read, bdpriv_reg_write, bdpriv_get_uo_mask,
+                          bdpriv_set_bdj_uo_mask, bdpriv_sound_effect, bdpriv_set_virtual_package, bd_select_angle,
+                          bd_tell_time, _fill_disc_info, bd_get_playlist_info, _fill_title_info, _copy_streams) and
+                          bdnav/navigation.c (nav_title_open, _extrapolate_title, _fill_mark, nav_clip_lookup_aspect)
+    bdj/jvm/natives/libbluray.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c, bdjo.c, util.c,
+                          org_videolan_Logger.c, java_awt_BDFontMetrics.c and java_awt_BDGraphics.c (font and text
+                          natives as fixed-metric stubs), bdj/bdjo_parse.c (bdjo_get), disc/disc.c
+                          (disc_cache_bdrom_file, disc_open_dir) and file/file.c (file_mkdirs)
+    hdmv/uo-mask.ts uoMaskBits from src/libbluray/bluray.c (bdpriv_get_uo_mask)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
   subs/srt.ts and subs/text-renderer.ts (SubRip subtitles) are original
@@ -147,4 +157,4 @@ fdlibm 5.3 (the C library behind the JDK's StrictMath)
     bdj/jvm/natives/strictmath.ts  fdlibmExp, from e_exp.c (__ieee754_exp)
                                    fdlibmRemainder, from e_remainder.c (__ieee754_remainder)
   The rest of bdj/jvm/ (interpreter, loader, heap, threads, VFS and the other
-  natives) is original code.
+  natives, except natives/libbluray.ts above) is original code.
