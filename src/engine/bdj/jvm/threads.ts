@@ -1,6 +1,6 @@
 /*
- * Original code for bluray-web: Java threads of the BD-J virtual machine. This scheduler runs one thread at a time to
- * completion; the green-thread scheduler with monitors replaces it.
+ * Original code for bluray-web: the green-thread scheduler of the BD-J virtual machine (Java threads, monitors,
+ * wait/notify, sleep, interrupt and parking), all on one JS thread.
  *
  * Copyright (C) 2026 bluray-web contributors
  *
@@ -9,10 +9,10 @@
 
 import { JavaThrowable } from './values';
 import type { JObject, JValue } from './values';
-import type { JMethod } from './loader';
+import type { JClass, JMethod } from './loader';
 import type { Jvm } from './jvm';
-import { Invoke, ThrowResult, andThen, complete, execute } from './interpreter';
-import type { Frame } from './interpreter';
+import { BLOCKED, Invoke, Suspend, ThrowResult, andThen, complete, execute } from './interpreter';
+import type { Frame, NativeResult } from './interpreter';
 
 export type ThreadState =
   | 'runnable'
@@ -50,10 +50,41 @@ export interface SchedulerOptions {
   readonly setTimer: (ms: number, fn: () => void) => () => void;
 }
 
+/** Slices between yields to the event loop, so that I/O promises settle. */
+const YIELD_EVERY = 50;
+/** setTimeout's largest delay; a longer timed wait wakes early, which Java allows. */
+const MAX_TIMER_MS = 0x7fffffff;
+
+type Settled = JValue | undefined | ThrowResult;
+
+interface Waiting {
+  readonly o: JObject;
+  /** The recursion count to reacquire; 0 for a wait on another thread's class initialisation. */
+  readonly count: number;
+}
+
+const blocked = (): Suspend => new Suspend(BLOCKED);
+
 export class Scheduler {
   private nextId = 1;
-  private readonly threads: JThread[] = [];
-  private readonly suspended = new Map<JThread, Promise<void>>();
+  private threads: JThread[] = [];
+  private readonly queue: JThread[] = [];
+  private readonly queued = new Set<JThread>();
+  /** What a thread does when it next runs: a wakeup's result, or an Invoke to retry. */
+  private readonly pending = new Map<JThread, () => NativeResult>();
+  /** The continuation of a thread's Suspend. */
+  private readonly conts = new Map<JThread, (r: Settled) => NativeResult>();
+  private readonly timers = new Map<JThread, () => void>();
+  private readonly waiting = new Map<JThread, Waiting>();
+  /** Woken waiters queued in a monitor's entry set, with the count to take it back with. */
+  private readonly reacquiring = new Map<JThread, { readonly count: number; readonly result: () => NativeResult }>();
+  private readonly permits = new Set<JThread>();
+  private readonly yielded: JThread[] = [];
+  private timerWaiters: (() => void)[] = [];
+  private io = 0;
+  private wake: (() => void) | null = null;
+  private failure: { readonly error: unknown } | null = null;
+  private running = false;
 
   constructor(
     private readonly jvm: Jvm,
@@ -62,6 +93,16 @@ export class Scheduler {
 
   get live(): readonly JThread[] {
     return this.threads.filter((t) => t.state !== 'terminated');
+  }
+
+  /** Some thread sleeps, parks or waits with a timeout. */
+  get timersPending(): boolean {
+    return this.timers.size > 0;
+  }
+
+  /** Settles when the next sleep, park or timed wait times out. */
+  nextTimer(): Promise<void> {
+    return new Promise((r) => this.timerWaiters.push(r));
   }
 
   /** A static method's class is initialised first, as invokestatic would. */
@@ -73,46 +114,322 @@ export class Scheduler {
         t.result = ret;
         return undefined;
       });
-    const init = method.isStatic ? this.jvm.loader.initialize(t, method.cls) : null;
-    complete(this.jvm, t, init === null ? call() : andThen(init, call));
+    const start = (): NativeResult => {
+      const init = method.isStatic ? this.jvm.loader.initialize(t, method.cls) : null;
+      return init === null ? call() : andThen(init, start);
+    };
+    this.inThread(t, () => complete(this.jvm, t, start()));
+    if (t.state === 'runnable') this.enqueue(t);
     return t;
   }
 
-  monitorEnter(_t: JThread, _o: JObject): boolean {
-    return true;
+  monitorEnter(t: JThread, o: JObject): boolean {
+    const m = monitorOf(o);
+    if (m.owner === null) {
+      m.owner = t;
+      m.count = 1;
+      return true;
+    }
+    if (m.owner === t) {
+      m.count++;
+      return true;
+    }
+    t.state = 'blocked-monitor';
+    if (!m.entrySet.includes(t)) m.entrySet.push(t);
+    return false;
   }
 
-  monitorExit(_t: JThread, _o: JObject): void {}
+  monitorExit(t: JThread, o: JObject): void {
+    const m = o.monitor;
+    if (m?.owner !== t) throw this.illegalMonitorState();
+    if (--m.count === 0) this.release(m);
+  }
+
+  wait(t: JThread, o: JObject, ms: number): NativeResult {
+    const m = o.monitor;
+    if (m?.owner !== t) return this.jvm.throwNew('java/lang/IllegalMonitorStateException');
+    if (ms < 0) return this.jvm.throwNew('java/lang/IllegalArgumentException', 'timeout value is negative');
+    if (takeInterrupt(t)) return this.jvm.throwNew('java/lang/InterruptedException');
+    this.waiting.set(t, { o, count: m.count });
+    m.waitSet.push(t);
+    t.state = ms > 0 ? 'timed-waiting' : 'waiting';
+    this.release(m);
+    if (ms > 0) this.after(t, ms, () => this.endWait(t, () => undefined));
+    return blocked();
+  }
+
+  notify(o: JObject, all: boolean, t: JThread): void {
+    const m = o.monitor;
+    if (m?.owner !== t) throw this.illegalMonitorState();
+    const waiters = m.waitSet.filter((w) => this.waiting.get(w)!.count > 0);
+    for (const w of all ? waiters : waiters.slice(0, 1)) this.endWait(w, () => undefined);
+  }
+
+  sleep(t: JThread, ms: number): NativeResult {
+    if (ms < 0) return this.jvm.throwNew('java/lang/IllegalArgumentException', 'timeout value is negative');
+    if (takeInterrupt(t)) return this.jvm.throwNew('java/lang/InterruptedException', 'sleep interrupted');
+    if (ms === 0) return undefined;
+    t.state = 'sleeping';
+    this.after(t, ms, () => this.resume(t, () => undefined));
+    return blocked();
+  }
+
+  /** Thread.yield: the thread goes to the back of the run queue. */
+  yield(t: JThread): NativeResult {
+    t.state = 'sleeping';
+    this.pending.set(t, () => undefined);
+    this.yielded.push(t);
+    return blocked();
+  }
+
+  /** Unsafe.park: `time` is a deadline in ms when absolute, otherwise a timeout in ns (0: none). */
+  park(t: JThread, absolute: boolean, time: bigint): NativeResult {
+    if (this.permits.delete(t) || t.interrupted) return undefined;
+    let ms = 0;
+    if (absolute) {
+      ms = Number(time) - this.opts.nowMs();
+      if (ms <= 0) return undefined;
+    } else if (time < 0n) {
+      return undefined;
+    } else if (time > 0n) {
+      ms = Math.max(1, Math.ceil(Number(time) / 1e6));
+    }
+    t.state = 'parked';
+    if (ms > 0) this.after(t, ms, () => this.resume(t, () => undefined));
+    return blocked();
+  }
+
+  unpark(t: JThread): void {
+    if (t.state === 'parked') this.resume(t, () => undefined);
+    else this.permits.add(t);
+  }
+
+  /** A sleeping or waiting thread throws InterruptedException and the flag clears; a parked one just returns. */
+  interrupt(t: JThread): void {
+    t.interrupted = true;
+    if (t.state === 'sleeping' && this.timers.has(t)) {
+      t.interrupted = false;
+      this.resume(t, () => this.jvm.throwNew('java/lang/InterruptedException', 'sleep interrupted'));
+    } else if (this.waiting.get(t)?.count) {
+      t.interrupted = false;
+      this.endWait(t, () => this.jvm.throwNew('java/lang/InterruptedException'));
+    } else if (t.state === 'parked') {
+      this.resume(t, () => undefined);
+    }
+  }
+
+  /** JVM §5.5 step 2: waits on the class's monitor until the initialising thread finishes; the caller then retries. */
+  awaitInit(t: JThread, c: JClass): NativeResult {
+    const o = this.jvm.mirror(c);
+    monitorOf(o).waitSet.push(t);
+    this.waiting.set(t, { o, count: 0 });
+    t.state = 'waiting';
+    return blocked();
+  }
+
+  /** Wakes the threads waiting for the class's initialisation, which has just completed or failed. */
+  initFinished(c: JClass): void {
+    const m = c.mirror?.monitor;
+    if (!m) return;
+    for (const w of m.waitSet.filter((x) => this.waiting.get(x)!.count === 0)) this.endWait(w, () => undefined);
+  }
 
   suspendOn(t: JThread, p: Promise<JValue | undefined>): void {
+    this.suspend(t, new Suspend(p));
+  }
+
+  /** Parks the thread on a Suspend; a BLOCKED one is woken by the scheduler instead of its promise. */
+  suspend(t: JThread, s: Suspend): void {
+    if (s.k) this.conts.set(t, s.k);
+    if (s.promise === BLOCKED) return;
     t.state = 'suspended-native';
-    this.suspended.set(
-      t,
-      p.then(
-        (v) => {
-          this.suspended.delete(t);
-          complete(this.jvm, t, v);
-        },
-        (e: unknown) => {
-          this.suspended.delete(t);
-          if (!(e instanceof JavaThrowable)) throw e;
-          complete(this.jvm, t, new ThrowResult(e.obj));
-        },
-      ),
+    this.io++;
+    s.promise.then(
+      (v) => {
+        this.io--;
+        this.resume(t, () => v);
+      },
+      (e: unknown) => {
+        this.io--;
+        if (e instanceof JavaThrowable) {
+          this.resume(t, () => new ThrowResult(e.obj));
+        } else {
+          this.failure ??= { error: e };
+          this.wake?.();
+        }
+      },
     );
   }
 
+  /** The thread, already blocked, does `r` when it next runs. */
+  later(t: JThread, r: NativeResult): void {
+    this.pending.set(t, () => r);
+  }
+
+  /**
+   * Runs until no thread can make progress; resolves 'idle' (no live thread, or some thread waits on a timer) or
+   * 'deadlock' (every live thread blocked on a monitor or untimed wait). Rejects if a suspension fails with a JS error.
+   */
   async run(signal?: AbortSignal): Promise<'idle' | 'deadlock' | 'aborted'> {
-    for (;;) {
-      if (signal?.aborted) return 'aborted';
-      const t = this.threads.find((x) => x.state === 'runnable');
-      if (t) {
-        execute(this.jvm, t, this.opts.slice);
-        continue;
+    if (this.running) throw new Error('Scheduler.run is already running');
+    this.running = true;
+    const onAbort = (): void => this.wake?.();
+    signal?.addEventListener('abort', onAbort);
+    try {
+      let slices = 0;
+      for (;;) {
+        if (this.failure) {
+          const { error } = this.failure;
+          this.failure = null;
+          throw error;
+        }
+        if (signal?.aborted) return 'aborted';
+        for (const y of this.yielded.splice(0)) this.makeRunnable(y);
+        const t = this.queue.shift();
+        if (t) {
+          this.queued.delete(t);
+          if (t.state === 'runnable') {
+            this.step(t);
+            if (t.state === 'runnable') this.enqueue(t);
+          }
+          if (++slices % YIELD_EVERY === 0) await new Promise<void>((r) => this.opts.setTimer(0, r));
+          continue;
+        }
+        if (this.io > 0) {
+          await new Promise<void>((r) => (this.wake = r));
+          this.wake = null;
+          continue;
+        }
+        return this.timers.size > 0 || this.live.length === 0 ? 'idle' : 'deadlock';
       }
-      const waiting = this.suspended.values().next();
-      if (waiting.done) return 'idle';
-      await waiting.value;
+    } finally {
+      this.running = false;
+      this.wake = null;
+      signal?.removeEventListener('abort', onAbort);
+      this.threads = this.live.slice();
     }
   }
+
+  private step(t: JThread): void {
+    const result = this.pending.get(t);
+    if (result) {
+      this.pending.delete(t);
+      const k = this.conts.get(t);
+      this.conts.delete(t);
+      this.inThread(t, () => {
+        let r: NativeResult;
+        try {
+          const v = result();
+          r = k && !(v instanceof Invoke) && !(v instanceof Suspend) ? k(v) : v;
+        } catch (e) {
+          if (!(e instanceof JavaThrowable)) throw e;
+          r = new ThrowResult(e.obj);
+        }
+        complete(this.jvm, t, r);
+      });
+      if (t.state !== 'runnable') return;
+    }
+    execute(this.jvm, t, this.opts.slice);
+  }
+
+  private inThread(t: JThread, fn: () => void): void {
+    const previous = this.jvm.currentThread;
+    this.jvm.currentThread = t;
+    try {
+      fn();
+    } finally {
+      this.jvm.currentThread = previous;
+    }
+  }
+
+  private enqueue(t: JThread): void {
+    if (this.queued.has(t)) return;
+    this.queued.add(t);
+    this.queue.push(t);
+  }
+
+  private makeRunnable(t: JThread): void {
+    t.state = 'runnable';
+    this.enqueue(t);
+    this.wake?.();
+  }
+
+  private resume(t: JThread, result: () => NativeResult): void {
+    this.cancelTimer(t);
+    this.pending.set(t, result);
+    this.makeRunnable(t);
+  }
+
+  /** Frees the monitor and hands it on: a woken waiter takes it with its count, a blocked entrant retries. */
+  private release(m: Monitor): void {
+    m.owner = null;
+    m.count = 0;
+    const next = m.entrySet.shift();
+    if (!next) return;
+    const re = this.reacquiring.get(next);
+    if (!re) {
+      this.makeRunnable(next);
+      return;
+    }
+    this.reacquiring.delete(next);
+    m.owner = next;
+    m.count = re.count;
+    this.resume(next, re.result);
+  }
+
+  private endWait(t: JThread, result: () => NativeResult): void {
+    const w = this.waiting.get(t);
+    if (!w) return;
+    this.waiting.delete(t);
+    this.cancelTimer(t);
+    const m = w.o.monitor!;
+    m.waitSet.splice(m.waitSet.indexOf(t), 1);
+    if (w.count === 0) {
+      this.resume(t, result);
+    } else if (m.owner === null) {
+      m.owner = t;
+      m.count = w.count;
+      this.resume(t, result);
+    } else {
+      t.state = 'blocked-monitor';
+      m.entrySet.push(t);
+      this.reacquiring.set(t, { count: w.count, result });
+    }
+  }
+
+  private after(t: JThread, ms: number, fn: () => void): void {
+    this.cancelTimer(t);
+    let cancel: () => void = () => {};
+    const fire = (): void => {
+      if (this.timers.get(t) !== cancel) return;
+      this.timers.delete(t);
+      fn();
+      const waiters = this.timerWaiters;
+      this.timerWaiters = [];
+      for (const w of waiters) w();
+    };
+    cancel = this.opts.setTimer(Math.min(ms, MAX_TIMER_MS), fire);
+    this.timers.set(t, cancel);
+  }
+
+  private cancelTimer(t: JThread): void {
+    const cancel = this.timers.get(t);
+    if (!cancel) return;
+    this.timers.delete(t);
+    cancel();
+  }
+
+  private illegalMonitorState(): JavaThrowable {
+    return new JavaThrowable(this.jvm.throwNew('java/lang/IllegalMonitorStateException').exception);
+  }
+}
+
+function monitorOf(o: JObject): Monitor {
+  return (o.monitor ??= { owner: null, count: 0, entrySet: [], waitSet: [] });
+}
+
+function takeInterrupt(t: JThread): boolean {
+  const was = t.interrupted;
+  t.interrupted = false;
+  return was;
 }

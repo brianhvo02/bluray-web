@@ -13,7 +13,7 @@ import { ClassPath, Loader, externalName } from './loader';
 import type { JClass, JMethod } from './loader';
 import { ThrowResult } from './interpreter';
 import { JThread, Scheduler } from './threads';
-import { NativeTable, registerBootstrapNatives } from './natives/index';
+import { NativeTable, registerBootstrapNatives, registerSchedulerNatives } from './natives/index';
 import { JavaThrowable } from './values';
 import type { JObject, JValue } from './values';
 
@@ -48,6 +48,7 @@ export class Jvm {
     this.loader = new Loader(this, new ClassPath(opts.bootJars.map((b) => ZipArchive.open(b))));
     this.natives = new NativeTable();
     registerBootstrapNatives(this.natives);
+    registerSchedulerNatives(this.natives);
     this.threads = new Scheduler(this, { slice: TIME_SLICE, nowMs: opts.nowMs, setTimer: opts.setTimer });
   }
 
@@ -64,7 +65,11 @@ export class Jvm {
       if (e instanceof JavaThrowable) throw new Error(this.describe(e.obj));
       throw e;
     }
-    const outcome = await this.threads.run();
+    let outcome = await this.threads.run();
+    while (outcome === 'idle' && t.state !== 'terminated' && this.threads.timersPending) {
+      await this.threads.nextTimer();
+      outcome = await this.threads.run();
+    }
     if (t.uncaught) throw new Error(this.describe(t.uncaught));
     if (t.state !== 'terminated') throw new Error(`${externalName(cls)}.${name} did not finish (${outcome})`);
     return t.result;

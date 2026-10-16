@@ -55,3 +55,15 @@ export function registerBootstrapNatives(table: NativeTable): void {
     },
   });
 }
+
+/** Object monitors and Thread timing, as thin wrappers over the scheduler; a long arrives as a bigint. */
+export function registerSchedulerNatives(table: NativeTable): void {
+  table.register({
+    'java/lang/Thread.registerNatives()V': none,
+    'java/lang/Object.wait(J)V': (ctx, self, ms) => ctx.jvm.threads.wait(ctx.thread, self as JObject, Number(ms as bigint)),
+    'java/lang/Object.notify()V': (ctx, self) => void ctx.jvm.threads.notify(self as JObject, false, ctx.thread),
+    'java/lang/Object.notifyAll()V': (ctx, self) => void ctx.jvm.threads.notify(self as JObject, true, ctx.thread),
+    'java/lang/Thread.sleep(J)V': (ctx, ms) => ctx.jvm.threads.sleep(ctx.thread, Number(ms as bigint)),
+    'java/lang/Thread.yield()V': (ctx) => ctx.jvm.threads.yield(ctx.thread),
+  });
+}

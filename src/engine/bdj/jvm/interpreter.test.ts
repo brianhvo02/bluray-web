@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { execute } from './interpreter';
 import { Jvm } from './jvm';
+import { VirtualClock, assembleClass } from '../../../../tests/helpers/jvm-asm';
+import type { AsmMethod } from '../../../../tests/helpers/jvm-asm';
 
 const jar = (rel: string): Uint8Array => readFileSync(fileURLToPath(new URL(rel, import.meta.url)));
 const BOOT = [
@@ -11,88 +13,10 @@ const BOOT = [
   jar('../../../bdj-classlib/rt-bdj.jar'),
 ];
 
-type Const =
-  | readonly ['utf8', string] | readonly ['class', string] | readonly ['int', number] | readonly ['float', number]
-  | readonly ['long', bigint] | readonly ['double', number] | readonly ['field' | 'method', string, string, string];
-
-interface AsmMethod {
-  readonly name: string;
-  readonly desc: string;
-  /** Bytecode; a `{ c: Const }` entry becomes its 2-byte constant-pool index. */
-  readonly code: readonly (number | { readonly c: Const })[];
-  readonly maxStack?: number;
-  readonly maxLocals?: number;
-  readonly handlers?: readonly (readonly [start: number, end: number, handler: number, type: string | null])[];
-}
-
-/** Emits a minimal class file (version 52, public, ACC_SUPER) with static fields and static methods. */
-function assembleClass(name: string, methods: readonly AsmMethod[], staticFields: readonly [string, string][] = [], superName = 'java/lang/Object'): Uint8Array {
-  const out: number[] = [];
-  const u1 = (v: number): void => void out.push(v & 0xff);
-  const u2 = (v: number): void => { u1(v >> 8); u1(v); };
-  const u4 = (v: number): void => { u2(v >>> 16); u2(v); };
-  const pool: number[][] = [];
-  const keys = new Map<string, number>();
-  let next = 1;
-  const cp = (c: Const): number => {
-    const key = JSON.stringify(c, (_, v: unknown) => (typeof v === 'bigint' ? `${v}n` : v));
-    const hit = keys.get(key);
-    if (hit !== undefined) return hit;
-    const b: number[] = [];
-    const w2 = (v: number): void => void b.push((v >> 8) & 0xff, v & 0xff);
-    const dv = new DataView(new ArrayBuffer(8));
-    switch (c[0]) {
-      case 'utf8': { const s = new TextEncoder().encode(c[1]); b.push(1); w2(s.length); b.push(...s); break; }
-      case 'class': { const n = cp(['utf8', c[1]]); b.push(7); w2(n); break; }
-      case 'int': dv.setInt32(0, c[1]); b.push(3, ...new Uint8Array(dv.buffer, 0, 4)); break;
-      case 'float': dv.setFloat32(0, c[1]); b.push(4, ...new Uint8Array(dv.buffer, 0, 4)); break;
-      case 'long': dv.setBigInt64(0, c[1]); b.push(5, ...new Uint8Array(dv.buffer)); break;
-      case 'double': dv.setFloat64(0, c[1]); b.push(6, ...new Uint8Array(dv.buffer)); break;
-      default: {
-        const cls = cp(['class', c[1]]);
-        const nn = cp(['utf8', c[2]]);
-        const dd = cp(['utf8', c[3]]);
-        pool.push([12, nn >> 8, nn & 0xff, dd >> 8, dd & 0xff]);
-        const natIndex = next++;
-        b.push(c[0] === 'field' ? 9 : 10); w2(cls); w2(natIndex);
-      }
-    }
-    pool.push(b);
-    const index = next;
-    next += c[0] === 'long' || c[0] === 'double' ? 2 : 1;
-    keys.set(key, index);
-    return index;
-  };
-  const thisIndex = cp(['class', name]);
-  const superIndex = cp(['class', superName]);
-  const codeName = cp(['utf8', 'Code']);
-  const bodies = methods.map((m) => {
-    const code: number[] = [];
-    for (const op of m.code) if (typeof op === 'number') code.push(op & 0xff); else { const i = cp(op.c); code.push(i >> 8, i & 0xff); }
-    const handlers = (m.handlers ?? []).map(([s, e, h, t]) => [s, e, h, t === null ? 0 : cp(['class', t])] as const);
-    return { name: cp(['utf8', m.name]), desc: cp(['utf8', m.desc]), code, handlers, maxStack: m.maxStack ?? 8, maxLocals: m.maxLocals ?? 4 };
-  });
-  const fields = staticFields.map(([n, d]) => [cp(['utf8', n]), cp(['utf8', d])] as const);
-  u4(0xcafebabe); u2(0); u2(52);
-  u2(next);
-  for (const e of pool) for (const b of e) u1(b);
-  u2(0x21); u2(thisIndex); u2(superIndex); u2(0);
-  u2(fields.length);
-  for (const [n, d] of fields) { u2(0x0009); u2(n); u2(d); u2(0); }
-  u2(bodies.length);
-  for (const m of bodies) {
-    u2(0x0009); u2(m.name); u2(m.desc); u2(1);
-    u2(codeName); u4(12 + m.code.length + 8 * m.handlers.length);
-    u2(m.maxStack); u2(m.maxLocals); u4(m.code.length); for (const b of m.code) u1(b);
-    u2(m.handlers.length);
-    for (const h of m.handlers) for (const v of h) u2(v);
-    u2(0);
-  }
-  u2(0);
-  return new Uint8Array(out);
-}
-
-const newJvm = (): Jvm => new Jvm({ bootJars: BOOT, nowMs: () => 0, setTimer: () => () => {}, stdout: () => {}, stderr: () => {} });
+const newJvm = (): Jvm => {
+  const clock = new VirtualClock();
+  return new Jvm({ bootJars: BOOT, nowMs: clock.nowMs, setTimer: clock.setTimer, stdout: () => {}, stderr: () => {} });
+};
 
 /** Defines a class `T` with one static method `m` and calls it. */
 async function run1(desc: string, code: AsmMethod['code'], maxLocals?: number): Promise<unknown> {

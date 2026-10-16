@@ -27,13 +27,20 @@ export interface Frame {
 export type NativeResult = JValue | undefined | Suspend | Invoke | ThrowResult;
 
 /**
- * The thread parks until the promise settles; its value is the native method's result. The promise must resolve to a
- * plain JValue or undefined, never to an Invoke or a Frame: both have a `then` property, so the promise machinery would
- * call it as a thenable and the thread would hang without an error.
+ * The thread parks until the promise settles; its value, passed through `k` when given, is the native method's result
+ * (a rejection with a JavaThrowable reaches `k` as a ThrowResult). The promise must resolve to a plain JValue or
+ * undefined, never to an Invoke or a Frame: both have a `then` property, so the promise machinery would call it as a
+ * thenable and the thread would hang without an error.
  */
 export class Suspend {
-  constructor(readonly promise: Promise<JValue | undefined>) {}
+  constructor(
+    readonly promise: Promise<JValue | undefined>,
+    readonly k?: (r: JValue | undefined | ThrowResult) => NativeResult,
+  ) {}
 }
+
+/** The promise of a Suspend the scheduler settles itself: the thread is in a monitor wait, a sleep or a park. */
+export const BLOCKED: Promise<never> = new Promise<never>(() => {});
 
 /** Calls exactly `method` (no virtual selection, no class initialisation) and continues with `then`. */
 export class Invoke {
@@ -79,10 +86,7 @@ class PendingThrow {
   ) {}
 }
 
-/**
- * Runs `k` on the result of `r` once any calls it makes complete; exceptions go to `onThrow` when given. A native
- * reached through an Invoke cannot suspend yet: a Suspend here throws (Task 8/10 must chain `k` onto the promise).
- */
+/** Runs `k` on the result of `r` once any calls and suspensions it makes complete; exceptions go to `onThrow` when given. */
 export function andThen(
   r: NativeResult,
   k: (ret: JValue | undefined) => NativeResult,
@@ -97,7 +101,10 @@ export function andThen(
     );
   }
   if (r instanceof ThrowResult) return onThrow ? onThrow(r.exception) : r;
-  if (r instanceof Suspend) throw new Error('andThen cannot continue a suspended native');
+  if (r instanceof Suspend) {
+    const s = r;
+    return new Suspend(s.promise, (v) => andThen(s.k ? s.k(v) : v, k, onThrow));
+  }
   return k(r);
 }
 
@@ -114,7 +121,12 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
       const inv = r;
       const m = inv.method;
       if (m.isNative) {
-        r = andThen(callNative(jvm, t, m, inv.args), inv.then, inv.onThrow);
+        const lock = m.isSynchronized ? (m.isStatic ? jvm.mirror(m.cls) : (inv.args[0] as JObject)) : null;
+        if (lock && !jvm.threads.monitorEnter(t, lock)) {
+          jvm.threads.later(t, inv);
+          return;
+        }
+        r = andThen(unlocking(jvm, t, lock, callNative(jvm, t, m, inv.args)), inv.then, inv.onThrow);
         continue;
       }
       const thrown = (e: JObject): NativeResult => (inv.onThrow ? inv.onThrow(e) : new ThrowResult(e));
@@ -137,9 +149,10 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
       callee.then = (ret, e) => (e ? thrown(e) : inv.then(ret));
       if (m.isSynchronized) {
         callee.lock = m.isStatic ? jvm.mirror(m.cls) : (callee.locals[0] as JObject);
-        // Task 8: when monitorEnter returns false the thread must block and retry this Invoke later, instead of
-        // pushing the frame without holding the monitor as it does now.
-        jvm.threads.monitorEnter(t, callee.lock);
+        if (!jvm.threads.monitorEnter(t, callee.lock)) {
+          jvm.threads.later(t, inv);
+          return;
+        }
       }
       t.frames.push(callee);
       return;
@@ -149,7 +162,7 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
       return;
     }
     if (r instanceof Suspend) {
-      jvm.threads.suspendOn(t, r.promise);
+      jvm.threads.suspend(t, r);
       return;
     }
     const caller = t.frames[t.frames.length - 1] as JFrame | undefined;
@@ -164,6 +177,22 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
     caller.pc = caller.nextPc;
     return;
   }
+}
+
+/** Releases a synchronized native's monitor once its result is complete, whether it returns or throws. */
+function unlocking(jvm: Jvm, t: JThread, lock: JObject | null, r: NativeResult): NativeResult {
+  if (!lock) return r;
+  return andThen(
+    r,
+    (v) => {
+      jvm.threads.monitorExit(t, lock);
+      return v;
+    },
+    (e) => {
+      jvm.threads.monitorExit(t, lock);
+      return new ThrowResult(e);
+    },
+  );
 }
 
 function callNative(jvm: Jvm, t: JThread, m: JMethod, args: readonly JValue[]): NativeResult {
@@ -309,9 +338,9 @@ function ldc2(cls: JClass, index: number): number | bigint {
 /** Pops the arguments for `m` from `f` and calls it: a new frame for Java code, the native function otherwise. */
 function call(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void {
   if (m.isNative) {
-    // Task 8: a synchronized native must enter the monitor (receiver or class mirror) before the call, retrying the
-    // instruction when monitorEnter returns false, and exit it once its result is complete; none is taken now.
     let s = f.sp - m.argSlots;
+    const lock = m.isSynchronized ? (m.isStatic ? jvm.mirror(m.cls) : (f.stack[s] as JObject)) : null;
+    if (lock && !jvm.threads.monitorEnter(t, lock)) return; // blocked: the instruction runs again
     f.sp = s;
     const args: JValue[] = [];
     if (!m.isStatic) args.push(f.stack[s++]!);
@@ -321,7 +350,7 @@ function call(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void
     }
     f.nextPc = nextPc;
     f.wideResult = m.returnType === 'D';
-    complete(jvm, t, callNative(jvm, t, m, args));
+    complete(jvm, t, unlocking(jvm, t, lock, callNative(jvm, t, m, args)));
     return;
   }
   if (!m.code) throw new PendingThrow('java/lang/AbstractMethodError', `${externalName(m.cls.name)}.${m.name}${m.desc}`);

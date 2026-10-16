@@ -530,7 +530,8 @@ export class Loader {
 
   /**
    * Class initialisation (JVM §5.5). Null when the class is ready for this thread now; otherwise the work to do
-   * (an Invoke chain running the initialisers, or the exception), after which the caller retries.
+   * (an Invoke chain running the initialisers, a wait for the thread initialising it, or the exception), after which
+   * the caller retries.
    */
   initialize(t: JThread, c: JClass): NativeResult | null {
     switch (c.state) {
@@ -538,9 +539,7 @@ export class Loader {
         return null;
       case 'initializing':
         if (c.initThread === t) return null;
-        // Task 8: §5.5 step 2, wait on the class's initialisation (block until the other thread finishes, then
-        // re-check the state) instead of throwing.
-        throw new Error(`${c.name} is being initialised by another thread`);
+        return this.jvm.threads.awaitInit(t, c);
       case 'erroneous':
         return this.jvm.throwNew('java/lang/NoClassDefFoundError', `Could not initialize class ${externalName(c.name)}`);
     }
@@ -554,7 +553,7 @@ export class Loader {
     for (let i = from; i < supers.length; i++) {
       const r = this.initialize(t, supers[i]!);
       if (r !== null && r !== undefined) {
-        return andThen(r, () => this.initFrom(t, c, i + 1), (e) => this.initFailed(c, e));
+        return andThen(r, () => this.initFrom(t, c, i), (e) => this.initFailed(c, e));
       }
     }
     const clinit = c.methods.get('<clinit>()V');
@@ -565,6 +564,7 @@ export class Loader {
   private initDone(c: JClass): undefined {
     c.state = 'initialized';
     c.initThread = null;
+    this.jvm.threads.initFinished(c);
     return undefined;
   }
 
@@ -572,6 +572,7 @@ export class Loader {
     c.state = 'erroneous';
     c.initThread = null;
     c.initError = e;
+    this.jvm.threads.initFinished(c);
     return new ThrowResult(e);
   }
 
