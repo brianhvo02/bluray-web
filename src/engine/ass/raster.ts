@@ -155,19 +155,44 @@ export interface RasterContext {
   readonly masks?: MaskCache;
   /** Each animated run's last shape (its mask key without position): a run whose shape changes every frame is drawn directly. */
   readonly lastShapes?: Map<string, string>;
+  /** Coloured run layers by mask and colours (libass's composite cache): a run that only moves is one drawImage. */
+  readonly layers?: LayerCache;
 }
 
 export interface RunMasks { readonly w: number; readonly h: number; readonly fill: Uint8Array; readonly border: Uint8Array | null; readonly shadow: Uint8Array | null }
 export interface MaskCache { get(key: string): RunMasks | undefined; set(key: string, masks: RunMasks): void }
+/** Layers positioned relative to the run's canvas origin. */
+export interface CachedLayers { readonly shadow: Layer | null; readonly border: Layer | null; readonly fill: Layer | null; readonly ox: number; readonly oy: number }
+export interface LayerCache { get(key: string): CachedLayers | undefined; set(key: string, layers: CachedLayers): void }
 
-/** Positions on a 1/8 px grid, as libass's quantize_transform keeps them, so cached masks fit any frame. */
-const POSITION_GRID = 8; // 26.6 units
+/** libass's subpixel grid: 1/8 px, in 26.6 units. */
+const POSITION_GRID = 8;
+
+/**
+ * quantize_transform's positions for a run (affine glyphs): the first glyph with ink has the centre of its box
+ * rounded to the 1/8 px grid, and every glyph is first moved by that rounding, then has its own centre rounded.
+ * Glyphs stay on the grid relative to the run, so cached masks fit any frame.
+ */
+export function quantizePositions(glyphs: readonly GlyphInfo[], mats: readonly Mat3[]): Mat3[] {
+  let offset: readonly [number, number] | null = null;
+  return mats.map((m, k) => {
+    if (!isAffine(m)) return m;
+    const g = glyphs[k]!;
+    const [cx, cy] = applyMat3(m, (g.bboxXMin + g.bboxXMax) / 2, (g.bboxYMin + g.bboxYMax) / 2);
+    const c = [cx / POSITION_GRID, cy / POSITION_GRID] as const;
+    const inked = g.bboxXMax > g.bboxXMin && g.bboxYMax > g.bboxYMin;
+    const d = offset ?? [0, 0];
+    const q = [Math.round(c[0] - d[0]), Math.round(c[1] - d[1])] as const;
+    if (!offset && inked) offset = [c[0] - q[0], c[1] - q[1]];
+    return [m[0], m[1], m[2] + (q[0] - c[0]) * POSITION_GRID, m[3], m[4], m[5] + (q[1] - c[1]) * POSITION_GRID, m[6], m[7], m[8]] as Mat3;
+  });
+}
 
 /** An event composited into one canvas; drawn at (x, y + the event's collision shift). */
 export interface RenderedEvent { readonly canvas: OffscreenCanvas; readonly x: number; readonly y: number }
 
 /** A coloured layer at a frame position: pixels (the mask path) or a canvas (the direct path). */
-interface Layer { x: number; y: number; w: number; h: number; data?: ImageData; canvas?: OffscreenCanvas }
+export interface Layer { x: number; y: number; w: number; h: number; data?: ImageData; canvas?: OffscreenCanvas }
 interface RunLayers { shadow: Layer | null; border: Layer | null; fill: Layer | null }
 
 type Affine = [number, number, number, number, number, number];
@@ -305,9 +330,30 @@ function boxRect(s: RenderState, g: GlyphInfo): [number, number, number, number]
  */
 const STATIC_SS = 4;
 const ANIMATED_SS = 2;
+/**
+ * Chrome draws text under about 256 device px from a glyph cache that snaps the baseline to whole pixels (and x to
+ * quarter pixels); larger text is filled as exact paths. Text runs are supersampled enough to reach that size, up
+ * to MAX_TEXT_SS, where the snapping is at most 1/16 px.
+ */
+const PATH_TEXT_PX = 256;
+const MAX_TEXT_SS = 8;
+
+/** The supersampling factor for a run's masks. */
+export function textSupersampling(base: number, glyphs: readonly GlyphInfo[], mats: readonly Mat3[]): number {
+  let ss = base;
+  glyphs.forEach((g, k) => {
+    if (g.drawingText !== null || !g.face || g.emPx <= 0) return;
+    const t = glyphAffine(mats[k]!, g);
+    const px = g.emPx * Math.sqrt(Math.abs(t[0] * t[3] - t[1] * t[2]));
+    if (px > 0) ss = Math.max(ss, Math.min(MAX_TEXT_SS, Math.ceil(PATH_TEXT_PX / px)));
+  });
+  return ss;
+}
 function supersampled(rc: RasterContext, w: number, h: number, ss: number, draw: (ctx: OffscreenCanvasRenderingContext2D) => void): Uint8Array {
   const big = rc.createCanvas(w * ss, h * ss);
-  const ctx = big.getContext('2d', { willReadFrequently: true })!;
+  // GPU-backed although read back once: Chrome's CPU canvases snap the baseline of text under 256 px to whole
+  // pixels (and x to quarter pixels), which the GPU's glyph atlas positions to a few hundredths
+  const ctx = big.getContext('2d')!;
   ctx.fillStyle = '#fff';
   ctx.strokeStyle = '#fff';
   draw(ctx);
@@ -334,22 +380,47 @@ function readAlpha(ctx: OffscreenCanvasRenderingContext2D, w: number, h: number)
   return out;
 }
 
-/** A Gaussian blur of an alpha mask, by the canvas filter. */
-function blur(rc: RasterContext, mask: Uint8Array, w: number, h: number, sigma: number): Uint8Array {
-  if (sigma < 0.03) return mask;
-  const src = rc.createCanvas(w, h);
-  const sctx = src.getContext('2d', { willReadFrequently: true })!;
-  const img = sctx.createImageData(w, h);
-  for (let i = 0; i < mask.length; i++) {
-    img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = 255;
-    img.data[4 * i + 3] = mask[i]!;
-  }
-  sctx.putImageData(img, 0, 0);
-  const dst = rc.createCanvas(w, h);
-  const dctx = dst.getContext('2d', { willReadFrequently: true })!;
-  dctx.filter = `blur(${sigma}px)`;
-  dctx.drawImage(src, 0, 0);
-  return readAlpha(dctx, w, h);
+/** Normalized taps of a sampled Gaussian, out to 3σ. */
+function gaussianKernel(sigma: number): Float64Array {
+  const r = Math.max(1, Math.ceil(3 * sigma));
+  const k = new Float64Array(2 * r + 1);
+  let sum = 0;
+  for (let i = -r; i <= r; i++) sum += k[i + r] = Math.exp((-i * i) / (2 * sigma * sigma));
+  for (let i = 0; i < k.length; i++) k[i]! /= sum;
+  return k;
+}
+
+/**
+ * A Gaussian blur of an alpha mask with separate x and y deviations, like ass_gaussian_blur. Done in JS rather
+ * than by the canvas filter: Chrome's CPU-backed canvases (the ones we read back) approximate blur() with box
+ * passes that drop deviations under 0.8 px and step coarsely above.
+ */
+export function gaussianBlur(mask: Uint8Array, w: number, h: number, sigmaX: number, sigmaY: number): Uint8Array {
+  if (sigmaX < 0.03 && sigmaY < 0.03) return mask;
+  let buf = Float64Array.from(mask);
+  const pass = (sigma: number, horizontal: boolean): void => {
+    if (sigma < 0.03) return;
+    const k = gaussianKernel(sigma);
+    const r = (k.length - 1) / 2;
+    const out = new Float64Array(buf.length);
+    const [n, lines, step, stride] = horizontal ? [w, h, 1, w] : [h, w, w, 1];
+    for (let line = 0; line < lines; line++) {
+      const base = line * stride;
+      for (let i = 0; i < n; i++) {
+        const v = buf[base + i * step]!;
+        if (v === 0) continue;
+        const lo = Math.max(0, i - r);
+        const hi = Math.min(n - 1, i + r);
+        for (let j = lo; j <= hi; j++) out[base + j * step]! += v * k[j - i + r]!;
+      }
+    }
+    buf = out;
+  };
+  pass(sigmaX, true);
+  pass(sigmaY, false);
+  const res = new Uint8Array(mask.length);
+  for (let i = 0; i < res.length; i++) res[i] = Math.min(255, Math.round(buf[i]!));
+  return res;
 }
 
 function colorize(mask: Uint8Array, w: number, h: number, color: (x: number) => number, x0: number, y0: number): Layer {
@@ -372,15 +443,10 @@ function colorize(mask: Uint8Array, w: number, h: number, color: (x: number) => 
 
 /** Renders a run's shadow, border and fill layers in device space. */
 function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], runIndex: number): RunLayers {
-  const ss = ev.animated ? ANIMATED_SS : STATIC_SS;
   const s = ev.layout.text.state;
   const glyphs = idx.map((i) => ev.layout.text.glyphs[i]!);
-  const mats = idx.map((i) => {
-    const m = normalize(ev.matrices[i]!);
-    if (!isAffine(m)) return m;
-    const q = (v: number): number => Math.round(v / POSITION_GRID) * POSITION_GRID;
-    return [m[0], m[1], q(m[2]), m[3], m[4], q(m[5]), m[6], m[7], m[8]] as Mat3;
-  });
+  const mats = quantizePositions(glyphs, idx.map((i) => normalize(ev.matrices[i]!)));
+  const ss = textSupersampling(ev.animated ? ANIMATED_SS : STATIC_SS, glyphs, mats);
   const first = glyphs[0]!;
   const flags = runFlags(first);
   const c = first.c.map((v) => { const f = applyFade(v, first.fade); return rc.mapColor ? rc.mapColor(f) : f; });
@@ -398,6 +464,8 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   const ry = Math.hypot(jxy * by26, jyy * by26) / 64;
   const r2x = blurVariance(first.blur, s.blurScaleX);
   const r2y = blurVariance(first.blur, s.blurScaleY);
+  const sigmaX = Math.sqrt(r2x + 0.5 * first.be);
+  const sigmaY = Math.sqrt(r2y + 0.5 * first.be);
   const sigma = Math.sqrt((r2x + r2y) / 2 + 0.5 * first.be);
   const shadow26X = quantizeShadow(doubleToD6(first.shadowX * s.borderScaleX), first.blur * s.blurScaleX * BLUR_RADIUS_SCALE);
   const shadow26Y = quantizeShadow(doubleToD6(first.shadowY * s.borderScaleY), first.blur * s.blurScaleY * BLUR_RADIUS_SCALE);
@@ -433,7 +501,10 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   // onto canvases (GPU, no read-back) when compositing allows it; moving, fading or karaoke runs keep their masks
   let reshaped = false;
   if (ev.animated && rc.lastShapes) {
-    const shapeKey = maskKey(glyphs, mats.map((m) => [m[0], m[1], 0, m[3], m[4], 0, m[6], m[7], m[8]] as Mat3), 0, 0, w, h, flags, bx26, by26, sigma, s, ss);
+    // no position and no canvas size (both follow the sub-pixel position of a run that only moves)
+    // nor the fill-in flags, which follow the alpha (a fade)
+    const shapeFlags = flags & ~(FILTER_FILL_IN_BORDER | FILTER_FILL_IN_SHADOW);
+    const shapeKey = maskKey(glyphs, mats.map((m) => [m[0], m[1], 0, m[3], m[4], 0, m[6], m[7], m[8]] as Mat3), 0, 0, 0, 0, shapeFlags, bx26, by26, sigma, s, ss);
     const id = `${ev.index}:${runIndex}`;
     reshaped = rc.lastShapes.get(id) !== undefined && rc.lastShapes.get(id) !== shapeKey;
     rc.lastShapes.set(id, shapeKey);
@@ -442,29 +513,70 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
     && (!(flags & FILTER_NONZERO_BORDER) || (flags & FILTER_FILL_IN_BORDER) !== 0)
     && (!(flags & FILTER_NONZERO_SHADOW) || (flags & FILTER_FILL_IN_SHADOW) !== 0);
   if (direct && !rc.masks?.get(key)) return directLayers();
-  const cached = rc.masks?.get(key);
-  const masks = cached ?? buildMasks();
-  if (!cached) rc.masks?.set(key, masks);
-  return colorLayers(masks.fill, masks.border, masks.shadow);
+
+  const type = first.effectType;
+  const kTiming = first.effectTiming;
+  const colorKey = rc.layers
+    ? `${key}#${c.join(',')}#${type}#${type === EF_KARAOKE_KF ? kfBreak(glyphs, mats, first, s.parScaleX) - ox : kTiming > 0 ? 1 : 0}`
+    : '';
+  const hit = rc.layers?.get(colorKey);
+  if (hit) {
+    const at = (l: Layer | null): Layer | null => (l ? { ...l, x: l.x + ox - hit.ox, y: l.y + oy - hit.oy } : null);
+    return { shadow: at(hit.shadow), border: at(hit.border), fill: at(hit.fill) };
+  }
+  const result = layersFromMasks();
+  if (rc.layers) {
+    const toCanvas = (l: Layer | null): Layer | null => {
+      if (!l?.data) return l;
+      const canvas = rc.createCanvas(l.w, l.h);
+      canvas.getContext('2d')!.putImageData(l.data, 0, 0);
+      return { x: l.x, y: l.y, w: l.w, h: l.h, canvas };
+    };
+    const stored = { shadow: toCanvas(result.shadow), border: toCanvas(result.border), fill: toCanvas(result.fill), ox, oy };
+    rc.layers.set(colorKey, stored);
+    return stored;
+  }
+  return result;
+
+  function layersFromMasks(): RunLayers {
+    const cached = rc.masks?.get(key);
+    const masks = cached ?? buildMasks();
+    if (!cached) rc.masks?.set(key, masks);
+    return colorLayers(masks.fill, masks.border, masks.shadow);
+  }
 
   /**
    * White shapes drawn by the canvas and tinted with source-in, for a run whose border keeps the fill (opaque fill)
    * and whose shadow takes the whole shape: no ass_fix_outline is needed, so no pixels are read back.
    */
   function directLayers(): RunLayers {
+    // text supersampled on the GPU past the glyph cache's baseline snapping, then scaled down (and blurred) there
+    const dss = textSupersampling(1, glyphs, mats);
     const shapes = (borderWidthOf: ((k: number) => number) | null, blurred: boolean): OffscreenCanvas => {
+      const draw = (ctx: OffscreenCanvasRenderingContext2D, scale: number): void => {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#fff';
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        glyphs.forEach((g, k) => {
+          const t = glyphAffine(mats[k]!, g);
+          ctx.setTransform(scale * t[0], scale * t[1], scale * t[2], scale * t[3], scale * (t[4] - ox), scale * (t[5] - oy));
+          drawGlyph(ctx, g, rc, borderWidthOf ? borderWidthOf(k) : 0);
+        });
+      };
       const canvas = rc.createCanvas(w, h);
       const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#fff';
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      if (blurred && sigma >= 0.03) ctx.filter = `blur(${sigma}px)`;
-      glyphs.forEach((g, k) => {
-        const t = glyphAffine(mats[k]!, g);
-        ctx.setTransform(t[0], t[1], t[2], t[3], t[4] - ox, t[5] - oy);
-        drawGlyph(ctx, g, rc, borderWidthOf ? borderWidthOf(k) : 0);
-      });
+      const filter = blurred && sigma >= 0.03 ? `blur(${sigma}px)` : 'none';
+      if (dss === 1) {
+        ctx.filter = filter;
+        draw(ctx, 1);
+        return canvas;
+      }
+      const big = rc.createCanvas(w * dss, h * dss);
+      draw(big.getContext('2d')!, dss);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.filter = filter;
+      ctx.drawImage(big, 0, 0, w, h);
       return canvas;
     };
     const tint = (shape: OffscreenCanvas, paint: (ctx: OffscreenCanvasRenderingContext2D) => void, x: number, y: number): Layer => {
@@ -623,8 +735,8 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   }
 
   // ass_synth_blur: the fill only without a border (or for the opaque box), the border always
-  if (!(flags & FILTER_NONZERO_BORDER) || flags & FILTER_BORDER_STYLE_3) fill = blur(rc, fill, w, h, sigma);
-  if (border) border = blur(rc, border, w, h, sigma);
+  if (!(flags & FILTER_NONZERO_BORDER) || flags & FILTER_BORDER_STYLE_3) fill = gaussianBlur(fill, w, h, sigmaX, sigmaY);
+  if (border) border = gaussianBlur(border, w, h, sigmaX, sigmaY);
 
   if (border && !(flags & FILTER_FILL_IN_BORDER) && !(flags & FILTER_FILL_IN_SHADOW)) fixOutline(fill, border);
   let shadow: Uint8Array | null = null;
@@ -751,13 +863,13 @@ export function renderEvent(rc: RasterContext, ev: FrameEvent, frame: { readonly
   const x1 = Math.ceil(Math.max(...layers.map((l) => l.x + l.w)));
   const y1 = Math.ceil(Math.max(...layers.map((l) => l.y + l.h)));
   const out = rc.createCanvas(x1 - x0, y1 - y0);
-  const ctx = out.getContext('2d', { willReadFrequently: true })!;
+  const ctx = out.getContext('2d')!; // drawn, never read: stays on the GPU
   ctx.translate(-x0, -y0);
   applyClip(ctx, rc, ev, frame);
   let scratch: OffscreenCanvas | null = null;
   for (const layer of layers) {
     if (!scratch || scratch.width < layer.w || scratch.height < layer.h) scratch = rc.createCanvas(Math.max(layer.w, scratch?.width ?? 0), Math.max(layer.h, scratch?.height ?? 0));
-    const sctx = scratch.getContext('2d', { willReadFrequently: true })!;
+    const sctx = scratch.getContext('2d')!;
     if (layer.canvas) {
       ctx.drawImage(layer.canvas, layer.x, layer.y);
       continue;

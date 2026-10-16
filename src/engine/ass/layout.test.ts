@@ -123,10 +123,9 @@ describe('layoutEvent', () => {
 
   it('rounds advances to whole pixels at the 256 px outline size, as FreeType does', () => {
     const g = shown(lay('ab'));
-    // the fixed measurer gives 0.5 em; at 256 px that is a fraction of a pixel, rounded before scaling down
+    // the fixed measurer gives 0.5 em, rounded to whole pixels at the outline size before scaling down
     const em = g[0]!.emPx;
     expect(g[0]!.advanceX).toBe(Math.round(Math.round(0.5 * em) * 64 * g[0]!.scaleX));
-    expect(Math.round(0.5 * em)).not.toBe(0.5 * em);
   });
 
   it('merges ligature clusters: the first character draws the ligature, the rest are skipped', () => {

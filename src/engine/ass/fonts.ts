@@ -63,9 +63,21 @@ function similarity(a: FaceInfo, weight: number, italic: boolean): number {
   return score + Math.floor((73 * Math.abs(w - weight)) / 256);
 }
 
-/** px em size for an ASS font size: ass_face_set_size with REAL_DIM makes ascender + descender the size. */
+/**
+ * px em size for an ASS font size: ass_face_set_size with REAL_DIM makes ascender + descender the size. This is the
+ * scale of FreeType's unhinted outlines and of the size metrics ass_font_get_asc_desc reads.
+ */
 export function emSize(face: FaceInfo, size: number): number {
   return (size * face.unitsPerEm) / (face.ascender - face.descender);
+}
+
+/**
+ * px em size of the shaper's advances: HarfBuzz reads them hinted (FT_LOAD_DEFAULT), and FreeType's TrueType
+ * driver scales hinted glyphs by the ppem rounded to whole pixels for fonts whose head flags ask for it.
+ */
+export function advanceEmSize(face: FaceInfo, size: number): number {
+  const em = emSize(face, size);
+  return face.integerPpem ? Math.round(em) : em;
 }
 
 /** The faces an ASS_Font has added so far (add_face), in order. */

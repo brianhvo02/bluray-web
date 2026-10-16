@@ -27,6 +27,11 @@ export interface FaceInfo {
   /** CFF outlines (libass's ass_face_is_postscript). */
   readonly isPostscript: boolean;
   readonly unitsPerEm: number;
+  /**
+   * A TrueType face whose head flags force an integer ppem (bit 3): FreeType's TrueType driver rounds the pixel
+   * size of hinted loads, so the shaper's advances use the rounded em; unhinted outlines and the size metrics don't.
+   */
+  readonly integerPpem: boolean;
   /** set_font_metrics's GDI ascender and descender, font units, descender negative. */
   readonly ascender: number;
   readonly descender: number;
@@ -267,7 +272,7 @@ function faceInfo(file: string, index: number, tables: Tables): FaceInfo {
     file, index, families, fullNames: msNames(4), postscriptName: ps?.text ?? null,
     weight: weightOf(usWeightClass, bold), italic, bold,
     isPostscript: tables.has('CFF ') || tables.has('CFF2'),
-    unitsPerEm, ascender, descender,
+    unitsPerEm, integerPpem: tables.has('glyf') && (hv.getUint16(16) & 8) !== 0, ascender, descender,
     underlinePosition: post && post.length >= 12 ? view(post).getInt16(8) : 0,
     underlineThickness: post && post.length >= 12 ? view(post).getInt16(10) : 0,
     strikeoutSize: os2 && os2.length >= 30 ? view(os2).getInt16(26) : 0,

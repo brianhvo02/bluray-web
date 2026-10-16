@@ -18,7 +18,7 @@
 
 import { parseDrawing } from './drawing';
 import { d6ToDouble, doubleToD6, lrint, processKaraoke, type EventText, type GlyphInfo } from './events';
-import { emSize, type AssFonts } from './fonts';
+import { advanceEmSize, emSize, type AssFonts } from './fonts';
 import { DECO_ROTATE, DECO_STRIKETHROUGH, DECO_UNDERLINE, EVENT_POSITIONED, type RenderState } from './state';
 import { HALIGN_CENTER, HALIGN_LEFT, HALIGN_RIGHT, VALIGN_CENTER, VALIGN_SUB, VALIGN_TOP } from './types';
 import type { GlyphMeasurer } from './measure';
@@ -100,12 +100,15 @@ function shape(e: EventText, fonts: AssFonts, measurer: GlyphMeasurer): void {
     const first = runGlyphs[0]!;
     const face = first.face ?? fonts.resolve(first.font);
     const em = emSize(face.face, first.fontSize);
+    const advanceEm = advanceEmSize(face.face, first.fontSize);
     const cps = runGlyphs.map((x) => (x.symbol === NEWLINE ? SPACE : x.symbol));
+    // ink at the outline size, advances at the hinted size (the browser's advances don't scale linearly)
     const metrics = measurer.measureRun(face.cssFamily, em, cps, kerning);
+    const advances = advanceEm === em ? metrics : measurer.measureRun(face.cssFamily, advanceEm, cps, kerning);
     // HarfBuzz merges ligatures into one cluster (liga and clig are off with \fsp)
     const clusters = first.hspacing === 0 ? face.face.clusters(cps) : cps.map((_, k) => k);
     const clusterPx = new Map<number, number>();
-    clusters.forEach((root, k) => clusterPx.set(root, (clusterPx.get(root) ?? 0) + metrics[k]!.advance));
+    clusters.forEach((root, k) => clusterPx.set(root, (clusterPx.get(root) ?? 0) + advances[k]!.advance));
     clusters.forEach((root, k) => {
       if (root !== k) runGlyphs[root]!.clusterText = (runGlyphs[root]!.clusterText ?? String.fromCodePoint(cps[root]!)) + String.fromCodePoint(cps[k]!);
     });
@@ -120,7 +123,7 @@ function shape(e: EventText, fonts: AssFonts, measurer: GlyphMeasurer): void {
       info.skip = false;
       info.emPx = em;
       info.metrics = m;
-      // FreeType's advances are whole pixels at the outline size (256 px), HarfBuzz uses them as they are
+      // FreeType's hinted advances are whole pixels at the outline size (256 px), HarfBuzz uses them as they are
       let adv = isIgnorable(info.symbol) || info.symbol === NEWLINE ? 0 : Math.round(clusterPx.get(k)!) * 64;
       if (info.flags & DECO_ROTATE) adv = Math.round(info.fontSize * 64); // vertical advance ≈ the face height at REAL_DIM size
       info.offsetX = 0;

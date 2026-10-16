@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   blurVariance, dilate, FILTER_BORDER_STYLE_3, FILTER_FILL_IN_BORDER, FILTER_FILL_IN_SHADOW, FILTER_NONZERO_BORDER,
-  FILTER_NONZERO_SHADOW, fixOutline, quantizeShadow, runFlags,
+  FILTER_NONZERO_SHADOW, fixOutline, gaussianBlur, quantizePositions, quantizeShadow, runFlags,
 } from './raster';
 
 const glyph = (over: Record<string, number | number[]> = {}) => ({
@@ -71,5 +71,50 @@ describe('dilate', () => {
     const out = dilate(m, w, w, 4, 1);
     expect(out[5 * w + 9]).toBe(255);
     expect(out[8 * w + 5]).toBe(0);
+  });
+});
+
+describe('gaussianBlur', () => {
+  const line = (): Uint8Array => {
+    const m = new Uint8Array(40 * 3);
+    for (let y = 0; y < 3; y++) m[y * 40 + 19] = m[y * 40 + 20] = 255;
+    return m;
+  };
+
+  it('softens a 2 px stroke even at deviations under 0.8 px', () => {
+    const out = gaussianBlur(line(), 40, 3, 0.64, 0);
+    expect(out[40 + 18]).toBeGreaterThan(30);
+    expect(out[40 + 19]).toBeGreaterThan(190);
+    expect(out[40 + 19]).toBeLessThan(225);
+    expect(out[40 + 19]).toBe(out[40 + 20]);
+  });
+
+  it('keeps the mass and blurs each axis by its own deviation', () => {
+    const out = gaussianBlur(line(), 40, 3, 1.5, 0);
+    expect(out.reduce((a, b) => a + b, 0)).toBeGreaterThan(3 * 510 - 12);
+    expect(out[18]).toBe(out[40 + 18]); // no vertical blur
+    expect(gaussianBlur(line(), 40, 3, 0, 0)).toEqual(line());
+  });
+});
+
+describe('quantizePositions (quantize_transform)', () => {
+  const g = (x0: number, x1: number) => ({ bboxXMin: x0, bboxXMax: x1, bboxYMin: -640, bboxYMax: 0 }) as unknown as Parameters<typeof quantizePositions>[0][number];
+  const at = (x: number, y: number) => [1, 0, x, 0, 1, y, 0, 0, 1] as [number, number, number, number, number, number, number, number, number];
+
+  it('moves the run by the rounding of the first inked glyph\'s box centre', () => {
+    // centre of glyph 0: (3 + 100, -320 + 5) 26.6 → x 103/8 = 12.875 → 13 (+1), y -315/8 = -39.375 → -39 (+3)
+    const [m0, m1] = quantizePositions([g(0, 200), g(0, 202)], [at(3, 5), at(1003, 5)]);
+    expect([m0![2], m0![5]]).toEqual([4, 8]);
+    // glyph 1: centre x (1003 + 101)/8 = 138 minus the run's offset (-0.125) → 138.125 → 138: unmoved;
+    // y has the same centre as glyph 0, so it moves with it
+    expect([m1![2], m1![5]]).toEqual([1003, 8]);
+  });
+
+  it('ignores glyphs without ink for the run offset and keeps perspective matrices', () => {
+    const persp = [1, 0, 3, 0, 1, 5, 1e-3, 0, 1] as const;
+    const [space, ink, p] = quantizePositions([g(0, 0), g(0, 200), g(0, 200)], [at(3, 5), at(3, 5), [...persp]]);
+    expect(ink![2]).toBe(4); // as if it came first: the space before it sets no offset
+    expect(space![2]).toBe(0); // its own centre (3 26.6 = 0.375 grid) rounded
+    expect(p).toEqual([...persp]);
   });
 });

@@ -12,7 +12,7 @@ import type { TextRenderOptions } from '../subs/text-renderer';
 import type { AssFonts } from './fonts';
 import { FrameBuilder, type FrameEvent } from './frame';
 import type { GlyphMeasurer } from './measure';
-import { renderEvent, type MaskCache, type RasterContext, type RenderedEvent, type RunMasks } from './raster';
+import { renderEvent, type CachedLayers, type RasterContext, type RenderedEvent, type RunMasks } from './raster';
 import type { RenderSettings } from './state';
 import type { Mat3 } from './transform';
 import { YCbCr, type AssTrack, type YCbCrMatrix } from './types';
@@ -32,30 +32,45 @@ export interface AssRendererDeps {
 }
 
 const CACHE_SIZE = 64;
-const MASK_CACHE_SIZE = 256;
-
-/** Least recently used run masks (libass bounds its bitmap caches the same way). */
-class MaskLru implements MaskCache {
-  private readonly map = new Map<string, RunMasks>();
-  get(key: string): RunMasks | undefined {
-    const v = this.map.get(key);
-    if (v) {
-      this.map.delete(key);
-      this.map.set(key, v);
-    }
-    return v;
-  }
-  set(key: string, masks: RunMasks): void {
-    this.map.set(key, masks);
-    if (this.map.size > MASK_CACHE_SIZE) this.map.delete(this.map.keys().next().value!);
-  }
-  clear(): void {
-    this.map.clear();
-  }
-}
 const BUDGET_MS = 8;
 const SEEK_MS = 1000;
 const ANIMATION_STEP_MS = 40;
+const MASK_CACHE_BYTES = 64 * 1024 * 1024;
+const LAYER_CACHE_BYTES = 128 * 1024 * 1024;
+
+/** Least recently used values within a byte budget (libass bounds its bitmap caches the same way). */
+class SizedLru<V> {
+  private readonly map = new Map<string, { value: V; bytes: number }>();
+  private bytes = 0;
+  constructor(private readonly budget: number, private readonly sizeOf: (v: V) => number) {}
+  get(key: string): V | undefined {
+    const e = this.map.get(key);
+    if (!e) return undefined;
+    this.map.delete(key);
+    this.map.set(key, e);
+    return e.value;
+  }
+  set(key: string, value: V): void {
+    const old = this.map.get(key);
+    if (old) this.bytes -= old.bytes;
+    const bytes = this.sizeOf(value);
+    this.map.delete(key);
+    this.map.set(key, { value, bytes });
+    this.bytes += bytes;
+    while (this.bytes > this.budget && this.map.size > 1) {
+      const [k, e] = this.map.entries().next().value!;
+      this.map.delete(k);
+      this.bytes -= e.bytes;
+    }
+  }
+  clear(): void {
+    this.map.clear();
+    this.bytes = 0;
+  }
+}
+
+const maskBytes = (m: RunMasks): number => m.fill.length + (m.border?.length ?? 0) + (m.shadow?.length ?? 0);
+const layerBytes = (l: CachedLayers): number => [l.shadow, l.border, l.fill].reduce((n, x) => n + (x ? 4 * x.w * x.h : 0), 0);
 
 const BT601 = { kr: 0.299, kb: 0.114 };
 const BT709 = { kr: 0.2126, kb: 0.0722 };
@@ -84,7 +99,8 @@ export class AssRenderer implements TextRendererLike {
   private builder: FrameBuilder;
   private readonly rc: RasterContext;
   private readonly cache = new Map<number, RenderedEvent | null>();
-  private readonly masks = new MaskLru();
+  private readonly masks = new SizedLru<RunMasks>(MASK_CACHE_BYTES, maskBytes);
+  private readonly layers = new SizedLru<CachedLayers>(LAYER_CACHE_BYTES, layerBytes);
   private cacheSettings: RenderSettings | null = null;
   private lastActive = '';
   private lastAnimated = false;
@@ -102,6 +118,7 @@ export class AssRenderer implements TextRendererLike {
       createCanvas: deps.createCanvas,
       Path2D: deps.Path2D,
       masks: this.masks,
+      layers: this.layers,
       lastShapes: new Map(),
       ...(deps.warp ? { warp: deps.warp } : {}),
       ...(deps.colorMatrix === 'video' ? { mapColor: (c: number) => convertColor(c, track.ycbcrMatrix, 'video') } : {}),
@@ -149,6 +166,7 @@ export class AssRenderer implements TextRendererLike {
     if (!sameSettings(this.cacheSettings, settings)) {
       this.cache.clear();
       this.masks.clear();
+      this.layers.clear();
       this.cacheSettings = settings;
     }
     const frame = this.builder.build(t, settings);
@@ -158,6 +176,7 @@ export class AssRenderer implements TextRendererLike {
         this.deps.measurer.reset?.();
         this.cache.clear();
         this.masks.clear();
+        this.layers.clear();
         this.dirty = true;
       });
     }
@@ -210,6 +229,7 @@ export class AssRenderer implements TextRendererLike {
     this.builder = new FrameBuilder(this.track, this.fonts, this.deps.measurer);
     this.cache.clear();
     this.masks.clear();
+    this.layers.clear();
     this.dirty = true;
   }
 

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { readFontFile } from './font-tables';
-import { AssFonts, emSize, type FontLoader, type FontRequest } from './fonts';
+import { advanceEmSize, AssFonts, emSize, type FontLoader, type FontRequest } from './fonts';
 
 const bytes = (f: string): Uint8Array => new Uint8Array(readFileSync(`fixtures/ass/fonts/${f}`));
 function fakeLoader() {
@@ -90,10 +90,13 @@ describe('AssFonts', () => {
   });
 });
 
-describe('emSize', () => {
-  it('makes ascender + descender equal the requested size', async () => {
+describe('emSize and advanceEmSize', () => {
+  it('makes ascender + descender equal the requested size, the advance em rounded to whole pixels for TrueType fonts that force it', async () => {
     const [face] = (await readFontFile('a.ttf', bytes('DejaVuSans.ttf'))).faces;
-    const em = emSize(face!, 64);
-    expect(((face!.ascender - face!.descender) * em) / face!.unitsPerEm).toBeCloseTo(64, 9);
+    expect(face!.integerPpem).toBe(true); // head.flags bit 3, glyf outlines
+    const exact = (256 * face!.unitsPerEm) / (face!.ascender - face!.descender);
+    expect(emSize(face!, 256)).toBeCloseTo(exact, 9);
+    expect(advanceEmSize(face!, 256)).toBe(Math.round(exact));
+    expect(advanceEmSize({ ...face!, integerPpem: false }, 256)).toBeCloseTo(exact, 9);
   });
 });
