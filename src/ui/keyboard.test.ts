@@ -78,3 +78,13 @@ describe('keyActionUo', () => {
     expect(keyActionUo({ type: 'volumeBy', delta: 0.1 }, ctx)).toBeNull();
   });
 });
+
+describe('shader key', () => {
+  it('cycles shader sets with V, also with a menu shown, and has no UO', () => {
+    for (const ctx of [{ menuActive: false }, { menuActive: true }]) {
+      expect(keyToAction('v', ctx)).toEqual({ type: 'cycleShaders' });
+      expect(keyToAction('V', ctx)).toEqual({ type: 'cycleShaders' });
+    }
+    expect(keyActionUo({ type: 'cycleShaders' }, { playing: true, popupShown: false })).toBeNull();
+  });
+});

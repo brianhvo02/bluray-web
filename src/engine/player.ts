@@ -29,8 +29,10 @@ import { looksLikeAss, parseAss } from './ass/parse';
 import { AssRenderer } from './ass/renderer';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, SubtitleChoice } from './protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
+import { ShaderStage } from './shaders/stage';
+import { UNAVAILABLE, type ShaderBackend } from './shaders/webgl-backend';
 import { decodeText, parseSrt } from './subs/srt';
 import { TextSubtitleRenderer, type TextRenderOptions } from './subs/text-renderer';
 import { episodeStarts, sortByName, TextSet, TextSetRenderer, type SetFile } from './subs/text-set';
@@ -42,6 +44,7 @@ const UO_MASKED_MESSAGE = "The disc doesn't allow this here.";
 const NO_SUBTITLES_MESSAGE = 'this file has no subtitles we can read';
 const SOME_SUBTITLES_MESSAGE = 'Some lines of this file could not be read';
 const PLACE_FILES_MESSAGE = "Place each subtitle file at its episode's start in the subtitle menu";
+const NO_SHADER_BACKEND_MESSAGE = 'Shaders are unavailable here';
 const MIN_TEXT_SCALE = 0.5;
 const MAX_TEXT_SCALE = 2;
 /** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
@@ -62,6 +65,8 @@ export interface PlayerDeps {
   readonly createAudioDecoder: AudioDecoderFactory;
   /** What ASS subtitles need from the browser (fonts, measuring, canvases); created once, when the first ASS file loads. */
   readonly createAssDeps?: () => Promise<AssDeps>;
+  /** The GPU backend for video shaders, or why there is none; created once, when the first set is chosen. */
+  readonly createShaderBackend?: (events: { lost(): void; restored(): void }) => ShaderBackend | string;
 }
 
 export interface AssDeps {
@@ -203,6 +208,10 @@ export class Player {
   private assDeps: Promise<AssDeps> | null = null;
   /** A subtitle setting changed: the next paint redraws even when no frame or plane changed. */
   private subtitlesDirty = false;
+  /** Video shaders; created with the first set chosen and kept for the page (across discs). */
+  private shaderStage: ShaderStage | null = null;
+  /** The shader set changed: the next paint redraws the current frame even when nothing else changed. */
+  private shadersDirty = false;
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
@@ -222,6 +231,7 @@ export class Player {
           break;
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
+          if (this.shaderStage) this.compositor.setShaderStage?.(this.shaderStage);
           this.startRenderLoop();
           break;
         case 'attachAudio':
@@ -262,6 +272,9 @@ export class Player {
           break;
         case 'close':
           this.close();
+          break;
+        case 'setVideoShaders':
+          this.setVideoShaders(cmd.set);
           break;
         case 'seek':
           if (this.refused('timeSearch')) break;
@@ -354,7 +367,8 @@ export class Player {
     const igChanged = ig !== null && ig.dirty() !== null;
     const textChanged = this.subtitlesDirty || (text !== null && text.renderer.changed(nowUs, textOpts));
     this.subtitlesDirty = false;
-    const changed = pgChanged || igChanged || textChanged;
+    const changed = pgChanged || igChanged || textChanged || this.shadersDirty;
+    this.shadersDirty = false;
     if (frame) this.compositor?.drawVideo(frame);
     else if (changed) this.compositor?.drawVideo(this.presenter.current);
     if (!(frame || changed)) return;
@@ -369,6 +383,30 @@ export class Player {
       else ig.takeDirty();
     }
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
+  }
+
+  private setVideoShaders(set: ShaderSetData | null): void {
+    if (!this.shaderStage) {
+      if (!set) {
+        this.deps.emit({ type: 'shaderStatus', state: 'off', set: null, error: null });
+        return;
+      }
+      let backend: ShaderBackend | string | undefined;
+      try {
+        backend = this.deps.createShaderBackend?.({ lost: () => this.shaderStage?.contextLost(), restored: () => this.shaderStage?.contextRestored() });
+      } catch {
+        backend = UNAVAILABLE; // e.g. OffscreenCanvas or getContext throwing: report unavailable rather than failing playback
+      }
+      this.shaderStage = new ShaderStage(
+        backend ?? NO_SHADER_BACKEND_MESSAGE,
+        (status) => this.deps.emit({ type: 'shaderStatus', ...status }),
+        () => {
+          this.shadersDirty = true;
+        },
+      );
+      this.compositor?.setShaderStage?.(this.shaderStage);
+    }
+    this.shaderStage.setSet(set);
   }
 
   private startRenderLoop(): void {
@@ -1521,6 +1559,7 @@ export class Player {
         textCue: this.textCueVisible(),
         textFile: this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.file ?? null : null,
         ass: this.assStats(),
+        shader: this.shaderStage?.stats ?? null,
       },
     });
   }

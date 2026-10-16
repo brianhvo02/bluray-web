@@ -35,6 +35,7 @@ export function decodePng(bytes: Uint8Array): { width: number; height: number; r
   if (!SIGNATURE.every((v, i) => buf[i] === v)) throw new Error('not a PNG');
   let width = 0;
   let height = 0;
+  let bpp = 4;
   const idat: Buffer[] = [];
   for (let at = 8; at < buf.length; ) {
     const length = buf.readUInt32BE(at);
@@ -43,24 +44,33 @@ export function decodePng(bytes: Uint8Array): { width: number; height: number; r
     if (type === 'IHDR') {
       width = data.readUInt32BE(0);
       height = data.readUInt32BE(4);
-      if (data[8] !== 8 || data[9] !== 6 || data[12] !== 0) throw new Error('only 8-bit RGBA, non-interlaced PNGs are supported');
+      if (data[8] !== 8 || (data[9] !== 6 && data[9] !== 2) || data[12] !== 0) throw new Error('only 8-bit RGB or RGBA, non-interlaced PNGs are supported');
+      bpp = data[9] === 6 ? 4 : 3;
     } else if (type === 'IDAT') idat.push(data);
     at += 12 + length;
   }
   const raw = inflateSync(Buffer.concat(idat));
-  const stride = width * 4;
-  const rgba = new Uint8Array(height * stride);
+  const stride = width * bpp;
+  const pixels = new Uint8Array(height * stride);
   for (let y = 0; y < height; y++) {
     const filter = raw[y * (stride + 1)]!;
     const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
     for (let x = 0; x < stride; x++) {
-      const a = x >= 4 ? rgba[y * stride + x - 4]! : 0;
-      const b = y > 0 ? rgba[(y - 1) * stride + x]! : 0;
-      const c = x >= 4 && y > 0 ? rgba[(y - 1) * stride + x - 4]! : 0;
+      const a = x >= bpp ? pixels[y * stride + x - bpp]! : 0;
+      const b = y > 0 ? pixels[(y - 1) * stride + x]! : 0;
+      const c = x >= bpp && y > 0 ? pixels[(y - 1) * stride + x - bpp]! : 0;
       const pred = filter === 0 ? 0 : filter === 1 ? a : filter === 2 ? b : filter === 3 ? (a + b) >> 1 : filter === 4 ? paeth(a, b, c) : NaN;
       if (Number.isNaN(pred)) throw new Error(`bad PNG filter ${filter}`);
-      rgba[y * stride + x] = (line[x]! + pred) & 0xff;
+      pixels[y * stride + x] = (line[x]! + pred) & 0xff;
     }
+  }
+  if (bpp === 4) return { width, height, rgba: pixels };
+  const rgba = new Uint8Array(width * height * 4);
+  for (let i = 0, j = 0; i < pixels.length; i += 3, j += 4) {
+    rgba[j] = pixels[i]!;
+    rgba[j + 1] = pixels[i + 1]!;
+    rgba[j + 2] = pixels[i + 2]!;
+    rgba[j + 3] = 255;
   }
   return { width, height, rgba };
 }

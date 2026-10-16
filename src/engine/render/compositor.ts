@@ -1,4 +1,5 @@
 import type { OverlayPlane } from '../graphics/overlay-plane';
+import type { ShaderStage } from '../shaders/stage';
 import type { TextRenderOptions } from '../subs/text-renderer';
 
 export interface Rect {
@@ -25,6 +26,8 @@ export interface CompositorLike {
   drawText?(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void;
   /** Draws the IG plane over the video (and PG) just drawn: call it after every drawVideo. */
   drawIg?(plane: OverlayPlane): void;
+  /** Shades every video frame drawn from now on with the stage's set (null: draw frames as they are). */
+  setShaderStage?(stage: ShaderStage | null): void;
 }
 
 /** A text subtitle renderer (SRT or ASS) as the player and compositor use it. */
@@ -49,6 +52,7 @@ export class Compositor implements CompositorLike {
   private frameSize: { readonly width: number; readonly height: number } | null = null;
   /** Storage (coded, visible) size of the last frame: ASS layout follows it for anamorphic video. */
   private storageSize: { readonly width: number; readonly height: number } | null = null;
+  private stage: ShaderStage | null = null;
 
   constructor(
     private readonly canvas: OffscreenCanvas,
@@ -64,6 +68,10 @@ export class Compositor implements CompositorLike {
     this.canvas.height = Math.max(1, Math.round(height));
   }
 
+  setShaderStage(stage: ShaderStage | null): void {
+    this.stage = stage;
+  }
+
   drawVideo(frame: VideoFrame | null): void {
     const { width, height } = this.canvas;
     this.ctx.fillStyle = '#000';
@@ -72,7 +80,9 @@ export class Compositor implements CompositorLike {
     this.frameSize = { width: frame.displayWidth, height: frame.displayHeight };
     this.storageSize = { width: frame.visibleRect?.width ?? frame.codedWidth, height: frame.visibleRect?.height ?? frame.codedHeight };
     const r = fitRect(frame.displayWidth, frame.displayHeight, width, height);
-    this.ctx.drawImage(frame, r.x, r.y, r.width, r.height);
+    // the shaded image is already at the fitted size (shaders see it as OUTPUT)
+    const image = r.width > 0 && r.height > 0 ? this.stage?.process(frame, { width: r.width, height: r.height }) : null;
+    this.ctx.drawImage(image ?? frame, r.x, r.y, r.width, r.height);
   }
 
   drawPg(plane: OverlayPlane): void {

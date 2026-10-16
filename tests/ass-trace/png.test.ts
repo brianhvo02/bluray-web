@@ -1,3 +1,4 @@
+import { deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { decodePng, encodePng } from './png';
 
@@ -10,9 +11,25 @@ describe('png', () => {
     expect([...out.rgba]).toEqual([...rgba]);
   });
 
-  it('rejects anything that is not 8-bit RGBA', () => {
-    const png = encodePng(1, 1, new Uint8Array(4));
+  it('decodes 8-bit RGB (as Chrome screenshots opaque content) to opaque RGBA', () => {
+    const png = encodePng(2, 2, new Uint8Array(16));
     png[25] = 2; // colour type RGB
+    // Rows: filter 0 then 1 (Sub), three bytes per pixel.
+    const raw = Buffer.from([0, 10, 20, 30, 40, 50, 60, 1, 5, 6, 7, 1, 1, 1]);
+    const ihdrEnd = 8 + 12 + 13;
+    const idat = deflateSync(raw);
+    const chunk = Buffer.alloc(12 + idat.length);
+    chunk.writeUInt32BE(idat.length, 0);
+    chunk.write('IDAT', 4, 'latin1');
+    idat.copy(chunk, 8);
+    const iend = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+    const out = decodePng(new Uint8Array(Buffer.concat([Buffer.from(png.subarray(0, ihdrEnd)), chunk, iend])));
+    expect([...out.rgba]).toEqual([10, 20, 30, 255, 40, 50, 60, 255, 5, 6, 7, 255, 6, 7, 8, 255]);
+  });
+
+  it('rejects anything that is not 8-bit RGB or RGBA', () => {
+    const png = encodePng(1, 1, new Uint8Array(4));
+    png[25] = 0; // colour type greyscale
     expect(() => decodePng(png)).toThrow(/RGBA/);
   });
 });

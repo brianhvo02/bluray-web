@@ -1,0 +1,52 @@
+const DB_NAME = 'bluray-web';
+const DB_VERSION = 3;
+/** v1 keyed discs by folder name, so two discs opened via folders named "BDMV" overwrote each other. */
+const LEGACY_RECENT_STORE = 'recent-discs';
+
+export const STORES = {
+  recentDiscs: 'recent-discs-v2',
+  shaderFiles: 'shader-files',
+  shaderSets: 'shader-sets',
+  settings: 'settings',
+} as const;
+
+function openDb(factory: IDBFactory): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = factory.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (db.objectStoreNames.contains(LEGACY_RECENT_STORE)) db.deleteObjectStore(LEGACY_RECENT_STORE);
+      const create = (name: string, options: IDBObjectStoreParameters): void => {
+        if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, options);
+      };
+      create(STORES.recentDiscs, { keyPath: 'id', autoIncrement: true });
+      create(STORES.shaderFiles, { keyPath: 'name' });
+      create(STORES.shaderSets, { keyPath: 'name' });
+      create(STORES.settings, { keyPath: 'key' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('The bluray-web database upgrade is blocked by another tab; close other Blu-ray Web tabs and reload.'));
+  });
+}
+
+/** Runs one transaction on one store; resolves with the request's result once the transaction commits. */
+export async function withStore<T>(
+  factory: IDBFactory,
+  store: string,
+  mode: IDBTransactionMode,
+  run: (s: IDBObjectStore) => IDBRequest<T> | void,
+): Promise<T | undefined> {
+  const db = await openDb(factory);
+  try {
+    return await new Promise<T | undefined>((resolve, reject) => {
+      const tx = db.transaction(store, mode);
+      const req = run(tx.objectStore(store));
+      tx.oncomplete = () => resolve(req ? req.result : undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new DOMException(`${store} transaction aborted`, 'AbortError'));
+    });
+  } finally {
+    db.close();
+  }
+}

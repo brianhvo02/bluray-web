@@ -10,6 +10,7 @@ import { browserVideoCodecApi } from './decode/video-decoder';
 import { Player } from './player';
 import type { EngineCommand, EngineEvent } from './protocol';
 import { Compositor } from './render/compositor';
+import { createWebGlBackend } from './shaders/webgl-backend';
 
 interface WorkerScope {
   postMessage(message: EngineEvent): void;
@@ -29,6 +30,8 @@ const player = new Player({
     else setTimeout(callback, 16);
   },
   createCompositor: (canvas) => new Compositor(canvas),
+  // WebGL2 on its own OffscreenCanvas, created when the first shader set is chosen
+  createShaderBackend: (events) => createWebGlBackend((w, h) => new OffscreenCanvas(w, h), events),
   // Commands run one at a time, so a stalled download would block every later one: give up and report it instead.
   createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) }))),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)

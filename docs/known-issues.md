@@ -87,6 +87,32 @@ what would change that decision.
 - **The local corpus gate needs Docker and the developer's files**, so CI runs only the synthetic fixtures. *Revisit*
   if a freely licensed real-world script with fonts becomes available to commit.
 
+## Video shaders
+
+- **The final scaler is bilinear (the canvas draw), not mpv's Lanczos.** Anime4K does the real upscaling; what is
+  left is a small resize to the window. *Revisit if* the difference is visible.
+- **PREKERNEL runs in gamma light**, as the video is delivered; mpv's linear-light option is not implemented.
+- **Shaders are compiled as GLSL ES 3.00, which rejects desktop-GLSL habits** such as implicit int to float
+  conversion, so some non-Anime4K shaders fail to compile (the error shows in the menu). *Revisit if* a wanted
+  shader needs a rewrite pass.
+- **Unsupported directives are rejected when the file is added:** `COMPUTE`, `TEXTURE`, `PARAM`, `BUFFER` and
+  `OFFSET` (the Anime4K files use none of them), more than 16 `BIND`s per pass, and files over 4 MiB.
+- **No in-memory fallback when IndexedDB is unavailable:** the menu opens but sets cannot be chosen that session
+  (errors are logged). Chrome's private windows still provide IndexedDB, so this is rare. *Revisit if* users with
+  blocked site storage need shaders.
+- **`unavailable` is discovered only when a set is first chosen:** the engine creates the WebGL2 backend lazily, so
+  until then the menu lists sets as usual, and only after the first choice does it show the unavailable message.
+  *Revisit if* users on such browsers find the late message confusing (probe at startup).
+- **A pass skipped for an error mid-chain lets later passes bind a same-named texture saved earlier by another
+  file,** where libplacebo fails the whole hook. Not reachable with Anime4K.
+- **A transient render error (for example a closed `VideoFrame`) turns the set to `error` until it is selected
+  again,** instead of costing one frame. *Revisit if* it shows up in practice (treat `InvalidStateError` as per-frame).
+- **Resolved: GitHub CI runs the shader E2E tests.** `ubuntu-latest` Chrome provides WebGL2 float render targets
+  (SwiftShader) with no extra flags; the fixture-shader tests ran and passed on PR #1 (2026-10-16). The tests still
+  skip with a logged reason if a runner lacks them, and the Anime4K and sync tests stay behind `SHADERS_GPU=1`.
+- **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
+  (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
+
 ## Audio
 
 - **TrueHD and DTS-HD play through their lossy cores.** The output is a stereo 48 kHz downmix,
