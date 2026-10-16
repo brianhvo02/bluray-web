@@ -281,9 +281,10 @@ export function registerReflectNatives(table: NativeTable): void {
     'java/lang/reflect/Executable.getTypeAnnotationBytes0()[B': () => null,
     'java/lang/reflect/Field.getTypeAnnotationBytes0()[B': () => null,
 
+    // Frame 0 is getCallerClass itself, frame 1 the caller-sensitive method that called it.
     'sun/reflect/Reflection.getCallerClass()Ljava/lang/Class;': (ctx) => {
       const frames = ctx.thread.frames;
-      for (let i = frames.length - 2; i >= 0; i--) {
+      for (let i = frames.length - 3; i >= 0; i--) {
         const m = frames[i]!.method;
         if (!ignoredFrame(ctx.jvm, m)) return ctx.jvm.mirror(m.cls);
       }
@@ -291,7 +292,7 @@ export function registerReflectNatives(table: NativeTable): void {
     },
     'sun/reflect/Reflection.getCallerClass(I)Ljava/lang/Class;': (ctx, depth) => {
       const jvm = ctx.jvm;
-      const list: JClass[] = [jvm.bootClass('sun/reflect/Reflection')];
+      const list: JClass[] = [];
       const frames = ctx.thread.frames;
       for (let i = frames.length - 1; i >= 0; i--) if (!ignoredFrame(jvm, frames[i]!.method)) list.push(frames[i]!.method.cls);
       const c = list[depth as number];

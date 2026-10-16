@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import { Invoke, ThrowResult, andThen } from '../interpreter';
+import { BLOCKED, Invoke, Suspend, ThrowResult, andThen } from '../interpreter';
 import type { NativeResult } from '../interpreter';
 import { selectMethod } from '../loader';
 import type { JClass, JMethod } from '../loader';
@@ -15,6 +15,16 @@ import type { JThread } from '../threads';
 import type { JArray, JObject, JValue } from '../values';
 
 export const none = (): undefined => undefined;
+
+/** Enters `o`'s monitor, blocking until it is free (retried when the scheduler wakes the thread), then runs `k`. */
+export function withMonitor(jvm: Jvm, t: JThread, o: JObject, k: () => NativeResult): NativeResult {
+  const attempt = (): NativeResult => {
+    if (jvm.threads.monitorEnter(t, o)) return k();
+    jvm.threads.onWake(t, attempt);
+    return new Suspend(BLOCKED);
+  };
+  return attempt();
+}
 
 export function jsStr(jvm: Jvm, s: JValue): string {
   return jvm.heap.jsString(s as JObject | null) ?? '';

@@ -46,6 +46,8 @@ export class JThread {
   /** A 'sleeping' thread that only yielded, which Java sees as RUNNABLE. */
   yielding = false;
   parkTimed = false;
+  /** The thread has run its exit sequence; Thread.isAlive is false from here on. */
+  exited = false;
   constructor(
     readonly id: number,
     public javaThread: JObject | null,
@@ -136,11 +138,16 @@ export class Scheduler {
   private wake: (() => void) | null = null;
   private failure: { readonly error: unknown } | null = null;
   private running = false;
+  private halted = false;
+  /** Bytecodes per turn; tests shrink it to force preemption at awkward points. */
+  slice: number;
 
   constructor(
     private readonly jvm: Jvm,
     private readonly opts: SchedulerOptions,
-  ) {}
+  ) {
+    this.slice = opts.slice;
+  }
 
   get live(): readonly JThread[] {
     return this.threads.filter((t) => t.state !== 'terminated');
@@ -175,6 +182,10 @@ export class Scheduler {
   /** A new thread whose work is `start`'s result, usually an Invoke chain. */
   spawnWith(javaThread: JObject | null, start: (t: JThread) => NativeResult): JThread {
     const t = new JThread(this.nextId++, javaThread);
+    if (this.halted) {
+      t.state = 'terminated';
+      return t;
+    }
     this.threads.push(t);
     this.inThread(t, () => complete(this.jvm, t, start(t)));
     if (t.state === 'runnable') this.enqueue(t);
@@ -220,11 +231,6 @@ export class Scheduler {
     const m = o.monitor;
     if (m?.owner !== t) throw this.illegalMonitorState();
     this.wakeWaiters(m, all);
-  }
-
-  /** notifyAll by the VM itself, as HotSpot's ensure_join does on a terminating thread's Thread object. */
-  notifyAllFromVm(o: JObject): void {
-    if (o.monitor) this.wakeWaiters(o.monitor, true);
   }
 
   private wakeWaiters(m: Monitor, all: boolean): void {
@@ -330,6 +336,28 @@ export class Scheduler {
     );
   }
 
+  /** Runtime.halt: every thread ends where it is; run() returns 'idle' and later wakeups are ignored. */
+  halt(): void {
+    this.halted = true;
+    for (const t of this.threads) {
+      this.cancelTimer(t);
+      t.frames.length = 0;
+      t.state = 'terminated';
+    }
+    this.queue.length = 0;
+    this.queued.clear();
+    this.pending.clear();
+    this.conts.clear();
+    this.waiting.clear();
+    this.reacquiring.clear();
+    this.yielded.length = 0;
+    this.wake?.();
+  }
+
+  get isHalted(): boolean {
+    return this.halted;
+  }
+
   /** The thread, already blocked, does `r` when it next runs. */
   later(t: JThread, r: NativeResult): void {
     this.pending.set(t, () => r);
@@ -352,6 +380,7 @@ export class Scheduler {
     try {
       let slices = 0;
       for (;;) {
+        if (this.halted) return 'idle';
         if (this.failure) {
           const { error } = this.failure;
           this.failure = null;
@@ -403,7 +432,7 @@ export class Scheduler {
       });
       if (t.state !== 'runnable') return;
     }
-    execute(this.jvm, t, this.opts.slice);
+    execute(this.jvm, t, this.slice);
   }
 
   private inThread(t: JThread, fn: () => void): void {
@@ -423,6 +452,7 @@ export class Scheduler {
   }
 
   private makeRunnable(t: JThread): void {
+    if (this.halted) return;
     t.state = 'runnable';
     this.enqueue(t);
     this.wake?.();

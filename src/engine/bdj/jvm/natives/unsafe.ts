@@ -11,7 +11,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import { BLOCKED, Suspend, ThrowResult } from '../interpreter';
+import { ThrowResult } from '../interpreter';
 import type { NativeResult } from '../interpreter';
 import { externalName, retrying } from '../loader';
 import type { JClass } from '../loader';
@@ -20,7 +20,7 @@ import { JThread } from '../threads';
 import type { JArray, JObject, JValue } from '../values';
 import type { NativeContext, NativeTable } from './index';
 import { classOf } from './lang';
-import { internalName, jsStr, none } from './util';
+import { internalName, jsStr, none, withMonitor } from './util';
 
 /** The nativeData of a staticFieldBase object. */
 class StaticBase {
@@ -143,15 +143,6 @@ function cas(jvm: Jvm, o: JValue, offset: JValue, k: Kind, expected: JValue, x: 
 /** A field's offset is its slot in the object's fields or the class's statics. */
 function fieldSlot(ctx: NativeContext, f: JValue): bigint {
   return BigInt(ctx.jvm.getField(f as JObject, 'slot', 'I') as number);
-}
-
-function monitorEnter(ctx: NativeContext, o: JObject): NativeResult {
-  const attempt = (): NativeResult => {
-    if (ctx.jvm.threads.monitorEnter(ctx.thread, o)) return undefined;
-    ctx.jvm.threads.onWake(ctx.thread, attempt);
-    return new Suspend(BLOCKED);
-  };
-  return attempt();
 }
 
 function accessors(): Record<string, (ctx: NativeContext, ...a: JValue[]) => NativeResult> {
@@ -285,7 +276,7 @@ export function registerUnsafeNatives(table: NativeTable): void {
       return undefined;
     },
     'sun/misc/Unsafe.monitorEnter(Ljava/lang/Object;)V': (ctx, _self, o) =>
-      o === null ? ctx.jvm.throwNew('java/lang/NullPointerException') : monitorEnter(ctx, o as JObject),
+      o === null ? ctx.jvm.throwNew('java/lang/NullPointerException') : withMonitor(ctx.jvm, ctx.thread, o as JObject, none),
     'sun/misc/Unsafe.monitorExit(Ljava/lang/Object;)V': (ctx, _self, o) => {
       ctx.jvm.threads.monitorExit(ctx.thread, o as JObject);
       return undefined;

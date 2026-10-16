@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from './index';
-import { fdlibmExp } from './strictmath';
+import { fdlibmExp, fdlibmRemainder } from './strictmath';
 
 /** Packages whose natives later tasks implement (Task 11: invoke; Task 12: I/O, zip, net, AWT, security; Task 13: libbluray). */
 const LATER = [
@@ -50,5 +50,20 @@ describe('JDK natives', () => {
     expect(fdlibmExp(Number.NEGATIVE_INFINITY)).toBe(0);
     expect(fdlibmExp(NaN)).toBeNaN();
     expect(fdlibmExp(1e-300)).toBe(1);
+  });
+
+  it('StrictMath.IEEEremainder is fdlibm: x - p*n with n the nearest integer to x/p, ties to even', () => {
+    expect(fdlibmRemainder(5, 3)).toBe(-1);
+    expect(fdlibmRemainder(-5, 3)).toBe(1);
+    expect(fdlibmRemainder(3, 2)).toBe(-1);
+    expect(fdlibmRemainder(5, 2)).toBe(1);
+    expect(fdlibmRemainder(7.5, 2)).toBe(-0.5);
+    expect(Object.is(fdlibmRemainder(-6, 3), -0)).toBe(true);
+    expect(Object.is(fdlibmRemainder(6, -3), 0)).toBe(true);
+    expect(fdlibmRemainder(1, Infinity)).toBe(1);
+    expect(fdlibmRemainder(1, 0)).toBeNaN();
+    expect(fdlibmRemainder(Infinity, 1)).toBeNaN();
+    expect(fdlibmRemainder(1, NaN)).toBeNaN();
+    expect(fdlibmRemainder(3 * 2 ** -1070, 2 * 2 ** -1070)).toBe(-(2 ** -1070));
   });
 });

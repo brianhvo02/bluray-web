@@ -1,13 +1,12 @@
 /*
  * java.lang.StrictMath natives of the BD-J virtual machine.
  *
- * exp is ported from fdlibm 5.3's e_exp.c, which the JDK's StrictMath uses:
+ * exp and IEEEremainder are ported from fdlibm 5.3's e_exp.c and e_remainder.c, which the JDK's StrictMath uses:
  *   Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
  *   Developed at SunSoft, a Sun Microsystems, Inc. business.
  *   Permission to use, copy, modify, and distribute this software is freely granted, provided that this notice
  *   is preserved.
- * IEEEremainder and the mapping of the other functions onto JS Math follow DoppioJVM's src/natives/java_lang.ts
- * (MIT; see src/engine/NOTICE).
+ * The other functions map onto JS Math, as DoppioJVM's src/natives/java_lang.ts does (MIT; see src/engine/NOTICE).
  *
  * Copyright (C) 2026 bluray-web contributors
  *
@@ -86,28 +85,34 @@ export function fdlibmExp(x: number): number {
   return withHi(y, hi(y) + ((k + 1000) << 20)) * TWOM1000;
 }
 
-/** From DoppioJVM src/natives/java_lang.ts, java_lang_StrictMath 'IEEEremainder(DD)D'. */
-function ieeeRemainder(x: number, y: number): number {
-  if (x === Number.NEGATIVE_INFINITY || !(x < Number.POSITIVE_INFINITY) || y === 0 || y !== y) return Number.NaN;
-  const TWO_1023 = 8.98846567431158e307;
-  const negative = x < 0;
+/** fdlibm __ieee754_remainder (e_remainder.c); JS `%` is C's fmod, exact as __ieee754_fmod is. */
+export function fdlibmRemainder(x: number, p: number): number {
+  let hx = hi(x);
+  const lx = lo(x);
+  let hp = hi(p);
+  const lp = lo(p);
+  const sx = hx & 0x80000000;
+  hp &= 0x7fffffff;
+  hx &= 0x7fffffff;
+  if ((hp | lp) === 0) return (x * p) / (x * p);
+  if (hx >= 0x7ff00000 || (hp >= 0x7ff00000 && ((hp - 0x7ff00000) | lp) !== 0)) return (x * p) / (x * p);
+  if (hp <= 0x7fdfffff) x = x % (p + p);
+  if (((hx - hp) | (lx - lp)) === 0) return 0 * x;
   x = Math.abs(x);
-  y = Math.abs(y);
-  if (x === y || x === 0) return 0 * x;
-  if (y < TWO_1023) x %= y + y;
-  if (y < 4 / TWO_1023) {
-    if (x + x > y) {
-      x -= y;
-      if (x + x >= y) x -= y;
+  p = Math.abs(p);
+  if (hp < 0x00200000) {
+    if (x + x > p) {
+      x -= p;
+      if (x + x >= p) x -= p;
     }
   } else {
-    y *= 0.5;
-    if (x > y) {
-      x -= y;
-      if (x >= y) x -= y;
+    const pHalf = 0.5 * p;
+    if (x > pHalf) {
+      x -= p;
+      if (x >= pHalf) x -= p;
     }
   }
-  return negative ? -x : x;
+  return withHi(x, hi(x) ^ sx);
 }
 
 const d = (f: (x: number) => number) => (_ctx: unknown, x: unknown): number => f(x as number);
@@ -127,7 +132,7 @@ export function registerStrictMathNatives(table: NativeTable): void {
     'java/lang/StrictMath.log10(D)D': d(Math.log10),
     'java/lang/StrictMath.sqrt(D)D': d(Math.sqrt),
     'java/lang/StrictMath.cbrt(D)D': d(Math.cbrt),
-    'java/lang/StrictMath.IEEEremainder(DD)D': dd(ieeeRemainder),
+    'java/lang/StrictMath.IEEEremainder(DD)D': dd(fdlibmRemainder),
     'java/lang/StrictMath.atan2(DD)D': dd(Math.atan2),
     'java/lang/StrictMath.pow(DD)D': dd(Math.pow),
     'java/lang/StrictMath.sinh(D)D': d(Math.sinh),

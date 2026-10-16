@@ -195,14 +195,23 @@ function unlocking(jvm: Jvm, t: JThread, lock: JObject | null, r: NativeResult):
   );
 }
 
+const NO_VALUES: JValue[] = [];
+
+/**
+ * Runs a native with a marker frame on the thread while it runs synchronously, so stack walks (exceptions it
+ * throws, getCallerClass) see it as HotSpot's native frame; the marker is gone before its result is applied.
+ */
 function callNative(jvm: Jvm, t: JThread, m: JMethod, args: readonly JValue[]): NativeResult {
-  const fn = (m.native ??= jvm.natives.get(m.nativeKey));
-  if (!fn) return jvm.throwNew('java/lang/UnsatisfiedLinkError', m.nativeKey);
+  t.frames.push(new JFrame(m, NO_VALUES, NO_VALUES));
   try {
+    const fn = (m.native ??= jvm.natives.get(m.nativeKey));
+    if (!fn) return jvm.throwNew('java/lang/UnsatisfiedLinkError', m.nativeKey);
     return fn({ jvm, thread: t, method: m }, ...args);
   } catch (e) {
     if (e instanceof JavaThrowable) return new ThrowResult(e.obj);
     throw e;
+  } finally {
+    if (t.frames[t.frames.length - 1]?.method === m) t.frames.pop();
   }
 }
 

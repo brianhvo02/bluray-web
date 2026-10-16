@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import { BLOCKED, Invoke, Suspend, ThrowResult, andThen } from '../interpreter';
+import { Invoke, ThrowResult, andThen } from '../interpreter';
 import type { NativeResult } from '../interpreter';
 import { ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, externalName, retrying, selectMethod } from '../loader';
 import type { JClass, JMethod } from '../loader';
@@ -16,7 +16,7 @@ import { JThread } from '../threads';
 import { JavaThrowable } from '../values';
 import type { JArray, JObject, JValue } from '../values';
 import type { NativeTable } from './index';
-import { each, internalName, jsStr, method, none, throwConstructed, virtual } from './util';
+import { each, internalName, jsStr, method, none, throwConstructed, virtual, withMonitor } from './util';
 
 const ACC_FINAL = 0x0010;
 const ACC_SUPER = 0x0020;
@@ -220,10 +220,15 @@ function startThread(jvm: Jvm, self: JObject): NativeResult {
   jvm.threads.spawnWith(self, (t) => {
     t.syncStatus(jvm.threadStatusSlot);
     self.nativeData = t;
-    const finish = (): undefined => {
-      jvm.threads.notifyAllFromVm(self);
-      return undefined;
-    };
+    // HotSpot's ensure_join: under the Thread object's monitor, the thread stops being alive and joiners are woken.
+    const finish = (): NativeResult =>
+      withMonitor(jvm, t, self, () => {
+        t.exited = true;
+        jvm.setField(self, 'threadStatus', 'I', 2);
+        jvm.threads.notify(self, true, t);
+        jvm.threads.monitorExit(t, self);
+        return undefined;
+      });
     const exit = (): NativeResult => new Invoke(method(thread, 'exit()V'), [self], finish, finish);
     const run = virtual(self, thread, 'run()V');
     return new Invoke(run, [self], exit, (e) =>
@@ -233,10 +238,10 @@ function startThread(jvm: Jvm, self: JObject): NativeResult {
   return undefined;
 }
 
-/** The classes of the calling thread's frames, innermost first, without reflection frames (SecurityManager). */
+/** The classes of the calling thread's frames below the native itself, innermost first, without Method.invoke. */
 function contextClasses(t: JThread): JClass[] {
   const out: JClass[] = [];
-  for (let i = t.frames.length - 1; i >= 0; i--) {
+  for (let i = t.frames.length - 2; i >= 0; i--) {
     const m = t.frames[i]!.method;
     if (m.cls.name === 'java/lang/reflect/Method' && m.name === 'invoke') continue;
     out.push(m.cls);
@@ -343,7 +348,7 @@ export function registerLangNatives(table: NativeTable): void {
     'java/lang/Thread.start0()V': (ctx, self) => startThread(ctx.jvm, self as JObject),
     'java/lang/Thread.isAlive()Z': (_ctx, self) => {
       const t = jthread(self);
-      return t && t.state !== 'terminated' ? 1 : 0;
+      return t && !t.exited && t.state !== 'terminated' ? 1 : 0;
     },
     'java/lang/Thread.holdsLock(Ljava/lang/Object;)Z': (ctx, o) => {
       if (o === null) return ctx.jvm.throwNew('java/lang/NullPointerException');
@@ -467,10 +472,11 @@ export function registerLangNatives(table: NativeTable): void {
     'java/lang/Package.getSystemPackages0()[Ljava/lang/String;': (ctx) => ctx.jvm.newArray(ctx.jvm.bootClass('java/lang/String'), []),
 
     'java/lang/Shutdown.beforeHalt()V': none,
-    // Runtime.halt: the VM records the status and the calling thread never returns; the host decides what exiting means.
+    // Runtime.halt: every thread ends and the status is kept for the host, which decides what exiting means.
     'java/lang/Shutdown.halt0(I)V': (ctx, status) => {
       ctx.jvm.exitStatus = status as number;
-      return new Suspend(BLOCKED);
+      ctx.jvm.threads.halt();
+      return undefined;
     },
 
     'java/lang/SecurityManager.getClassContext()[Ljava/lang/Class;': (ctx) =>
