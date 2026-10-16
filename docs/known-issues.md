@@ -64,6 +64,16 @@ what would change that decision.
   glyph cache that snaps the baseline to whole pixels, so masks are supersampled until text reaches that size, at
   most 8×. Text animated in shape every frame (the direct path) is drawn the same way on the GPU but blurred by the
   canvas filter with one deviation for both axes.
+- **Without GPU canvas rasterization, large animated text misses the libass pixel budget.** Chrome's software
+  rasterizer shades glyph edges differently from its GPU path: `anim` (the `\t(\fs120)` text at 2500 and 2999 ms)
+  gives 515 and 680 differing pixels against budgets of 326 and 381 on the Linux CI runners and in Linux Chromium in
+  Docker, and fails the same frames (plus 5000/5500 ms, the spin) on macOS Chrome with `--disable-gpu`. With the GPU
+  on, macOS passes. Positions agree within 0.25 px and only glyph heights differ (up to 0.4 px); turning off
+  fontconfig hinting changes nothing, as the fixtures' fonts are web `FontFace`s. The same runners put 21-29% of the
+  animated sign's draws over 8 ms. Because of this, the libass comparison runs as its own CI job that the deploy does
+  not wait for, and it stays red; `ASS_BUDGET_SCALE=8` covers the draw time in the E2E suite. Viewers whose GPU is
+  blocklisted get these edges too. *Revisit* by making the masks independent of the canvas rasterizer (drawing glyph
+  paths at a supersampling high enough that edge coverage converges) or by finding a CI runner with a GPU.
 - **Not drawn as libass does:** BorderStyle 4 (libass's background box) is not drawn; vertical `@font` glyphs are
   drawn unrotated; `\be` is folded into the Gaussian (variance 0.5 per pass); a rotated border with `\xbord` ≠
   `\ybord` is dilated axis-aligned in device space. *Revisit if* a real file shows the difference.
