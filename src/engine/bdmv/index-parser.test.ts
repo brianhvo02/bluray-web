@@ -4,6 +4,15 @@ import { ParseError } from '../util/byte-reader';
 import { indexUsesBdj, parseIndex } from './index-parser';
 
 describe('parseIndex', () => {
+  it("reads AppInfoBDMV's initial output mode preference and content exist flag", () => {
+    const base = { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [] } as const;
+    expect(parseIndex(buildIndex({ ...base, titles: [] })).appInfo).toEqual({ initialOutputModePreference: 0, contentExistFlag: false });
+    expect(parseIndex(buildIndex({ ...base, titles: [], appInfo: { initialOutputModePreference: 1, contentExistFlag: true } })).appInfo).toEqual({
+      initialOutputModePreference: 1,
+      contentExistFlag: true,
+    });
+  });
+
   it('parses HDMV first play, top menu and titles', () => {
     const index = parseIndex(
       buildIndex({

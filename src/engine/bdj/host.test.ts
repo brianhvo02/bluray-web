@@ -4,8 +4,28 @@ import { syntheticSource } from '../../../tests/helpers/synthetic-disc';
 import type { Clpi } from '../bdmv/clpi-parser';
 import { loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
-import { RecordingHost } from './host';
+import { parseIndex } from '../bdmv/index-parser';
+import { RegisterFile } from '../hdmv/registers';
+import { buildIndex } from '../../../tests/helpers/bdmv-builders';
+import { RecordingHost, initDiscProfile } from './host';
 import type { TraceEntry } from './host';
+
+describe('initDiscProfile', () => {
+  const objects = { firstPlay: { kind: 'bdj', name: '00000' }, topMenu: { kind: 'bdj', name: '00001' }, titles: [] } as const;
+  const profile = (spec: Partial<Parameters<typeof buildIndex>[0]>): number => {
+    const regs = new RegisterFile();
+    initDiscProfile(regs, parseIndex(buildIndex({ ...objects, titles: [], ...spec })));
+    return regs.psrRead(31);
+  };
+
+  it("switches a UHD index (0300) to Profile 6 and a 3D one (02xx with content) to Profile 5, as _fill_disc_info does", () => {
+    expect(profile({ version: '0300' })).toBe(0x0310);
+    expect(profile({ version: '0200', appInfo: { initialOutputModePreference: 1, contentExistFlag: true } })).toBe((0x13 << 16) | 0x0240);
+    expect(profile({ version: '0240', appInfo: { initialOutputModePreference: 0, contentExistFlag: true } })).toBe((0x13 << 16) | 0x0240);
+    expect(profile({ version: '0200' })).toBe((0x03 << 16) | 0x0200);
+    expect(profile({ version: '0100', appInfo: { initialOutputModePreference: 0, contentExistFlag: true } })).toBe((0x03 << 16) | 0x0200);
+  });
+});
 
 describe('RecordingHost on disc-bdj', () => {
   let disc: DiscModel;

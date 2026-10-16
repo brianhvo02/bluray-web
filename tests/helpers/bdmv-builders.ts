@@ -9,16 +9,19 @@ export interface IndexSpec {
   firstPlay: IndexObjectSpec;
   topMenu: IndexObjectSpec;
   titles: IndexObjectSpec[];
+  version?: string;
+  appInfo?: { initialOutputModePreference: number; contentExistFlag: boolean };
 }
 
 export function buildIndex(spec: IndexSpec): Uint8Array<ArrayBuffer> {
   const w = new ByteWriter();
-  w.ascii('INDX').ascii('0200');
+  w.ascii('INDX').ascii(spec.version ?? '0200');
   const indexesStartAt = w.position;
   w.u32(0); // indexes_start_address (patched)
   w.u32(0); // extension_data_start_address
   w.zeros(24);
-  w.u32(34).zeros(34); // AppInfoBDMV
+  const app = spec.appInfo;
+  w.u32(34).bits(1, 0).bits(1, app?.initialOutputModePreference ?? 0).bits(1, app?.contentExistFlag ? 1 : 0).bits(5, 0).zeros(33); // AppInfoBDMV
   w.patchU32(indexesStartAt, w.position);
   const lengthAt = w.position;
   w.u32(0);

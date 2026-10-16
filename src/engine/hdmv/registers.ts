@@ -21,6 +21,22 @@ export type PsrEventType = 'save' | 'write' | 'change' | 'restore';
 export interface PsrEvent { readonly type: PsrEventType; readonly psr: number; readonly oldValue: number; readonly newValue: number }
 export interface RegisterWrite { readonly kind: 'gpr' | 'psr'; readonly index: number; readonly value: number }
 
+const PSR_DISPLAY_CAP = 23;
+const PSR_3D_CAP = 24;
+const PSR_UHD_CAP = 25;
+const PSR_UHD_DISPLAY_CAP = 26;
+const PSR_UHD_HDR_PREFER = 27;
+const PSR_UHD_SDR_CONV_PREFER = 28;
+const OUTPUT_PREFER_3D = 1;
+const DCAP_1080P_720P_3D = 0x01;
+const DCAP_720P_50HZ_3D = 0x02;
+const DCAP_NO_3D_CLASSES_REQUIRED = 0x04;
+const DCAP_INTERLACED_3D = 0x08;
+const PROFILE_5_V2_4 = (0x13 << 16) | 0x0240;
+const PROFILE_6_V3_1 = (0x00 << 16) | 0x0310;
+const PROFILE_3D_FLAG = 0x100000;
+const PROFILE_VERSION_MASK = 0xffff;
+
 /** bd_psr_init: initial values (5.8.2). */
 const PSR_INIT: readonly number[] = (() => {
   const t = new Array<number>(PSR_COUNT).fill(0);
@@ -96,6 +112,33 @@ export class RegisterFile {
     if (mask >>> 0 === 0xffffffff) return this.psrWrite(i, v);
     const cur = this.psrRead(i);
     return this.psrWrite(i, ((cur & ~mask) | (v & mask)) >>> 0);
+  }
+
+  /** psr_init_3D: the Profile 5 (3D) player settings; without `force`, refused once the profile is 6 or 3D. */
+  psrInit3D(initialMode: number, force: boolean): number {
+    if (!force && !this.profileUpgradable()) return -1;
+    this.psrSettingWrite(PSR.OUTPUT_PREFER, OUTPUT_PREFER_3D);
+    this.psrSettingWrite(PSR_DISPLAY_CAP, DCAP_1080P_720P_3D | DCAP_720P_50HZ_3D | DCAP_NO_3D_CLASSES_REQUIRED | DCAP_INTERLACED_3D);
+    this.psrSettingWrite(PSR_3D_CAP, 0xffffffff);
+    this.psrSettingWrite(PSR.PROFILE_VERSION, PROFILE_5_V2_4);
+    this.psrWrite(PSR['3D_STATUS'], initialMode ? 1 : 0);
+    return 0;
+  }
+
+  /** psr_init_UHD: the Profile 6 (UHD) player settings; without `force`, refused once the profile is 6 or 3D. */
+  psrInitUhd(force: boolean): number {
+    if (!force && !this.profileUpgradable()) return -1;
+    this.psrSettingWrite(PSR_UHD_CAP, 0xffffffff);
+    this.psrSettingWrite(PSR_UHD_DISPLAY_CAP, 0xffffffff);
+    this.psrSettingWrite(PSR_UHD_HDR_PREFER, 0xffffffff);
+    this.psrSettingWrite(PSR_UHD_SDR_CONV_PREFER, 0);
+    this.psrSettingWrite(PSR.PROFILE_VERSION, PROFILE_6_V3_1);
+    return 0;
+  }
+
+  private profileUpgradable(): boolean {
+    const profile = this.psrRead(PSR.PROFILE_VERSION);
+    return (profile & PROFILE_VERSION_MASK) < 0x0300 && !(profile & PROFILE_3D_FLAG);
   }
 
   /** bd_psr_save_state: PSR4-8 to PSR36-40, PSR10-12 to PSR42-44. */

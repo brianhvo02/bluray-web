@@ -72,4 +72,24 @@ describe('RegisterFile', () => {
     r.psrWriteBits(PSR.CHAPTER, 0xffffffff, 0xffffffff);
     expect(r.psrRead(PSR.CHAPTER)).toBe(0xffffffff);
   });
+  it('psrInitUhd and psrInit3D switch the player profile as psr_init_UHD and psr_init_3D do', () => {
+    const uhd = new RegisterFile();
+    expect(uhd.psrInitUhd(true)).toBe(0);
+    expect([25, 26, 27, 28].map((i) => uhd.psrRead(i))).toEqual([0xffffffff, 0xffffffff, 0xffffffff, 0]);
+    expect(uhd.psrRead(PSR.PROFILE_VERSION)).toBe(0x0310);
+    // without force, refused once the profile version is 3.0 or more
+    expect(uhd.psrInit3D(1, false)).toBe(-1);
+    expect(uhd.psrInitUhd(false)).toBe(-1);
+
+    const s3d = new RegisterFile();
+    expect(s3d.psrInit3D(1, false)).toBe(0);
+    expect(s3d.psrRead(PSR.OUTPUT_PREFER)).toBe(1);
+    expect(s3d.psrRead(23)).toBe(0x0f);
+    expect(s3d.psrRead(24)).toBe(0xffffffff);
+    expect(s3d.psrRead(PSR.PROFILE_VERSION)).toBe((0x13 << 16) | 0x0240);
+    expect(s3d.psrRead(PSR['3D_STATUS'])).toBe(1);
+    // the 3D flag refuses a second switch without force
+    expect(s3d.psrInitUhd(false)).toBe(-1);
+    expect(s3d.psrInitUhd(true)).toBe(0);
+  });
 });
