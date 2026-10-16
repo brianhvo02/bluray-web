@@ -16,12 +16,14 @@ function discFiles(): Map<string, Uint8Array<ArrayBuffer>> {
   put('BDMV/JAR/00000.jar');
   put('BDMV/BDJO/00000.bdjo');
   put('BDMV/index.bdmv');
+  for (const p of ['BDMV/JAR/00001/CONFIG.XML', 'BDMV/JAR/00001/IMG/X.PNG', 'BDMV/AUXDATA/SUB/F.OTF']) files.set(p, new Uint8Array([1, 2, 3]));
   return files;
 }
 
 function make(extra: Partial<ConstructorParameters<typeof Vfs>[0]> = {}): { vfs: Vfs; clock: { t: number } } {
   const clock = { t: 100 };
-  const vfs = new Vfs({ disc: syntheticSource(discFiles()), jdkLib: rtBdj, nowMs: () => clock.t, ...extra });
+  const disc = syntheticSource(discFiles());
+  const vfs = new Vfs({ disc, discPaths: disc.paths(), jdkLib: rtBdj, nowMs: () => clock.t, ...extra });
   return { vfs, clock };
 }
 
@@ -50,14 +52,30 @@ describe('/disc/', () => {
 
   it('lists with BD-ROM conventional spelling, and with the disc spelling when given', () => {
     const { vfs } = make();
-    expect(vfs.list('/disc/BDMV/JAR')).toEqual(['00000.jar']);
+    expect(vfs.list('/disc/BDMV/JAR')).toEqual(['00000.jar', '00001']);
     expect(vfs.list('/disc/bdmv/bdjo')).toEqual(['00000.bdjo']);
-    expect(vfs.list('/disc/BDMV')).toEqual(['BDJO', 'JAR', 'index.bdmv']);
+    expect(vfs.list('/disc/BDMV')).toEqual(['AUXDATA', 'BDJO', 'JAR', 'index.bdmv']);
     expect(vfs.list('/disc')).toEqual(['BDMV']);
     const originalNames = new Map([['BDMV/JAR/00000.JAR', 'Disc/bdmv/Jar/00000.JAR']]);
     const named = make({ originalNames }).vfs;
-    expect(named.list('/disc/BDMV/JAR')).toEqual(['00000.JAR']);
+    expect(named.list('/disc/BDMV/JAR')).toEqual(['00000.JAR', '00001']);
     expect(named.list('/disc/BDMV')).toContain('Jar');
+  });
+
+  it('derives directories from the file set and round-trips list and stat', () => {
+    const { vfs } = make();
+    expect(vfs.list('/disc/BDMV/JAR')).toContain('00001');
+    expect(vfs.stat('/disc/BDMV/JAR/00001/img')?.kind).toBe('dir');
+    expect(vfs.list('/disc/BDMV/JAR/00001')).toEqual(['CONFIG.xml', 'IMG']);
+    const walk = (dir: string): void => {
+      for (const name of vfs.list(dir)!) {
+        const child = `${dir}/${name}`;
+        const st = vfs.stat(child);
+        expect(st, child).not.toBeNull();
+        if (st!.kind === 'dir') walk(child);
+      }
+    };
+    walk('/disc');
   });
 
   it('reads through a promise and returns -1 at EOF', async () => {
@@ -90,6 +108,11 @@ describe('/disc/', () => {
     expect(vfs.list('/disc')).toEqual([]);
     expect(vfs.stat('/disc/BDMV')).toBeNull();
   });
+});
+
+it('requires discPaths with a disc', () => {
+  const disc = syntheticSource(discFiles());
+  expect(() => new Vfs({ disc, jdkLib: rtBdj, nowMs: () => 0 })).toThrow(/discPaths/);
 });
 
 describe('/app/', () => {

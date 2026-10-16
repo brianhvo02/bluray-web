@@ -26,6 +26,8 @@ export interface VfsOptions {
   readonly disc: ByteSource | null;
   /** rt-bdj.jar; its lib/ entries appear under /jdk/lib/. */
   readonly jdkLib: ZipArchive;
+  /** The disc's normalised file paths (FileSource.paths()); required when `disc` is given. */
+  readonly discPaths?: Iterable<string>;
   readonly nowMs: () => number;
   /** Normalised (upper-case) disc path to the disc's own spelling, used for listings. */
   readonly originalNames?: ReadonlyMap<string, string>;
@@ -114,10 +116,6 @@ const SPECIAL_NAMES = new Map([
   ['SOUND.BDMV', 'sound.bdmv'],
 ]);
 
-/** ByteSource lists files only, so subdirectories are found by probing the names a BDMV tree can contain. */
-const DISC_DIR_CANDIDATES = ['BDMV', 'CERTIFICATE', 'AUXDATA', 'BACKUP', 'META', 'BDJO', 'CLIPINF', 'JAR', 'PLAYLIST', 'STREAM', 'SSIF', 'DL', 'THUMBNAIL'];
-const MAX_PROBE_DEPTH = 4;
-
 function newDir(now: number): MemDir {
   return { kind: 'dir', children: new Map(), mtimeMs: now };
 }
@@ -127,12 +125,28 @@ export class Vfs {
   private readonly disc: ByteSource | null;
   private readonly nowMs: () => number;
   private readonly backings = new Map<string, Backing>();
+  private readonly discDirs = new Map<string, Set<string>>([['', new Set()]]);
   private readonly spelling = new Map<string, string>();
   private readonly jdkCache = new Map<string, Uint8Array>();
 
   constructor(opts: VfsOptions) {
     this.disc = opts.disc;
     this.nowMs = opts.nowMs;
+    if (opts.disc) {
+      if (!opts.discPaths) throw new Error('Vfs: discPaths is required when a disc is given');
+      for (const path of opts.discPaths) {
+        const parts = path.toUpperCase().split('/').filter(Boolean);
+        let dir = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+          let kids = this.discDirs.get(dir);
+          if (!kids) this.discDirs.set(dir, (kids = new Set()));
+          kids.add(parts[i]!);
+          dir = dir === '' ? parts[i]! : `${dir}/${parts[i]}`;
+          if (!this.discDirs.has(dir)) this.discDirs.set(dir, new Set());
+        }
+        if (parts.length > 0) this.discDirs.get(dir)!.add(parts[parts.length - 1]!);
+      }
+    }
     const now = opts.nowMs();
     this.backings.set('disc', { type: 'disc' });
     for (const m of ['tmp', 'persistent', 'buda']) this.backings.set(m, { type: 'mem', root: newDir(now) });
@@ -299,6 +313,7 @@ export class Vfs {
     }
     return this.disc!.read(handle.discPath!, pos, n).then((bytes) => {
       out.set(bytes.subarray(0, n), offset);
+      handle.position -= n - bytes.length;
       return bytes.length;
     });
   }
@@ -361,39 +376,22 @@ export class Vfs {
   }
 
   private discStat(rest: readonly string[]): VfsStat | null {
-    const disc = this.disc;
-    if (!disc) return rest.length === 0 ? { kind: 'dir', size: 0, mtimeMs: 0 } : null;
     const key = rest.join('/').toUpperCase();
-    if (key === '') return { kind: 'dir', size: 0, mtimeMs: 0 };
-    if (disc.exists(key)) return { kind: 'file', size: disc.size(key), mtimeMs: 0 };
-    return this.discIsDir(key) ? { kind: 'dir', size: 0, mtimeMs: 0 } : null;
-  }
-
-  private discIsDir(key: string): boolean {
-    const disc = this.disc!;
-    if (disc.list(key).length > 0 || this.spelling.has(key)) return true;
-    if (key.split('/').length >= MAX_PROBE_DEPTH) return false;
-    return DISC_DIR_CANDIDATES.some((c) => this.discIsDir(`${key}/${c}`));
+    if (this.discDirs.has(key)) return { kind: 'dir', size: 0, mtimeMs: 0 };
+    if (this.disc?.exists(key)) return { kind: 'file', size: this.disc.size(key), mtimeMs: 0 };
+    return null;
   }
 
   private discList(rest: readonly string[]): string[] | null {
-    const disc = this.disc;
-    if (!disc) return rest.length === 0 ? [] : null;
     const key = rest.join('/').toUpperCase();
-    if (key !== '' && (disc.exists(key) || !this.discIsDir(key))) return null;
+    const kids = this.discDirs.get(key);
+    if (!kids) return null;
     const prefix = key === '' ? '' : `${key}/`;
-    const names = new Set(key === '' ? [] : disc.list(key));
-    for (const c of DISC_DIR_CANDIDATES) if (this.discIsDir(prefix + c)) names.add(c);
-    for (const known of this.spelling.keys()) {
-      if (!known.startsWith(prefix)) continue;
-      const rest = known.slice(prefix.length);
-      if (rest !== '' && !rest.includes('/')) names.add(rest);
-    }
-    return [...names].map((n) => this.spelling.get(prefix + n) ?? this.conventional(prefix + n, n)).sort();
+    return [...kids].map((n) => this.spelling.get(prefix + n) ?? this.conventional(prefix + n, n)).sort();
   }
 
   private conventional(key: string, name: string): string {
-    if (this.discIsDir(key)) return name.toUpperCase();
+    if (this.discDirs.has(key)) return name.toUpperCase();
     const upper = name.toUpperCase();
     const special = SPECIAL_NAMES.get(upper);
     if (special) return special;
