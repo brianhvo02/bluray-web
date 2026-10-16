@@ -40,7 +40,7 @@ Decisions taken during brainstorming:
 | Storage | Local to the browser, survives reloads; nothing uploaded anywhere |
 | Where sets come from | Built-in Anime4K modes + `input.conf` import; no set editor in v1 |
 | Too slow for the machine | Audio and sync win (frames drop as today); the UI warns with the drop rate; no automatic switching |
-| Compile time | Video keeps playing unshaded while a set compiles; menu shows "Compiling…" |
+| Compile time | While a set compiles, video keeps playing with the previously active set (unshaded if none was active); menu shows "Compiling…" |
 | GPU API | WebGL2 (GLSL bodies compile nearly verbatim; WebGPU would need a GLSL→WGSL translator in WASM) |
 
 ## 2. Components
@@ -116,7 +116,7 @@ The library (files and imported sets) and the selected set name persist in Index
 
 ## 5. Engine behaviour
 
-- `setVideoShaders { set: { name, files: { name, source }[] } | null }`. The engine parses and compiles in the background while video keeps drawing unshaded; on success it switches at the next frame; on failure it stays unshaded and emits the error.
+- `setVideoShaders { set: { name, files: { name, source }[] } | null }`. The engine parses and compiles in the background while video keeps drawing with the previously active set (unshaded if none was active); on success it switches at the next frame; on failure it drops to unshaded and emits the error.
 - Compiled sets are kept for the session (keyed by name and source hash), so switching back is immediate.
 - Event `shaderStatus { state: 'off' | 'compiling' | 'active' | 'error' | 'unavailable', set, error? }`. `unavailable` when WebGL2 or `EXT_color_buffer_float` is missing; the menu then explains why and offers nothing.
 - WebGL context loss: drop to unshaded, report `error`, and recompile on restore.

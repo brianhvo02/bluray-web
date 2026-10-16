@@ -100,6 +100,9 @@ what would change that decision.
 - **No in-memory fallback when IndexedDB is unavailable:** the menu opens but sets cannot be chosen that session
   (errors are logged). Chrome's private windows still provide IndexedDB, so this is rare. *Revisit if* users with
   blocked site storage need shaders.
+- **`unavailable` is discovered only when a set is first chosen:** the engine creates the WebGL2 backend lazily, so
+  until then the menu lists sets as usual, and only after the first choice does it show the unavailable message.
+  *Revisit if* users on such browsers find the late message confusing (probe at startup).
 - **A pass skipped for an error mid-chain lets later passes bind a same-named texture saved earlier by another
   file,** where libplacebo fails the whole hook. Not reachable with Anime4K.
 - **A transient render error (for example a closed `VideoFrame`) turns the set to `error` until it is selected
