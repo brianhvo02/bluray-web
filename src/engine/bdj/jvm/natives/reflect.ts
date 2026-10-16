@@ -67,6 +67,15 @@ export function newField(jvm: Jvm, f: JField): JObject {
   return o;
 }
 
+/** The JField behind a java.lang.reflect.Field. */
+export function fieldOf(jvm: Jvm, o: JObject): JField | null {
+  const c = classOf(jvm.getField(o, 'clazz', 'Ljava/lang/Class;'));
+  const slot = jvm.getField(o, 'slot', 'I') as number;
+  const isStatic = ((jvm.getField(o, 'modifiers', 'I') as number) & 0x0008) !== 0;
+  for (const f of c.declaredFields) if (f.slot === slot && f.isStatic === isStatic) return f;
+  return null;
+}
+
 export function newExecutable(jvm: Jvm, m: JMethod): JObject {
   const c = m.cls;
   const slot = methodList(c).indexOf(m);
@@ -90,7 +99,7 @@ export function newExecutable(jvm: Jvm, m: JMethod): JObject {
 }
 
 /** The JMethod behind a java.lang.reflect.Method or Constructor. */
-function methodOf(jvm: Jvm, o: JObject): JMethod {
+export function methodOf(jvm: Jvm, o: JObject): JMethod {
   const c = classOf(jvm.getField(o, 'clazz', 'Ljava/lang/Class;'));
   return methodList(c)[jvm.getField(o, 'slot', 'I') as number]!;
 }

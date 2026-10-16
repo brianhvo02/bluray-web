@@ -1,7 +1,7 @@
 /*
  * Original code for bluray-web: sun.misc natives of the BD-J virtual machine (VM, Signal, Version, Perf,
  * URLClassPath), and the few java.io natives the JDK boot itself needs: standard output and error, and the
- * initIDs of the stream and file-system classes.
+ * initIDs of the stream, file-system and zip classes.
  *
  * Copyright (C) 2026 bluray-web contributors
  *
@@ -82,6 +82,7 @@ export function registerMiscNatives(table: NativeTable): void {
     'java/io/FileInputStream.initIDs()V': none,
     'java/io/FileOutputStream.initIDs()V': none,
     'java/io/UnixFileSystem.initIDs()V': none,
+    'java/util/zip/ZipFile.initIDs()V': none,
     'java/io/FileOutputStream.writeBytes([BIIZ)V': (ctx, self, b, off, len) => {
       if (b === null) return ctx.jvm.throwNew('java/lang/NullPointerException');
       const data = (b as JArray).data as Int8Array;

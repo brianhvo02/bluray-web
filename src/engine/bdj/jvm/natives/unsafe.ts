@@ -32,6 +32,13 @@ interface Block {
   readonly view: DataView;
 }
 
+/** The object Unsafe.staticFieldBase returns for a class: static field offsets are relative to it. */
+export function staticFieldBase(jvm: Jvm, cls: JClass): JObject {
+  const base = jvm.heap.newObject(jvm.bootClass('java/lang/Object'));
+  base.nativeData = new StaticBase(cls);
+  return base;
+}
+
 /** Off-heap blocks per VM. */
 const memories = new WeakMap<Jvm, { blocks: Map<bigint, Block>; next: bigint }>();
 
@@ -186,11 +193,8 @@ export function registerUnsafeNatives(table: NativeTable): void {
       cas(ctx.jvm, o, off, 'L', e, x),
     'sun/misc/Unsafe.objectFieldOffset(Ljava/lang/reflect/Field;)J': (ctx, _self, f) => fieldSlot(ctx, f),
     'sun/misc/Unsafe.staticFieldOffset(Ljava/lang/reflect/Field;)J': (ctx, _self, f) => fieldSlot(ctx, f),
-    'sun/misc/Unsafe.staticFieldBase(Ljava/lang/reflect/Field;)Ljava/lang/Object;': (ctx, _self, f) => {
-      const base = ctx.jvm.heap.newObject(ctx.jvm.bootClass('java/lang/Object'));
-      base.nativeData = new StaticBase(classOf(ctx.jvm.getField(f as JObject, 'clazz', 'Ljava/lang/Class;')));
-      return base;
-    },
+    'sun/misc/Unsafe.staticFieldBase(Ljava/lang/reflect/Field;)Ljava/lang/Object;': (ctx, _self, f) =>
+      staticFieldBase(ctx.jvm, classOf(ctx.jvm.getField(f as JObject, 'clazz', 'Ljava/lang/Class;'))),
     'sun/misc/Unsafe.arrayBaseOffset(Ljava/lang/Class;)I': () => 0,
     'sun/misc/Unsafe.arrayIndexScale(Ljava/lang/Class;)I': () => 1,
     'sun/misc/Unsafe.addressSize()I': () => 8,

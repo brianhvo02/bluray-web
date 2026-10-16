@@ -18,9 +18,9 @@ const T_INT = 10;
 const GETSTATIC = 0xb2, ISTORE_1 = 0x3c, ILOAD_1 = 0x1b, IFLE = 0x9e, IINC = 0x84, GOTO = 0xa7;
 const ACC_PUBLIC = 0x0001;
 
-function bootedJvm(stdout: (s: string) => void = () => {}, stderr: (s: string) => void = () => {}): Jvm {
+function bootedJvm(stdout: (s: string) => void = () => {}, stderr: (s: string) => void = () => {}, bootJars = BOOT_JARS): Jvm {
   return new Jvm({
-    bootJars: BOOT_JARS,
+    bootJars,
     nowMs: () => Date.now(),
     setTimer: (ms, fn) => {
       const id = setTimeout(fn, ms);
@@ -183,6 +183,45 @@ describe('after JDK boot', () => {
     },
     60_000,
   );
+
+  it('java.time, which uses lambdas inside the JDK, adds days to a date', async () => {
+    const LDC2_W = 0x14, SIPUSH = 0x11, BIPUSH = 0x10;
+    const date = (n: string, d: string): { c: ['method', string, string, string] } => ({ c: ['method', 'java/time/LocalDate', n, d] });
+    jvm.loader.define(
+      'Dates',
+      assembleClass('Dates', [
+        {
+          name: 'go',
+          desc: '()Ljava/lang/String;',
+          code: [SIPUSH, 0x07, 0xea, BIPUSH, 10, BIPUSH, 15, INVOKESTATIC, date('of', '(III)Ljava/time/LocalDate;'),
+            LDC2_W, { c: ['long', 30n] }, INVOKEVIRTUAL, date('plusDays', '(J)Ljava/time/LocalDate;'),
+            INVOKEVIRTUAL, date('toString', '()Ljava/lang/String;'), ARETURN],
+        },
+      ]),
+      null,
+      null,
+    );
+    const start = performance.now();
+    const s = (await jvm.callStatic('Dates', 'go', '()Ljava/lang/String;')) as JObject;
+    console.log(`LocalDate took ${(performance.now() - start).toFixed(0)} ms`);
+    expect(jvm.heap.jsString(s)).toBe('2026-11-14');
+  }, 60_000);
+});
+
+// HotSpot ran the programs on the JDK's class path alone. With libbluray's jars, opening a file goes through its
+// FileInputStream, whose Logger takes over System.out; Lambdas opens one (String.format reads currency.data).
+describe('on the JDK class path alone', () => {
+  it('Lambdas prints what HotSpot prints', async () => {
+    let out = '';
+    const jvm = bootedJvm((s) => (out += s), () => {}, [RT, file('./conformance.jar')]);
+    await jvm.boot();
+    const loader = jvm.loader;
+    const args: JValue = jvm.heap.newArray(loader.arrayOf(loader.loadBoot('java/lang/String')!), 0);
+    const start = performance.now();
+    await jvm.callStatic('conformance/Lambdas', 'main', '([Ljava/lang/String;)V', [args]);
+    console.log(`Lambdas took ${(performance.now() - start).toFixed(0)} ms`);
+    expect(out).toBe(new TextDecoder().decode(file('./conformance/Lambdas.out')));
+  }, 60_000);
 });
 
 describe('Runtime.halt', () => {

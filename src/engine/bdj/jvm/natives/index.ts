@@ -11,6 +11,8 @@ import type { JMethod } from '../loader';
 import type { JThread } from '../threads';
 import type { Jvm } from '../jvm';
 import type { NativeResult } from '../interpreter';
+import { registerInvokeNatives } from './invoke';
+import { registerIoNatives } from './io';
 import { registerLangNatives } from './lang';
 import { registerMiscNatives } from './misc';
 import { registerReflectNatives } from './reflect';
@@ -28,10 +30,21 @@ export type NativeFn = (ctx: NativeContext, ...args: JValue[]) => NativeResult;
 
 export class NativeTable {
   private readonly fns = new Map<string, NativeFn>();
+  private readonly replacedKeys = new Set<string>();
 
   /** Keys are 'java/lang/Object.hashCode()I'. */
   register(entries: Readonly<Record<string, NativeFn>>): void {
     for (const [key, fn] of Object.entries(entries)) this.fns.set(key, fn);
+  }
+
+  /** Implements Java (non-native) methods natively: classes defined afterwards run these instead of the bytecode. */
+  replace(entries: Readonly<Record<string, NativeFn>>): void {
+    this.register(entries);
+    for (const key of Object.keys(entries)) this.replacedKeys.add(key);
+  }
+
+  get replaced(): ReadonlySet<string> {
+    return this.replacedKeys;
   }
 
   get(key: string): NativeFn | undefined {
@@ -73,9 +86,11 @@ export function registerSchedulerNatives(table: NativeTable): void {
   });
 }
 
-/** The JDK's natives: java.lang, reflection, Unsafe, sun.misc (later tasks add invoke, io, zip, security, net, awt). */
+/** The JDK's natives: java.lang, java.lang.invoke, reflection, Unsafe, sun.misc (later tasks add io, zip, security, net, awt). */
 export function registerJdkNatives(table: NativeTable): void {
   registerLangNatives(table);
+  registerInvokeNatives(table);
+  registerIoNatives(table);
   registerStrictMathNatives(table);
   registerReflectNatives(table);
   registerUnsafeNatives(table);

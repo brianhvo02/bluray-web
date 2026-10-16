@@ -4,9 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from './index';
 import { fdlibmExp, fdlibmRemainder } from './strictmath';
 
-/** Packages whose natives later tasks implement (Task 11: invoke; Task 12: I/O, zip, net, AWT, security; Task 13: libbluray). */
+/** Packages whose natives later tasks implement (Task 12: I/O, zip, net, AWT, security; Task 13: libbluray). */
 const LATER = [
-  'java/lang/invoke/',
   'java/io/',
   'java/util/zip/',
   'java/util/jar/',

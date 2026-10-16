@@ -59,6 +59,8 @@ export interface JMethod {
   /** The native table key, 'java/lang/Object.hashCode()I'. */
   readonly nativeKey: string;
   native: NativeFn | undefined;
+  /** Per invokedynamic instruction (by pc), the linked call site. */
+  callSites?: Map<number, JMethod>;
 }
 
 export function parseMethodDescriptor(desc: string): { args: string[]; ret: string } {
@@ -92,6 +94,8 @@ interface JClassInit {
   readonly descriptor?: string;
   /** java/lang/Object, which interface method resolution searches (interfaces have no superclass here). */
   readonly objectClass: JClass | null;
+  /** Native-table keys of Java methods the VM implements natively instead of running their bytecode. */
+  readonly replaced?: ReadonlySet<string>;
 }
 
 export class JClass {
@@ -182,7 +186,7 @@ export class JClass {
         returnType: ret,
         vtableIndex: -1,
         isStatic,
-        isNative: (m.access & ACC_NATIVE) !== 0,
+        isNative: (m.access & ACC_NATIVE) !== 0 || init.replaced?.has(`${init.name}.${m.name}${m.desc}`) === true,
         isAbstract: (m.access & ACC_ABSTRACT) !== 0,
         isSynchronized: (m.access & ACC_SYNCHRONIZED) !== 0,
         nativeKey: `${init.name}.${m.name}${m.desc}`,
@@ -514,6 +518,10 @@ export class Loader {
   defineAnonymous(host: JClass, bytes: Uint8Array, patches: readonly (JObject | null)[] | null): JClass {
     const file = this.parse('anonymous class', bytes);
     const cls = this.link(file, host.loader, host.protectionDomain, `${file.name}/${++this.anonymousCount}`);
+    // No loader finds the class by name, so its own Class entries resolve to it directly.
+    file.cp.forEach((e, i) => {
+      if (e?.tag === 'class' && file.cp[e.name]?.tag === 'utf8' && (file.cp[e.name] as { value: string }).value === file.name) cls.resolved[i] = cls;
+    });
     for (let i = 0; patches && i < patches.length; i++) {
       const p = patches[i];
       if (!p) continue;
@@ -579,6 +587,7 @@ export class Loader {
       componentType: null,
       primitive: false,
       objectClass,
+      replaced: this.jvm.natives.replaced,
     });
   }
 

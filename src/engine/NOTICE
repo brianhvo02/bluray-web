@@ -109,6 +109,15 @@ DoppioJVM (https://github.com/plasma-umass/doppio), MIT
                                    offsets as indices, staticFieldBase objects, malloc'd memory blocks)
     bdj/jvm/natives/strictmath.ts  from src/natives/java_lang.ts (java_lang_StrictMath: the mapping of the
                                    functions other than exp and IEEEremainder onto JS Math)
+    bdj/jvm/natives/invoke.ts      from src/ConstantPool.ts (InvokeDynamic.constructCallSiteObject and its static
+                                   arguments, MethodHandle.resolve, MethodReference.resolveMemberName: linkage through
+                                   MethodHandleNatives.linkCallSite, linkMethodHandleConstant and linkMethod with an
+                                   appendix), src/util.ts (createMethodType), src/ClassData.ts and src/methods.ts
+                                   (signature-polymorphic lookup), src/opcodes.ts (invokebasic, linktospecial,
+                                   linktovirtual) and src/natives/java_lang.ts (java_lang_invoke_MethodHandleNatives:
+                                   getConstant, getMembers, getMemberVMInfo, the field offsets and staticFieldBase,
+                                   setCallSiteTargetNormal; java_lang_invoke_MethodHandle: invoke and invokeExact
+                                   called reflectively)
   Copyright (c) 2012, 2013, 2014, 2015 John Vilk, CJ Carey, Jez Ng, and Jonny Leahey.
 
   Permission is hereby granted, free of charge, to any person obtaining a copy of

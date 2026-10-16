@@ -14,6 +14,7 @@ import { JavaThrowable, isWide } from './values';
 import type { JArray, JObject, JValue } from './values';
 import type { JThread } from './threads';
 import type { Jvm } from './jvm';
+import { linkCallSite, resolveConstant, signaturePolymorphic } from './natives/invoke';
 
 export interface Frame {
   readonly method: JMethod;
@@ -312,14 +313,16 @@ function resolveMethod(jvm: Jvm, cls: JClass, index: number): JMethod {
   if (nat?.tag !== 'nat') throw new PendingThrow('java/lang/ClassFormatError', `constant ${e.nat} is not a NameAndType`);
   const name = utf8(cls, nat.name);
   const desc = utf8(cls, nat.desc);
-  const m = e.tag === 'imethodref' ? owner.findInterfaceMethod(name, desc) : owner.findMethod(name, desc);
+  const m =
+    (e.tag === 'methodref' ? signaturePolymorphic(jvm, cls, owner, name, desc) : null) ??
+    (e.tag === 'imethodref' ? owner.findInterfaceMethod(name, desc) : owner.findMethod(name, desc));
   if (!m) throw new PendingThrow('java/lang/NoSuchMethodError', `${externalName(owner.name)}.${name}${desc}`);
   cls.resolved[index] = m;
   return m;
 }
 
-/** ldc and ldc_w: int, float, String or Class. */
-function resolveLdc(jvm: Jvm, cls: JClass, index: number): JValue {
+/** ldc and ldc_w: int, float, String, Class, MethodType or MethodHandle. */
+function resolveLdc(jvm: Jvm, t: JThread, cls: JClass, index: number): JValue {
   const e = cpEntry(cls, index);
   switch (e?.tag) {
     case 'int':
@@ -335,8 +338,11 @@ function resolveLdc(jvm: Jvm, cls: JClass, index: number): JValue {
     case 'class':
       return jvm.mirror(resolveClass(jvm, cls, index));
     case 'mtype':
-    case 'mhandle':
-      throw new PendingThrow('java/lang/UnsatisfiedLinkError', `ldc ${e.tag}`);
+    case 'mhandle': {
+      const hit = cls.resolved[index];
+      if (hit) return hit as JObject;
+      throw new LoadPending(resolveConstant(jvm, t, cls, index));
+    }
     default:
       throw new PendingThrow('java/lang/ClassFormatError', `bad ldc constant ${index}`);
   }
@@ -537,14 +543,18 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
             stack[sp++] = (((code[pc + 1]! << 8) | code[pc + 2]!) << 16) >> 16;
             pc += 3;
             break;
-          case 0x12: // ldc
-            stack[sp++] = resolveLdc(jvm, cls, code[pc + 1]!);
+          case 0x12: { // ldc
+            const v = resolveLdc(jvm, t, cls, code[pc + 1]!);
+            stack[sp++] = v;
             pc += 2;
             break;
-          case 0x13: // ldc_w
-            stack[sp++] = resolveLdc(jvm, cls, (code[pc + 1]! << 8) | code[pc + 2]!);
+          }
+          case 0x13: { // ldc_w
+            const v = resolveLdc(jvm, t, cls, (code[pc + 1]! << 8) | code[pc + 2]!);
+            stack[sp++] = v;
             pc += 3;
             break;
+          }
           case 0x14: // ldc2_w
             stack[sp] = ldc2(cls, (code[pc + 1]! << 8) | code[pc + 2]!);
             sp += 2;
@@ -1181,8 +1191,13 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
             call(jvm, t, f, target, pc + 5);
             continue outer;
           }
-          case 0xba: // invokedynamic
-            throw new PendingThrow('java/lang/UnsatisfiedLinkError', 'invokedynamic');
+          case 0xba: { // invokedynamic: linked once per instruction, then a call of its call site
+            const site = f.method.callSites?.get(pc);
+            if (!site) throw new LoadPending(linkCallSite(jvm, t, f.method, pc, (code[pc + 1]! << 8) | code[pc + 2]!));
+            f.sp = sp;
+            call(jvm, t, f, site, pc + 5);
+            continue outer;
+          }
           case 0xbb: { // new
             const c = resolveClass(jvm, cls, (code[pc + 1]! << 8) | code[pc + 2]!);
             if (c.isInterface || c.access & ACC_ABSTRACT) throw new PendingThrow('java/lang/InstantiationError', externalName(c.name));
@@ -1318,7 +1333,8 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
       }
     } catch (e) {
       if (e instanceof LoadPending) {
-        // A Java class loader must load a class first; the instruction runs again afterwards.
+        // A Java class loader must load a class, or Java code link a call site or constant, first; the instruction
+        // runs again afterwards.
         f.sp = sp;
         f.nextPc = f.pc;
         f.wideResult = false;

@@ -99,10 +99,12 @@ export class Heap {
     return str;
   }
 
-  /** Object.clone: a shallow copy with a fresh monitor and identity hash. */
+  /** Object.clone: a shallow copy with a fresh monitor and identity hash; VM data goes along, as HotSpot's injected fields do. */
   clone(o: JObject): JObject {
     if ('data' in o) return new Arr(o.cls, (o as JArray).data.slice());
-    return new Obj(o.cls, o.fields.slice());
+    const c = new Obj(o.cls, o.fields.slice());
+    c.nativeData = o.nativeData;
+    return c;
   }
 
   jsString(str: JObject | null): string | null {
