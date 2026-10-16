@@ -59,10 +59,27 @@ describe('resolveSets', () => {
     expect(r[0]!.available).toBe(false);
     expect(r[0]!.missing[0]).toBe('Anime4K_Restore_CNN_VL.glsl');
   });
-  it('marks a fully present set available', () => {
+  it('marks a fully present set available and lists it first', () => {
     const r = resolveSets([], new Set(BUILT_IN_SETS[6]!.files));
-    expect(r[6]!.available).toBe(true);
-    expect(r[6]!.missing).toEqual([]);
+    expect(r[0]!.name).toBe(BUILT_IN_SETS[6]!.name);
+    expect(r[0]!.available).toBe(true);
+    expect(r[0]!.missing).toEqual([]);
+  });
+  it('lists available sets before unavailable ones, built-ins then imported within each group', () => {
+    const lib = new Set([...BUILT_IN_SETS[6]!.files, ...BUILT_IN_SETS[7]!.files, 'm.glsl']);
+    const imported = [
+      { name: 'gone', files: ['x.glsl'], origin: 'imported' as const },
+      { name: 'mine', files: ['m.glsl'], origin: 'imported' as const },
+    ];
+    const r = resolveSets(imported, lib);
+    const order = (keep: (e: (typeof r)[number]) => boolean) => r.filter(keep).map((e) => e.name);
+    const builtInOrder = BUILT_IN_SETS.map((b) => b.name);
+    const availBuiltIns = order((e) => e.available && e.origin === 'anime4k');
+    const unavailBuiltIns = order((e) => !e.available && e.origin === 'anime4k');
+    expect(availBuiltIns.length).toBeGreaterThanOrEqual(2);
+    expect(r.map((e) => e.name)).toEqual([...availBuiltIns, 'mine', ...unavailBuiltIns, 'gone']);
+    expect(availBuiltIns).toEqual(builtInOrder.filter((n) => availBuiltIns.includes(n)));
+    expect(unavailBuiltIns).toEqual(builtInOrder.filter((n) => unavailBuiltIns.includes(n)));
   });
   it('drops imported sets equal to a built-in and keeps the rest after', () => {
     const other = { name: 'mine', files: ['m.glsl'], origin: 'imported' as const };

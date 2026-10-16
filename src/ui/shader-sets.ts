@@ -73,7 +73,10 @@ function entry(def: ShaderSetDef, library: ReadonlySet<string>): SetEntry {
   return { ...def, missing, available: missing.length === 0 };
 }
 
-/** Built-ins appear once any of their files is in the library; imported sets always, unless equal to a built-in's list. */
+/**
+ * Built-ins appear once any of their files is in the library; imported sets always, unless equal to a built-in's list.
+ * Available sets come first, then unavailable ones; each group keeps built-ins (template order) before imported ones (import order).
+ */
 export function resolveSets(imported: readonly ShaderSetDef[], library: ReadonlySet<string>): SetEntry[] {
   const out: SetEntry[] = [];
   for (const def of BUILT_IN_SETS) {
@@ -83,7 +86,7 @@ export function resolveSets(imported: readonly ShaderSetDef[], library: Readonly
     if (BUILT_IN_SETS.some((b) => sameFiles(b.files, def.files))) continue;
     out.push(entry(def, library));
   }
-  return out;
+  return [...out.filter((e) => e.available), ...out.filter((e) => !e.available)];
 }
 
 export function missingLabel(missing: readonly string[]): string {
