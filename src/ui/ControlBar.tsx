@@ -3,6 +3,8 @@ import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { AudioMenu } from './AudioMenu';
+import { ShaderMenu } from './ShaderMenu';
+import type { ShaderModel, ShaderModelState } from './shader-model';
 import { SubtitleMenu } from './SubtitleMenu';
 import { formatTime } from './format';
 
@@ -102,6 +104,8 @@ function SeekBar({ durationUs, timeUs, chapters, disabled, onSeek }: SeekBarProp
 interface ControlBarProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
+  readonly shaderModel: ShaderModel;
+  readonly shaderState: ShaderModelState;
   readonly visible: boolean;
   onOpenPlaylists(): void;
   onFullscreen(): void;
@@ -112,7 +116,7 @@ interface ControlBarProps {
   onMenuOpenChange(open: boolean): void;
 }
 
-export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange }: ControlBarProps): ReactElement {
+export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
   const masked = (op: UoOp): boolean => snapshot.uoMask.includes(op);
@@ -182,6 +186,7 @@ export function ControlBar({ controller, snapshot, visible, onOpenPlaylists, onF
           onRemove={() => controller.removeSubtitleFile()}
           onOpenChange={onMenuOpenChange}
         />
+        <ShaderMenu model={shaderModel} state={shaderState} status={snapshot.shaders} dropWarning={snapshot.shaderDropWarning} onOpenChange={onMenuOpenChange} />
         {snapshot.indexTitles?.hasTopMenu && (
           <button type="button" data-testid="top-menu" disabled={masked('menuCall')} title={tip('menuCall')} onClick={() => onMenuKey('topMenu')}>
             Top Menu

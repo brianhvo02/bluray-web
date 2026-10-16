@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
+import type { ShaderModel, ShaderModelState } from './shader-model';
 import { collectDroppedFiles, splitPick } from '../player/drop-files';
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
@@ -16,6 +17,8 @@ const OFFSET_NOTICE_MS = 2000;
 interface PlayerScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
+  readonly shaderModel: ShaderModel;
+  readonly shaderState: ShaderModelState;
 }
 
 /**
@@ -32,7 +35,7 @@ function toggleFullscreen(element: HTMLElement | null): void {
   else void element?.requestFullscreen();
 }
 
-export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): ReactElement {
+export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }: PlayerScreenProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -65,7 +68,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target;
       if (target instanceof HTMLTextAreaElement) return;
-      if (target instanceof Element && target.closest('.audio-menu-list')) return; // an open audio or subtitle menu handles its own keys
+      if (target instanceof Element && target.closest('.audio-menu-list, .shader-dialog')) return; // an open audio or subtitle menu handles its own keys
       if (controller.getSnapshot().encodingPrompt) return; // the encoding dialog is modal
       if (target instanceof HTMLInputElement) {
         if (target.type !== 'range') return;
@@ -104,6 +107,9 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         case 'cycleSubtitles':
           controller.cycleSubtitles();
           break;
+        case 'cycleShaders':
+          void shaderModel.cycle().catch((e) => console.error('shader cycle failed', e));
+          break;
         case 'subtitleOffset':
           controller.shiftSubtitles(action.deltaMs);
           break;
@@ -114,7 +120,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [controller]);
+  }, [controller, shaderModel]);
 
   useEffect(() => {
     if (!pressed) return;
@@ -276,6 +282,8 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
       <ControlBar
         controller={controller}
         snapshot={snapshot}
+        shaderModel={shaderModel}
+        shaderState={shaderState}
         visible={controlsVisible}
         onOpenPlaylists={() => setPickerOpen(true)}
         onFullscreen={() => toggleFullscreen(rootRef.current)}

@@ -9,6 +9,7 @@ export type KeyAction =
   | { readonly type: 'cycleAudio' }
   | { readonly type: 'subtitleOffset'; readonly deltaMs: number }
   | { readonly type: 'cycleSubtitles' }
+  | { readonly type: 'cycleShaders' }
   | { readonly type: 'menuKey'; readonly key: MenuKey };
 
 export interface KeyContext {
@@ -18,7 +19,7 @@ export interface KeyContext {
 
 const MENU_ARROWS: Readonly<Record<string, MenuKey>> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', Enter: 'ok' };
 
-/** Playback keys (spec §7), A (audio track), S (subtitles), [ and ] (text subtitle timing), M (top menu), P (pop-up), and menu keys while a menu is shown. */
+/** Playback keys (spec §7), A (audio track), S (subtitles), V (video shaders), [ and ] (text subtitle timing), M (top menu), P (pop-up), and menu keys while a menu is shown. */
 export function keyToAction(key: string, ctx: KeyContext = { menuActive: false }): KeyAction | null {
   if (ctx.menuActive) {
     const menuKey = MENU_ARROWS[key] ?? (/^[0-9]$/.test(key) ? (key as MenuKey) : undefined);
@@ -44,6 +45,9 @@ export function keyToAction(key: string, ctx: KeyContext = { menuActive: false }
     case 's':
     case 'S':
       return { type: 'cycleSubtitles' };
+    case 'v':
+    case 'V':
+      return { type: 'cycleShaders' };
     case '[':
       return { type: 'subtitleOffset', deltaMs: -100 };
     case ']':
