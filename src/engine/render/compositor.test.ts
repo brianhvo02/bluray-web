@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OverlayPlane } from '../graphics/overlay-plane';
+import type { ShaderStage } from '../shaders/stage';
 import { Compositor, fitRect } from './compositor';
 
 describe('fitRect', () => {
@@ -114,5 +115,39 @@ describe('Compositor.drawText', () => {
     expect(calls[0]![0]).toBe(mainCtx);
     // the frame's visible coded size goes along as the storage size (anamorphic ASS layout)
     expect(calls[0]!.slice(1)).toEqual([5, { x: 0, y: 218, width: 1000, height: 563 }, { ...opts, storage: { width: 1440, height: 1080 } }]);
+  });
+});
+
+describe('Compositor.drawVideo with a shader stage', () => {
+  function fake() {
+    const calls: Array<[string, ...unknown[]]> = [];
+    const mainCtx = new Proxy({}, { get: (_t, prop: string) => (...args: unknown[]) => calls.push([`main.${prop}`, ...args]) });
+    const main = { width: 1000, height: 1000, getContext: () => mainCtx } as unknown as OffscreenCanvas;
+    return { calls, compositor: new Compositor(main, () => ({}) as OffscreenCanvas) };
+  }
+  const frame = { displayWidth: 1920, displayHeight: 1080, codedWidth: 1440, codedHeight: 1088, visibleRect: { width: 1440, height: 1080 } } as unknown as VideoFrame;
+
+  it('draws the shaded image in the fitted rectangle, asking for it at that size', () => {
+    const { calls, compositor } = fake();
+    const shaded = { shaded: true } as unknown as OffscreenCanvas;
+    const asked: unknown[][] = [];
+    const stage = { process: (...args: unknown[]) => { asked.push(args); return shaded; } } as unknown as ShaderStage;
+    compositor.setShaderStage(stage);
+    compositor.drawVideo(frame);
+    expect(asked).toEqual([[frame, { width: 1000, height: 563 }]]);
+    expect(calls.filter(([n]) => n === 'main.drawImage')).toEqual([['main.drawImage', shaded, 0, 218, 1000, 563]]);
+    // text is still laid out from the frame
+    const text: unknown[][] = [];
+    compositor.drawText({ render: (...args: unknown[]) => { text.push(args); return 0; }, changed: () => false, visible: () => false }, 0, { offsetUs: 0, scale: 1 });
+    expect(text[0]!.slice(2)).toEqual([{ x: 0, y: 218, width: 1000, height: 563 }, { offsetUs: 0, scale: 1, storage: { width: 1440, height: 1080 } }]);
+  });
+
+  it('draws the raw frame when the stage has no image, and after the stage is removed', () => {
+    const { calls, compositor } = fake();
+    compositor.setShaderStage({ process: () => null } as unknown as ShaderStage);
+    compositor.drawVideo(frame);
+    compositor.setShaderStage(null);
+    compositor.drawVideo(frame);
+    expect(calls.filter(([n]) => n === 'main.drawImage')).toEqual([['main.drawImage', frame, 0, 218, 1000, 563], ['main.drawImage', frame, 0, 218, 1000, 563]]);
   });
 });

@@ -44,7 +44,14 @@ export interface Telemetry {
   readonly textFile: number | null;
   /** The showing ASS file's last draw (events drawn, how many animate, its time), its draws so far and those over 8 ms; null otherwise. */
   readonly ass: { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number; readonly renders: number } | null;
+  /** The shader set that shaded the last frame drawn: passes run and GPU time (null without a timer query); null when unshaded. */
+  readonly shader: { readonly set: string; readonly passesRun: number; readonly gpuMs: number | null } | null;
 }
+
+/** A set of mpv user shaders, in the order they run. */
+export interface ShaderSetData { readonly name: string; readonly files: readonly { readonly name: string; readonly source: string }[] }
+
+export type ShaderState = 'off' | 'compiling' | 'active' | 'error' | 'unavailable';
 
 /** A file's name and bytes, transferred with the command. */
 export interface FileData { readonly name: string; readonly bytes: ArrayBuffer }
@@ -116,7 +123,9 @@ export type EngineCommand =
   /** In the 1920×1080 menu space. */
   | { readonly type: 'pointer'; readonly kind: 'move' | 'click'; readonly x: number; readonly y: number }
   /** Forget the open disc ("Open another disc"). */
-  | { readonly type: 'close' };
+  | { readonly type: 'close' }
+  /** Shade the video with this set (compiled in the background), or draw it unshaded (null). Kept across discs. */
+  | { readonly type: 'setVideoShaders'; readonly set: ShaderSetData | null };
 
 export type EngineEvent =
   | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly warnings: readonly string[] }
@@ -149,4 +158,6 @@ export type EngineEvent =
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }
   /** The current playlist was torn down (a new pick, a failed pick, or close). */
-  | { readonly type: 'playlistCleared' };
+  | { readonly type: 'playlistCleared' }
+  /** On every shader set change and compile result; `error` explains 'error' and 'unavailable'. */
+  | { readonly type: 'shaderStatus'; readonly state: ShaderState; readonly set: string | null; readonly error: string | null };

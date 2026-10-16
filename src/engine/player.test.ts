@@ -14,7 +14,9 @@ import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
 import { OverlayPlane } from './graphics/overlay-plane';
 import { Navigator } from './nav/navigator';
 import { Player, type PlayerDeps } from './player';
-import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
+import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
+import { ShaderStage } from './shaders/stage';
+import type { CompiledSet, ShaderBackend } from './shaders/webgl-backend';
 
 const decoders: FakeDecoder[] = [];
 
@@ -59,6 +61,12 @@ interface Harness {
   pgDraws: OverlayPlane[];
   /** Callbacks the engine registered with requestFrame. */
   frames: Array<() => void>;
+  /** Compositor draw calls in order: `video:<timestamp|null>`, `pg`, `ig`. */
+  order: string[];
+  /** The shader stages handed to setShaderStage, one entry per call. */
+  shaderStages: Array<ShaderStage | null>;
+  /** The disc's files, to open it again. */
+  entries: ReturnType<typeof discEntries>;
   /** Whether the engine has the ring in its playing state. */
   ringPlaying(): boolean;
   /** Advance simulated time; the fake worklet consumes audio unless audio: false; ticks unless render: false. */
@@ -95,7 +103,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']> } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend'] } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
@@ -111,6 +119,9 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   const igDraws: OverlayPlane[] = [];
   const pgDraws: OverlayPlane[] = [];
   const frames: Array<() => void> = [];
+  const order: string[] = [];
+  const shaderStages: Array<ShaderStage | null> = [];
+  let stage: ShaderStage | null = null;
   const clock = { ms: 1000 };
   const player = new Player({
     emit: (e) => events.push(e),
@@ -119,19 +130,28 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     requestFrame: (cb) => frames.push(cb),
     createAudioDecoder: opts.createAudioDecoder ?? noWasmFactory,
     createAssDeps: opts.createAssDeps ?? fakeAssDeps(),
+    createShaderBackend: opts.createShaderBackend,
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
         if (f && opts.throwOnDraw) throw new Error('draw exploded');
+        order.push(`video:${f?.timestamp ?? null}`);
+        if (f) stage?.process(f, { width: 320, height: 180 });
         if (f) drawn.push(f.timestamp);
       },
       drawIg: (plane) => {
+        order.push('ig');
         igDraws.push(plane);
         plane.takeDirty();
       },
       drawPg: (plane) => {
+        order.push('pg');
         pgDraws.push(plane);
         plane.takeDirty();
+      },
+      setShaderStage: (s) => {
+        shaderStages.push(s);
+        stage = s;
       },
     }),
   });
@@ -139,7 +159,8 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   const views: RingViews = ringViews(ring);
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
-  await player.handle({ type: 'open', entries: discEntries(files) });
+  const entries = discEntries(files);
+  await player.handle({ type: 'open', entries });
   const left = new Float32Array(128);
   const right = new Float32Array(128);
   return {
@@ -149,6 +170,9 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     igDraws,
     pgDraws,
     frames,
+    order,
+    shaderStages,
+    entries,
     ringPlaying: () => Atomics.load(views.control, Control.Playing) === 1,
     async play(ms, opts = {}) {
       for (let elapsed = 0; elapsed < ms; elapsed += STEP_MS) {
@@ -1537,3 +1561,110 @@ describe('Player text subtitles', () => {
   });
 });
 
+
+describe('Player video shaders', () => {
+  const PASS = '//!HOOK MAIN\n//!BIND HOOKED\nvec4 hook() { return HOOKED_tex(HOOKED_pos); }\n';
+  const setA: ShaderSetData = { name: 'A', files: [{ name: 'a.glsl', source: PASS }] };
+
+  /** Compiles when `finish()` is called; renders a sentinel image. */
+  function fakeShaders() {
+    const pending: Array<() => void> = [];
+    const created: Array<{ lost(): void; restored(): void }> = [];
+    const image = { shaded: true } as unknown as OffscreenCanvas;
+    const backend: ShaderBackend = {
+      compile: (passes) => new Promise<CompiledSet>((resolve) => pending.push(() => resolve({ passes, dispose: () => undefined }))),
+      render: (set) => ({ image, passesRun: set.passes.length, gpuMs: null }),
+    };
+    return {
+      created,
+      createShaderBackend: (events: { lost(): void; restored(): void }) => {
+        created.push(events);
+        return backend;
+      },
+      finish: async () => {
+        for (const p of pending.splice(0)) p();
+        await new Promise((r) => setTimeout(r, 0));
+      },
+    };
+  }
+  const shaderStatuses = (events: EngineEvent[]) => events.flatMap((e) => (e.type === 'shaderStatus' ? [e] : []));
+
+  it('creates the backend only when a set is chosen, and hands a set chosen before the canvas to the compositor', async () => {
+    const shaders = fakeShaders();
+    const events: EngineEvent[] = [];
+    const stages: Array<ShaderStage | null> = [];
+    const player = new Player({
+      emit: (e) => events.push(e), videoCodecApi: fakeApi, nowMs: () => 0, requestFrame: () => undefined, createAudioDecoder: noWasmFactory,
+      createShaderBackend: shaders.createShaderBackend,
+      createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined, setShaderStage: (s) => stages.push(s) }),
+    });
+    await player.handle({ type: 'setVideoShaders', set: null });
+    expect(shaders.created).toHaveLength(0);
+    expect(shaderStatuses(events)).toEqual([{ type: 'shaderStatus', state: 'off', set: null, error: null }]);
+    await player.handle({ type: 'setVideoShaders', set: setA });
+    expect(shaders.created).toHaveLength(1);
+    expect(shaderStatuses(events).at(-1)).toEqual({ type: 'shaderStatus', state: 'compiling', set: 'A', error: null });
+    await shaders.finish();
+    expect(shaderStatuses(events).at(-1)).toEqual({ type: 'shaderStatus', state: 'active', set: 'A', error: null });
+    await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
+    expect(stages).toHaveLength(1);
+    expect(stages[0]).toBeInstanceOf(ShaderStage);
+    await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
+    expect(stages).toHaveLength(2);
+    expect(stages[1]).toBe(stages[0]);
+  });
+
+  it('reports unavailable when the browser has no backend', async () => {
+    const h = await harness(CodingType.LPCM, { createShaderBackend: () => 'no WebGL2 here' });
+    await h.player.handle({ type: 'setVideoShaders', set: setA });
+    expect(shaderStatuses(h.events)).toEqual([{ type: 'shaderStatus', state: 'unavailable', set: 'A', error: 'no WebGL2 here' }]);
+  });
+
+  it('reports unavailable without a backend factory', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'setVideoShaders', set: setA });
+    expect(shaderStatuses(h.events).at(-1)).toMatchObject({ state: 'unavailable', set: 'A' });
+  });
+
+  it('keeps the chosen set across closing and opening a disc, and reports it in telemetry', async () => {
+    const shaders = fakeShaders();
+    const h = await harness(CodingType.LPCM, { createShaderBackend: shaders.createShaderBackend });
+    await h.player.handle({ type: 'setVideoShaders', set: setA });
+    await shaders.finish();
+    expect(h.shaderStages).toHaveLength(1);
+    await h.player.handle({ type: 'close' });
+    await h.player.handle({ type: 'open', entries: h.entries });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(600); // a telemetry sample after frames were drawn
+    expect(h.shaderStages).toEqual([expect.any(ShaderStage)]);
+    expect(shaderStatuses(h.events).map((e) => e.state)).toEqual(['compiling', 'active']);
+    expect(lastTelemetry(h)!.shader).toEqual({ set: 'A', passesRun: 1, gpuMs: null });
+    await h.player.handle({ type: 'setVideoShaders', set: null });
+    await h.play(600);
+    expect(lastTelemetry(h)!.shader).toBeNull();
+  });
+
+  it('repaints the paused frame and its overlays once the set is ready', async () => {
+    const shaders = fakeShaders();
+    const at = (seconds: number, segs: Uint8Array[]) => segs.map((payload) => ({ pts: CLIP_START_PTS + Math.round(seconds * 90_000), payload }));
+    const h = await harness(CodingType.LPCM, { createShaderBackend: shaders.createShaderBackend, pgStreams: [{ pid: 0x1200, lang: 'eng', units: at(1, subtitleSegments({ x: 100 })) }] });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+    await untilPlaying(h);
+    await stepUntil(h, () => clockUs(h) >= 1_300_000);
+    await h.player.handle({ type: 'pause' });
+    await h.play(200);
+    const current = h.drawn.at(-1);
+    h.order.length = 0;
+    await h.player.handle({ type: 'setVideoShaders', set: setA });
+    h.player.tick();
+    expect(h.order).toEqual([]); // compiling: nothing to repaint yet
+    await shaders.finish();
+    h.player.tick();
+    expect(h.order).toEqual([`video:${current}`, 'pg']);
+    h.order.length = 0;
+    h.player.tick();
+    expect(h.order).toEqual([]);
+  });
+});
