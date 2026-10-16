@@ -53,8 +53,7 @@ jobs:
             playwright-report/
           retention-days: 7
 
-  # the native ASS renderer against the libass goldens (layout traces and frames); a job of its own
-  # so the deploy does not wait on it while the Linux-only glyph-edge mismatch in `anim` is open
+  # the native ASS renderer against the libass goldens (layout traces and frames)
   ass:
     name: ASS renderer vs libass (Chrome)
     runs-on: ubuntu-latest
@@ -80,7 +79,7 @@ jobs:
 
   deploy:
     name: Deploy to Cloudflare Pages
-    needs: [check, e2e]
+    needs: [check, e2e, ass]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # a newer push to main must not cancel an upload halfway; deploys queue instead
