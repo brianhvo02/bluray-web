@@ -233,6 +233,7 @@ java/io/SyncFailedException
 java/io/UnixFileSystem
 java/io/UnsupportedEncodingException
 java/io/Writer
+java/lang/AbstractMethodError
 java/lang/AbstractStringBuilder
 java/lang/Appendable
 java/lang/ArithmeticException
@@ -256,6 +257,8 @@ java/lang/Class$Atomic
 java/lang/Class$MethodArray
 java/lang/Class$ReflectionData
 java/lang/ClassCastException
+java/lang/ClassCircularityError
+java/lang/ClassFormatError
 java/lang/ClassLoader
 java/lang/ClassLoader$1
 java/lang/ClassLoader$2
@@ -277,7 +280,9 @@ java/lang/Double
 java/lang/Enum
 java/lang/Error
 java/lang/Exception
+java/lang/ExceptionInInitializerError
 java/lang/Float
+java/lang/IllegalAccessError
 java/lang/IllegalAccessException
 java/lang/IllegalArgumentException
 java/lang/IllegalMonitorStateException
@@ -285,15 +290,18 @@ java/lang/IllegalStateException
 java/lang/IncompatibleClassChangeError
 java/lang/IndexOutOfBoundsException
 java/lang/InheritableThreadLocal
+java/lang/InstantiationError
 java/lang/InstantiationException
 java/lang/Integer
 java/lang/Integer$IntegerCache
+java/lang/InternalError
 java/lang/InterruptedException
 java/lang/Iterable
 java/lang/LinkageError
 java/lang/Long
 java/lang/Long$LongCache
 java/lang/Math
+java/lang/NegativeArraySizeException
 java/lang/NoClassDefFoundError
 java/lang/NoSuchFieldError
 java/lang/NoSuchFieldException
@@ -343,7 +351,9 @@ java/lang/ThreadLocal$ThreadLocalMap
 java/lang/ThreadLocal$ThreadLocalMap$Entry
 java/lang/Throwable
 java/lang/UnsatisfiedLinkError
+java/lang/UnsupportedClassVersionError
 java/lang/UnsupportedOperationException
+java/lang/VerifyError
 java/lang/VirtualMachineError
 java/lang/Void
 java/lang/annotation/Annotation
