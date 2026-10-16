@@ -37,7 +37,7 @@ function bindMacros(name: string): string[] {
     `#define ${name}_rot mat2(1.0)`,
     `#define ${name}_off vec2(0.0)`,
     `#define ${name}_tex(pos) (${name}_mul * textureLod(${name}_raw, pos, 0.0))`,
-    `#define ${name}_texOff(off) ${name}_tex(${name}_pos + ${name}_pt * (off))`,
+    `#define ${name}_texOff(off) ${name}_tex(${name}_pos + ${name}_pt * vec2(off))`,
   ];
 }
 

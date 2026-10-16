@@ -18,7 +18,7 @@ describe('fragmentSource', () => {
     expect(src).toContain('uniform sampler2D HOOKED_raw;');
     expect(src).toContain('uniform sampler2D TINT_raw;');
     expect(src).toContain('#define TINT_tex(pos) (TINT_mul * textureLod(TINT_raw, pos, 0.0))');
-    expect(src).toContain('#define TINT_texOff(off) TINT_tex(TINT_pos + TINT_pt * (off))');
+    expect(src).toContain('#define TINT_texOff(off) TINT_tex(TINT_pos + TINT_pt * vec2(off))');
     expect(src).toContain('#define TINT_pos v_pos');
     expect(src).toContain(pass.body);
     expect(src.trimEnd()).toMatch(/void main\(\) \{\s*\w+ = hook\(\);\s*\}$/);

@@ -32,9 +32,25 @@ export class ShaderCompileError extends Error {
   }
 }
 
+/** The WebGL context was lost before or during the call; recompile after `restored()`. */
+export class ShaderContextLostError extends Error {
+  constructor() {
+    super('WebGL context lost');
+    this.name = 'ShaderContextLostError';
+  }
+}
+
 export interface ShaderBackend {
-  /** Rejects with ShaderCompileError. */
+  /**
+   * Compiles one program per (pass, firing stage). Rejects with ShaderCompileError when a pass fails to compile or
+   * link, or with ShaderContextLostError when the context is lost before or while compiling.
+   */
   compile(passes: readonly ShaderPass[]): Promise<CompiledSet>;
+  /**
+   * Runs the set on `frame` and draws the result at `output` size into the returned canvas (the same canvas every call).
+   * Throws ShaderContextLostError while the context is lost; throws a plain Error for a set that was disposed or
+   * compiled on an earlier (lost) context, and passes through errors from the upload of `frame` (a closed VideoFrame).
+   */
   render(set: CompiledSet, frame: VideoFrame, output: Size): RenderResult;
 }
 
@@ -208,7 +224,7 @@ class WebGlBackend implements ShaderBackend {
   async compile(passes: readonly ShaderPass[]): Promise<CompiledSet> {
     const gl = this.gl;
     const generation = this.generation;
-    if (gl.isContextLost() || !this.vertex) throw new Error('WebGL context lost');
+    if (gl.isContextLost() || !this.vertex) throw new ShaderContextLostError();
     const vertex = this.vertex;
 
     const jobs: { pass: ShaderPass; stage: PlanStage; fs: WebGLShader; program: WebGLProgram }[] = [];
@@ -234,7 +250,7 @@ class WebGlBackend implements ShaderBackend {
       }
     }
     if (this.generation !== generation || gl.isContextLost()) {
-      throw new Error('WebGL context lost');
+      throw new ShaderContextLostError();
     }
 
     const programs = new Map<ShaderPass, Map<PlanStage, Program>>();
@@ -264,24 +280,32 @@ class WebGlBackend implements ShaderBackend {
   render(set: CompiledSet, frame: VideoFrame, output: Size): RenderResult {
     const gl = this.gl;
     if (!(set instanceof WebGlSet) || set.generation !== this.generation || !this.sets.has(set)) {
-      throw new Error('shader set is not usable on this WebGL context');
+      if (this.gl.isContextLost()) throw new ShaderContextLostError();
+      throw new Error('shader set is disposed or was compiled on a lost WebGL context');
     }
-    if (!this.final || !this.frameTexture) throw new Error('WebGL context lost');
+    if (gl.isContextLost() || !this.final || !this.frameTexture) throw new ShaderContextLostError();
+    const final = this.final;
+    const frameTexture = this.frameTexture;
 
     this.collectTimer();
-    const query = this.beginTimer();
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.frameTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);
-
-    // texImage2D uploads the visible rectangle, so MAIN is the visible size (spec section 3.3).
-    const source: Size = { width: frame.visibleRect?.width ?? frame.codedWidth, height: frame.visibleRect?.height ?? frame.codedHeight };
-    const plan = planFrame(set.passes, source, output);
     const textures = new Map<number, PoolTexture>();
-    const glTexture = (ref: TexRef): WebGLTexture => (ref.id === 0 ? this.frameTexture! : textures.get(ref.id)!.texture);
-
+    const glTexture = (ref: TexRef): WebGLTexture => (ref.id === 0 ? frameTexture : textures.get(ref.id)!.texture);
+    let passesRun = 0;
+    // Everything after beginTimer sits in the try, so the query is always ended and the textures released.
+    const query = this.beginTimer();
     try {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, frameTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+
+      // texImage2D uploads the visible rectangle, so MAIN is the visible size (spec section 3.3).
+      const source: Size = {
+        width: frame.visibleRect?.width ?? frame.codedWidth,
+        height: frame.visibleRect?.height ?? frame.codedHeight,
+      };
+      const plan = planFrame(set.passes, source, output);
+      passesRun = plan.passes.length;
+
       for (const step of plan.passes) {
         const program = set.programs.get(step.pass)?.get(step.stage);
         if (!program) throw new Error(`no program for ${step.pass.desc} at ${step.stage}`);
@@ -311,16 +335,16 @@ class WebGlBackend implements ShaderBackend {
       if (this.canvas.height !== output.height) this.canvas.height = output.height;
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, output.width, output.height);
-      gl.useProgram(this.final.program);
+      gl.useProgram(final.program);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, glTexture(plan.final));
-      gl.uniform1i(uniform(gl, this.final, 'image'), 0);
+      gl.uniform1i(uniform(gl, final, 'image'), 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     } finally {
       if (query) gl.endQuery(TIME_ELAPSED_EXT);
       this.releaseFrame(textures);
     }
-    return { image: this.canvas, passesRun: plan.passes.length, gpuMs: this.gpuMs };
+    return { image: this.canvas, passesRun, gpuMs: this.gpuMs };
   }
 
   private acquire(ref: TexRef): PoolTexture {
@@ -364,6 +388,11 @@ class WebGlBackend implements ShaderBackend {
     const q = this.gl.createQuery();
     if (!q) return null;
     this.gl.beginQuery(TIME_ELAPSED_EXT, q);
+    // A query that did not start (another one still active) would never become available and stall collectTimer.
+    if (this.gl.getQuery(TIME_ELAPSED_EXT, this.gl.CURRENT_QUERY) !== q) {
+      this.gl.deleteQuery(q);
+      return null;
+    }
     this.pending.push(q);
     return q;
   }
