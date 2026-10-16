@@ -51,7 +51,7 @@ interface Draft {
 }
 
 export function parseShaderFile(file: string, source: string): ShaderPass[] {
-  const text = source.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  const text = source.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   const lines = text.split('\n');
   const drafts: Draft[] = [];
   let cur: Draft | null = null;

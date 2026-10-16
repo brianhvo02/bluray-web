@@ -22,7 +22,7 @@ describe('parseShaderFile', () => {
 
   it('tolerates CRLF, BOM and extra spaces', () => {
     const clean = basic('passthrough');
-    const messy = '﻿' + clean.replace(/\n/g, '\r\n').replace('//!HOOK MAIN', '//!HOOK  MAIN  ');
+    const messy = '\uFEFF' + clean.replace(/\n/g, '\r\n').replace('//!HOOK MAIN', '//!HOOK  MAIN  ');
     expect(parseShaderFile('p.glsl', messy)).toEqual(parseShaderFile('p.glsl', clean));
   });
 
