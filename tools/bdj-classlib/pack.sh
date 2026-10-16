@@ -12,6 +12,13 @@ trap 'rm -rf "$T"' EXIT
 $MK $OUT/libbluray-j2se.jar $LB/libbluray-j2se-1.5.1.jar -
 $MK $OUT/libbluray-awt-j2se.jar $LB/libbluray-awt-j2se-1.5.1.jar -
 
+# the synthetic disc's xlets: class version 47 (-source/-target 1.3), compiled against libbluray's own jars
+mkdir "$T/xlets"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets" tests/bdj/xlets/src/bdjweb/test/*.java
+$MK tests/bdj/xlets/00000.jar "$T/xlets" -
+
 # classes.txt plus every nested class of each listed class (X$*.class)
 unzip -Z1 "$JRE/lib/rt.jar" | grep '\.class$' | LC_ALL=C sort > "$T/rt-entries"
 LC_ALL=C awk -v listfile=$OUT/classes.txt '
