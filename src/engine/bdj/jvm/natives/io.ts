@@ -124,9 +124,9 @@ function checkBounds(jvm: Jvm, b: JValue, off: number, len: number): NativeResul
 
 /**
  * Suspends on a host read; a rejection (a removed file, an abort) becomes a Java exception of class `cls` in the
- * calling thread rather than a failure of the whole runtime.
+ * calling thread rather than a failure of the whole runtime, with `message` or else the JS error's message.
  */
-export function suspendRead<T>(jvm: Jvm, read: Promise<T>, cls: string, k: (v: T) => NativeResult): Suspend {
+export function suspendRead<T>(jvm: Jvm, read: Promise<T>, cls: string, k: (v: T) => NativeResult, message?: string): Suspend {
   let value: T;
   let failure: unknown = null;
   let failed = false;
@@ -139,7 +139,7 @@ export function suspendRead<T>(jvm: Jvm, read: Promise<T>, cls: string, k: (v: T
       if (r instanceof ThrowResult) return r;
       if (!failed) return k(value);
       if (failure instanceof JavaThrowable) return new ThrowResult(failure.obj);
-      return jvm.throwNew(cls, failure instanceof Error ? failure.message : String(failure));
+      return jvm.throwNew(cls, message ?? (failure instanceof Error ? failure.message : String(failure)));
     },
   );
 }

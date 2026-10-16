@@ -489,8 +489,8 @@ describe('java.io paths and failures', () => {
     ]);
     const call = await probing(files, (p) => p.endsWith('00001.JAR'));
     expect(await call('read', '/disc/BDMV/JAR/00001.jar')).toBe('java.io.IOException: file was removed');
-    // rt-bdj.jar has no ZipException, so ZipFile's errors are its superclass IOException.
-    expect(await call('zip', '/disc/BDMV/JAR/00001.jar')).toBe('java.io.IOException: file was removed');
+    // As in the JDK: a read error during ZipFile.open sets no zip_util message, so open throws its generic ZipException.
+    expect(await call('zip', '/disc/BDMV/JAR/00001.jar')).toBe('java.util.zip.ZipException: error in opening zip file');
     expect(await call('read', '/disc/BDMV/JAR/00000.jar')).toBe('read');
     expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
   }, 60_000);

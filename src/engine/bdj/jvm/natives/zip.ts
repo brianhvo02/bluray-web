@@ -253,13 +253,8 @@ class ZDeflater {
   }
 }
 
-/** rt-bdj.jar lacks ZipException (no disc path needed it); its superclass IOException stands in then. */
-function zipExceptionClass(jvm: Jvm): string {
-  return jvm.loader.loadBoot('java/util/zip/ZipException') ? 'java/util/zip/ZipException' : 'java/io/IOException';
-}
-
 function zipException(jvm: Jvm, message: string): NativeResult {
-  return jvm.throwNew(zipExceptionClass(jvm), message);
+  return jvm.throwNew('java/util/zip/ZipException', message);
 }
 
 function zipOf(ctx: NativeContext, h: JValue): ZipHandle | null {
@@ -305,7 +300,8 @@ export function registerZipNatives(natives: NativeTable): void {
         h.zips.set(id, { archive, byName: null });
         return id;
       };
-      return data instanceof Promise ? suspendRead(jvm, data, zipExceptionClass(jvm), open) : open(data);
+      // A read error leaves zip_util's message unset, so the JDK's ZipFile.open throws its generic ZipException.
+      return data instanceof Promise ? suspendRead(jvm, data, 'java/util/zip/ZipException', open, 'error in opening zip file') : open(data);
     },
     'java/util/zip/ZipFile.getTotal(J)I': (ctx, h) => zipOf(ctx, h)?.archive.list.length ?? 0,
     'java/util/zip/ZipFile.startsWithLOC(J)Z': (ctx, h) => (zipOf(ctx, h)?.archive.startsWithLoc ? 1 : 0),
