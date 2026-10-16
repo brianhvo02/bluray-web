@@ -30,7 +30,6 @@ what would change that decision.
 
 ## Subtitles
 
-- **ASS/SSA files are not supported yet.** The native ASS renderer is milestone 4b, with its own spec.
 - **HDMV TextST streams (stream type 0x92) are not decoded.** No local disc carries one. *Revisit when* a disc does.
 - **PG carried in sub-paths is not decoded**, as in libbluray (it decodes main-path PG only); such tracks are left out
   of the subtitle menu. *Revisit if* a disc carries its only subtitles in a sub-path.
@@ -41,6 +40,36 @@ what would change that decision.
   (the file belongs to the open disc).
 - **SRT is verified on synthetic data only** (unit tests and `tests/e2e/subtitles.spec.ts`); no real-world SRT corpus
   is tested. Encodings other than UTF-8 need the user's choice in the encoding prompt (no detection).
+
+## ASS subtitles
+
+- **Not loaded yet: subtitles and fonts inside `.mkv` files, and installed system fonts (`queryLocalFonts()`).**
+  Both are a later milestone. Fonts come from files picked or dropped with the script and from its `[Fonts]`
+  section; a family that is still missing is replaced and named in a notice.
+- **WOFF2 fonts are not accepted** (Brotli and table transforms); `.ttf`, `.otf`, `.ttc` and `.woff` are. Fansub
+  fonts are TTF/OTF. *Revisit if* a release ships WOFF2.
+- **Legacy `Effect` field effects (`Banner`, `Scroll up`, `Scroll down`) are ignored**, and `Comment`, `Picture`,
+  `Sound`, `Movie` and `Command` events are skipped. *Revisit if* a real file uses them.
+- **Right-to-left text is reordered by Chrome within a style run only**; libass's FriBidi reordering across runs is
+  not ported, so mixed-direction lines that change style mid-word can order differently.
+- **Lines break as libass does without libunibreak** (spaces and ZWSP only), which is what most ffmpeg builds do.
+  CJK text without spaces therefore wraps only at the frame edge, as in those builds.
+- **Fonts without TrueType hinting instructions space their glyphs slightly differently from libass.** libass's
+  shaper loads glyphs hinted, so FreeType runs its auto-hinter on such fonts and the advances follow the snapped stem
+  edges: about 1 px per glyph at the 256 px shaping size, up to ~1 px across a short title on screen. Porting the
+  auto-hinter is out of scope. In the TSURUNE corpus this is Chalk Board (the episode title card); it is recorded in
+  that fixture's `exceptions.json` and is the only difference left (57 layout differences and 3 frames, all in 2
+  events). Glyph shapes are unaffected.
+- **Small text keeps up to 1/16 px of Chrome's glyph snapping.** Chrome draws text under about 256 device px from a
+  glyph cache that snaps the baseline to whole pixels, so masks are supersampled until text reaches that size, at
+  most 8×. Text animated in shape every frame (the direct path) is drawn the same way on the GPU but blurred by the
+  canvas filter with one deviation for both axes.
+- **Not drawn as libass does:** BorderStyle 4 (libass's background box) is not drawn; vertical `@font` glyphs are
+  drawn unrotated; `\be` is folded into the Gaussian (variance 0.5 per pass); a rotated border with `\xbord` ≠
+  `\ybord` is dilated axis-aligned in device space. *Revisit if* a real file shows the difference.
+- **Verified against one real script so far** (TSURUNE episode 1, its 18 fonts, 2340 sampled times; local gate
+  `ASS_LOCAL=1`). The 15 committed synthetic fixtures cover the tag set. *Revisit* by adding scripts to
+  `fixtures/local/ass/`.
 
 ## Audio
 
@@ -55,6 +84,11 @@ what would change that decision.
 
 ## Resolved (for reference)
 
+- **ASS rendering differences from Chrome's canvas, found by the TSURUNE gate.** Canvases created with
+  `willReadFrequently` (CPU) approximate `blur()` with box passes: deviations under 0.8 px do nothing and larger ones
+  step, so mask blurs are a Gaussian in JS. Both CPU and GPU canvases snap the baseline of text under ~256 px to whole
+  device pixels (see above). Canvases that are only drawn into are GPU-backed: read-backs of the composited output
+  were most of the animated draw time (p95 15 ms → 4 ms).
 - **"Underruns" at the end of a playlist were the stream ending, not dropouts.** The output keeps running until the
   last video frame (plus 100 ms) so the clock can finish the picture, and every silent quantum after the audio ran out
   counted as an underrun (about 50 per playlist end; TSURUNE showed 57 from its First Play logo ending). Once all of

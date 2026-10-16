@@ -3,7 +3,7 @@
  * projective matrix from outline coordinates to frame coordinates (both 26.6).
  *
  * Ported from libass 0.17.5 (ass_render.c): calc_transform_matrix, calculate_rotation_params. The matrix is used
- * exactly; libass's quantize_transform (bitmap cache keys) is not ported. libass is ISC-licensed; see
+ * exactly; of quantize_transform only the position rounding is ported (raster.ts). libass is ISC-licensed; see
  * src/engine/NOTICE. Modified for bluray-web, 2026.
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later AND ISC

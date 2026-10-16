@@ -11,6 +11,12 @@ FriBidi from Ubuntu 24.04 (pinned by digest), without fontconfig or libunibreak.
   and fails on any diff (`.github/workflows/ass-trace.yml`).
 - `npm run ass-trace -- <file.ass> <fonts dir> <times file> [<w>x<h>]` traces any file into
   `tools/ass-trace/out/<name>/` (`trace.jsonl` and `<ms>.png`).
+- `ASS_LOCAL=1 npx playwright test -c playwright.ass.config.ts local` checks real scripts: each
+  `fixtures/local/ass/<name>/` (gitignored) holds a script, its fonts (any depth up to two) and optionally
+  `times.txt` and `exceptions.json` (`{"events": {"<index>": "reason"}}`, differences recorded in
+  `docs/known-issues.md`, reported but not failing). libass runs live, cached by content in
+  `tools/ass-trace/out/local/<name>/`; the report, our failing frames and diff images go to
+  `test-results/ass-local/<name>/`. The gate also checks the animated draw-time p95 against 8 ms.
 
 Settings match what our trace page uses: a 1920×1080 frame, font scale 1, no hinting, complex shaping, no
 font provider other than the fonts directory and `[Fonts]`, DejaVu Sans (from the fonts directory) as the

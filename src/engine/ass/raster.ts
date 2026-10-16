@@ -3,9 +3,10 @@
  * widened by the border ellipse), blur, the fill cut out of the border, a shadow, colours and karaoke, clips;
  * shadows of all runs first, then borders, then fills. Glyphs are rasterized by the browser.
  *
- * Ported from libass 0.17.5 (ass_render.c): the filter flags of render_and_combine_glyphs, quantize_blur,
- * restore_blur, the composition of ass_composite_construct, render_text, render_glyph (rectangle and karaoke
- * split), blend_vector_clip (as a canvas clip), the BorderStyle 3 box of get_bitmap_glyph; (ass_bitmap.c):
+ * Ported from libass 0.17.5 (ass_render.c): the filter flags of render_and_combine_glyphs, the positions of
+ * quantize_transform, quantize_blur, restore_blur, the composition of ass_composite_construct, render_text,
+ * render_glyph (rectangle and karaoke split), blend_vector_clip (as a canvas clip), the BorderStyle 3 box of
+ * get_bitmap_glyph; (ass_bitmap.c):
  * ass_fix_outline; (ass_font.c): the strengths of ass_glyph_embolden and ass_glyph_italicize and the decoration
  * rectangles of ass_get_glyph_outline. libass is ISC-licensed; see src/engine/NOTICE. Modified for bluray-web, 2026.
  *

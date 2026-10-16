@@ -1,7 +1,7 @@
 # Milestone 4b: Native ASS Renderer — Design Spec
 
 Date: 2026-10-15
-Status: Approved design; implementation plan to follow.
+Status: Done (2026-10-15). Plan: `docs/superpowers/plans/2026-10-15-m4b-ass-renderer.md`; deviations in §10.
 Parent spec: `2026-10-12-bluray-web-player-design.md` (§6 ASS, §9 golden images, §11 milestone 4). Builds on `2026-10-15-m4a-pgs-srt-design.md` (text track, subtitle menu, offset and size controls) and the M3 trace harness pattern (`tools/vm-trace/`).
 
 ## 1. Goal and scope
@@ -184,3 +184,46 @@ Delivered phase by phase on main:
 3. With `ASS_LOCAL=1`, every file in `fixtures/local/ass/` passes layout and pixels; any exception is in `docs/known-issues.md` with its diff image and cause.
 4. The performance budget (§7) holds on the local corpus during disc playback, and the A/V sync E2E passes with an ASS track on.
 5. `docs/known-issues.md` lists what is deferred: MKV extraction, `queryLocalFonts()`, legacy `Effect` effects, and JASSUB (only if criterion 3 calls for it).
+
+## 10. Deviations
+
+Decided while planning (the plan's list):
+
+1. The harness libass is built without libunibreak; lines break as libass does without it (spaces, ZWSP).
+2. No FriBidi reordering across style runs; Chrome reorders right-to-left text within a run.
+3. WOFF2 is not accepted (`.ttf .otf .ttc .woff` are).
+4. Goldens are opaque: libass's images are blended onto `#808080`, and the page fills the same colour first.
+5. Fonts are matched when the track loads, not lazily (`FontFace.load()` is asynchronous; libass's rendering is not).
+6. Synthetic bold and italic are libass's strengths and shear applied when drawing, not Chrome's synthesis.
+7. The colour-matrix conversion is the player's (§3.3 said libass converts; it does not): `Default`/missing and
+   `*.601` scripts are converted BT.601 → BT.709, the trace page converts nothing.
+
+Decided while implementing:
+
+8. **Rasterization is partly ours, not only the browser's** (§2 said `fillText`/`strokeText`, `Path2D` and
+   `ctx.filter`). Glyphs are still drawn by the browser, but fill and border masks are supersampled and box-filtered
+   in JS (4× static, 2× animated, raised until text is at least 256 device px, at most 8×: Chrome's glyph cache snaps
+   the baseline to whole pixels below that); borders are strokes when round and uniform, otherwise a weighted
+   distance-transform dilation; the mask blur is a Gaussian in JS with separate x/y deviations, because Chrome's
+   CPU-backed canvas `blur()` drops deviations under 0.8 px. Runs whose shape changes every frame are drawn directly on
+   GPU canvases (no read-back) when their compositing needs no `ass_fix_outline`.
+9. **Shaping and font metrics follow FreeType where the browser differs:** GSUB `liga`/`clig`/`rlig` clusters are
+   read from the font (`gsub.ts`), as HarfBuzz merges them; advances are whole pixels at the 256 px shaping size, at
+   the rounded ppem for TrueType fonts whose head flags force it (hinted loads only; outlines and ascender/descender
+   keep the requested size).
+10. **libass's `quantize_transform` positions are ported:** a run moves by the 1/8 px rounding of its first inked
+    glyph's box centre. Its matrix quantization is not (the matrix is used exactly).
+11. **Not drawn as libass does:** BorderStyle 4's background box, vertical `@font` glyph rotation, `\be` as separate
+    box passes (folded into the Gaussian), rotated anisotropic borders (dilated axis-aligned). Recorded in
+    `docs/known-issues.md`.
+12. **Trace format and tolerances:** `font` is `<requested family>|<PostScript name>`; numbers keep 6 decimals; the
+    comparer allows 1e-5 on scale/rotation/shear, the position tolerance on translations and `\k` timings, 1 px on
+    integer boxes and 2e-3 relative on perspective matrices. Frames where a run uses a missing family skip the pixel
+    comparison and that event's box.
+13. **One recorded corpus exception (§6.4):** fonts without TrueType hinting instructions get FreeType auto-hinter
+    advances in libass's shaper (about 1 px per glyph at 256 px). The local gate reads per-fixture
+    `exceptions.json` files and reports, but does not fail on, those events. JASSUB was not needed.
+14. **WrapStyle 3 behaves like 0**, as in libass (its FIXME), not "lower lines wider" (§2).
+15. **Episode sets** (§3.5) draw through one `TextSetRenderer` over the files; the player's global text offset became
+    per file; an explicit seek clears ASS collision memory.
+
