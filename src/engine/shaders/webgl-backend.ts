@@ -240,8 +240,16 @@ class WebGlBackend implements ShaderBackend {
       for (const stage of STAGES) {
         if (!pass.hooks.some((h) => canonical(h) === stage)) continue;
         const fs = this.shader(gl.FRAGMENT_SHADER, fragmentSource(pass, stage));
-        jobs.push({ pass, stage, fs, program: this.link(vertex, fs) });
+        const program = this.link(vertex, fs);
+        jobs.push({ pass, stage, fs, program });
+        if (!this.parallel) {
+          // Without KHR_parallel_shader_compile, finish this link now and yield so the worker's render loop runs between programs.
+          gl.getProgramParameter(program, gl.LINK_STATUS);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (this.generation !== generation) break;
+        }
       }
+      if (this.generation !== generation) break;
     }
     const discard = (): void => {
       for (const j of jobs) {
