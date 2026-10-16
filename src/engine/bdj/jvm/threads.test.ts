@@ -304,4 +304,29 @@ describe('time slicing', () => {
     spawn('spin');
     expect(await jvm.threads.run(AbortSignal.abort())).toBe('aborted');
   });
+
+  it('callStatic returns once its own thread ends while another thread spins (R20)', async () => {
+    const { jvm, spawn, get } = setup();
+    const spinner = spawn('spin');
+    await jvm.callStatic('T', 'count', '()V');
+    expect(get('n')).toBe(1000);
+    expect(spinner.state).toBe('runnable');
+  });
+
+  it('preempt() ends the running thread\'s slice at its next call', async () => {
+    const { jvm, get } = setup();
+    jvm.loader.define('P', assembleClass('P', [
+      { name: 'mark', desc: '()V' },
+      { name: 'go', desc: '()V', code: [INVOKESTATIC, method('P', 'mark', '()V'), INVOKESTATIC, method('T', 'count', '()V'), RETURN] },
+    ]), null, null);
+    const t = jvm.threads.spawn(null, jvm.loader.loadBoot('P')!.methods.get('go()V')!, []);
+    const abort = new AbortController();
+    jvm.natives.register({ 'P.mark()V': () => {
+      jvm.threads.preempt();
+      abort.abort();
+    } });
+    expect(await jvm.threads.run(abort.signal)).toBe('aborted');
+    expect(get('n')).toBe(0);
+    expect(t.state).toBe('runnable');
+  });
 });

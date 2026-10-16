@@ -70,7 +70,8 @@ export function classModifiers(c: JClass): number {
   return access & ~ACC_SUPER & JVM_ACC_WRITTEN_FLAGS;
 }
 
-function lineNumber(m: JMethod, pc: number): number {
+/** The source line of `pc` in `m` from its LineNumberTable; -2 for a native method, -1 when unknown. */
+export function lineNumber(m: JMethod, pc: number): number {
   if (m.isNative) return -2;
   let best = -1;
   let bestPc = -1;

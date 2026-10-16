@@ -204,15 +204,17 @@ const NO_VALUES: JValue[] = [];
  */
 function callNative(jvm: Jvm, t: JThread, m: JMethod, args: readonly JValue[]): NativeResult {
   t.frames.push(new JFrame(m, NO_VALUES, NO_VALUES));
+  let failed = false;
   try {
     const fn = (m.native ??= jvm.natives.get(m.nativeKey));
     if (!fn) return jvm.throwNew('java/lang/UnsatisfiedLinkError', m.nativeKey);
     return fn({ jvm, thread: t, method: m }, ...args);
   } catch (e) {
     if (e instanceof JavaThrowable) return new ThrowResult(e.obj);
+    failed = true; // a JS error stops the runtime; the marker stays so the fault's stack shows the native
     throw e;
   } finally {
-    if (t.frames[t.frames.length - 1]?.method === m) t.frames.pop();
+    if (!failed && t.frames[t.frames.length - 1]?.method === m) t.frames.pop();
   }
 }
 
@@ -489,6 +491,7 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
   outer: for (;;) {
     if (t.state === 'terminated') return 'finished';
     if (t.state !== 'runnable') return 'blocked';
+    if (jvm.threads.preempted) return 'budget';
     const f = t.frames[t.frames.length - 1] as JFrame | undefined;
     if (!f) {
       t.state = 'terminated';

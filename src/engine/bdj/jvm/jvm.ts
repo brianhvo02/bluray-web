@@ -83,11 +83,14 @@ export class Jvm {
 
   /** Runs the scheduler until `t` ends; rejects with its uncaught exception's toString(). */
   private async drive(t: JThread, what: string): Promise<void> {
-    let outcome = await this.threads.run();
+    const ended = new AbortController();
+    t.onTerminate = () => ended.abort();
+    let outcome = t.state === 'terminated' ? 'idle' : await this.threads.run(ended.signal);
     while (outcome === 'idle' && t.state !== 'terminated' && this.threads.timersPending) {
       await this.threads.nextTimer();
-      outcome = await this.threads.run();
+      outcome = await this.threads.run(ended.signal);
     }
+    t.onTerminate = null;
     if (t.uncaught) throw new Error(this.describe(t.uncaught));
     if (t.state !== 'terminated') throw new Error(`${what} did not finish (${outcome})`);
   }

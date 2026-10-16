@@ -48,6 +48,8 @@ export class JThread {
   parkTimed = false;
   /** The thread has run its exit sequence; Thread.isAlive is false from here on. */
   exited = false;
+  /** Called when the thread terminates, so a caller waiting for it can stop the scheduler while others run on. */
+  onTerminate: (() => void) | null = null;
   constructor(
     readonly id: number,
     public javaThread: JObject | null,
@@ -61,6 +63,7 @@ export class JThread {
     this.current = s;
     if (s !== 'sleeping') this.yielding = false;
     if (this.statusSlot >= 0 && this.javaThread) this.javaThread.fields[this.statusSlot] = this.status();
+    if (s === 'terminated') this.onTerminate?.();
   }
 
   /** Starts keeping `javaThread`'s threadStatus field in sync with the scheduler's state. */
@@ -139,6 +142,10 @@ export class Scheduler {
   private failure: { readonly error: unknown } | null = null;
   private running = false;
   private halted = false;
+  /** Set by preempt(): the running thread stops at its next call or return. */
+  preempted = false;
+  /** The thread that was running when a JS error escaped the interpreter. */
+  faulted: JThread | null = null;
   /** Bytecodes per turn; tests shrink it to force preemption at awkward points. */
   slice: number;
 
@@ -354,6 +361,11 @@ export class Scheduler {
     this.wake?.();
   }
 
+  /** Ends the running thread's slice at its next method call or return (a native that must stop the run now). */
+  preempt(): void {
+    if (this.running) this.preempted = true;
+  }
+
   get isHalted(): boolean {
     return this.halted;
   }
@@ -392,7 +404,14 @@ export class Scheduler {
         if (t) {
           this.queued.delete(t);
           if (t.state === 'runnable') {
-            this.step(t);
+            try {
+              this.step(t);
+            } catch (e) {
+              this.faulted = t;
+              throw e;
+            } finally {
+              this.preempted = false;
+            }
             if (t.state === 'runnable') this.enqueue(t);
           }
           if (++slices % YIELD_EVERY === 0) await new Promise<void>((r) => this.opts.setTimer(0, r));

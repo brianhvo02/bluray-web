@@ -43,6 +43,8 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
                           org_videolan_Logger.c, java_awt_BDFontMetrics.c and java_awt_BDGraphics.c (font and text
                           natives as fixed-metric stubs), bdj/bdjo_parse.c (bdjo_get), disc/disc.c
                           (disc_cache_bdrom_file, disc_open_dir) and file/file.c (file_mkdirs)
+    bdj/runtime.ts        from src/libbluray/bdj/bdj.c (bdj_open, _create_jvm properties, _bdj_init,
+                          bdj_process_event, bdj_close) and bluray.c (_start_bdj, _stop_bdj)
     hdmv/uo-mask.ts uoMaskBits from src/libbluray/bluray.c (bdpriv_get_uo_mask)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
