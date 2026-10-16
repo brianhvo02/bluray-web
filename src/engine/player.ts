@@ -22,18 +22,26 @@ import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
 import { audioTracks } from './playback/tracks';
-import type { AudioTrack, EngineCommand, EngineEvent, MenuKey, NoticeCode, PlaybackState, SubtitleChoice } from './protocol';
-import type { CompositorLike } from './render/compositor';
-import { activeCues, decodeText, parseSrt, type TextCue } from './subs/srt';
+import type { FontFile } from './ass/font-tables';
+import { AssFonts, type FontLoader } from './ass/fonts';
+import type { GlyphMeasurer } from './ass/measure';
+import { looksLikeAss, parseAss } from './ass/parse';
+import { AssRenderer } from './ass/renderer';
+import type { Mat3 } from './ass/transform';
+import type { AssTrack } from './ass/types';
+import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, SubtitleChoice } from './protocol';
+import type { CompositorLike, TextRendererLike } from './render/compositor';
+import { decodeText, parseSrt } from './subs/srt';
 import { TextSubtitleRenderer, type TextRenderOptions } from './subs/text-renderer';
+import { episodeStarts, sortByName, TextSet, TextSetRenderer, type SetFile } from './subs/text-set';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
 import { pts90ToUs, ticks45ToUs } from './util/time';
 
 const UO_MASKED_MESSAGE = "The disc doesn't allow this here.";
-const NO_SUBTITLES_MESSAGE = 'This file has no subtitles we can read';
+const NO_SUBTITLES_MESSAGE = 'this file has no subtitles we can read';
 const SOME_SUBTITLES_MESSAGE = 'Some lines of this file could not be read';
-const MAX_TEXT_OFFSET_MS = 600_000;
+const PLACE_FILES_MESSAGE = "Place each subtitle file at its episode's start in the subtitle menu";
 const MIN_TEXT_SCALE = 0.5;
 const MAX_TEXT_SCALE = 2;
 /** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
@@ -52,6 +60,27 @@ export interface PlayerDeps {
   requestFrame(callback: () => void): void;
   createCompositor(canvas: OffscreenCanvas): CompositorLike;
   readonly createAudioDecoder: AudioDecoderFactory;
+  /** What ASS subtitles need from the browser (fonts, measuring, canvases); created once, when the first ASS file loads. */
+  readonly createAssDeps?: () => Promise<AssDeps>;
+}
+
+export interface AssDeps {
+  readonly loader: FontLoader;
+  readonly defaultFont: FontFile;
+  readonly measurer: GlyphMeasurer;
+  readonly createCanvas: (w: number, h: number) => OffscreenCanvas;
+  readonly Path2D: typeof Path2D;
+  readonly warp?: (target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number) => void;
+}
+
+/** The user's subtitle set: files in name order, each SRT or ASS, and the fonts its ASS files share. */
+interface TextTrack {
+  readonly files: readonly SetFile<TextRendererLike>[];
+  readonly renderer: TextSetRenderer<TextRendererLike>;
+  readonly fonts: AssFonts | null;
+  readonly assTracks: readonly AssTrack[];
+  /** The playlist placements were last chosen for. */
+  placedFor: string | null;
 }
 
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
@@ -165,11 +194,13 @@ export class Player {
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
-  /** The user's subtitle file; it belongs to the open disc (kept across playlists, dropped with the disc). */
-  private textTrack: { readonly name: string; readonly cues: readonly TextCue[]; readonly renderer: TextSubtitleRenderer } | null = null;
+  /** The user's subtitle set; it belongs to the open disc (kept across playlists, dropped with the disc). */
+  private textTrack: TextTrack | null = null;
   private textOn = false;
-  private textOffsetMs = 0;
   private textScale = 1;
+  /** Bumped by every subtitle load and by closing the disc: a load that finds it changed is dropped. */
+  private textLoadGeneration = 0;
+  private assDeps: Promise<AssDeps> | null = null;
   /** A subtitle setting changed: the next paint redraws even when no frame or plane changed. */
   private subtitlesDirty = false;
 
@@ -235,6 +266,8 @@ export class Player {
         case 'seek':
           if (this.refused('timeSearch')) break;
           this.notifySeeked(cmd.timeUs);
+          // ASS collision memory belongs to what was on screen before the seek
+          for (const f of this.textTrack?.files ?? []) if (f.renderer instanceof AssRenderer) f.renderer.reset();
           await this.startAt(cmd.timeUs, this.wantPlaying);
           break;
         case 'selectAudio':
@@ -243,16 +276,23 @@ export class Player {
         case 'selectSubtitle':
           this.selectSubtitle(cmd.choice);
           break;
-        case 'addTextSubtitle':
-          this.addTextSubtitle(cmd.name, cmd.bytes, cmd.encoding);
+        case 'addTextSubtitles':
+          await this.addTextSubtitles(cmd.files, cmd.encoding, cmd.fonts ?? []);
+          break;
+        case 'addSubtitleFonts':
+          await this.addSubtitleFonts(cmd.fonts);
           break;
         case 'removeTextSubtitle':
-          this.textTrack = null;
+          this.dropTextTrack();
           this.textOn = false;
           this.subtitlesChanged();
           break;
+        case 'setSubtitleStart':
+          if (cmd.startUs === null || Number.isFinite(cmd.startUs)) this.textTrack?.renderer.set.setStart(cmd.file, cmd.startUs);
+          this.subtitlesChanged();
+          break;
         case 'setSubtitleOffset':
-          if (Number.isFinite(cmd.ms)) this.textOffsetMs = Math.max(-MAX_TEXT_OFFSET_MS, Math.min(MAX_TEXT_OFFSET_MS, Math.round(cmd.ms)));
+          if (Number.isFinite(cmd.ms)) this.textTrack?.renderer.set.setOffset(cmd.file, cmd.ms);
           this.subtitlesChanged();
           break;
         case 'setSubtitleScale':
@@ -822,34 +862,155 @@ export class Player {
     this.subtitlesChanged();
   }
 
-  private addTextSubtitle(name: string, bytes: ArrayBuffer, encoding: string | undefined): void {
+  private assDepsOnce(): Promise<AssDeps> | null {
+    if (!this.deps.createAssDeps) return null;
+    this.assDeps ??= this.deps.createAssDeps();
+    return this.assDeps;
+  }
+
+  /** Every family a script names (styles and \fn), matched so its faces load before the first frame. */
+  private static resolveFamilies(fonts: AssFonts, tracks: readonly AssTrack[]): void {
+    for (const t of tracks) {
+      // the styles events use, by their Style field or a \r tag (libass's built-in Default is often unused)
+      const used = new Set(t.events.map((e) => e.style));
+      for (const e of t.events) for (const m of e.text.matchAll(/\\r([^\\}]+)/g)) t.styles.forEach((st, i) => { if (st.name === m[1]) used.add(i); });
+      for (const st of t.styles.filter((_, i) => used.has(i))) {
+        const family = st.fontName.replace(/^@/, '');
+        fonts.resolve({ family, bold: st.bold ? 700 : 400, italic: st.italic ? 100 : 0, vertical: st.fontName.startsWith('@') });
+      }
+      for (const e of t.events) {
+        for (const m of e.text.matchAll(/\\fn([^\\}]*)/g)) {
+          const name = m[1]!.trim();
+          if (name && name !== '0') fonts.resolve({ family: name.replace(/^@/, ''), bold: 400, italic: 0, vertical: name.startsWith('@') });
+        }
+      }
+    }
+  }
+
+  /**
+   * Loads a subtitle set: decodes every file (one encoding prompt for the load), parses SRT or ASS, loads the
+   * fonts the ASS files name, places the files on the current playlist and selects the text track.
+   */
+  private async addTextSubtitles(files: readonly FileData[], encoding: string | undefined, fontFiles: readonly FileData[]): Promise<void> {
     if (!this.disc) return;
-    const decoded = decodeText(new Uint8Array(bytes), encoding);
-    if ('needsEncoding' in decoded) {
-      this.deps.emit({ type: 'subtitleEncodingNeeded', name });
+    const generation = ++this.textLoadGeneration;
+    const decoded: { name: string; text: string }[] = [];
+    const needsEncoding: string[] = [];
+    for (const f of files) {
+      const d = decodeText(new Uint8Array(f.bytes), encoding);
+      if ('needsEncoding' in d) needsEncoding.push(f.name);
+      else decoded.push({ name: f.name, text: d.text });
+    }
+    if (needsEncoding.length) {
+      this.deps.emit({ type: 'subtitleEncodingNeeded', names: needsEncoding });
       return;
     }
-    const parsed = parseSrt(decoded.text);
-    if (parsed.cues.length === 0) {
-      this.notice('subtitle-file', NO_SUBTITLES_MESSAGE);
-      return;
+    const parsed: ({ name: string; format: 'srt'; cues: ReturnType<typeof parseSrt>['cues'] } | { name: string; format: 'ass'; track: AssTrack })[] = [];
+    for (const { name, text } of decoded) {
+      if (looksLikeAss(text)) {
+        const track = parseAss(text);
+        if (track.trackType === 'unknown' || track.events.length === 0) {
+          this.notice('subtitle-file', `${name}: ${NO_SUBTITLES_MESSAGE}`);
+          continue;
+        }
+        if (track.skippedLines * 2 > track.eventLines) this.notice('subtitle-file', SOME_SUBTITLES_MESSAGE);
+        parsed.push({ name, format: 'ass', track });
+      } else {
+        const srt = parseSrt(text);
+        if (srt.cues.length === 0) {
+          this.notice('subtitle-file', `${name}: ${NO_SUBTITLES_MESSAGE}`);
+          continue;
+        }
+        if (srt.skipped * 2 > srt.blocks) this.notice('subtitle-file', SOME_SUBTITLES_MESSAGE);
+        parsed.push({ name, format: 'srt', cues: srt.cues });
+      }
     }
-    if (parsed.skipped * 2 > parsed.blocks) this.notice('subtitle-file', SOME_SUBTITLES_MESSAGE);
-    this.textTrack = { name, cues: parsed.cues, renderer: new TextSubtitleRenderer(parsed.cues) };
+    if (!parsed.length) return;
+
+    const assTracks = parsed.flatMap((p) => (p.format === 'ass' ? [p.track] : []));
+    let fonts: AssFonts | null = null;
+    let deps: AssDeps | null = null;
+    let unreadable: readonly string[] = [];
+    if (assTracks.length) {
+      const pending = this.assDepsOnce();
+      if (!pending) return;
+      deps = await pending;
+      if (generation !== this.textLoadGeneration) return;
+      fonts = new AssFonts(deps.loader, deps.defaultFont);
+      // libass registers a script's [Fonts] before other fonts
+      await fonts.add(assTracks.flatMap((t) => t.fonts));
+      unreadable = (await fonts.add(fontFiles.map((f) => ({ name: f.name, bytes: new Uint8Array(f.bytes) })))).unreadable;
+      Player.resolveFamilies(fonts, assTracks);
+      await fonts.ready();
+      if (generation !== this.textLoadGeneration || !this.disc) {
+        fonts.dispose();
+        return;
+      }
+    }
+
+    const setFiles = sortByName(parsed.map((p): SetFile<TextRendererLike> => (p.format === 'srt'
+      ? { name: p.name, format: 'srt', cues: p.cues.length, renderer: new TextSubtitleRenderer(p.cues) }
+      : {
+        name: p.name, format: 'ass', cues: p.track.events.length,
+        renderer: new AssRenderer(p.track, fonts!, {
+          measurer: deps!.measurer, createCanvas: deps!.createCanvas, nowMs: () => this.deps.nowMs(), Path2D: deps!.Path2D,
+          colorMatrix: 'video', ...(deps!.warp ? { warp: deps!.warp } : {}),
+        }),
+      })));
+    this.dropTextTrack();
+    this.textTrack = { files: setFiles, renderer: new TextSetRenderer(new TextSet(setFiles)), fonts, assTracks, placedFor: null };
+    this.placeTextFiles();
+    if (unreadable.length) this.notice('subtitle-fonts', `Some font files could not be read: ${unreadable.join(', ')}`);
+    const missing = fonts?.missingFamilies() ?? [];
+    if (missing.length) this.notice('subtitle-fonts', `Some fonts are missing and were replaced: ${missing.join(', ')}`);
     this.selectSubtitle({ kind: 'text' });
+  }
+
+  /** More fonts for the set's ASS files: matched again, loaded, and the ASS files laid out again. */
+  private async addSubtitleFonts(fontFiles: readonly FileData[]): Promise<void> {
+    const track = this.textTrack;
+    if (!track?.fonts) return;
+    const generation = this.textLoadGeneration;
+    const { unreadable } = await track.fonts.add(fontFiles.map((f) => ({ name: f.name, bytes: new Uint8Array(f.bytes) })));
+    Player.resolveFamilies(track.fonts, track.assTracks);
+    await track.fonts.ready();
+    if (generation !== this.textLoadGeneration || this.textTrack !== track) return;
+    for (const f of track.files) if (f.renderer instanceof AssRenderer) f.renderer.fontsChanged();
+    if (unreadable.length) this.notice('subtitle-fonts', `Some font files could not be read: ${unreadable.join(', ')}`);
+    this.subtitlesChanged();
+  }
+
+  /** Placements for the playing playlist: remembered ones, or by its episode starts (a notice when that fails). */
+  private placeTextFiles(): void {
+    const track = this.textTrack;
+    const s = this.session;
+    if (!track || !s || track.placedFor === s.playlistId) return;
+    track.placedFor = s.playlistId;
+    const { placed } = track.renderer.set.usePlaylist(s.playlistId, this.episodeStartsOf(s));
+    if (!placed) this.notice('subtitle-file', PLACE_FILES_MESSAGE);
+  }
+
+  private episodeStartsOf(s: Session): number[] {
+    return episodeStarts(s.timeline.items.map((i) => ({ startUs: ticks45ToUs(i.start), durationUs: ticks45ToUs(i.outTime - i.inTime) })));
+  }
+
+  private dropTextTrack(): void {
+    this.textTrack?.fonts?.dispose();
+    this.textTrack = null;
   }
 
   /** Forgets the text track and its settings (the disc it belongs to is closing). */
   private resetTextSubtitles(): void {
-    this.textTrack = null;
+    this.textLoadGeneration++;
+    this.dropTextTrack();
     this.textOn = false;
-    this.textOffsetMs = 0;
     this.textScale = 1;
     this.subtitlesDirty = true;
   }
 
+  /** Offsets are per file in the set, which applies them. */
   private textOptions(): TextRenderOptions {
-    return { offsetUs: this.textOffsetMs * 1000, scale: this.textScale };
+    return { offsetUs: 0, scale: this.textScale };
   }
 
   private subtitlesChanged(): void {
@@ -862,13 +1023,20 @@ export class Player {
     const tracks = pg?.tracks() ?? [];
     this.sentPgTracks = JSON.stringify(tracks);
     const { stream, display } = pg?.selection ?? { stream: 0, display: false };
+    this.placeTextFiles();
     const track = this.textTrack;
+    const placements = track?.renderer.set.placements() ?? [];
     this.deps.emit({
       type: 'subtitles',
       pg: tracks,
-      text: track ? { name: track.name, cues: track.cues.length } : null,
+      text: track
+        ? {
+          files: track.files.map((f, i) => ({ name: f.name, format: f.format, cues: f.cues, startUs: placements[i]?.startUs ?? null, offsetMs: placements[i]?.offsetMs ?? 0 })),
+          missingFonts: track.fonts?.missingFamilies() ?? [],
+          episodeStarts: this.session ? this.episodeStartsOf(this.session) : [],
+        }
+        : null,
       selected: this.textOn && track ? 'text' : display && stream > 0 ? { pg: stream } : 'off',
-      offsetMs: this.textOffsetMs,
       scale: this.textScale,
     });
   }
@@ -1351,13 +1519,20 @@ export class Player {
         pg: this.pg?.shown ?? null,
         pgErrors: this.pg?.errors ?? 0,
         textCue: this.textCueVisible(),
+        textFile: this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.file ?? null : null,
+        ass: this.assStats(),
       },
     });
   }
 
   private textCueVisible(): boolean {
     const track = this.textTrack;
-    return this.textOn && track !== null && activeCues(track.cues, this.clock.nowUs() - this.textOffsetMs * 1000).length > 0;
+    return this.textOn && track !== null && track.renderer.visible(this.clock.nowUs(), this.textOptions());
+  }
+
+  private assStats(): { events: number; animated: number; renderMs: number; overBudget: number } | null {
+    const showing = this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.renderer : undefined;
+    return showing instanceof AssRenderer ? showing.stats() : null;
   }
 
   /** A user operation the disc masks here: refused with a notice. Discs without a navigator mask nothing. */

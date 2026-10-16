@@ -5,7 +5,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file';
+export type NoticeCode = 'bdj' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts';
 export type ErrorCode = DiscErrorCode | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
 export interface Telemetry {
@@ -40,6 +40,24 @@ export interface Telemetry {
   readonly pgErrors: number;
   /** A text subtitle cue is on screen. */
   readonly textCue: boolean;
+  /** Index (name order) of the subtitle set's file showing now, or null. */
+  readonly textFile: number | null;
+  /** The showing ASS file's last draw: events drawn, how many animate, its time and the frames over 8 ms; null otherwise. */
+  readonly ass: { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number } | null;
+}
+
+/** A file's name and bytes, transferred with the command. */
+export interface FileData { readonly name: string; readonly bytes: ArrayBuffer }
+
+/** One file of the subtitle set, in name order. */
+export interface TextFileInfo {
+  readonly name: string;
+  readonly format: 'srt' | 'ass';
+  /** Cues (SRT) or Dialogue events (ASS). */
+  readonly cues: number;
+  /** Playlist time where the file starts, or null when not placed. */
+  readonly startUs: number | null;
+  readonly offsetMs: number;
 }
 
 export interface PgTrack {
@@ -78,10 +96,15 @@ export type EngineCommand =
   | { readonly type: 'selectAudio'; readonly index: number }
   | { readonly type: 'selectSubtitle'; readonly choice: SubtitleChoice }
   /** An .srt file; `encoding` (a TextDecoder label) is used when the bytes are neither BOM-marked nor UTF-8. */
-  | { readonly type: 'addTextSubtitle'; readonly name: string; readonly bytes: ArrayBuffer; readonly encoding?: string }
+  /** A subtitle set (SRT and/or ASS files, placed at episode starts) with fonts for its ASS files; replaces the old set. */
+  | { readonly type: 'addTextSubtitles'; readonly files: readonly FileData[]; readonly encoding?: string; readonly fonts?: readonly FileData[] }
+  /** More fonts for the set's ASS files. */
+  | { readonly type: 'addSubtitleFonts'; readonly fonts: readonly FileData[] }
   | { readonly type: 'removeTextSubtitle' }
-  /** Text subtitle timing shift, clamped to ±10 minutes. */
-  | { readonly type: 'setSubtitleOffset'; readonly ms: number }
+  /** Places a file of the set (index in name order) at a playlist time, or unplaces it. */
+  | { readonly type: 'setSubtitleStart'; readonly file: number; readonly startUs: number | null }
+  /** A file's timing shift, clamped to ±10 minutes. */
+  | { readonly type: 'setSubtitleOffset'; readonly file: number; readonly ms: number }
   /** Text subtitle size factor, clamped to 0.5–2. */
   | { readonly type: 'setSubtitleScale'; readonly scale: number }
   | { readonly type: 'nextChapter' }
@@ -109,15 +132,14 @@ export type EngineEvent =
   | { readonly type: 'pointerTarget'; readonly button: number | null }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
-  /** The file is not UTF-8 and no encoding was given: ask the user, then send addTextSubtitle again with one. */
-  | { readonly type: 'subtitleEncodingNeeded'; readonly name: string }
+  /** Files of a load are not UTF-8 and no encoding was given: ask the user, then send addTextSubtitles again with one. */
+  | { readonly type: 'subtitleEncodingNeeded'; readonly names: readonly string[] }
   /** On disc open and close, playlist start, a play item whose PG tracks differ, every PSR2 change and every subtitle command. */
   | {
     readonly type: 'subtitles';
     readonly pg: readonly PgTrack[];
-    readonly text: { readonly name: string; readonly cues: number } | null;
+    readonly text: { readonly files: readonly TextFileInfo[]; readonly missingFonts: readonly string[]; readonly episodeStarts: readonly number[] } | null;
     readonly selected: 'off' | 'text' | { readonly pg: number };
-    readonly offsetMs: number;
     readonly scale: number;
   }
   | { readonly type: 'state'; readonly state: PlaybackState }

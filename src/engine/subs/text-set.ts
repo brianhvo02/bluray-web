@@ -7,6 +7,9 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import type { Rect, TextRendererLike } from '../render/compositor';
+import type { TextRenderOptions } from './text-renderer';
+
 export interface SetFile<R> { readonly name: string; readonly format: 'srt' | 'ass'; readonly cues: number; readonly renderer: R }
 export interface Placement { readonly startUs: number | null; readonly offsetMs: number }
 
@@ -92,5 +95,34 @@ export class TextSet<R> {
   /** The next window boundary after `playlistUs`, or null. */
   nextBoundary(playlistUs: number): number | null {
     return this.placed().find((p) => p.startUs > playlistUs)?.startUs ?? null;
+  }
+}
+
+/** The set as one text renderer: draws the showing file at its local time (its offset already applied). */
+export class TextSetRenderer<R extends TextRendererLike> implements TextRendererLike {
+  private lastFile: number | null = null;
+
+  constructor(readonly set: TextSet<R>) {}
+
+  render(ctx: OffscreenCanvasRenderingContext2D, timeUs: number, videoRect: Rect, opts: TextRenderOptions): number {
+    const at = this.set.at(timeUs);
+    this.lastFile = at?.file ?? null;
+    return at ? at.renderer.render(ctx, at.localUs, videoRect, { ...opts, offsetUs: 0 }) : 0;
+  }
+
+  changed(timeUs: number, opts: TextRenderOptions): boolean {
+    const at = this.set.at(timeUs);
+    if ((at?.file ?? null) !== this.lastFile) return true;
+    return at ? at.renderer.changed(at.localUs, { ...opts, offsetUs: 0 }) : false;
+  }
+
+  visible(timeUs: number, opts: TextRenderOptions): boolean {
+    const at = this.set.at(timeUs);
+    return at ? at.renderer.visible(at.localUs, { ...opts, offsetUs: 0 }) : false;
+  }
+
+  /** The file showing at a playlist time, or null. */
+  fileAt(timeUs: number): { readonly file: number; readonly renderer: R } | null {
+    return this.set.at(timeUs);
   }
 }

@@ -356,15 +356,16 @@ describe('menu sounds', () => {
 
 describe('subtitles', () => {
   const subs = (over: Partial<Extract<EngineEvent, { type: 'subtitles' }>> = {}): EngineEvent => ({
-    type: 'subtitles', pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: 'off', offsetMs: 0, scale: 1, ...over,
+    type: 'subtitles', pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: 'off', scale: 1, ...over,
   });
+  const oneFile = { files: [{ name: 'a.srt', format: 'srt' as const, cues: 3, startUs: 0, offsetMs: 0 }], missingFonts: [], episodeStarts: [0] };
   const posted = (w: FakeWorker) => w.posted as Array<{ type: string } & Record<string, unknown>>;
 
   it('puts the subtitles state and the encoding prompt in the snapshot; a new disc clears them', () => {
-    let s = reduceEvent(INITIAL_SNAPSHOT, subs({ selected: { pg: 2 }, offsetMs: 300 }));
-    s = reduceEvent(s, { type: 'subtitleEncodingNeeded', name: 'a.srt' });
-    expect(s.subtitles).toEqual({ pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: { pg: 2 }, offsetMs: 300, scale: 1 });
-    expect(s.encodingPrompt).toEqual({ name: 'a.srt' });
+    let s = reduceEvent(INITIAL_SNAPSHOT, subs({ selected: { pg: 2 }, text: oneFile }));
+    s = reduceEvent(s, { type: 'subtitleEncodingNeeded', names: ['a.srt', 'b.ass'] });
+    expect(s.subtitles).toEqual({ pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: oneFile, selected: { pg: 2 }, scale: 1 });
+    expect(s.encodingPrompt).toEqual({ names: ['a.srt', 'b.ass'] });
     s = reduceEvent(s, { type: 'titles', playlists: [summary], usesBdj: false, warnings: [] });
     expect(s.subtitles).toBeNull();
     expect(s.encodingPrompt).toBeNull();
@@ -373,7 +374,7 @@ describe('subtitles', () => {
   it('selects, shifts by absolute offsets with a notice, and scales in steps', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
-    worker.emit(subs({ text: { name: 'a.srt', cues: 3 }, selected: 'text' }));
+    worker.emit(subs({ text: oneFile, selected: 'text' }));
     c.selectSubtitle({ kind: 'pg', stream: 2 });
     c.shiftSubtitles(100);
     c.shiftSubtitles(100);
@@ -381,8 +382,8 @@ describe('subtitles', () => {
     c.scaleSubtitles(5);
     expect(posted(worker)).toEqual([
       { type: 'selectSubtitle', choice: { kind: 'pg', stream: 2 } },
-      { type: 'setSubtitleOffset', ms: 100 },
-      { type: 'setSubtitleOffset', ms: 200 },
+      { type: 'setSubtitleOffset', file: 0, ms: 100 },
+      { type: 'setSubtitleOffset', file: 0, ms: 200 },
       { type: 'setSubtitleScale', scale: 1.1 },
       { type: 'setSubtitleScale', scale: 2 },
     ]);
@@ -394,7 +395,7 @@ describe('subtitles', () => {
   it('cycles Off → each PG track → the file → Off', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
-    worker.emit(subs({ text: { name: 'a.srt', cues: 3 } }));
+    worker.emit(subs({ text: oneFile }));
     for (let i = 0; i < 4; i++) c.cycleSubtitles();
     expect(posted(worker).map((m) => m.choice)).toEqual([{ kind: 'pg', stream: 1 }, { kind: 'pg', stream: 2 }, { kind: 'text' }, { kind: 'off' }]);
   });
@@ -428,14 +429,16 @@ describe('subtitles', () => {
     const file = new File([Uint8Array.of(0x63, 0x61, 0x66, 0xe9)], 'latin.srt');
     await c.loadSubtitleFile(file);
     const first = posted(worker)[0]!;
-    expect(first).toMatchObject({ type: 'addTextSubtitle', name: 'latin.srt' });
-    expect([...new Uint8Array(first.bytes as ArrayBuffer)]).toEqual([0x63, 0x61, 0x66, 0xe9]);
+    const sent = first.files as Array<{ name: string; bytes: ArrayBuffer }>;
+    expect(first.type).toBe('addTextSubtitles');
+    expect(sent[0]!.name).toBe('latin.srt');
+    expect([...new Uint8Array(sent[0]!.bytes)]).toEqual([0x63, 0x61, 0x66, 0xe9]);
     expect(first.encoding).toBeUndefined();
-    worker.emit({ type: 'subtitleEncodingNeeded', name: 'latin.srt' });
+    worker.emit({ type: 'subtitleEncodingNeeded', names: ['latin.srt'] });
     await c.answerEncoding('windows-1252');
     expect(c.getSnapshot().encodingPrompt).toBeNull();
-    expect(posted(worker)[1]).toMatchObject({ type: 'addTextSubtitle', name: 'latin.srt', encoding: 'windows-1252' });
-    worker.emit({ type: 'subtitleEncodingNeeded', name: 'latin.srt' });
+    expect(posted(worker)[1]).toMatchObject({ type: 'addTextSubtitles', encoding: 'windows-1252' });
+    worker.emit({ type: 'subtitleEncodingNeeded', names: ['latin.srt'] });
     await c.answerEncoding(null);
     expect(c.getSnapshot().encodingPrompt).toBeNull();
     expect(worker.posted).toHaveLength(2);

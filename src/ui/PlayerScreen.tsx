@@ -268,7 +268,7 @@ export function PlayerScreen({ controller, snapshot }: PlayerScreenProps): React
         />
       )}
       {remoteOpen && controlsVisible && snapshot.indexTitles && <RemotePad onKey={sendMenuKey} />}
-      {snapshot.encodingPrompt && <EncodingPrompt fileName={snapshot.encodingPrompt.name} onAnswer={answerEncoding} />}
+      {snapshot.encodingPrompt && <EncodingPrompt fileName={snapshot.encodingPrompt.names.join(', ')} onAnswer={answerEncoding} />}
       <ControlBar
         controller={controller}
         snapshot={snapshot}

@@ -1,7 +1,7 @@
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
-import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PgTrack, PlaybackState, SubtitleChoice, Telemetry } from '../engine/protocol';
+import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 
 export interface Notice {
@@ -36,17 +36,12 @@ export interface PlayerSnapshot {
   readonly indexTitles: IndexTitles | null;
   /** The engine's last 'subtitles' event; null until a disc reports one. */
   readonly subtitles: SubtitlesState | null;
-  /** A subtitle file that is not UTF-8 waits for the user to pick its encoding. */
-  readonly encodingPrompt: { readonly name: string } | null;
+  /** Subtitle files that are not UTF-8 wait for the user to pick their encoding. */
+  readonly encodingPrompt: { readonly names: readonly string[] } | null;
 }
 
-export interface SubtitlesState {
-  readonly pg: readonly PgTrack[];
-  readonly text: { readonly name: string; readonly cues: number } | null;
-  readonly selected: 'off' | 'text' | { readonly pg: number };
-  readonly offsetMs: number;
-  readonly scale: number;
-}
+/** The engine's last 'subtitles' event. */
+export type SubtitlesState = Omit<Extract<EngineEvent, { type: 'subtitles' }>, 'type'>;
 
 export const MAX_SUBTITLE_OFFSET_MS = 600_000;
 /** Far beyond any subtitle file (a feature's SRT is well under 1 MB); larger picks are refused before reading them. */
@@ -125,9 +120,9 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'soundEffect':
       return s; // handed to the audio output by the controller
     case 'subtitles':
-      return { ...s, subtitles: { pg: e.pg, text: e.text, selected: e.selected, offsetMs: e.offsetMs, scale: e.scale } };
+      return { ...s, subtitles: { pg: e.pg, text: e.text, selected: e.selected, scale: e.scale } };
     case 'subtitleEncodingNeeded':
-      return { ...s, encodingPrompt: { name: e.name } };
+      return { ...s, encodingPrompt: { names: e.names } };
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'indexTitles':
@@ -341,7 +336,7 @@ export class PlayerController {
     }
     this.pendingSubtitleFile = file;
     const bytes = await file.arrayBuffer();
-    this.post({ type: 'addTextSubtitle', name: file.name, bytes, ...(encoding !== undefined ? { encoding } : {}) }, [bytes]);
+    this.post({ type: 'addTextSubtitles', files: [{ name: file.name, bytes }], ...(encoding !== undefined ? { encoding } : {}) }, [bytes]);
   }
 
   /** The encoding prompt's answer; null cancels. */
@@ -356,13 +351,18 @@ export class PlayerController {
     this.post({ type: 'removeTextSubtitle' });
   }
 
-  /** [ and ]: moves the subtitle file's cues by `deltaMs`, with a short notice of the new offset. */
+  /** [ and ]: moves the showing subtitle file's cues by `deltaMs`, with a short notice of the new offset. */
   shiftSubtitles(deltaMs: number): void {
     const subs = this.snapshot.subtitles;
-    if (!subs?.text) return;
-    const offsetMs = Math.max(-MAX_SUBTITLE_OFFSET_MS, Math.min(MAX_SUBTITLE_OFFSET_MS, subs.offsetMs + deltaMs));
-    this.post({ type: 'setSubtitleOffset', ms: offsetMs });
-    this.update(withNotice({ ...this.snapshot, subtitles: { ...subs, offsetMs } }, { code: 'subtitle-offset', message: `Subtitles ${formatSubtitleOffset(offsetMs)}` }));
+    const text = subs?.text;
+    if (!subs || !text) return;
+    const file = this.snapshot.telemetry?.textFile ?? (text.files.length === 1 ? 0 : null);
+    const current = file === null ? undefined : text.files[file];
+    if (file === null || !current) return;
+    const offsetMs = Math.max(-MAX_SUBTITLE_OFFSET_MS, Math.min(MAX_SUBTITLE_OFFSET_MS, current.offsetMs + deltaMs));
+    this.post({ type: 'setSubtitleOffset', file, ms: offsetMs });
+    const files = text.files.map((f, i) => (i === file ? { ...f, offsetMs } : f));
+    this.update(withNotice({ ...this.snapshot, subtitles: { ...subs, text: { ...text, files } } }, { code: 'subtitle-offset', message: `Subtitles ${formatSubtitleOffset(offsetMs)}` }));
   }
 
   scaleSubtitles(delta: number): void {

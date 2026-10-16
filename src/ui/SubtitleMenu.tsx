@@ -79,7 +79,8 @@ export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShif
   };
 
   if (!subtitles) return null;
-  const { pg, text, selected, offsetMs, scale } = subtitles;
+  const { pg, text, selected, scale } = subtitles;
+  const offsetMs = text?.files[0]?.offsetMs ?? 0;
   const currentPg = typeof selected === 'object' ? selected.pg : null;
   // moving to another PG stream is pgChange; leaving a shown PG stream for Off or the file turns PG's display off
   const pgMasked = (stream: number): boolean => currentPg !== null && stream !== currentPg && isMasked('pgChange');
@@ -125,8 +126,8 @@ export function SubtitleMenu({ subtitles, isMasked, onSelect, onLoadFile, onShif
           ))}
           {text && (
             <li role="none">
-              <button type="button" role="menuitemradio" aria-checked={selected === 'text'} data-testid="subtitle-text" disabled={offMasked} title={offMasked ? MASKED_TOOLTIP : `${text.cues} subtitles`} onClick={() => choose({ kind: 'text' })}>
-                {text.name}
+              <button type="button" role="menuitemradio" aria-checked={selected === 'text'} data-testid="subtitle-text" disabled={offMasked} title={offMasked ? MASKED_TOOLTIP : `${text.files.reduce((n, f) => n + f.cues, 0)} subtitles`} onClick={() => choose({ kind: 'text' })}>
+                {text.files.map((f) => f.name).join(', ')}
               </button>
             </li>
           )}
