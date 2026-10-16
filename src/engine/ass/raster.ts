@@ -151,7 +151,15 @@ export interface RasterContext {
   warp?(target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number): void;
   /** Maps a 0xRRGGBBAA colour before drawing (the player's colour-matrix conversion). */
   mapColor?(c: number): number;
+  /** Rendered run masks by everything that shapes them (libass's bitmap and composite caches). */
+  readonly masks?: MaskCache;
 }
+
+export interface RunMasks { readonly w: number; readonly h: number; readonly fill: Uint8Array; readonly border: Uint8Array | null; readonly shadow: Uint8Array | null }
+export interface MaskCache { get(key: string): RunMasks | undefined; set(key: string, masks: RunMasks): void }
+
+/** Positions on a 1/8 px grid, as libass's quantize_transform keeps them, so cached masks fit any frame. */
+const POSITION_GRID = 8; // 26.6 units
 
 /** An event composited into one canvas; drawn at (x, y + the event's collision shift). */
 export interface RenderedEvent { readonly canvas: OffscreenCanvas; readonly x: number; readonly y: number }
@@ -178,10 +186,15 @@ function glyphAffine(m: Mat3, g: GlyphInfo): Affine {
 }
 
 /** Draws one glyph's fill (text, synthetic bold, decorations, or drawing) in white at the current transform. */
-function drawGlyph(ctx: OffscreenCanvasRenderingContext2D, g: GlyphInfo, rc: RasterContext): void {
+function drawGlyph(ctx: OffscreenCanvasRenderingContext2D, g: GlyphInfo, rc: RasterContext, borderWidth = 0): void {
   if (g.drawingText !== null) {
     const d = g.drawing ?? parseDrawing(g.drawingText);
-    ctx.fill(toPath2D(d, (x, y) => [x / 64, y / 64], rc.Path2D), 'nonzero');
+    const path = toPath2D(d, (x, y) => [x / 64, y / 64], rc.Path2D);
+    ctx.fill(path, 'nonzero');
+    if (borderWidth > 0) {
+      ctx.lineWidth = borderWidth;
+      ctx.stroke(path);
+    }
     return;
   }
   const face = g.face;
@@ -191,23 +204,73 @@ function drawGlyph(ctx: OffscreenCanvasRenderingContext2D, g: GlyphInfo, rc: Ras
   ctx.font = `${em}px "${face.cssFamily}"`;
   ctx.fontKerning = 'none';
   const text = g.clusterText ?? String.fromCodePoint(g.symbol);
+  const bold = face.synthBold ? em / 64 : 0;
+  // FT_Outline_Embolden grows the outline right and up by its strength, keeping the left and bottom edges: a
+  // centred stroke of that width, moved by half of it, does the same
+  if (bold > 0) ctx.translate(bold / 2, -bold / 2);
   ctx.fillText(text, 0, 0);
-  if (face.synthBold) {
-    ctx.lineWidth = em / 64;
-    ctx.lineJoin = 'round';
-    ctx.strokeText(text, 0, 0);
+  if (bold > 0 || borderWidth > 0) {
+    if (bold > 0) {
+      // ass_glyph_embolden: FT_Outline_Embolden moves points along corner bisectors (mitred corners)
+      ctx.lineWidth = bold;
+      ctx.lineJoin = 'miter';
+      ctx.strokeText(text, 0, 0);
+    }
+    if (borderWidth > 0) {
+      ctx.lineWidth = bold + borderWidth;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(text, 0, 0);
+    }
   }
+  if (bold > 0) ctx.translate(-bold / 2, bold / 2);
   const f = face.face;
   const k = em / f.unitsPerEm;
   const adv = Math.round(g.metrics?.advance ?? 0);
   if (adv > 0 && g.flags & DECO_UNDERLINE && f.underlinePosition <= 0 && f.underlineThickness > 0) {
     const size = Math.round(f.underlineThickness * k * 64) / 64;
     ctx.fillRect(0, -f.underlinePosition * k - size / 2, adv, size);
+    if (borderWidth > 0) {
+      ctx.lineWidth = borderWidth;
+      ctx.strokeRect(0, -f.underlinePosition * k - size / 2, adv, size);
+    }
   }
   if (adv > 0 && g.flags & DECO_STRIKETHROUGH && f.strikeoutPosition >= 0 && f.strikeoutSize > 0) {
     const size = Math.round(f.strikeoutSize * k * 64) / 64;
     ctx.fillRect(0, -f.strikeoutPosition * k - size / 2, adv, size);
+    if (borderWidth > 0) {
+      ctx.lineWidth = borderWidth;
+      ctx.strokeRect(0, -f.strikeoutPosition * k - size / 2, adv, size);
+    }
   }
+}
+
+/**
+ * The border as the canvas stroke of each glyph with round joins, when every glyph's transform is a uniform scale
+ * and rotation and the border is round (the common case): exact, unlike the distance transform. Null otherwise.
+ */
+function strokedBorder(rc: RasterContext, glyphs: readonly GlyphInfo[], mats: readonly Mat3[], w: number, h: number, ox: number, oy: number, bx26: number, by26: number): Uint8Array | null {
+  if (Math.abs(bx26 - by26) > 1e-6 * Math.max(bx26, by26)) return null;
+  const transforms = glyphs.map((g, k) => glyphAffine(mats[k]!, g));
+  const scales: number[] = [];
+  for (const t of transforms) {
+    const sx = Math.hypot(t[0], t[1]);
+    const sy = Math.hypot(t[2], t[3]);
+    if (Math.abs(sx - sy) > 1e-4 * Math.max(sx, sy) || Math.abs(t[0] * t[2] + t[1] * t[3]) > 1e-4 * sx * sy) return null;
+    scales.push(sx);
+  }
+  return supersampled(rc, w, h, (ctx) => {
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    glyphs.forEach((g, k) => {
+      const t = transforms[k]!;
+      // the border radius in layout px is bx26/64; the glyph's layout→device scale is the same for x and y here
+      const m = mats[k]!;
+      const layoutToDevice = Math.hypot(m[0], m[3]);
+      const radius = ((bx26 / 64) * layoutToDevice) / scales[k]!; // in the glyph's local px
+      ctx.setTransform(SS * t[0], SS * t[1], SS * t[2], SS * t[3], SS * (t[4] - ox), SS * (t[5] - oy));
+      drawGlyph(ctx, g, rc, 2 * radius);
+    });
+  });
 }
 
 /** The BorderStyle 3 box of a glyph, as get_bitmap_glyph builds it, in layout 26.6 relative to the glyph. */
@@ -225,10 +288,37 @@ function boxRect(s: RenderState, g: GlyphInfo): [number, number, number, number]
   height *= osy;
   bx = Math.max(64, bx);
   by = Math.max(64, by);
-  // the unit box (0..64) scaled by (size/64) in outline units, then the outline transform (trScale) applies
-  const x0 = -bx * g.trScaleX;
-  const y0 = (-by - g.asc) * g.trScaleY;
-  return [x0, y0, x0 + (width + 2 * bx) * g.trScaleX, y0 + (height + 2 * by) * g.trScaleY];
+  // get_bitmap_glyph maps the unit box straight into the matrix's layout units: offset (−bx, −by − asc), size + 2·bord
+  const x0 = -bx;
+  const y0 = -by - g.asc;
+  return [x0, y0, x0 + width + 2 * bx, y0 + height + 2 * by];
+}
+
+/**
+ * Draws white at SS× the size and box-filters it down: browser text masks are emboldened by font smoothing and
+ * contrast by a roughly constant fraction of a device pixel, which libass's linear coverage does not have.
+ */
+const SS = 4;
+function supersampled(rc: RasterContext, w: number, h: number, draw: (ctx: OffscreenCanvasRenderingContext2D) => void): Uint8Array {
+  const big = rc.createCanvas(w * SS, h * SS);
+  const ctx = big.getContext('2d', { willReadFrequently: true })!;
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#fff';
+  draw(ctx);
+  const hi = ctx.getImageData(0, 0, w * SS, h * SS).data;
+  const out = new Uint8Array(w * h);
+  const W = w * SS;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let j = 0; j < SS; j++) {
+        const row = ((y * SS + j) * W + x * SS) * 4 + 3;
+        for (let i = 0; i < SS; i++) sum += hi[row + 4 * i]!;
+      }
+      out[y * w + x] = Math.round(sum / (SS * SS));
+    }
+  }
+  return out;
 }
 
 function readAlpha(ctx: OffscreenCanvasRenderingContext2D, w: number, h: number): Uint8Array {
@@ -242,7 +332,7 @@ function readAlpha(ctx: OffscreenCanvasRenderingContext2D, w: number, h: number)
 function blur(rc: RasterContext, mask: Uint8Array, w: number, h: number, sigma: number): Uint8Array {
   if (sigma < 0.03) return mask;
   const src = rc.createCanvas(w, h);
-  const sctx = src.getContext('2d')!;
+  const sctx = src.getContext('2d', { willReadFrequently: true })!;
   const img = sctx.createImageData(w, h);
   for (let i = 0; i < mask.length; i++) {
     img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = 255;
@@ -250,7 +340,7 @@ function blur(rc: RasterContext, mask: Uint8Array, w: number, h: number, sigma: 
   }
   sctx.putImageData(img, 0, 0);
   const dst = rc.createCanvas(w, h);
-  const dctx = dst.getContext('2d')!;
+  const dctx = dst.getContext('2d', { willReadFrequently: true })!;
   dctx.filter = `blur(${sigma}px)`;
   dctx.drawImage(src, 0, 0);
   return readAlpha(dctx, w, h);
@@ -278,7 +368,12 @@ function colorize(mask: Uint8Array, w: number, h: number, color: (x: number) => 
 function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): RunLayers {
   const s = ev.layout.text.state;
   const glyphs = idx.map((i) => ev.layout.text.glyphs[i]!);
-  const mats = idx.map((i) => normalize(ev.matrices[i]!));
+  const mats = idx.map((i) => {
+    const m = normalize(ev.matrices[i]!);
+    if (!isAffine(m)) return m;
+    const q = (v: number): number => Math.round(v / POSITION_GRID) * POSITION_GRID;
+    return [m[0], m[1], q(m[2]), m[3], m[4], q(m[5]), m[6], m[7], m[8]] as Mat3;
+  });
   const first = glyphs[0]!;
   const flags = runFlags(first);
   const c = first.c.map((v) => { const f = applyFade(v, first.fade); return rc.mapColor ? rc.mapColor(f) : f; });
@@ -326,79 +421,103 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
   const h = Math.ceil(maxY) + pad - oy;
   if (w <= 0 || h <= 0 || w * h > 4096 * 4096) return { shadow: null, border: null, fill: null };
 
-  const fillCanvas = rc.createCanvas(w, h);
-  const fctx = fillCanvas.getContext('2d')!;
-  fctx.fillStyle = '#fff';
-  fctx.strokeStyle = '#fff';
-  const affine = mats.every(isAffine) || !rc.warp;
-  let fill: Uint8Array;
-  let border: Uint8Array | null = null;
-  if (affine) {
-    glyphs.forEach((g, k) => {
-      const t = glyphAffine(mats[k]!, g);
-      fctx.setTransform(t[0], t[1], t[2], t[3], t[4] - ox, t[5] - oy);
-      drawGlyph(fctx, g, rc);
-    });
-    fill = readAlpha(fctx, w, h);
-    if (!(flags & FILTER_BORDER_STYLE_3) && flags & FILTER_NONZERO_BORDER) border = dilate(fill, w, h, rx, ry);
-  } else {
-    // 3D rotation: fill and border in layout space around the first glyph (libass strokes before the
-    // transform), then both warped to the frame
-    const lrx = bx26 / 64;
-    const lry = by26 / 64;
-    let lx0 = Infinity;
-    let ly0 = Infinity;
-    let lx1 = -Infinity;
-    let ly1 = -Infinity;
-    for (const g of glyphs) {
-      const dx = (g.shiftX - first.shiftX) / 64;
-      const dy = (g.shiftY - first.shiftY) / 64;
-      lx0 = Math.min(lx0, dx + g.bboxXMin / 64); lx1 = Math.max(lx1, dx + g.bboxXMax / 64);
-      ly0 = Math.min(ly0, dy + g.bboxYMin / 64); ly1 = Math.max(ly1, dy + g.bboxYMax / 64);
-    }
-    const lpad = Math.ceil(Math.max(lrx, lry) + 3);
-    const lox = Math.floor(lx0) - lpad;
-    const loy = Math.floor(ly0) - lpad;
-    const lw = Math.ceil(lx1) + lpad - lox;
-    const lh = Math.ceil(ly1) + lpad - loy;
-    const layout = rc.createCanvas(lw, lh);
-    const lctx = layout.getContext('2d')!;
-    lctx.fillStyle = '#fff';
-    lctx.strokeStyle = '#fff';
-    for (const g of glyphs) {
-      const dx = (g.shiftX - first.shiftX) / 64;
-      const dy = (g.shiftY - first.shiftY) / 64;
-      lctx.setTransform(g.trScaleX, 0, 0, g.trScaleY, dx + g.trOffsetX / 64 - lox, dy + g.trOffsetY / 64 - loy);
-      drawGlyph(lctx, g, rc);
-    }
-    // layout canvas px (u, v) is layout 26.6 (64(u + lox), 64(v + loy)) relative to the first glyph
-    const tx = 64 * lox;
-    const ty = 64 * loy;
-    const shifted: Mat3 = [m0[0], m0[1], m0[2] + tx * m0[0] + ty * m0[1], m0[3], m0[4], m0[5] + tx * m0[3] + ty * m0[4], m0[6], m0[7], m0[8] + tx * m0[6] + ty * m0[7]];
-    rc.warp!(fctx, layout, shifted, ox, oy);
-    fill = readAlpha(fctx, w, h);
-    if (!(flags & FILTER_BORDER_STYLE_3) && flags & FILTER_NONZERO_BORDER) {
-      const lfill = readAlpha(lctx, lw, lh);
-      const lborder = dilate(lfill, lw, lh, lrx, lry);
-      const lb = rc.createCanvas(lw, lh);
-      const lbctx = lb.getContext('2d')!;
-      const img = lbctx.createImageData(lw, lh);
-      for (let i = 0; i < lborder.length; i++) {
-        img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = 255;
-        img.data[4 * i + 3] = lborder[i]!;
+  const key = rc.masks ? maskKey(glyphs, mats, ox, oy, w, h, flags, bx26, by26, sigma, s) : '';
+  const cached = rc.masks?.get(key);
+  const masks = cached ?? buildMasks();
+  if (!cached) rc.masks?.set(key, masks);
+  return colorLayers(masks.fill, masks.border, masks.shadow);
+
+  function buildMasks(): RunMasks {
+    const fillCanvas = rc.createCanvas(w, h);
+    const fctx = fillCanvas.getContext('2d', { willReadFrequently: true })!;
+    fctx.fillStyle = '#fff';
+    fctx.strokeStyle = '#fff';
+    const affine = mats.every(isAffine) || !rc.warp;
+    let fill: Uint8Array;
+    let border: Uint8Array | null = null;
+    if (affine) {
+      fill = supersampled(rc, w, h, (sctx) => {
+        glyphs.forEach((g, k) => {
+          const t = glyphAffine(mats[k]!, g);
+          sctx.setTransform(SS * t[0], SS * t[1], SS * t[2], SS * t[3], SS * (t[4] - ox), SS * (t[5] - oy));
+          drawGlyph(sctx, g, rc);
+        });
+      });
+      if (!(flags & FILTER_BORDER_STYLE_3) && flags & FILTER_NONZERO_BORDER) {
+        const stroked = strokedBorder(rc, glyphs, mats, w, h, ox, oy, bx26, by26);
+        border = stroked ?? dilate(fill, w, h, rx, ry);
       }
-      lbctx.putImageData(img, 0, 0);
-      const bc = rc.createCanvas(w, h);
-      const bctx = bc.getContext('2d')!;
-      rc.warp!(bctx, lb, shifted, ox, oy);
-      border = readAlpha(bctx, w, h);
-    }
+    } else {
+      // 3D rotation: fill and border in layout space around the first glyph (libass strokes before the
+      // transform), then both warped to the frame
+      const lrx = bx26 / 64;
+      const lry = by26 / 64;
+      let lx0 = Infinity;
+      let ly0 = Infinity;
+      let lx1 = -Infinity;
+      let ly1 = -Infinity;
+      for (const g of glyphs) {
+        const dx = (g.shiftX - first.shiftX) / 64;
+        const dy = (g.shiftY - first.shiftY) / 64;
+        lx0 = Math.min(lx0, dx + g.bboxXMin / 64); lx1 = Math.max(lx1, dx + g.bboxXMax / 64);
+        ly0 = Math.min(ly0, dy + g.bboxYMin / 64); ly1 = Math.max(ly1, dy + g.bboxYMax / 64);
+      }
+      const lpad = Math.ceil(Math.max(lrx, lry) + 3);
+      const lox = Math.floor(lx0) - lpad;
+      const loy = Math.floor(ly0) - lpad;
+      const lw = Math.ceil(lx1) + lpad - lox;
+      const lh = Math.ceil(ly1) + lpad - loy;
+      // supersampled like the affine path: layout canvas at SS×, warped into an SS× device canvas, filtered down
+      const drawLayout = (ctx: OffscreenCanvasRenderingContext2D, borderOf: (g: GlyphInfo) => number): void => {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#fff';
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        for (const g of glyphs) {
+          const dx = (g.shiftX - first.shiftX) / 64;
+          const dy = (g.shiftY - first.shiftY) / 64;
+          ctx.setTransform(SS * g.trScaleX, 0, 0, SS * g.trScaleY, SS * (dx + g.trOffsetX / 64 - lox), SS * (dy + g.trOffsetY / 64 - loy));
+          drawGlyph(ctx, g, rc, borderOf(g));
+        }
+      };
+      // layout canvas px (u, v) at SS× is layout 26.6 (64(u/SS + lox), 64(v/SS + loy)) relative to the first glyph;
+      // the device canvas is SS× too
+      const tx = 64 * lox;
+      const ty = 64 * loy;
+      const m2 = m0[2] + tx * m0[0] + ty * m0[1];
+      const m5 = m0[5] + tx * m0[3] + ty * m0[4];
+      const m8 = m0[8] + tx * m0[6] + ty * m0[7];
+      const shifted: Mat3 = [m0[0], m0[1], SS * m2, m0[3], m0[4], SS * m5, m0[6] / SS, m0[7] / SS, m8];
+      const warped = (source: OffscreenCanvas): Uint8Array => supersampled(rc, w, h, (sctx) => rc.warp!(sctx, source, shifted, SS * ox, SS * oy));
+      const layout = rc.createCanvas(lw * SS, lh * SS);
+      const lctx = layout.getContext('2d', { willReadFrequently: true })!;
+      drawLayout(lctx, () => 0);
+      fill = warped(layout);
+      if (!(flags & FILTER_BORDER_STYLE_3) && flags & FILTER_NONZERO_BORDER) {
+        const lb = rc.createCanvas(lw * SS, lh * SS);
+        const lbctx = lb.getContext('2d', { willReadFrequently: true })!;
+        const uniform = Math.abs(lrx - lry) <= 1e-6 * Math.max(lrx, lry) && glyphs.every((g) => Math.abs(g.trScaleX - g.trScaleY) <= 1e-6 * g.trScaleX);
+        if (uniform) {
+          // a round border in layout space, stroked in each glyph's local px
+          drawLayout(lbctx, (g) => (2 * lrx) / g.trScaleX);
+        } else {
+          const lfill = readAlpha(lctx, lw * SS, lh * SS);
+          const lborder = dilate(lfill, lw * SS, lh * SS, lrx * SS, lry * SS);
+          const img = lbctx.createImageData(lw * SS, lh * SS);
+          for (let i = 0; i < lborder.length; i++) {
+            img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = 255;
+            img.data[4 * i + 3] = lborder[i]!;
+          }
+          lbctx.putImageData(img, 0, 0);
+        }
+        border = warped(lb);
+      }
   }
 
   if (flags & FILTER_BORDER_STYLE_3) {
     if (flags & (FILTER_NONZERO_BORDER | FILTER_NONZERO_SHADOW)) {
       const bc = rc.createCanvas(w, h);
-      const bctx = bc.getContext('2d')!;
+      const bctx = bc.getContext('2d', { willReadFrequently: true })!;
       bctx.fillStyle = '#fff';
       glyphs.forEach((g, k) => {
         const [x0, y0, x1, y1] = boxRect(s, g);
@@ -432,15 +551,18 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
     }
   }
   if (border && flags & FILTER_FILL_IN_SHADOW && !(flags & FILTER_FILL_IN_BORDER)) fixOutline(fill, border);
+  return { w, h, fill, border, shadow };
+  }
 
-  // colours: render_text
-  const type = first.effectType;
-  const kTiming = first.effectTiming;
-  let fillColor: (x: number) => number = () => c[0]!;
-  if (type === EF_KARAOKE || type === EF_KARAOKE_KO) fillColor = () => (kTiming > 0 ? c[0]! : c[1]!);
-  else if (type === EF_KARAOKE_KF) {
-    const brk = kfBreak(glyphs, mats, first, s.parScaleX);
-    fillColor = (x) => (x < brk ? c[0]! : c[1]!);
+  function colorLayers(fill: Uint8Array, border: Uint8Array | null, shadow: Uint8Array | null): RunLayers {
+    // colours: render_text
+    const type = first.effectType;
+    const kTiming = first.effectTiming;
+    let fillColor: (x: number) => number = () => c[0]!;
+    if (type === EF_KARAOKE || type === EF_KARAOKE_KO) fillColor = () => (kTiming > 0 ? c[0]! : c[1]!);
+    else if (type === EF_KARAOKE_KF) {
+      const brk = kfBreak(glyphs, mats, first, s.parScaleX);
+      fillColor = (x) => (x < brk ? c[0]! : c[1]!);
   }
   const shadowLayer = shadow ? colorize(shadow, w, h, () => c[3]!, ox, oy) : null;
   if (shadowLayer) {
@@ -449,6 +571,21 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[]): R
   }
   const borderLayer = border && !(type === EF_KARAOKE_KO && kTiming <= 0) ? colorize(border, w, h, () => c[2]!, ox, oy) : null;
   return { shadow: shadowLayer, border: borderLayer, fill: colorize(fill, w, h, fillColor, ox, oy) };
+  }
+}
+
+/** Everything that shapes a run's masks, positions relative to its canvas origin. */
+function maskKey(glyphs: readonly GlyphInfo[], mats: readonly Mat3[], ox: number, oy: number, w: number, h: number, flags: number, bx26: number, by26: number, sigma: number, s: RenderState): string {
+  const r = (v: number): number => Math.round(v * 1e6) / 1e6;
+  const parts: (string | number)[] = [w, h, flags, r(bx26), r(by26), r(sigma)];
+  glyphs.forEach((g, k) => {
+    const m = mats[k]!;
+    parts.push(g.clusterText ?? g.symbol, g.drawingText ?? '', g.face?.cssFamily ?? '', g.face?.synthBold ? 1 : 0, g.face?.synthItalic ? 1 : 0,
+      g.flags, r(g.emPx), r(g.trScaleX), r(g.trScaleY), r(g.trOffsetX), r(g.trOffsetY), r(g.shiftX - glyphs[0]!.shiftX), r(g.shiftY - glyphs[0]!.shiftY),
+      r(m[0]), r(m[1]), r(m[2] - 64 * ox * m[8]), r(m[3]), r(m[4]), r(m[5] - 64 * oy * m[8]), r(m[6]), r(m[7]), r(m[8]));
+    if (flags & FILTER_BORDER_STYLE_3) parts.push(...boxRect(s, g).map(r));
+  });
+  return parts.join('|');
 }
 
 /** render_and_combine_glyphs' \kf split: the run's leftmost transformed x plus the sweep distance, device px. */
@@ -525,13 +662,13 @@ export function renderEvent(rc: RasterContext, ev: FrameEvent, frame: { readonly
   const x1 = Math.ceil(Math.max(...layers.map((l) => l.x + l.w)));
   const y1 = Math.ceil(Math.max(...layers.map((l) => l.y + l.h)));
   const out = rc.createCanvas(x1 - x0, y1 - y0);
-  const ctx = out.getContext('2d')!;
+  const ctx = out.getContext('2d', { willReadFrequently: true })!;
   ctx.translate(-x0, -y0);
   applyClip(ctx, rc, ev, frame);
   let scratch: OffscreenCanvas | null = null;
   for (const layer of layers) {
     if (!scratch || scratch.width < layer.w || scratch.height < layer.h) scratch = rc.createCanvas(Math.max(layer.w, scratch?.width ?? 0), Math.max(layer.h, scratch?.height ?? 0));
-    const sctx = scratch.getContext('2d')!;
+    const sctx = scratch.getContext('2d', { willReadFrequently: true })!;
     sctx.clearRect(0, 0, layer.w, layer.h);
     sctx.putImageData(layer.data, 0, 0);
     ctx.drawImage(scratch, 0, 0, layer.w, layer.h, layer.x, layer.y, layer.w, layer.h);

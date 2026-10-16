@@ -12,7 +12,7 @@ import type { TextRenderOptions } from '../subs/text-renderer';
 import type { AssFonts } from './fonts';
 import { FrameBuilder, type FrameEvent } from './frame';
 import type { GlyphMeasurer } from './measure';
-import { renderEvent, type RasterContext, type RenderedEvent } from './raster';
+import { renderEvent, type MaskCache, type RasterContext, type RenderedEvent, type RunMasks } from './raster';
 import type { RenderSettings } from './state';
 import type { Mat3 } from './transform';
 import { YCbCr, type AssTrack, type YCbCrMatrix } from './types';
@@ -32,6 +32,27 @@ export interface AssRendererDeps {
 }
 
 const CACHE_SIZE = 64;
+const MASK_CACHE_SIZE = 256;
+
+/** Least recently used run masks (libass bounds its bitmap caches the same way). */
+class MaskLru implements MaskCache {
+  private readonly map = new Map<string, RunMasks>();
+  get(key: string): RunMasks | undefined {
+    const v = this.map.get(key);
+    if (v) {
+      this.map.delete(key);
+      this.map.set(key, v);
+    }
+    return v;
+  }
+  set(key: string, masks: RunMasks): void {
+    this.map.set(key, masks);
+    if (this.map.size > MASK_CACHE_SIZE) this.map.delete(this.map.keys().next().value!);
+  }
+  clear(): void {
+    this.map.clear();
+  }
+}
 const BUDGET_MS = 8;
 const SEEK_MS = 1000;
 
@@ -62,6 +83,7 @@ export class AssRenderer implements TextRendererLike {
   private builder: FrameBuilder;
   private readonly rc: RasterContext;
   private readonly cache = new Map<number, RenderedEvent | null>();
+  private readonly masks = new MaskLru();
   private cacheSettings: RenderSettings | null = null;
   private lastActive = '';
   private lastAnimated = false;
@@ -76,6 +98,7 @@ export class AssRenderer implements TextRendererLike {
     this.rc = {
       createCanvas: deps.createCanvas,
       Path2D: deps.Path2D,
+      masks: this.masks,
       ...(deps.warp ? { warp: deps.warp } : {}),
       ...(deps.colorMatrix === 'video' ? { mapColor: (c: number) => convertColor(c, track.ycbcrMatrix, 'video') } : {}),
     };
@@ -119,6 +142,7 @@ export class AssRenderer implements TextRendererLike {
     };
     if (!sameSettings(this.cacheSettings, settings)) {
       this.cache.clear();
+      this.masks.clear();
       this.cacheSettings = settings;
     }
     const frame = this.builder.build(t, settings);
@@ -127,6 +151,7 @@ export class AssRenderer implements TextRendererLike {
       void this.fonts.ready().then(() => {
         this.deps.measurer.reset?.();
         this.cache.clear();
+        this.masks.clear();
         this.dirty = true;
       });
     }
@@ -176,6 +201,7 @@ export class AssRenderer implements TextRendererLike {
     this.deps.measurer.reset?.();
     this.builder = new FrameBuilder(this.track, this.fonts, this.deps.measurer);
     this.cache.clear();
+    this.masks.clear();
     this.dirty = true;
   }
 
