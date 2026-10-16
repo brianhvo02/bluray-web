@@ -195,6 +195,12 @@ export class JClass {
     }
     this.methods = methods;
     this.vtable = this.isInterface ? [] : this.buildVtable(methods);
+    for (const key of init.replaced ?? []) {
+      if (!key.startsWith(`${init.name}.`)) continue;
+      // A replacement whose key no longer names a Java method would silently leave the bytecode running.
+      const m = methods.get(key.slice(init.name.length + 1));
+      if (!m?.code) throw new Error(`replaced native ${key} names no method with code in ${init.name}`);
+    }
   }
 
   /** Overriding by name and descriptor; a package-private method is overridden only from its runtime package. */

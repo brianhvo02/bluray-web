@@ -245,6 +245,17 @@ function callMember(ctx: NativeContext, refKind: number, target: MethodTarget | 
     case REF_invokeSpecial:
       if (args[0] === null) return npe(jvm);
       return new Invoke(m, args, same);
+    case REF_invokeInterface: {
+      // As invokeinterface: the receiver must implement the interface, and selection must find a method.
+      const recv = args[0] as JObject | null;
+      if (recv === null) return npe(jvm);
+      if (!recv.cls.isSubclassOf(m.cls)) {
+        return jvm.throwNew('java/lang/IncompatibleClassChangeError', `Class ${externalName(recv.cls.name)} does not implement the requested interface ${externalName(m.cls.name)}`);
+      }
+      const target = m.cls.isInterface ? selectMethod(recv.cls, m) : select(recv, m);
+      if (!target || target.isAbstract) return jvm.throwNew('java/lang/AbstractMethodError', `${externalName(recv.cls.name)}.${m.name}${m.desc}`);
+      return new Invoke(target, args, same);
+    }
     default: {
       const recv = args[0] as JObject | null;
       if (recv === null) return npe(jvm);
@@ -663,7 +674,7 @@ function resolve(ctx: NativeContext, self: JValue): NativeResult {
       return mn;
     }
     default:
-      return jvm.throwNew('java/lang/LinkageError', 'resolve member name');
+      return jvm.throwNew('java/lang/LinkageError', `MemberName of kind ${flags & ALL_KINDS} cannot be resolved`);
   }
 }
 
@@ -689,7 +700,7 @@ function init(ctx: NativeContext, self: JValue, ref: JValue): NativeResult {
       return undefined;
     }
     default:
-      return internalError(jvm, 'init: Invalid target.');
+      return internalError(jvm, `MemberName from a ${externalName(r.cls.name)}`);
   }
 }
 

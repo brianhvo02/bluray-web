@@ -214,6 +214,15 @@ describe('on the JDK class path alone', () => {
   it('Lambdas prints what HotSpot prints', async () => {
     let out = '';
     const jvm = bootedJvm((s) => (out += s), () => {}, [RT, file('./conformance.jar')]);
+    const defined: string[] = [];
+    const define = jvm.loader.define.bind(jvm.loader);
+    const defineAnonymous = jvm.loader.defineAnonymous.bind(jvm.loader);
+    jvm.loader.define = (name, bytes, loader, pd) => (defined.push(name), define(name, bytes, loader, pd));
+    jvm.loader.defineAnonymous = (host, bytes, patches) => {
+      const c = defineAnonymous(host, bytes, patches);
+      defined.push(c.name);
+      return c;
+    };
     await jvm.boot();
     const loader = jvm.loader;
     const args: JValue = jvm.heap.newArray(loader.arrayOf(loader.loadBoot('java/lang/String')!), 0);
@@ -221,6 +230,15 @@ describe('on the JDK class path alone', () => {
     await jvm.callStatic('conformance/Lambdas', 'main', '([Ljava/lang/String;)V', [args]);
     console.log(`Lambdas took ${(performance.now() - start).toFixed(0)} ms`);
     expect(out).toBe(new TextDecoder().decode(file('./conformance/Lambdas.out')));
+    // LambdaForms are interpreted: no LambdaForm$ class is spun. BoundMethodHandle.Factory still spins the species
+    // (plain data holders) that rt-bdj.jar lacks, with the JDK's ASM and Unsafe.defineClass; these are the ones Lambdas needs.
+    const rt = ZipArchive.open(RT);
+    const spun = (prefix: string): string[] => defined.filter((n) => n.startsWith(prefix) && !rt.read(`${n}.class`)).sort();
+    expect(defined.some((n) => n.includes('$$Lambda$'))).toBe(true);
+    expect(spun('java/lang/invoke/LambdaForm$')).toEqual([]);
+    expect(spun('java/lang/invoke/BoundMethodHandle$Species_')).toEqual(
+      ['L3', 'L4', 'LL'].map((s) => `java/lang/invoke/BoundMethodHandle$Species_${s}`),
+    );
   }, 60_000);
 });
 

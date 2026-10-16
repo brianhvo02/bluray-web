@@ -19,7 +19,7 @@ export interface AsmClassOptions {
 export interface AsmMethod {
   readonly name: string;
   readonly desc: string;
-  /** Bytecode; a `{ c: Const }` entry becomes its 2-byte constant-pool index. Absent for a native method. */
+  /** Bytecode; a `{ c: Const }` entry becomes its 2-byte constant-pool index. Absent for a native or abstract method. */
   readonly code?: readonly (number | { readonly c: Const })[];
   /** Defaults to public static (0x0009); ACC_NATIVE is added when there is no code. */
   readonly access?: number;
@@ -94,7 +94,7 @@ export function assembleClass(
     const code: number[] | null = m.code ? [] : null;
     for (const op of m.code ?? []) if (typeof op === 'number') code!.push(op & 0xff); else { const i = cp(op.c); code!.push(i >> 8, i & 0xff); }
     const handlers = (m.handlers ?? []).map(([s, e, h, t]) => [s, e, h, t === null ? 0 : cp(['class', t])] as const);
-    const access = (m.access ?? ACC_PUBLIC_STATIC) | (code ? 0 : ACC_NATIVE);
+    const access = (m.access ?? ACC_PUBLIC_STATIC) | (code || (m.access ?? 0) & 0x0400 ? 0 : ACC_NATIVE);
     return { access, name: cp(['utf8', m.name]), desc: cp(['utf8', m.desc]), code, handlers, maxStack: m.maxStack ?? 8, maxLocals: m.maxLocals ?? 4 };
   });
   const fields = [

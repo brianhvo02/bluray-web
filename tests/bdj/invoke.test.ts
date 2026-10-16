@@ -5,6 +5,7 @@ import { Jvm } from '../../src/engine/bdj/jvm/jvm';
 import { Vfs } from '../../src/engine/bdj/jvm/vfs';
 import { ZipArchive } from '../../src/engine/bdj/jvm/zip';
 import type { JObject } from '../../src/engine/bdj/jvm/values';
+import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from '../../src/engine/bdj/jvm/natives/index';
 import { assembleClass } from '../helpers/jvm-asm';
 import type { Const } from '../helpers/jvm-asm';
 
@@ -12,7 +13,7 @@ const file = (rel: string): Uint8Array => readFileSync(fileURLToPath(new URL(rel
 const RT = file('../../src/bdj-classlib/rt-bdj.jar');
 
 const ICONST_0 = 0x03, ICONST_1 = 0x04, ICONST_5 = 0x08, BIPUSH = 0x10, LDC_W = 0x13;
-const ILOAD_0 = 0x1a, ILOAD_1 = 0x1b, ALOAD_0 = 0x2a, ALOAD_2 = 0x2c, ISTORE_0 = 0x3b, ISTORE_1 = 0x3c;
+const ILOAD_0 = 0x1a, ILOAD_1 = 0x1b, ALOAD_0 = 0x2a, ASTORE_0 = 0x4b, ALOAD_2 = 0x2c, ISTORE_0 = 0x3b, ISTORE_1 = 0x3c;
 const DUP = 0x59, IADD = 0x60, IINC = 0x84, IF_ICMPGE = 0xa2, GOTO = 0xa7, IRETURN = 0xac, ARETURN = 0xb0, RETURN = 0xb1;
 const GETSTATIC = 0xb2, PUTSTATIC = 0xb3, PUTFIELD = 0xb5, INVOKEVIRTUAL = 0xb6, INVOKESPECIAL = 0xb7, INVOKESTATIC = 0xb8;
 const INVOKEDYNAMIC = 0xba, NEW = 0xbb;
@@ -83,6 +84,8 @@ describe('method handles and invokedynamic', () => {
         { instanceFields: [['v', 'I']] },
       ),
     );
+    define('MhAbs', assembleClass('MhAbs', [{ name: 'gone', desc: '()I', access: 0x0401 }], [], 'java/lang/Object', { access: 0x0601 }));
+    define('MhNoImpl', assembleClass('MhNoImpl', [{ name: '<init>', desc: '()V', access: 0x0001, code: [...INIT_OBJECT, RETURN] }], [], 'java/lang/Object', { interfaces: ['MhAbs'] }));
     const newObj = (cls: string): (number | { c: Const })[] => [NEW, { c: ['class', cls] }, DUP, INVOKESPECIAL, m(cls, '<init>', '()V')];
     define(
       'Mh',
@@ -130,6 +133,15 @@ describe('method handles and invokedynamic', () => {
               INVOKEVIRTUAL, m('java/lang/StringBuilder', 'toString', '()Ljava/lang/String;'), ARETURN],
           },
           { name: 'getter', desc: '()I', code: [LDC_W, handle(REF_getField, ['field', 'MhObj', 'v', 'I']), ...newObj('MhObj'), INVOKEVIRTUAL, mh('(LMhObj;)I'), IRETURN] },
+          // MethodHandle.linkToInterface(receiver, the handle's MemberName), as a DirectMethodHandle's form calls it
+          ...(['wrongReceiver', 'noMethod'] as const).map((name) => ({
+            name,
+            desc: '()I',
+            code: [LDC_W, name === 'wrongReceiver' ? handle(REF_invokeInterface, ['imethod', 'MhIface', 'hello', '()I']) : handle(REF_invokeInterface, ['imethod', 'MhAbs', 'gone', '()I']),
+              INVOKEVIRTUAL, m('java/lang/invoke/MethodHandle', 'internalMemberName', '()Ljava/lang/invoke/MemberName;'), ASTORE_0,
+              ...newObj(name === 'wrongReceiver' ? 'java/lang/Object' : 'MhNoImpl'), ALOAD_0,
+              INVOKESTATIC, m('java/lang/invoke/MethodHandle', 'linkToInterface', '(Ljava/lang/Object;Ljava/lang/invoke/MemberName;)I'), IRETURN],
+          })),
           { name: 'staticGetter', desc: '()I', code: [LDC_W, handle(REF_getStatic, ['field', 'Mh', 'n', 'I']), INVOKEVIRTUAL, mh('()I'), IRETURN] },
         ],
         [['n', 'I']],
@@ -169,5 +181,30 @@ describe('method handles and invokedynamic', () => {
     const cls = jvm.loader.loadBoot('Mh')!;
     cls.staticValues[cls.declaredField('n', 'I')!.slot] = 99;
     expect(await call('Mh', 'staticGetter', '()I')).toBe(99);
+  });
+
+  it('linkToInterface checks the receiver and the selected method, as invokeinterface does', async () => {
+    await expect(call('Mh', 'wrongReceiver', '()I')).rejects.toThrow(/IncompatibleClassChangeError: Class java.lang.Object does not implement/);
+    await expect(call('Mh', 'noMethod', '()I')).rejects.toThrow(/AbstractMethodError: MhNoImpl.gone\(\)I/);
+  });
+
+  it('every Java method the VM replaces natively exists with bytecode in rt-bdj.jar', () => {
+    const t = new NativeTable();
+    registerBootstrapNatives(t);
+    registerSchedulerNatives(t);
+    registerJdkNatives(t);
+    expect([...t.replaced]).toContain('java/lang/invoke/LambdaForm.compileToBytecode()Ljava/lang/invoke/MemberName;');
+    for (const key of t.replaced) {
+      const dot = key.indexOf('.');
+      const m = jvm.loader.loadBoot(key.slice(0, dot))?.methods.get(key.slice(dot + 1));
+      expect(m?.code, key).toBeTruthy();
+    }
+  });
+
+  it('refuses to link a class when a replaced native names no method of it', () => {
+    jvm.natives.replace({ 'Stale.gone()V': () => undefined });
+    expect(() => jvm.loader.define('Stale', assembleClass('Stale', [{ name: 'here', desc: '()V', code: [RETURN] }]), null, null)).toThrow(
+      /replaced native Stale.gone\(\)V names no method/,
+    );
   });
 });
