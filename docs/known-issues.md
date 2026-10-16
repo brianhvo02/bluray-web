@@ -107,9 +107,9 @@ what would change that decision.
   file,** where libplacebo fails the whole hook. Not reachable with Anime4K.
 - **A transient render error (for example a closed `VideoFrame`) turns the set to `error` until it is selected
   again,** instead of costing one frame. *Revisit if* it shows up in practice (treat `InvalidStateError` as per-frame).
-- **Real GitHub CI WebGL support is unconfirmed.** Docker (SwiftShader) and a local GPU pass; the shader E2E tests
-  skip with a logged reason when WebGL2 float render targets are missing, and the Anime4K and sync tests need
-  `SHADERS_GPU=1`.
+- **Resolved: GitHub CI runs the shader E2E tests.** `ubuntu-latest` Chrome provides WebGL2 float render targets
+  (SwiftShader) with no extra flags; the fixture-shader tests ran and passed on PR #1 (2026-10-16). The tests still
+  skip with a logged reason if a runner lacks them, and the Anime4K and sync tests stay behind `SHADERS_GPU=1`.
 - **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
   (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
 
