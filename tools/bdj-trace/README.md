@@ -34,3 +34,5 @@ Calls from several Java threads interleave in the order they reach `printf`.
 ## Golden trace
 
 `golden.sh` (`npm run bdj-trace:golden`) writes `tests/bdj/golden/disc-bdj.jsonl`: the trace of `fixtures/synthetic/disc-bdj` up to the first `selectPlaylistN`, reduced to the control calls (`selectTitleN`, `selectPlaylistN`, `seekN`, `selectAngleN`, `selectRateN`, `writeRegN`, `setUOMaskN`, `setKeyInterestN`, `soundEffectN`, `setVirtualPackageN`). Diagnostic calls are left out because they vary between runs: `logN` carries timing and `cacheBdRomFileN` a random cache directory name. CI regenerates the file and fails on any diff (`.github/workflows/bdj-trace.yml`). Never edit it by hand.
+
+The disc is BD-J only (First Play and title 1 are BD-J objects). `selectTitleN` is only reached for HDMV titles (`BDJLoader` to `Libbluray.selectHdmvTitle`), so this disc does not exercise it.

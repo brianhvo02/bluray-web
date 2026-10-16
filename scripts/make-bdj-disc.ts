@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { CodingType } from '../src/engine/bdmv/stream-types';
 import { buildIndex } from '../tests/helpers/bdmv-builders';
 import { buildBdjo } from '../tests/helpers/bdjo-builder';
-import { asm, buildMovieObjects, imm } from '../tests/helpers/hdmv-builders';
 import { buildSyntheticDisc, syntheticClip } from '../tests/helpers/synthetic-disc';
 import { writeFixture } from './fixture-dir';
 
@@ -17,17 +16,11 @@ const jar = new Uint8Array(readFileSync(new URL('../tests/bdj/xlets/00000.jar', 
 
 const ORG_ID = 0x7fff0001;
 const KEY_PLAY = 0x80000000; // VK_PLAY in the key interest table
-const INTERACTIVE = 1;
 const BDJ_INTERACTIVE = 3;
-
-// FirstPlayXlet selects title 1, an HDMV title (libbluray reaches selectTitleN only for those); its movie object jumps to
-// title 2, the BD-J title whose xlet plays playlist 00000.
-const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(2))] }]);
 
 const files = buildSyntheticDisc({
   clips: [syntheticClip('00000', 2, { audio: CodingType.LPCM })],
   playlists: [{ id: '00000', clipIds: ['00000'] }],
-  movieObjects,
 });
 
 files.set(
@@ -36,7 +29,6 @@ files.set(
     firstPlay: { kind: 'bdj', name: '00000', playbackType: BDJ_INTERACTIVE },
     topMenu: { kind: 'bdj', name: '00000', playbackType: BDJ_INTERACTIVE },
     titles: [
-      { kind: 'hdmv', movieObjectId: 0, playbackType: INTERACTIVE },
       { kind: 'bdj', name: '00001', playbackType: BDJ_INTERACTIVE },
     ],
   }),

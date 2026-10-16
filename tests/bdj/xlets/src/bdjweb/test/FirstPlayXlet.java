@@ -20,7 +20,7 @@ import org.dvb.event.UserEventRepository;
 /*
  * First-play xlet of the synthetic BD-J disc (disc-bdj). Its startXlet exercises, in order: two PSR reads (diagnostic),
  * GPR 100 = 42 (writeRegN), a user-event repository for ENTER and UP (EventManager), and a TitleContext start of
- * title 1 (selectTitleN).
+ * title 1, a BD-J title running TitleXlet (a BD-J to BD-J change stays inside Java: no selectTitleN).
  *
  * Compiled with -source 1.3 -target 1.3 (class version 47, as on real discs); no generics.
  *
@@ -28,8 +28,8 @@ import org.dvb.event.UserEventRepository;
  *  - setKeyInterestN is not reached through EventManager. libbluray calls it from BDJLoader.loadN with the BDJO's key
  *    interest table whenever a BD-J title loads, so the BDJO's keyInterest field is what produces it (the EventManager
  *    registration is kept as the public-API step).
- *  - selectTitleN is only called by BDJLoader for an HDMV title (Libbluray.selectHdmvTitle). Title 1 of this disc is
- *    therefore an HDMV title whose movie object jumps to title 2, the BD-J title running TitleXlet.
+ *  - selectTitleN is only reached for HDMV titles (BDJLoader to Libbluray.selectHdmvTitle), so this disc does not
+ *    exercise it.
  *  - Titles are found through SIManager's service list; TitleImpl.getTitleNum is libbluray's own class.
  */
 public class FirstPlayXlet implements Xlet, UserEventListener {
