@@ -42,8 +42,8 @@ export interface Telemetry {
   readonly textCue: boolean;
   /** Index (name order) of the subtitle set's file showing now, or null. */
   readonly textFile: number | null;
-  /** The showing ASS file's last draw: events drawn, how many animate, its time and the frames over 8 ms; null otherwise. */
-  readonly ass: { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number } | null;
+  /** The showing ASS file's last draw (events drawn, how many animate, its time), its draws so far and those over 8 ms; null otherwise. */
+  readonly ass: { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number; readonly renders: number } | null;
 }
 
 /** A file's name and bytes, transferred with the command. */

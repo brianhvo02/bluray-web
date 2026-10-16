@@ -1530,7 +1530,7 @@ export class Player {
     return this.textOn && track !== null && track.renderer.visible(this.clock.nowUs(), this.textOptions());
   }
 
-  private assStats(): { events: number; animated: number; renderMs: number; overBudget: number } | null {
+  private assStats(): { events: number; animated: number; renderMs: number; overBudget: number; renders: number } | null {
     const showing = this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.renderer : undefined;
     return showing instanceof AssRenderer ? showing.stats() : null;
   }

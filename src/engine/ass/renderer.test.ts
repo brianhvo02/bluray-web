@@ -105,7 +105,7 @@ describe('AssRenderer', () => {
   it('counts drawn and animated events and times the draw', () => {
     const { r } = renderer();
     r.render(fakeCtx().ctx, 1_500_000, RECT, OPTS);
-    expect(r.stats()).toMatchObject({ events: 2, animated: 1, overBudget: 0 });
+    expect(r.stats()).toMatchObject({ events: 2, animated: 1, overBudget: 0, renders: 1 });
   });
 });
 

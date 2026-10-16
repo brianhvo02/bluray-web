@@ -17,7 +17,7 @@ import type { RenderSettings } from './state';
 import type { Mat3 } from './transform';
 import { YCbCr, type AssTrack, type YCbCrMatrix } from './types';
 
-export interface AssRenderStats { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number }
+export interface AssRenderStats { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number; readonly renders: number }
 
 export interface AssRendererDeps {
   readonly measurer: GlyphMeasurer;
@@ -55,6 +55,7 @@ class MaskLru implements MaskCache {
 }
 const BUDGET_MS = 8;
 const SEEK_MS = 1000;
+const ANIMATION_STEP_MS = 40;
 
 const BT601 = { kr: 0.299, kb: 0.114 };
 const BT709 = { kr: 0.2126, kb: 0.0722 };
@@ -89,9 +90,11 @@ export class AssRenderer implements TextRendererLike {
   private lastAnimated = false;
   private lastScale = 1;
   private lastSeenT: number | null = null;
+  private lastRenderT = 0;
   private dirty = true;
-  private lastStats: AssRenderStats = { events: 0, animated: 0, renderMs: 0, overBudget: 0 };
+  private lastStats: AssRenderStats = { events: 0, animated: 0, renderMs: 0, overBudget: 0, renders: 0 };
   private overBudget = 0;
+  private renders = 0;
 
   constructor(private readonly track: AssTrack, private readonly fonts: AssFonts, private readonly deps: AssRendererDeps) {
     this.builder = new FrameBuilder(track, fonts, deps.measurer);
@@ -99,6 +102,7 @@ export class AssRenderer implements TextRendererLike {
       createCanvas: deps.createCanvas,
       Path2D: deps.Path2D,
       masks: this.masks,
+      lastShapes: new Map(),
       ...(deps.warp ? { warp: deps.warp } : {}),
       ...(deps.colorMatrix === 'video' ? { mapColor: (c: number) => convertColor(c, track.ycbcrMatrix, 'video') } : {}),
     };
@@ -121,7 +125,9 @@ export class AssRenderer implements TextRendererLike {
   changed(timeUs: number, opts: TextRenderOptions): boolean {
     const t = AssRenderer.ms(timeUs, opts);
     this.see(t);
-    if (this.dirty || this.lastAnimated) return true;
+    if (this.dirty) return true;
+    // animation advances with the video's frames, or every ANIMATION_STEP_MS when none arrive (a still)
+    if (this.lastAnimated && Math.abs(t - this.lastRenderT) >= ANIMATION_STEP_MS) return true;
     const key = this.activeKey(t);
     return key !== this.lastActive || (key !== '' && opts.scale !== this.lastScale);
   }
@@ -182,11 +188,13 @@ export class AssRenderer implements TextRendererLike {
     ctx.restore();
     this.lastActive = frame.events.map((e) => e.index).sort((a, b) => a - b).join(',');
     this.lastAnimated = animated > 0;
+    this.lastRenderT = t;
     this.lastScale = opts.scale;
     this.dirty = false;
     const renderMs = this.deps.nowMs() - start;
+    this.renders++;
     if (renderMs > BUDGET_MS) this.overBudget++;
-    this.lastStats = { events: frame.events.length, animated, renderMs, overBudget: this.overBudget };
+    this.lastStats = { events: frame.events.length, animated, renderMs, overBudget: this.overBudget, renders: this.renders };
     return frame.events.length;
   }
 
