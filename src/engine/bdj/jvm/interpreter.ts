@@ -26,7 +26,11 @@ export interface Frame {
 
 export type NativeResult = JValue | undefined | Suspend | Invoke | ThrowResult;
 
-/** The thread parks until the promise settles; its value is the native method's result. */
+/**
+ * The thread parks until the promise settles; its value is the native method's result. The promise must resolve to a
+ * plain JValue or undefined, never to an Invoke or a Frame: both have a `then` property, so the promise machinery would
+ * call it as a thenable and the thread would hang without an error.
+ */
 export class Suspend {
   constructor(readonly promise: Promise<JValue | undefined>) {}
 }
@@ -75,7 +79,10 @@ class PendingThrow {
   ) {}
 }
 
-/** Runs `k` on the result of `r` once any calls it makes complete; exceptions go to `onThrow` when given. */
+/**
+ * Runs `k` on the result of `r` once any calls it makes complete; exceptions go to `onThrow` when given. A native
+ * reached through an Invoke cannot suspend yet: a Suspend here throws (Task 8/10 must chain `k` onto the promise).
+ */
 export function andThen(
   r: NativeResult,
   k: (ret: JValue | undefined) => NativeResult,
@@ -130,6 +137,8 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
       callee.then = (ret, e) => (e ? thrown(e) : inv.then(ret));
       if (m.isSynchronized) {
         callee.lock = m.isStatic ? jvm.mirror(m.cls) : (callee.locals[0] as JObject);
+        // Task 8: when monitorEnter returns false the thread must block and retry this Invoke later, instead of
+        // pushing the frame without holding the monitor as it does now.
         jvm.threads.monitorEnter(t, callee.lock);
       }
       t.frames.push(callee);
@@ -300,6 +309,8 @@ function ldc2(cls: JClass, index: number): number | bigint {
 /** Pops the arguments for `m` from `f` and calls it: a new frame for Java code, the native function otherwise. */
 function call(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void {
   if (m.isNative) {
+    // Task 8: a synchronized native must enter the monitor (receiver or class mirror) before the call, retrying the
+    // instruction when monitorEnter returns false, and exit it once its result is complete; none is taken now.
     let s = f.sp - m.argSlots;
     f.sp = s;
     const args: JValue[] = [];

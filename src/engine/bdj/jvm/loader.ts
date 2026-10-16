@@ -538,6 +538,8 @@ export class Loader {
         return null;
       case 'initializing':
         if (c.initThread === t) return null;
+        // Task 8: §5.5 step 2, wait on the class's initialisation (block until the other thread finishes, then
+        // re-check the state) instead of throwing.
         throw new Error(`${c.name} is being initialised by another thread`);
       case 'erroneous':
         return this.jvm.throwNew('java/lang/NoClassDefFoundError', `Could not initialize class ${externalName(c.name)}`);
