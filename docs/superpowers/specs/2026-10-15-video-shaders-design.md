@@ -79,7 +79,7 @@ Supported in a HOOK block: `HOOK` (repeatable), `BIND` (repeatable), `SAVE`, `DE
 
 ### 3.3 Stages and sizes
 
-- `MAIN` (and `MAINPRESUB`, `NATIVE` as aliases at frame entry): the RGB frame at its visible size (`VideoFrame.visibleRect`, so 1920×1080, not the 1088-line coded size; anamorphic 1440×1080 stays 1440×1080 and the final scale stretches it, as mpv does).
+- `MAIN` (and `MAINPRESUB`, `NATIVE` as aliases at frame entry): the RGB frame at its visible size (`VideoFrame.visibleRect`, so 1920×1080, not the 1088-line coded size; anamorphic 1440×1080 stays 1440×1080 and the final scale stretches it, as mpv does). Spike-verified (Chrome, WebGL2 `texImage2D` of a `VideoFrame` with visibleRect 1440×1080, display 1920×1080): `textureSize` is 1440×1080, so `MAIN` is the visible size and no deviation is needed; the display aspect only enters the final-scale rect.
 - `PREKERNEL`: fires once after all MAIN passes, on the current MAIN, always (even when no scaling follows). Anime4K's `Clamp_Highlights` depends on this.
 - `OUTPUT` in expressions is the displayed video rectangle in device pixels: `fitRect(...)`'s width and height, not the canvas size. `NATIVE` / `NATIVE_CROPPED` in expressions is the frame's visible size.
 - Hooks that cannot fire on an RGB frame (`LUMA`, `CHROMA`, `ALPHA`, `RGB`, `XYZ`, `CHROMA_SCALED`, `ALPHA_SCALED`, `LINEAR`, `SIGMOID`, `POSTKERNEL`, `SCALED`, `OUTPUT` as a hook) are accepted but never fire, as libplacebo allows. A file none of whose passes can fire is rejected on add ("this shader hooks only LUMA, which this player doesn't provide").
@@ -104,7 +104,7 @@ The `VideoFrame` is uploaded with `texImage2D`; Chromium converts YUV→RGB with
 
 ### 4.2 Built-in Anime4K modes
 
-The player carries Anime4K v4's mode lists from `md/Template/GLSL_*/input.conf` in the Anime4K repository, pinned to tag `v4.0.1` (file names are the same across v4.x; my call): modes A, B, C, A+A, B+B, C+A, each in the HQ (high-end) and Fast (low-end) variant, as ordered lists of file names. Copy them from the templates; do not retype them. A built-in set appears in the menu once the library holds any file it names, and is usable when it holds all of them.
+The player carries Anime4K v4's mode lists from `md/Template/GLSL_*/input.conf` in the Anime4K repository, pinned to commit `7684e9586f8dcc738af08a1cdceb024cc184f426` (2024-04-25) of `https://github.com/bloc97/Anime4K` (not tag `v4.0.1`: that tag has no `md/Template/` folder and lacks several files; file names are otherwise the same across v4.x): modes A, B, C, A+A, B+B, C+A, each in the HQ (high-end) and Fast (low-end) variant, as ordered lists of file names. Copy them from the templates; do not retype them. A built-in set appears in the menu once the library holds any file it names, and is usable when it holds all of them.
 
 ### 4.3 `input.conf` import
 

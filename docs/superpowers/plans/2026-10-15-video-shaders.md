@@ -475,4 +475,17 @@ All tests open the disc with `?telemetry=1`, add shaders through `shader-add-fil
 
 ## Spike findings
 
-(Filled in by Task 1.)
+Probe: `spike/` (untracked). Worker `OffscreenCanvas(64,64)` WebGL2; a `VideoFrame` from an ArrayBuffer (I420, coded 1440x1088, visibleRect 1440x1080, display 1920x1080) uploaded with `texImage2D`; `textureSize` read back from an RGBA16F target via FLOAT `readPixels`.
+
+| Run | WebGL2 | EXT_color_buffer_float | RGBA16F FB complete | MAX_TEXTURE_IMAGE_UNITS | Renderer | texImage2D size of anamorphic frame |
+|---|---|---|---|---|---|---|
+| Local Chrome, Apple M5 Max GPU | yes | yes | yes | 16 | ANGLE Metal | 1440x1080 |
+| Docker `mcr.microsoft.com/playwright:v1.64.0-noble` (linux/amd64, emulated on Apple Silicon), Chrome via `npx playwright install chrome`, headless, default flags | yes | yes | yes | 32 | ANGLE Vulkan SwiftShader | 1440x1080 |
+| Same, `--use-angle=swiftshader --enable-unsafe-swiftshader` | yes | yes | yes | 32 | ANGLE Vulkan SwiftShader | 1440x1080 |
+| Same image, Playwright's bundled chromium, default flags | yes | yes | yes | 32 | ANGLE Vulkan SwiftShader | 1440x1080 |
+
+Findings:
+- No launch flags are needed: default headless Chrome falls back to SwiftShader and passes every check. Task 11 does not add `launchOptions.args` for GL, and shader E2E tests need not skip on CI. (Harmless to add the SwiftShader flags later if real CI disagrees.)
+- The upload gives the visible size (1440x1080), not the display size, so `MAIN` is the visible size as the spec already says; no deviation. `codedHeight` reports 1080 for that frame in Chrome (visible rect applied).
+- Caveat: real GitHub `ubuntu-latest` was NOT confirmed (the controller ruled out pushing a draft PR). The evidence is a local GPU run and Docker amd64 emulation; the runner's Chrome version and GPU stack may differ. Task 11 should keep a cheap `SHADERS_AVAILABLE` check so tests skip rather than fail if WebGL2/float targets are absent.
+- Anime4K pinned to commit 7684e95... in the spec §4.2.
