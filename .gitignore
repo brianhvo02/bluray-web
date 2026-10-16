@@ -7,5 +7,6 @@ playwright-report
 .claude/worktrees/
 .cache/
 tools/vm-trace/out/
+tools/bdj-trace/out/
 .DS_Store
 tools/ass-trace/out/
