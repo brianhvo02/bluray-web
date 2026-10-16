@@ -96,7 +96,7 @@ public class Collections {
         List<String> pk = new ArrayList<String>();
         for (Object k : p.keySet()) pk.add((String) k);
         java.util.Collections.sort(pk);
-        for (String k : pk) System.out.println("prop " + k + "=" + p.getProperty(k));
+        for (String k : pk) System.out.println("prop " + k + "=" + ascii(p.getProperty(k)));
         System.out.println("prop-default " + p.getProperty("missing", "dflt"));
 
         java.util.PriorityQueue<Integer> pq = new java.util.PriorityQueue<Integer>();
@@ -113,6 +113,15 @@ public class Collections {
         lhm.put("a", 2);
         lhm.put("m", 3);
         System.out.println("linkedhashmap " + lhm);
+    }
+
+    static String ascii(String s) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 128) b.append(c); else b.append("\\u").append(Integer.toHexString(c));
+        }
+        return b.toString();
     }
 
     static String tryModify(List<Integer> l) {

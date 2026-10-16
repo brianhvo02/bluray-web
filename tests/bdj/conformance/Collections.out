@@ -21,7 +21,7 @@ prop alpha=1
 prop beta=two words
 prop gamma key=3
 prop multi=ab
-prop uni=?
+prop uni=\ue9
 prop-default dflt
 pq 1 3 5 null
 bitset {3, 70} 2 71

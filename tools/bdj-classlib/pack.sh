@@ -24,13 +24,23 @@ $MK tests/bdj/xlets/00000.jar "$T/xlets" -
 mkdir "$T/conf"
 javac -nowarn -source 1.8 -target 1.8 -d "$T/conf" tests/bdj/conformance/*.java
 $MK tests/bdj/conformance.jar "$T/conf" -
+# locale and encoding pinned so no output depends on the machine
+JOPTS="-Xint -Duser.language=en -Duser.country=US -Dfile.encoding=UTF-8"
+run_twice() { # <class> <classpath> <out>
+  java $JOPTS -cp "$2" "$1" > "$3"
+  java $JOPTS -cp "$2" "$1" > "$T/again"
+  cmp "$3" "$T/again" || { echo "$1 output differs between runs" >&2; exit 1; }
+  if LC_ALL=C grep -q -P '[^\x00-\x7F?]' "$3" || grep -q '?' "$3"; then echo "$3 has non-ASCII bytes or '?'" >&2; exit 1; fi
+}
 for src in tests/bdj/conformance/*.java; do
   name="$(basename "$src" .java)"
   grep -q 'static void main' "$src" || continue
-  java -Xint -cp tests/bdj/conformance.jar "conformance.$name" > "tests/bdj/conformance/$name.out"
-  java -Xint -cp tests/bdj/conformance.jar "conformance.$name" > "$T/$name.again"
-  cmp "tests/bdj/conformance/$name.out" "$T/$name.again" || { echo "conformance.$name output differs between runs" >&2; exit 1; }
+  run_twice "conformance.$name" tests/bdj/conformance.jar "tests/bdj/conformance/$name.out"
 done
+# Bare has no main: a harness (not packed into the jar) prints each method's result
+mkdir "$T/harness"
+javac -nowarn -source 1.8 -target 1.8 -cp tests/bdj/conformance.jar -d "$T/harness" tests/bdj/conformance/harness/*.java
+run_twice harness.BareMain "tests/bdj/conformance.jar:$T/harness" tests/bdj/conformance/Bare.out
 
 # classes.txt plus every nested class of each listed class (X$*.class)
 unzip -Z1 "$JRE/lib/rt.jar" | grep '\.class$' | LC_ALL=C sort > "$T/rt-entries"

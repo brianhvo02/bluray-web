@@ -11,7 +11,7 @@ split [a, b, c, d]
 split2 [a, b, , c] [a, b, , c, , ]
 split3 [one, two, three]
 replace bbbbbb x/y/z heLo
-upper-sharp-s STRASSE stra?e
+upper-sharp-s STRASSE 223
 upper-i TITLE
 utf8 3 9 true
 utf16 6 101 229

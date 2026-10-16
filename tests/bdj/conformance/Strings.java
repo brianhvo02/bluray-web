@@ -12,9 +12,9 @@ public class Strings {
         sb.deleteCharAt(1);
         System.out.println("sb-edit " + sb + " " + sb.indexOf("l"));
 
-        System.out.println("format " + String.format("%5.2f|%x|%s", 3.14159, 255, "hi"));
-        System.out.println("format2 " + String.format("%08d|%-6s|%+d|%c|%b|%e", 42, "ab", 5, 'q', true, 12345.678));
-        System.out.println("format3 " + String.format("%,d|%o|%10.3e|%%", 1234567, 8, 0.000123));
+        System.out.println("format " + String.format(java.util.Locale.US, "%5.2f|%x|%s", 3.14159, 255, "hi"));
+        System.out.println("format2 " + String.format(java.util.Locale.US, "%08d|%-6s|%+d|%c|%b|%e", 42, "ab", 5, 'q', true, 12345.678));
+        System.out.println("format3 " + String.format(java.util.Locale.US, "%,d|%o|%10.3e|%%", 1234567, 8, 0.000123));
 
         String s1 = new String("interned");
         String s2 = "interned";
@@ -28,7 +28,7 @@ public class Strings {
         System.out.println("split2 " + java.util.Arrays.toString("a,b,,c,,".split(",")) + " " + java.util.Arrays.toString("a,b,,c,,".split(",", -1)));
         System.out.println("split3 " + java.util.Arrays.toString("one  two\tthree".split("\\s+")));
         System.out.println("replace " + "aaa".replace("a", "bb") + " " + "x.y.z".replaceAll("\\.", "/") + " " + "hello".replaceFirst("l+", "L"));
-        System.out.println("upper-sharp-s " + "stra\u00dfe".toUpperCase() + " " + "STRA\u00dfE".toLowerCase());
+        System.out.println("upper-sharp-s " + "stra\u00dfe".toUpperCase(java.util.Locale.ENGLISH) + " " + (int) "STRA\u00dfE".toLowerCase(java.util.Locale.ENGLISH).charAt(4));
         System.out.println("upper-i " + "title".toUpperCase(java.util.Locale.ENGLISH));
 
         String jp = "\u65e5\u672c\u8a9e";
