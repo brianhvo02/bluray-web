@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { buildSoundBdmv } from '../../tests/helpers/bdmv-builders';
+import { buildSoundBdmv, type IndexSpec } from '../../tests/helpers/bdmv-builders';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
 import { clearSegments, subtitleSegments } from '../../tests/helpers/pg-builders';
-import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticPgStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
+import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticDiscSpec, type SyntheticPgStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
 import { readFontFile } from './ass/font-tables';
 import { createFixedMeasurer } from './ass/measure';
 import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
@@ -12,6 +12,7 @@ import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
 import { OverlayPlane } from './graphics/overlay-plane';
+import { RegisterFile } from './hdmv/registers';
 import { Navigator } from './nav/navigator';
 import { Player, type PlayerDeps } from './player';
 import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
@@ -103,13 +104,14 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend'] } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index'] } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
     clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits, pgStreams: opts.pgStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
     movieObjects: opts.movieObjects,
+    index: opts.index,
     subPathIg: opts.subPathIg,
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
@@ -1054,6 +1056,53 @@ describe('Player with HDMV navigation', () => {
       const after = h.igDraws.length; // the clear itself was painted
       await h.play(500);
       expect(h.igDraws).toHaveLength(after);
+    });
+  });
+
+  describe('disc profile', () => {
+    const hdmvIndex: IndexSpec = { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'hdmv', movieObjectId: 0 }] };
+    const regsOf = (h: Harness, key: 'navRegs' | 'pgRegs'): { psrRead(i: number): number } => (h.player as unknown as Record<string, { psrRead(i: number): number }>)[key];
+    const profile = (r: { psrRead(i: number): number }): number[] => [29, 30, 31, 24, 25].map((i) => r.psrRead(i));
+    const movieObjects = buildMovieObjects([{ cmds: [asm.playPl(imm(0))] }]);
+
+    it('leaves an ordinary disc at the default profile', async () => {
+      const plain = await harness(undefined);
+      const nav = await harness(undefined, { movieObjects, index: hdmvIndex });
+      expect(profile(regsOf(plain, 'pgRegs'))).toEqual(profile(new RegisterFile()));
+      expect(profile(regsOf(nav, 'navRegs'))).toEqual(profile(new RegisterFile()));
+    });
+
+    it('applies the UHD profile to a 0300 index, with and without a navigator', async () => {
+      const expected = new RegisterFile();
+      expected.psrInitUhd(true);
+      const index = { ...hdmvIndex, version: '0300' };
+      const plain = await harness(undefined, { index });
+      const nav = await harness(undefined, { movieObjects, index });
+      expect(profile(regsOf(plain, 'pgRegs'))).toEqual(profile(expected));
+      expect(profile(regsOf(nav, 'navRegs'))).toEqual(profile(expected));
+      expect(regsOf(nav, 'navRegs').psrRead(31)).not.toBe(profile(new RegisterFile())[2]);
+    });
+
+    it('applies the 3D profile to a 0200 index with content', async () => {
+      const expected = new RegisterFile();
+      expected.psrInit3D(1, false);
+      const index = { ...hdmvIndex, appInfo: { initialOutputModePreference: 1, contentExistFlag: true } };
+      const plain = await harness(undefined, { index });
+      const nav = await harness(undefined, { movieObjects, index });
+      expect(profile(regsOf(plain, 'pgRegs'))).toEqual(profile(expected));
+      expect(profile(regsOf(nav, 'navRegs'))).toEqual(profile(expected));
+    });
+
+    it('keeps the disc ID only for BD-J discs', async () => {
+      const id = new Uint8Array(60);
+      id.set([...'BDID0200'].map((c) => c.charCodeAt(0)));
+      id.fill(0xab, 44, 60);
+      const bdjIndex: IndexSpec = { firstPlay: { kind: 'bdj', name: '00000' }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [] };
+      const discId = (h: Harness): unknown => (h.player as unknown as { bdjDiscId: unknown }).bdjDiscId;
+      const extraFiles = { 'CERTIFICATE/ID.BDMV': id };
+      expect(discId(await harness(undefined, { extraFiles }))).toBeNull();
+      expect(discId(await harness(undefined, { index: bdjIndex, extraFiles }))).toBe('ab'.repeat(16));
+      expect(discId(await harness(undefined, { index: bdjIndex }))).toBeNull();
     });
   });
 

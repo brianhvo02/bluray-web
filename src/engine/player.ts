@@ -9,8 +9,9 @@ import { type AudioDecodeResult, type AudioDecoder, type AudioDecoderFactory } f
 import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
 import { M2tsReader } from './demux/m2ts-reader';
 import { DiscError } from './disc/byte-source';
+import { applyDiscProfile } from './disc/disc-profile';
 import { FileSource } from './disc/file-source';
-import { checkStreamReadable, loadClips, openDisc, playlistPath, streamPath, type DiscModel } from './disc/open-disc';
+import { checkStreamReadable, loadClips, openDisc, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
@@ -196,6 +197,8 @@ export class Player {
   /** PG subtitles of the open disc, on the navigator's registers or, without a navigator, on pgRegs. */
   private pg: PgStreamControl | null = null;
   private pgRegs: RegisterFile | null = null;
+  /** The disc ID BD-J's host will need (id.bdmv); not private only until something reads it (noUnusedLocals). */
+  protected bdjDiscId: string | null = null;
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -433,7 +436,9 @@ export class Player {
     this.source = source;
     this.disc = disc;
     this.soundsPlayed = 0;
+    this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
     this.pgRegs = new RegisterFile();
+    applyDiscProfile(this.pgRegs, disc.index);
     this.bindPg(this.pgRegs);
     this.resetTextSubtitles();
     this.emitSubtitles();
@@ -457,6 +462,7 @@ export class Player {
 
   private createNavigator(disc: DiscModel): Navigator {
     const regs = new RegisterFile();
+    applyDiscProfile(regs, disc.index);
     regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
     this.navRegs = regs;
     this.bindPg(regs);

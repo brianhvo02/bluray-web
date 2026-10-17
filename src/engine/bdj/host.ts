@@ -14,8 +14,9 @@
  */
 
 import type { Clpi } from '../bdmv/clpi-parser';
-import type { IndexBdmv, IndexObject } from '../bdmv/index-parser';
+import type { IndexObject } from '../bdmv/index-parser';
 import type { StreamEntry } from '../bdmv/mpls-parser';
+import { applyDiscProfile } from '../disc/disc-profile';
 import type { DiscModel } from '../disc/open-disc';
 import { streamPath } from '../disc/open-disc';
 import { RegisterFile } from '../hdmv/registers';
@@ -131,12 +132,6 @@ function titleOf(number: number, o: IndexObject): TitleInfo {
   return { number, objectType: 'hdmv', playbackType: 0, bdjoName: null, hdmvObjectId: 0 };
 }
 
-/** _fill_disc_info: a UHD (0300) index switches to the Profile 6 settings, a 3D one (02xx with content) to Profile 5. */
-export function initDiscProfile(registers: RegisterFile, index: IndexBdmv): void {
-  if (index.version >= '0300') registers.psrInitUhd(true);
-  if (index.version[1] === '2' && index.appInfo.contentExistFlag) registers.psrInit3D(index.appInfo.initialOutputModePreference, false);
-}
-
 /** _copy_streams: subpath_id follows the first entry's stream type, as libbluray reads `si->`. */
 function copyStreams(entries: readonly StreamEntry[], clip: Clpi | undefined): StreamInfo[] {
   const first = entries[0];
@@ -177,7 +172,7 @@ export class RecordingHost implements BdjHost {
     private readonly clips: ReadonlyMap<string, Clpi>,
     private readonly opts: { readonly startTitle: (title: number) => void; readonly onTrace?: (e: TraceEntry) => void },
   ) {
-    initDiscProfile(this.registers, disc.index);
+    applyDiscProfile(this.registers, disc.index);
     const fp = this.firstPlay();
     this.titleType = 'hdmv';
     if (fp?.objectType === 'bdj') this.titleType = 'bdj';

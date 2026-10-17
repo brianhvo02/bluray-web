@@ -7,14 +7,15 @@ import type { DiscModel } from '../disc/open-disc';
 import { parseIndex } from '../bdmv/index-parser';
 import { RegisterFile } from '../hdmv/registers';
 import { buildIndex } from '../../../tests/helpers/bdmv-builders';
-import { RecordingHost, initDiscProfile } from './host';
+import { applyDiscProfile } from '../disc/disc-profile';
+import { RecordingHost } from './host';
 import type { TraceEntry } from './host';
 
-describe('initDiscProfile', () => {
+describe('applyDiscProfile', () => {
   const objects = { firstPlay: { kind: 'bdj', name: '00000' }, topMenu: { kind: 'bdj', name: '00001' }, titles: [] } as const;
   const profile = (spec: Partial<Parameters<typeof buildIndex>[0]>): number => {
     const regs = new RegisterFile();
-    initDiscProfile(regs, parseIndex(buildIndex({ ...objects, titles: [], ...spec })));
+    applyDiscProfile(regs, parseIndex(buildIndex({ ...objects, titles: [], ...spec })));
     return regs.psrRead(31);
   };
 

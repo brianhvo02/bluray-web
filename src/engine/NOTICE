@@ -35,6 +35,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     graphics/composition.ts from src/libbluray/decoders/graphics_controller.c (_render_composition_object)
     graphics/rle.ts       from src/libbluray/decoders/rle.c (rle_crop_object)
     disc/main-title.ts    from src/libbluray/bdnav/navigation.c (_filter_repeats, _pl_cmp, _pl_guess_main_title)
+    disc/disc-profile.ts  from src/libbluray/bluray.c (_fill_disc_info: the psr_init_UHD and psr_init_3D calls) and register.c
     bdj/host.ts           from src/libbluray/bluray.c (RecordingHost: bdpriv_play_playlist_at, bdpriv_play_title_internal
                           and _play_title, bdpriv_seek, bdpriv_reg_read, bdpriv_reg_write, bdpriv_get_uo_mask,
                           bdpriv_set_bdj_uo_mask, bdpriv_sound_effect, bdpriv_set_virtual_package, bd_select_angle,

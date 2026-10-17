@@ -123,9 +123,6 @@ what would change that decision.
   `sound.bdmv`: libbluray loads `bd->sound_effects` lazily (on the first `bd_get_sound_effect`), so until then
   `bdpriv_sound_effect` returns 0 for any id up to 255, where `RecordingHost` returns -1 for ids at or past the disc's
   sound count.
-- **Player: the HDMV Navigator lacks libbluray's UHD/3D player-profile switch** (`register.c` `psr_init_UHD` and
-  `psr_init_3D`, via `_fill_disc_info`). This already affects UHD/3D HDMV discs. 5c's BD-J host must also carry the
-  disc-ID and profile handling that 5b put in `RecordingHost`.
 
 ## Audio
 
