@@ -51,6 +51,22 @@ test('skips to the next chapter and is back in sync within a second', async ({ p
   expectInSync(windows);
 });
 
+test('the folder input picks folders from its first render', async ({ page }) => {
+  // Records whether the input ever reached the DOM without webkitdirectory: a folder chosen through it in that window
+  // (or Playwright's setInputFiles(folder), which then throws) would not be read as a folder.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __folderInputSeen?: boolean[] };
+    w.__folderInputSeen = [];
+    new MutationObserver(() => {
+      const input = document.querySelector('[data-testid="folder-input"]');
+      if (input && w.__folderInputSeen!.length === 0) w.__folderInputSeen!.push(input.hasAttribute('webkitdirectory'));
+    }).observe(document, { childList: true, subtree: true });
+  });
+  await page.goto('/');
+  await expect(page.getByTestId('folder-input')).toHaveAttribute('webkitdirectory', '');
+  expect(await page.evaluate(() => (window as unknown as { __folderInputSeen: boolean[] }).__folderInputSeen)).toEqual([true]);
+});
+
 test('opens another disc after closing the current one', async ({ page }) => {
   await openDisc(page);
   await startPlaylist(page, '00000');

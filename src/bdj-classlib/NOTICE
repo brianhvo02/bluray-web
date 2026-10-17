@@ -1,5 +1,8 @@
 rt-bdj.jar holds classes and files of the OpenJDK 8 runtime (GPLv2 with the Classpath Exception; see LICENSE and
 ASSEMBLY_EXCEPTION), unmodified, selected by src/bdj-classlib/classes.txt and tools/bdj-classlib/resources.txt.
+The one exception is lib/security/cacerts, the keystore ca-certificates-java 20240118
+generates from ca-certificates 20260601~24.04.1: its entries' creation dates are set to
+2026-10-15T00:00:00Z (tools/bdj-classlib/normalize-jks.py) so the jar is reproducible.
 
 OpenJDK binary package: openjdk-8-jre-headless:amd64	8u504-ga-1ubuntu1~24.04.3
 Corresponding source:   Ubuntu source package openjdk-8 8u504-ga-1ubuntu1~24.04.3,
