@@ -1,6 +1,7 @@
 import type { MemoryProfileName } from './memory-profile';
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
+import type { HttpDiscRef } from './disc/http-source';
 import type { PlaylistSummary } from './disc/open-disc';
 import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
@@ -106,6 +107,8 @@ export type MenuKey = 'up' | 'down' | 'left' | 'right' | 'ok' | '0' | '1' | '2' 
 
 export type EngineCommand =
   | { readonly type: 'open'; readonly entries: ReadonlyArray<readonly [string, Blob]> }
+  /** Open a disc served over HTTP (tools/disc-server): the engine and BD-J workers each read it with an HttpSource. */
+  | { readonly type: 'openRemote'; readonly disc: HttpDiscRef }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
   | { readonly type: 'attachAudio'; readonly ring: SharedArrayBuffer }
   | { readonly type: 'resize'; readonly width: number; readonly height: number }

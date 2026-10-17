@@ -10,6 +10,7 @@ import { drawWarped } from './ass/warp';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { loadAudioWasm } from './decode/wasm-audio';
 import { browserVideoCodecApi } from './decode/video-decoder';
+import { HttpSource } from './disc/http-source';
 import { playerSettingsForLocale } from './disc/player-settings';
 import { Player } from './player';
 import type { EngineCommand, EngineEvent } from './protocol';
@@ -57,6 +58,7 @@ const player = new Player({
   },
   // bd_set_player_setting_str as a player application sets it: the browser's language and region
   playerSettings: playerSettingsForLocale(navigator.language),
+  openHttpSource: (disc) => HttpSource.open(disc.baseUrl, disc.token),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {

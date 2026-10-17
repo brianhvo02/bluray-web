@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import type { DiscFiles, DiscSourceRef, HttpDiscRef } from '../disc/http-source';
 import type { BdjErrorCode } from './errors';
 import type { ClassLibrarySource } from './runtime';
 
@@ -17,7 +18,10 @@ export type ToBdj =
       readonly type: 'boot';
       readonly registers: SharedArrayBuffer;
       readonly status: SharedArrayBuffer;
+      /** The picked files; empty when the disc is served over HTTP (`discHttp`): Blobs of remote files cannot cross. */
       readonly discFiles: readonly (readonly [string, Blob])[];
+      /** A disc served over HTTP: the BD-J worker opens its own HttpSource. */
+      readonly discHttp?: HttpDiscRef;
       readonly discId: string | null;
       readonly classLibrary: ClassLibrarySource;
     }
@@ -45,3 +49,9 @@ export type BdjCallName =
   | 'setVirtualPackage'
   | 'setUOMask'
   | 'setKeyInterest';
+
+/** The boot message's disc fields for picked files or a served disc. */
+export function bootDiscFields(disc: DiscFiles | DiscSourceRef): { readonly discFiles: DiscFiles; readonly discHttp?: HttpDiscRef } {
+  if (!('kind' in disc)) return { discFiles: disc };
+  return disc.kind === 'files' ? { discFiles: disc.entries } : { discFiles: [], discHttp: { baseUrl: disc.baseUrl, token: disc.token } };
+}

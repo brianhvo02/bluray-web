@@ -32,6 +32,8 @@ async function shellOr(network: Promise<Response>): Promise<Response> {
 // Navigations are network-first, so a deploy shows up on the next visit. Offline, or when the network takes longer
 // than NAVIGATION_TIMEOUT_MS, they get the cached shell. Registered before the precache route so it wins for '/' too.
 // The diagnostics page is not precached and must never be answered with the player's shell.
+// Disc reads from tools/disc-server (`/discs/…`, byte ranges, gigabytes) match no route, so they go to the network and
+// are never cached; the denylist keeps a navigation to one (opening the API in a tab) from getting the shell too.
 registerRoute(
   new NavigationRoute(
     async ({ request }) => {
@@ -51,7 +53,7 @@ registerRoute(
       }
       return shellOr(network);
     },
-    { denylist: [/^\/probe(\.html)?(\?.*)?$/] },
+    { denylist: [/^\/probe(\.html)?(\?.*)?$/, /^\/discs(\/|\?|$)/] },
   ),
 );
 

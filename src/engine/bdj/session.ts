@@ -10,7 +10,8 @@
 import type { PlayerBdjHost } from './player-host';
 import type { ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
-import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
+import type { DiscFiles, DiscSourceRef } from '../disc/http-source';
+import { bootDiscFields, type BdjCallName, type BdjFailureCode, type BdjWireValue, type FromBdj, type ToBdj } from './worker-protocol';
 
 export type { BdjFailureCode } from './worker-protocol';
 
@@ -56,12 +57,12 @@ export class BdjSession {
   }
 
   /** Settles once the worker has booted, or once the session has ended. */
-  boot(files: readonly (readonly [string, Blob])[], discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
+  boot(disc: DiscFiles | DiscSourceRef, discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
     return new Promise((resolve) => {
       if (this.stopped) return resolve();
       this.armTimeout();
       this.bootDone = resolve;
-      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, discFiles: files, discId, classLibrary });
+      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, ...bootDiscFields(disc), discId, classLibrary });
     });
   }
 

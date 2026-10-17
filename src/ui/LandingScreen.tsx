@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type Rea
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
+import { listServerDiscs, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
 interface LandingScreenProps {
@@ -16,6 +17,22 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // tools/disc-server: ?disc=<url>&token= or ?token= (spec 2026-10-17 §4.5)
+  const [serverLink] = useState<ServerLink | null>(() => serverLinkFromLocation(window.location.href));
+  const [serverDiscs, setServerDiscs] = useState<ServerDisc[] | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!serverLink) return;
+    let cancelled = false;
+    listServerDiscs(serverLink).then(
+      (discs) => !cancelled && setServerDiscs(discs),
+      (err: unknown) => !cancelled && setServerError(`The disc server could not be reached: ${err instanceof Error ? err.message : String(err)}`),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [serverLink]);
 
   useEffect(() => {
     inputRef.current?.setAttribute('webkitdirectory', '');
@@ -96,6 +113,11 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
     );
   };
 
+  const onServerDisc = (disc: ServerDisc): void => {
+    setLocalError(null);
+    if (serverLink) controller.openRemote({ baseUrl: disc.baseUrl, token: serverLink.token }); // starts audio inside the tap
+  };
+
   const error = localError ?? snapshot.error?.message ?? null;
   const errorPaths = localError ? [] : (snapshot.error?.paths ?? []);
 
@@ -123,6 +145,24 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         </button>
         <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" onChange={onInput} />
       </div>
+      {serverLink && (
+        <section className="recent server-discs" data-testid="server-discs">
+          <h2>On the disc server</h2>
+          {serverError && <p className="hint">{serverError}</p>}
+          {serverDiscs?.length === 0 && <p className="hint">The server has no discs.</p>}
+          {serverDiscs && serverDiscs.length > 0 && (
+            <ul>
+              {serverDiscs.map((disc) => (
+                <li key={disc.baseUrl}>
+                  <button type="button" disabled={!capabilities.core.ok} onClick={() => onServerDisc(disc)}>
+                    {disc.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
       {snapshot.engineState === 'loading' && <p className="status">Reading disc…</p>}
       {error && (
         <div className="error-banner" role="alert" data-testid="error">

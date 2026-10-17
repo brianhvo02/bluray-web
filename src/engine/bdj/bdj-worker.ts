@@ -8,6 +8,7 @@
 
 import type { Clpi } from '../bdmv/clpi-parser';
 import { FileSource } from '../disc/file-source';
+import { HttpSource } from '../disc/http-source';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
 import { normalizeDiscPaths } from '../disc/paths';
@@ -137,7 +138,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const boot = async (m: BootMessage): Promise<void> => {
     const t0 = performance.now();
     try {
-      const source = new FileSource(normalizeDiscPaths(m.discFiles));
+      const source = m.discHttp ? await HttpSource.open(m.discHttp.baseUrl, m.discHttp.token) : new FileSource(normalizeDiscPaths(m.discFiles));
       // the disc model loads while the JDK starts up; the host reads it once Libbluray.init asks for disc info
       let model: { readonly disc: DiscModel; readonly clips: ReadonlyMap<string, Clpi> } | null = null;
       const loading = (async () => {

@@ -16,10 +16,11 @@ import { UnsupportedCodecError, type DecoderError } from './decode/decoder';
 import { type AudioDecodeResult, type AudioDecoder, type AudioDecoderFactory } from './decode/audio-decoder';
 import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
 import { M2tsReader } from './demux/m2ts-reader';
-import { DiscError } from './disc/byte-source';
+import { DiscError, type ByteSource } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
 import { FileSource } from './disc/file-source';
+import type { DiscSourceRef, HttpDiscRef } from './disc/http-source';
 import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
 import { BdVk } from './graphics/graphics-controller';
@@ -28,6 +29,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { lookupSpn } from './nav/packets';
 import { PgStreamControl } from './nav/subtitles';
+import { bootDiscFields } from './bdj/worker-protocol';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
@@ -89,6 +91,8 @@ export interface PlayerDeps {
   readonly bdjLog?: (line: string, error: boolean) => void;
   /** bd_set_player_setting_str's languages and country, written to the program's registers when a BD-J title is entered. */
   readonly playerSettings?: PlayerSettings;
+  /** Opens a disc served over HTTP (the worker builds an HttpSource); without it `openRemote` fails. */
+  readonly openHttpSource?: (disc: HttpDiscRef) => Promise<ByteSource>;
 }
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
@@ -246,7 +250,7 @@ function isMediaError(err: unknown): boolean {
 
 /** Owns one disc and at most one playing playlist. Runs inside the engine worker. */
 export class Player {
-  private source: FileSource | null = null;
+  private source: ByteSource | null = null;
   private disc: DiscModel | null = null;
   private soundsPlayed = 0;
   private session: Session | null = null;
@@ -299,8 +303,8 @@ export class Player {
   private bdjDiscId: string | null = null;
   /** The class library, loading from the first BD-J disc on. */
   private bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
-  /** The open disc's files as the user gave them, for the BD-J worker's own disc model. */
-  private discEntries: ReadonlyArray<readonly [string, Blob]> = [];
+  /** The open disc's files as the user gave them (or where it is served), for the BD-J worker's own disc model. */
+  private discRef: DiscSourceRef = { kind: 'files', entries: [] };
   private bdj: BdjTitle | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
@@ -338,7 +342,10 @@ export class Player {
     try {
       switch (cmd.type) {
         case 'open':
-          await this.open(cmd.entries);
+          await this.open({ kind: 'files', entries: cmd.entries });
+          break;
+        case 'openRemote':
+          await this.open({ kind: 'http', baseUrl: cmd.disc.baseUrl, token: cmd.disc.token });
           break;
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
@@ -549,7 +556,7 @@ export class Player {
     this.deps.requestFrame(loop);
   }
 
-  private async open(entries: ReadonlyArray<readonly [string, Blob]>): Promise<void> {
+  private async open(ref: DiscSourceRef): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
     this.stopBdj();
@@ -557,9 +564,9 @@ export class Player {
     this.stopNavigator();
     this.teardownSession();
     this.setState('loading');
-    const source = new FileSource(normalizeDiscPaths(entries));
+    const source = await this.openSource(ref);
     // spec §4.7: the class library loads, and a BD-J First Play's worker boots, while the disc opens
-    const early = this.bdjSupported ? await this.startEarlyBdj(source, entries) : null;
+    const early = this.bdjSupported ? await this.startEarlyBdj(source, ref) : null;
     let disc: DiscModel;
     try {
       disc = await openDisc(source);
@@ -569,7 +576,7 @@ export class Player {
     }
     this.source = source;
     this.disc = disc;
-    this.discEntries = entries;
+    this.discRef = ref;
     this.soundsPlayed = 0;
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
@@ -591,6 +598,12 @@ export class Player {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
+  }
+
+  private async openSource(ref: DiscSourceRef): Promise<ByteSource> {
+    if (ref.kind === 'files') return new FileSource(normalizeDiscPaths(ref.entries));
+    if (!this.deps.openHttpSource) throw new DiscError('read-failed', 'This player cannot open discs over HTTP.');
+    return this.deps.openHttpSource({ baseUrl: ref.baseUrl, token: ref.token });
   }
 
   private get bdjSupported(): boolean {
@@ -624,7 +637,7 @@ export class Player {
    * whose First Play is BD-J gets its worker, registers and status block now; the worker's boot goes out once the
    * class library is in, so the JVM boots while the disc opens. enterBdj adopts it.
    */
-  private async startEarlyBdj(source: FileSource, entries: ReadonlyArray<readonly [string, Blob]>): Promise<EarlyBdj | null> {
+  private async startEarlyBdj(source: ByteSource, ref: DiscSourceRef): Promise<EarlyBdj | null> {
     const index = await peekIndex(source);
     if (!index || !indexUsesBdj(index)) return null;
     this.loadClassLibrary();
@@ -639,7 +652,7 @@ export class Player {
         const [classLibrary, bdid] = await Promise.all([library, readBdid(source)]);
         // once adopted, the session sends the same boot itself (EarlyBdjWorker passes only the first)
         if (this.earlyBdj !== early) return;
-        early.worker.boot({ type: 'boot', registers: early.regs.shared!, status: early.status.buffer, discFiles: entries, discId: bdid?.discId ?? null, classLibrary });
+        early.worker.boot({ type: 'boot', registers: early.regs.shared!, status: early.status.buffer, ...bootDiscFields(ref), discId: bdid?.discId ?? null, classLibrary });
       } catch {
         // a class library that does not load fails the session (bootBdj)
       }
@@ -728,7 +741,7 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
-    await entry.session.boot(this.discEntries, this.bdjDiscId, classes);
+    await entry.session.boot(this.discRef, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
     if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();

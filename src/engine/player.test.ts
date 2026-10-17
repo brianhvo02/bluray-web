@@ -11,6 +11,8 @@ import { Control, createRing, renderQuantum, ringViews, type RingViews } from '.
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
+import { FileSource } from './disc/file-source';
+import { normalizeDiscPaths } from './disc/paths';
 import { OverlayPlane } from './graphics/overlay-plane';
 import { RegisterFile } from './hdmv/registers';
 import { Navigator } from './nav/navigator';
@@ -284,6 +286,36 @@ describe('Player', () => {
     await untilPlaying(h);
     await h.play(1000);
     expect(lastTelemetry(h)?.clockMode).toBe('audio');
+  });
+
+  it('opens a disc served over HTTP through the openHttpSource dependency', async () => {
+    const events: EngineEvent[] = [];
+    const asked: unknown[] = [];
+    const files = buildSyntheticDisc({ clips: [syntheticClip('00001', 4)], playlists: [{ id: '00001', clipIds: ['00001'] }] });
+    const player = new Player({
+      emit: (e) => events.push(e),
+      videoCodecApi: fakeApi,
+      nowMs: () => 0,
+      requestFrame: () => undefined,
+      createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+      createAudioDecoder: noWasmFactory,
+      openHttpSource: async (disc) => {
+        asked.push(disc);
+        return new FileSource(normalizeDiscPaths(discEntries(files)));
+      },
+    });
+    await player.handle({ type: 'openRemote', disc: { baseUrl: 'https://192.168.1.2:8443/discs/abc', token: 'tok' } });
+    expect(asked).toEqual([{ baseUrl: 'https://192.168.1.2:8443/discs/abc', token: 'tok' }]);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'titles' }));
+    expect(events.at(-1)).toEqual({ type: 'state', state: 'idle' });
+  });
+
+  it('reports read-failed for a served disc when it cannot open one over HTTP', async () => {
+    const events: EngineEvent[] = [];
+    const player = new Player({ emit: (e) => events.push(e), videoCodecApi: fakeApi, nowMs: () => 0, requestFrame: () => undefined, createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }), createAudioDecoder: noWasmFactory });
+    await player.handle({ type: 'openRemote', disc: { baseUrl: 'https://192.168.1.2:8443/discs/abc', token: 'tok' } });
+    expect(events).toContainEqual(expect.objectContaining({ type: 'error', code: 'read-failed' }));
+    expect(events.at(-1)).toEqual({ type: 'state', state: 'error' });
   });
 
   it('reports a folder without BDMV', async () => {

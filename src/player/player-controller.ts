@@ -4,6 +4,7 @@ import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { MemoryProfileName } from '../engine/memory-profile';
 import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
+import type { HttpDiscRef } from '../engine/disc/http-source';
 import { trackLabel } from './language';
 import { DROP_WARN_RATE, DropMeter } from './drop-meter';
 
@@ -309,6 +310,13 @@ export class PlayerController {
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
     this.post({ type: 'open', entries });
+  }
+
+  /** A disc on the development disc server (tools/disc-server); the engine reads it over HTTP. */
+  openRemote(disc: HttpDiscRef): void {
+    this.startAudio();
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
+    this.post({ type: 'openRemote', disc });
   }
 
   playPlaylist(playlistId: string): void {

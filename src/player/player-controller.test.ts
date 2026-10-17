@@ -153,6 +153,21 @@ describe('PlayerController', () => {
     expect(audio.starts).toBe(2);
   });
 
+  it('opens a served disc with openRemote, starting audio in the gesture', async () => {
+    const worker = new FakeWorker();
+    const audio = new FakeAudio();
+    const c = new PlayerController(worker, audio);
+    c.openRemote({ baseUrl: 'https://192.168.1.5:8443/discs/abc', token: 'tok' });
+    expect(c.getSnapshot().engineState).toBe('loading');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(worker.posted).toEqual([
+      { type: 'openRemote', disc: { baseUrl: 'https://192.168.1.5:8443/discs/abc', token: 'tok' } },
+      { type: 'attachAudio', ring: audio.ring },
+    ]);
+    expect(audio.starts).toBe(1);
+  });
+
   it('notifies subscribers with new snapshots from worker events', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
