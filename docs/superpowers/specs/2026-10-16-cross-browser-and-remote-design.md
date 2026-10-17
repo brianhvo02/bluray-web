@@ -2,7 +2,7 @@
 
 Date: 2026-10-16
 Status: Draft
-Prerequisite: step 1 starts after BD-J (milestone 5, all sub-milestones) is complete and merged, and builds on it.
+Base: step 1 is built on `main` before milestone 5 (BD-J) lands, and runs in parallel with it. BD-J on phones is handed to milestone 5 (§3.9).
 Parent spec: `2026-10-12-bluray-web-player-design.md`. Touches every milestone's UI, and the engine's disc source (§2 of the parent spec).
 
 This spec covers four steps that build on each other. Step 1 is specified in full and gets the first implementation plan. Steps 2–4 are specified far enough that step 1 doesn't paint them into a corner; each gets its own detailed design pass and plan when it starts.
@@ -110,7 +110,7 @@ iPhones kill pages that use too much memory, with no exception to catch. Add a "
 | Compressed read-ahead 2 s / 64 MB (`player.ts:99-100`) | Unchanged for local discs (the remote source has its own buffer, §4.4) |
 | Decoded frame queue 8 (`player.ts:92`) | 4 for 4K streams |
 
-BD-J discs are in scope: step 1 starts after milestone 5 is complete, and BD-J discs must work on iPhone like HDMV discs. The JVM's heap, class data and interpreter caches get constrained-profile limits too, and its CPU cost on an iPhone (menu draw and time to first frame against M5's own targets) is measured early in the step-1 plan. If an iPhone misses M5's targets, that is a step-1 blocker to fix in the JVM, not a known issue to accept.
+BD-J is not part of step 1 (§3.9); until milestone 5 lands, BD-J discs fall back to the playlist picker on every browser, as on desktop today.
 
 ### 3.6 Installable offline app
 
@@ -124,14 +124,23 @@ BD-J discs are in scope: step 1 starts after milestone 5 is complete, and BD-J d
 
 - **Playwright projects** for `chromium` (as today, `channel: 'chrome'`), `webkit` and `firefox`, on the existing Linux runners. Playwright's WebKit on Linux is not Safari and generally lacks H.264 in WebCodecs, so in that project the playback tests skip with a stated reason; what it must run is the landing screen, capability messages, folder picking, touch layout and the service worker. Firefox desktop runs the playback tests. The A/V sync tests stay Chrome-only in CI. Real Safari is covered by the real-device gate, not CI; no macOS runner. (My call.)
 - **Mobile emulation** projects (Chromium with a phone viewport and touch) cover layout, touch controls and menu taps.
-- **Real-device gate**, run by hand at the end of step 1 and recorded in this spec's status line, as earlier milestones did: iPhone (iOS 26), iPad (iPadOS 26, USB drive in the Files app), Safari macOS, Firefox desktop. Per device: open a 1080p H.264 disc, a 1080i disc, an HEVC disc where available, a BD-J disc, navigate an HDMV menu and a BD-J menu by touch, PGS and ASS subtitles, audio switching, seek, ten minutes of playback with no drift visible (telemetry from `?telemetry=1`), install and open offline.
+- **Real-device gate**, run by hand at the end of step 1 and recorded in this spec's status line, as earlier milestones did: iPhone (iOS 26), iPad (iPadOS 26, USB drive in the Files app), Safari macOS, Firefox desktop. Per device: open a 1080p H.264 disc, a 1080i disc, an HEVC disc where available, navigate an HDMV menu by touch, PGS and ASS subtitles, audio switching, seek, ten minutes of playback with no drift visible (telemetry from `?telemetry=1`), install and open offline.
 - **Android**: the user has no Android device. Chrome Android stays a supported target, verified on the Android emulator (Android Studio, Chrome) for layout, touch, folder picking from emulated storage, H.264 playback and offline install. Hardware HEVC and USB OTG can't be verified there; they are listed as unverified in `docs/known-issues.md` until someone tests on a device. No paid device farm. (My call.)
-- **Early device checks**, as the first tasks of the plan, because they decide go/no-go for pieces of the design: `Blob.slice` beyond 4 GiB from a USB drive on iPad and iPhone, the `AudioContext` sample rate on iOS, worker rAF smoothness on Safari, HEVC decode on iPhone and iPad, BD-J time to first frame on iPhone.
+- **Early device checks**, as the first tasks of the plan, because they decide go/no-go for pieces of the design: `Blob.slice` beyond 4 GiB from a USB drive on iPad and iPhone, the `AudioContext` sample rate on iOS, worker rAF smoothness on Safari, HEVC decode on iPhone and iPad.
 - `capabilities` and the memory profile get unit tests; touch handling gets component tests.
 
 ### 3.8 Done when
 
-All goals in §2 for step 1 pass the real-device gate (Android on the emulator, §3.7), BD-J discs included; every existing test passes unchanged in Chromium; CI runs the new WebKit and Firefox projects.
+All goals in §2 for step 1 pass the real-device gate (Android on the emulator, §3.7); every existing test passes unchanged in Chromium; CI runs the new WebKit and Firefox projects.
+
+### 3.9 BD-J on phones (handed to milestone 5)
+
+The user wants BD-J discs to work on iPhone and iPad like HDMV discs. Step 1 is built before milestone 5 finishes, so these requirements belong to milestone 5's remaining work and its device gate, and are recorded in `docs/known-issues.md` until then:
+
+- BD-J discs open and reach their menus on iPhone and iPad (iOS/iPadOS 26) and Safari macOS, within milestone 5's own time-to-first-frame target, navigated by touch (taps map to the same pointer and key events as HDMV menus, §3.3).
+- The BD-J worker (added in M5c) and everything it uses run in Safari and Firefox: check its use of `SharedArrayBuffer`, `Atomics.wait`, OffscreenCanvas and fonts against §3.1's capability report.
+- The JVM's heap, class data and interpreter caches get limits in the constrained memory profile (§3.5), measured on an iPhone.
+- If an iPhone misses milestone 5's targets, that is a milestone-5 blocker to fix in the JVM, not a known issue to accept.
 
 ## 4. Step 2: NAS server and the HTTPS route
 
@@ -237,7 +246,7 @@ Browser-only access: no Tailscale needed for family and friends, or for the user
 | Downloading discs for offline viewing | No | User |
 | Routes to the NAS | Both: HTTPS (LAN, Tailscale) and browser-only WebRTC | User |
 | Who watches | The user, maybe family and friends | User |
-| BD-J | Step 1 waits for all of milestone 5; BD-J discs count toward "works on iPhone" | User |
+| BD-J | BD-J discs must work on iPhone; step 1 starts now without BD-J, and milestone 5 carries the phone requirements (§3.9) | User |
 | Test devices | iPhone, iPad, USB drive, Mac; no Android device | User |
 | Rip format | Mostly folders, some `.iso` | User |
 | Android verification | Emulator only; HEVC and USB OTG listed as unverified | My call |

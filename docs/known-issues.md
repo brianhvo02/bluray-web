@@ -114,6 +114,10 @@ what would change that decision.
   the next one starts.
 - **AC-3 at 44.1 or 32 kHz is ignored** (treated as no sync). Blu-ray AC-3 is always 48 kHz.
 
+## Browsers and devices
+
+- **BD-J discs are untested on iPhone and iPad.** Cross-browser support (step 1 of `docs/superpowers/specs/2026-10-16-cross-browser-and-remote-design.md`) was built before milestone 5 (BD-J) finished, so BD-J on phones is part of milestone 5's remaining work: the requirements are in that spec's §3.9 (time to first frame on iPhone within M5's target, touch navigation, the BD-J worker in Safari and Firefox, JVM caches in the constrained memory profile). Until then BD-J discs fall back to the playlist picker on every browser.
+
 ## Resolved (for reference)
 
 - **Resolved: large animated text missed the libass pixel budget without GPU canvas rasterization (2026-10-16).**

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The player opens and plays local discs (HDMV and BD-J) in Chrome, Safari (macOS, iOS, iPadOS), Firefox desktop and Chrome Android, works by touch, and installs as an offline app, without changing desktop Chromium behaviour.
+**Goal:** The player opens and plays local discs (HDMV; BD-J falls back to the playlist picker until milestone 5) in Chrome, Safari (macOS, iOS, iPadOS), Firefox desktop and Chrome Android, works by touch, and installs as an offline app, without changing desktop Chromium behaviour.
 
 **Architecture:** Per-feature capability detection replaces the Chromium gate. Small platform adapters (fullscreen, audio session, wake lock, media session, folder drop) sit behind injectable interfaces like the existing `PlayerDeps`/`AudioOutputLike`. A memory profile chosen by the UI and sent to the worker scales the engine's caches. A service worker built with `vite-plugin-pwa` (injectManifest) caches the app and re-adds the isolation headers.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-16-cross-browser-and-remote-design.md` §3 (step 1 only). Read §2 and §8 too.
 
-**Precondition:** do not start until milestone 5 (BD-J, all sub-milestones) is merged into `main`. Then rebase this branch onto `main`. Line numbers below are from `f387ebe` and will have moved; find the code by the names given.
+**Base:** `origin/main` without milestone 5 (BD-J), which is built in parallel on other branches. M5c also edits `player.ts`, `worker.ts`, `protocol.ts`, `player-controller.ts` and `PlaylistPicker.tsx`; keep step 1's edits there small and additive, and whichever lands second rebases. Line numbers below are from `f387ebe` and may have moved; find the code by the names given.
 
 ## Global Constraints
 
@@ -80,15 +80,14 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
   `src/probe/main.ts` renders a "Pick a disc folder" button (`<input type=file webkitdirectory multiple>`), then the results as a table and a "Copy as JSON" button.
 - [ ] **Step 4: Run** the tests again. Expected: PASS. `npm run build` emits `dist/probe.html`.
 - [ ] **Step 5: Commit** `feat(probe): device capability probe page`.
-- [ ] **Step 6 (user, manual): run the probe on devices.** Deploy this branch with `gh workflow run preview.yml --ref <this branch>` (Step 0); no local Cloudflare login is needed. Open `<preview URL>/probe.html` on the iPhone and iPad and pick a disc folder from the USB drive in Files. Do the same on Safari macOS, Firefox desktop and the Android emulator. Also open a BD-J disc in the main app on the iPhone with `?telemetry=1` and record its time from open to first frame against M5's target.
+- [ ] **Step 6 (user, manual): run the probe on devices.** Deploy this branch with `gh workflow run preview.yml --ref <this branch>` (Step 0); no local Cloudflare login is needed. Open `<preview URL>/probe.html` on the iPhone and iPad and pick a disc folder from the USB drive in Files. Do the same on Safari macOS, Firefox desktop and the Android emulator.
 - [ ] **Step 7: Record results** in a new "Device probe results (date)" table in `docs/known-issues.md`.
 
   These results decide:
   - whether Task 7 Step 3 (resampling) runs;
   - whether Task 12 needs the half-float branch;
   - whether Task 13's letter-spacing fallback is needed;
-  - whether rAF smoothness needs Task 9 Step 4;
-  - whether a BD-J performance fix in the JVM is needed before the gate (if so, stop and raise it with the user: it is a separate piece of work).
+  - whether rAF smoothness needs Task 9 Step 4.
 
   A failed `blob-slice-over-4gib` becomes a known issue naming the platform.
 - [ ] **Step 8: Commit** `docs: device probe results`.
@@ -180,7 +179,6 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
   - `src/engine/ass/renderer.ts`: cache constants → `AssRendererDeps.limits`
   - `src/engine/ass/raster.ts`: `MAX_TEXT_SS` → `RasterContext.maxTextSupersampling`
   - `src/player/create-controller.ts`: sends the command first
-  - the BD-J JVM's caches, if M5 introduced size constants (see Step 3)
 
 **Interfaces:**
 - Produces:
@@ -208,7 +206,6 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
 - [ ] **Step 3: Implement.**
   - Thread the profile through `Player`, defaulting to `desktop` so tests and vm-trace runs are unchanged.
   - The ASS renderer reads its limits from the deps.
-  - After M5: if the JVM (`src/engine/bdj/`) holds caches with byte or entry limits, add them to `MemoryProfile`. Halve them under `constrained` unless the Task 1 probe shows the iPhone is comfortable, and record the values chosen in the spec §3.5 table.
 - [ ] **Step 4: Run** `npm test` and `npm run typecheck`. Expected: PASS, with vm-trace and bdj-trace unchanged.
 - [ ] **Step 5: Commit** `feat(engine): constrained memory profile for phones and tablets`.
 
@@ -421,8 +418,8 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
 - [ ] **Step 2: Run the spec §3.7 gate** on iPhone (iOS 26), iPad (iPadOS 26, USB drive in Files), Safari macOS and Firefox desktop.
 
   Per device:
-  - Open a 1080p H.264 disc, a 1080i disc, an HEVC disc and a BD-J disc.
-  - Navigate an HDMV menu and a BD-J menu by touch.
+  - Open a 1080p H.264 disc, a 1080i disc and an HEVC disc.
+  - Navigate an HDMV menu by touch.
   - PGS and ASS subtitles; switch audio; seek.
   - Play ten minutes with `?telemetry=1` and no visible drift.
   - Install, go offline, and open a disc.
