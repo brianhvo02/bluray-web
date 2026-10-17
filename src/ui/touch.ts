@@ -1,3 +1,5 @@
+import type { PlaybackState } from '../engine/protocol';
+
 /** A touch tap on the video: where it landed horizontally and when. */
 export interface Tap {
   readonly x: number;
@@ -25,4 +27,12 @@ export function classifyTap(prev: Tap | null, tap: Tap, ctx: { width: number; me
 /** The tap a following tap pairs with: a tap that clicked a menu button never starts a double tap. */
 export function pairableTap(action: TapAction, tap: Tap): Tap | null {
   return action === 'menuClick' ? null : tap;
+}
+
+/**
+ * The controls' idle flag after a single tap on the video. Only playback (or buffering) toggles it: while paused the controls
+ * are always shown, and flipping the hidden flag would make them vanish the moment play is pressed.
+ */
+export function idleAfterTap(idle: boolean, state: PlaybackState): boolean {
+  return state === 'playing' || state === 'buffering' ? !idle : idle;
 }

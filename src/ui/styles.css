@@ -21,7 +21,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .player { position: relative; height: 100%; background: #000; overflow: hidden; }
 .player.idle { cursor: auto; }
 @media (hover: hover) { .player.idle { cursor: none; } }
-.player-canvas { width: 100%; height: 100%; display: block; }
+.player-canvas { width: 100%; height: 100%; display: block; touch-action: manipulation; } /* no double-tap zoom competing with double-tap seek */
 .player-canvas.over-button { cursor: pointer; }
 .notices { position: absolute; z-index: 20; top: 12px; left: 12px; right: 12px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .notices > * { pointer-events: auto; }

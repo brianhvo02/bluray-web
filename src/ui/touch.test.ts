@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, DOUBLE_TAP_MS, pairableTap } from './touch';
+import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -35,5 +35,18 @@ describe('pairableTap', () => {
     expect(pairableTap('menuClick', tap)).toBeNull();
     // a quick tap after a menu click is a fresh tap, not a seek
     expect(classifyTap(pairableTap('menuClick', tap), { x: 800, timeMs: 100 }, ctx)).toBe('toggleControls');
+  });
+});
+
+describe('idleAfterTap', () => {
+  it('flips the controls while playing or buffering', () => {
+    expect(idleAfterTap(false, 'playing')).toBe(true);
+    expect(idleAfterTap(true, 'playing')).toBe(false);
+    expect(idleAfterTap(false, 'buffering')).toBe(true);
+  });
+
+  it('leaves them alone while paused, where they are always shown', () => {
+    expect(idleAfterTap(false, 'paused')).toBe(false);
+    expect(idleAfterTap(true, 'paused')).toBe(true);
   });
 });

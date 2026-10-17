@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, DOUBLE_TAP_MS, pairableTap, type Tap } from './touch';
+import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -247,12 +247,10 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         // Delayed so that the first tap of a double tap doesn't flash the controls.
         tapTimer.current = window.setTimeout(() => {
           tapTimer.current = null;
-          if (idleRef.current) {
-            setIdle(false);
-            setActivity((a) => a + 1);
-          } else {
-            setIdle(true);
-          }
+          const next = idleAfterTap(idleRef.current, controller.getSnapshot().engineState);
+          if (next === idleRef.current) return;
+          setIdle(next);
+          if (!next) setActivity((a) => a + 1);
         }, DOUBLE_TAP_MS);
         break;
       }
