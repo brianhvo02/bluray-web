@@ -24,10 +24,20 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
+  # One runner per browser project: sharing one 4-vCPU runner with the other browsers starved WebKit (software-rendered,
+  # no GPU), whose playback clock and page then fell seconds behind the tests' waits.
   e2e:
-    name: Browser tests
+    name: Browser tests (${{ matrix.project }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { project: chromium, browser: chrome }
+          - { project: firefox, browser: firefox }
+          - { project: webkit, browser: webkit }
+          - { project: mobile-chromium, browser: chrome }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,9 +46,9 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0
       - run: npm ci
-      - run: npx playwright install --with-deps chrome firefox webkit
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: scripts/ci-audio.sh
-      - run: npm run test:e2e
+      - run: npm run test:e2e -- --project ${{ matrix.project }}
         env:
           # Linux containers measured up to 19 ms mean / 41 ms max offset against the 20/50 ms bounds; 1.5 gives headroom.
           SYNC_TOLERANCE_SCALE: '1.5'
@@ -47,7 +57,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: playwright-results
+          name: playwright-results-${{ matrix.project }}
           path: |
             test-results/
             playwright-report/
