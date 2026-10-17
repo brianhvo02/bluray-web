@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fakeNas } from '../../tests/helpers/fake-nas';
 import { fakeVideoCodecApi } from '../../tests/helpers/fake-video-decoder';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
 import { VirtualClock, storedZip } from '../../tests/helpers/jvm-asm';
@@ -57,6 +58,8 @@ interface Harness {
   /** Everything the engine sent to the BD-J worker. */
   readonly sent: ToBdj[];
   readonly terminated: () => boolean;
+  /** Paths read from the fake NAS (remote harness only). */
+  readonly requested: readonly string[];
   /** Delivers a message to the engine as if the BD-J worker had sent it. */
   inject(m: FromBdj): void;
   play(ms: number): Promise<void>;
@@ -73,6 +76,8 @@ interface HarnessOptions {
   readonly worker?: WorkerLike;
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
   readonly playerSettings?: PlayerSettings;
+  /** Serve the disc from a fake NAS: the engine and the BD-J worker read it by HTTP range reads. */
+  readonly remote?: boolean;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -82,6 +87,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   let terminated = false;
   let toEngine: MessagePort | null = null;
   const clock = { ms: 1000 };
+  const nas = opts.remote ? fakeNas(files) : null;
   const player = new Player({
     emit: (e) => events.push(e),
     videoCodecApi: fakeVideoCodecApi,
@@ -93,7 +99,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     createBdjWorker: () => {
       if (opts.worker) return opts.worker;
       const { port1, port2 } = new MessageChannel();
-      runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0]);
+      runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0], nas ? { fetch: nas.fetch } : {});
       toEngine = port2;
       const worker: WorkerLike = {
         postMessage: (m: ToBdj) => {
@@ -116,13 +122,14 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     },
     loadClassLibrary: async () => classes,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
+    ...(nas ? { fetch: nas.fetch } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
   const views = ringViews(ring);
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
-  await player.handle({ type: 'open', entries: discEntries(files) });
+  await player.handle({ type: 'open', disc: nas ? nas.spec : { kind: 'files', entries: discEntries(files) } });
   const left = new Float32Array(128);
   const right = new Float32Array(128);
   return {
@@ -130,6 +137,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     events,
     sent,
     terminated: () => terminated,
+    requested: nas?.requested ?? [],
     inject: (m) => toEngine!.postMessage(m),
     async play(ms) {
       for (let elapsed = 0; elapsed < ms; elapsed += STEP_MS) {
@@ -174,6 +182,16 @@ async function playing(files = bdjDisc()): Promise<Harness> {
 }
 
 describe('Player with BD-J titles (in-process BD-J worker)', () => {
+  it('runs First Play from a disc on the NAS: the engine and the BD-J worker both read it by range reads', async () => {
+    const h = await harness(fixtureDiscFiles('disc-bdj'), { remote: true });
+    await until(h, () => lastState(h) === 'playing' && playlistsPlayed(h).length > 0);
+    expect(playlistsPlayed(h)).toEqual(['00000']);
+    const boot = h.sent.find((m) => m.type === 'boot');
+    expect(boot).toMatchObject({ disc: { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/' }, readAheadBytes: 128 * 1024 * 1024 });
+    expect(h.requested).toContain('BDMV/JAR/00000.JAR'); // only the BD-J worker reads the jar
+    expect(h.requested).toContain('BDMV/STREAM/00000.M2TS');
+  }, 90_000);
+
   it('runs First Play: Java plays playlist 00000 with no picker and a menu-hidden notice', async () => {
     const h = await playing();
     expect(h.events).toContainEqual(expect.objectContaining({ type: 'titles', bdjSupported: true }));
@@ -314,7 +332,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
       loadClassLibrary: async () => CLASSES,
     });
     players.push(player);
-    await player.handle({ type: 'open', entries: discEntries(bdjDisc()) });
+    await player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(bdjDisc()) } });
     await vi.waitFor(() => expect(order).toContain('post:boot'));
     expect(order.filter((o) => o === 'post:boot')).toHaveLength(1);
     expect(order.indexOf('post:boot')).toBeLessThan(order.indexOf('emit:titles'));
@@ -403,7 +421,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(lastState(h)).toBe('loading');
     const other = buildSyntheticDisc({ clips: [syntheticClip('00009', 4, { audio: CodingType.LPCM })], playlists: [{ id: '00009', clipIds: ['00009'] }] });
     const at = h.events.length;
-    await h.player.handle({ type: 'open', entries: discEntries(other) });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(other) } });
     await h.play(500);
     expect(h.events.slice(at).some((e) => e.type === 'chapters' || e.type === 'tracks')).toBe(false);
     expect(lastState(h)).toBe('idle');

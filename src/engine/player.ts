@@ -19,9 +19,11 @@ import { M2tsReader } from './demux/m2ts-reader';
 import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
-import { FileSource } from './disc/file-source';
+import { createByteSource, type DiscSpec } from './disc/disc-spec';
+import type { FileSource } from './disc/file-source';
+import { RemoteDiscError, TokenRelay } from './disc/http-transport';
 import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
-import { normalizeDiscPaths } from './disc/paths';
+import { RemoteSource } from './disc/remote-source';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
 import type { UoOp } from './hdmv/uo-mask';
@@ -89,6 +91,8 @@ export interface PlayerDeps {
   readonly bdjLog?: (line: string, error: boolean) => void;
   /** bd_set_player_setting_str's languages and country, written to the program's registers when a BD-J title is entered. */
   readonly playerSettings?: PlayerSettings;
+  /** Reads a NAS disc's files (HttpTransport); the global fetch by default. */
+  readonly fetch?: typeof fetch;
 }
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
@@ -120,6 +124,7 @@ interface TextTrack {
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
 const MAX_DECODE_QUEUE = 8;
 const MENU_MEMORY_MESSAGE = "This disc's menus need more memory than this device allows.";
+const NAS_WAITING_MESSAGE = 'Waiting for the NAS drive…';
 /**
  * Read-ahead budget for compressed video waiting to enter the decoder. Discs may multiplex video
  * well ahead of its audio (≥ 0.5 s seen on real discs), so reading must be able to run this far
@@ -246,7 +251,7 @@ function isMediaError(err: unknown): boolean {
 
 /** Owns one disc and at most one playing playlist. Runs inside the engine worker. */
 export class Player {
-  private source: FileSource | null = null;
+  private source: FileSource | RemoteSource | null = null;
   private disc: DiscModel | null = null;
   private soundsPlayed = 0;
   private session: Session | null = null;
@@ -299,8 +304,12 @@ export class Player {
   private bdjDiscId: string | null = null;
   /** The class library, loading from the first BD-J disc on. */
   private bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
-  /** The open disc's files as the user gave them, for the BD-J worker's own disc model. */
-  private discEntries: ReadonlyArray<readonly [string, Blob]> = [];
+  /** The open disc as the UI gave it (with the latest NAS token), for the BD-J worker's own disc model. */
+  private discSpec: DiscSpec = { kind: 'files', entries: [] };
+  /** Fresh NAS tokens for the open (or opening) disc's reads, asked of the controller. */
+  private tokens: TokenRelay | null = null;
+  /** The opening (then open) disc's NAS source, which takes token refreshes. */
+  private remote: RemoteSource | null = null;
   private bdj: BdjTitle | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
@@ -330,6 +339,11 @@ export class Player {
 
   /** Commands run strictly one at a time, in arrival order. */
   handle(cmd: EngineCommand): Promise<void> {
+    // a read waiting for a fresh token holds up the queue, so the token cannot wait in it
+    if (cmd.type === 'remoteToken') {
+      this.remoteToken(cmd.token);
+      return Promise.resolve();
+    }
     this.queue = this.queue.then(() => this.run(cmd));
     return this.queue;
   }
@@ -338,8 +352,10 @@ export class Player {
     try {
       switch (cmd.type) {
         case 'open':
-          await this.open(cmd.entries);
+          await this.open(cmd.disc);
           break;
+        case 'remoteToken':
+          break; // handled at once
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
           if (this.shaderStage) this.compositor.setShaderStage?.(this.shaderStage);
@@ -549,17 +565,18 @@ export class Player {
     this.deps.requestFrame(loop);
   }
 
-  private async open(entries: ReadonlyArray<readonly [string, Blob]>): Promise<void> {
+  private async open(spec: DiscSpec): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
     this.teardownSession();
+    this.dropRemote();
     this.setState('loading');
-    const source = new FileSource(normalizeDiscPaths(entries));
+    const source = this.createSource(spec);
     // spec §4.7: the class library loads, and a BD-J First Play's worker boots, while the disc opens
-    const early = this.bdjSupported ? await this.startEarlyBdj(source, entries) : null;
+    const early = this.bdjSupported ? await this.startEarlyBdj(source) : null;
     let disc: DiscModel;
     try {
       disc = await openDisc(source);
@@ -569,7 +586,6 @@ export class Player {
     }
     this.source = source;
     this.disc = disc;
-    this.discEntries = entries;
     this.soundsPlayed = 0;
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
@@ -591,6 +607,45 @@ export class Player {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
+  }
+
+  /** The disc's bytes; a NAS disc's waits show a notice, and its 401s ask the controller for a fresh token. */
+  private createSource(spec: DiscSpec): FileSource | RemoteSource {
+    this.discSpec = spec;
+    const tokens = new TokenRelay(() => this.deps.emit({ type: 'remoteTokenNeeded' }), this.deps.setTimer ?? defaultSetTimer);
+    const source: FileSource | RemoteSource = createByteSource(spec, {
+      fetch: this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
+      readAheadBytes: this.memory.remoteReadAheadBytes,
+      onWaiting: (waiting) => {
+        if (this.remote !== source) return; // a disc closed meanwhile
+        if (waiting) this.notice('nas-waiting', NAS_WAITING_MESSAGE);
+        else this.deps.emit({ type: 'noticeCleared', code: 'nas-waiting' });
+      },
+      refreshToken: () => tokens.request(),
+    });
+    if (source instanceof RemoteSource) {
+      this.remote = source;
+      this.tokens = tokens;
+    }
+    return source;
+  }
+
+  /** A fresh NAS token: for the reads waiting on one, the open disc's source and its BD-J worker, and later BD-J boots. */
+  private remoteToken(token: string): void {
+    if (this.discSpec.kind !== 'remote' || !this.remote) return;
+    this.discSpec = { ...this.discSpec, token };
+    this.remote.setToken(token);
+    this.tokens?.deliver(token);
+    this.earlyBdj?.worker.postMessage({ type: 'remoteToken', token });
+    this.bdj?.session.setToken(token);
+  }
+
+  /** Forgets the NAS disc: its fetches stop and its read-ahead is freed. */
+  private dropRemote(): void {
+    this.remote?.close();
+    this.remote = null;
+    this.tokens = null;
+    this.discSpec = { kind: 'files', entries: [] };
   }
 
   private get bdjSupported(): boolean {
@@ -624,7 +679,7 @@ export class Player {
    * whose First Play is BD-J gets its worker, registers and status block now; the worker's boot goes out once the
    * class library is in, so the JVM boots while the disc opens. enterBdj adopts it.
    */
-  private async startEarlyBdj(source: FileSource, entries: ReadonlyArray<readonly [string, Blob]>): Promise<EarlyBdj | null> {
+  private async startEarlyBdj(source: FileSource | RemoteSource): Promise<EarlyBdj | null> {
     const index = await peekIndex(source);
     if (!index || !indexUsesBdj(index)) return null;
     this.loadClassLibrary();
@@ -639,7 +694,15 @@ export class Player {
         const [classLibrary, bdid] = await Promise.all([library, readBdid(source)]);
         // once adopted, the session sends the same boot itself (EarlyBdjWorker passes only the first)
         if (this.earlyBdj !== early) return;
-        early.worker.boot({ type: 'boot', registers: early.regs.shared!, status: early.status.buffer, discFiles: entries, discId: bdid?.discId ?? null, classLibrary });
+        early.worker.boot({
+          type: 'boot',
+          registers: early.regs.shared!,
+          status: early.status.buffer,
+          disc: this.discSpec,
+          readAheadBytes: this.memory.remoteReadAheadBytes,
+          discId: bdid?.discId ?? null,
+          classLibrary,
+        });
       } catch {
         // a class library that does not load fails the session (bootBdj)
       }
@@ -705,6 +768,9 @@ export class Player {
         if (live()) this.bdjFailed(code, message);
       },
       onLog: this.deps.bdjLog,
+      onTokenNeeded: () => {
+        if (live()) this.deps.emit({ type: 'remoteTokenNeeded' });
+      },
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
     });
@@ -728,7 +794,7 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
-    await entry.session.boot(this.discEntries, this.bdjDiscId, classes);
+    await entry.session.boot(this.discSpec, this.memory.remoteReadAheadBytes, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
     if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();
@@ -1725,6 +1791,7 @@ export class Player {
     this.pgRegs = null;
     this.resetTextSubtitles();
     this.emitSubtitles();
+    this.dropRemote();
     this.source = null;
     this.disc = null;
     this.setState('idle');
@@ -2090,7 +2157,7 @@ export class Player {
 
   private reportError(err: unknown): void {
     if (err instanceof DiscError) {
-      this.deps.emit({ type: 'error', code: err.code, message: err.message, paths: err.paths });
+      this.deps.emit({ type: 'error', code: err instanceof RemoteDiscError ? err.reason : err.code, message: err.message, paths: err.paths });
     } else if (err instanceof UnsupportedCodecError) {
       this.deps.emit({ type: 'unsupported', kind: isVideoCoding(err.codingType) ? 'video' : 'audio', codec: codingName(err.codingType), message: err.message });
     } else if (err instanceof ParseError) {

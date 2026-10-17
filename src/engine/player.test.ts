@@ -4,6 +4,8 @@ import { buildSoundBdmv, type IndexSpec } from '../../tests/helpers/bdmv-builder
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
 import { clearSegments, subtitleSegments } from '../../tests/helpers/pg-builders';
+import { fakeNas, type FakeNas } from '../../tests/helpers/fake-nas';
+import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
 import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticDiscSpec, type SyntheticPgStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
 import { readFontFile } from './ass/font-tables';
 import { createFixedMeasurer } from './ass/measure';
@@ -105,7 +107,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings'] } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas; noOpen?: boolean } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
@@ -136,6 +138,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     createAssDeps: opts.createAssDeps ?? fakeAssDeps(),
     createShaderBackend: opts.createShaderBackend,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
+    ...(opts.remote ? { fetch: opts.remote.fetch } : {}),
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
@@ -166,7 +169,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
   const entries = discEntries(files);
-  await player.handle({ type: 'open', entries });
+  if (!opts.noOpen) await player.handle({ type: 'open', disc: opts.remote ? opts.remote.spec : { kind: 'files', entries } });
   const left = new Float32Array(128);
   const right = new Float32Array(128);
   return {
@@ -289,7 +292,7 @@ describe('Player', () => {
   it('reports a folder without BDMV', async () => {
     const events: EngineEvent[] = [];
     const player = new Player({ emit: (e) => events.push(e), videoCodecApi: fakeApi, nowMs: () => 0, requestFrame: () => undefined, createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }), createAudioDecoder: noWasmFactory });
-    await player.handle({ type: 'open', entries: [['Stuff/readme.txt', new Blob(['hi'])]] });
+    await player.handle({ type: 'open', disc: { kind: 'files', entries: [['Stuff/readme.txt', new Blob(['hi'])]] } });
     expect(events).toContainEqual(expect.objectContaining({ type: 'error', code: 'not-bdmv' }));
     expect(events.at(-1)).toEqual({ type: 'state', state: 'error' });
   });
@@ -1582,7 +1585,7 @@ describe('Player text subtitles', () => {
     await h.player.handle({ type: 'close' });
     expect(subtitleEvents(h).at(-1)).toMatchObject({ text: null, pg: [] });
     const other = buildSyntheticDisc({ clips: [syntheticClip('00009', 2)], playlists: [{ id: '00009', clipIds: ['00009'] }] });
-    await h.player.handle({ type: 'open', entries: discEntries(other) });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(other) } });
     expect(subtitleEvents(h).at(-1)).toMatchObject({ text: null, selected: 'off' });
   });
 
@@ -1740,7 +1743,7 @@ describe('Player video shaders', () => {
     await shaders.finish();
     expect(h.shaderStages).toHaveLength(1);
     await h.player.handle({ type: 'close' });
-    await h.player.handle({ type: 'open', entries: h.entries });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
     await h.play(600); // a telemetry sample after frames were drawn
@@ -1764,7 +1767,7 @@ describe('Player video shaders', () => {
     h.order.length = 0;
     expect(() => h.player.tick()).not.toThrow();
     expect(h.order).toEqual([]);
-    await h.player.handle({ type: 'open', entries: h.entries });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
     await h.play(600);
@@ -1793,5 +1796,64 @@ describe('Player video shaders', () => {
     h.order.length = 0;
     h.player.tick();
     expect(h.order).toEqual([]);
+  });
+});
+
+describe('Player with a disc on the NAS', () => {
+  const titlesOf = (h: Harness) => h.events.find((e) => e.type === 'titles');
+
+  it('opens disc1 by HTTP range reads and plays it; the small files come from the manifest', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'));
+    const h = await harness(undefined, { remote: nas });
+    expect(titlesOf(h)).toMatchObject({ playlists: [expect.objectContaining({ id: '00000' }), expect.objectContaining({ id: '00001' })] });
+    expect(nas.requested.every((p) => p.startsWith('BDMV/STREAM/'))).toBe(true); // index, playlists and clip info are inlined
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(500);
+    expect(h.drawn.length).toBeGreaterThan(5);
+    expect(nas.requested).toContain('BDMV/STREAM/00001.M2TS');
+  });
+
+  it('asks for a fresh token on a 401 while a command waits on the read, and carries on with it', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'), 'fresh');
+    const remote = { ...nas, spec: { ...nas.spec, token: 'expired' } };
+    const h = await harness(undefined, { remote, noOpen: true });
+    const opening = h.player.handle({ type: 'open', disc: remote.spec });
+    await vi.waitFor(() => expect(h.events).toContainEqual({ type: 'remoteTokenNeeded' }));
+    await h.player.handle({ type: 'remoteToken', token: 'fresh' }); // not queued behind the open
+    await opening;
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    expect(h.events.filter((e) => e.type === 'remoteTokenNeeded')).toHaveLength(1);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('reports a disc that changed on the NAS with its own code and the copy', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'));
+    const changed: FakeNas = { ...nas, fetch: (async () => Response.json({ error: 'disc-changed' }, { status: 404 })) as typeof fetch };
+    const h = await harness(undefined, { remote: changed });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    expect(h.events).toContainEqual({ type: 'error', code: 'disc-changed', message: 'This disc changed on the NAS. Open its folder again.', paths: ['BDMV/STREAM/00001.M2TS'] });
+  });
+
+  it('shows "Waiting for the NAS drive…" while a read takes over 3 s, and clears it when the read lands', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow: FakeNas = { ...nas, fetch: (async (input: string | URL | Request, init?: RequestInit) => (await gate, nas.fetch(input, init))) as typeof fetch };
+    const h = await harness(undefined, { remote: slow, noOpen: true });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const picking = h.player.handle({ type: 'open', disc: slow.spec });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(h.events).toContainEqual({ type: 'notice', code: 'nas-waiting', message: 'Waiting for the NAS drive…' });
+      expect(h.events).not.toContainEqual({ type: 'noticeCleared', code: 'nas-waiting' });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      await picking;
+      expect(h.events).toContainEqual({ type: 'noticeCleared', code: 'nas-waiting' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -13,6 +13,8 @@ export interface MemoryProfile {
   readonly maxTextSupersampling: number;
   /** Decoded frames held for the presenter, for a stream of this coded width. */
   readonly maxQueuedFrames: (codedWidth: number) => number;
+  /** A NAS disc's read-ahead: bytes fetched ahead of playback and kept. */
+  readonly remoteReadAheadBytes: number;
 }
 
 export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>> = {
@@ -23,6 +25,7 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     assMaskCacheBytes: 64 * MB,
     maxTextSupersampling: 8,
     maxQueuedFrames: () => 8,
+    remoteReadAheadBytes: 128 * MB,
   },
   constrained: {
     igPreloadLimitBytes: 64 * MB,
@@ -31,5 +34,6 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     assMaskCacheBytes: 16 * MB,
     maxTextSupersampling: 4,
     maxQueuedFrames: (codedWidth) => (codedWidth >= 3840 ? 4 : 8),
+    remoteReadAheadBytes: 48 * MB,
   },
 };
