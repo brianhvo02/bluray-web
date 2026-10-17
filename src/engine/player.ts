@@ -115,8 +115,43 @@ const SCR_PER_MS = 90;
 const PRELOAD_SIZE_LIMIT = 512 * 1024 * 1024;
 const INDEX_ID_NONE = 0xffff;
 
+/** Who opened a playlist: the user's pick, the HDMV navigator, or a BD-J title. */
+type PlaylistCaller = 'user' | 'navigator' | 'bdj';
+
+/** What a BD-J title hears of playback (PlayerBdjHost). */
+export interface BdjPlaybackListener {
+  /** _open_playlist: called synchronously from inside playPlaylist once the playlist is open, before anything loads. */
+  playlistStarted(playlistId: string, item: number): void;
+  playItemChanged(item: number): void;
+  /** _playmark_reached: the marks passed since the last look, in order; the position is now packet `clipPkt` of `item`. */
+  marksReached(marks: readonly number[], item: number, clipPkt: number): void;
+  /** bd_set_scr: the presentation position, each tick while the playlist is presented. */
+  position(item: number, clipTime45: number): void;
+  /** A user seek (not one the port asked for) to `clipTime45` of play item `item`. */
+  seeked(item: number, clipTime45: number): void;
+  playlistEnded(): void;
+}
+
+/** How a BD-J title drives the player: the navigator's port paths plus rate, time seeks and sound effects. */
+export interface BdjPlaybackPort {
+  /** false if the playlist is missing or cannot play; the listener's playlistStarted runs inside, as for the navigator. Opens paused (bdj_wait_start). */
+  playPlaylist(id: string, at: PlayAt): Promise<boolean>;
+  seekPlayItem(item: number): void;
+  seekMark(mark: number): void;
+  /** _seek_time: a playlist time in 45 kHz ticks. */
+  seekTime45(t: number): void;
+  stopPlaylist(): void;
+  /** 0 pauses, anything else plays. */
+  setRate(rate: number): void;
+  currentClipTime45(): number | undefined;
+  playlistOpen(): boolean;
+  playSound(id: number): void;
+  setListener(listener: BdjPlaybackListener | null): void;
+}
+
 interface Session {
   readonly playlistId: string;
+  readonly owner: PlaylistCaller;
   readonly timeline: Timeline;
   readonly chapters: readonly Chapter[];
   readonly tracks: readonly AudioTrack[];
@@ -194,6 +229,7 @@ export class Player {
   private popupAvailable = false;
   /** Bumped by every playlist open and by navigator teardown, so a superseded open stops early. */
   private openGeneration = 0;
+  private bdjListener: BdjPlaybackListener | null = null;
   /** PG subtitles of the open disc, on the navigator's registers or, without a navigator, on pgRegs. */
   private pg: PgStreamControl | null = null;
   private pgRegs: RegisterFile | null = null;
@@ -347,8 +383,9 @@ export class Player {
       this.wantPlaying = false;
       this.ring?.setPlaying(false);
       this.clock.setRunning(false);
-      // With a navigator, its program decides what follows: the next playlist replaces the session
-      this.navigator?.playlistEnded();
+      // With a navigator or a BD-J title, its program decides what follows: the next playlist replaces the session
+      if (s.owner === 'bdj') this.bdjListener?.playlistEnded();
+      else this.navigator?.playlistEnded();
       if (this.session === s) this.setState('ended');
     }
     if (this.session !== s) return; // the navigator replaced the session
@@ -590,39 +627,81 @@ export class Player {
 
   private navigationPort(): PlaybackPort {
     return {
-      playPlaylist: async (id, at) => {
-        try {
-          return await this.playPlaylist(id, at, true);
-        } catch (err) {
-          // A clip that cannot be opened or decoded is an invalid playlist to the VM (_open_playlist returns 0)
-          if (!isMediaError(err)) throw err;
-          this.reportError(err);
-          if (!this.session) this.setState('idle');
-          return false;
-        }
-      },
-      seekPlayItem: (item) => {
-        const s = this.session;
-        if (s && item >= 0 && item < s.timeline.items.length) this.enqueueNavSeek(s, s.timeline.itemStartUs(item));
-      },
-      seekMark: (mark) => {
-        const s = this.session;
-        if (!s) return;
-        try {
-          this.enqueueNavSeek(s, s.timeline.markTimeUs(mark));
-        } catch (err) {
-          if (!(err instanceof RangeError)) throw err;
-        }
-      },
-      stopPlaylist: () => {
-        this.openGeneration++; // also cancels an open that is still loading
-        this.teardownSession();
-        this.setState('idle');
-      },
+      playPlaylist: (id, at) => this.playPlaylistFor('navigator', id, at),
+      seekPlayItem: (item) => this.seekPlayItem(item),
+      seekMark: (mark) => this.seekMark(mark),
+      stopPlaylist: () => this.stopPlaylist(),
       hold: (on) => this.setHold(on),
-      // _update_time_psr_from_stream: the clip time of the presentation position
-      currentClipTime45: () => (this.session ? this.session.timeline.locate(this.clock.nowUs()).clipTime45 : undefined),
+      currentClipTime45: () => this.currentClipTime45(),
     };
+  }
+
+  /** The port a BD-J title (PlayerBdjHost) drives playback through. */
+  bdjPort(): BdjPlaybackPort {
+    return {
+      playPlaylist: (id, at) => this.playPlaylistFor('bdj', id, at),
+      seekPlayItem: (item) => this.seekPlayItem(item),
+      seekMark: (mark) => this.seekMark(mark),
+      seekTime45: (t) => {
+        const s = this.session;
+        if (s && t >= 0 && t < s.timeline.duration45) this.enqueueNavSeek(s, ticks45ToUs(t));
+      },
+      stopPlaylist: () => this.stopPlaylist(),
+      setRate: (rate) =>
+        this.enqueue(async () => {
+          if (!this.session || this.state === 'ended' || this.state === 'error') return;
+          if (rate === 0) this.pause();
+          else await this.play();
+        }),
+      currentClipTime45: () => this.currentClipTime45(),
+      playlistOpen: () => this.session !== null,
+      playSound: (id) => {
+        this.soundsPlayed++;
+        this.deps.emit({ type: 'soundEffect', id });
+      },
+      setListener: (listener) => {
+        this.bdjListener = listener;
+      },
+    };
+  }
+
+  /** A playlist the navigator or a BD-J title asked for. */
+  private async playPlaylistFor(caller: PlaylistCaller, id: string, at: PlayAt): Promise<boolean> {
+    try {
+      return await this.playPlaylist(id, at, caller);
+    } catch (err) {
+      // A clip that cannot be opened or decoded is an invalid playlist to the program (_open_playlist returns 0)
+      if (!isMediaError(err)) throw err;
+      this.reportError(err);
+      if (!this.session) this.setState('idle');
+      return false;
+    }
+  }
+
+  private seekPlayItem(item: number): void {
+    const s = this.session;
+    if (s && item >= 0 && item < s.timeline.items.length) this.enqueueNavSeek(s, s.timeline.itemStartUs(item));
+  }
+
+  private seekMark(mark: number): void {
+    const s = this.session;
+    if (!s) return;
+    try {
+      this.enqueueNavSeek(s, s.timeline.markTimeUs(mark));
+    } catch (err) {
+      if (!(err instanceof RangeError)) throw err;
+    }
+  }
+
+  private stopPlaylist(): void {
+    this.openGeneration++; // also cancels an open that is still loading
+    this.teardownSession();
+    this.setState('idle');
+  }
+
+  /** _update_time_psr_from_stream: the clip time of the presentation position. */
+  private currentClipTime45(): number | undefined {
+    return this.session ? this.session.timeline.locate(this.clock.nowUs()).clipTime45 : undefined;
   }
 
   /** A seek the navigator asked for: the target is applied once the queued commands ran. */
@@ -640,10 +719,12 @@ export class Player {
   /** A user seek: libbluray's _seek_internal updates the chapter PSR for the packet the target time maps to. */
   private notifySeeked(targetUs: number): void {
     const s = this.session;
-    if (!s || !this.navigator) return;
+    const bdj = s?.owner === 'bdj' ? this.bdjListener : null;
+    if (!s || (!this.navigator && !bdj)) return;
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
     const at = s.timeline.locate(t);
-    this.navigator.seeked(at.item.index, at.clipTime45);
+    if (bdj) bdj.seeked(at.item.index, at.clipTime45);
+    else this.navigator?.seeked(at.item.index, at.clipTime45);
   }
 
   /** Runs `work` after the queued commands, reporting a failure like a command's. */
@@ -684,6 +765,10 @@ export class Player {
 
   /** Presentation follows the clock: tell the navigator about item and chapter changes and about the end of a still item. */
   private syncNavigator(s: Session): void {
+    if (s.owner === 'bdj') {
+      this.syncBdj(s);
+      return;
+    }
     const nav = this.navigator;
     if (!nav || (this.state !== 'playing' && this.state !== 'paused') || this.held) return;
     const now = this.clock.nowUs();
@@ -711,6 +796,25 @@ export class Player {
     }
   }
 
+  /** syncNavigator for a BD-J title: item changes, the marks passed and the position (bd_set_scr). */
+  private syncBdj(s: Session): void {
+    const listener = this.bdjListener;
+    if (!listener || (this.state !== 'playing' && this.state !== 'paused') || this.held) return;
+    const now = this.clock.nowUs();
+    const { item, clipTime45 } = s.timeline.locate(now);
+    if (item.index !== this.navItem) {
+      this.navItem = item.index;
+      listener.playItemChanged(item.index);
+    }
+    const marks: number[] = [];
+    while (this.navSeeksPending === 0 && this.navNextMark >= 0 && now > s.timeline.markTimeUs(this.navNextMark)) {
+      marks.push(this.navNextMark);
+      this.navNextMark = this.navNextMark + 1 < s.timeline.markCount ? this.navNextMark + 1 : -1;
+    }
+    if (marks.length > 0) listener.marksReached(marks, item.index, lookupSpn(this.disc?.clips.get(s.playItems[item.index]!.clipId), clipTime45, true));
+    listener.position(item.index, clipTime45);
+  }
+
   /** _find_next_playmark: the first mark after `timeUs`. */
   private nextMarkAfter(timeline: Timeline, timeUs: number): number {
     for (let i = 0; i < timeline.markCount; i++) if (timeline.markTimeUs(i) > timeUs) return i;
@@ -718,10 +822,12 @@ export class Player {
   }
 
   /**
-   * `viaNavigator`: the navigator asked for it. Then the result says whether the playlist exists, and the navigator is told
-   * of the start (playlistStarted) synchronously, before the first await.
+   * `caller`: the navigator or a BD-J title asked for it. Then the result says whether the playlist exists, and the
+   * program is told of the start (playlistStarted) synchronously, before the first await. A BD-J title's playlist opens
+   * paused until Java starts it (bdj_wait_start).
    */
-  private async playPlaylist(playlistId: string, at: PlayAt = {}, viaNavigator = false): Promise<boolean> {
+  private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user'): Promise<boolean> {
+    const viaNavigator = caller !== 'user';
     const source = this.source;
     const mpls = this.disc?.playlists.get(playlistId);
     if (!source || !mpls || mpls.playItems.length === 0) {
@@ -737,7 +843,8 @@ export class Player {
     this.navItem = startItem;
     this.navEndReported = null;
     this.navNextMark = this.nextMarkAfter(timeline, startUs);
-    if (viaNavigator && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
+    if (caller === 'navigator' && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
+    if (caller === 'bdj') this.bdjListener?.playlistStarted(playlistId, startItem);
     this.setState('loading');
     const clipIds = [...new Set(mpls.playItems.map((p) => p.clipId))];
     const clips = await loadClips(source, clipIds);
@@ -803,6 +910,7 @@ export class Player {
     );
     const session: Session = {
       playlistId,
+      owner: caller,
       timeline,
       chapters,
       tracks: audioTracks(mpls.playItems[startItem].stn),
@@ -839,7 +947,7 @@ export class Player {
     this.sentPgTracks = '';
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
-    await this.startAt(startUs, true);
+    await this.startAt(startUs, caller !== 'bdj');
     return true;
   }
 
