@@ -1,6 +1,14 @@
 import { runChecks, type ProbeEnv, type WorkerProbe } from './checks';
 
 const root = document.getElementById('root') as HTMLElement;
+const logView = document.createElement('pre');
+const lines: string[] = [];
+const t0 = performance.now();
+/** Appends a timestamped line to the live log (kept in the copied JSON too). */
+function log(line: string): void {
+  lines.push(`${((performance.now() - t0) / 1000).toFixed(1)} s  ${line}`);
+  logView.textContent = lines.join('\n');
+}
 
 function pickFolder(): Promise<File[]> {
   return new Promise((resolve) => {
@@ -12,11 +20,15 @@ function pickFolder(): Promise<File[]> {
     input.setAttribute('webkitdirectory', '');
     input.hidden = true;
     input.addEventListener('change', () => {
+      log(`files handed over (${input.files?.length ?? 0})`);
       button.disabled = true;
       resolve([...(input.files ?? [])]);
     });
-    button.addEventListener('click', () => input.click());
-    root.append(button, input);
+    button.addEventListener('click', () => {
+      log('picker opened');
+      input.click();
+    });
+    root.append(button, input, logView);
   });
 }
 
@@ -42,9 +54,11 @@ const env: ProbeEnv = {
   createAudioContext: () => new AudioContext({ sampleRate: 48000 }),
   worker,
   globals: globalThis as unknown as Record<string, unknown>,
+  log,
 };
 
 runChecks(env).then((results) => {
+  log('done');
   root.replaceChildren();
   const table = document.createElement('table');
   for (const r of results) {
@@ -58,10 +72,11 @@ runChecks(env).then((results) => {
   const copy = document.createElement('button');
   copy.textContent = 'Copy as JSON';
   copy.addEventListener('click', () => {
-    const json = JSON.stringify({ userAgent: navigator.userAgent, results }, null, 2);
+    const json = JSON.stringify({ userAgent: navigator.userAgent, results, log: lines }, null, 2);
     void navigator.clipboard.writeText(json).catch(() => window.prompt('Copy:', json));
   });
-  root.append(table, copy);
+  root.append(table, copy, logView);
 }).catch((err: unknown) => {
-  root.textContent = `Probe failed: ${err instanceof Error ? err.message : String(err)}`;
+  log(`probe failed: ${err instanceof Error ? err.message : String(err)}`);
+  root.replaceChildren(logView);
 });
