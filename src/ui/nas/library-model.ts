@@ -52,7 +52,7 @@ export function formatSize(bytes: number): string {
 }
 
 export interface DiscFacts {
-  /** The main title's peak rate (its first clip's TS_recording_rate) in megabits per second; null when unknown. */
+  /** The main title's peak rate (the highest TS_recording_rate of its clips) in megabits per second; null when unknown. */
   readonly peakMbps: number | null;
   /** The main title is HEVC 2160p. */
   readonly uhd: boolean;
@@ -94,14 +94,18 @@ export function discFacts(manifest: DiscManifest): DiscFacts {
       if (hasVideo && complete) candidates.push({ id: m[1]!, mpls });
     }
     const mainId = chooseMainTitle(candidates);
-    const clipId = candidates.find((c) => c.id === mainId)?.mpls.playItems[0]?.clipId;
-    const clpiBytes = clipId === undefined ? null : inlined(manifest, clipInfoPath(clipId));
-    if (!clpiBytes) return unknown;
-    const clip = parseClpi(clpiBytes);
-    const video = clip.programs.flatMap((p) => p.streams).find((s) => isVideoCoding(s.codingType));
+    const clipIds = [...new Set(candidates.find((c) => c.id === mainId)?.mpls.playItems.map((p) => p.clipId) ?? [])];
+    const clips = clipIds.flatMap((id) => {
+      const bytes = inlined(manifest, clipInfoPath(id));
+      return bytes ? [parseClpi(bytes)] : [];
+    });
+    const first = clips[0];
+    if (!first) return unknown;
+    const video = first.programs.flatMap((p) => p.streams).find((s) => isVideoCoding(s.codingType));
+    // TS_recording_rate is in bytes per second; the title's peak is its fastest clip's.
+    const peak = Math.max(...clips.map((c) => c.recordingRate));
     return {
-      // TS_recording_rate is in bytes per second.
-      peakMbps: clip.recordingRate > 0 ? (clip.recordingRate * 8) / 1e6 : null,
+      peakMbps: peak > 0 ? (peak * 8) / 1e6 : null,
       uhd: video?.codingType === CodingType.HEVC && video.format === VIDEO_FORMAT_2160P,
     };
   } catch {
@@ -142,4 +146,9 @@ export function folderMemory(storage: StorageLike | undefined): { get(): string;
       }
     },
   };
+}
+
+/** Whether the engine reported the disc it was opening as failed (the controller resets both when an open starts). */
+export function openFailed(snapshot: { readonly engineState: string; readonly error: unknown }): boolean {
+  return snapshot.error !== null || snapshot.engineState === 'error';
 }

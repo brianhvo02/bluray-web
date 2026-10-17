@@ -94,8 +94,8 @@ export interface PlayerDeps {
   readonly playerSettings?: PlayerSettings;
   /** Reads a NAS disc's files (HttpTransport); the global fetch by default. */
   readonly fetch?: typeof fetch;
-  /** Size of a NAS disc's range requests; REMOTE_CHUNK_BYTES by default. */
-  readonly remoteChunkBytes?: number;
+  /** A NAS disc's range request size (REMOTE_CHUNK_BYTES) and read-ahead budget (the memory profile's) when set. */
+  readonly remoteLimits?: { readonly chunkBytes?: number; readonly readAheadBytes?: number };
 }
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
@@ -620,8 +620,8 @@ export class Player {
     const tokens = new TokenRelay(() => this.deps.emit({ type: 'remoteTokenNeeded' }), this.deps.setTimer ?? defaultSetTimer);
     const source: FileSource | RemoteSource = createByteSource(spec, {
       fetch: this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
-      readAheadBytes: this.memory.remoteReadAheadBytes,
-      ...(this.deps.remoteChunkBytes ? { chunkBytes: this.deps.remoteChunkBytes } : {}),
+      readAheadBytes: this.deps.remoteLimits?.readAheadBytes ?? this.memory.remoteReadAheadBytes,
+      ...(this.deps.remoteLimits?.chunkBytes ? { chunkBytes: this.deps.remoteLimits.chunkBytes } : {}),
       onWaiting: (waiting) => {
         if (this.remote !== source) return; // a disc closed meanwhile
         if (waiting) this.notice('nas-waiting', NAS_WAITING_MESSAGE);

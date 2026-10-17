@@ -1,9 +1,9 @@
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
-import { discBadges, discFacts, formatSize, preflightLines, type DiscFacts } from './library-model';
-import { NAS_MESSAGES, NasHttpError, type NasClient } from './nas-client';
+import { discBadges, discFacts, formatSize, openFailed, preflightLines, type DiscFacts } from './library-model';
+import { NasHttpError, type NasClient } from './nas-client';
 
 interface PreflightProps {
   readonly nas: NasClient;
@@ -25,7 +25,13 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
   const [mbps, setMbps] = useState<number | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
+  /** 'launched' once the engine opens the disc: an open that fails there (shown as the player's error) ends it. */
+  const [opening, setOpening] = useState<'idle' | 'starting' | 'launched'>('idle');
+  const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  const engineFailed = openFailed(snapshot);
+  useEffect(() => {
+    if (opening === 'launched' && engineFailed) setOpening('idle');
+  }, [opening, engineFailed]);
 
   useEffect(() => {
     let live = true;
@@ -59,18 +65,15 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
   const play = (): void => {
     if (!manifest) return;
     controller.startAudio(); // inside the click gesture
-    setOpening(true);
+    setOpening('starting');
     setError(null);
-    Promise.all([nas.pairing(), nas.session()]).then(
-      ([pairing, session]) => {
-        if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
-        controller.openRemote(
-          { kind: 'remote', base: `${pairing.base}discs/${encodeURIComponent(disc.id)}/`, token: session.token, manifest },
-          () => nas.session().then((s) => s.token),
-        );
+    Promise.all([nas.discBase(disc.id), nas.session()]).then(
+      ([base, session]) => {
+        controller.openRemote({ kind: 'remote', base, token: session.token, manifest }, () => nas.session().then((s) => s.token));
+        setOpening('launched');
       },
     ).catch((err: unknown) => {
-      setOpening(false);
+      setOpening('idle');
       setError(message(err));
     });
   };
@@ -101,7 +104,7 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
         </div>
       )}
       <div className="preflight-actions">
-        <button type="button" data-testid="nas-play" disabled={!manifest || opening} onClick={play}>
+        <button type="button" data-testid="nas-play" disabled={!manifest || opening !== 'idle'} onClick={play}>
           Play
         </button>
         <button type="button" onClick={onCancel}>

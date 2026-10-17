@@ -109,12 +109,12 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteChunkBytes?: number; noOpen?: boolean } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
-    clips: [syntheticClip('00001', 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits, pgStreams: opts.pgStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
+    clips: [syntheticClip('00001', opts.clipSeconds ?? 4, { audio, corruptAudioPesIndex: opts.corruptAudioPesIndex, frameBytes: opts.frameBytes, audioStreams: opts.audioStreams, igUnits: opts.igUnits, pgStreams: opts.pgStreams }), syntheticClip('00002', 4, { audio, audioMuxLag90k: opts.audioMuxLag90k, frameBytes: opts.frameBytes, audioStreams: opts.secondClipAudioStreams ?? opts.audioStreams })],
     playlists: opts.playlists ?? [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: opts.videoCodingType }],
     movieObjects: opts.movieObjects,
     index: opts.index,
@@ -142,7 +142,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     createShaderBackend: opts.createShaderBackend,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
     ...(remote ? { fetch: remote.fetch } : {}),
-    ...(opts.remoteChunkBytes ? { remoteChunkBytes: opts.remoteChunkBytes } : {}),
+    ...(opts.remoteLimits ? { remoteLimits: opts.remoteLimits } : {}),
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
@@ -1840,31 +1840,46 @@ describe('Player with a disc on the NAS', () => {
     expect(h.events).toContainEqual({ type: 'error', code: 'disc-changed', message: 'This disc changed on the NAS. Open its folder again.', paths: ['BDMV/STREAM/00001.M2TS'] });
   });
 
+  const CHUNK = 64 * 1024;
+  /** TS_recording_rate of the 3 s tests, bytes per second: 3 s is 24 chunks of 64 KiB, in 192-byte source packets. */
+  const RATE = 500_000;
+  const NEEDED_CHUNKS = Math.ceil((3 * RATE * 192) / 188 / CHUNK);
+  const READ = DEFAULT_CHUNK_PACKETS * SOURCE_PACKET_SIZE;
+  /**
+   * The offset that holds read-ahead one chunk short of 3 s when the reader has read up to `reads` reads from the
+   * clip's start (the last of them its prefetch, whose chunk it holds; read-ahead is counted after it).
+   */
+  const gateAfter = (reads: number): number => Math.ceil((reads * READ) / CHUNK) * CHUNK + (NEEDED_CHUNKS - 1) * CHUNK;
+
+  /** A fake NAS whose clips have TS_recording_rate `rate`; reads of a clip at or past its limit wait until it is raised. */
+  function gatedNas(files: Map<string, Uint8Array<ArrayBuffer>>, rate: number, limits: Record<string, number>) {
+    for (const id of ['00001', '00002']) {
+      const clpi = files.get(`BDMV/CLIPINF/${id}.clpi`)!;
+      new DataView(clpi.buffer, clpi.byteOffset).setUint32(52, rate);
+    }
+    const nas = fakeNas(files);
+    let waiting: Array<() => void> = [];
+    const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const from = Number(/^bytes=(\d+)-/.exec(new Headers(init?.headers).get('Range') ?? '')?.[1] ?? 0);
+      const clip = /(\d{5})\.M2TS/.exec(String(input))?.[1];
+      while (clip !== undefined && from >= (limits[clip] ?? Infinity)) await new Promise<void>((r) => waiting.push(r));
+      return nas.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const raise = (clip: string, limit: number): void => {
+      limits[clip] = limit;
+      const woken = waiting;
+      waiting = [];
+      for (const wake of woken) wake();
+    };
+    return { nas: { ...nas, fetch }, raise };
+  }
+
   it("starts the clock only once 3 s of stream at the clip's TS_recording_rate are read ahead", async () => {
-    const RATE = 500_000; // TS_recording_rate, bytes per second
-    const CHUNK = 64 * 1024;
-    // 3 s at RATE, in 192-byte source packets: 24 chunks of 64 KiB. The reader holds its read and its prefetch;
-    // read-ahead after them is counted from the first chunk past the prefetch.
-    const needed = Math.ceil((3 * RATE * 192) / 188 / CHUNK);
-    const prefetchEnd = 2 * DEFAULT_CHUNK_PACKETS * SOURCE_PACKET_SIZE;
-    const firstAhead = Math.ceil(prefetchEnd / CHUNK) * CHUNK;
-    const gate = firstAhead + (needed - 1) * CHUNK; // everything up to one chunk short of 3 s lands; the rest waits
-    let open!: () => void;
-    const opened = new Promise<void>((r) => (open = r));
+    let gate!: ReturnType<typeof gatedNas>;
     const h = await harness(undefined, {
       frameBytes: 70_000, // clips of about 7 MB, well past the gate
-      remoteChunkBytes: CHUNK,
-      remote: (files) => {
-        const clpi = files.get('BDMV/CLIPINF/00001.clpi')!;
-        new DataView(clpi.buffer, clpi.byteOffset).setUint32(52, RATE);
-        const nas = fakeNas(files);
-        const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-          const from = Number(/^bytes=(\d+)-/.exec(new Headers(init?.headers).get('Range') ?? '')?.[1] ?? 0);
-          if (String(input).includes('00001.M2TS') && from >= gate) await opened;
-          return nas.fetch(input, init);
-        }) as typeof globalThis.fetch;
-        return { ...nas, fetch };
-      },
+      remoteLimits: { chunkBytes: CHUNK },
+      remote: (files) => (gate = gatedNas(files, RATE, { '00001': gateAfter(2) })).nas,
     });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await vi.waitFor(async () => {
@@ -1874,7 +1889,55 @@ describe('Player with a disc on the NAS', () => {
     await h.play(1000);
     expect(lastState(h)).toBe('buffering');
     expect(states(h)).not.toContain('playing');
-    open();
+    gate.raise('00001', Infinity);
+    await untilPlaying(h);
+  });
+
+  it('starts short of 3 s once the read-ahead budget is full', async () => {
+    // 3 s at 10 MB/s is far more than the 1 MiB budget can hold, and the clip (12 s, about 21 MB) is not read to its
+    // end: the reader stops a few seconds in (backpressure) and read-ahead stops 1 MiB after it.
+    const h = await harness(undefined, {
+      frameBytes: 70_000,
+      clipSeconds: 12,
+      remoteLimits: { chunkBytes: CHUNK, readAheadBytes: 1024 * 1024 },
+      remote: (files) => gatedNas(files, 10_000_000, {}).nas,
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+  });
+
+  it('starts short of 3 s once the clip is read to its end', async () => {
+    // 3 s at 10 MB/s is more than the whole clip (about 50 kB).
+    const h = await harness(undefined, { remoteLimits: { chunkBytes: CHUNK }, remote: (files) => gatedNas(files, 10_000_000, {}).nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+  });
+
+  it('resumes after an underrun only once 3 s are read ahead again', async () => {
+    // The second clip (about 12 MB with LPCM audio) gets the reader's first two reads; once they are played out the
+    // output runs dry. Its next two reads then arrive, with read-ahead one chunk short of 3 s after them.
+    let gate!: ReturnType<typeof gatedNas>;
+    const h = await harness(CodingType.LPCM, {
+      frameBytes: 110_000,
+      remoteLimits: { chunkBytes: CHUNK },
+      remote: (files) => (gate = gatedNas(files, RATE, { '00002': Math.ceil((2 * READ) / CHUNK) * CHUNK })).nas,
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await vi.waitFor(
+      async () => {
+        await h.play(100);
+        expect(lastState(h)).toBe('buffering');
+      },
+      { timeout: 10_000 },
+    );
+    const before = states(h).length;
+    gate.raise('00002', gateAfter(4));
+    await h.play(1500);
+    expect(lastState(h)).toBe('buffering');
+    expect(states(h).slice(before)).not.toContain('playing');
+    expect(h.ringPlaying()).toBe(false);
+    gate.raise('00002', Infinity);
     await untilPlaying(h);
   });
 

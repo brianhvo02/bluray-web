@@ -20,7 +20,7 @@ export const RENDEZVOUS_URL = `http://localhost:${RENDEZVOUS_PORT}`;
 export const NAS_E2E_DIR = join(REPO, '.cache/e2e-nas');
 /** The copy of fixtures/synthetic the server serves as root `syn`. */
 export const NAS_ROOT = join(NAS_E2E_DIR, 'syn');
-/** A disc each browser deletes from the root between listing and opening it (`changed/<project>`). */
+/** Discs each browser deletes from the root: between listing and pre-flight (`changed/<project>`), and between pre-flight and opening (`changed/<project>-open`). */
 export const CHANGED_FOLDER = 'changed';
 export const PROJECTS = ['chromium', 'firefox', 'webkit'] as const;
 export const SERVER = join(REPO, 'server/dist/server.mjs');
@@ -32,6 +32,8 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   PORT: String(NAS_PORT),
   PUBLIC_BASE: `http://localhost:${NAS_PORT}/api/`,
   RENDEZVOUS_URL,
+  // Nothing proxies here; the default ('caddy') would only log that it does not resolve.
+  TRUSTED_PROXY: '127.0.0.1',
 };
 
 /** Puts `changed/<project>` (a copy of disc1, timestamps kept so its disc id never changes) back in the root. */
@@ -80,7 +82,7 @@ async function main(): Promise<void> {
   rmSync(NAS_E2E_DIR, { recursive: true, force: true });
   mkdirSync(NAS_E2E_DIR, { recursive: true });
   cpSync(join(REPO, 'fixtures/synthetic'), NAS_ROOT, { recursive: true, preserveTimestamps: true });
-  for (const project of PROJECTS) restoreChangedDisc(project);
+  for (const project of PROJECTS) for (const name of [project, `${project}-open`]) restoreChangedDisc(name);
   await startRendezvous();
   const server = spawn(process.execPath, [SERVER], { env: { ...process.env, ...NAS_ENV }, stdio: 'inherit' });
   server.on('exit', (code) => process.exit(code ?? 1));

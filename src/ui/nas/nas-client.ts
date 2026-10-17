@@ -66,6 +66,9 @@ function base64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+/** A disc's routes, relative to the NAS base. */
+const discPath = (discId: string): string => `discs/${encodeURIComponent(discId)}/`;
+
 const jsonPost = (body: unknown): RequestInit => ({
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -211,14 +214,21 @@ export class NasClient {
     return (await this.json(`library?path=${encodeURIComponent(path)}`)) as { folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean };
   }
 
+  /** The disc's API base for the engine (`RemoteDiscSpec.base`): `<NAS base>discs/<id>/`. */
+  async discBase(discId: string): Promise<string> {
+    const pairing = await this.pairing();
+    if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
+    return `${pairing.base}${discPath(discId)}`;
+  }
+
   async manifest(discId: string): Promise<DiscManifest> {
-    return (await this.json(`discs/${encodeURIComponent(discId)}/manifest`)) as DiscManifest;
+    return (await this.json(`${discPath(discId)}manifest`)) as DiscManifest;
   }
 
   /** Throughput of reading the probe (the first 4 MiB of the disc's largest clip), in megabits per second. */
   async probe(discId: string): Promise<{ mbps: number }> {
     const started = this.deps.now();
-    const res = await this.authed(`discs/${encodeURIComponent(discId)}/probe`, {}, true);
+    const res = await this.authed(`${discPath(discId)}probe`, {}, true);
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
     const bytes = (await res.arrayBuffer()).byteLength;
     const seconds = Math.max(this.deps.now() - started, 1) / 1000;

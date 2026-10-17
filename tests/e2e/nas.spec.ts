@@ -140,3 +140,32 @@ test('a disc deleted after its folder was listed says so', async ({ page, browse
   await expect(page.getByTestId('nas-error')).toHaveText('This disc changed on the NAS. Open its folder again.');
   await expect(page.getByTestId('nas-play')).toBeDisabled();
 });
+
+test('a disc whose probe finds no clip shows no throughput line and still plays', async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  // As the server answers for a disc without a .M2TS.
+  await page.route('**/discs/*/probe?*', (route) =>
+    route.fulfill({ status: 404, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': new URL(page.url()).origin }, body: '{"error":"not found"}' }),
+  );
+  await discRow(page, 'disc1').click();
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 15_000 });
+  await expect(page.getByText('Measuring this connection…')).toBeHidden();
+  await expect(page.getByTestId('nas-preflight-line')).toHaveCount(0);
+  await expect(page.getByTestId('nas-error')).toHaveCount(0);
+  await page.getByTestId('nas-play').click();
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+});
+
+test('a disc deleted after its pre-flight fails to open, and Play works again', async ({ page, browserName }, testInfo) => {
+  const project = `${testInfo.project.name}-open`;
+  const dir = restoreChangedDisc(project);
+  await openLibrary(page, browserName);
+  await page.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+  await discRow(page, project).click();
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 15_000 });
+  rmSync(dir, { recursive: true, force: true });
+  await page.getByTestId('nas-play').click();
+  await expect(page.getByTestId('error')).toContainText('This disc changed on the NAS. Open its folder again.', { timeout: 15_000 });
+  await expect(page.getByTestId('nas-play')).toBeEnabled();
+});

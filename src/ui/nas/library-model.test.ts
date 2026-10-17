@@ -2,16 +2,17 @@ import { describe, expect, it } from 'vitest';
 import type { DiscEntry, DiscManifest, FolderEntry } from '../../engine/disc/nas-api';
 import { fakeNas } from '../../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
-import { breadcrumbs, discBadges, discFacts, folderMemory, formatSize, preflightLines, sortRows } from './library-model';
+import { breadcrumbs, discBadges, discFacts, folderMemory, formatSize, openFailed, preflightLines, sortRows } from './library-model';
 
 const folder = (name: string, path = `drv5/${name}`): FolderEntry => ({ name, path, discs: 1 });
 const disc = (name: string, kind: DiscEntry['kind'] = 'folder', sizeBytes = 1): DiscEntry => ({ id: name, name, path: `drv5/${name}`, kind, sizeBytes });
 
-/** disc1's manifest, its clip info changed by `patch` (the first clip's CLPI, 00001.clpi). */
-function disc1Manifest(patch?: (clpi: Uint8Array) => void): DiscManifest {
+/** disc1's manifest, its clip info changed by `patch` (the first clip's CLPI, 00001.clpi) and `patchSecond` (00002.clpi). */
+function disc1Manifest(patch?: (clpi: Uint8Array) => void, patchSecond?: (clpi: Uint8Array) => void): DiscManifest {
   const files = fixtureDiscFiles('disc1');
-  const clpi = files.get('BDMV/CLIPINF/00001.clpi')!;
-  patch?.(clpi);
+  for (const id of ['00001', '00002']) setRecordingRate(6_000_000)(files.get(`BDMV/CLIPINF/${id}.clpi`)!);
+  patch?.(files.get('BDMV/CLIPINF/00001.clpi')!);
+  patchSecond?.(files.get('BDMV/CLIPINF/00002.clpi')!);
   return fakeNas(files).spec.manifest;
 }
 
@@ -82,6 +83,12 @@ describe('discFacts', () => {
     expect(discFacts(disc1Manifest((c) => (setRecordingRate(13_625_000)(c), makeUhd(c))))).toEqual({ peakMbps: 109, uhd: true });
   });
 
+  it("takes the peak rate as the highest of the main title's clips", () => {
+    // disc1's main title (00000) plays 00001 then 00002.
+    expect(discFacts(disc1Manifest(undefined, setRecordingRate(10_000_000))).peakMbps).toBe(80);
+    expect(discFacts(disc1Manifest(setRecordingRate(7_000_000), setRecordingRate(1_000_000))).peakMbps).toBe(56);
+  });
+
   it('knows nothing of a disc whose playlists it cannot parse', () => {
     const files = [{ path: 'BDMV/PLAYLIST/00000.MPLS', size: 3 }];
     const manifest: DiscManifest = { discId: 'x', name: 'x', files, inline: { 'BDMV/PLAYLIST/00000.MPLS': 'AAAA' } };
@@ -125,5 +132,14 @@ describe('folderMemory', () => {
       memory.set('drv0');
       expect(memory.get()).toBe('');
     }
+  });
+});
+
+describe('openFailed', () => {
+  it('is true once the engine reports an error for the disc being opened', () => {
+    expect(openFailed({ engineState: 'loading', error: null })).toBe(false);
+    expect(openFailed({ engineState: 'idle', error: null })).toBe(false);
+    expect(openFailed({ engineState: 'error', error: null })).toBe(true);
+    expect(openFailed({ engineState: 'loading', error: { code: 'disc-changed', message: 'x', paths: [] } })).toBe(true);
   });
 });

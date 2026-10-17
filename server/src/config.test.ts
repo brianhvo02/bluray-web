@@ -3,13 +3,13 @@ import { loadConfig } from './config';
 
 describe('loadConfig', () => {
   it('reads roots, data dir and port', () => {
-    expect(loadConfig({ LIBRARY_ROOTS: 'drv0=/library/drv0, drv2=/library/drv2', DATA_DIR: '/d', PORT: '4190' })).toEqual({
+    expect(loadConfig({ LIBRARY_ROOTS: 'drv0=/library/drv0, drv2=/library/drv2', DATA_DIR: '/d', PORT: '4192' })).toEqual({
       roots: [
         { name: 'drv0', dir: '/library/drv0' },
         { name: 'drv2', dir: '/library/drv2' },
       ],
       dataDir: '/d',
-      port: 4190,
+      port: 4192,
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
@@ -56,7 +56,7 @@ describe('loadConfig', () => {
   });
 
   it('reads PUBLIC_BASE', () => {
-    expect(loadConfig({ PUBLIC_BASE: 'http://localhost:4190/api/' }).publicBase).toBe('http://localhost:4190/api/');
+    expect(loadConfig({ PUBLIC_BASE: 'http://localhost:4192/api/' }).publicBase).toBe('http://localhost:4192/api/');
   });
 
   it.each(['', 'nas/api', 'ftp://nas/api/'])('rejects PUBLIC_BASE=%j', (value) => {
