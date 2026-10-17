@@ -20,11 +20,10 @@ export async function collectDroppedFiles(items: DataTransferItemList): Promise<
     const item = items[i]!;
     if (item.kind !== 'file') continue;
     const entry = item.webkitGetAsEntry?.() as EntryLike | null;
-    if (entry) entries.push(entry);
-    else {
-      const f = item.getAsFile();
-      if (f) plain.push(f);
-    }
+    // a plain file comes from getAsFile: WebKit's file entry can't read a file that has no disk path
+    const file = entry?.isDirectory ? null : item.getAsFile();
+    if (file) plain.push(file);
+    else if (entry) entries.push(entry);
   }
   return [...plain, ...(await walkEntries(entries, 1)).map(([, f]) => f)];
 }
