@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, type Tap } from './touch';
+import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, tapPoint, type PointerPoint, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -64,6 +64,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const idleRef = useRef(idle);
   idleRef.current = idle;
   const lastUpWasTouch = useRef(false);
+  /** The last touch pointerdown on the video: a tap's position comes from it (see tapPoint). */
+  const touchDown = useRef<PointerPoint | null>(null);
 
   useEffect(
     () => () => {
@@ -219,11 +221,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  const onCanvasPointerDown = (e: PointerEvent<HTMLCanvasElement>): void => {
+    if (e.pointerType === 'touch') touchDown.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  };
+
   const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
     lastUpWasTouch.current = e.pointerType === 'touch';
     if (e.pointerType !== 'touch') return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
+    const at = tapPoint(touchDown.current, { id: e.pointerId, x: e.clientX, y: e.clientY });
+    touchDown.current = null;
+    const tap: Tap = { x: at.x - rect.left, timeMs: e.timeStamp };
     const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: snapshot.menuActive });
     lastTap.current = pairableTap(action, tap);
     if (tapTimer.current !== null) {
@@ -232,7 +240,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     }
     switch (action) {
       case 'menuClick': {
-        const point = toMenuSpace(e.clientX, e.clientY, rect);
+        const point = toMenuSpace(at.x, at.y, rect);
         if (point) controller.pointer('click', point.x, point.y);
         break;
       }
@@ -322,6 +330,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
         data-testid="video-canvas"
         onPointerMove={onCanvasPointerMove}
+        onPointerDown={onCanvasPointerDown}
         onPointerUp={onCanvasPointerUp}
         onClick={onCanvasClick}
       />
