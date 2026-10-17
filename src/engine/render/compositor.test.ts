@@ -264,3 +264,59 @@ describe('Compositor.drawBdj', () => {
     expect(calls.some(([n]) => n === 'main.drawImage')).toBe(false);
   });
 });
+
+describe('Compositor background still (BD-J displayImage)', () => {
+  function fake(width: number, height: number) {
+    const calls: Array<[string, ...unknown[]]> = [];
+    const mainCtx = new Proxy({}, { get: (_t, prop: string) => (...args: unknown[]) => calls.push([`main.${prop}`, ...args]) });
+    const main = { width, height, getContext: () => mainCtx } as unknown as OffscreenCanvas;
+    return { calls, compositor: new Compositor(main, () => ({}) as OffscreenCanvas) };
+  }
+  const frame = { displayWidth: 1440, displayHeight: 1080, codedWidth: 1440, codedHeight: 1080 } as unknown as VideoFrame;
+  const image = { still: true } as unknown as ImageBitmap;
+
+  it('draws the still in its part of the 16:9 screen rectangle, after the black fill and before the video', () => {
+    const { calls, compositor } = fake(1000, 1000);
+    compositor.setBackground({ image, rect: { x: 0.5, y: 0.25, width: 0.5, height: 0.5 } });
+    compositor.drawVideo(null);
+    // 16:9 in 1000×1000 is (0, 218) 1000×563
+    expect(calls).toEqual([['main.fillRect', 0, 0, 1000, 1000], ['main.drawImage', image, 500, 218 + 563 * 0.25, 500, 563 * 0.5]]);
+    // the 4:3 frame (pillarboxed at 240..1680 of 1920×1080) leaves the right of the still showing: still first, then video
+    const wide = fake(1920, 1080);
+    wide.compositor.setBackground({ image, rect: { x: 0.5, y: 0.25, width: 0.5, height: 0.5 } });
+    wide.compositor.drawVideo(frame);
+    expect(wide.calls.map(([n]) => n)).toEqual(['main.fillRect', 'main.drawImage', 'main.drawImage']);
+    expect(wide.calls[1]).toEqual(['main.drawImage', image, 960, 270, 960, 540]);
+    expect(wide.calls[2]).toEqual(['main.drawImage', frame, 240, 0, 1440, 1080]);
+  });
+
+  it('shows with no video (a menu without a playlist), and not after it is cleared', () => {
+    const { calls, compositor } = fake(1920, 1080);
+    compositor.setBackground({ image, rect: { x: 0, y: 0, width: 1, height: 1 } });
+    compositor.drawVideo(null);
+    expect(calls.filter(([n]) => n === 'main.drawImage')).toEqual([['main.drawImage', image, 0, 0, 1920, 1080]]);
+    calls.length = 0;
+    compositor.setBackground(null);
+    compositor.drawVideo(null);
+    expect(calls.map(([n]) => n)).toEqual(['main.fillRect']);
+  });
+
+  it('draws nothing for an empty rectangle', () => {
+    const { calls, compositor } = fake(1920, 1080);
+    compositor.setBackground({ image, rect: { x: 0, y: 0, width: 0, height: 1 } });
+    compositor.drawVideo(null);
+    expect(calls.map(([n]) => n)).toEqual(['main.fillRect']);
+  });
+
+  it('skips the still where a frame covers it (a full-screen feature over a full-screen still)', () => {
+    const { calls, compositor } = fake(1920, 1080);
+    const hd = { displayWidth: 1920, displayHeight: 1080, codedWidth: 1920, codedHeight: 1080 } as unknown as VideoFrame;
+    compositor.setBackground({ image, rect: { x: 0, y: 0, width: 1, height: 1 } });
+    compositor.drawVideo(hd);
+    expect(calls.filter(([n]) => n === 'main.drawImage')).toEqual([['main.drawImage', hd, 0, 0, 1920, 1080]]);
+    // a pillarboxed 4:3 frame leaves the sides of the still showing
+    calls.length = 0;
+    compositor.drawVideo(frame);
+    expect(calls.filter(([n]) => n === 'main.drawImage').map(([, src]) => src)).toEqual([image, frame]);
+  });
+});

@@ -12,6 +12,7 @@
 
 import type { Clpi } from '../bdmv/clpi-parser';
 import type { DiscModel } from '../disc/open-disc';
+import type { ScreenRect } from './background';
 import { playlistInfo, titleInfos } from './disc-info';
 import { updateGraphic, type GraphicsPlaneWriter } from './graphics-plane';
 import type { BdjHost, PlaylistInfo, TitleInfo } from './host';
@@ -24,6 +25,8 @@ export interface WorkerBdjHostOptions {
   readonly status: StatusBlockReader;
   /** Where updateGraphicN draws; without one, graphics are dropped. */
   readonly plane?: GraphicsPlaneWriter;
+  /** Where displayImage's background stills go (the engine worker); without it, they are dropped. */
+  readonly background?: (image: Uint8Array | null, rect: ScreenRect) => void;
   readonly call: (name: BdjCallName, args: readonly BdjWireValue[]) => Promise<number | string>;
   /** Read only once Java asks for disc information (the worker boots the JDK while it loads these). */
   readonly disc: DiscModel;
@@ -114,6 +117,11 @@ export class WorkerBdjHost implements BdjHost {
   /** Java_org_videolan_Libbluray_updateGraphicN, into the shared graphics plane (graphics-plane.ts). */
   updateGraphic(width: number, height: number, argb: Int32Array | null, x0: number, y0: number, x1: number, y1: number): void {
     if (this.opts.plane) updateGraphic(this.opts.plane, width, height, argb, x0, y0, x1, y1);
+  }
+
+  /** A background still for the engine (natives/havi.ts); no reply, as displayImage returns at once. */
+  displayImage(image: Uint8Array | null, rect: ScreenRect): void {
+    this.opts.background?.(image, rect);
   }
 
   log(file: string | null, line: number, msg: string, error: boolean): void {

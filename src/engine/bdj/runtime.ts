@@ -21,6 +21,7 @@ import { externalName } from './jvm/loader';
 import type { JMethod } from './jvm/loader';
 import { lineNumber } from './jvm/natives/lang';
 import type { NativeTable } from './jvm/natives/index';
+import { registerHaviNatives } from './jvm/natives/havi';
 import { registerLibblurayNatives } from './jvm/natives/libbluray';
 import type { StackTrace } from './jvm/jvm';
 import type { JThread } from './jvm/threads';
@@ -154,11 +155,13 @@ export class BdjRuntime {
       }),
       systemProperties: JVM_PROPERTIES,
     });
+    const host = this.logging(inner);
     registerLibblurayNatives(
       this.jvm.natives,
-      this.logging(inner),
+      host,
       fonts ? { loadFreeType: fonts.loadFreeType, fallbackFontPath: DEFAULT_FONT_PATH, log: deps.log } : { log: deps.log },
     );
+    registerHaviNatives(this.jvm.natives, host);
   }
 
   /** Runtime.halt's status, once Java has halted the JVM; nothing runs after that. */

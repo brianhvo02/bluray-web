@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import type { ScreenRect } from './background';
 import type { PlayerBdjHost } from './player-host';
 import type { ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
@@ -34,6 +35,8 @@ export interface BdjSessionDeps {
   readonly time45: () => bigint;
   readonly onFailed: (code: BdjFailureCode, message: string) => void;
   readonly onLog?: (line: string, error: boolean) => void;
+  /** A background still Java asked to show (null: none). */
+  readonly onBackground?: (image: Uint8Array | null, rect: ScreenRect) => void;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** How long after boot (or the first start) Java has to select a playlist. */
@@ -113,6 +116,9 @@ export class BdjSession {
         break;
       case 'log':
         this.deps.onLog?.(m.line, m.error);
+        break;
+      case 'background':
+        this.deps.onBackground?.(m.image, m.rect);
         break;
       case 'failed':
         this.fail(m.code, m.message);

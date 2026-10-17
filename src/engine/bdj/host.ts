@@ -19,6 +19,7 @@ import { streamPath } from '../disc/open-disc';
 import { RegisterFile } from '../hdmv/registers';
 import { EMPTY_UO_MASK, combineUoMasks, parseUoMaskTable, uoMaskBits } from '../hdmv/uo-mask';
 import type { UoMask, UoOp } from '../hdmv/uo-mask';
+import type { ScreenRect } from './background';
 import { TITLE_FIRST_PLAY, firstPlayInfo, playlistInfo, titleInfos, titleOf } from './disc-info';
 
 /** One entry of libbluray's title list (BLURAY_TITLE): index 0 is the top menu, then the titles, then First Play. */
@@ -105,6 +106,11 @@ export interface BdjHost {
   getAacsData(type: number): Uint8Array | null;
   setVirtualPackage(vpPath: string | null, psrBackup: boolean): number | Promise<number>;
   updateGraphic(width: number, height: number, argb: Int32Array | null, x0: number, y0: number, x1: number, y1: number): void;
+  /**
+   * HStillImageBackgroundConfiguration.displayImage (natives/havi.ts), which libbluray leaves unimplemented: the still's
+   * encoded bytes to show under the video in `rect`, or null for none. Not part of libbluray's trace.
+   */
+  displayImage?(image: Uint8Array | null, rect: ScreenRect): void;
   log(file: string | null, line: number, msg: string, error: boolean): void;
   /** Natives served by the file system rather than the player (cacheBdRomFileN, listBdFilesN, getBdjoN) report here. */
   record?(e: TraceEntry): void;

@@ -171,6 +171,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
             regs: new SharedRegisterView(m.registers),
             status: new StatusBlockReader(m.status),
             plane: new GraphicsPlaneWriter(m.plane),
+            background: (image, rect) => post({ type: 'background', image, rect }),
             call,
             get disc() {
               return loaded().disc;

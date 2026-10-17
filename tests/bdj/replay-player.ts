@@ -10,6 +10,8 @@ import type { WorkerLike } from '../../src/engine/bdj/session';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from '../../src/engine/bdj/worker-protocol';
 import { createAudioDecoderFactory } from '../../src/engine/decode/audio-decoder';
 import { Player } from '../../src/engine/player';
+import type { CompositorLike } from '../../src/engine/render/compositor';
+import type { DecodeImage } from '../../src/engine/bdj/background';
 import type { EngineEvent } from '../../src/engine/protocol';
 import { fakeVideoCodecApi } from '../helpers/fake-video-decoder';
 import { directoryEntries } from '../helpers/file-blob';
@@ -108,6 +110,10 @@ export async function replayPlayerBdj(
     log?: (line: string) => void;
     classLibrary?: ClassLibrarySource;
     untilPlane?: (plane: GraphicsPlaneReader) => boolean;
+    /** The player's compositor (default: one that draws nothing). */
+    compositor?: CompositorLike;
+    /** PlayerDeps.decodeImage, for background stills (default: none, so none are shown). */
+    decodeImage?: DecodeImage;
   },
 ): Promise<PlayerBdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
@@ -150,7 +156,8 @@ export async function replayPlayerBdj(
     nowMs: () => clock.ms,
     requestFrame: () => undefined,
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm in the replay'))),
-    createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+    createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
+    ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
     // the replay has its own timeout; the first-playlist timer would measure the virtual clock's real-time steps
     setTimer: () => () => undefined,
     createBdjWorker: () => inProcessWorker(onToBdj, onFromBdj),

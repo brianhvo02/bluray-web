@@ -7,6 +7,7 @@
  */
 
 import type { DiscFiles, DiscSourceRef, HttpDiscRef } from '../disc/http-source';
+import type { ScreenRect } from './background';
 import type { BdjErrorCode } from './errors';
 import type { ClassLibrarySource } from './runtime';
 
@@ -35,6 +36,8 @@ export type FromBdj =
   | { readonly type: 'booted'; readonly bootMs: number }
   | { readonly type: 'call'; readonly id: number; readonly name: BdjCallName; readonly args: readonly BdjWireValue[] }
   | { readonly type: 'log'; readonly line: string; readonly error: boolean }
+  /** HStillImageBackgroundConfiguration.displayImage: the still's encoded bytes (null: none) and where it goes. */
+  | { readonly type: 'background'; readonly image: Uint8Array | null; readonly rect: ScreenRect }
   | { readonly type: 'failed'; readonly code: BdjFailureCode; readonly message: string };
 
 export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';

@@ -12,6 +12,7 @@ import { ZipArchive } from './bdj/jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './bdj/runtime';
 import type { WorkerLike } from './bdj/session';
 import type { FromBdj, ToBdj } from './bdj/worker-protocol';
+import type { DecodeImage } from './bdj/background';
 import { SharedRegisterView } from './bdj/shared-registers';
 import type { PlayerSettings } from './disc/player-settings';
 import { CodingType } from './bdmv/stream-types';
@@ -76,6 +77,7 @@ interface HarnessOptions {
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
   readonly playerSettings?: PlayerSettings;
   readonly compositor?: CompositorLike;
+  readonly decodeImage?: DecodeImage;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -119,6 +121,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     },
     loadClassLibrary: async () => classes,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
+    ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
@@ -401,6 +404,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
         plane.copyDirtyInto(image);
       },
       clearBdj: () => void calls.push('clearBdj'),
+      setBackground: (still) => void calls.push(still ? `setBackground:${(still.image as unknown as { name: string }).name}` : 'setBackground:null'),
     };
     return { compositor, calls, planes };
   }
@@ -468,6 +472,116 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
       w.emit({ type: 'failed', code: 'internal', message: 'boom' });
       expect(notices(h)).toContain('bdj-failed');
     });
+  });
+
+  /** Stand-in ImageBitmaps named after the bytes they were decoded from; `hold()` makes the next decodes wait for `release()`. */
+  function bitmaps() {
+    const made: { name: string; closed: boolean }[] = [];
+    let gate: Promise<void> = Promise.resolve();
+    let open: () => void = () => undefined;
+    const decode: DecodeImage = async (bytes) => {
+      await gate;
+      const b = { name: String.fromCharCode(...bytes), width: 1920, height: 1080, closed: false, close: () => void (b.closed = true) };
+      made.push(b);
+      return b as unknown as ImageBitmap;
+    };
+    return {
+      made,
+      decode,
+      hold: () => void (gate = new Promise((r) => (open = r))),
+      release: () => open(),
+    };
+  }
+
+  const still = (name: string): FromBdj => ({ type: 'background', image: new TextEncoder().encode(name), rect: { x: 0, y: 0, width: 1, height: 1 } });
+
+  /** A menu shown by a hand-driven worker, whose Java then asked for the still 'bg' under it. */
+  async function backgroundShown() {
+    const img = bitmaps();
+    const w = handWorker();
+    const rec = recordingCompositor();
+    const h = await harness(bdjDisc(), { worker: w.worker, compositor: rec.compositor, decodeImage: img.decode });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot') throw new Error('no boot');
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    const writer = new GraphicsPlaneWriter(boot.plane);
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 100, 100, 299, 149);
+    await h.play(50);
+    const at = rec.calls.length;
+    w.emit(still('bg'));
+    await vi.waitFor(() => expect(img.made).toHaveLength(1));
+    await h.play(20);
+    // the still goes under the video, and the picture is repainted although no playlist plays
+    expect(rec.calls.slice(at)).toEqual(['setBackground:bg', 'drawVideo', 'drawBdj']);
+    return { h, w, rec, writer, img };
+  }
+
+  it("shows Java's background still under the video and the plane, with no playlist playing", async () => {
+    const { h, w, rec, img } = await backgroundShown();
+    // a newer still replaces it; the old bitmap is closed once the compositor has the new one
+    const at = rec.calls.length;
+    w.emit(still('bg2'));
+    await vi.waitFor(() => expect(img.made).toHaveLength(2));
+    await h.play(20);
+    expect(rec.calls.slice(at)).toEqual(['setBackground:bg2', 'drawVideo', 'drawBdj']);
+    expect(img.made.map((b) => b.closed)).toEqual([true, false]);
+    // Java's displayImage(null) takes it down
+    w.emit({ type: 'background', image: null, rect: { x: 0, y: 0, width: 1, height: 1 } });
+    await h.play(20);
+    expect(rec.calls.slice(-3)).toEqual(['setBackground:null', 'drawVideo', 'drawBdj']);
+    expect(img.made[1]!.closed).toBe(true);
+  });
+
+  /** After `leave`, the background still goes with the plane, in the same repaint, and its bitmap is closed. */
+  async function backgroundClearedBy(leave: (h: Harness, w: ReturnType<typeof handWorker>) => Promise<void>): Promise<void> {
+    const { h, w, rec, img } = await backgroundShown();
+    const at = rec.calls.length;
+    await leave(h, w);
+    expect(rec.calls.slice(at, at + 3)).toEqual(['setBackground:null', 'clearBdj', 'drawVideo']);
+    expect(img.made[0]!.closed).toBe(true);
+    // a still the dying worker still sends is not shown
+    w.emit(still('late'));
+    await h.play(200);
+    expect(rec.calls.slice(at).filter((c) => c.startsWith('setBackground:') && c !== 'setBackground:null')).toEqual([]);
+    expect(img.made).toHaveLength(1);
+  }
+
+  it('clears the background still at once when the user picks a playlist in the picker', async () => {
+    await backgroundClearedBy((h) => h.player.handle({ type: 'playPlaylist', playlistId: '00001' }));
+  });
+
+  it('clears the background still at once when the disc closes', async () => {
+    await backgroundClearedBy((h) => h.player.handle({ type: 'close' }));
+  });
+
+  it('clears the background still at once when BD-J fails', async () => {
+    await backgroundClearedBy(async (_h, w) => w.emit({ type: 'failed', code: 'internal', message: 'boom' }));
+  });
+
+  it('clears the background still at once when another disc opens', async () => {
+    const other = buildSyntheticDisc({ clips: [syntheticClip('00009', 4, { audio: CodingType.LPCM })], playlists: [{ id: '00009', clipIds: ['00009'] }] });
+    await backgroundClearedBy((h) => h.player.handle({ type: 'open', entries: discEntries(other) }));
+  });
+
+  it('closes a still whose decode finishes after BD-J stopped, without showing it', async () => {
+    const img = bitmaps();
+    img.hold();
+    const w = handWorker();
+    const rec = recordingCompositor();
+    const h = await harness(bdjDisc(), { worker: w.worker, compositor: rec.compositor, decodeImage: img.decode });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    w.emit(still('slow'));
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    img.release();
+    await vi.waitFor(() => expect(img.made).toHaveLength(1));
+    await h.play(50);
+    expect(img.made[0]!.closed).toBe(true);
+    expect(rec.calls.filter((c) => c.startsWith('setBackground'))).toEqual([]);
   });
 
   it('a playlist Java asked for that is still loading when the disc closes never opens afterwards', async () => {

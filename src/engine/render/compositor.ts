@@ -1,3 +1,4 @@
+import type { ShownStill } from '../bdj/background';
 import { PLANE_HEIGHT, PLANE_WIDTH, type GraphicsPlaneReader } from '../bdj/graphics-plane';
 import type { OverlayPlane } from '../graphics/overlay-plane';
 import type { ShaderStage } from '../shaders/stage';
@@ -20,7 +21,13 @@ export function fitRect(srcW: number, srcH: number, dstW: number, dstH: number):
 
 export interface CompositorLike {
   resize(width: number, height: number): void;
+  /** Clears to black, draws the background still (if any), then the frame. */
   drawVideo(frame: VideoFrame | null): void;
+  /**
+   * The BD-J background still drawn under the video from the next drawVideo on (null: none), placed in its screen
+   * rectangle of the 1920×1080 menu rectangle. The caller owns the image and closes it after replacing it here.
+   */
+  setBackground?(still: ShownStill | null): void;
   /** Draws the PG plane over the video just drawn: call it after every drawVideo, before drawIg. */
   drawPg?(plane: OverlayPlane): void;
   /** Draws text subtitles inside the video rectangle, after drawPg and before drawIg. */
@@ -60,7 +67,10 @@ interface BdjCanvas {
   plane: GraphicsPlaneReader | null;
 }
 
-/** Draws planes onto the transferred canvas: video, then the PG overlay, then the IG overlay, then the BD-J plane. */
+/**
+ * Draws planes onto the transferred canvas: the BD-J background still, video, then the PG overlay, then the IG
+ * overlay, then the BD-J plane.
+ */
 export class Compositor implements CompositorLike {
   private readonly ctx: OffscreenCanvasRenderingContext2D;
   private pg: PlaneCanvas | null = null;
@@ -71,6 +81,7 @@ export class Compositor implements CompositorLike {
   /** Storage (coded, visible) size of the last frame: ASS layout follows it for anamorphic video. */
   private storageSize: { readonly width: number; readonly height: number } | null = null;
   private stage: ShaderStage | null = null;
+  private background: ShownStill | null = null;
 
   constructor(
     private readonly canvas: OffscreenCanvas,
@@ -90,14 +101,29 @@ export class Compositor implements CompositorLike {
     this.stage = stage;
   }
 
+  setBackground(still: ShownStill | null): void {
+    this.background = still;
+  }
+
   drawVideo(frame: VideoFrame | null): void {
     const { width, height } = this.canvas;
     this.ctx.fillStyle = '#000';
     this.ctx.fillRect(0, 0, width, height);
-    if (!frame) return;
+    const r = frame ? fitRect(frame.displayWidth, frame.displayHeight, width, height) : null;
+    const bg = this.background;
+    if (bg && bg.rect.width > 0 && bg.rect.height > 0) {
+      const screen = fitRect(PLANE_WIDTH, PLANE_HEIGHT, width, height);
+      const x = screen.x + bg.rect.x * screen.width;
+      const y = screen.y + bg.rect.y * screen.height;
+      const w = bg.rect.width * screen.width;
+      const h = bg.rect.height * screen.height;
+      // an opaque frame that covers the still hides it: no full-screen draw under every frame of a feature
+      const hidden = r !== null && r.x <= x && r.y <= y && r.x + r.width >= x + w && r.y + r.height >= y + h;
+      if (!hidden) this.ctx.drawImage(bg.image, x, y, w, h);
+    }
+    if (!frame || !r) return;
     this.frameSize = { width: frame.displayWidth, height: frame.displayHeight };
     this.storageSize = { width: frame.visibleRect?.width ?? frame.codedWidth, height: frame.visibleRect?.height ?? frame.codedHeight };
-    const r = fitRect(frame.displayWidth, frame.displayHeight, width, height);
     // the shaded image is already at the fitted size (shaders see it as OUTPUT)
     const image = r.width > 0 && r.height > 0 ? this.stage?.process(frame, { width: r.width, height: r.height }) : null;
     this.ctx.drawImage(image ?? frame, r.x, r.y, r.width, r.height);

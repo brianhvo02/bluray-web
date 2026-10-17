@@ -47,6 +47,28 @@ describe('WorkerBdjHost', () => {
     return { host, engine, status, calls, logs, plane: new GraphicsPlaneReader(planeBuf) };
   }
 
+  it('hands displayImage stills to the engine with no call to answer, and drops them without a sink', () => {
+    const { host, calls } = setup();
+    expect(() => host.displayImage(new Uint8Array([1]), { x: 0, y: 0, width: 1, height: 1 })).not.toThrow();
+    const sent: [Uint8Array | null, unknown][] = [];
+    const withSink = new WorkerBdjHost({
+      regs: new SharedRegisterView(createRegisterBuffer()),
+      status: new StatusBlockReader(createStatusBlock()),
+      call: () => Promise.resolve(0),
+      disc,
+      clips,
+      log: () => undefined,
+      background: (image, rect) => void sent.push([image, rect]),
+    });
+    withSink.displayImage(new Uint8Array([1, 2]), { x: 0.5, y: 0, width: 0.5, height: 1 });
+    withSink.displayImage(null, { x: 0, y: 0, width: 1, height: 1 });
+    expect(sent).toEqual([
+      [new Uint8Array([1, 2]), { x: 0.5, y: 0, width: 0.5, height: 1 }],
+      [null, { x: 0, y: 0, width: 1, height: 1 }],
+    ]);
+    expect(calls).toEqual([]);
+  });
+
   it("draws updateGraphicN into the shared plane, locally (no engine call)", () => {
     const { host, plane, calls } = setup();
     host.updateGraphic(1920, 1080, null, 0, 0, 0, 0);

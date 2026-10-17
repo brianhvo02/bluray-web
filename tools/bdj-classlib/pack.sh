@@ -24,6 +24,13 @@ javac -nowarn -source 1.3 -target 1.3 \
   -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
   -d "$T/xlets-mixed" tests/bdj/xlets/src/bdjweb/mixed/*.java
 $MK tests/bdj/xlets/mixed.jar "$T/xlets-mixed" -
+# the background still disc's xlet (disc-bdj-background), with the still it shows (bg.png) at the jar's root
+mkdir "$T/xlets-background"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets-background" tests/bdj/xlets/src/bdjweb/background/*.java
+cp tests/bdj/xlets/src/bdjweb/background/bg.png "$T/xlets-background/"
+$MK tests/bdj/xlets/background.jar "$T/xlets-background" -
 
 # the JVM conformance programs (package conformance) and HotSpot's stdout for each class with a main; every program runs
 # twice and the outputs must match

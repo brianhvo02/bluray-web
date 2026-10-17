@@ -1,6 +1,7 @@
 import { AudioWriter } from './audio/audio-writer';
 import { OUTPUT_SAMPLE_RATE, RingWriter, ringViews } from './audio/ring';
 import { type PlayItem } from './bdmv/mpls-parser';
+import { BackgroundStill, type DecodeImage } from './bdj/background';
 import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
 import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
@@ -94,6 +95,8 @@ export interface PlayerDeps {
   readonly playerSettings?: PlayerSettings;
   /** Opens a disc served over HTTP (the worker builds an HttpSource); without it `openRemote` fails. */
   readonly openHttpSource?: (disc: HttpDiscRef) => Promise<ByteSource>;
+  /** Decodes a BD-J background still (createImageBitmap); without it, background stills are not shown. */
+  readonly decodeImage?: DecodeImage;
 }
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
@@ -333,9 +336,21 @@ export class Player {
   private shadersDirty = false;
   /** The video under the BD-J plane was redrawn without it (no playlist): the next paint draws the plane again. */
   private bdjDirty = false;
+  /** The BD-J title's background still, under the video; cleared with the BD-J plane (stopBdj). */
+  private readonly background: BackgroundStill;
+  /** The background still changed: the next paint redraws the video over it. */
+  private backgroundDirty = false;
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
+    this.background = new BackgroundStill({
+      decode: deps.decodeImage ?? (() => Promise.reject(new Error('this player has no image decoder'))),
+      onChange: (still) => {
+        this.compositor?.setBackground?.(still);
+        this.backgroundDirty = true;
+      },
+      onError: (message) => this.deps.bdjLog?.(message, true),
+    });
   }
 
   /** Commands run strictly one at a time, in arrival order. */
@@ -356,6 +371,7 @@ export class Player {
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
           if (this.shaderStage) this.compositor.setShaderStage?.(this.shaderStage);
+          if (this.background.current) this.compositor.setBackground?.(this.background.current);
           this.startRenderLoop();
           break;
         case 'attachAudio':
@@ -519,8 +535,9 @@ export class Player {
     const igChanged = ig !== null && ig.dirty() !== null;
     const textChanged = this.subtitlesDirty || (text !== null && text.renderer.changed(nowUs, textOpts));
     this.subtitlesDirty = false;
-    const changed = pgChanged || igChanged || textChanged || bdjChanged || this.shadersDirty;
+    const changed = pgChanged || igChanged || textChanged || bdjChanged || this.shadersDirty || this.backgroundDirty;
     this.shadersDirty = false;
+    this.backgroundDirty = false;
     if (frame) this.compositor?.drawVideo(frame);
     else if (changed) this.compositor?.drawVideo(this.presenter.current);
     if (!(frame || changed)) return;
@@ -754,6 +771,11 @@ export class Player {
         if (live()) this.bdjFailed(code, message);
       },
       onLog: this.deps.bdjLog,
+      onBackground: (image, rect) => {
+        if (!live()) return;
+        if (image && this.deps.decodeImage) this.background.show(image, rect);
+        else this.background.clear();
+      },
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
     });
@@ -835,7 +857,9 @@ export class Player {
     this.bdj = null;
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
-    // the menu goes at once (Review Focus 2): nothing of the plane is drawn again
+    // the menu goes at once (Review Focus 2): nothing of the plane or the background still is drawn again
+    this.background.clear();
+    this.backgroundDirty = false; // repainted here
     this.compositor?.clearBdj?.();
     this.repaint();
     if (this.pgRegs && this.navRegs !== entry.regs) this.bindPg(this.pgRegs);

@@ -72,6 +72,10 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdj/jvm/natives/intrinsics/graphics.ts from src/libbluray/bdj/java/java/awt/BDGraphicsBase.java (drawSpanN,
                           applyComposite, alphaBlend), Area.java (add) and BDRootWindow.java (isBackBufferClear)
     bdj/jvm/natives/intrinsics/image.ts from src/libbluray/bdj/java/java/awt/BDImageConsumer.java (setPixels)
+    bdj/jvm/natives/havi.ts from src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
+                          (displayImage's fields; the still itself is shown where libbluray leaves it unimplemented),
+                          HBackgroundImage.java and java/awt/BDToolkitBase.java (createImage(String): where the
+                          still's file is named)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
   subs/srt.ts and subs/text-renderer.ts (SubRip subtitles) are original

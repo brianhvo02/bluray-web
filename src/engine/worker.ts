@@ -60,6 +60,8 @@ const player = new Player({
   playerSettings: playerSettingsForLocale(navigator.language),
   openHttpSource: (disc) => HttpSource.open(disc.baseUrl, disc.token),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
+  // BD-J background stills: the browser sniffs the format (PNG, JPEG, GIF) from the bytes
+  decodeImage: (bytes) => createImageBitmap(new Blob([new Uint8Array(bytes)])),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {
     const response = await fetch(defaultFontUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) });
