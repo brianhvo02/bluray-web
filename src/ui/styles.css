@@ -24,6 +24,12 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .library-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .library-row { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; }
 .library-name { overflow-wrap: anywhere; }
+.library-actions { display: flex; gap: 8px; }
+.admin-new-code, .admin-device { display: flex; align-items: center; gap: 12px; }
+.admin-device { justify-content: space-between; }
+.admin-owner { display: inline-flex; align-items: center; gap: 6px; }
+.admin-qr { display: block; width: min(240px, 100%); height: auto; }
+.admin-code-text { font-size: 1.4em; letter-spacing: 0.05em; }
 .library-meta { flex: none; display: flex; align-items: center; gap: 8px; opacity: 0.75; font-size: 0.9em; font-variant-numeric: tabular-nums; }
 .badge { border: 1px solid #4a4a55; border-radius: 4px; padding: 0 6px; font-size: 0.8em; }
 .preflight { display: flex; flex-direction: column; gap: 8px; }
@@ -131,4 +137,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .remote-digits { grid-template-columns: repeat(5, 44px); }
   .subtitle-file select, .shader-dialog select { min-height: 44px; }
   .library-row { min-height: 44px; }
+  .admin-owner { min-height: 44px; }
+  .admin-owner input { width: 24px; height: 24px; }
 }
