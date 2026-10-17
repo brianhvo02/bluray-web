@@ -1,0 +1,13 @@
+import { json } from '../http';
+import type { Handler } from '../http';
+import type { Library } from '../library';
+
+/** `GET /api/library?path=<root-relative folder>`; Task 4 puts the auth guard in front of this. */
+export function libraryRoute(library: Library): Handler {
+  return async (req, url) => {
+    if (url.pathname !== '/api/library' || req.method !== 'GET') return null;
+    const listing = library.list(url.searchParams.get('path') ?? '');
+    if (!listing) return json(404, { error: 'unknown folder' });
+    return json(200, { ...listing, scanning: library.scanning });
+  };
+}
