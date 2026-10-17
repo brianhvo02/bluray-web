@@ -2,10 +2,12 @@
 import { parseClpi } from '../engine/bdmv/clpi-parser';
 import { CodingType } from '../engine/bdmv/stream-types';
 import { analyzeHevc, hevcCodecString } from '../engine/decode/hevc';
+import type { ByteSource } from '../engine/disc/byte-source';
 import { FileSource } from '../engine/disc/file-source';
+import { HttpSource } from '../engine/disc/http-source';
 import { normalizeDiscPaths } from '../engine/disc/paths';
 import { M2tsReader } from '../engine/demux/m2ts-reader';
-import type { WorkerProbe } from './checks';
+import type { WorkerInput, WorkerProbe } from './checks';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope & { requestAnimationFrame?: (cb: (t: number) => void) => number };
 
@@ -43,8 +45,13 @@ async function supported(codec: string): Promise<boolean> {
   }
 }
 
-async function hevc(entries: ReadonlyArray<readonly [string, File]>): Promise<WorkerProbe['hevc']> {
-  const source = new FileSource(normalizeDiscPaths(entries));
+async function openSource(input: WorkerInput): Promise<ByteSource> {
+  if ('server' in input) return HttpSource.open(input.server.baseUrl, input.server.token);
+  return new FileSource(normalizeDiscPaths(input.entries));
+}
+
+async function hevc(input: WorkerInput): Promise<WorkerProbe['hevc']> {
+  const source = await openSource(input);
   let target: { clip: string; pid: number } | null = null;
   for (const name of source.list('BDMV/CLIPINF')) {
     if (!name.endsWith('.CLPI')) continue;
@@ -114,12 +121,12 @@ async function hevc(entries: ReadonlyArray<readonly [string, File]>): Promise<Wo
   return result;
 }
 
-scope.onmessage = async (event: MessageEvent<{ entries: Array<readonly [string, File]> }>) => {
-  const { entries } = event.data;
+scope.onmessage = async (event: MessageEvent<WorkerInput>) => {
+  const input = event.data;
   const [raf, gl, hevcResult] = await Promise.all([
     timerP95(),
     Promise.resolve().then(webgl).catch(() => ({ float: false, half: false })),
-    hevc(entries).catch((err: unknown) => ({ hvc1: false, hev1: false, decoded: false, error: err instanceof Error ? err.message : String(err) })),
+    hevc(input).catch((err: unknown) => ({ hvc1: false, hev1: false, decoded: false, error: err instanceof Error ? err.message : String(err) })),
   ]);
   const probe: WorkerProbe = { hevc: hevcResult, raf, webgl: gl };
   scope.postMessage(probe);

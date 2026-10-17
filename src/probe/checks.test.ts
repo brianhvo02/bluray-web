@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runChecks, type ProbeEnv, type WorkerProbe } from './checks';
+import { runChecks, type ProbeEnv, type ProbeFile, type WorkerInput, type WorkerProbe } from './checks';
 
 const GIB = 2 ** 30;
 
@@ -38,7 +38,7 @@ const okWorker: WorkerProbe = {
 
 function env(over: Partial<ProbeEnv> & { files?: File[]; rate?: number } = {}): ProbeEnv {
   return {
-    pickFolder: async () => over.files ?? [fakeBigFile('00001.m2ts', 5 * GIB, false)],
+    openDisc: over.openDisc ?? (async () => ({ route: 'folder', files: over.files ?? [fakeBigFile('00001.m2ts', 5 * GIB, false)] })),
     createAudioContext: () => ({ sampleRate: over.rate ?? 48000 }) as unknown as BaseAudioContext,
     worker: over.worker ?? (async () => okWorker),
     globals: over.globals ?? {},
@@ -111,10 +111,22 @@ describe('runChecks', () => {
 
   it('passes [path, File] entries to the worker', async () => {
     const file = fakeBigFile('00001.m2ts', 5 * GIB, false);
-    let seen: ReadonlyArray<readonly [string, File]> = [];
-    await runChecks(env({ files: [file], worker: async (entries) => { seen = entries; return okWorker; } }));
-    expect(seen[0][0]).toBe('disc/BDMV/STREAM/00001.m2ts');
-    expect(seen[0][1]).toBe(file);
+    let seen: WorkerInput | null = null;
+    await runChecks(env({ files: [file], worker: async (input) => { seen = input; return okWorker; } }));
+    const entries = seen && 'entries' in seen ? (seen as { entries: ReadonlyArray<readonly [string, File]> }).entries : [];
+    expect(entries[0][0]).toBe('disc/BDMV/STREAM/00001.m2ts');
+    expect(entries[0][1]).toBe(file);
+  });
+
+  it('server route: the slice is a range read, the worker gets the server ref, relative-path is untested', async () => {
+    const server = { baseUrl: 'http://127.0.0.1:8080/discs/abc', token: 't' };
+    const big = fakeBigFile('00001.M2TS', 5 * GIB, false) as unknown as ProbeFile;
+    let seen: WorkerInput | null = null;
+    const r = await runChecks(env({ openDisc: async () => ({ route: 'server', files: [big], server }), worker: async (input) => { seen = input; return okWorker; } }));
+    expect(r.find((x) => x.name === 'blob-slice-over-4gib')).toMatchObject({ ok: true });
+    expect(r.find((x) => x.name === 'blob-slice-over-4gib')?.detail.startsWith('server: offset ')).toBe(true);
+    expect(r.find((x) => x.name === 'relative-path')).toMatchObject({ ok: false, detail: 'untested: server route (paths come from the manifest)' });
+    expect(seen).toEqual({ server });
   });
 
   it('worker rows report timed out after 15 s while other rows still run', async () => {
