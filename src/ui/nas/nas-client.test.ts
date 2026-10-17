@@ -1,10 +1,15 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import type { IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { appHandlers } from '../../../server/src/app';
 import { Auth } from '../../../server/src/auth';
 import { codeHash } from '../../../server/src/codes';
-import { bearerToken } from '../../../server/src/routes/admin';
+import { HttpError, json } from '../../../server/src/http';
+import type { Response as ServerResponse } from '../../../server/src/http';
+import type { Library } from '../../../server/src/library';
 import { Store } from '../../../server/src/store';
 import type { CodeLookup, CodeRoutes } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
@@ -48,25 +53,62 @@ interface FakeServer {
   readonly fetch: typeof fetch;
   /** Registers a fresh code with the rendezvous service and returns it. */
   code(routes?: CodeRoutes): Promise<string>;
-  /** Requests by route, e.g. 'session' → 2. */
+  /** NAS requests by route, e.g. 'session' → 2. */
   readonly hits: Record<string, number>;
-  /** Answer the next requests to these routes with 429. */
-  readonly rateLimited: Set<string>;
+  /** Folder paths the library was listed at. */
+  readonly listed: string[];
+  /** Answer rendezvous lookups with 429. */
+  lookupRateLimited: boolean;
   /** Overrides for NAS requests (not rendezvous). */
   nas?: (url: URL, init?: RequestInit) => Promise<Response>;
 }
 
-/** The rendezvous Worker's lookup and the NAS server's pairing, session and library routes, over a real `Auth`. */
+/**
+ * The rendezvous Worker's lookup (a map of code hashes), and the NAS server's real handlers (`appHandlers`:
+ * pairing, sessions, the token guard, library) over a real `Auth`, with Caddy's `/bluray` prefix stripped.
+ */
 function fakeServer(): FakeServer {
   const auth = new Auth(new Store(tmp), now);
   const codes = new Map<string, CodeLookup>();
   const hits: Record<string, number> = {};
-  const rateLimited = new Set<string>();
-  const unauthorized = () => Response.json({ error: 'unauthorized' }, { status: 401 });
+  const listed: string[] = [];
+  const library = {
+    scanning: false,
+    list: (path: string) => {
+      listed.push(path);
+      return { folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [] };
+    },
+  } as unknown as Library;
+  const handlers = appHandlers({ auth, library, publicBase: BASE, now });
+
+  const serve = async (url: URL, init?: RequestInit): Promise<Response> => {
+    const body = typeof init?.body === 'string' ? Buffer.from(init.body, 'utf8') : null;
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers).forEach((value, name) => (headers[name] = value));
+    if (body) headers['content-length'] = String(body.length);
+    const path = url.pathname.replace(/^\/bluray/, '') + url.search;
+    const req = Object.assign(Readable.from(body ? [body] : []), {
+      method: init?.method ?? 'GET',
+      url: path,
+      headers,
+      socket: { remoteAddress: '100.64.0.2' },
+    }) as unknown as IncomingMessage;
+    let res: ServerResponse | null = null;
+    try {
+      for (const handler of handlers) if ((res = await handler(req, new URL(path, 'http://localhost')))) break;
+    } catch (err) {
+      if (!(err instanceof HttpError)) throw err;
+      res = json(err.status, { error: err.message }, err.headers);
+    }
+    res ??= json(404, { error: 'not found' });
+    return new Response(typeof res.body === 'string' ? res.body : null, { status: res.status, headers: res.headers });
+  };
+
   const server: FakeServer = {
     auth,
     hits,
-    rateLimited,
+    listed,
+    lookupRateLimited: false,
     async code(routes = { https: BASE }) {
       const { record, code } = auth.createCode({ owner: true });
       codes.set(record.hash, { nasId: 'nas1', routes });
@@ -74,41 +116,18 @@ function fakeServer(): FakeServer {
     },
     fetch: (async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(String(input));
-      const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, string>) : {};
       if (url.href.startsWith(RENDEZVOUS)) {
-        const route = url.href.slice(RENDEZVOUS.length);
-        hits[route] = (hits[route] ?? 0) + 1;
-        if (rateLimited.has('lookup')) return Response.json({ error: 'too many lookups' }, { status: 429 });
-        if (route !== '/codes/lookup' || init?.method !== 'POST') return new Response(null, { status: 404 });
-        const found = normalizeCode(body.code ?? '') === null ? undefined : codes.get(codeHash(body.code!));
+        if (server.lookupRateLimited) return Response.json({ error: 'too many lookups' }, { status: 429 });
+        if (url.href !== `${RENDEZVOUS}/codes/lookup` || init?.method !== 'POST') return new Response(null, { status: 404 });
+        const { code } = JSON.parse(String(init.body)) as { code: string };
+        const found = normalizeCode(code) === null ? undefined : codes.get(codeHash(code));
         return found ? Response.json(found) : Response.json({ error: 'unknown code' }, { status: 404 });
       }
       if (!url.href.startsWith(BASE)) return new Response(null, { status: 404 });
       if (server.nas) return server.nas(url, init);
       const route = url.pathname.slice(new URL(BASE).pathname.length);
       hits[route] = (hits[route] ?? 0) + 1;
-      if (rateLimited.has(route)) return Response.json({ error: 'too many tries' }, { status: 429, headers: { 'Retry-After': '60' } });
-      switch (`${init?.method ?? 'GET'} ${route}`) {
-        case 'POST pair/redeem': {
-          const device = auth.redeem(body.code!, body.deviceName!, body.publicKeyJwk as unknown as JsonWebKey);
-          return device ? Response.json({ deviceId: device.id, owner: device.owner }) : Response.json({ error: 'invalid code' }, { status: 401 });
-        }
-        case 'POST session/challenge': {
-          const challenge = auth.challenge(body.deviceId!);
-          return challenge ? Response.json({ challenge }) : unauthorized();
-        }
-        case 'POST session': {
-          const session = auth.startSession(body.deviceId!, body.challenge!, body.signature!);
-          return session ? Response.json(session) : unauthorized();
-        }
-        case 'GET library': {
-          const token = bearerToken(new Headers(init?.headers).get('Authorization') ?? undefined);
-          if (token === null || !auth.verify(token)) return unauthorized();
-          return Response.json({ folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [], scanning: false, path: url.searchParams.get('path') });
-        }
-        default:
-          return new Response(null, { status: 404 });
-      }
+      return serve(url, init);
     }) as typeof fetch,
   };
   return server;
@@ -128,9 +147,9 @@ describe('NasClient', () => {
     expect(server.auth.devices().map((d) => d.name)).toEqual(['Mac Safari']);
     const session = await nas.session();
     expect(server.auth.verify(session.token)?.id).toBe(store.value!.deviceId);
-    const listing = await nas.library('drv5/[BD] 鋼の旅団 #1?');
-    expect(listing.folders).toEqual([{ name: 'drv5', path: 'drv5', discs: 1 }]);
-    expect((listing as unknown as { path: string }).path).toBe('drv5/[BD] 鋼の旅団 #1?');
+    const listing = await nas.library('drv5/[BD] 鋼の旅団 #1? 100% a+b');
+    expect(listing).toEqual({ folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [], scanning: false });
+    expect(server.listed).toEqual(['drv5/[BD] 鋼の旅団 #1? 100% a+b']);
   });
 
   it('keeps the private key non-extractable', async () => {
@@ -175,6 +194,101 @@ describe('NasClient', () => {
     expect(await nas.pairing()).toBeNull();
   });
 
+  it('treats a stored record without a usable key as not paired, and clears it', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    store.value = { base: BASE, deviceId: 'd1', deviceName: 'iPad', owner: false, key: {} } as unknown as NasPairing;
+    const nas = client(server, store);
+    expect(await nas.pairing()).toBeNull();
+    expect(store.value).toBeNull();
+    await expect(nas.session()).rejects.toThrow(NAS_MESSAGES.unpaired);
+  });
+
+  it('forgets a pairing whose key can no longer sign, and tells the listeners', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    await client(server, store).pair(await server.code(), 'iPad');
+    const { publicKey } = store.value!.key;
+    store.value = { ...store.value!, key: { publicKey, privateKey: publicKey } }; // a key that can't sign
+    const nas = client(server, store);
+    const unpaired = vi.fn();
+    nas.onUnpaired(unpaired);
+    await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
+    expect(store.value).toBeNull();
+    expect(await nas.pairing()).toBeNull();
+    expect(unpaired).toHaveBeenCalledTimes(1);
+  });
+
+  it('tells the listeners when the NAS has revoked the device', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad');
+    const unpaired = vi.fn();
+    const unsubscribe = nas.onUnpaired(unpaired);
+    server.auth.revokeDevice(store.value!.deviceId);
+    await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
+    expect(unpaired).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('reads the pairing from the store once', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    await client(server, store).pair(await server.code(), 'iPad');
+    const get = vi.spyOn(store, 'get');
+    const nas = client(server, store);
+    await Promise.all([nas.pairing(), nas.pairing()]);
+    await nas.library('');
+    await nas.pairing();
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it('forgets the pairing on request, so the code field can come back', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad');
+    await nas.library('');
+    await nas.forget();
+    expect(store.value).toBeNull();
+    expect(await nas.pairing()).toBeNull();
+    await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
+    await nas.pair(await server.code(), 'iPad');
+    expect((await nas.library('')).folders).toHaveLength(1);
+  });
+
+  it("doesn't cache a session started for a pairing forgotten meanwhile", async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const old = nas.session();
+    await nas.forget();
+    await old;
+    await expect(nas.session()).rejects.toThrow(NAS_MESSAGES.unpaired);
+  });
+
+  it("keeps a newer session when a request made with an older token gets 401", async () => {
+    const server = fakeServer();
+    let nas!: NasClient;
+    let intercept = true;
+    const fetchWithLateRefusal = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (intercept && String(input).startsWith(`${BASE}library`)) {
+        intercept = false;
+        // While this request is out, its token is replaced by a refresh; then the NAS refuses the old token.
+        clock += 56 * MINUTE;
+        await nas.session();
+        return Response.json({ error: 'unauthorized' }, { status: 401 });
+      }
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    nas = new NasClient({ fetch: fetchWithLateRefusal, subtle: crypto.subtle, store: memoryStore(), now, rendezvousUrl: RENDEZVOUS });
+    await nas.pair(await server.code(), 'iPad');
+    await nas.session();
+    await nas.library('');
+    expect(server.hits.session).toBe(2);
+  });
+
   it('pairs with a code typed in lower case with spaces', async () => {
     expect(normalizeCode('k7qm 4xp2 r9td')).toBe('K7QM4XP2R9TD');
     const server = fakeServer();
@@ -201,10 +315,12 @@ describe('NasClient', () => {
     const server = fakeServer();
     const nas = client(server);
     const code = await server.code();
-    server.rateLimited.add('lookup');
+    server.lookupRateLimited = true;
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.tooMany);
-    server.rateLimited.clear();
-    server.rateLimited.add('pair/redeem');
+    server.lookupRateLimited = false;
+    // The NAS allows 10 failed redeems a minute per client; an expired code fails there.
+    clock += 11 * MINUTE;
+    for (let i = 0; i < 10; i++) await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.invalidCode);
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.tooMany);
   });
 
@@ -263,6 +379,7 @@ describe('groupCodeInput', () => {
     expect(groupCodeInput('k7qm4')).toBe('K7QM-4');
     expect(groupCodeInput('k7qm 4xp2-r9td')).toBe('K7QM-4XP2-R9TD');
     expect(groupCodeInput('K7QM-4XP2-R9TDXX')).toBe('K7QM-4XP2-R9TD');
+    expect(groupCodeInput('K7QM - 4XP2 - R9TD')).toBe('K7QM-4XP2-R9TD'); // pasted: 18 characters, none lost
   });
 });
 

@@ -37,7 +37,6 @@ export function PairScreen({ client, initialCode = '', onPaired }: PairScreenPro
             value={code}
             onChange={(e) => setCode(groupCodeInput(e.target.value))}
             placeholder="XXXX-XXXX-XXXX"
-            maxLength={14}
             inputMode="text"
             autoCapitalize="characters"
             autoComplete="off"

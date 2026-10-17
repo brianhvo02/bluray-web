@@ -81,10 +81,31 @@ async function errorCode(res: Response): Promise<string | null> {
   }
 }
 
+/** A stored record usable as a pairing: a missing or damaged key pair (say, after storage was tampered with) is not. */
+function isPairing(value: unknown): value is NasPairing {
+  if (typeof value !== 'object' || value === null) return false;
+  const { base, deviceId, deviceName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
+  const k = key as Partial<CryptoKeyPair> | null | undefined;
+  return (
+    typeof base === 'string' &&
+    typeof deviceId === 'string' &&
+    typeof deviceName === 'string' &&
+    typeof owner === 'boolean' &&
+    k?.privateKey instanceof CryptoKey &&
+    k.publicKey instanceof CryptoKey
+  );
+}
+
 /** Pairing with the NAS, its sessions and its API. Every browser API comes in through `deps`. */
 export class NasClient {
   private cached: NasSession | null = null;
   private pending: Promise<NasSession> | null = null;
+  /** The pairing once loaded from the store (null: not paired); undefined until then. */
+  private current: NasPairing | null | undefined = undefined;
+  private loading: Promise<NasPairing | null> | null = null;
+  /** Bumped whenever the pairing changes, so work begun for an older pairing can't touch the new one. */
+  private generation = 0;
+  private readonly unpairedListeners = new Set<() => void>();
 
   readonly admin = {
     devices: async (): Promise<NasDevice[]> => ((await this.json('admin/devices')) as { devices: NasDevice[] }).devices,
@@ -109,9 +130,27 @@ export class NasClient {
     return Boolean(this.deps.rendezvousUrl?.trim());
   }
 
-  /** The stored pairing, or null when this device isn't paired. */
+  /** The pairing, or null when this device isn't paired. Read from the store once; a damaged record is cleared. */
   pairing(): Promise<NasPairing | null> {
-    return this.deps.store.get();
+    if (this.current !== undefined) return Promise.resolve(this.current);
+    this.loading ??= this.loadPairing().finally(() => {
+      this.loading = null;
+    });
+    return this.loading;
+  }
+
+  /** Calls `listener` whenever the NAS turns out to have forgotten this device. Returns the unsubscribe function. */
+  onUnpaired(listener: () => void): () => void {
+    this.unpairedListeners.add(listener);
+    return () => {
+      this.unpairedListeners.delete(listener);
+    };
+  }
+
+  /** Forgets the pairing on this device (the NAS keeps it until an owner removes it). */
+  async forget(): Promise<void> {
+    this.reset(null);
+    await this.deps.store.clear();
   }
 
   /** Where a code leads, from the rendezvous service; the code is normalized first. */
@@ -151,17 +190,20 @@ export class NasClient {
     if (res.status === 429) throw new Error(NAS_MESSAGES.tooMany);
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
     const { deviceId, owner } = (await res.json()) as { deviceId: string; owner: boolean };
-    this.cached = null;
-    this.pending = null;
-    await this.deps.store.put({ base, deviceId, deviceName: name, owner, key });
+    const pairing: NasPairing = { base, deviceId, deviceName: name, owner, key };
+    await this.deps.store.put(pairing);
+    this.reset(pairing);
   }
 
   /** A session token, reused until 5 minutes before it expires; concurrent callers share one refresh. */
   session(): Promise<NasSession> {
     if (this.cached && this.deps.now() < this.cached.expiresAt - REFRESH_MARGIN_MS) return Promise.resolve(this.cached);
-    this.pending ??= this.startSession().finally(() => {
-      this.pending = null;
-    });
+    if (!this.pending) {
+      const pending = this.startSession().finally(() => {
+        if (this.pending === pending) this.pending = null;
+      });
+      this.pending = pending;
+    }
     return this.pending;
   }
 
@@ -183,29 +225,57 @@ export class NasClient {
     return { mbps: (bytes * 8) / 1e6 / seconds };
   }
 
+  private async loadPairing(): Promise<NasPairing | null> {
+    const generation = this.generation;
+    const stored = await this.deps.store.get();
+    if (generation !== this.generation) return this.current ?? null;
+    const pairing = isPairing(stored) ? stored : null;
+    if (stored && !pairing) await this.deps.store.clear();
+    if (generation !== this.generation) return this.current ?? null;
+    this.current = pairing;
+    return pairing;
+  }
+
+  private reset(pairing: NasPairing | null): void {
+    this.generation++;
+    this.current = pairing;
+    this.cached = null;
+    this.pending = null;
+  }
+
   private async startSession(): Promise<NasSession> {
-    const pairing = await this.deps.store.get();
+    const generation = this.generation;
+    const pairing = await this.pairing();
     if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
     const challengeRes = await this.request(`${pairing.base}session/challenge`, jsonPost({ deviceId: pairing.deviceId }));
-    if (challengeRes.status === 401) return this.unpaired();
+    if (challengeRes.status === 401) return this.unpaired(generation);
     if (!challengeRes.ok) throw new NasHttpError(challengeRes.status, await errorCode(challengeRes));
     const { challenge } = (await challengeRes.json()) as { challenge: string };
-    const signature = await this.deps.subtle.sign(ECDSA_SIGN, pairing.key.privateKey, new TextEncoder().encode(challenge));
+    let signature: ArrayBuffer;
+    try {
+      signature = await this.deps.subtle.sign(ECDSA_SIGN, pairing.key.privateKey, new TextEncoder().encode(challenge));
+    } catch {
+      // The stored key can't sign (damaged storage): the pairing is unusable.
+      return this.unpaired(generation);
+    }
     const res = await this.request(
       `${pairing.base}session`,
       jsonPost({ deviceId: pairing.deviceId, challenge, signature: base64url(new Uint8Array(signature)) }),
     );
-    if (res.status === 401) return this.unpaired();
+    if (res.status === 401) return this.unpaired(generation);
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
     const session = (await res.json()) as NasSession;
-    this.cached = session;
+    if (generation === this.generation) this.cached = session;
     return session;
   }
 
-  /** Forgets the pairing the NAS no longer knows. */
-  private async unpaired(): Promise<never> {
-    this.cached = null;
-    await this.deps.store.clear();
+  /** Forgets a pairing the NAS no longer knows (or that can't sign), unless it was replaced meanwhile, and tells the listeners. */
+  private async unpaired(generation: number): Promise<never> {
+    if (generation === this.generation) {
+      this.reset(null);
+      await this.deps.store.clear();
+      for (const listener of this.unpairedListeners) listener();
+    }
     throw new Error(NAS_MESSAGES.unpaired);
   }
 
@@ -215,16 +285,18 @@ export class NasClient {
    */
   private async authed(path: string, init: RequestInit = {}, viaQuery = false): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
-      const { token } = await this.session();
-      const pairing = await this.deps.store.get();
+      const generation = this.generation;
+      const session = await this.session();
+      const pairing = await this.pairing();
       if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
+      const { token } = session;
       const url = viaQuery ? `${pairing.base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${pairing.base}${path}`;
       const headers = new Headers(init.headers);
       if (!viaQuery) headers.set('Authorization', `Bearer ${token}`);
       const res = await this.request(url, { ...init, headers });
       if (res.status !== 401) return res;
-      this.cached = null;
-      if (attempt > 0) return this.unpaired();
+      if (this.cached?.token === token) this.cached = null;
+      if (attempt > 0) return this.unpaired(generation);
     }
   }
 
