@@ -345,4 +345,16 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(h.terminated()).toBe(true);
     expect(h.events.filter((e) => e.type === 'bdjActive').at(-1)).toEqual({ type: 'bdjActive', active: false });
   }, 90_000);
+
+  it('disc-bdj-mixed: First Play (BD-J) selects HDMV title 1, whose playlist ends in JumpTitle 2 (BD-J), which plays 00001', async () => {
+    const h = await harness(fixtureDiscFiles('disc-bdj-mixed'));
+    await until(h, () => playlistsPlayed(h).at(-1) === '00001' && lastState(h) === 'playing');
+    expect(playlistsPlayed(h)).toEqual(['00000', '00001']);
+    expect(h.sent.filter((m) => m.type === 'start')).toEqual([
+      { type: 'start', title: 0xffff },
+      { type: 'start', title: 2 },
+    ]);
+    expect(h.events.flatMap((e) => (e.type === 'bdjActive' ? [e.active] : []))).toEqual([true, false, true]);
+    expect(notices(h)).not.toContain('bdj-failed');
+  }, 90_000);
 });

@@ -21,6 +21,18 @@ describe('BD-J trace parity', () => {
     compareBdjTraces(golden, trace);
   }, 120_000);
 
+  it('disc-bdj-mixed hands First Play to HDMV title 1 and its JumpTitle to BD-J title 2, with the calls libbluray makes', async () => {
+    const golden = parseBdjTrace(readFileSync(new URL('./golden/disc-bdj-mixed.jsonl', import.meta.url), 'utf8'));
+    // First Play's TitleContext.start of HDMV title 1 (BDJLoader → selectHdmvTitle), then title 2's playlist 00001
+    expect(golden.filter((e) => e.call === 'selectTitleN').map((e) => e.args)).toEqual([[1]]);
+    expect(golden.filter((e) => e.call === 'selectPlaylistN').map((e) => e.args[0])).toEqual([1]);
+    const { trace, events } = await replayPlayerBdj('fixtures/synthetic/disc-bdj-mixed', { until: 'selectPlaylistN' });
+    compareBdjTraces(golden, trace);
+    // BD-J, then the HDMV title on the navigator (playlist 00000 from its PlayPL), then BD-J again for title 2
+    expect(events.flatMap((e) => (e.type === 'bdjActive' ? [e.active] : []))).toEqual([true, false, true]);
+    expect(events.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : []))[0]).toBe('00000');
+  }, 120_000);
+
   it("formats the engine's replies as trace.patch prints the natives", () => {
     expect(traceEntryOf('selectRate', [0.3333333432674408, 1], 1)).toEqual({ call: 'selectRateN', args: [0.333333, 1], ret: 1 });
     expect(traceEntryOf('writeReg', [0, 500, 0x88000000, -1], 0)).toEqual({ call: 'writeRegN', args: [0, 500, -2013265920, -1], ret: 0 });

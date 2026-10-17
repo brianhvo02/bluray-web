@@ -24,7 +24,7 @@
     "ass-trace:build": "tools/ass-trace/build.sh",
     "ass-trace:golden": "tools/ass-trace/golden.sh",
     "ass-trace": "tsx tests/ass-trace/run.ts",
-    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu && tsx scripts/make-subs-disc.ts fixtures/synthetic/disc-subs && tsx scripts/make-bdj-disc.ts fixtures/synthetic/disc-bdj"
+    "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu && tsx scripts/make-subs-disc.ts fixtures/synthetic/disc-subs && tsx scripts/make-bdj-disc.ts fixtures/synthetic/disc-bdj && tsx scripts/make-bdj-mixed-disc.ts fixtures/synthetic/disc-bdj-mixed"
   },
   "dependencies": {
     "react": "^19.3.0",

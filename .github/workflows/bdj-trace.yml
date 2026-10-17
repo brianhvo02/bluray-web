@@ -6,22 +6,28 @@ on:
     paths:
       - 'tools/bdj-trace/**'
       - 'scripts/make-bdj-disc.ts'
+      - 'scripts/make-bdj-mixed-disc.ts'
       - 'fixtures/synthetic/disc-bdj/**'
+      - 'fixtures/synthetic/disc-bdj-mixed/**'
       - 'tests/bdj/xlets/**'
       - 'tests/bdj/golden/**'
       - 'tests/helpers/bdjo-builder.ts'
       - 'tests/helpers/bdmv-builders.ts'
+      - 'tests/helpers/hdmv-builders.ts'
       - 'tests/helpers/synthetic-disc.ts'
       - '.github/workflows/bdj-trace.yml'
   pull_request:
     paths:
       - 'tools/bdj-trace/**'
       - 'scripts/make-bdj-disc.ts'
+      - 'scripts/make-bdj-mixed-disc.ts'
       - 'fixtures/synthetic/disc-bdj/**'
+      - 'fixtures/synthetic/disc-bdj-mixed/**'
       - 'tests/bdj/xlets/**'
       - 'tests/bdj/golden/**'
       - 'tests/helpers/bdjo-builder.ts'
       - 'tests/helpers/bdmv-builders.ts'
+      - 'tests/helpers/hdmv-builders.ts'
       - 'tests/helpers/synthetic-disc.ts'
       - '.github/workflows/bdj-trace.yml'
 
@@ -30,7 +36,7 @@ permissions:
 
 jobs:
   golden:
-    name: Golden trace matches libbluray
+    name: Golden traces match libbluray
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -18,6 +18,12 @@ javac -nowarn -source 1.3 -target 1.3 \
   -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
   -d "$T/xlets" tests/bdj/xlets/src/bdjweb/test/*.java
 $MK tests/bdj/xlets/00000.jar "$T/xlets" -
+# the HDMV and BD-J disc's xlets (disc-bdj-mixed), in a jar of their own so disc-bdj's jar stays as it is
+mkdir "$T/xlets-mixed"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets-mixed" tests/bdj/xlets/src/bdjweb/mixed/*.java
+$MK tests/bdj/xlets/mixed.jar "$T/xlets-mixed" -
 
 # the JVM conformance programs (package conformance) and HotSpot's stdout for each class with a main; every program runs
 # twice and the outputs must match

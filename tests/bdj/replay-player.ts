@@ -27,6 +27,8 @@ export interface PlayerBdjReplay {
   readonly untilMs: number;
   /** Virtual (player clock) time from the open command to the end of the run. */
   readonly virtualMs: number;
+  /** Everything the player emitted up to the end of the run (not the close that follows). */
+  readonly events: readonly EngineEvent[];
 }
 
 /** sixDigits: %.6g of a Java float, as trace.patch prints selectRateN's rate. */
@@ -169,6 +171,7 @@ export async function replayPlayerBdj(
       firstPlaylistMs: (firstPlaylistAt ?? end) - t0,
       untilMs: end - t0,
       virtualMs: clock.ms - start,
+      events: [...events], // before the close in finally
     };
   } finally {
     await player.handle({ type: 'close' });

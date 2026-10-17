@@ -11,6 +11,7 @@ on:
       - 'tests/bdj/conformance.jar'
       - 'tests/bdj/xlets/**'
       - 'fixtures/synthetic/disc-bdj/BDMV/JAR/**'
+      - 'fixtures/synthetic/disc-bdj-mixed/BDMV/JAR/**'
       - '.github/workflows/bdj-classlib.yml'
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - 'tests/bdj/conformance.jar'
       - 'tests/bdj/xlets/**'
       - 'fixtures/synthetic/disc-bdj/BDMV/JAR/**'
+      - 'fixtures/synthetic/disc-bdj-mixed/BDMV/JAR/**'
       - '.github/workflows/bdj-classlib.yml'
 
 permissions:
@@ -28,7 +30,7 @@ permissions:
 
 jobs:
   reproducible:
-    name: The class library, conformance outputs and xlet jar match their source
+    name: The class library, conformance outputs and xlet jars match their source
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -36,8 +38,11 @@ jobs:
       - run: tools/bdj-trace/build.sh && tools/bdj-classlib/build.sh
       # pack.sh writes all of these; an untracked file (an .out never committed) fails too
       - run: |
-          OUT='src/bdj-classlib tests/bdj/conformance tests/bdj/conformance.jar tests/bdj/xlets/00000.jar'
+          OUT='src/bdj-classlib tests/bdj/conformance tests/bdj/conformance.jar tests/bdj/xlets/00000.jar tests/bdj/xlets/mixed.jar'
           git diff --exit-code $OUT
           test -z "$(git status --porcelain $OUT)"
-      # fixture:synthetic (scripts/make-bdj-disc.ts) copies the xlet jar into the synthetic disc unchanged
-      - run: cmp tests/bdj/xlets/00000.jar fixtures/synthetic/disc-bdj/BDMV/JAR/00000.jar
+      # fixture:synthetic (scripts/make-bdj-disc.ts, make-bdj-mixed-disc.ts) copies the xlet jars into the synthetic discs
+      # unchanged
+      - run: |
+          cmp tests/bdj/xlets/00000.jar fixtures/synthetic/disc-bdj/BDMV/JAR/00000.jar
+          cmp tests/bdj/xlets/mixed.jar fixtures/synthetic/disc-bdj-mixed/BDMV/JAR/00000.jar
