@@ -1,7 +1,7 @@
 # Cross-Browser, Mobile, Offline App and Remote Watching from a NAS — Design Spec
 
 Date: 2026-10-16
-Status: Draft
+Status: Step 1 implemented and deployed (2026-10-17). Device gate, iPad (iPad Pro 12.9" 5th gen, iPadOS 27.0.1 Safari, driven remotely with safaridriver; fixture discs handed to the page in place of the Files picker, which can't be automated): all checks pass. disc1 across the play-item boundary at 7.4 ms mean / 9.9 ms worst A/V offset with no drops or underruns; disc2 (B-frames, open GOP) seek; disc3 audio switch LPCM to AC-3; HDMV menu by tap and by the on-screen remote; PGS and forced captions; an ASS file; BD-J (first frame 514 ms); tap to show controls and double tap to seek both ways; phone layout with 44 px targets; the service worker controlling the page while cross-origin isolated. The run found one bug, fixed: touch pointerup reported at (0, 0). Still to run: iPhone, Safari and Firefox on the Mac, offline in Airplane Mode, and full discs on iOS through the NAS (step 2).
 Base: step 1 is built on `main` before milestone 5 (BD-J) lands, and runs in parallel with it. BD-J on phones is handed to milestone 5 (§3.9).
 Parent spec: `2026-10-12-bluray-web-player-design.md`. Touches every milestone's UI, and the engine's disc source (§2 of the parent spec).
 
