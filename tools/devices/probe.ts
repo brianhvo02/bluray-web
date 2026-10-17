@@ -11,7 +11,9 @@
  * can read the server's disc list too.
  */
 
-import { withDevice, write } from './run';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseMs, withDevice, write } from './run';
 
 interface ProbeResult {
   name: string;
@@ -19,36 +21,39 @@ interface ProbeResult {
   detail: string;
 }
 
-interface Options {
+export interface ProbeOptions {
   device: string;
   server: string;
   token: string;
   disc: string;
   out: string | null;
   screenshot: string | null;
+  callTimeoutMs: number | undefined;
 }
 
-function parseArgs(argv: readonly string[]): Options {
-  const o: Options = { device: '', server: '', token: '', disc: '', out: null, screenshot: null };
+const USAGE = 'usage: probe.ts --device <udid|"sim:<name>"> --server <origin> --token <token> --disc <name> [--out results.json] [--screenshot out.png] [--call-timeout ms]';
+
+export function parseArgs(argv: readonly string[]): ProbeOptions {
+  const o: ProbeOptions = { device: '', server: '', token: '', disc: '', out: null, screenshot: null, callTimeoutMs: undefined };
   for (let i = 0; i < argv.length; i += 2) {
-    const flag = argv[i].replace(/^--/, '');
+    const arg = argv[i];
+    const flag = arg.startsWith('--') ? arg.slice(2) : '';
+    if (!['device', 'server', 'token', 'disc', 'out', 'screenshot', 'call-timeout'].includes(flag)) throw new Error(`unknown option ${arg}\n${USAGE}`);
     const value = argv[i + 1];
-    if (value === undefined) throw new Error(`${argv[i]} needs a value`);
+    if (value === undefined) throw new Error(`${arg} needs a value`);
     if (flag === 'device' || flag === 'server' || flag === 'token' || flag === 'disc') o[flag] = value;
     else if (flag === 'out' || flag === 'screenshot') o[flag] = value;
-    else throw new Error(`unknown option ${argv[i]}`);
+    else o.callTimeoutMs = parseMs('--call-timeout', value);
   }
-  if (!o.device || !o.server || !o.token || !o.disc) {
-    throw new Error('usage: probe.ts --device <udid|"sim:<name>"> --server <origin> --token <token> --disc <name> [--out results.json] [--screenshot out.png]');
-  }
+  if (!o.device || !o.server || !o.token || !o.disc) throw new Error(USAGE);
   o.server = o.server.replace(/\/+$/, '');
   return o;
 }
 
-async function discUrl(o: Options): Promise<string> {
+async function discUrl(o: ProbeOptions): Promise<string> {
   let response: Response;
   try {
-    response = await fetch(`${o.server}/discs`, { headers: { Authorization: `Bearer ${o.token}` } });
+    response = await fetch(`${o.server}/discs`, { headers: { Authorization: `Bearer ${o.token}` }, signal: AbortSignal.timeout(15_000) });
   } catch (err) {
     throw new Error(`could not reach ${o.server}/discs (${String(err)}); over HTTPS set NODE_EXTRA_CA_CERTS to mkcert's rootCA.pem`);
   }
@@ -65,11 +70,11 @@ async function main(): Promise<void> {
   const url = `${o.server}/probe.html?disc=${encodeURIComponent(disc)}&token=${encodeURIComponent(o.token)}`;
   const report = await withDevice(o.device, async (session) => {
     await session.open(url);
-    await session.until('window.__probeResults', 90_000);
+    await session.until('window.__probeResults', 90_000); // fails at once on a reload (memory kill) or a lost device
     if (o.screenshot) await session.screenshot(o.screenshot);
     const probe = await session.evaluate<{ userAgent: string; results?: ProbeResult[]; error?: string }>('window.__probeResults');
     return { device: session.target.simulator ? `Simulator: ${session.target.name}` : 'real device', route: 'server', disc: o.disc, date: new Date().toISOString(), ...probe };
-  });
+  }, o.callTimeoutMs);
   if (o.out) write(o.out, `${JSON.stringify(report, null, 2)}\n`);
   console.log(report.userAgent);
   if (report.error) {
@@ -80,7 +85,9 @@ async function main(): Promise<void> {
   for (const r of report.results ?? []) console.log(`${r.ok ? 'ok  ' : 'FAIL'}  ${r.name.padEnd(22)} ${r.detail}`);
 }
 
-main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err: unknown) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

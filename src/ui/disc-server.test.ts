@@ -19,6 +19,19 @@ describe('serverLinkFromLocation', () => {
   });
 });
 
+describe('serverLinkFromLocation with sameOrigin', () => {
+  it('accepts a disc on the page origin and refuses one elsewhere, so the token never leaves the server', () => {
+    const page = 'https://192.168.1.5:8443/probe.html?token=tok&disc=';
+    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://192.168.1.5:8443/discs/abc')}`, { sameOrigin: true })?.disc).toBe('https://192.168.1.5:8443/discs/abc');
+    expect(serverLinkFromLocation(`${page}${encodeURIComponent('/discs/abc')}`, { sameOrigin: true })?.disc).toBe('https://192.168.1.5:8443/discs/abc');
+    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://evil.example/discs/abc')}`, { sameOrigin: true })).toBeNull();
+    expect(serverLinkFromLocation(`${page}${encodeURIComponent('http://192.168.1.5:8443/discs/abc')}`, { sameOrigin: true })).toBeNull();
+    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://192.168.1.5:9000/discs/abc')}`, { sameOrigin: true })).toBeNull();
+    // the player keeps cross-origin links (the Vite dev server opening a disc on the disc server)
+    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://evil.example/discs/abc')}`)).not.toBeNull();
+  });
+});
+
 describe('listServerDiscs', () => {
   it("lists the server's discs with their base URLs, sending the token", async () => {
     const asked: Array<[string, string | null]> = [];

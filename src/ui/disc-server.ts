@@ -21,7 +21,12 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 const DISC_PATH = /^(.*\/discs)\/([^/]+)\/?$/;
 
-export function serverLinkFromLocation(href: string): ServerLink | null {
+/**
+ * `sameOrigin` refuses a `disc` URL on another origin than the page, so the token is only ever sent back to the server
+ * that served the page (the probe page uses it). The player allows other origins: `npm run dev` opens discs on the
+ * disc server across origins (tools/disc-server/README.md, CORS).
+ */
+export function serverLinkFromLocation(href: string, options: { readonly sameOrigin?: boolean } = {}): ServerLink | null {
   const page = new URL(href);
   const token = page.searchParams.get('token');
   if (!token) return null;
@@ -34,6 +39,7 @@ export function serverLinkFromLocation(href: string): ServerLink | null {
     return null;
   }
   if (disc.protocol !== 'https:' && disc.protocol !== 'http:') return null;
+  if (options.sameOrigin && disc.origin !== page.origin) return null;
   const m = DISC_PATH.exec(disc.pathname);
   if (!m) return null;
   const base = `${disc.origin}${m[0].replace(/\/$/, '')}`;

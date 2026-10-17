@@ -38,7 +38,10 @@ async function openServerDisc(baseUrl: string, token: string): Promise<ProbeDisc
 }
 
 function openDisc(): Promise<ProbeDisc> {
-  const link = serverLinkFromLocation(window.location.href);
+  const params = new URL(window.location.href).searchParams;
+  // same origin only: the token goes back to the server that served this page and nowhere else
+  const link = serverLinkFromLocation(window.location.href, { sameOrigin: true });
+  if (params.has('disc') && !link?.disc) return Promise.reject(new Error('the disc URL must be on the same server as this page'));
   if (link?.disc) {
     root.textContent = 'Probing the disc on the disc server…';
     return openServerDisc(link.disc, link.token);

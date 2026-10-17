@@ -1,6 +1,7 @@
 /**
  * Drives Safari on an iPhone, iPad or iOS Simulator through Appium's XCUITest driver (W3C WebDriver over HTTP;
- * no client library). Spec: docs/superpowers/specs/2026-10-17-m5d-bdj-menus-design.md §4.5. Setup: README.md here.
+ * no client library; the session itself is session.ts). Spec: docs/superpowers/specs/2026-10-17-m5d-bdj-menus-design.md
+ * §4.5. Setup: README.md here.
  *
  *   npx tsx tools/devices/run.ts --device <udid|"sim:iPhone 17"> --url <url> [step …]
  *
@@ -14,30 +15,30 @@
  *   --eval <js-expression>    print the expression's value as JSON (a promise is awaited)
  * and at the end:
  *   --console <out.txt>       Safari's console log for the whole run
+ * Other options:
+ *   --call-timeout <ms>       the longest one WebDriver call may take (default 120000, or $DEVICE_CALL_TIMEOUT_MS)
+ *
+ * A lost device, Appium or WebDriverAgent fails the run at once ("device disconnected or session lost"), and so does a
+ * reload of the opened page ("page reloaded (possible memory kill)"), instead of waiting out a step's timeout.
  *
  * Without a running Appium at $APPIUM_URL (default http://127.0.0.1:4723) it starts the local one from
  * $APPIUM_HOME (default .cache/appium) and stops it afterwards.
  */
 
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { DeviceSession, write, type DeviceTarget } from './session';
+
+export { DeviceSession, DeviceLostError, PageReloadedError, write, type DeviceTarget } from './session';
 
 const exec = promisify(execFile);
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const APPIUM_URL = process.env.APPIUM_URL ?? 'http://127.0.0.1:4723';
 const APPIUM_HOME = process.env.APPIUM_HOME ?? resolve(REPO, '.cache/appium');
-const ELEMENT = 'element-6066-11e4-a52e-4f735466cecf';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-export interface DeviceTarget {
-  readonly udid: string;
-  readonly simulator: boolean;
-  readonly name: string;
-}
 
 interface SimDevice {
   udid: string;
@@ -68,7 +69,7 @@ export async function resolveDevice(spec: string): Promise<DeviceTarget> {
 
 async function appiumReady(): Promise<boolean> {
   try {
-    const r = await fetch(`${APPIUM_URL}/status`);
+    const r = await fetch(`${APPIUM_URL}/status`, { signal: AbortSignal.timeout(5000) });
     return r.ok && ((await r.json()) as { value?: { ready?: boolean } }).value?.ready === true;
   } catch {
     return false;
@@ -93,187 +94,70 @@ export async function ensureAppium(): Promise<() => void> {
   throw failed ?? new Error('Appium did not become ready in 60 s');
 }
 
-interface WireValue<T> {
-  value: T;
-}
-
-export class DeviceSession {
-  private webview: string | null = null;
-
-  private constructor(
-    private readonly base: string,
-    readonly target: DeviceTarget,
-  ) {}
-
-  static async start(target: DeviceTarget): Promise<DeviceSession> {
-    const caps: Record<string, unknown> = {
-      platformName: 'iOS',
-      browserName: 'Safari',
-      'appium:automationName': 'XCUITest',
-      'appium:udid': target.udid,
-      'appium:newCommandTimeout': 600,
-      'appium:wdaLaunchTimeout': 600_000,
-      'appium:showSafariConsoleLog': true,
-      'appium:safariIgnoreFraudWarning': true,
-    };
-    if (!target.simulator) {
-      // Real devices: WebDriverAgent is signed with the user's personal team (README.md). Kept out of the repository.
-      const team = process.env.DEVICE_TEAM_ID;
-      if (team) Object.assign(caps, { 'appium:xcodeOrgId': team, 'appium:xcodeSigningId': 'Apple Development', 'appium:allowProvisioningDeviceRegistration': true });
-      if (process.env.WDA_BUNDLE_ID) caps['appium:updatedWDABundleId'] = process.env.WDA_BUNDLE_ID;
-    }
-    const r = await fetch(`${APPIUM_URL}/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ capabilities: { alwaysMatch: caps } }) });
-    const body = (await r.json()) as WireValue<{ sessionId?: string; message?: string }>;
-    if (!r.ok || !body.value.sessionId) throw new Error(`Appium could not start Safari on ${target.name}: ${body.value.message ?? r.status}`);
-    const session = new DeviceSession(`${APPIUM_URL}/session/${body.value.sessionId}`, target);
-    await session.call('POST', '/timeouts', { script: 60_000 });
-    return session;
+/** Appium capabilities for Safari on `target`. Real devices take WebDriverAgent's signing from the environment (README.md). */
+export function safariCaps(target: DeviceTarget): Record<string, unknown> {
+  const caps: Record<string, unknown> = {
+    platformName: 'iOS',
+    browserName: 'Safari',
+    'appium:automationName': 'XCUITest',
+    'appium:udid': target.udid,
+    'appium:newCommandTimeout': 600,
+    'appium:wdaLaunchTimeout': 600_000,
+    'appium:showSafariConsoleLog': true,
+    'appium:safariIgnoreFraudWarning': true,
+  };
+  if (!target.simulator) {
+    const team = process.env.DEVICE_TEAM_ID;
+    if (team) Object.assign(caps, { 'appium:xcodeOrgId': team, 'appium:xcodeSigningId': 'Apple Development', 'appium:allowProvisioningDeviceRegistration': true });
+    if (process.env.WDA_BUNDLE_ID) caps['appium:updatedWDABundleId'] = process.env.WDA_BUNDLE_ID;
   }
-
-  private async call<T>(method: string, path: string, payload?: unknown): Promise<T> {
-    const r = await fetch(`${this.base}${path}`, {
-      method,
-      headers: payload === undefined ? {} : { 'content-type': 'application/json' },
-      body: payload === undefined ? undefined : JSON.stringify(payload),
-    });
-    const body = (await r.json()) as WireValue<T & { error?: string; message?: string }>;
-    if (!r.ok) throw new Error(`${method} ${path}: ${body.value?.message ?? r.status}`);
-    return body.value;
-  }
-
-  async open(url: string): Promise<void> {
-    await this.call('POST', '/url', { url });
-    const contexts = await this.call<string[]>('GET', '/contexts');
-    this.webview = contexts.filter((c) => c.startsWith('WEBVIEW')).pop() ?? null;
-  }
-
-  /** Runs `return (<expression>)` in the page. */
-  async evaluate<T>(expression: string): Promise<T> {
-    return this.call<T>('POST', '/execute/sync', { script: `return (${expression});`, args: [] });
-  }
-
-  /** Like `evaluate`, but waits for a promise the expression returns. */
-  async evaluateAsync<T>(expression: string): Promise<T> {
-    const script =
-      `const done = arguments[arguments.length - 1];` +
-      ` Promise.resolve().then(() => (${expression})).then((value) => done({ value }), (err) => done({ error: String(err) }));`;
-    const r = await this.call<{ value?: T; error?: string }>('POST', '/execute/async', { script, args: [] });
-    if (r.error !== undefined) throw new Error(`${expression}: ${r.error}`);
-    return r.value as T;
-  }
-
-  async until(expression: string, timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    let last = '';
-    while (Date.now() < deadline) {
-      try {
-        if (await this.evaluate<boolean>(`!!(${expression})`)) return;
-        last = 'falsy';
-      } catch (err) {
-        last = err instanceof Error ? err.message : String(err);
-      }
-      await sleep(500);
-    }
-    throw new Error(`--until ${expression}: still ${last} after ${timeoutMs} ms`);
-  }
-
-  /**
-   * A native touch at page (CSS viewport) coordinates. Safari's toolbars move the page on screen, so each tap first
-   * calibrates: a probe element fixed at the viewport's corner is found in the accessibility tree, which gives the
-   * page's offset and scale on screen.
-   */
-  async tap(x: number, y: number): Promise<void> {
-    const id = `devices-calibrate-${Date.now()}`;
-    await this.evaluate(
-      `(() => { const e = document.createElement('div'); e.id = ${JSON.stringify(id)}; e.setAttribute('role', 'button'); e.setAttribute('aria-label', ${JSON.stringify(id)});` +
-        ` e.style.cssText = 'position:fixed;left:0;top:0;width:100px;height:100px;opacity:0.02;z-index:2147483647;pointer-events:none'; document.body.append(e); return true; })()`,
-    );
-    let point: { x: number; y: number };
-    try {
-      await this.call('POST', '/context', { name: 'NATIVE_APP' });
-      let rect: { x: number; y: number; width: number; height: number } | null = null;
-      for (let i = 0; i < 10 && !rect; i++) {
-        try {
-          const el = await this.call<Record<string, string>>('POST', '/element', { using: 'accessibility id', value: id });
-          rect = await this.call('GET', `/element/${el[ELEMENT]}/rect`);
-        } catch {
-          await sleep(300);
-        }
-      }
-      if (!rect) throw new Error('could not find the calibration element on screen');
-      const scale = rect.width / 100;
-      point = { x: rect.x + x * scale, y: rect.y + y * scale };
-      await this.call('POST', '/execute/sync', { script: 'mobile: tap', args: [point] });
-    } finally {
-      if (this.webview) await this.call('POST', '/context', { name: this.webview });
-      await this.evaluate(`(document.getElementById(${JSON.stringify(id)})?.remove(), true)`).catch(() => undefined);
-    }
-  }
-
-  /** The centre (page coordinates) of the first visible element `selector` matches. */
-  async locate(selector: string): Promise<{ x: number; y: number }> {
-    const found = await this.evaluate<{ x: number; y: number } | null>(
-      `(() => { const el = [...document.querySelectorAll(${JSON.stringify(selector)})].find((e) => e.getClientRects().length > 0);` +
-        ` if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
-    );
-    if (!found) throw new Error(`nothing visible matches ${selector}`);
-    return found;
-  }
-
-  async screenshot(out: string): Promise<void> {
-    const b64 = await this.call<string>('GET', '/screenshot');
-    write(out, Buffer.from(b64, 'base64'));
-  }
-
-  async consoleLog(): Promise<string[]> {
-    const entries = await this.call<Array<{ timestamp: number; level: string; message: string }>>('POST', '/se/log', { type: 'safariConsole' });
-    return entries.map((e) => {
-      let text = e.message;
-      try {
-        text = (JSON.parse(e.message) as { text?: string }).text ?? text; // the inspector's console message, as JSON
-      } catch {
-        // already plain text
-      }
-      return `${new Date(e.timestamp).toISOString()} ${e.level} ${text}`;
-    });
-  }
-
-  async close(): Promise<void> {
-    await fetch(this.base, { method: 'DELETE' }).catch(() => undefined);
-  }
-}
-
-export function write(out: string, data: string | Uint8Array): void {
-  mkdirSync(dirname(resolve(out)), { recursive: true });
-  writeFileSync(out, data);
+  return caps;
 }
 
 type Step = { kind: 'until' | 'tap' | 'tap-on' | 'wait' | 'screenshot' | 'telemetry' | 'eval'; arg: string };
 
-interface Options {
+export interface Options {
   device: string;
   url: string;
   timeoutMs: number;
+  callTimeoutMs: number;
   console: string | null;
   steps: Step[];
 }
 
 const STEP_FLAGS = new Set(['until', 'tap', 'tap-on', 'wait', 'screenshot', 'telemetry', 'eval']);
+const OPTION_FLAGS = new Set(['device', 'url', 'timeout', 'call-timeout', 'console']);
+const USAGE =
+  'usage: run.ts --device <udid|"sim:<name>"> --url <url> [--until js] [--tap x,y] [--tap-on selector] [--wait ms] [--screenshot out.png] [--telemetry out.json] [--eval js] [--console out.txt] [--timeout ms] [--call-timeout ms]';
 
-function parseArgs(argv: readonly string[]): Options {
-  const o: Options = { device: '', url: '', timeoutMs: 60_000, console: null, steps: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i].replace(/^--/, '');
-    const value = argv[++i];
-    if (value === undefined) throw new Error(`${argv[i - 1]} needs a value`);
+/** A positive whole number of milliseconds, or an error naming the flag. */
+export function parseMs(flag: string, value: string): number {
+  const n = Number(value);
+  if (!/^\d+$/.test(value.trim()) || !Number.isSafeInteger(n) || n <= 0) throw new Error(`${flag} ${value}: expected a positive number of milliseconds`);
+  return n;
+}
+
+export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Options {
+  const callDefault = env.DEVICE_CALL_TIMEOUT_MS ? parseMs('DEVICE_CALL_TIMEOUT_MS', env.DEVICE_CALL_TIMEOUT_MS) : 120_000;
+  const o: Options = { device: '', url: '', timeoutMs: 60_000, callTimeoutMs: callDefault, console: null, steps: [] };
+  for (let i = 0; i < argv.length; i += 2) {
+    const arg = argv[i];
+    const flag = arg.startsWith('--') ? arg.slice(2) : '';
+    if (!OPTION_FLAGS.has(flag) && !STEP_FLAGS.has(flag)) throw new Error(`unknown option ${arg}\n${USAGE}`);
+    const value = argv[i + 1];
+    if (value === undefined) throw new Error(`${arg} needs a value`);
     if (flag === 'device') o.device = value;
     else if (flag === 'url') o.url = value;
-    else if (flag === 'timeout') o.timeoutMs = Number(value);
+    else if (flag === 'timeout') o.timeoutMs = parseMs('--timeout', value);
+    else if (flag === 'call-timeout') o.callTimeoutMs = parseMs('--call-timeout', value);
     else if (flag === 'console') o.console = value;
-    else if (STEP_FLAGS.has(flag)) o.steps.push({ kind: flag as Step['kind'], arg: value });
-    else throw new Error(`unknown option ${argv[i - 1]}`);
+    else {
+      if (flag === 'wait') parseMs('--wait', value);
+      if (flag === 'tap' && !/^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(value)) throw new Error(`--tap ${value}: expected x,y`);
+      o.steps.push({ kind: flag as Step['kind'], arg: value });
+    }
   }
-  if (!o.device || !o.url) throw new Error('usage: run.ts --device <udid|"sim:<name>"> --url <url> [--until js] [--tap x,y] [--tap-on selector] [--wait ms] [--screenshot out.png] [--telemetry out.json] [--eval js] [--console out.txt] [--timeout ms]');
+  if (!o.device || !o.url) throw new Error(USAGE);
   return o;
 }
 
@@ -284,7 +168,6 @@ async function runStep(session: DeviceSession, step: Step, timeoutMs: number): P
       return;
     case 'tap': {
       const [x, y] = step.arg.split(',').map(Number);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`--tap ${step.arg}: expected x,y`);
       await session.tap(x, y);
       return;
     }
@@ -309,11 +192,11 @@ async function runStep(session: DeviceSession, step: Step, timeoutMs: number): P
 }
 
 /** Opens a session, runs `body`, and always closes the session (and an Appium it started). */
-export async function withDevice<T>(device: string, body: (session: DeviceSession) => Promise<T>): Promise<T> {
+export async function withDevice<T>(device: string, body: (session: DeviceSession) => Promise<T>, callTimeoutMs?: number): Promise<T> {
   const target = await resolveDevice(device);
   const stopAppium = await ensureAppium();
   try {
-    const session = await DeviceSession.start(target);
+    const session = await DeviceSession.start(target, { appiumUrl: APPIUM_URL, callTimeoutMs }, safariCaps(target));
     try {
       return await body(session);
     } finally {
@@ -326,17 +209,21 @@ export async function withDevice<T>(device: string, body: (session: DeviceSessio
 
 async function main(): Promise<void> {
   const o = parseArgs(process.argv.slice(2));
-  await withDevice(o.device, async (session) => {
-    await session.open(o.url);
-    try {
-      for (const step of o.steps) {
-        console.error(`· ${step.kind} ${step.arg}`);
-        await runStep(session, step, o.timeoutMs);
+  await withDevice(
+    o.device,
+    async (session) => {
+      await session.open(o.url);
+      try {
+        for (const step of o.steps) {
+          console.error(`· ${step.kind} ${step.arg}`);
+          await runStep(session, step, o.timeoutMs);
+        }
+      } finally {
+        if (o.console) write(o.console, `${(await session.consoleLog().catch((e: unknown) => [`(console log unavailable: ${String(e)})`])).join('\n')}\n`);
       }
-    } finally {
-      if (o.console) write(o.console, `${(await session.consoleLog().catch((e: unknown) => [`(console log unavailable: ${String(e)})`])).join('\n')}\n`);
-    }
-  });
+    },
+    o.callTimeoutMs,
+  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

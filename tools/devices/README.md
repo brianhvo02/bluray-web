@@ -2,20 +2,20 @@
 
 Scripts that open the player or the device probe in Safari on a real iPhone or iPad (over USB) or on an iOS Simulator, wait for a condition, read telemetry, tap, take screenshots and collect console logs. Spec: `docs/superpowers/specs/2026-10-17-m5d-bdj-menus-design.md` §4.5.
 
-They speak W3C WebDriver to [Appium](https://appium.io) with the XCUITest driver. Appium runs Safari's remote inspector for the page (scripts, console) and WebDriverAgent, a helper app it builds with Xcode, for touches and screenshots. Taps are real touches, so they count as the user gesture the player needs to start audio.
+They speak W3C WebDriver to [Appium](https://appium.io) with the XCUITest driver. Appium uses Safari's remote inspector for the page (scripts, console) and WebDriverAgent, a helper app it builds with Xcode, for touches and screenshots. Taps are real touches, so they count as the user gesture the player needs to start audio.
 
 The Simulator needs no setup beyond Xcode. A real device needs the one-time setup below.
 
-## Install Appium (once per checkout)
+## Install Appium (once)
 
-Appium and its driver live in `.cache/appium` (gitignored), not in `package.json` and not globally:
+Appium and its driver live in `.cache/appium` (gitignored), not in `package.json` and not globally. They need Node 20.19+, 22.12+ or 24+ and npm 10 or later (this repository's CI uses Node 24 and npm 11.19+, which work); check with `node -v` and `npm -v`. In a worktree, `.cache` may be a link to the main checkout's `.cache`, in which case every worktree shares one install.
 
 ```sh
 npm install --prefix .cache/appium appium@3.8.0
 APPIUM_HOME="$PWD/.cache/appium" .cache/appium/node_modules/.bin/appium driver install xcuitest@12.18.1
 ```
 
-npm skips Appium's `postinstall` (it only auto-installs extensions from an environment variable); that is fine. The scripts start this Appium themselves when nothing answers at `$APPIUM_URL` (default `http://127.0.0.1:4723`), and stop it afterwards. The first session on a device builds WebDriverAgent (a few minutes); later ones start in about 30 s.
+npm skips Appium's `postinstall`. That is fine: the script only auto-installs extensions named in an environment variable. The scripts start this Appium themselves when nothing answers at `$APPIUM_URL` (default `http://127.0.0.1:4723`), and stop it afterwards. The first session on a device builds WebDriverAgent, which takes a few minutes; later sessions start in about 15–30 s.
 
 ## Run
 
@@ -33,32 +33,66 @@ npx tsx tools/devices/run.ts --device "sim:iPhone 17" \
   --telemetry telemetry.json --screenshot playing.png --console console.txt
 ```
 
-`--device` is `sim:<name>` (as `xcrun simctl list devices available` names it; the newest runtime wins and the Simulator is booted if needed) or a real device's UDID (`xcrun xctrace list devices`). `run.ts` runs its steps in the order given: `--until <js>` (polls until truthy; `--timeout <ms>`, default 60000), `--tap x,y` (page coordinates, the CSS pixels of `clientX`/`clientY`), `--tap-on <css selector>`, `--wait <ms>`, `--screenshot <png>`, `--telemetry <json>` (`window.__blurayTelemetry`; the URL needs `?telemetry=1`), `--eval <js>` (prints the value; a promise is awaited); `--console <txt>` writes Safari's console log at the end.
+`--device` takes one of two forms:
 
-`probe.ts` opens `probe.html?disc=<disc URL>&token=<token>`, which probes a disc on the disc server instead of a picked folder: the "Blob slicing over 4 GiB" row is then an HTTP range read past 4 GiB (its detail starts with `server:`), and the HEVC row decodes the disc's first HEVC GOP read over HTTP. For a real device use the server's HTTPS LAN origin (`--server https://<lan-ip>:8443`) and run with `NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"` so the script can read the server's disc list. The USB route (a folder picked in Files) needs a person to pick the folder: open `https://<lan-ip>:8443/probe.html` on the device and tap "Pick a disc folder".
+- `sim:<name>`, the name `xcrun simctl list devices available` shows. The newest runtime wins, and the Simulator is booted if needed.
+- A real device's UDID, from `xcrun xctrace list devices`.
+
+`run.ts` runs its steps in the order given:
+
+- `--until <js>` polls until the expression is truthy. `--timeout <ms>` sets how long it waits (default 60000).
+- `--tap x,y` taps at page coordinates, in the CSS pixels of `clientX`/`clientY`.
+- `--tap-on <css selector>` taps the centre of the first visible match.
+- `--wait <ms>` sleeps.
+- `--screenshot <png>` saves the device screen.
+- `--telemetry <json>` saves `window.__blurayTelemetry`; the URL needs `?telemetry=1`.
+- `--eval <js>` prints the value; a promise is awaited.
+
+`--console <txt>` writes Safari's console log at the end of the run. `--call-timeout <ms>` bounds each WebDriver call.
+
+`probe.ts` opens `probe.html?disc=<disc URL>&token=<token>`, which probes a disc on the disc server instead of a picked folder. The page only accepts a disc on its own server, so the token is never sent anywhere else; `/probe.html` itself is static and needs no token. On this route:
+
+- The "Blob slicing over 4 GiB" row is an HTTP range read past 4 GiB; its detail starts with `server:`.
+- The HEVC row decodes the disc's first HEVC GOP, read over HTTP.
+
+For a real device, use the server's HTTPS LAN origin (`--server https://<lan-ip>:8443`) and run with `NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"`, so the script can read the server's disc list. The USB route (a folder picked in Files) needs a person to pick the folder: open `https://<lan-ip>:8443/probe.html` on the device and tap "Pick a disc folder".
 
 ## One-time setup for a real iPhone or iPad
 
-Xcode must be installed with its licence accepted (`sudo xcodebuild -license accept`). Then, for each device:
+Xcode must be installed with its licence accepted (`sudo xcodebuild -license accept`). The menu labels below are as of iOS 18. **On iOS 26 the exact labels still have to be confirmed on the device**; those steps are marked *to confirm*. If a label differs, use the nearest match and note the right one here. Do the steps in this order for each device:
 
-1. **Trust this Mac.** Connect the device by USB-C, unlock it and tap Trust, entering the passcode. `xcrun xctrace list devices` then lists it with its UDID.
-2. **Developer Mode.** Settings → Privacy & Security → Developer Mode → on; the device restarts; confirm Turn On after it unlocks. (The switch only appears after the device has been connected to a Mac with Xcode; if it is missing, open Xcode → Window → Devices and Simulators once with the device connected.)
-3. **Web Inspector and Remote Automation.** Settings → Apps → Safari → Advanced → turn on Web Inspector (Safari's remote inspector, used for scripts and console logs; also lets you inspect the page from Safari on the Mac, Develop menu) and Remote Automation.
-4. **Apple ID in Xcode.** Xcode → Settings → Accounts → + → Apple ID. A free Apple ID gives a "Personal Team"; note its Team ID (shown as `(Personal Team)` with a 10-character ID in the account's team list or in a signing error).
-5. **Sign WebDriverAgent with the personal team.** Open the driver's project:
+1. **Trust this Mac.** Connect the device by USB-C, unlock it, tap Trust and enter the passcode. `xcrun xctrace list devices` then lists it with its UDID.
+2. **Let Xcode prepare the device.** With the device connected and unlocked, open Xcode → Window → Devices and Simulators and select the device. Xcode copies its debugging support onto the device, which can take several minutes the first time. Wait until the device shows no progress or warning there.
+3. **Developer Mode.** The switch only appears once the device has been used with Xcode (step 2). Settings → Privacy & Security → Developer Mode (*to confirm*; near the bottom) → on. The device restarts; after unlocking, confirm Turn On.
+4. **Web Inspector and Remote Automation.** Settings → Apps → Safari → Advanced (*to confirm*). Turn on Web Inspector (Safari's remote inspector, used for scripts and console logs; it also lets you inspect the page from Safari on the Mac through the Develop menu) and Remote Automation.
+5. **Apple ID in Xcode.** Xcode → Settings → Accounts → + → Apple ID. A free Apple ID gives a "Personal Team". Its Team ID is a 10-character code, shown in signing errors and in the provisioning profile Xcode makes in step 6.
+6. **Sign WebDriverAgent with the personal team.** Open the driver's project:
    ```sh
    APPIUM_HOME="$PWD/.cache/appium" .cache/appium/node_modules/.bin/appium driver run xcuitest open-wda
    ```
-   In Xcode select the `WebDriverAgentRunner` target → Signing & Capabilities: tick "Automatically manage signing", choose your Personal Team, and change the bundle identifier to something unique to you (for example `com.<yourname>.WebDriverAgentRunner`; a free team cannot use `com.facebook.*`). Do the same team for the `WebDriverAgentLib` target. Select your device as the run destination and press ⌘U (Product → Test) once; it fails to launch the first time.
-6. **Trust the developer certificate on the device.** Settings → General → VPN & Device Management → your Apple ID under Developer App → Trust. Run ⌘U again; WebDriverAgent starts on the device (the screen shows "Automation Running"). Stop it in Xcode.
-7. **Tell the scripts** your team and bundle identifier through the environment, never in the repository:
+   - `WebDriverAgentRunner` target → Signing & Capabilities: tick "Automatically manage signing", choose your Personal Team, and set a bundle identifier unique to you, e.g. `com.<yourname>.WebDriverAgentRunner`. A free team cannot sign the default `com.facebook.*` identifiers.
+   - `WebDriverAgentLib` target: choose the same team and use the same prefix, `com.<yourname>.WebDriverAgentLib`.
+   - Keep these identifiers consistent with `WDA_BUNDLE_ID` in step 8, which must be exactly the Runner's identifier. Otherwise Appium rebuilds under an identifier your profile doesn't cover, and signing fails.
+
+   Select your device as the run destination and press ⌘U (Product → Test).
+
+   **The first ⌘U is expected to fail** with an error saying the developer or app is not trusted ("Untrusted Developer", "invalid code signature" or "profile has not been explicitly trusted by the user"). That is normal for a free team; step 7 fixes it.
+7. **Trust your developer app on the device.** Settings → General → VPN & Device Management (*to confirm*) → your Apple ID under Developer App → Trust. Press ⌘U again: WebDriverAgent starts on the device, which shows "Automation Running". Stop it in Xcode (⌘.).
+8. **Tell the scripts** your team and bundle identifier through the environment, never in the repository:
    ```sh
    export DEVICE_TEAM_ID=<your team ID>
-   export WDA_BUNDLE_ID=com.<yourname>.WebDriverAgentRunner
+   export WDA_BUNDLE_ID=com.<yourname>.WebDriverAgentRunner      # exactly the Runner's identifier from step 6
    ```
-8. **The disc server's certificate.** Make the mkcert certificate as in `tools/disc-server/README.md`, then AirDrop `"$(mkcert -CAROOT)/rootCA.pem"` to the device, open it (Settings shows "Profile Downloaded"; Settings → General → VPN & Device Management → install it), and turn on full trust: Settings → General → About → Certificate Trust Settings → the mkcert root → on. Check by opening `https://<lan-ip>:8443/` in Safari on the device: no certificate warning. The device must be on the same Wi-Fi as the Mac.
+9. **Trust the disc server's certificate authority.** Make the mkcert certificate as in `tools/disc-server/README.md`.
+   - Send the device **only** `"$(mkcert -CAROOT)/rootCA.pem"`, by AirDrop or by mailing it to yourself. **Never copy `rootCA-key.pem`** from the same folder: it is the CA's private key, and whoever has it can make certificates your devices would trust for any site.
+   - On the device, open the file; Settings shows "Profile Downloaded". Install it under Settings → General → VPN & Device Management (*to confirm*).
+   - Turn on full trust under Settings → General → About → Certificate Trust Settings → the mkcert root.
 
-**Every 7 days:** a free team's provisioning profile expires after 7 days and WebDriverAgent stops launching ("profile has expired" or the app closes at once). Re-sign: connect the device, open the project as in step 5 and press ⌘U again (Xcode renews the profile), or delete WebDriverAgentRunner from the device first if Xcode complains. A free team is also limited to 3 devices and 10 app IDs per week, which is enough here.
+   To check, open `https://<lan-ip>:8443/` in Safari on the device; there should be no certificate warning. The device must be on the same Wi-Fi as the Mac.
+
+   *To remove it later:* on the device, Settings → General → VPN & Device Management → the mkcert profile → Remove Profile (this also removes the full-trust switch). On the Mac, `mkcert -uninstall` removes the CA from the Mac's trust stores, and deleting the `mkcert -CAROOT` folder deletes the CA itself.
+
+**Every 7 days:** a free team's provisioning profile lasts 7 days. After that, WebDriverAgent stops launching: you get "profile has expired", or the app closes at once. To re-sign, connect the device, open the project as in step 6 and press ⌘U again; Xcode renews the profile. If Xcode complains, delete WebDriverAgentRunner from the device first. Apple currently limits free teams (at the time of writing, about 3 devices and 10 app IDs per 7 days). That is enough here, but the limits may change.
 
 If Appium cannot find a connected device running iOS 17 or later, start the driver's device tunnel in another terminal (it needs root) and retry:
 
@@ -66,9 +100,19 @@ If Appium cannot find a connected device running iOS 17 or later, start the driv
 sudo APPIUM_HOME="$PWD/.cache/appium" .cache/appium/node_modules/.bin/appium driver run xcuitest tunnel-creation
 ```
 
+## When a run fails
+
+- `device disconnected or session lost: …`: one of these happened:
+  - the device was unplugged or locked;
+  - WebDriverAgent crashed, or its profile expired;
+  - Appium stopped.
+
+  Every WebDriver call has a timeout (`--call-timeout`, default 120 s, or `$DEVICE_CALL_TIMEOUT_MS`), so a hung device fails instead of hanging.
+- `page reloaded (possible memory kill) during …`: the page the run opened went away under it. On iOS that usually means Safari killed the tab for memory. `run.ts` marks the page after `--url` opens it (`window.__runMarker`), and `--until` (and `probe.ts`'s wait) check the mark on every poll. A step that navigates on purpose also trips it.
+
 ## The Simulator
 
-Nothing to set up: WebDriverAgent needs no signing there, and the Simulator shares the Mac's network, so plain HTTP on `127.0.0.1` is a secure context and the disc server needs no certificate. To test HTTPS there anyway, add the mkcert root with `xcrun simctl keychain booted add-root-cert "$(mkcert -CAROOT)/rootCA.pem"`. Simulator Safari runs on the Mac's media stack and CPU, so codec support and timings there say nothing about the real devices.
+Nothing to set up. WebDriverAgent needs no signing there, and the Simulator shares the Mac's network, so plain HTTP on `127.0.0.1` is a secure context and the disc server needs no certificate. To test HTTPS there anyway, add the mkcert root with `xcrun simctl keychain booted add-root-cert "$(mkcert -CAROOT)/rootCA.pem"`. Simulator Safari runs on the Mac's media stack and CPU, so codec support and timings there say nothing about the real devices.
 
 ## Not here
 
