@@ -2,6 +2,7 @@ import { splitPick } from './drop-files';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
+import type { MemoryProfileName } from '../engine/memory-profile';
 import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 import { DROP_WARN_RATE, DropMeter } from './drop-meter';
@@ -461,6 +462,11 @@ export class PlayerController {
     const scale = Math.round(Math.max(MIN_SUBTITLE_SCALE, Math.min(MAX_SUBTITLE_SCALE, subs.scale + delta)) * 10) / 10;
     this.post({ type: 'setSubtitleScale', scale });
     this.update({ ...this.snapshot, subtitles: { ...subs, scale } });
+  }
+
+  /** Tells the engine which memory limits to use (sent once, before a disc opens). */
+  setMemoryProfile(profile: MemoryProfileName): void {
+    this.post({ type: 'setMemoryProfile', profile });
   }
 
   /** Applies a shader set to the video; null turns shaders off. */

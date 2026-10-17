@@ -1,3 +1,4 @@
+import type { MemoryProfileName } from './memory-profile';
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
 import type { PlaylistSummary } from './disc/open-disc';
@@ -125,7 +126,8 @@ export type EngineCommand =
   /** Forget the open disc ("Open another disc"). */
   | { readonly type: 'close' }
   /** Shade the video with this set (compiled in the background), or draw it unshaded (null). Kept across discs. */
-  | { readonly type: 'setVideoShaders'; readonly set: ShaderSetData | null };
+  | { readonly type: 'setVideoShaders'; readonly set: ShaderSetData | null }
+  | { readonly type: 'setMemoryProfile'; readonly profile: MemoryProfileName };
 
 export type EngineEvent =
   | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly warnings: readonly string[] }

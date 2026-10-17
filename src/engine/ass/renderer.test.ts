@@ -7,6 +7,7 @@ import { FrameBuilder } from './frame';
 import { createFixedMeasurer } from './measure';
 import { parseAss } from './parse';
 import type { RenderedEvent } from './raster';
+import { MEMORY_PROFILES } from '../memory-profile';
 import { AssRenderer, convertColor } from './renderer';
 import { YCbCr } from './types';
 
@@ -47,6 +48,7 @@ function renderer(track = script([ev('0:00:01.00', '0:00:03.00', 'static'), ev('
     nowMs: () => 0,
     Path2D: class {} as unknown as typeof Path2D,
     colorMatrix,
+    limits: MEMORY_PROFILES.desktop,
     renderEvent: (_rc, e): RenderedEvent => { rendered.push(e.index); return { canvas, x: 0, y: 0 }; },
   });
   return { r, rendered };

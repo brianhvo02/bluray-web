@@ -982,6 +982,23 @@ describe('Player with HDMV navigation', () => {
       expect(h.igDraws.length).toBeGreaterThan(0);
     });
 
+    describe('memory profile', () => {
+      const BIG = 65 * 1024 * 1024;
+      const preload = (h: Harness) => (h.player as unknown as { preloadSubPathIg(id: string, s: AbortSignal): Promise<unknown[]> }).preloadSubPathIg('00009', new AbortController().signal);
+      const big = { 'BDMV/STREAM/00009.m2ts': new Uint8Array(BIG) };
+
+      it('rejects a 65 MB sub-path clip under constrained', async () => {
+        const h = await bootMenu({ subPathIg: { clipId: '00009', units: menuAt(0.2) }, extraFiles: big });
+        await h.player.handle({ type: 'setMemoryProfile', profile: 'constrained' });
+        await expect(preload(h)).rejects.toMatchObject({ code: 'unreadable-stream', message: "This disc's menus need more memory than this device allows." });
+      });
+
+      it('preloads the same clip under desktop', async () => {
+        const h = await bootMenu({ subPathIg: { clipId: '00009', units: menuAt(0.2) }, extraFiles: big });
+        await expect(preload(h)).resolves.toEqual([]);
+      });
+    });
+
     it('keeps playing without a menu when the sub-path clip cannot be read', async () => {
       const h = await bootMenu({ subPathIg: { clipId: '00009', units: menuAt(0.2) }, dropFiles: ['BDMV/STREAM/00009.m2ts'] });
       await untilPlaying(h);
