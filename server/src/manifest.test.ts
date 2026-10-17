@@ -1,14 +1,15 @@
-import { closeSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DiscManifest } from '../../src/engine/disc/nas-api';
 import { buildUdf250 } from '../../tests/helpers/udf-image';
 import { appHandlers } from './app';
 import type { Auth } from './auth';
 import { createServer } from './http';
+import { IsoTrees } from './iso';
 import { Library } from './library';
 import { buildManifest } from './manifest';
 import { discRoutes } from './routes/discs';
@@ -85,6 +86,8 @@ describe('disc routes', () => {
     writeFileSync(join(root, 'big/BDMV/STREAM/empty.m2ts'), '');
     copyFileSync(join(FIXTURES, 'disc1.iso'), join(root, 'disc.iso'));
     copyFileSync(join(FIXTURES, 'disc1.iso'), join(root, 'gone.iso'));
+    copyFileSync(join(FIXTURES, 'disc1.iso'), join(root, 'swap.iso'));
+    copyFileSync(join(FIXTURES, 'disc1.iso'), join(root, 'race.iso'));
     const fd = openSync(join(root, 'multi.iso'), 'w');
     for (const [lba, block] of multi.image.blocks) writeSync(fd, block, 0, block.length, lba * 2048);
     closeSync(fd);
@@ -294,6 +297,33 @@ describe('disc routes', () => {
       const res = await fetch(`${base}/${ids['gone.iso']}/${path}`);
       expect(res.status, path).toBe(404);
       expect(await res.json()).toEqual({ error: 'disc-changed' });
+    }
+  });
+
+  it('answers 500 when an unchanged image no longer parses', async () => {
+    const path = join(tmp, 'root', 'swap.iso');
+    // A whole-second mtime, so that putting it back is exact; rescanned so the id matches it.
+    utimesSync(path, 1_700_000_000, 1_700_000_000);
+    await library.scan();
+    for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
+    writeFileSync(path, Buffer.alloc(statSync(path).size)); // same size, same mtime: unchanged to the server
+    utimesSync(path, 1_700_000_000, 1_700_000_000);
+    const res = await fetch(`${base}/${ids['swap.iso']}/manifest`);
+    expect(res.status).toBe(500);
+  });
+
+  it('answers 404 disc-changed when an image changes while its tree is parsed', async () => {
+    const path = join(tmp, 'root', 'race.iso');
+    const get = vi.spyOn(IsoTrees.prototype, 'get').mockImplementation(async () => {
+      writeFileSync(path, Buffer.alloc(2048));
+      throw new Error('not a UDF image');
+    });
+    try {
+      const res = await fetch(`${base}/${ids['race.iso']}/manifest`);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'disc-changed' });
+    } finally {
+      get.mockRestore();
     }
   });
 });

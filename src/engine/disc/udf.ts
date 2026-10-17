@@ -55,9 +55,11 @@ const AD_NORMAL = 0;
 const AD_EXTENT_AD = 3;
 
 const CHAR_DIR = 0x02;
+const CHAR_DELETED = 0x04;
 const CHAR_PARENT = 0x08;
 
 const FT_DIR = 4;
+const FT_BYTESTREAM = 5;
 const FT_METADATA = 250;
 const FT_METADATA_MIRROR = 251;
 
@@ -241,6 +243,11 @@ interface DirEntry {
 const MAX_VDP_HOPS = 64;
 const MAX_ALLOCATION_EXTENTS = 4096;
 const MAX_DEPTH = 32;
+/** Bounds on lengths read from the image, checked before anything is allocated or read. */
+const MAX_DIR_BYTES = 16 * 1024 * 1024;
+const MAX_VDS_BLOCKS = 256;
+/** Files above 8 TiB are taken as corrupt entries. */
+const MAX_FILE_BYTES = 2 ** 43;
 
 class Volume {
   constructor(
@@ -284,6 +291,8 @@ class Volume {
     if (!fe || fe.inline) return fe;
     for (let n = 0; n < MAX_ALLOCATION_EXTENTS && fe.ads.at(-1)?.extentType === AD_EXTENT_AD; n++) {
       const next = fe.ads.pop()!;
+      // An allocation extent is at most one block (UDF 2.60, 2.3.11).
+      if (next.length > BLOCK) throw new UdfError('UDF: allocation extent longer than a block');
       const aed = await this.readMetadata(next);
       if (!aed || aed.tag !== TAG_AED || !decodeAllocationExtent(fe, aed.data, next.length, next.partition)) break;
     }
@@ -298,6 +307,7 @@ class Volume {
     // Like libudfread, a directory is read from its first extent only.
     const loc = fe.ads[0];
     if (!loc) return null;
+    if (loc.length > MAX_DIR_BYTES) throw new UdfError('UDF: directory too large');
     const data = await this.readMetadata(loc);
     return data ? parseDir(data.data, loc.length) : null;
   }
@@ -337,7 +347,7 @@ function parseDir(data: Uint8Array, length: number): DirEntry[] | null {
     if (!decoded) break; // Not enough data: keep the entries read so far.
     p += decoded.used;
     const { fid } = decoded;
-    if (fid.characteristic & CHAR_PARENT || fid.filename.length < 1) continue;
+    if (fid.characteristic & (CHAR_PARENT | CHAR_DELETED) || fid.filename.length < 1) continue;
     const name = cs0ToString(fid.filename);
     if (!name) continue;
     out.push({ name, icb: fid.icb, characteristic: fid.characteristic });
@@ -373,7 +383,7 @@ async function searchVds(input: UdfRead, first: ExtentAd): Promise<{ pd: Partiti
   let loc = first;
   for (let hops = 0; hops < MAX_VDP_HOPS; hops++) {
     let next: ExtentAd | null = null;
-    const end = loc.lba + Math.floor(loc.length / BLOCK);
+    const end = loc.lba + Math.min(Math.floor(loc.length / BLOCK), MAX_VDS_BLOCKS);
     for (let lba = loc.lba; lba < end; lba++) {
       const buf = await Volume.readBlocks(input, lba, 1);
       const tag = buf ? decodeDescriptorTag(buf) : TAG_INVALID;
@@ -501,7 +511,10 @@ export class UdfImage {
     return null;
   }
 
-  /** Every regular file, sorted by path; on a case clash the first name wins, and unreadable entries are left out. */
+  /**
+   * Every regular file, sorted by path; on a case clash the first name wins, and unreadable entries (and other file
+   * types) are left out. Rejects with a UdfError when a directory or allocation extent is malformed.
+   */
   async files(): Promise<UdfFile[]> {
     const out = new Map<string, UdfFile>();
     const seen = new Set<string>();
@@ -524,9 +537,11 @@ export class UdfImage {
     return [...out.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
+  /** A regular file (a byte stream, UDF 2.60 2.3.5.2) of a sane size, or null. */
   private async file(path: string, entry: DirEntry): Promise<UdfFile | null> {
     const fe = await this.volume.readFileEntry(entry.icb);
-    return fe ? { path, size: fe.length, extents: this.volume.extents(fe) } : null;
+    if (!fe || fe.fileType !== FT_BYTESTREAM || fe.length > MAX_FILE_BYTES) return null;
+    return { path, size: fe.length, extents: this.volume.extents(fe) };
   }
 }
 

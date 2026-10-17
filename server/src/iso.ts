@@ -6,11 +6,16 @@ import { UdfError, UdfImage, readUdf, udfPieces } from '../../src/engine/disc/ud
 import type { UdfExtent, UdfFile, UdfRead } from '../../src/engine/disc/udf';
 import { discId } from './disc-id';
 
-/** Runs `fn` with a reader over the image at `abs`, open for that long. */
-async function withImage<T>(abs: string, fn: (read: UdfRead) => Promise<T>): Promise<T> {
+/**
+ * Runs `fn` with a reader over the image at `abs`, open for that long, and the image's size. A request past the end
+ * is clamped to it before anything is allocated, so it comes back short.
+ */
+async function withImage<T>(abs: string, fn: (read: UdfRead, size: number) => Promise<T>): Promise<T> {
   const handle = await open(abs, 'r');
   try {
-    return await fn(async (offset, length) => {
+    const { size } = await handle.stat();
+    return await fn(async (offset, requested) => {
+      const length = Math.max(0, Math.min(requested, size - offset));
       const buf = Buffer.alloc(length);
       let got = 0;
       while (got < length) {
@@ -19,7 +24,7 @@ async function withImage<T>(abs: string, fn: (read: UdfRead) => Promise<T>): Pro
         got += bytesRead;
       }
       return buf.subarray(0, got);
-    });
+    }, size);
   } finally {
     await handle.close();
   }
@@ -59,7 +64,11 @@ export class IsoTrees {
     if (tree) {
       this.trees.delete(id);
     } else {
-      tree = withImage(abs, readUdf).then((files) => new Map(files.map((f) => [f.path, f])));
+      tree = withImage(abs, async (read, size) => {
+        const files = await readUdf(read);
+        // A file whose extents go past the end of the image is left out: it could not be served whole.
+        return new Map(files.filter((f) => f.extents.every((e) => e.offset < 0 || e.offset + e.length <= size)).map((f) => [f.path, f]));
+      });
       // A failed parse isn't kept: the next request tries again.
       tree.catch(() => {
         if (this.trees.get(id) === tree) this.trees.delete(id);
@@ -83,7 +92,13 @@ function piecesStream(abs: string, pieces: readonly UdfExtent[]): Readable {
       if (piece.offset < 0) {
         for (let left = piece.length; left > 0; left -= ZEROS.length) yield ZEROS.subarray(0, Math.min(left, ZEROS.length));
       } else {
-        yield* createReadStream(abs, { start: piece.offset, end: piece.offset + piece.length - 1 }) as AsyncIterable<Buffer>;
+        let got = 0;
+        for await (const chunk of createReadStream(abs, { start: piece.offset, end: piece.offset + piece.length - 1 }) as AsyncIterable<Buffer>) {
+          got += chunk.length;
+          yield chunk;
+        }
+        // The image is shorter than the tree says: fail the body rather than end it early.
+        if (got < piece.length) throw new Error(`short read in ${abs} at ${piece.offset}`);
       }
     }
   }
@@ -103,7 +118,11 @@ export async function readIsoFiles(abs: string, files: readonly UdfFile[]): Prom
       const buf = Buffer.alloc(file.size);
       let at = 0;
       for (const piece of udfPieces(file, 0, file.size)) {
-        if (piece.offset >= 0) buf.set(await read(piece.offset, piece.length), at);
+        if (piece.offset >= 0) {
+          const bytes = await read(piece.offset, piece.length);
+          if (bytes.length < piece.length) throw new Error(`short read in ${abs} at ${piece.offset}`);
+          buf.set(bytes, at);
+        }
         at += piece.length;
       }
       out.set(file.path, buf);
