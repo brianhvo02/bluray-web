@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
+import { PairScreen } from './nas/PairScreen';
+import type { NasClient } from './nas/nas-client';
+import type { NasPairing } from './nas/nas-store';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
@@ -10,9 +13,12 @@ const COPY_NOTICE_DELAY_MS = 1500;
 interface LandingScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
+  readonly nas: NasClient;
+  /** A code from a `?pair=` link: the pair screen opens with it filled in. */
+  readonly pairCode?: string;
 }
 
-export function LandingScreen({ controller, snapshot }: LandingScreenProps): ReactElement {
+export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingScreenProps): ReactElement {
   const [capabilities] = useState(() => checkCapabilities());
   const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
@@ -26,6 +32,14 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   useEffect(() => {
     listRecentDiscs().then(setRecent, () => setRecent([]));
   }, []);
+
+  /** undefined while loading; null when this device isn't paired. */
+  const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
+  const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
+  const loadPairing = (): void => {
+    nas.pairing().then(setPairing, () => setPairing(null));
+  };
+  useEffect(loadPairing, [nas]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -168,6 +182,21 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
           )}
         </div>
       )}
+      {pairing !== undefined &&
+        (pairing === null || pairRequested ? (
+          <PairScreen
+            client={nas}
+            initialCode={pairCode}
+            onPaired={() => {
+              setPairRequested(false);
+              loadPairing();
+            }}
+          />
+        ) : (
+          <p className="status" data-testid="nas-paired">
+            Paired with the NAS as {pairing.deviceName}.
+          </p>
+        ))}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>

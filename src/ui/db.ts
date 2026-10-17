@@ -1,5 +1,5 @@
 const DB_NAME = 'bluray-web';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 /** v1 keyed discs by folder name, so two discs opened via folders named "BDMV" overwrote each other. */
 const LEGACY_RECENT_STORE = 'recent-discs';
 
@@ -8,6 +8,8 @@ export const STORES = {
   shaderFiles: 'shader-files',
   shaderSets: 'shader-sets',
   settings: 'settings',
+  /** The NAS pairing, one record under the key 'pairing'. */
+  nas: 'nas',
 } as const;
 
 function openDb(factory: IDBFactory): Promise<IDBDatabase> {
@@ -23,6 +25,7 @@ function openDb(factory: IDBFactory): Promise<IDBDatabase> {
       create(STORES.shaderFiles, { keyPath: 'name' });
       create(STORES.shaderSets, { keyPath: 'name' });
       create(STORES.settings, { keyPath: 'key' });
+      create(STORES.nas, {});
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
