@@ -18,7 +18,6 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    inputRef.current?.setAttribute('webkitdirectory', '');
     listRecentDiscs().then(setRecent, () => setRecent([]));
   }, []);
 
@@ -121,7 +120,8 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         <button type="button" data-testid="open-folder" disabled={!capabilities.core.ok} onClick={onPickFolder}>
           Open disc folder
         </button>
-        <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" onChange={onInput} />
+        {/* webkitdirectory is rendered, not set in an effect: the input must pick folders from the moment it exists */}
+        <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" {...{ webkitdirectory: '' }} onChange={onInput} />
       </div>
       {snapshot.engineState === 'loading' && <p className="status">Reading disc…</p>}
       {error && (
