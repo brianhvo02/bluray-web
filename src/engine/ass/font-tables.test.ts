@@ -101,7 +101,11 @@ describe('readFontFile', () => {
     expect(fonts.faces.map((f) => [f.index, f.families[0]])).toEqual([[0, 'DejaVu Sans'], [1, 'DejaVu Serif']]);
     const serif = await readFontFile('serif.ttf', extractFace(fonts, 1));
     expect(serif.faces.map((f) => f.postscriptName)).toEqual(['DejaVuSerif']);
-    expect(extractFace(await load('DejaVuSans.ttf'), 0)).toEqual(file('DejaVuSans.ttf'));
+    // not toEqual: its element-by-element compare of the 740 KiB font took 0.6 s here and 2.7 s on CI
+    const sans = file('DejaVuSans.ttf');
+    const extracted = extractFace(await load('DejaVuSans.ttf'), 0);
+    expect(extracted.length).toBe(sans.length);
+    expect(extracted.findIndex((b, i) => b !== sans[i])).toBe(-1);
   });
 
   it('reads WOFF', async () => {

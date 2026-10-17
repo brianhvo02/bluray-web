@@ -714,13 +714,9 @@ describe('Player', () => {
     });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
-    await vi.waitFor(
-      async () => {
-        await h.play(20);
-        expect(requested).toBe(true); // read-ahead reached item 2
-      },
-      { timeout: 5000 },
-    );
+    // Steps the playback directly: vi.waitFor's 50 ms polls made the ~1.5 s of playback this needs take ~3.7 s of the 5 s.
+    for (let ms = 0; ms < 5000 && !requested; ms += 20) await h.play(20);
+    expect(requested).toBe(true); // read-ahead reached item 2
     return { h, fail: () => reject(new Error('offline')) };
   }
 
