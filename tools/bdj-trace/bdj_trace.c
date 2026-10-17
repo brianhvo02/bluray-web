@@ -1,7 +1,8 @@
 /* BD-J trace harness: plays a disc headless through patched libbluray with BD-J enabled. The patch prints one JSONL
  * line per JNI native call to stdout. With --keys or --planes this program adds its own lines there: one per ARGB
  * overlay flush (and, with --keys, one per script step and one at the end). Diagnostics go to stderr.
- * usage: bdj_trace <disc> [--seconds N] [--planes] [--keys FILE] [--tail S] [--dump-planes DIR]
+ * usage: bdj_trace <disc> [--seconds N] [--planes] [--keys FILE] [--tail S] [--wait-timeout S] [--dump-planes DIR]
+ * Exit status 3 when a script wait times out or the run ends with script steps left.
  * Reads the stream no faster than real time, so BD-J timers and playback progress behave roughly as on a player. */
 #include <libbluray/bluray.h>
 #include <libbluray/keys.h>
@@ -233,7 +234,14 @@ static int parse_script(const char *path, step_t **out)
     snprintf(s.text, sizeof s.text, "%s%s%s%s%s", w[0], cnt > 1 ? " " : "", w[1], cnt > 2 ? " " : "", w[2]);
     if (n == cap) {
       cap = cap ? cap * 2 : 16;
-      steps = realloc(steps, (size_t)cap * sizeof *steps);
+      step_t *grown = realloc(steps, (size_t)cap * sizeof *steps);
+      if (!grown) {
+        fprintf(stderr, "out of memory reading %s\n", path);
+        fclose(f);
+        free(steps);
+        return -1;
+      }
+      steps = grown;
     }
     steps[n++] = s;
     continue;
@@ -248,7 +256,33 @@ static int parse_script(const char *path, step_t **out)
   return n;
 }
 
-static int last_playlist = -1, last_title = -1;
+/* BD_EVENT_PLAYLIST and BD_EVENT_TITLE params seen since the previous step ran (the window `wait playlist` and
+ * `wait title` look at, so a later event cannot hide an earlier match) */
+#define MAX_SEEN 256
+static struct {
+  int playlist;
+  unsigned param;
+} seen[MAX_SEEN];
+static int nseen;
+
+static void note_event(int playlist, unsigned param)
+{
+  if (nseen < MAX_SEEN) {
+    seen[nseen].playlist = playlist;
+    seen[nseen].param = param;
+    nseen++;
+  }
+}
+
+static int seen_since_step(int playlist, int param)
+{
+  for (int i = 0; i < nseen; i++) {
+    if (seen[i].playlist == playlist && seen[i].param == (unsigned)param) {
+      return 1;
+    }
+  }
+  return 0;
+}
 static int step_flushes; /* the flush count just before the previous step ran */
 
 /* `wait still MS`: the plane has flushed since the previous step and then not again for MS milliseconds */
@@ -265,8 +299,8 @@ static int wait_met(const step_t *s)
   switch (s->kind) {
     case S_WAIT_FLUSH: return flush_count() >= s->a;
     case S_WAIT_STILL: return plane_still(s->a);
-    case S_WAIT_PLAYLIST: return last_playlist == s->a;
-    case S_WAIT_TITLE: return last_title == s->a;
+    case S_WAIT_PLAYLIST: return seen_since_step(1, s->a);
+    case S_WAIT_TITLE: return seen_since_step(0, s->a);
     default: return 1;
   }
 }
@@ -296,11 +330,13 @@ static void step_line(int n, const char *text)
 int main(int argc, char **argv)
 {
   const char *disc = NULL, *keys = NULL;
-  double limit = 60, tail = 5;
+  double limit = 60, tail = 5, wait_timeout = 30;
   int bad = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--seconds") && i + 1 < argc) {
       limit = atof(argv[++i]);
+    } else if (!strcmp(argv[i], "--wait-timeout") && i + 1 < argc) {
+      wait_timeout = atof(argv[++i]);
     } else if (!strcmp(argv[i], "--tail") && i + 1 < argc) {
       tail = atof(argv[++i]);
     } else if (!strcmp(argv[i], "--keys") && i + 1 < argc) {
@@ -316,7 +352,8 @@ int main(int argc, char **argv)
     }
   }
   if (!disc || bad) {
-    fprintf(stderr, "usage: %s <disc> [--seconds N] [--planes] [--keys FILE] [--tail S] [--dump-planes DIR]\n", argv[0]);
+    fprintf(stderr, "usage: %s <disc> [--seconds N] [--planes] [--keys FILE] [--tail S] [--wait-timeout S] "
+            "[--dump-planes DIR]\n", argv[0]);
     return 2;
   }
   step_t *steps = NULL;
@@ -346,7 +383,7 @@ int main(int argc, char **argv)
   }
 
   static unsigned char buf[6144 * 32];
-  double playlist_wall = 0, script_done = -1;
+  double playlist_wall = 0, script_done = -1, step_start = 0; /* step_start: when the current step became current */
   const char *why = "limit";
   while (now_s() < limit) {
     /* the script: each step runs once its wait holds; key and mouse steps run at once */
@@ -355,6 +392,12 @@ int main(int argc, char **argv)
       run_step(bd, &steps[idx]);
       step_line(idx, steps[idx].text);
       idx++;
+      nseen = 0;
+      step_start = now_s();
+    }
+    if (idx < nsteps && now_s() - step_start >= wait_timeout) {
+      why = "timeout";
+      break;
     }
     if (keys && idx == nsteps) {
       if (script_done < 0) {
@@ -370,9 +413,9 @@ int main(int argc, char **argv)
     for (;;) {
       if (ev.event == BD_EVENT_PLAYLIST) {
         playlist_wall = now_s();
-        last_playlist = (int)ev.param;
+        note_event(1, ev.param);
       } else if (ev.event == BD_EVENT_TITLE) {
-        last_title = (int)ev.param;
+        note_event(0, ev.param);
       }
       if (!bd_get_event(bd, &ev)) {
         break;
@@ -393,11 +436,25 @@ int main(int argc, char **argv)
       usleep((useconds_t)((ahead - 0.5) * 1e6));
     }
   }
+  int status = 0;
   if (keys) {
-    printf("{\"script\":\"end\",\"n\":%d,\"why\":\"%s\",\"flushes\":%d,\"t\":%ld}\n", idx, why, flush_count(),
-           (long)(now_s() * 1000));
+    if (!strcmp(why, "timeout")) {
+      /* step text is made of script words, nothing to escape */
+      printf("{\"script\":\"end\",\"why\":\"timeout\",\"n\":%d,\"text\":\"%s\",\"flushes\":%d,\"t\":%ld}\n", idx,
+             steps[idx].text, flush_count(), (long)(now_s() * 1000));
+      fprintf(stderr, "bdj_trace: script step %d \"%s\" did not hold within %g s\n", idx, steps[idx].text, wait_timeout);
+      status = 3;
+    } else {
+      printf("{\"script\":\"end\",\"n\":%d,\"why\":\"%s\",\"flushes\":%d,\"t\":%ld}\n", idx, why, flush_count(),
+             (long)(now_s() * 1000));
+      if (idx < nsteps) {
+        fprintf(stderr, "bdj_trace: run ended (%s) at script step %d \"%s\" with %d steps left\n", why, idx,
+                steps[idx].text, nsteps - idx);
+        status = 3;
+      }
+    }
   }
   fflush(stdout);
   bd_close(bd);
-  return 0;
+  return status;
 }
