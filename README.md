@@ -6,8 +6,11 @@ Client-side Blu-ray (BDMV) player for the browser. Supported: Safari 26 (macOS, 
 - `npm run dev`: dev server (cross-origin isolated).
 - `npm test`: unit tests. `npm run test:e2e`: Playwright (the `chromium` and `mobile-chromium` projects require Google Chrome; all projects need a working audio output; `--project=firefox|webkit|mobile-chromium` runs the others).
   The A/V sync checks allow 20 ms mean and 50 ms max offset; `SYNC_TOLERANCE_SCALE=2` doubles both on slower machines.
-- `npm run wasm:build` rebuilds `src/wasm/audio/audio.wasm` (FFmpeg n9.0.2 AC-3, E-AC-3 and DTS decoders plus `shim.c`) in Docker.
-  It needs Docker. The build is reproducible, and `.github/workflows/wasm.yml` checks that the committed `audio.wasm` matches.
+- `npm run wasm:build` rebuilds `src/wasm/audio/audio.wasm` (FFmpeg n9.0.2 AC-3, E-AC-3 and DTS decoders plus `shim.c`) and
+  `src/wasm/freetype/freetype.wasm` (FreeType 2.13.2 as Ubuntu 24.04 ships it, for BD-J text) in Docker
+  (`wasm:build:audio` / `wasm:build:freetype` build one). It needs Docker. The builds are reproducible, and
+  `.github/workflows/wasm.yml` checks that the committed `.wasm` files match. `npm run bdj-trace:freetype-golden`
+  regenerates `tests/bdj/fonts/freetype-golden.json` from the BD-J harness image's system FreeType.
 - `npm run fixture:synthetic` regenerates `fixtures/synthetic/`. It needs `ffmpeg` on PATH, because the audio fixtures and
   `disc3` use its ac3, eac3, dca and truehd encoders. Their bytes depend on the host ffmpeg version (currently 9.0.2).
   `fixtures/synthetic/disc3` is the four-codec audio disc (LPCM, AC-3 5.1, TrueHD with an AC-3 core, DTS).

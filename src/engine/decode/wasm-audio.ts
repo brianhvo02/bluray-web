@@ -1,3 +1,5 @@
+import { instantiateStandaloneWasm } from '../util/standalone-wasm';
+
 export interface AudioWasm {
   readonly memory: WebAssembly.Memory;
   audio_open(codec: number): number;
@@ -22,39 +24,10 @@ export class AudioFrameError extends Error {
 
 /** Largest output of one access unit: a DTS frame of 128 blocks × 32 samples, with headroom. */
 const MAX_FRAMES = 8192;
-const ENOSYS = 52;
 
-/** Streams the compile; a wrong Content-Type makes that reject with a TypeError, so retry from the buffered body. */
-async function compileResponse(response: Response): Promise<WebAssembly.Module> {
-  try {
-    return await WebAssembly.compileStreaming(response.clone());
-  } catch (err) {
-    if (!(err instanceof TypeError)) throw err;
-    return WebAssembly.compile(await response.arrayBuffer());
-  }
-}
-
-/**
- * Instantiates the standalone (WASI-flavoured) module without emscripten's JS glue. The shim never does I/O,
- * so WASI calls fail with ENOSYS and exits throw.
- */
-export async function loadAudioWasm(source: BufferSource | Promise<Response>): Promise<AudioWasm> {
-  const module = source instanceof Promise ? await compileResponse(await source) : await WebAssembly.compile(source);
-  const imports: Record<string, Record<string, WebAssembly.ImportValue>> = {};
-  for (const imp of WebAssembly.Module.imports(module)) {
-    if (imp.kind !== 'function') throw new Error(`audio.wasm needs an unexpected ${imp.kind} import ${imp.module}.${imp.name}`);
-    const exits = imp.name === 'proc_exit' || imp.name === 'abort';
-    const value = imp.module === 'wasi_snapshot_preview1' ? ENOSYS : 0;
-    (imports[imp.module] ??= {})[imp.name] = exits
-      ? (code: number): never => {
-          throw new Error(`audio decoder aborted (${code})`);
-        }
-      : (): number => value;
-  }
-  const instance = await WebAssembly.instantiate(module, imports);
-  const exports = instance.exports as unknown as AudioWasm & { _initialize?: () => void };
-  exports._initialize?.();
-  return exports;
+/** Instantiates audio.wasm (src/wasm/audio/) without emscripten's JS glue. */
+export function loadAudioWasm(source: BufferSource | Promise<Response>): Promise<AudioWasm> {
+  return instantiateStandaloneWasm<AudioWasm>(source, 'audio.wasm', 'audio decoder');
 }
 
 /** One FFmpeg decoder instance inside the shared module; decodes whole frames to interleaved stereo. */

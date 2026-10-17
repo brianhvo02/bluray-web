@@ -134,6 +134,17 @@ FFmpeg decoders (src/wasm/audio/), LGPL-2.1-or-later
   audio.wasm is built from FFmpeg n9.0.2 (ac3, eac3, dca decoders) and src/wasm/audio/shim.c.
   See src/wasm/audio/NOTICE for the exact source and build.
 
+FreeType (https://freetype.org), FreeType License (FTL)
+  Portions of this software are copyright © 2023 The FreeType Project
+  (www.freetype.org). All rights reserved.
+  freetype.wasm (src/wasm/freetype/), which bdj/fonts/freetype.ts loads for
+  BD-J text, is built from FreeType 2.13.2 as Ubuntu 24.04 ships it, used
+  under the FreeType License (FreeType is dual FTL / GPLv2). The licence text
+  is src/wasm/freetype/FTL.TXT; src/wasm/freetype/NOTICE has the exact source
+  and build. bdj/fonts/freetype.ts and src/wasm/freetype/shim.c are original
+  code that makes the FreeType calls of libbluray's
+  src/libbluray/bdj/native/java_awt_BDFontMetrics.c and java_awt_BDGraphics.c.
+
 DoppioJVM (https://github.com/plasma-umass/doppio), MIT
   Commit 41f41fbae16f23d2791471e150eeb50ad1247eb8 (cloned into .cache/doppio).
   Derived functions:

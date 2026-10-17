@@ -13,6 +13,7 @@ import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
 import { normalizeDiscPaths } from '../disc/paths';
 import { BdjError } from './errors';
+import type { FreeType } from './fonts/freetype';
 import type { NativeTable } from './jvm/natives/index';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
@@ -54,6 +55,11 @@ function eventLoopTurn(): () => Promise<void> {
 export interface BdjWorkerOptions {
   /** JvmOptions.extraIntrinsics: the class library's intrinsics (src/bdj-classlib/intrinsics), which the engine does not carry. */
   readonly extraIntrinsics?: (table: NativeTable) => void;
+  /**
+   * FreeType for the BD-J text natives (java_awt_BDFontMetrics.c, java_awt_BDGraphics.c), loaded when text is first
+   * needed, not at boot: the entry fetches src/wasm/freetype/freetype.wasm. Calls share one load.
+   */
+  readonly loadFreeType?: () => Promise<FreeType>;
 }
 
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */

@@ -9,10 +9,14 @@ on:
 
 jobs:
   reproducible:
-    name: audio.wasm matches its source
+    name: ${{ matrix.module }}.wasm matches its source
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [audio, freetype]
     steps:
       - uses: actions/checkout@v4
-      - run: src/wasm/audio/build.sh
-      - run: git diff --exit-code src/wasm/audio/
+      - run: src/wasm/${{ matrix.module }}/build.sh
+      - run: git diff --exit-code src/wasm/${{ matrix.module }}/
