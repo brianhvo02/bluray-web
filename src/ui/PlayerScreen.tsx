@@ -4,7 +4,7 @@ import { ControlBar } from './ControlBar';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { collectDroppedFiles, splitPick } from '../player/drop-files';
 import { checkCapabilities } from './capabilities';
-import { FULLSCREEN_HINT_TEXT, isFullscreenHintDismissed, markFullscreenHintDismissed, shouldShowFullscreenHint, toggleFullscreen, type FullscreenKind } from './fullscreen';
+import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismissed, safeLocalStorage, toggleFullscreen } from './fullscreen';
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
@@ -32,18 +32,15 @@ function uoContext(controller: PlayerController): { playing: boolean; popupShown
   return { playing: now.engineState === 'playing' || now.engineState === 'buffering', popupShown: now.menuActive && now.popupAvailable };
 }
 
-/** The storage and media queries behind the fullscreen hint; each can throw or be missing, which means "don't show". */
-function initialHintVisible(fullscreen: FullscreenKind | null): boolean {
-  try {
-    return shouldShowFullscreenHint({
-      fullscreen,
-      coarsePointer: window.matchMedia('(pointer: coarse)').matches,
-      standalone: window.matchMedia('(display-mode: standalone)').matches,
-      dismissed: isFullscreenHintDismissed(window.localStorage),
-    });
-  } catch {
-    return false;
-  }
+function Notice({ message, onDismiss, testId }: { message: string; onDismiss(): void; testId?: string }): ReactElement {
+  return (
+    <div className="notice" role="status" data-testid={testId}>
+      {message}
+      <button type="button" aria-label="Dismiss" onClick={onDismiss}>
+        ×
+      </button>
+    </div>
+  );
 }
 
 export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }: PlayerScreenProps): ReactElement {
@@ -56,7 +53,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const [menuOpen, setMenuOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
   const [fullscreen] = useState(() => checkCapabilities().fullscreen);
-  const [hintVisible, setHintVisible] = useState(() => initialHintVisible(fullscreen));
+  const [hintVisible, setHintVisible] = useState(() => evaluateFullscreenHint(fullscreen));
   const playing = snapshot.engineState === 'playing';
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
@@ -263,27 +260,18 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           </div>
         )}
         {snapshot.notices.map((n) => (
-          <div key={n.code} className="notice" role="status">
-            {n.message}
-            <button type="button" aria-label="Dismiss" onClick={() => controller.dismissNotice(n.code)}>
-              ×
-            </button>
-          </div>
+          <Notice key={n.code} message={n.message} onDismiss={() => controller.dismissNotice(n.code)} />
         ))}
         {hintVisible && (
-          <div className="notice" role="status" data-testid="fullscreen-hint">
-            {FULLSCREEN_HINT_TEXT}
-            <button
-              type="button"
-              aria-label="Dismiss"
-              onClick={() => {
-                markFullscreenHintDismissed(window.localStorage);
-                setHintVisible(false);
-              }}
-            >
-              ×
-            </button>
-          </div>
+          <Notice
+            message={FULLSCREEN_HINT_TEXT}
+            testId="fullscreen-hint"
+            onDismiss={() => {
+              setHintVisible(false);
+              const storage = safeLocalStorage();
+              if (storage) markFullscreenHintDismissed(storage);
+            }}
+          />
         )}
       </div>
       {snapshot.engineState === 'buffering' && <div className="spinner" aria-label="Buffering" />}
@@ -314,7 +302,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         shaderState={shaderState}
         visible={controlsVisible}
         onOpenPlaylists={() => setPickerOpen(true)}
-        onFullscreen={fullscreen ? () => rootRef.current && toggleFullscreen(document, rootRef.current, fullscreen) : undefined}
+        onFullscreen={
+          fullscreen
+            ? () => {
+                if (rootRef.current) toggleFullscreen(document, rootRef.current, fullscreen);
+              }
+            : undefined
+        }
         onMenuKey={sendMenuKey}
         remoteOpen={remoteOpen}
         onToggleRemote={() => setRemoteOpen((o) => !o)}

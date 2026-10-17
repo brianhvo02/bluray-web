@@ -34,7 +34,7 @@ export function shouldShowFullscreenHint({ fullscreen, coarsePointer, standalone
   return fullscreen === null && coarsePointer && !standalone && !dismissed;
 }
 
-interface HintStorage {
+export interface HintStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 }
@@ -54,4 +54,36 @@ export function markFullscreenHintDismissed(storage: HintStorage): void {
   } catch {
     // ignored
   }
+}
+
+/** `window.localStorage` itself throws SecurityError in some modes. */
+export function safeLocalStorage(win: { readonly localStorage: HintStorage } = window): HintStorage | null {
+  try {
+    return win.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export interface HintEnvironment {
+  matchMedia(query: string): { readonly matches: boolean };
+  readonly localStorage: HintStorage;
+}
+
+/**
+ * Whether to show the hint now. Unusable storage counts as "not dismissed" (the hint shows again next time); a missing or
+ * throwing matchMedia means we can't tell the device, so no hint.
+ */
+export function evaluateFullscreenHint(fullscreen: FullscreenKind | null, win: HintEnvironment = window): boolean {
+  let coarsePointer: boolean;
+  let standalone: boolean;
+  try {
+    coarsePointer = win.matchMedia('(pointer: coarse)').matches;
+    standalone = win.matchMedia('(display-mode: standalone)').matches;
+  } catch {
+    return false;
+  }
+  const storage = safeLocalStorage(win);
+  const dismissed = storage !== null && isFullscreenHintDismissed(storage);
+  return shouldShowFullscreenHint({ fullscreen, coarsePointer, standalone, dismissed });
 }
