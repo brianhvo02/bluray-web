@@ -298,6 +298,9 @@ export class Player {
   private bdj: BdjTitle | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
+  /** When the open command for this disc arrived (nowMs), and BD-J start-up times since then (telemetry `bdj`). */
+  private openedAtMs = 0;
+  private bdjStartup: { bootMs: number | null; firstPlaylistMs: number | null; firstFrameMs: number | null } | null = null;
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -446,6 +449,8 @@ export class Player {
     const now = this.clock.nowUs();
     const frame = this.presenter.select(now);
     if (frame && this.state === 'playing') this.offsets.push(now - frame.timestamp);
+    const startup = this.bdjStartup;
+    if (frame && s.owner === 'bdj' && startup && startup.firstPlaylistMs !== null && startup.firstFrameMs === null) startup.firstFrameMs = this.sinceOpenMs();
     this.pg?.tick(now);
     this.paint(frame, now);
     this.feedDecoder(s); // presenting freed decoded-frame slots
@@ -536,6 +541,8 @@ export class Player {
   }
 
   private async open(entries: ReadonlyArray<readonly [string, Blob]>): Promise<void> {
+    this.openedAtMs = this.deps.nowMs();
+    this.bdjStartup = null;
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
@@ -685,6 +692,7 @@ export class Player {
       setTimer: this.deps.setTimer ?? defaultSetTimer,
     });
     entry = { session, host, events, regs: programRegs, status, end: () => void (ended = true), pendingTitle: null, booted: false };
+    this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
     this.deps.emit({ type: 'bdjActive', active: true });
@@ -706,6 +714,7 @@ export class Player {
     await entry.session.boot(this.discEntries, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
+    if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();
     const title = entry.pendingTitle;
     entry.pendingTitle = null;
     if (title !== null) entry.session.start(title);
@@ -961,7 +970,11 @@ export class Player {
   /** The port a BD-J title (PlayerBdjHost) drives playback through; it does nothing once `live` turns false. */
   bdjPort(live: () => boolean = () => true): BdjPlaybackPort {
     return {
-      playPlaylist: (id, at) => (live() ? this.playPlaylistFor('bdj', id, at) : Promise.resolve(false)),
+      playPlaylist: (id, at) => {
+        if (!live()) return Promise.resolve(false);
+        if (this.bdjStartup && this.bdjStartup.firstPlaylistMs === null) this.bdjStartup.firstPlaylistMs = this.sinceOpenMs();
+        return this.playPlaylistFor('bdj', id, at);
+      },
       seekPlayItem: (item) => {
         if (live()) this.seekPlayItem(item);
       },
@@ -2006,8 +2019,13 @@ export class Player {
         textFile: this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.file ?? null : null,
         ass: this.assStats(),
         shader: this.shaderStage?.stats ?? null,
+        bdj: this.bdjStartup ? { ...this.bdjStartup } : null,
       },
     });
+  }
+
+  private sinceOpenMs(): number {
+    return Math.round(this.deps.nowMs() - this.openedAtMs);
   }
 
   private textCueVisible(): boolean {

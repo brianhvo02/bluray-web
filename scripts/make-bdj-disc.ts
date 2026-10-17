@@ -2,8 +2,9 @@ import { readFileSync } from 'node:fs';
 import { CodingType } from '../src/engine/bdmv/stream-types';
 import { buildIndex } from '../tests/helpers/bdmv-builders';
 import { buildBdjo } from '../tests/helpers/bdjo-builder';
-import { buildSyntheticDisc, syntheticClip } from '../tests/helpers/synthetic-disc';
+import { CLIP_START_PTS, buildSyntheticDisc } from '../tests/helpers/synthetic-disc';
 import { writeFixture } from './fixture-dir';
+import { encodeTestVideo } from './x264';
 
 const outDir = process.argv[2];
 if (!outDir) {
@@ -18,8 +19,9 @@ const ORG_ID = 0x7fff0001;
 const KEY_PLAY = 0x80000000; // VK_PLAY in the key interest table
 const BDJ_INTERACTIVE = 3;
 
+// Real H.264 (x264, IDR every second) so the disc also plays in Chrome (tests/e2e/bdj.spec.ts).
 const files = buildSyntheticDisc({
-  clips: [syntheticClip('00000', 2, { audio: CodingType.LPCM })],
+  clips: [{ clipId: '00000', videoAus: encodeTestVideo(2 * 24), keyIndices: [0, 24], startPts: CLIP_START_PTS, audio: CodingType.LPCM }],
   playlists: [{ id: '00000', clipIds: ['00000'] }],
 });
 

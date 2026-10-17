@@ -17,7 +17,7 @@ import type { PlayerSettings } from './disc/player-settings';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { Player } from './player';
-import type { EngineEvent, PlaybackState } from './protocol';
+import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const CLASSES: ClassLibrarySource = {
@@ -153,6 +153,7 @@ function handWorker(): { readonly worker: WorkerLike; readonly sent: ToBdj[]; em
 const lastState = (h: Harness): PlaybackState | undefined => h.events.flatMap((e) => (e.type === 'state' ? [e.state] : [])).at(-1);
 const notices = (h: Harness): string[] => h.events.flatMap((e) => (e.type === 'notice' ? [e.code] : []));
 const playlistsPlayed = (h: Harness): string[] => h.events.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : []));
+const lastTelemetry = (h: Harness): Telemetry | undefined => h.events.flatMap((e) => (e.type === 'telemetry' ? [e.telemetry] : [])).at(-1);
 const bdjEvents = (h: Harness, ev: number): number[] => h.sent.flatMap((m) => (m.type === 'event' && m.ev === ev ? [m.param] : []));
 
 async function until(h: Harness, cond: () => boolean, timeout = 60_000): Promise<void> {
@@ -187,6 +188,20 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(h.sent.filter((m) => m.type === 'start')).toEqual([{ type: 'start', title: 0xffff }]);
     // the disc's playlist masks pause and seeks, but under a BD-J title the UI is told only of menu call and title search
     expect(h.events.filter((e) => e.type === 'uoMask').every((e) => e.type === 'uoMask' && e.masked.length === 0)).toBe(true);
+  }, 90_000);
+
+  it('reports start-up times since the open in telemetry: boot, Java\'s first playlist, its first presented frame (spec §4.7)', async () => {
+    const h = await playing();
+    await h.play(600); // a telemetry interval
+    const bdj = lastTelemetry(h)?.bdj;
+    expect(bdj).toBeTruthy();
+    const { bootMs, firstPlaylistMs, firstFrameMs } = bdj!;
+    expect(bootMs).toBeGreaterThanOrEqual(0);
+    expect(firstPlaylistMs).toBeGreaterThanOrEqual(bootMs!);
+    expect(firstFrameMs).toBeGreaterThan(firstPlaylistMs!);
+    // later playlists and frames do not move them
+    await h.play(2000);
+    expect(lastTelemetry(h)?.bdj).toEqual(bdj);
   }, 90_000);
 
   it('never refuses pause or play under a BD-J title, and Java hears RATE', async () => {
@@ -358,6 +373,16 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(h.terminated()).toBe(true);
     await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
     await until(h, () => lastState(h) === 'playing');
+    await h.play(600);
+    // a playlist the user chose is not Java's first playlist
+    expect(lastTelemetry(h)?.bdj).toEqual({ bootMs: null, firstPlaylistMs: null, firstFrameMs: null });
+  }, 90_000);
+
+  it('falls back to the picker with bdj-failed on an unreadable libbluray jar (the browser\'s ?bdjfail=1 hook)', async () => {
+    const h = await harness(bdjDisc(), { classes: { ...CLASSES, libbluray: new Uint8Array(0) } });
+    await until(h, () => notices(h).includes('bdj-failed'));
+    expect(h.events).toContainEqual({ type: 'bdjActive', active: false });
+    expect(lastState(h)).toBe('idle');
   }, 90_000);
 
   it("follows Java's PSR1 write with the audio track", async () => {

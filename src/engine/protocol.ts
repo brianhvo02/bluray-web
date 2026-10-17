@@ -46,6 +46,18 @@ export interface Telemetry {
   readonly ass: { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number; readonly renders: number } | null;
   /** The shader set that shaded the last frame drawn: passes run and GPU time (null without a timer query); null when unshaded. */
   readonly shader: { readonly set: string; readonly passesRun: number; readonly gpuMs: number | null } | null;
+  /**
+   * BD-J start-up (spec §4.7), in ms since the disc's open command: the worker booted, Java selected its first playlist,
+   * the first frame of that playlist was presented. Each is null until it happens; the whole is null when no BD-J title
+   * has run since the disc opened.
+   */
+  readonly bdj: BdjStartup | null;
+}
+
+export interface BdjStartup {
+  readonly bootMs: number | null;
+  readonly firstPlaylistMs: number | null;
+  readonly firstFrameMs: number | null;
 }
 
 /** A set of mpv user shaders, in the order they run. */

@@ -10,6 +10,7 @@ import { drawWarped } from './ass/warp';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { loadAudioWasm } from './decode/wasm-audio';
 import { browserVideoCodecApi } from './decode/video-decoder';
+import { playerSettingsForLocale } from './disc/player-settings';
 import { Player } from './player';
 import type { EngineCommand, EngineEvent } from './protocol';
 import { Compositor } from './render/compositor';
@@ -22,6 +23,12 @@ interface WorkerScope {
 }
 
 const scope = self as unknown as WorkerScope;
+/**
+ * Test-only (E2E): the page names the worker this when opened with ?bdjfail=1 (create-controller.ts, like ?telemetry=1).
+ * The libbluray jar is then unreadable, so every BD-J boot fails and the fallback (spec §5) can be seen in the browser.
+ */
+const BDJ_FAIL_WORKER_NAME = 'bluray-engine:bdjfail'; // the same name in src/player/create-controller.ts
+const brokenClassLibrary = (self as unknown as { name?: string }).name === BDJ_FAIL_WORKER_NAME;
 const WASM_FETCH_TIMEOUT_MS = 20_000;
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
@@ -46,8 +53,10 @@ const player = new Player({
   createBdjWorker: () => new Worker(new URL('./bdj/bdj-worker-entry.ts', import.meta.url), { type: 'module' }),
   loadClassLibrary: async () => {
     const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);
-    return { rt, libbluray, libblurayAwt };
+    return { rt, libbluray: brokenClassLibrary ? new Uint8Array(0) : libbluray, libblurayAwt };
   },
+  // bd_set_player_setting_str as a player application sets it: the browser's language and region
+  playerSettings: playerSettingsForLocale(navigator.language),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {

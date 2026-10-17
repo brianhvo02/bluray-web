@@ -3,9 +3,12 @@ import { AudioOutput } from './audio-output';
 import { PlayerController } from './player-controller';
 
 export function createController(): PlayerController {
-  const worker = new Worker(new URL('../engine/worker.ts', import.meta.url), { type: 'module' });
+  const params = new URLSearchParams(location.search);
+  // Test-only (E2E): ?bdjfail=1 names the engine worker so that it injects an unreadable class library (engine/worker.ts).
+  // (the options stay an object literal with a literal type: Vite reads it to bundle the worker as a module)
+  const worker = new Worker(new URL('../engine/worker.ts', import.meta.url), { type: 'module', name: params.has('bdjfail') ? 'bluray-engine:bdjfail' : 'bluray-engine' });
   const controller = new PlayerController(worker, new AudioOutput());
-  if (new URLSearchParams(location.search).has('telemetry')) {
+  if (params.has('telemetry')) {
     const target = window as unknown as { __blurayTelemetry?: Telemetry | null };
     controller.subscribe(() => {
       target.__blurayTelemetry = controller.getSnapshot().telemetry;

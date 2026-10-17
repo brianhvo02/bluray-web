@@ -61,3 +61,10 @@ export function expectInSync(windows: TelemetrySample[]): void {
   }
   console.log(`sync stats: windows=${windows.length} worst|mean|=${worstMean}us worstMaxAbs=${worstMax}us (bounds ${SYNC_TOLERANCE_US}/${MAX_ABS_TOLERANCE_US}us)`);
 }
+
+/** Telemetry's BD-J start-up times (ms since the open command), or null when no BD-J title has run. */
+export interface BdjStartupSample { bootMs: number | null; firstPlaylistMs: number | null; firstFrameMs: number | null }
+
+export async function bdjStartup(page: Page): Promise<BdjStartupSample | null> {
+  return page.evaluate(() => (window as unknown as { __blurayTelemetry?: { bdj?: BdjStartupSample | null } | null }).__blurayTelemetry?.bdj ?? null);
+}

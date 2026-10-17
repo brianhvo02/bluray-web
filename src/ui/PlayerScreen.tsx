@@ -227,6 +227,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       className={`player${controlsVisible ? '' : ' idle'}`}
       data-testid="player"
       data-state={snapshot.engineState}
+      data-playlist={snapshot.currentPlaylistId ?? undefined}
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
       onPointerMove={wake}

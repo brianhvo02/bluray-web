@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RegisterFile } from '../hdmv/registers';
-import { applyPlayerSettings, strToUint32 } from './player-settings';
+import { applyPlayerSettings, playerSettingsForLocale, strToUint32 } from './player-settings';
 
 describe('player settings (bd_set_player_setting_str)', () => {
   it('packs strings as str_to_uint32 does', () => {
@@ -22,5 +22,21 @@ describe('player settings (bd_set_player_setting_str)', () => {
     const before = regs.psrRead(16);
     applyPlayerSettings(regs, { country: 'us' });
     expect(regs.psrRead(16)).toBe(before);
+  });
+
+  it('derives the settings from a browser locale: ISO 639-2/B languages, a lowercase ISO 3166 country', () => {
+    expect(playerSettingsForLocale('en-US')).toEqual({ audioLanguage: 'eng', pgLanguage: 'eng', menuLanguage: 'eng', country: 'us' });
+    expect(playerSettingsForLocale('fr-CA')).toEqual({ audioLanguage: 'fre', pgLanguage: 'fre', menuLanguage: 'fre', country: 'ca' });
+    expect(playerSettingsForLocale('de')).toEqual({ audioLanguage: 'ger', pgLanguage: 'ger', menuLanguage: 'ger' });
+    expect(playerSettingsForLocale('ja-JP')).toEqual({ audioLanguage: 'jpn', pgLanguage: 'jpn', menuLanguage: 'jpn', country: 'jp' });
+    expect(playerSettingsForLocale('zh-Hant-TW')).toMatchObject({ audioLanguage: 'chi', country: 'tw' });
+    expect(playerSettingsForLocale('es-419')).toEqual({ audioLanguage: 'spa', pgLanguage: 'spa', menuLanguage: 'spa' }); // a numeric region is no country
+  });
+
+  it('leaves what it cannot tell unset (libbluray defaults)', () => {
+    expect(playerSettingsForLocale(undefined)).toEqual({});
+    expect(playerSettingsForLocale('')).toEqual({});
+    expect(playerSettingsForLocale('not a locale!')).toEqual({});
+    expect(playerSettingsForLocale('tlh-US')).toEqual({ country: 'us' }); // a language without a known ISO 639-2 code
   });
 });

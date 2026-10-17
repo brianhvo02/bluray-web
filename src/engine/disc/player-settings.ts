@@ -25,3 +25,37 @@ export function applyPlayerSettings(regs: RegisterFile, settings: PlayerSettings
   if (settings.menuLanguage !== undefined) regs.psrSettingWrite(PSR.MENU_LANG, strToUint32(settings.menuLanguage, 3));
   if (settings.country !== undefined) regs.psrSettingWrite(PSR.COUNTRY, strToUint32(settings.country, 2));
 }
+
+/**
+ * ISO 639-1 to ISO 639-2. Blu-ray discs label their streams with the bibliographic (/B) codes ("fre", "ger", "chi"),
+ * so where /B and /T differ this table uses /B.
+ */
+const ISO_639_2: Readonly<Record<string, string>> = {
+  ar: 'ara', bg: 'bul', bn: 'ben', ca: 'cat', cs: 'cze', cy: 'wel', da: 'dan', de: 'ger', el: 'gre', en: 'eng',
+  es: 'spa', et: 'est', eu: 'baq', fa: 'per', fi: 'fin', fr: 'fre', ga: 'gle', gl: 'glg', he: 'heb', hi: 'hin',
+  hr: 'hrv', hu: 'hun', hy: 'arm', id: 'ind', is: 'ice', it: 'ita', ja: 'jpn', ka: 'geo', kk: 'kaz', km: 'khm',
+  ko: 'kor', lt: 'lit', lv: 'lav', mk: 'mac', ml: 'mal', mr: 'mar', ms: 'may', mt: 'mlt', my: 'bur', nb: 'nob',
+  nl: 'dut', nn: 'nno', no: 'nor', pa: 'pan', pl: 'pol', pt: 'por', ro: 'rum', ru: 'rus', sk: 'slo', sl: 'slv',
+  sq: 'alb', sr: 'srp', sv: 'swe', sw: 'swa', ta: 'tam', te: 'tel', th: 'tha', tl: 'tgl', tr: 'tur', uk: 'ukr',
+  ur: 'urd', vi: 'vie', zh: 'chi', zu: 'zul',
+};
+
+/**
+ * The settings a player application would pass for a BCP 47 locale (the browser's `navigator.language`): its
+ * language as ISO 639-2/B for audio, subtitles and menus, and its region as the country in lowercase, as libbluray's
+ * examples do. Anything unknown stays unset, so the register keeps libbluray's default.
+ */
+export function playerSettingsForLocale(tag: string | undefined): PlayerSettings {
+  let locale: Intl.Locale;
+  try {
+    locale = new Intl.Locale(tag ?? '');
+  } catch {
+    return {};
+  }
+  const language = ISO_639_2[locale.language];
+  const region = locale.region !== undefined && /^[A-Z]{2}$/.test(locale.region) ? locale.region.toLowerCase() : undefined;
+  return {
+    ...(language ? { audioLanguage: language, pgLanguage: language, menuLanguage: language } : {}),
+    ...(region ? { country: region } : {}),
+  };
+}

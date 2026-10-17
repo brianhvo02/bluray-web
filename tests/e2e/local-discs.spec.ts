@@ -1,8 +1,9 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
+import { parseIndex } from '../../src/engine/bdmv/index-parser';
 import { scanPg } from '../helpers/pg-scan';
-import { collectWindows, expectInSync, telemetry } from './telemetry';
+import { bdjStartup, collectWindows, expectInSync, telemetry, type BdjStartupSample } from './telemetry';
 
 const LOCAL = 'fixtures/local';
 const SEEK_FRACTIONS = [0.13, 0.31, 0.52, 0.27, 0.74, 0.08, 0.91, 0.45];
@@ -22,7 +23,7 @@ const menuShown = async (page: Page): Promise<boolean> => (await page.getByTestI
 const featurePlaying = async (page: Page): Promise<boolean> =>
   (await page.getByTestId('player').getAttribute('data-state')) === 'playing' && (await durationUs(page)) > FEATURE_MIN_US && !(await menuShown(page));
 
-/** What a freshly opened disc shows first: the picker (BD-J or no HDMV program), a menu, or playback. */
+/** What a freshly opened disc shows first: the picker (no disc program, or a BD-J fallback), a menu, or playback. */
 async function firstScreen(page: Page): Promise<'picker' | 'menu' | 'playing'> {
   let seen: 'picker' | 'menu' | 'playing' | null = null;
   await expect
@@ -64,15 +65,98 @@ async function hdmvIntoFeature(page: Page, name: string, first: 'menu' | 'playin
 
 const discs = existsSync(LOCAL) ? readdirSync(LOCAL).filter((name) => existsSync(join(LOCAL, name, 'BDMV'))) : [];
 
+/** Whether the disc's First Play is a BD-J title (it then starts under the disc's Java). */
+function bdjFirstPlay(name: string): boolean {
+  const path = join(LOCAL, name, 'BDMV', 'index.bdmv');
+  return existsSync(path) && parseIndex(new Uint8Array(readFileSync(path))).firstPlay.kind === 'bdj';
+}
+
+/**
+ * BD-J discs: what Java selects first and the menu-background playlist it selects next (libbluray's selectPlaylistN #1
+ * and #2, tests/local/bdj-boot.test.ts), and spec §4.7's bar for the first frame of Java's first playlist (warm cache).
+ */
+const BDJ_EXPECTED: Record<string, { readonly playlists: readonly [string, string]; readonly firstFrameBarMs?: number }> = {
+  A_NEW_ERA: { playlists: ['00833', '00149'], firstFrameBarMs: 5_000 },
+  RENTAL_FAMILY: { playlists: ['01611', '01355'] },
+};
+
+/** Records every playlist the player shows, sampled each animation frame from the player's data-playlist. */
+async function recordPlaylists(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    (window as unknown as { __playlists: string[] }).__playlists = seen;
+    const sample = (): void => {
+      const id = document.querySelector('[data-testid="player"]')?.getAttribute('data-playlist');
+      if (id && seen.at(-1) !== id) seen.push(id);
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+}
+
+const playlistsSeen = (page: Page): Promise<string[]> => page.evaluate(() => [...(window as unknown as { __playlists?: string[] }).__playlists ?? []]);
+
+/** Opens the disc in a fresh page load and waits for the first presented frame of Java's first playlist. */
+async function openBdj(page: Page, name: string): Promise<BdjStartupSample> {
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
+  await expect.poll(async () => (await bdjStartup(page))?.firstFrameMs ?? null, { timeout: 60_000 }).not.toBeNull();
+  await expect(page.getByTestId('playlist-picker')).toBeHidden();
+  return (await bdjStartup(page))!;
+}
+
+for (const name of discs.filter(bdjFirstPlay)) {
+  test(`BD-J: ${name} plays Java's first playlist, then its menu-background playlist`, async ({ page }) => {
+    test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
+    test.setTimeout(600_000);
+    await recordPlaylists(page);
+    // Cold: the first open in this browser context (empty HTTP cache, nothing compiled yet).
+    const cold = await openBdj(page, name);
+    console.log(`${name}: BD-J start-up, cold: ${JSON.stringify(cold)}`);
+    // Warm (spec §4.7's bar): the page loads again in the same context, with the HTTP cache warm, and opens the disc again.
+    const warm = await openBdj(page, name);
+    console.log(`${name}: BD-J start-up, warm: ${JSON.stringify(warm)}`);
+    const expected = BDJ_EXPECTED[name];
+    await expect.poll(async () => new Set(await playlistsSeen(page)).size, { timeout: 300_000 }).toBeGreaterThanOrEqual(2);
+    const seen = await playlistsSeen(page);
+    console.log(`${name}: playlists under Java: ${seen.join(', ')}`);
+    if (expected) expect(seen.slice(0, 2)).toEqual(expected.playlists);
+    await expect(page.getByTestId('playlist-picker')).toBeHidden();
+    await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 30_000 });
+    const start = (await telemetry(page))?.clockUs ?? 0;
+    const windows = await collectWindows(page, start + 4_000_000, 30_000);
+    expectInSync(windows.slice(1));
+    const t = await telemetry(page);
+    expect(t?.decoderErrors).toBe(0);
+    if (expected?.firstFrameBarMs !== undefined) expect(warm.firstFrameMs!, 'first frame of the first playlist, warm (ms)').toBeLessThanOrEqual(expected.firstFrameBarMs);
+  });
+
+  test(`BD-J: ${name} falls back to the picker when BD-J cannot boot (?bdjfail=1)`, async ({ page }) => {
+    test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
+    test.setTimeout(120_000);
+    await page.goto('/?telemetry=1&bdjfail=1');
+    await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
+    await expect(page.getByTestId('playlist-picker')).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator('.notice', { hasText: /^BD-J couldn't start this disc/ })).toBeVisible();
+  });
+}
+
 for (const name of discs) {
   test(`seeks around ${name} on the browser's decoder without errors`, async ({ page }) => {
     test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
     test.setTimeout(900_000);
     await page.goto('/?telemetry=1');
     await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
-    const first = await firstScreen(page);
-    if (first === 'picker') {
-      console.log(`${name}: picker (BD-J or no HDMV program)`);
+    const first = bdjFirstPlay(name) ? 'bdj' : await firstScreen(page);
+    if (first === 'bdj') {
+      // the disc's Java plays its own playlists; the picker stays reachable from the control bar
+      console.log(`${name}: BD-J, opening the picker`);
+      await expect.poll(async () => (await bdjStartup(page)) !== null, { timeout: 60_000 }).toBe(true);
+      await page.getByTestId('player').hover();
+      await page.getByRole('button', { name: /^(Playlists|Titles)$/ }).click();
+      await page.locator('button[data-testid^="playlist-"]:not([disabled])').first().click(); // the main feature is listed first
+    } else if (first === 'picker') {
+      console.log(`${name}: picker (no HDMV program)`);
       await page.locator('button[data-testid^="playlist-"]:not([disabled])').first().click(); // the main feature is listed first
     } else {
       await hdmvIntoFeature(page, name, first);

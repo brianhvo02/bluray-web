@@ -373,6 +373,7 @@ describe('Player', () => {
     const telemetry = lastTelemetry(h);
     expect(telemetry?.clockMode).toBe('audio');
     expect(Math.abs(telemetry?.avOffsetMeanUs ?? Infinity)).toBeLessThanOrEqual(20_000);
+    expect(telemetry?.bdj).toBeNull(); // no BD-J title ran on this disc
   });
 
   it('applies only the last of several rapid seeks and never draws earlier frames', async () => {
