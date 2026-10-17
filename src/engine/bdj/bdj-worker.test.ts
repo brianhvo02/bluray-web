@@ -19,7 +19,8 @@ describe('runBdjWorker', () => {
       type: 'boot',
       registers: createRegisterBuffer(),
       status: createStatusBlock(),
-      discFiles: discEntries(fixtureDiscFiles('disc-bdj')),
+      disc: { kind: 'files', entries: discEntries(fixtureDiscFiles('disc-bdj')) },
+      readAheadBytes: 0,
       discId: null,
       classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
     };

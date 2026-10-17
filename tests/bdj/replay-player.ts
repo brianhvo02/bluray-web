@@ -155,7 +155,7 @@ export async function replayPlayerBdj(
     await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
     const start = clock.ms;
     t0 = performance.now();
-    await player.handle({ type: 'open', entries: await directoryEntries(dir) });
+    await player.handle({ type: 'open', disc: { kind: 'files', entries: await directoryEntries(dir) } });
     while (!done) {
       if (performance.now() - t0 > timeoutMs) throw fail(`timed out after ${timeoutMs} ms`);
       const failed = events.find((e) => e.type === 'notice' && e.code === 'bdj-failed');

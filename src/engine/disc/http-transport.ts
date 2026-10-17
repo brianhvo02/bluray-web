@@ -1,0 +1,165 @@
+/*
+ * Original code for bluray-web: byte ranges of a NAS disc's files over HTTP (the NAS server's files route).
+ *
+ * Copyright (C) 2026  bluray-web contributors
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
+import { DiscError, type DiscErrorCode } from './byte-source';
+import type { RangeTransport } from './remote-source';
+
+export const DISC_CHANGED_MESSAGE = 'This disc changed on the NAS. Open its folder again.';
+export const NAS_LOST_MESSAGE = 'Connection to the NAS lost.';
+export const NAS_UNPAIRED_MESSAGE = 'This device is no longer paired with the NAS.';
+
+/** A request that has not answered (headers and body) after this long has lost the NAS. The first read of a disc may wake its drive. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+/** How long the engine waits for the controller's fresh token before it gives up (as unpaired). */
+export const TOKEN_TIMEOUT_MS = 10_000;
+
+export type RemoteFailure = 'disc-changed' | 'nas-lost' | 'nas-unpaired';
+
+/** A DiscError of a remote disc, with what went wrong for the UI. */
+export class RemoteDiscError extends DiscError {
+  constructor(
+    readonly reason: RemoteFailure,
+    code: DiscErrorCode,
+    message: string,
+    paths: readonly string[] = [],
+  ) {
+    super(code, message, paths);
+  }
+}
+
+const discChanged = (path: string): RemoteDiscError => new RemoteDiscError('disc-changed', 'source-changed', DISC_CHANGED_MESSAGE, [path]);
+const nasLost = (path: string): RemoteDiscError => new RemoteDiscError('nas-lost', 'read-failed', NAS_LOST_MESSAGE, [path]);
+const unpaired = (path: string): RemoteDiscError => new RemoteDiscError('nas-unpaired', 'read-failed', NAS_UNPAIRED_MESSAGE, [path]);
+
+export interface HttpTransportOptions {
+  readonly fetch: typeof fetch;
+  /** A fresh session token, asked for once when a request answers 401; none (or a rejection) means unpaired. */
+  readonly refreshToken?: () => Promise<string>;
+}
+
+/**
+ * Reads `<base>files/<path>?t=<token>` with a single `Range: bytes=a-b` and no other headers, so the request needs no
+ * preflight. `base` ends with '/': `https://…/bluray/api/discs/<id>/`.
+ */
+export class HttpTransport implements RangeTransport {
+  private refreshing: Promise<string> | null = null;
+
+  constructor(
+    private readonly base: string,
+    private token: string,
+    private readonly opts: HttpTransportOptions,
+  ) {}
+
+  setToken(token: string): void {
+    this.token = token;
+  }
+
+  async read(path: string, offset: number, length: number, signal?: AbortSignal): Promise<Uint8Array> {
+    if (length <= 0) return new Uint8Array(0);
+    let retried = false;
+    for (;;) {
+      const token = this.token;
+      const answer = await this.request(path, offset, length, token, signal);
+      if (answer.status !== 401) return answer.bytes;
+      if (retried) throw unpaired(path);
+      retried = true;
+      // a request that went out with an older token tries the current one first
+      if (this.token === token) await this.refresh(path);
+    }
+  }
+
+  private async refresh(path: string): Promise<void> {
+    const refresh = this.opts.refreshToken;
+    if (!refresh) throw unpaired(path);
+    this.refreshing ??= refresh().finally(() => (this.refreshing = null));
+    try {
+      this.token = await this.refreshing;
+    } catch {
+      throw unpaired(path);
+    }
+  }
+
+  /** One request, cut off after REQUEST_TIMEOUT_MS. The bytes of a 206 (empty for 416), or a 401 to retry. */
+  private async request(path: string, offset: number, length: number, token: string, signal?: AbortSignal): Promise<{ status: number; bytes: Uint8Array }> {
+    signal?.throwIfAborted();
+    const url = `${this.base}files/${path.split('/').map(encodeURIComponent).join('/')}?t=${encodeURIComponent(token)}`;
+    const controller = new AbortController();
+    const lost = nasLost(path);
+    const timer = setTimeout(() => controller.abort(lost), REQUEST_TIMEOUT_MS);
+    const onAbort = (): void => controller.abort(signal!.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const response = await this.opts.fetch(url, { headers: { Range: `bytes=${offset}-${offset + length - 1}` }, signal: controller.signal });
+      switch (response.status) {
+        case 206:
+          return { status: 206, bytes: new Uint8Array(await response.arrayBuffer()) };
+        case 416: // starts at or past the end of the file
+          return { status: 416, bytes: new Uint8Array(0) };
+        case 401:
+          return { status: 401, bytes: new Uint8Array(0) };
+        case 404:
+          if ((await errorOf(response)) === 'disc-changed') throw discChanged(path);
+          throw new DiscError('read-failed', `Failed to read ${path}: the NAS does not have it`, [path]);
+        default:
+          throw new DiscError('read-failed', `Failed to read ${path}: HTTP ${response.status}`, [path]);
+      }
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason;
+      if (controller.signal.aborted) throw lost;
+      if (err instanceof DiscError) throw err;
+      throw lost; // fetch rejects with a TypeError when the network fails
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
+async function errorOf(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { error?: unknown };
+    return typeof body.error === 'string' ? body.error : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fresh tokens from the main thread: `request` asks for one (once for every waiter) and settles with the next token
+ * delivered, or rejects after TOKEN_TIMEOUT_MS.
+ */
+export class TokenRelay {
+  private waiters: Array<{ resolve: (token: string) => void; cancel: () => void }> = [];
+
+  constructor(
+    private readonly ask: () => void,
+    private readonly setTimer: (ms: number, fn: () => void) => () => void,
+  ) {}
+
+  request(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const first = this.waiters.length === 0;
+      const waiter = {
+        resolve,
+        cancel: this.setTimer(TOKEN_TIMEOUT_MS, () => {
+          this.waiters = this.waiters.filter((w) => w !== waiter);
+          reject(new Error('no session token arrived'));
+        }),
+      };
+      this.waiters.push(waiter);
+      if (first) this.ask();
+    });
+  }
+
+  deliver(token: string): void {
+    for (const w of this.waiters.splice(0)) {
+      w.cancel();
+      w.resolve(token);
+    }
+  }
+}

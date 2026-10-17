@@ -146,11 +146,36 @@ describe('PlayerController', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(worker.posted).toEqual([
-      { type: 'open', entries: [['Disc/BDMV/index.bdmv', file]] },
+      { type: 'open', disc: { kind: 'files', entries: [['Disc/BDMV/index.bdmv', file]] } },
       { type: 'play' },
       { type: 'attachAudio', ring: audio.ring },
     ]);
     expect(audio.starts).toBe(2);
+  });
+
+  it('opens a NAS disc, answers the engine\'s token requests and relays scheduled refreshes', async () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const spec = { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/', token: 't1', manifest: { discId: 'd1', name: 'Disc', files: [], inline: {} } } as const;
+    let refreshes = 0;
+    c.openRemote(spec, async () => `t${++refreshes + 1}`);
+    expect(c.getSnapshot().engineState).toBe('loading');
+    expect(worker.posted[0]).toEqual({ type: 'open', disc: spec });
+    worker.emit({ type: 'remoteTokenNeeded' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(worker.posted).toContainEqual({ type: 'remoteToken', token: 't2' });
+    c.setRemoteToken('t9');
+    expect(worker.posted.at(-1)).toEqual({ type: 'remoteToken', token: 't9' });
+  });
+
+  it('shows the NAS waiting notice until the engine clears it', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'notice', code: 'nas-waiting', message: 'Waiting for the NAS drive…' });
+    expect(c.getSnapshot().notices).toEqual([{ code: 'nas-waiting', message: 'Waiting for the NAS drive…' }]);
+    worker.emit({ type: 'noticeCleared', code: 'nas-waiting' });
+    expect(c.getSnapshot().notices).toEqual([]);
   });
 
   it('notifies subscribers with new snapshots from worker events', () => {

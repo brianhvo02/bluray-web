@@ -7,10 +7,11 @@
  */
 
 import type { Clpi } from '../bdmv/clpi-parser';
-import { FileSource } from '../disc/file-source';
+import { createByteSource } from '../disc/disc-spec';
+import { TokenRelay } from '../disc/http-transport';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
-import { normalizeDiscPaths } from '../disc/paths';
+import { RemoteSource } from '../disc/remote-source';
 import { BdjError } from './errors';
 import type { NativeTable } from './jvm/natives/index';
 import { BdjRuntime } from './runtime';
@@ -53,6 +54,8 @@ function eventLoopTurn(): () => Promise<void> {
 export interface BdjWorkerOptions {
   /** JvmOptions.extraIntrinsics: the class library's intrinsics (src/bdj-classlib/intrinsics), which the engine does not carry. */
   readonly extraIntrinsics?: (table: NativeTable) => void;
+  /** Reads a NAS disc's files; the worker's fetch by default. */
+  readonly fetch?: typeof fetch;
 }
 
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
@@ -68,6 +71,16 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let driving: AbortController | null = null;
   /** The runtime's log repeats each line the host logs; the host's copy carries the error flag. */
   let hostLine: string | null = null;
+  /** A NAS disc's fresh tokens from the engine; the latest is kept for a source created after it arrived. */
+  const tokens = new TokenRelay(
+    () => post({ type: 'remoteTokenNeeded' }),
+    (ms, fn) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    },
+  );
+  let latestToken: string | null = null;
+  let remote: RemoteSource | null = null;
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -137,15 +150,20 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const boot = async (m: BootMessage): Promise<void> => {
     const t0 = performance.now();
     try {
-      const source = new FileSource(normalizeDiscPaths(m.discFiles));
+      const fetchFn = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
+      const disc = createByteSource(m.disc, { fetch: fetchFn, readAheadBytes: m.readAheadBytes, onWaiting: () => undefined, refreshToken: () => tokens.request() });
+      if (disc instanceof RemoteSource) {
+        remote = disc;
+        if (latestToken !== null) disc.setToken(latestToken);
+      }
       // the disc model loads while the JDK starts up; the host reads it once Libbluray.init asks for disc info
       let model: { readonly disc: DiscModel; readonly clips: ReadonlyMap<string, Clpi> } | null = null;
       const loading = (async () => {
-        const disc = await openDisc(source);
-        const clipIds = new Set([...disc.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
+        const opened = await openDisc(disc);
+        const clipIds = new Set([...opened.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
         // openDisc has already parsed the clips of a disc with movie objects; only the rest are read here
-        const rest = await loadClips(source, [...clipIds].filter((id) => !disc.clips.has(id) && source.exists(clipInfoPath(id))));
-        model = { disc, clips: new Map([...disc.clips, ...rest]) };
+        const rest = await loadClips(disc, [...clipIds].filter((id) => !opened.clips.has(id) && disc.exists(clipInfoPath(id))));
+        model = { disc: opened, clips: new Map([...opened.clips, ...rest]) };
       })();
       loading.catch(() => undefined); // awaited below; this only keeps a failure while the runtime is set up from going unhandled
       const loaded = (): NonNullable<typeof model> => {
@@ -153,7 +171,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         return model;
       };
       rt = new BdjRuntime({
-        disc: source,
+        disc,
         discId: m.discId,
         classLibrary: m.classLibrary,
         host: () =>
@@ -202,6 +220,11 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   port.onmessage = ({ data: m }) => {
     if (ended) return;
     switch (m.type) {
+      case 'remoteToken':
+        latestToken = m.token;
+        remote?.setToken(m.token);
+        tokens.deliver(m.token);
+        break;
       case 'boot':
         void boot(m);
         break;

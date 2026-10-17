@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { VirtualClock, assembleClass, storedZip } from '../../../tests/helpers/jvm-asm';
 import { discEntries } from '../../../tests/helpers/synthetic-disc';
+import type { DiscSpec } from '../disc/disc-spec';
 import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
@@ -27,7 +28,7 @@ const GOLDEN = ((lines: string[]) => lines.slice(0, lines.findIndex((l) => l.inc
 );
 const GOLDEN_RETURNS: Partial<Record<BdjCallName, number>> = { writeReg: 0, selectPlaylist: 1 };
 const FIRST_PLAY = 0xffff;
-const DISC_FILES = discEntries(fixtureDiscFiles('disc-bdj'));
+const DISC: DiscSpec = { kind: 'files', entries: discEntries(fixtureDiscFiles('disc-bdj')) };
 const INVOKESTATIC = 0xb8, ICONST_3 = 0x06, RETURN = 0xb1;
 
 type Call = { readonly name: BdjCallName; readonly args: readonly BdjWireValue[] };
@@ -120,7 +121,7 @@ describe('BdjSession with the in-process BD-J worker on disc-bdj', () => {
   it("boots, starts First Play and answers the golden's control calls in order through the host", async () => {
     const w = inProcessWorker();
     const h = session(w.worker, undefined, 4500n);
-    await h.session.boot(DISC_FILES, null, CLASSES);
+    await h.session.boot(DISC, 0, null, CLASSES);
     expect(h.logs.some((l) => l.includes("Using Java 1.8 (5b) from '/jdk'"))).toBe(true);
     h.session.start(FIRST_PLAY);
     await until(() => h.calls.some((c) => c.name === 'selectPlaylist'));
@@ -139,7 +140,7 @@ describe('BdjSession with the in-process BD-J worker on disc-bdj', () => {
     const entries = z.names.filter((n) => n !== 'org/videolan/Libbluray.class').map((n) => [n, z.read(n)!] as const);
     const w = inProcessWorker();
     const h = session(w.worker);
-    await h.session.boot(DISC_FILES, null, { ...CLASSES, libbluray: storedZip(entries) });
+    await h.session.boot(DISC, 0, null, { ...CLASSES, libbluray: storedZip(entries) });
     expect(h.failures).toHaveLength(1);
     expect(h.failures[0]![0]).toBe('class-not-found');
     expect(h.failures[0]![1]).toContain('org/videolan/Libbluray');
@@ -149,7 +150,7 @@ describe('BdjSession with the in-process BD-J worker on disc-bdj', () => {
   it('reports halted when the JVM halts mid-title, and later engine events do not throw', async () => {
     const w = inProcessWorker();
     const h = session(w.worker);
-    await h.session.boot(DISC_FILES, null, CLASSES);
+    await h.session.boot(DISC, 0, null, CLASSES);
     h.session.start(FIRST_PLAY);
     await until(() => h.calls.some((c) => c.name === 'selectPlaylist'));
     const rt = w.handle.runtime!;
@@ -179,7 +180,7 @@ describe('BdjSession rules', () => {
   it('fails with timeout when no playlist is selected within 20,000 ms of start', () => {
     const f = fakeWorker();
     const h = session(f.worker);
-    void h.session.boot(DISC_FILES, null, CLASSES);
+    void h.session.boot(DISC, 0, null, CLASSES);
     f.emit({ type: 'booted', bootMs: 10 });
     h.session.start(FIRST_PLAY);
     f.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [-1, -1, -1, '-1'] }); // a close is no selection
@@ -193,7 +194,7 @@ describe('BdjSession rules', () => {
   it('fails with timeout 20,000 ms after a boot that never completes', async () => {
     const f = fakeWorker();
     const h = session(f.worker);
-    const booted = h.session.boot(DISC_FILES, null, CLASSES);
+    const booted = h.session.boot(DISC, 0, null, CLASSES);
     h.clock.advance(19_999);
     expect(h.failures).toEqual([]);
     h.clock.advance(1);
@@ -216,7 +217,7 @@ describe('BdjSession rules', () => {
   it('ignores messages after stop() and terminates the worker', async () => {
     const f = fakeWorker();
     const h = session(f.worker);
-    const booted = h.session.boot(DISC_FILES, null, CLASSES);
+    const booted = h.session.boot(DISC, 0, null, CLASSES);
     h.session.start(FIRST_PLAY);
     const sent = f.sent.length;
     h.session.stop();

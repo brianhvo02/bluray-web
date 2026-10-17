@@ -1,4 +1,5 @@
 import { splitPick } from './drop-files';
+import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
@@ -124,6 +125,10 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, timeUs: e.timeUs };
     case 'notice':
       return withNotice(s, { code: e.code, message: e.message });
+    case 'noticeCleared':
+      return { ...s, notices: s.notices.filter((n) => n.code !== e.code) };
+    case 'remoteTokenNeeded':
+      return s; // answered by the controller
     case 'unsupported':
       return withNotice(s, { code: `unsupported-${e.kind}`, message: e.message });
     case 'error':
@@ -204,6 +209,8 @@ export class PlayerController {
   private readonly visibility: VisibilityLike;
   /** The platform suspended audio while the page was hidden and we paused; the notice waits for the page to return. */
   private backgroundPaused = false;
+  /** The open NAS disc's token source, asked when the engine's reads get a 401. */
+  private refreshToken: (() => Promise<string>) | null = null;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -219,6 +226,7 @@ export class PlayerController {
       const e = event.data;
       if (e.type === 'soundEffects') audio.loadEffects(e.clips);
       else if (e.type === 'soundEffect') audio.playEffect(e.id);
+      else if (e.type === 'remoteTokenNeeded') this.answerTokenRequest();
       else this.update(this.withDropWarning(reduceEvent(this.snapshot, e), e));
     };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
@@ -306,9 +314,34 @@ export class PlayerController {
   }
 
   open(entries: ReadonlyArray<readonly [string, File]>): void {
+    this.refreshToken = null;
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
-    this.post({ type: 'open', entries });
+    this.post({ type: 'open', disc: { kind: 'files', entries } });
+  }
+
+  /**
+   * A disc on the NAS. `refreshToken` gives a fresh session token when the NAS refuses the current one; a token
+   * refreshed on schedule goes to the engine through setRemoteToken.
+   */
+  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>): void {
+    this.refreshToken = refreshToken ?? null;
+    this.startAudio();
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
+    this.post({ type: 'open', disc: spec });
+  }
+
+  /** A fresh session token for the open NAS disc. */
+  setRemoteToken(token: string): void {
+    this.post({ type: 'remoteToken', token });
+  }
+
+  /** The engine got a 401; without an answer within 10 s it fails the disc as unpaired. */
+  private answerTokenRequest(): void {
+    this.refreshToken?.().then(
+      (token) => this.setRemoteToken(token),
+      () => undefined,
+    );
   }
 
   playPlaylist(playlistId: string): void {
@@ -569,6 +602,7 @@ export class PlayerController {
   }
 
   closeDisc(): void {
+    this.refreshToken = null;
     this.post({ type: 'close' });
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });
   }

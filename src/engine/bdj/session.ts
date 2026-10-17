@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import type { DiscSpec } from '../disc/disc-spec';
 import type { PlayerBdjHost } from './player-host';
 import type { ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
@@ -31,6 +32,8 @@ export interface BdjSessionDeps {
   readonly time45: () => bigint;
   readonly onFailed: (code: BdjFailureCode, message: string) => void;
   readonly onLog?: (line: string, error: boolean) => void;
+  /** The worker's NAS reads got a 401: a fresh token is wanted (setToken delivers it). */
+  readonly onTokenNeeded?: () => void;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** How long after boot (or the first start) Java has to select a playlist. */
@@ -56,13 +59,18 @@ export class BdjSession {
   }
 
   /** Settles once the worker has booted, or once the session has ended. */
-  boot(files: readonly (readonly [string, Blob])[], discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
+  boot(disc: DiscSpec, readAheadBytes: number, discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
     return new Promise((resolve) => {
       if (this.stopped) return resolve();
       this.armTimeout();
       this.bootDone = resolve;
-      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, discFiles: files, discId, classLibrary });
+      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, disc, readAheadBytes, discId, classLibrary });
     });
+  }
+
+  /** A fresh session token for the worker's NAS reads. */
+  setToken(token: string): void {
+    if (!this.stopped) this.post({ type: 'remoteToken', token });
   }
 
   start(title: number): void {
@@ -113,6 +121,9 @@ export class BdjSession {
         break;
       case 'failed':
         this.fail(m.code, m.message);
+        break;
+      case 'remoteTokenNeeded':
+        this.deps.onTokenNeeded?.();
         break;
     }
   }
