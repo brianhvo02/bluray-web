@@ -29,11 +29,13 @@ function fakeApi(over: Partial<AdminApi> = {}): AdminApi {
 
 describe('deviceRow', () => {
   it('reads name · paired <date> · last seen <relative>', () => {
-    expect(deviceRow(device(), NOW, 'other', DATES)).toEqual({ id: 'd1', text: 'Mum · paired 3 Oct 2026 · last seen 5 minutes ago' });
+    expect(deviceRow(device(), NOW, 'other', DATES)).toEqual({ id: 'd1', text: 'Mum · paired 3 Oct 2026 · last seen 5 minutes ago', thisDevice: false });
   });
 
   it("marks this device's own row", () => {
-    expect(deviceRow(device({ id: 'me', name: 'iPad' }), NOW, 'me', DATES).text).toBe('iPad (this device) · paired 3 Oct 2026 · last seen 5 minutes ago');
+    const row = deviceRow(device({ id: 'me', name: 'iPad' }), NOW, 'me', DATES);
+    expect(row.text).toBe('iPad (this device) · paired 3 Oct 2026 · last seen 5 minutes ago');
+    expect(row.thisDevice).toBe(true);
   });
 });
 
