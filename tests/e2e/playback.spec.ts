@@ -168,25 +168,37 @@ test('stays in sync for ten minutes (nightly)', async ({ page, browserName, isMo
 });
 
 test('holding and slowly dragging the seek bar seeks to where it is released', async ({ page }) => {
+  await recordTelemetrySamples(page);
   await openDisc(page);
   await startPlaylist(page, '00000');
   await page.getByTestId('player').hover();
   const bar = await page.getByTestId('seek').boundingBox();
   if (!bar) throw new Error('seek bar not found');
   const y = bar.y + bar.height / 2;
+  const clockUs = async (): Promise<number> => (await telemetry(page))?.clockUs ?? -1;
   await page.mouse.move(bar.x + bar.width * 0.1, y);
   await page.mouse.down();
   await page.waitForTimeout(3500); // longer than the controls' hide delay
   await expect(page.getByTestId('control-bar')).not.toHaveClass(/hidden/);
+  // Pause while still holding, so from here on only a seek moves the clock: how far the 8 s playlist got while a slow
+  // browser ran the steps above no longer matters.
+  const beforePause = (await telemetrySamples(page)).length;
+  await page.keyboard.press('Space');
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
+  const paused = await pausedClockUs(page, beforePause);
+  const target = paused < 4_000_000 ? 0.75 : 0.25; // a release point at least 2 s away from the paused time
   for (let i = 1; i <= 20; i++) {
-    await page.mouse.move(bar.x + bar.width * (0.1 + (0.6 * i) / 20), y);
+    await page.mouse.move(bar.x + bar.width * (0.1 + ((target - 0.1) * i) / 20), y);
     await page.waitForTimeout(50); // slow enough for Chrome to fire a trailing `change` on release
   }
-  const released = (await telemetry(page))?.clockUs ?? Infinity;
-  expect(released).toBeLessThan(5_000_000); // the drag itself did not seek
+  const afterDrag = (await telemetrySamples(page)).length;
+  await expect.poll(async () => (await telemetrySamples(page, afterDrag)).length, { timeout: 5_000, intervals: [50] }).toBeGreaterThan(0);
+  // the drag itself did not seek (a paused clock can still settle by a few ms, as in "pauses and resumes")
+  expect(Math.abs((await clockUs()) - paused)).toBeLessThan(50_000);
   await page.mouse.up();
-  // Released at 70% of 8 s: the clock must reach the target and stay past it, not snap back to the old time.
-  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 1000, intervals: [50] }).toBeGreaterThanOrEqual(5_500_000);
+  // The clock must reach the release point and stay there, not snap back to the old time.
+  const near = (us: number): boolean => Math.abs(us - target * 8_000_000) < 500_000;
+  await expect.poll(async () => near(await clockUs()), { timeout: 5_000, intervals: [50] }).toBe(true);
   await page.waitForTimeout(500);
-  expect((await telemetry(page))?.clockUs ?? 0).toBeGreaterThanOrEqual(5_500_000);
+  expect(near(await clockUs())).toBe(true);
 });
