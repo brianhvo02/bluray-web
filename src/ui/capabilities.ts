@@ -42,3 +42,19 @@ export function checkCapabilities(g: Bag = globalThis as unknown as Bag): Capabi
     mediaSession: nav !== undefined && 'mediaSession' in nav,
   };
 }
+
+/**
+ * Whether the landing screen warns that Safari clears site data after 7 days without a visit: only in a browser tab of a
+ * browser without FileSystemHandle permissions (non-Chromium). An installed app (standalone) is exempt.
+ */
+export function showStorageHint(
+  canRememberDiscs: boolean,
+  win: { matchMedia(query: string): { readonly matches: boolean } } = window,
+): boolean {
+  if (canRememberDiscs) return false;
+  try {
+    return !win.matchMedia('(display-mode: standalone)').matches;
+  } catch {
+    return true;
+  }
+}

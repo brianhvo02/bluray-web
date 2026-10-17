@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkCapabilities } from './capabilities';
+import { checkCapabilities, showStorageHint } from './capabilities';
 
 const base = { VideoDecoder: class {}, AudioWorkletNode: class {}, OffscreenCanvas: class {}, SharedArrayBuffer, crossOriginIsolated: true };
 
@@ -63,5 +63,30 @@ describe('checkCapabilities', () => {
   it('reports no fullscreen when the document disables it (iPhone)', () => {
     const report = checkCapabilities({ ...base, document: { fullscreenEnabled: false, webkitFullscreenEnabled: false } });
     expect(report.fullscreen).toBeNull();
+  });
+});
+
+describe('showStorageHint', () => {
+  const win = (standalone: boolean | 'throws') => ({
+    matchMedia: (q: string) => {
+      if (standalone === 'throws') throw new Error('no matchMedia');
+      return { matches: q === '(display-mode: standalone)' && standalone };
+    },
+  });
+
+  it('is hidden where discs can be remembered (Chromium)', () => {
+    expect(showStorageHint(true, win(false))).toBe(false);
+  });
+
+  it('shows in a browser tab that cannot remember discs', () => {
+    expect(showStorageHint(false, win(false))).toBe(true);
+  });
+
+  it('is hidden when running as an installed app', () => {
+    expect(showStorageHint(false, win(true))).toBe(false);
+  });
+
+  it('shows when matchMedia throws', () => {
+    expect(showStorageHint(false, win('throws'))).toBe(true);
   });
 });

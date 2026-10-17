@@ -51,7 +51,7 @@ registerRoute(
       }
       return shellOr(network);
     },
-    { denylist: [/^\/probe(\.html)?$/] },
+    { denylist: [/^\/probe(\.html)?(\?.*)?$/] },
   ),
 );
 

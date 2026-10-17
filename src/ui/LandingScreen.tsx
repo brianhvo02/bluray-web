@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
-import { checkCapabilities } from './capabilities';
+import { checkCapabilities, showStorageHint } from './capabilities';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
@@ -11,6 +11,7 @@ interface LandingScreenProps {
 
 export function LandingScreen({ controller, snapshot }: LandingScreenProps): ReactElement {
   const [capabilities] = useState(() => checkCapabilities());
+  const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -116,7 +117,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         onDrop={onDrop}
       >
         <p>Drop a decrypted Blu-ray folder here: the disc folder, or the BDMV folder inside it.</p>
-        <p className="hint">On Safari, add the app to your Home Screen or Dock so your settings aren't cleared after 7 days without a visit.</p>
+        {storageHint && <p className="hint">On Safari, add the app to your Home Screen or Dock so your settings aren't cleared after 7 days without a visit.</p>}
         <button type="button" data-testid="open-folder" disabled={!capabilities.core.ok} onClick={onPickFolder}>
           Open disc folder
         </button>
