@@ -47,7 +47,9 @@ Anti-goals:
 | App origin | Stays `bluray-web.pages.dev`; the server answers cross-origin with CORS and CORP | My call (parent §4.5) |
 | Auth on reads | Short-lived session token in the URL query, so range reads stay CORS-simple (no preflight per read) | My call |
 | Stack | Node 24 + TypeScript in `server/`, sharing `src/engine/bdmv/` and the UDF reader | Parent §4.1 |
-| ISO | In step 2, UDF reader ported from libudfread, shared by client and server | Parent §4.7 |
+| ISO | Server-side in step 2 (UDF reader ported from libudfread, in `src/engine/disc/` so the client can use it later); local `.iso` opening deferred | Parent §4.7; deferral my call |
+| Admin | A screen in the app, owner sessions only; the server serves JSON, no HTML | My call |
+| Owner invites | Single-use, minted by `deploy.sh --owner-invite` per device; rerun to recover | My call |
 
 ## 5. The server
 
@@ -63,14 +65,16 @@ Anti-goals:
 - `GET discs/<id>/manifest` → every file's path, size and mtime, plus the inlined contents of the metadata the engine reads at open (`index.bdmv`, `MovieObject.bdmv`, every `.mpls` and `.clpi`, `sound.bdmv`, `BDJO`, JAR sizes), so opening is one round trip (parent §4.2). For an ISO, each entry carries its extents in the image.
 - `GET discs/<id>/files/<path>?t=<token>` with a single `Range` → bytes (206). For an ISO the server maps the path's extents. `Cache-Control: private, max-age=3600` on immutable disc bytes.
 - `GET discs/<id>/probe?t=<token>` → 4 MB of the main clip for the throughput measurement (parent §4.4).
-- Pairing and sessions: `POST pair/redeem` (invite secret + device public key), `POST session` (signed challenge → session token valid 1 hour, refreshed by the client before expiry), `GET admin/*` for invites and devices.
+- Pairing and sessions: `POST pair/redeem` (invite secret + device public key), `POST session` (signed challenge → session token valid 1 hour, refreshed by the client before expiry).
+- Admin (owner sessions only, JSON): `GET admin/devices`, `GET admin/invites`, `POST admin/invites`, `DELETE admin/devices/<id>`, `DELETE admin/invites/<id>`, `POST admin/rescan`. These change state and carry a JSON body or a non-GET method, so they go through a CORS preflight (`Access-Control-Max-Age: 600`); only reads must stay preflight-free.
+- The manifest of an ISO disc lists its files as plain paths and sizes, like a folder disc; the server maps paths to extents itself, so the client needs no UDF reader in step 2.
 - Every response: `Access-Control-Allow-Origin: https://bluray-web.pages.dev` (plus `http://localhost:5173` and `:4173` for development, and preview origins `https://*.bluray-web.pages.dev`), `Cross-Origin-Resource-Policy: cross-origin`, `Vary: Origin`. Range reads use only CORS-safelisted headers, so they need no preflight.
 
 ## 7. Pairing (step 2's part of parent §5.3)
 
-- First run: the deploy script prints a one-time **owner invite** link; the user opens it on each of their devices (or the admin page creates more). Redeeming generates a non-extractable WebCrypto P-256 key pair on the device, stored in IndexedDB, and registers the public key.
+- Owner invites: `deploy.sh --owner-invite` mints one single-use owner invite (a link) per run and prints it; the user runs it once per device, or creates more invites from an already paired owner device. Rerunning it is also the recovery if every owner device is lost or revoked (my call). Redeeming generates a non-extractable WebCrypto P-256 key pair on the device, stored in IndexedDB, and registers the public key.
 - A session starts with a signed challenge and yields a session token (HMAC over device ID and expiry with a server secret in `/data`). Tokens ride in the query string of reads; revoking a device rejects its tokens at once.
-- Admin page at `/bluray/admin/`: invites, devices (name, last seen), revoke, rescan. Reachable only by a paired owner device (owner flag set by the owner invite). No separate admin password in step 2.
+- Admin is a screen inside the app (NAS settings: invites, devices with name and last seen, revoke, rescan), calling the admin endpoints with an owner session. The server serves no HTML, so nothing app-like runs on the NAS origin next to Vaultwarden (my call). No admin password in step 2.
 
 ## 8. The client
 
@@ -78,6 +82,9 @@ Anti-goals:
 - **Library**: a folder browser (breadcrumbs, folders first, discs with size and an "ISO" or "UHD" badge when known), touch-friendly, remembering the last folder.
 - **Engine**: `RemoteSource` with an HTTPS `RangeTransport` in the worker, exactly as parent §4.3; the `open` command gains the `remote` variant. Remote read-ahead and start-up buffering as parent §4.4 (about 30 s ahead, several reads in flight, start after about 3 s buffered).
 - **Pre-flight**: the measured throughput against the disc's peak rate, with a plain warning when it's lower (UHD discs at 60–100+ Mbps will often exceed a hotel connection; step 4 addresses that).
+- **BD-J discs**: the BD-J worker reads the disc itself (`src/engine/bdj/bdj-worker.ts` builds its own `FileSource` from `discFiles`), so a remote BD-J disc hands the BD-J worker the manifest and a transport too, and it builds a `RemoteSource`; the JVM's disc reads are already async.
+- **Chrome's Local Network Access**: requests from `bluray-web.pages.dev` to the tailnet name (a 100.64.0.0/10 address) may meet Chrome's local-network permission. The plan starts with a spike that checks it from Chrome, Edge, Safari and Firefox, for fetches from the page and from the worker. A one-time permission prompt is acceptable. If the permission can't cover reads made from a worker, the HTTPS transport runs on the main thread and serves the worker over a `MessagePort` (the same shape the WebRTC transport needs in step 3). No new ports or origins (my call).
+- **Slow first reads**: the drives have no spin-down configured (no `hdparm`/`hd-idle` setup found), but a cold read on a busy HDD can still take seconds. The first read of a disc tolerates up to 30 s, and after 3 s the UI says "Waiting for the NAS drive…" instead of looking stuck.
 - **Errors**: NAS unreachable, session expired (silently refreshed), device revoked (back to pairing), read failures with retry (parent §4.3).
 
 ## 9. Testing
@@ -87,6 +94,10 @@ Anti-goals:
 - E2E: the server in a local container with `fixtures/synthetic/` as its library; the app paired to it; open and play `disc1`, `disc-menu`, `disc-bdj` and an ISO in Chromium, Firefox and WebKit.
 - Device run (the remote-automation harness from step 1): iPad and iPhone open a real disc from the NAS over Tailscale, at home; seek; switch audio. Recorded in the status line.
 
-## 10. Left to the builder
+## 10. Out of step 2
+
+- Opening a local `.iso` file on the landing screen (parent §4.7): deferred, since the server handles ISO discs itself and iOS copies picked files anyway (my call).
+
+## 11. Left to the builder
 
 Library page layout details, scan scheduling details, exact token format, retry constants, how the deploy script detects the existing Caddy route, the fixture ISO's contents.
