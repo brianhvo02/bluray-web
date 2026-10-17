@@ -40,6 +40,12 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     nas.pairing().then(setPairing, () => setPairing(null));
   };
   useEffect(loadPairing, [nas]);
+  // A NAS call that finds this device revoked clears the pairing: show the code field again.
+  useEffect(() => nas.onUnpaired(loadPairing), [nas]);
+  const forgetNas = (): void => {
+    setPairRequested(false);
+    nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
+  };
 
   useEffect(() => {
     const input = inputRef.current;
@@ -194,7 +200,10 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
           />
         ) : (
           <p className="status" data-testid="nas-paired">
-            Paired with the NAS as {pairing.deviceName}.
+            Paired with the NAS as {pairing.deviceName}.{' '}
+            <button type="button" data-testid="nas-forget" onClick={forgetNas}>
+              Forget this NAS
+            </button>
           </p>
         ))}
       {capabilities.canRememberDiscs && recent.length > 0 && (
