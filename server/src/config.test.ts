@@ -12,6 +12,7 @@ describe('loadConfig', () => {
       port: 4190,
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
+      publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
     });
   });
 
@@ -22,6 +23,7 @@ describe('loadConfig', () => {
       port: 8080,
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
+      publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
     });
   });
 
@@ -49,5 +51,13 @@ describe('loadConfig', () => {
 
   it.each(['', 'abc', '80x', '-1', '1.5', '65536'])('rejects PORT=%j', (value) => {
     expect(() => loadConfig({ PORT: value })).toThrow(`PORT "${value}" is not a port number`);
+  });
+
+  it('reads PUBLIC_BASE', () => {
+    expect(loadConfig({ PUBLIC_BASE: 'http://localhost:4190/api/' }).publicBase).toBe('http://localhost:4190/api/');
+  });
+
+  it.each(['', 'nas/api', 'ftp://nas/api/'])('rejects PUBLIC_BASE=%j', (value) => {
+    expect(() => loadConfig({ PUBLIC_BASE: value })).toThrow(`PUBLIC_BASE "${value}" is not an http(s) URL`);
   });
 });

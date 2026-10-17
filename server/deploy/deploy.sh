@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Builds the server image, ships it to the NAS, (re)starts the service and
 # adds the /bluray/* route to Caddy. Run from the Mac: npm run server:deploy
+# With --owner-code it deploys nothing: it mints one owner pairing code on the
+# running server and prints it with its link and a terminal QR.
 set -euo pipefail
 
 HOST="${BLURAY_NAS_HOST:-mediaserver}"
+
+if [ "${1:-}" = "--owner-code" ]; then
+  exec ssh "$HOST" docker exec bluray-server node server.mjs owner-code
+fi
+
 REMOTE_DIR='~/bluray-server'
 cd "$(dirname "$0")/../.."
 

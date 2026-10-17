@@ -16,6 +16,39 @@ export function json(status: number, value: unknown, headers: Record<string, str
   return { status, headers: { 'Content-Type': 'application/json; charset=utf-8', ...headers }, body: JSON.stringify(value) };
 }
 
+/** Thrown by a handler to answer `status` with `{"error": message}`. */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly headers: Record<string, string> = {},
+  ) {
+    super(message);
+  }
+}
+
+const MAX_JSON_BYTES = 16 * 1024;
+
+/** The request's JSON body: 415 unless it is `application/json`, 413 above 16 KiB, 400 if it doesn't parse. */
+export async function readJson(req: IncomingMessage): Promise<unknown> {
+  const type = req.headers['content-type']?.split(';')[0]?.trim().toLowerCase();
+  if (type !== 'application/json') throw new HttpError(415, 'expected application/json');
+  const tooLarge = new HttpError(413, 'body too large', { Connection: 'close' });
+  if (Number(req.headers['content-length'] ?? 0) > MAX_JSON_BYTES) throw tooLarge;
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req as AsyncIterable<Buffer>) {
+    size += chunk.length;
+    if (size > MAX_JSON_BYTES) throw tooLarge;
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch {
+    throw new HttpError(400, 'bad request');
+  }
+}
+
 const health: Handler = async (req, url) => {
   if (url.pathname !== '/api/health') return null;
   if (req.method === 'GET') return json(200, { ok: true });
@@ -46,9 +79,14 @@ async function route(handlers: readonly Handler[], req: IncomingMessage): Promis
   } catch {
     return json(400, { error: 'bad request' });
   }
-  for (const handler of handlers) {
-    const response = await handler(req, url);
-    if (response) return response;
+  try {
+    for (const handler of handlers) {
+      const response = await handler(req, url);
+      if (response) return response;
+    }
+  } catch (err) {
+    if (err instanceof HttpError) return json(err.status, { error: err.message }, err.headers);
+    throw err;
   }
   return json(404, { error: 'not found' });
 }
