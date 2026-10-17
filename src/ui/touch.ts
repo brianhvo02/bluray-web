@@ -13,35 +13,50 @@ export type TapAction = 'toggleControls' | 'seekBack' | 'seekForward' | 'menuCli
 /** Two taps within this many ms make a double tap. */
 export const DOUBLE_TAP_MS = 300;
 
-/** The band at the player's bottom edge, this many px tall, whose letterbox part shows the controls over a menu (R12, R13). */
-export const MENU_TAP_ZONE_PX = 48;
-
 /**
- * Whether a tap at `y` (client px) on the canvas falls in the menu wake band (ruling R13): within MENU_TAP_ZONE_PX of the
- * bottom edge and below the picture, as the compositor fits the 1920×1080 menu into the canvas (the rectangle taps are
- * mapped through). Where the picture reaches the bottom edge (landscape on a phone) the band is empty: a tap on the picture
- * always goes to the disc.
+ * Whether a point (client px) on the canvas lies off the picture: in a letterbox or pillarbox band (top, bottom or sides)
+ * around the 1920×1080 picture as the compositor fits it into the canvas (the rectangle taps are mapped through, as
+ * toMenuSpace). A tap there reaches no disc, so over a menu it shows the controls instead (rulings R13, R14).
  */
-export function inMenuWakeBand(y: number, canvas: { readonly top: number; readonly width: number; readonly height: number }): boolean {
+export function offPicture(x: number, y: number, canvas: { readonly left: number; readonly top: number; readonly width: number; readonly height: number }): boolean {
   const fit = fitRect(MENU_WIDTH, MENU_HEIGHT, canvas.width, canvas.height);
-  const local = y - canvas.top;
-  return local < canvas.height && canvas.height - local <= MENU_TAP_ZONE_PX && local >= fit.y + fit.height;
+  const px = x - canvas.left;
+  const py = y - canvas.top;
+  if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) return false; // not on the canvas at all
+  return px < fit.x || py < fit.y || px >= fit.x + fit.width || py >= fit.y + fit.height;
+}
+
+/** A touch held at least this long (ms) is a long press. */
+export const LONG_PRESS_MS = 500;
+/** A touch that moves more than this many px from where it went down is no long press. */
+export const LONG_PRESS_SLOP_PX = 10;
+
+/** Whether a touch has moved too far from where it went down to be a long press. */
+export function beyondLongPressSlop(start: { readonly x: number; readonly y: number }, now: { readonly x: number; readonly y: number }): boolean {
+  return Math.hypot(now.x - start.x, now.y - start.y) > LONG_PRESS_SLOP_PX;
 }
 
 /**
- * What a tap on the video does. While a disc menu is shown (an HDMV menu, or a BD-J plane with anything visible) a tap is
- * a click on the menu, except that with the controls hidden a tap in the menu wake band (`inWakeBand`, inMenuWakeBand)
- * shows them: a touch-only user has another way to bring them back besides a tap the disc doesn't take (rulings R12, R13).
- * Otherwise a single tap toggles the controls, and a second tap within DOUBLE_TAP_MS in the left or right third seeks back
- * or forward.
+ * Whether a touch held for `heldMs` makes a long press that shows the controls (ruling R15): only over a disc menu, held at
+ * least LONG_PRESS_MS without moving beyond the slop. It is not sent to the disc; elsewhere a long touch is an ordinary tap.
+ */
+export function isMenuLongPress(ctx: { readonly inMenu: boolean; readonly heldMs: number; readonly moved: boolean }): boolean {
+  return ctx.inMenu && !ctx.moved && ctx.heldMs >= LONG_PRESS_MS;
+}
+
+/**
+ * What a tap on the video does. While a disc menu is shown (an HDMV menu, or a BD-J plane with anything visible) a tap on
+ * the picture is a click on the menu, and with the controls hidden a tap off it (`offPicture`) shows them: nothing reaches
+ * the disc there (rulings R13, R14). Otherwise a single tap toggles the controls, and a second tap within DOUBLE_TAP_MS in
+ * the left or right third seeks back or forward.
  */
 export function classifyTap(
   prev: Tap | null,
   tap: Tap,
-  ctx: { width: number; menuActive: boolean; bdjMenuVisible?: boolean; inWakeBand?: boolean; controlsShown?: boolean },
+  ctx: { width: number; menuActive: boolean; bdjMenuVisible?: boolean; offPicture?: boolean; controlsShown?: boolean },
 ): TapAction {
   if (ctx.menuActive || ctx.bdjMenuVisible) {
-    if (ctx.controlsShown === false && ctx.inWakeBand === true) return 'showControls';
+    if (ctx.controlsShown === false && ctx.offPicture === true) return 'showControls';
     return 'menuClick';
   }
   if (prev && tap.timeMs - prev.timeMs <= DOUBLE_TAP_MS && ctx.width > 0) {

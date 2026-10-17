@@ -178,6 +178,9 @@ what would change that decision.
   moves) beyond 8 pending, never other events. Pointer moves are not logged, like PTS. Escape/Back is not sent to
   Java: libbluray defines no Back key (`keys.h`) and Java drops unknown codes; Escape stays with the player UI. The
   remote opens by itself once per menu, with the notice; one the user closes stays closed until the next menu.
+- **Touch over a disc menu, HDMV or BD-J (5d, rulings R12-R15).** A tap on the picture goes to the disc; a tap off
+  it (any letterbox or pillarbox band), an HDMV tap that hits no button, a BD-J tap Java ignores (remote too), or a
+  long press (500 ms, at most 10 px of movement; never sent to the disc) brings up the controls.
 - **Local BD-J discs against libbluray (5d).** `tests/local/bdj-menus.test.ts` drives A_NEW_ERA (main menu to PLAY,
   and to CHAPTERS, chapter 2) and RENTAL_FAMILY (language picker, English, main menu, PLAY) to the feature and compares
   the control calls and the plane at every settled point with libbluray's committed runs (`tests/bdj/golden/local/`).

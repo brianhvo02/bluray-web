@@ -65,22 +65,38 @@ async function bottomEdge(page: Page, fromBottom: number): Promise<{ x: number; 
 /** Phone landscape (Pixel 7 turned): the 16:9 picture is pillarboxed and reaches the bottom edge. */
 const LANDSCAPE = { width: 839, height: 412 };
 
-test('portrait, HDMV menu: a tap in the letterbox band at the bottom brings back the controls that idled out (R12, R13)', async ({ page }) => {
+/** A point `fromTop` px below the player's top edge, centred. */
+async function topEdge(page: Page, fromTop: number): Promise<{ x: number; y: number }> {
+  const box = (await page.getByTestId('player').boundingBox())!;
+  return { x: box.x + box.width / 2, y: box.y + fromTop };
+}
+
+/** Holds a touch at (x, y) for `ms` (Chrome DevTools Protocol touches: pointerType 'touch'); `whileDown` runs before release. */
+async function longPress(page: Page, x: number, y: number, ms: number, whileDown?: () => Promise<void>): Promise<void> {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+  await page.waitForTimeout(ms);
+  if (whileDown) await whileDown();
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await cdp.detach();
+}
+
+test('portrait, HDMV menu: a tap in the top or the bottom letterbox brings back the controls that idled out (R13, R14)', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
   await expectMenu(page, true);
   const bar = page.getByTestId('control-bar');
   await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000); // idled out by the timer
-  // letterbox above the 48 px band: nothing
-  const high = await bottomEdge(page, 100);
-  await page.touchscreen.tap(high.x, high.y);
-  await page.waitForTimeout(500);
-  await expectBarHidden(bar);
-  const edge = await bottomEdge(page, 10);
-  await page.touchscreen.tap(edge.x, edge.y);
+  const top = await topEdge(page, 60);
+  await page.touchscreen.tap(top.x, top.y);
   await expectBarShown(bar, 1_000);
   await expectMenu(page, true);
+  // the bottom letterbox, well above the edge, does it too
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
+  const low = await bottomEdge(page, 100);
+  await page.touchscreen.tap(low.x, low.y);
+  await expectBarShown(bar, 1_000);
   // a tap on button A still activates it
   const a = await menuPoint(page, 232, 216);
   await page.touchscreen.tap(a.x, a.y);
@@ -136,7 +152,33 @@ test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignor
   await expectBarShown(bar);
 });
 
-test('portrait, BD-J menu: a tap in the letterbox band brings back the controls without reaching the disc; a tap on the picture reaches it (R12, R13)', async ({ page }) => {
+test('landscape, BD-J menu: a long press shows the controls while held and never reaches Java; a tap still does (R15)', async ({ page }) => {
+  await page.setViewportSize(LANDSCAPE);
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
+  const player = page.getByTestId('player');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+  const bar = page.getByTestId('control-bar');
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
+  const before = (await bdjPlane(page))!;
+  // a long press on Play: as a tap, its MouseListener would repaint the plane
+  const play = await menuPoint(page, 300, 400);
+  await longPress(page, play.x, play.y, 800, async () => {
+    await expect(bar).not.toHaveClass(/hidden/); // shown at 500 ms, with the finger still down
+  });
+  await expectBarShown(bar);
+  await page.waitForTimeout(1_000);
+  const after = (await bdjPlane(page))!;
+  expect(after.flushes).toBe(before.flushes); // Java got no click
+  expect(after.tapsIgnored).toBe(before.tapsIgnored);
+  await expect(page.getByTestId('remote-pad')).toBeHidden();
+  // an ordinary tap on Play still reaches Java
+  await page.touchscreen.tap(play.x, play.y);
+  await expect.poll(async () => (await bdjPlane(page))!.flushes, { timeout: 5_000 }).toBeGreaterThan(before.flushes);
+});
+
+test('portrait, BD-J menu: a tap in the bottom letterbox brings back the controls without reaching the disc; a tap on the picture reaches it (R13, R14)', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
   const player = page.getByTestId('player');
@@ -150,7 +192,7 @@ test('portrait, BD-J menu: a tap in the letterbox band brings back the controls 
   await page.waitForTimeout(1_000);
   expect((await bdjPlane(page))!.tapsIgnored).toBe(0); // the tap never reached Java
   await expect(page.getByTestId('remote-pad')).toBeHidden();
-  // a tap on Play (above the zone) reaches Java: its MouseListener repaints
+  // a tap on Play (the picture) reaches Java: its MouseListener repaints
   const before = (await bdjPlane(page))!.flushes;
   const play = await menuPoint(page, 300, 400);
   await page.touchscreen.tap(play.x, play.y);

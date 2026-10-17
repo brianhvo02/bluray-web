@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, inMenuWakeBand, MENU_TAP_ZONE_PX, MENU_WAKE_ZONE_PX, menuPointerEffect, missedMenuTapShowsControls, pairableTap } from './touch';
+import { beyondLongPressSlop, classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, MENU_WAKE_ZONE_PX, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -138,51 +138,69 @@ describe('controlsShown', () => {
   });
 });
 
-describe('inMenuWakeBand (rulings R12, R13)', () => {
-  it('uses a 48 px band', () => {
-    expect(MENU_TAP_ZONE_PX).toBe(48);
+describe('offPicture (rulings R13, R14)', () => {
+  it('is any letterbox band around the picture, top and bottom (portrait)', () => {
+    const canvas = { left: 0, top: 100, width: 400, height: 800 }; // the picture is 400x225 at y 287-512
+    expect(offPicture(200, 100 + 799.5, canvas)).toBe(true); // bottom edge
+    expect(offPicture(200, 100 + 700, canvas)).toBe(true); // bottom letterbox, far above the edge
+    expect(offPicture(200, 100 + 5, canvas)).toBe(true); // top letterbox
+    expect(offPicture(200, 100 + 286, canvas)).toBe(true);
+    expect(offPicture(200, 100 + 287, canvas)).toBe(false); // the picture's first row
+    expect(offPicture(200, 100 + 511, canvas)).toBe(false); // its last row
+    expect(offPicture(200, 100 + 512, canvas)).toBe(true);
   });
 
-  it('is the bottom 48 px of a letterbox under the picture (portrait)', () => {
-    const canvas = { top: 100, width: 400, height: 800 }; // the picture is 400x225 at y 287-512
-    expect(inMenuWakeBand(100 + 799.5, canvas)).toBe(true);
-    expect(inMenuWakeBand(100 + 800, canvas)).toBe(false); // past the canvas
-    expect(inMenuWakeBand(100 + 800 - 48, canvas)).toBe(true);
-    expect(inMenuWakeBand(100 + 800 - 49, canvas)).toBe(false); // letterbox, but above the band
-    expect(inMenuWakeBand(100 + 400, canvas)).toBe(false); // the picture
+  it('is the side bands when the picture is pillarboxed (landscape)', () => {
+    const canvas = { left: 0, top: 0, width: 839, height: 412 }; // the picture is 732x412 at x 53-785
+    expect(offPicture(20, 200, canvas)).toBe(true);
+    expect(offPicture(820, 200, canvas)).toBe(true);
+    for (const y of [0, 200, 380, 411.5]) expect(offPicture(400, y, canvas)).toBe(false); // the picture reaches top and bottom
   });
 
-  it('is only the part of the band below the picture when the letterbox is thinner than the band', () => {
-    const canvas = { top: 0, width: 400, height: 265 }; // the picture is 400x225 at y 20-245
-    expect(inMenuWakeBand(250, canvas)).toBe(true);
-    expect(inMenuWakeBand(245, canvas)).toBe(true);
-    expect(inMenuWakeBand(244, canvas)).toBe(false); // in the band, but on the picture
-  });
-
-  it('is empty where the picture reaches the bottom edge (landscape)', () => {
-    const canvas = { top: 0, width: 839, height: 412 }; // pillarboxed: the picture is full height
-    for (const y of [411.5, 400, 380, 364]) expect(inMenuWakeBand(y, canvas)).toBe(false);
+  it('is false off the canvas', () => {
+    const canvas = { left: 10, top: 10, width: 400, height: 800 };
+    expect(offPicture(5, 20, canvas)).toBe(false);
+    expect(offPicture(20, 810, canvas)).toBe(false);
   });
 });
 
-describe('classifyTap in the menu wake band (rulings R12, R13)', () => {
+describe('long press (ruling R15)', () => {
+  it('is 500 ms with a 10 px slop', () => {
+    expect(LONG_PRESS_MS).toBe(500);
+    expect(LONG_PRESS_SLOP_PX).toBe(10);
+  });
+
+  it('allows up to 10 px of movement', () => {
+    expect(beyondLongPressSlop({ x: 100, y: 100 }, { x: 106, y: 108 })).toBe(false); // exactly 10 px
+    expect(beyondLongPressSlop({ x: 100, y: 100 }, { x: 111, y: 100 })).toBe(true);
+  });
+
+  it('is a held, still touch over a disc menu only', () => {
+    expect(isMenuLongPress({ inMenu: true, heldMs: 500, moved: false })).toBe(true);
+    expect(isMenuLongPress({ inMenu: true, heldMs: 499, moved: false })).toBe(false);
+    expect(isMenuLongPress({ inMenu: true, heldMs: 900, moved: true })).toBe(false);
+    expect(isMenuLongPress({ inMenu: false, heldMs: 900, moved: false })).toBe(false); // over the feature: an ordinary tap
+  });
+});
+
+describe('classifyTap off the picture over a menu (rulings R13, R14)', () => {
   const menu = { width: 400, menuActive: true, controlsShown: false };
-  it('shows the hidden controls on a tap in the band, HDMV or BD-J', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, inWakeBand: true })).toBe('showControls');
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, bdjMenuVisible: true, inWakeBand: true })).toBe('showControls');
+  it('shows the hidden controls on a tap off the picture, HDMV or BD-J', () => {
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, offPicture: true })).toBe('showControls');
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, bdjMenuVisible: true, offPicture: true })).toBe('showControls');
   });
 
   it('sends any other tap to the menu, the picture included', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, inWakeBand: false })).toBe('menuClick');
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, offPicture: false })).toBe('menuClick');
     expect(classifyTap(null, { x: 200, timeMs: 0 }, menu)).toBe('menuClick');
   });
 
-  it('sends a tap in the band to the menu when the controls already show (a control, or empty bar space)', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, controlsShown: true, inWakeBand: true })).toBe('menuClick');
+  it('sends a tap off the picture to the menu when the controls already show (a control, or empty bar space)', () => {
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, controlsShown: true, offPicture: true })).toBe('menuClick');
   });
 
   it('leaves taps outside a menu as they were', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, inWakeBand: true })).toBe('toggleControls');
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, offPicture: true })).toBe('toggleControls');
   });
 
   it('never pairs a tap that showed the controls into a double tap', () => {

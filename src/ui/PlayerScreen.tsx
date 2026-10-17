@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction, keyWakesControls } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, inMenuWakeBand, isHoverPointer, menuPointerEffect, missedMenuTapShowsControls, pairableTap, type Tap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, beyondLongPressSlop, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -17,6 +17,17 @@ const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
 const TAP_NOTICE_MS = 6000;
 
+
+/** A touch held on the video over a disc menu: where and when it went down, and whether it moved or showed the controls. */
+interface Press {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly downAt: number;
+  moved: boolean;
+  fired: boolean;
+  timer: number | null;
+}
 
 interface PlayerScreenProps {
   readonly controller: PlayerController;
@@ -71,12 +82,15 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const idleRef = useRef(idle);
   idleRef.current = idle;
   const lastUpWasTouch = useRef(false);
+  /** A touch on the video over a disc menu that may become a long press (ruling R15). */
+  const press = useRef<Press | null>(null);
   /** Whether the controls showed at the last render (a tap at the bottom edge of a menu shows hidden ones, ruling R12). */
   const controlsVisibleRef = useRef(true);
 
   useEffect(
     () => () => {
       if (tapTimer.current !== null) window.clearTimeout(tapTimer.current);
+      if (press.current?.timer != null) window.clearTimeout(press.current.timer);
     },
     [],
   );
@@ -260,7 +274,16 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   // A BD-J title hears the mouse wherever it is over the picture (BDJ_EVENT_MOUSE), as libbluray's hosts send it.
   const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
-    if (e.pointerType === 'touch' || !(snapshot.menuActive || snapshot.bdjActive)) return;
+    if (e.pointerType === 'touch') {
+      const p = press.current;
+      if (p && p.id === e.pointerId && !p.moved && beyondLongPressSlop(p, { x: e.clientX, y: e.clientY })) {
+        p.moved = true; // a drag, not a long press
+        if (p.timer !== null) window.clearTimeout(p.timer);
+        p.timer = null;
+      }
+      return;
+    }
+    if (!(snapshot.menuActive || snapshot.bdjActive)) return;
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
     if (!point) return;
     const first = pendingMove.current === null;
@@ -273,9 +296,42 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  /** Ends a pending long press (its timer); returns whether it had already shown the controls. */
+  const endPress = (pointerId?: number): boolean => {
+    const p = press.current;
+    if (!p || (pointerId !== undefined && p.id !== pointerId)) return false;
+    if (p.timer !== null) window.clearTimeout(p.timer);
+    press.current = null;
+    return p.fired;
+  };
+
+  // A touch held still over a disc menu shows the controls once LONG_PRESS_MS pass, with the finger still down, and is not
+  // sent to the disc (ruling R15): the way back to the controls when every tap on the picture goes to the disc.
+  const onCanvasPointerDown = (e: PointerEvent<HTMLCanvasElement>): void => {
+    if (e.pointerType !== 'touch') return;
+    endPress();
+    const now = controller.getSnapshot();
+    if (!(now.menuActive || now.bdjMenuVisible)) return; // outside a menu a long touch is an ordinary tap
+    const p: Press = { id: e.pointerId, x: e.clientX, y: e.clientY, downAt: performance.now(), moved: false, fired: false, timer: null };
+    p.timer = window.setTimeout(() => {
+      p.timer = null;
+      const s = controller.getSnapshot();
+      if (!isMenuLongPress({ inMenu: s.menuActive || s.bdjMenuVisible, heldMs: performance.now() - p.downAt, moved: p.moved })) return;
+      p.fired = true;
+      setIdle(false);
+      setActivity((a) => a + 1);
+    }, LONG_PRESS_MS);
+    press.current = p;
+  };
+
   const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
     lastUpWasTouch.current = e.pointerType === 'touch';
     if (e.pointerType !== 'touch') return;
+    if (endPress(e.pointerId)) {
+      // the long press showed the controls: no click for the disc, and no tap to pair with
+      lastTap.current = null;
+      return;
+    }
     const rect = e.currentTarget.getBoundingClientRect();
     const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
     // the snapshot the engine last sent: the tap is mapped with the canvas rectangle as it is now (after a rotation too)
@@ -284,7 +340,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       width: rect.width,
       menuActive: now.menuActive,
       bdjMenuVisible: now.bdjMenuVisible,
-      inWakeBand: inMenuWakeBand(e.clientY, rect), // the letterbox at the bottom edge (the canvas fills the player)
+      offPicture: offPicture(e.clientX, e.clientY, rect), // a letterbox or pillarbox band: nothing there reaches the disc
       controlsShown: controlsVisibleRef.current,
     });
     lastTap.current = pairableTap(action, tap);
@@ -420,8 +476,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         ref={canvasRef}
         className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
         data-testid="video-canvas"
+        onPointerDown={onCanvasPointerDown}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
+        onPointerCancel={(e) => endPress(e.pointerId)}
+        onContextMenu={(e) => {
+          if (press.current) e.preventDefault(); // a long press over a menu shows the controls, not the browser's menu
+        }}
         onClick={onCanvasClick}
       />
       <div className="notices">
