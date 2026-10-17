@@ -27,7 +27,7 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,wasm,ttf,svg,png,webmanifest,jar}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         // The diagnostics page is online-only.
-        globIgnores: ['probe.html', 'assets/probe-*.js'],
+        globIgnores: ['probe.html', 'assets/probe-*.js', 'lna.html', 'lna-worker.js'],
       },
     }),
   ],

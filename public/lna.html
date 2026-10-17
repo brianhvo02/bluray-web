@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LNA probe</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+  button { font-size: 20px; padding: 12px 32px; }
+  pre { white-space: pre-wrap; word-break: break-all; background: #f3f3f3; padding: 8px; }
+</style>
+</head>
+<body>
+<h1>Local Network Access probe</h1>
+<p>Fetches the NAS health endpoint from this page and from a module worker.</p>
+<button id="run" type="button">Run</button>
+<pre id="out">idle</pre>
+<script type="module">
+const NAS = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/health';
+const VARIANTS = [
+  { name: 'plain', headers: {} },
+  { name: 'range', headers: { Range: 'bytes=0-15' } },
+];
+const out = document.getElementById('out');
+window.__lna = { state: 'idle', userAgent: navigator.userAgent, crossOriginIsolated: self.crossOriginIsolated, results: [] };
+
+async function permState() {
+  const res = {};
+  for (const name of ['local-network-access', 'local-network', 'loopback-network']) {
+    try { res[name] = (await navigator.permissions.query({ name })).state; }
+    catch (e) { res[name] = `unsupported (${e && e.name})`; }
+  }
+  return res;
+}
+
+async function probe(url, v) {
+  const t0 = performance.now();
+  const r = { where: 'page', variant: v.name };
+  try {
+    const res = await fetch(url, { headers: v.headers, cache: 'no-store' });
+    const body = await res.text();
+    Object.assign(r, { ok: res.ok, status: res.status, body: body.slice(0, 80), contentRange: res.headers.get('content-range') });
+  } catch (err) {
+    Object.assign(r, { ok: false, error: `${err && err.name}: ${err && err.message}` });
+  }
+  r.ms = Math.round(performance.now() - t0);
+  return r;
+}
+
+function inWorker() {
+  return new Promise((resolve) => {
+    const w = new Worker('/lna-worker.js', { type: 'module' });
+    const timer = setTimeout(() => { w.terminate(); resolve([{ where: 'worker', ok: false, error: 'timeout 30 s' }]); }, 30000);
+    w.onmessage = (e) => { clearTimeout(timer); w.terminate(); resolve(e.data); };
+    w.onerror = (e) => { clearTimeout(timer); resolve([{ where: 'worker', ok: false, error: `worker error: ${e.message}` }]); };
+    w.postMessage({ url: NAS, variants: VARIANTS });
+  });
+}
+
+function show() { out.textContent = JSON.stringify(window.__lna, null, 2); }
+
+document.getElementById('run').addEventListener('click', async () => {
+  const L = window.__lna;
+  L.state = 'running'; L.results = []; L.permBefore = await permState(); show();
+  // Page first by default, so a page-level grant (if any) can carry over; ?order=worker tries the worker cold.
+  L.order = new URLSearchParams(location.search).get('order') === 'worker' ? 'worker-first' : 'page-first';
+  const page = async () => { for (const v of VARIANTS) { L.results.push(await probe(NAS, v)); show(); } };
+  const worker = async () => { L.results.push(...(await inWorker())); show(); };
+  if (L.order === 'worker-first') { await worker(); await page(); } else { await page(); await worker(); }
+  L.permAfter = await permState();
+  L.state = 'done'; show();
+});
+show();
+</script>
+</body>
+</html>
