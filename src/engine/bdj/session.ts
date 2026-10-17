@@ -126,11 +126,18 @@ export class BdjSession {
     } finally {
       this.callInHand = null;
     }
+    // a call whose own handling stopped the session (selectTitle of an HDMV title: _play_hdmv → _stop_bdj) still has
+    // its answer, as libbluray's native returns to Java; the reply goes to a terminated worker, where it is dropped
+    const stoppedByThisCall = this.stopped;
     let value: number | string;
     try {
       value = await pending;
     } catch (e) {
       this.fail('internal', `${name} failed in the player: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (stoppedByThisCall) {
+      this.post({ type: 'reply', id, value });
       return;
     }
     if (this.stopped) return;

@@ -256,6 +256,26 @@ describe('BdjSession rules', () => {
     ]);
   });
 
+  it('still answers the call whose handling stopped the session (selectTitle of an HDMV title), and nothing else', async () => {
+    const f = fakeWorker();
+    let s: BdjSession | null = null;
+    const h = session(f.worker, (c) => {
+      if (c.name === 'selectTitle') {
+        s!.stop(); // _play_hdmv → _stop_bdj; libbluray's selectTitleN still returns 1 to Java
+        s!.event(BdjEvent.PSR102, 5);
+      }
+      return 1;
+    });
+    s = h.session;
+    f.emit({ type: 'call', id: 7, name: 'selectTitle', args: [1] });
+    await until(() => f.sent.length > 0);
+    f.emit({ type: 'call', id: 8, name: 'writeReg', args: [0, 1, 2, -1] });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(f.terminated()).toBe(true);
+    expect(f.sent).toEqual([{ type: 'reply', id: 7, value: 1 }]);
+    expect(h.calls.map((c) => c.name)).toEqual(['selectTitle']);
+  });
+
   it('publishes the time before replying to seek', async () => {
     const f = fakeWorker();
     const h = session(f.worker, () => '1', 9000n);
