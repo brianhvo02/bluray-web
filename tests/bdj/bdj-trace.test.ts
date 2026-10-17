@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { compareBdjTraces } from './compare';
 import { parseBdjTrace } from './format';
+import type { BdjHost, RecordingHost } from '../../src/engine/bdj/host';
 import { RegisterFile } from '../../src/engine/hdmv/registers';
 import { applyHarnessSettings, replayBdj } from './replay';
 
@@ -10,6 +11,29 @@ describe('BD-J trace parity', () => {
     const golden = parseBdjTrace(readFileSync(new URL('./golden/disc-bdj.jsonl', import.meta.url), 'utf8'));
     const { trace, bootMs, untilMs } = await replayBdj('fixtures/synthetic/disc-bdj', { until: 'selectPlaylistN' });
     console.log(`disc-bdj replay: boot ${bootMs.toFixed(0)} ms, until selectPlaylistN ${untilMs.toFixed(0)} ms`);
+    compareBdjTraces(golden, trace);
+  }, 120_000);
+
+  it('makes the same calls when the control calls answer through promises, as the BD-J worker host does', async () => {
+    const golden = parseBdjTrace(readFileSync(new URL('./golden/disc-bdj.jsonl', import.meta.url), 'utf8'));
+    const ASYNC = new Set(['selectTitle', 'selectPlaylist', 'seek', 'selectAngle', 'selectRate', 'writeReg', 'soundEffect', 'setVirtualPackage', 'setUOMask', 'setKeyInterest']);
+    let parked = 0;
+    const later = (host: RecordingHost): BdjHost =>
+      new Proxy(host, {
+        get: (target, key) => {
+          const v: unknown = Reflect.get(target, key);
+          if (typeof v !== 'function') return v;
+          const f = (v as (...a: unknown[]) => unknown).bind(target);
+          if (!ASYNC.has(String(key))) return f;
+          // the engine applies the call later, as across the worker boundary
+          return (...args: unknown[]) => {
+            parked++;
+            return new Promise((resolve) => setTimeout(() => resolve(f(...args)), 1));
+          };
+        },
+      });
+    const { trace } = await replayBdj('fixtures/synthetic/disc-bdj', { until: 'selectPlaylistN', wrapHost: later });
+    expect(parked).toBeGreaterThan(0);
     compareBdjTraces(golden, trace);
   }, 120_000);
 

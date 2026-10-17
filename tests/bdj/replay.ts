@@ -7,7 +7,7 @@ import { loadClips, openDisc, readBdid } from '../../src/engine/disc/open-disc';
 import { RecordingHost } from '../../src/engine/bdj/host';
 import { PSR } from '../../src/engine/hdmv/registers';
 import type { RegisterFile } from '../../src/engine/hdmv/registers';
-import type { TraceEntry } from '../../src/engine/bdj/host';
+import type { BdjHost, TraceEntry } from '../../src/engine/bdj/host';
 import { BdjRuntime } from '../../src/engine/bdj/runtime';
 
 const FIRST_PLAY = 0xffff;
@@ -34,11 +34,11 @@ export interface BdjReplay {
  * Boots the BD-J stack on a disc directory, starts First Play and runs until a trace entry with call name `until`
  * (or until idle), on the real clock so multi-second local-disc runs behave as on a device. `log` receives the
  * runtime's log (bdj_process_event lines, Logger.logN lines and Java's stdout/stderr). A thrown Error carries the
- * trace recorded so far as `trace`.
+ * trace recorded so far as `trace`. `wrapHost` gives the natives another host over the recording one.
  */
 export async function replayBdj(
   discDir: URL | string,
-  opts: { until?: string; timeoutMs?: number; log?: (line: string) => void } = {},
+  opts: { until?: string; timeoutMs?: number; log?: (line: string) => void; wrapHost?: (host: RecordingHost) => BdjHost } = {},
 ): Promise<BdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
   const source = new FileSource(normalizeDiscPaths(await directoryEntries(dir)));
@@ -52,7 +52,7 @@ export async function replayBdj(
     host: (startTitle, onTrace) => {
       host = new RecordingHost(disc, clips, { startTitle, onTrace });
       applyHarnessSettings(host.registers);
-      return host;
+      return opts.wrapHost ? opts.wrapHost(host) : host;
     },
     nowMs: () => Date.now(),
     setTimer: (ms, fn) => {

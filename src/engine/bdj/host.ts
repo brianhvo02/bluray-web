@@ -2,8 +2,7 @@
  * The player side of libbluray's BD-J natives. RecordingHost's checks and return values are ported from libbluray
  * src/libbluray/bluray.c (bdpriv_play_playlist_at, bdpriv_play_title_internal/_play_title, bdpriv_seek,
  * bdpriv_reg_read/bdpriv_reg_write, bdpriv_get_uo_mask, bdpriv_set_bdj_uo_mask, bdpriv_sound_effect,
- * bdpriv_set_virtual_package, bd_select_angle, bd_tell_time, _fill_disc_info, bd_get_playlist_info/_fill_title_info,
- * _copy_streams) and bdnav/navigation.c (nav_title_open, _extrapolate_title, _fill_mark, nav_clip_lookup_aspect).
+ * bdpriv_set_virtual_package, bd_select_angle, bd_tell_time); the disc information it reports is in disc-info.ts.
  * Copyright (C) 2009-2010  John Stebbins
  * Copyright (C) 2010  William Hahne
  * Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
@@ -14,14 +13,13 @@
  */
 
 import type { Clpi } from '../bdmv/clpi-parser';
-import type { IndexObject } from '../bdmv/index-parser';
-import type { StreamEntry } from '../bdmv/mpls-parser';
 import { applyDiscProfile } from '../disc/disc-profile';
 import type { DiscModel } from '../disc/open-disc';
 import { streamPath } from '../disc/open-disc';
 import { RegisterFile } from '../hdmv/registers';
 import { EMPTY_UO_MASK, combineUoMasks, parseUoMaskTable, uoMaskBits } from '../hdmv/uo-mask';
 import type { UoMask, UoOp } from '../hdmv/uo-mask';
+import { TITLE_FIRST_PLAY, firstPlayInfo, playlistInfo, titleInfos, titleOf } from './disc-info';
 
 /** One entry of libbluray's title list (BLURAY_TITLE): index 0 is the top menu, then the titles, then First Play. */
 export interface TitleInfo {
@@ -83,76 +81,43 @@ export interface TraceEntry {
 
 /**
  * What libbluray's natives reach in the player. Each method takes the arguments of its `native` declaration in
- * Libbluray.java without the `long np` handle and returns the JNI type (int → number, long → bigint).
+ * Libbluray.java without the `long np` handle and returns the JNI type (int → number, long → bigint). A method that
+ * needs the engine may return a promise instead; the calling Java thread waits for it.
  */
 export interface BdjHost {
-  selectTitle(title: number): number;
-  selectPlaylist(playlist: number, playitem: number, playmark: number, time: bigint): number;
-  seek(playitem: number, playmark: number, time: bigint): bigint;
+  selectTitle(title: number): number | Promise<number>;
+  selectPlaylist(playlist: number, playitem: number, playmark: number, time: bigint): number | Promise<number>;
+  seek(playitem: number, playmark: number, time: bigint): bigint | Promise<bigint>;
   /** The 1-based angle as Java passes it. */
-  selectAngle(angle: number): number;
-  selectRate(rate: number, reason: number): number;
+  selectAngle(angle: number): number | Promise<number>;
+  selectRate(rate: number, reason: number): number | Promise<number>;
   tellTime(): bigint;
   readReg(isPsr: number, num: number): number;
-  writeReg(isPsr: number, num: number, value: number, psrValueMask: number): number;
+  writeReg(isPsr: number, num: number, value: number, psrValueMask: number): number | Promise<number>;
   getUOMask(): bigint;
-  setUOMask(menuCallMask: boolean, titleSearchMask: boolean): void;
+  setUOMask(menuCallMask: boolean, titleSearchMask: boolean): void | Promise<void>;
   /** libbluray's converted key interest mask, as setKeyInterestN receives it. */
-  setKeyInterest(mask: number): void;
-  soundEffect(id: number): number;
+  setKeyInterest(mask: number): void | Promise<void>;
+  soundEffect(id: number): number | Promise<number>;
   /** num_titles + 2 entries; null where libbluray's title pointer is NULL (an unsupported First Play). */
   getTitleInfos(): readonly (TitleInfo | null)[];
   getPlaylistInfo(playlist: number): PlaylistInfo | null;
   getAacsData(type: number): Uint8Array | null;
-  setVirtualPackage(vpPath: string | null, psrBackup: boolean): number;
+  setVirtualPackage(vpPath: string | null, psrBackup: boolean): number | Promise<number>;
   updateGraphic(width: number, height: number, argb: Int32Array | null, x0: number, y0: number, x1: number, y1: number): void;
   log(file: string | null, line: number, msg: string, error: boolean): void;
   /** Natives served by the file system rather than the player (cacheBdRomFileN, listBdFilesN, getBdjoN) report here. */
   record?(e: TraceEntry): void;
 }
 
-const TITLE_FIRST_PLAY = 0xffff;
 const TITLE_TOP_MENU = 0;
 const PSR_TITLE_NUMBER = 4;
-const HDMV_INTERACTIVE = 1;
-const BDJ_INTERACTIVE = 3;
 const MAX_SOUND_ID = 0xff;
 
 type TitleType = 'undef' | 'hdmv' | 'bdj';
 
 /** %.6g of a Java float, as trace.patch prints selectRateN's rate. */
 const sixDigits = (v: number): number => Number(v.toPrecision(6));
-
-/** _fill_disc_info's BLURAY_TITLE for an index object; a zeroed struct for objects of no known type. */
-function titleOf(number: number, o: IndexObject): TitleInfo {
-  if (o.kind === 'bdj') return { number, objectType: 'bdj', playbackType: (o.playbackType === BDJ_INTERACTIVE ? 1 : 0) + 2, bdjoName: o.name, hdmvObjectId: null };
-  if (o.kind === 'hdmv' && o.movieObjectId !== 0xffff) {
-    return { number, objectType: 'hdmv', playbackType: o.playbackType === HDMV_INTERACTIVE ? 1 : 0, bdjoName: null, hdmvObjectId: o.movieObjectId };
-  }
-  return { number, objectType: 'hdmv', playbackType: 0, bdjoName: null, hdmvObjectId: 0 };
-}
-
-/** _copy_streams: subpath_id follows the first entry's stream type, as libbluray reads `si->`. */
-function copyStreams(entries: readonly StreamEntry[], clip: Clpi | undefined): StreamInfo[] {
-  const first = entries[0];
-  const subpathId = first && first.streamType >= 2 && first.streamType <= 4 ? first.subPathId : -1;
-  return entries.map((s) => ({
-    codingType: s.codingType,
-    format: s.format,
-    rate: s.rate,
-    charCode: s.charCode,
-    lang: s.lang,
-    pid: s.pid,
-    aspect: lookupAspect(clip, s.pid),
-    subpathId,
-  }));
-}
-
-/** nav_clip_lookup_aspect */
-function lookupAspect(clip: Clpi | undefined, pid: number): number {
-  for (const prog of clip?.programs ?? []) for (const ps of prog.streams) if (ps.pid === pid) return ps.aspect;
-  return 0;
-}
 
 /**
  * The only host in milestone 5b: answers from the parsed disc and a real register file, plays nothing, and records
@@ -173,7 +138,7 @@ export class RecordingHost implements BdjHost {
     private readonly opts: { readonly startTitle: (title: number) => void; readonly onTrace?: (e: TraceEntry) => void },
   ) {
     applyDiscProfile(this.registers, disc.index);
-    const fp = this.firstPlay();
+    const fp = firstPlayInfo(this.disc);
     this.titleType = 'hdmv';
     if (fp?.objectType === 'bdj') this.titleType = 'bdj';
     else if (fp) this.playHdmv(fp.hdmvObjectId ?? 0);
@@ -193,64 +158,16 @@ export class RecordingHost implements BdjHost {
     return ret;
   }
 
-  /** disc_info.first_play: present when First Play is a BD-J object or an HDMV object other than 0xffff. */
-  private firstPlay(): TitleInfo | null {
-    const fp = this.disc.index.firstPlay;
-    return fp.kind === 'bdj' || (fp.kind === 'hdmv' && fp.movieObjectId !== 0xffff) ? titleOf(TITLE_FIRST_PLAY, fp) : null;
-  }
-
-  private titleList(): (TitleInfo | null)[] {
-    const index = this.disc.index;
-    return [titleOf(0, index.topMenu), ...index.titles.map((t, i) => titleOf(i + 1, t.object)), this.firstPlay()];
-  }
-
   getTitleInfos(): readonly (TitleInfo | null)[] {
-    const list = this.titleList();
+    const list = titleInfos(this.disc);
     this.record({ call: 'getTitleInfosN', args: [], ret: list.length });
     return list;
   }
 
   getPlaylistInfo(playlist: number): PlaylistInfo | null {
-    const info = this.playlistInfo(playlist);
+    const info = playlistInfo(this.disc, this.clips, playlist);
     this.record({ call: 'getPlaylistInfoN', args: [playlist], ret: info ? info.playlist : null });
     return info;
-  }
-
-  /** _get_mpls_info and _fill_title_info for angle 0. */
-  private playlistInfo(playlist: number): PlaylistInfo | null {
-    if (playlist < 0 || playlist > 99999) return null;
-    const mpls = this.disc.playlists.get(String(playlist).padStart(5, '0'));
-    if (!mpls) return null;
-    const items = mpls.playItems;
-    const titleTimes: number[] = [];
-    let duration = 0;
-    let angleCount = 0;
-    for (const pi of items) {
-      angleCount = Math.max(angleCount, pi.angleCount);
-      titleTimes.push(duration);
-      duration = (duration + ((pi.outTime - pi.inTime) >>> 0)) >>> 0;
-    }
-    const marks = mpls.marks.map((m) => {
-      const ref = m.playItemRef < items.length ? m.playItemRef : 0;
-      const pi = items[m.playItemRef];
-      const titleTime = pi ? (titleTimes[m.playItemRef]! + m.time - pi.inTime) >>> 0 : 0;
-      return { type: m.type, playItem: ref, startTicks: BigInt(titleTime) * 2n };
-    });
-    const clips = items.map((pi) => {
-      const clpi = this.clips.get(pi.clipId);
-      return {
-        clipId: pi.clipId,
-        inTicks: BigInt(pi.inTime) * 2n,
-        outTicks: BigInt(pi.outTime) * 2n,
-        videoStreams: copyStreams(pi.stn.video, clpi),
-        audioStreams: copyStreams(pi.stn.audio, clpi),
-        pgStreams: copyStreams([...pi.stn.pg, ...pi.stn.pipPg], clpi),
-        igStreams: copyStreams(pi.stn.ig, clpi),
-        secondaryAudioStreams: copyStreams(pi.stn.secondaryAudio, clpi),
-        secondaryVideoStreams: copyStreams(pi.stn.secondaryVideo, clpi),
-      };
-    });
-    return { playlist, durationTicks: BigInt(duration) * 2n, angleCount, marks, clips };
   }
 
   /** _play_title, without playback: a BD-J title starts once the native has returned, as bdj_process_event(START) does. */
@@ -262,7 +179,7 @@ export class RecordingHost implements BdjHost {
     const index = this.disc.index;
     if (title === TITLE_FIRST_PLAY) {
       this.registers.psrWrite(PSR_TITLE_NUMBER, TITLE_FIRST_PLAY);
-      const fp = this.firstPlay();
+      const fp = firstPlayInfo(this.disc);
       if (!fp) {
         this.titleType = 'hdmv';
         return 1;

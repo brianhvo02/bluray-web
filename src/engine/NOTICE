@@ -39,8 +39,13 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdj/host.ts           from src/libbluray/bluray.c (RecordingHost: bdpriv_play_playlist_at, bdpriv_play_title_internal
                           and _play_title, bdpriv_seek, bdpriv_reg_read, bdpriv_reg_write, bdpriv_get_uo_mask,
                           bdpriv_set_bdj_uo_mask, bdpriv_sound_effect, bdpriv_set_virtual_package, bd_select_angle,
-                          bd_tell_time, _fill_disc_info, bd_get_playlist_info, _fill_title_info, _copy_streams) and
-                          bdnav/navigation.c (nav_title_open, _extrapolate_title, _fill_mark, nav_clip_lookup_aspect)
+                          bd_tell_time)
+    bdj/disc-info.ts      from src/libbluray/bluray.c (_fill_disc_info, bd_get_playlist_info, _get_mpls_info,
+                          _fill_title_info, _copy_streams) and bdnav/navigation.c (nav_title_open, _extrapolate_title,
+                          _fill_mark, nav_clip_lookup_aspect)
+    bdj/worker-host.ts    from src/libbluray/bluray.c (the natives answered in the BD-J worker: bdpriv_reg_read,
+                          bdpriv_get_uo_mask, bd_tell_time, bd_get_disc_info, bd_get_playlist_info) and
+                          bdj/native/org_videolan_Libbluray.c (getAacsDataN)
     bdj/jvm/natives/libbluray.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c, bdjo.c, util.c,
                           org_videolan_Logger.c, java_awt_BDFontMetrics.c and java_awt_BDGraphics.c (font and text
                           natives as fixed-metric stubs), bdj/bdjo_parse.c (bdjo_get), disc/disc.c

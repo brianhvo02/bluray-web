@@ -5,6 +5,7 @@ import { fixtureDiscFiles } from '../../../../../tests/helpers/fixture-disc';
 import { syntheticSource } from '../../../../../tests/helpers/synthetic-disc';
 import { loadClips, openDisc } from '../../../disc/open-disc';
 import { RecordingHost } from '../../host';
+import type { BdjHost } from '../../host';
 import { parseClassFile } from '../classfile';
 import { Jvm } from '../jvm';
 import type { JThread } from '../threads';
@@ -39,6 +40,8 @@ function declaredNatives(): string[] {
 describe('libbluray natives', () => {
   let jvm: Jvm;
   let host: RecordingHost;
+  /** Methods that replace the RecordingHost's for one test. */
+  let overrides: Partial<BdjHost> = {};
   const str = (s: string): JObject => jvm.heap.newString(s);
   const field = (o: JValue, name: string, desc: string): JValue => jvm.getField(o as JObject, name, desc);
   const jstr = (v: JValue): string | null => jvm.heap.jsString(v as JObject | null);
@@ -59,7 +62,14 @@ describe('libbluray natives', () => {
       stderr: () => {},
       vfs: new Vfs({ disc: source, discPaths: source.paths(), jdkLib: ZipArchive.open(RT), nowMs: () => 0 }),
     });
-    registerLibblurayNatives(jvm.natives, host);
+    const target = host;
+    const view = new Proxy(target, {
+      get: (t, key) => {
+        const v: unknown = (overrides as Record<PropertyKey, unknown>)[key] ?? Reflect.get(t, key);
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+      },
+    });
+    registerLibblurayNatives(jvm.natives, view);
     await jvm.boot();
   }, 60_000);
 
@@ -146,6 +156,39 @@ describe('libbluray natives', () => {
       '{"call":"selectRateN","args":[1,1],"ret":1}',
       '{"call":"updateGraphicN","args":[1920,1080,0,0,0,0,true],"ret":null}',
     ]);
+  });
+
+  it('parks the calling Java thread on a host promise and resumes with its value', async () => {
+    let release: ((v: number) => void) | null = null;
+    const later = <T>(v: T): Promise<T> => new Promise((resolve) => setTimeout(() => resolve(v), 5));
+    overrides = {
+      writeReg: () => new Promise<number>((resolve) => setTimeout(() => (release = resolve), 5)),
+      selectTitle: () => later(1),
+      seek: () => later(-5n),
+      setUOMask: () => later(undefined),
+    };
+    try {
+      // Libbluray.writeGPR and selectHdmvTitle use the native's result in Java.
+      const pending = jvm.callStatic(LIBBLURAY_CLASS, 'writeGPR', '(II)V', [1, 2]);
+      await new Promise((r) => setTimeout(r, 20));
+      release!(-1);
+      await expect(pending).rejects.toThrow(/IllegalArgumentException: Invalid GPR/);
+      expect(await jvm.callStatic(LIBBLURAY_CLASS, 'selectHdmvTitle', '(I)Z', [1])).toBe(1);
+      expect(await call('seekN', '(JIIJ)J', [-1, -1, 0n])).toBe(-5n);
+      expect(await call('setUOMaskN', '(JZZ)V', [1, 0])).toBeUndefined();
+    } finally {
+      overrides = {};
+    }
+  });
+
+  it('turns a rejected host promise into a Java exception on the calling thread', async () => {
+    overrides = { selectTitle: () => Promise.reject(new Error('engine gone')) };
+    try {
+      await expect(call('selectTitleN', '(JI)I', [1])).rejects.toThrow(/java\.lang\.RuntimeException: engine gone/);
+      expect(await call('readRegN', '(JII)I', [1, 4])).toEqual(expect.any(Number));
+    } finally {
+      overrides = {};
+    }
   });
 
   it('Logger.logN reaches the host unless the message is empty', async () => {

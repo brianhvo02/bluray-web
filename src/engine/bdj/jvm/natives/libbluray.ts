@@ -24,7 +24,7 @@ import type { Jvm } from '../jvm';
 import type { JArray, JObject, JValue } from '../values';
 import type { Vfs } from '../vfs';
 import type { NativeContext, NativeTable } from './index';
-import { closeStream, openInto, readBytes } from './io';
+import { closeStream, openInto, readBytes, suspendRead } from './io';
 import { jsStr, method, none } from './util';
 
 const DISC = '/disc/';
@@ -296,6 +296,15 @@ interface StubFace {
 
 const stubAdvance = (size: number): number => Math.floor((size * 6) / 10);
 
+/** A host answer: a promise parks the calling thread, and a rejected one throws a RuntimeException in it. */
+function answer<T>(ctx: NativeContext, r: T | Promise<T>, toJava: (v: T) => JValue | undefined): NativeResult {
+  return r instanceof Promise ? suspendRead(ctx.jvm, r, 'java/lang/RuntimeException', toJava) : toJava(r);
+}
+
+const int = (v: number): number => v;
+const long = (v: bigint): bigint => BigInt.asIntN(64, v);
+const voidOf = (): undefined => undefined;
+
 export function registerLibblurayNatives(table: NativeTable, host: BdjHost): void {
   const record = (e: TraceEntry): void => host.record?.(e);
   const faces = new Map<bigint, StubFace>();
@@ -319,21 +328,21 @@ export function registerLibblurayNatives(table: NativeTable, host: BdjHost): voi
       return arr;
     },
     'org/videolan/Libbluray.getUOMaskN(J)J': () => BigInt.asIntN(64, host.getUOMask()),
-    'org/videolan/Libbluray.setUOMaskN(JZZ)V': (_ctx, _np, menuCall, titleSearch) => void host.setUOMask(menuCall !== 0, titleSearch !== 0),
-    'org/videolan/Libbluray.setKeyInterestN(JI)V': (_ctx, _np, mask) => void host.setKeyInterest(mask as number),
+    'org/videolan/Libbluray.setUOMaskN(JZZ)V': (ctx, _np, menuCall, titleSearch) => answer(ctx, host.setUOMask(menuCall !== 0, titleSearch !== 0), voidOf),
+    'org/videolan/Libbluray.setKeyInterestN(JI)V': (ctx, _np, mask) => answer(ctx, host.setKeyInterest(mask as number), voidOf),
     'org/videolan/Libbluray.setVirtualPackageN(JLjava/lang/String;Z)I': (ctx, _np, path, backup) =>
-      host.setVirtualPackage(ctx.jvm.heap.jsString(path as JObject | null), backup !== 0),
-    'org/videolan/Libbluray.seekN(JIIJ)J': (_ctx, _np, playitem, playmark, time) => host.seek(playitem as number, playmark as number, time as bigint),
-    'org/videolan/Libbluray.selectPlaylistN(JIIIJ)I': (_ctx, _np, playlist, playitem, playmark, time) =>
-      host.selectPlaylist(playlist as number, playitem as number, playmark as number, time as bigint),
-    'org/videolan/Libbluray.selectTitleN(JI)I': (_ctx, _np, title) => host.selectTitle(title as number),
-    'org/videolan/Libbluray.selectAngleN(JI)I': (_ctx, _np, angle) => host.selectAngle(angle as number),
-    'org/videolan/Libbluray.soundEffectN(JI)I': (_ctx, _np, id) => host.soundEffect(id as number),
-    'org/videolan/Libbluray.tellTimeN(J)J': () => BigInt.asIntN(64, host.tellTime()),
-    'org/videolan/Libbluray.selectRateN(JFI)I': (_ctx, _np, rate, reason) => host.selectRate(rate as number, reason as number),
+      answer(ctx, host.setVirtualPackage(ctx.jvm.heap.jsString(path as JObject | null), backup !== 0), int),
+    'org/videolan/Libbluray.seekN(JIIJ)J': (ctx, _np, playitem, playmark, time) => answer(ctx, host.seek(playitem as number, playmark as number, time as bigint), long),
+    'org/videolan/Libbluray.selectPlaylistN(JIIIJ)I': (ctx, _np, playlist, playitem, playmark, time) =>
+      answer(ctx, host.selectPlaylist(playlist as number, playitem as number, playmark as number, time as bigint), int),
+    'org/videolan/Libbluray.selectTitleN(JI)I': (ctx, _np, title) => answer(ctx, host.selectTitle(title as number), int),
+    'org/videolan/Libbluray.selectAngleN(JI)I': (ctx, _np, angle) => answer(ctx, host.selectAngle(angle as number), int),
+    'org/videolan/Libbluray.soundEffectN(JI)I': (ctx, _np, id) => answer(ctx, host.soundEffect(id as number), int),
+    'org/videolan/Libbluray.tellTimeN(J)J': () => long(host.tellTime()),
+    'org/videolan/Libbluray.selectRateN(JFI)I': (ctx, _np, rate, reason) => answer(ctx, host.selectRate(rate as number, reason as number), int),
     'org/videolan/Libbluray.readRegN(JII)I': (_ctx, _np, isPsr, num) => host.readReg(isPsr as number, num as number),
-    'org/videolan/Libbluray.writeRegN(JIIII)I': (_ctx, _np, isPsr, num, value, mask) =>
-      host.writeReg(isPsr as number, num as number, value as number, mask as number),
+    'org/videolan/Libbluray.writeRegN(JIIII)I': (ctx, _np, isPsr, num, value, mask) =>
+      answer(ctx, host.writeReg(isPsr as number, num as number, value as number, mask as number), int),
     'org/videolan/Libbluray.cacheBdRomFileN(JLjava/lang/String;Ljava/lang/String;)I': (ctx, _np, rel, cache) => {
       const heap = ctx.jvm.heap;
       const relPath = heap.jsString(rel as JObject | null);
