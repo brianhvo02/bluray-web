@@ -440,7 +440,6 @@ export class Player {
     this.navigator?.tick(this.clock.nowUs());
     if (this.bdj) {
       this.bdj.status.setTime45(this.titleTime45());
-      this.bdj.status.setPlaylistOpen(this.session !== null);
     }
     const s = this.session;
     if (!s) return;
@@ -675,7 +674,6 @@ export class Player {
       port: this.bdjPort(live),
       regs: programRegs,
       disc,
-      source,
       events,
       psrEvents: sink,
       startTitle: (t) => {

@@ -28,6 +28,5 @@ describe('runBdjWorker', () => {
     // a signed disc jar's certificates are checked against this clock (JarVerifier); 1970 sends them down another path
     const now = handle.runtime!.jvm.opts.nowMs();
     expect(Math.abs(now - Date.now())).toBeLessThan(5_000);
-    port.onmessage!({ data: { type: 'stop' } });
   }, 90_000);
 });

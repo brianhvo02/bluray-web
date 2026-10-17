@@ -20,12 +20,10 @@ export type ToBdj =
       readonly discFiles: readonly (readonly [string, Blob])[];
       readonly discId: string | null;
       readonly classLibrary: ClassLibrarySource;
-      readonly playerSettings?: unknown;
     }
   | { readonly type: 'start'; readonly title: number }
   | { readonly type: 'event'; readonly ev: number; readonly param: number }
-  | { readonly type: 'reply'; readonly id: number; readonly value: number | string }
-  | { readonly type: 'stop' };
+  | { readonly type: 'reply'; readonly id: number; readonly value: number | string };
 
 export type FromBdj =
   | { readonly type: 'booted'; readonly bootMs: number }

@@ -10,21 +10,16 @@
 const TIME45 = 0;
 const UO_MASK = 1;
 const BIGINT_WORDS = 2;
-const PLAYLIST_OPEN = 0;
-const INT_WORDS = 1;
-const INT_OFFSET = BIGINT_WORDS * 8;
 
 export function createStatusBlock(): SharedArrayBuffer {
-  return new SharedArrayBuffer(INT_OFFSET + INT_WORDS * 4);
+  return new SharedArrayBuffer(BIGINT_WORDS * 8);
 }
 
 class StatusBlockViews {
   protected readonly longs: BigInt64Array;
-  protected readonly ints: Int32Array;
 
   constructor(readonly buffer: SharedArrayBuffer) {
     this.longs = new BigInt64Array(buffer, 0, BIGINT_WORDS);
-    this.ints = new Int32Array(buffer, INT_OFFSET, INT_WORDS);
   }
 }
 
@@ -38,10 +33,6 @@ export class StatusBlockWriter extends StatusBlockViews {
   setUoMask(bits: bigint): void {
     Atomics.store(this.longs, UO_MASK, BigInt.asIntN(64, bits));
   }
-
-  setPlaylistOpen(open: boolean): void {
-    Atomics.store(this.ints, PLAYLIST_OPEN, open ? 1 : 0);
-  }
 }
 
 export class StatusBlockReader extends StatusBlockViews {
@@ -51,9 +42,5 @@ export class StatusBlockReader extends StatusBlockViews {
 
   uoMask(): bigint {
     return BigInt.asUintN(64, Atomics.load(this.longs, UO_MASK));
-  }
-
-  playlistOpen(): boolean {
-    return Atomics.load(this.ints, PLAYLIST_OPEN) !== 0;
   }
 }

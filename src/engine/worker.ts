@@ -29,10 +29,10 @@ const scope = self as unknown as WorkerScope;
  */
 const BDJ_FAIL_WORKER_NAME = 'bluray-engine:bdjfail'; // the same name in src/player/create-controller.ts
 const brokenClassLibrary = (self as unknown as { name?: string }).name === BDJ_FAIL_WORKER_NAME;
-const WASM_FETCH_TIMEOUT_MS = 20_000;
+const ASSET_FETCH_TIMEOUT_MS = 20_000; // the audio wasm, the default font and the class library jars
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) });
+  const response = await fetch(url, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -49,7 +49,7 @@ const player = new Player({
   // WebGL2 on its own OffscreenCanvas, created when the first shader set is chosen
   createShaderBackend: (events) => createWebGlBackend((w, h) => new OffscreenCanvas(w, h), events),
   // Commands run one at a time, so a stalled download would block every later one: give up and report it instead.
-  createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) }))),
+  createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) }))),
   createBdjWorker: () => new Worker(new URL('./bdj/bdj-worker-entry.ts', import.meta.url), { type: 'module' }),
   loadClassLibrary: async () => {
     const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);
@@ -60,7 +60,7 @@ const player = new Player({
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {
-    const response = await fetch(defaultFontUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) });
+    const response = await fetch(defaultFontUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) });
     const defaultFont = await readFontFile('DejaVuSans.ttf', new Uint8Array(await response.arrayBuffer()));
     return {
       loader: createFontFaceLoader((self as unknown as { fonts: FontFaceSet }).fonts),

@@ -15,7 +15,6 @@
 
 import type { Mpls } from '../bdmv/mpls-parser';
 import type { SoundData } from '../bdmv/sound-parser';
-import type { ByteSource } from '../disc/byte-source';
 import type { DiscModel } from '../disc/open-disc';
 import { PSR, type RegisterFile } from '../hdmv/registers';
 import { EMPTY_UO_MASK, combineUoMasks, parseUoMaskTable, uoMaskBits, type UoMask, type UoOp } from '../hdmv/uo-mask';
@@ -36,7 +35,6 @@ export interface PlayerBdjHostDeps {
   readonly port: BdjPlaybackPort;
   readonly regs: RegisterFile;
   readonly disc: DiscModel;
-  readonly source: ByteSource;
   readonly events: BdjPlaybackEvents;
   /** When given, the PSR events of `regs` (bindBdjPsrEvents) go here until dispose(). */
   readonly psrEvents?: BdjEventSink;

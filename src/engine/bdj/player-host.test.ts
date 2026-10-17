@@ -88,7 +88,6 @@ async function setup(opts: { sounds?: boolean } = {}) {
     port: player.bdjPort(),
     regs,
     disc,
-    source,
     events: bdjPlaybackEvents(sink),
     psrEvents: sink,
     startTitle: (t) => calls.startTitle.push(t),

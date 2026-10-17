@@ -217,11 +217,6 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (!looping) kick();
         break;
       }
-      case 'stop':
-        ended = true;
-        driving?.abort();
-        void rt?.stop().catch(() => undefined);
-        break;
     }
   };
 

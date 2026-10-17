@@ -141,6 +141,9 @@ what would change that decision.
   Node replay's player uses a virtual clock (no effect seen). The intrinsics' loop hooks are pinned by checksum to the
   committed jars: a rebuilt class library fails loudly until the hooks are re-checked. `openDisc` and `loadClips`
   have no read-concurrency cap.
+- **Disc directory listings are sorted (5c).** `listBdFilesN` (and the VFS's other directory listings, `vfs.ts`)
+  return names in sorted order, where libbluray returns readdir order. A folder the browser hands over has no
+  canonical readdir order, so sorted is the one order that is the same on every run and machine.
 - **5d picks up:** BD-J graphics (`updateGraphicN`), keys and mouse to Java (VK_KEY, MOUSE), the pop-up key, fonts.
 
 ## Audio
@@ -189,7 +192,7 @@ what would change that decision.
   then the 119 min feature); Top Menu opens its menu, Enter starts the feature, and its three LPCM tracks play in
   sync with 0 decoder errors. `npm run vm-trace` matches libbluray on TSURUNE for menu → feature (113 entries) and
   pop-up open → close (65 entries), plane hashes included. A_NEW_ERA and RENTAL_FAMILY (BD-J) still open to the
-  picker with their main features, all tracks in sync.
+  picker (5c: no longer) with their main features, all tracks in sync.
 - **Main-path menus muxed at a clip's start now show.** Playback started the first play item at its first EP map
   entry, skipping an IG display set muxed ahead of the first keyframe, and a PES was only complete at the next unit
   start on its PID, so a menu's last segment waited for the end of the clip. Both now follow libbluray (`_fill_clip`
