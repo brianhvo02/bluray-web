@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap } from './touch';
+import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, tapPoint } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -48,5 +48,16 @@ describe('idleAfterTap', () => {
   it('leaves them alone while paused, where they are always shown', () => {
     expect(idleAfterTap(false, 'paused')).toBe(false);
     expect(idleAfterTap(true, 'paused')).toBe(true);
+  });
+});
+
+describe('tapPoint', () => {
+  it('takes the position from the matching pointerdown (iPadOS reports pointerup at 0,0)', () => {
+    expect(tapPoint({ id: 3, x: 165, y: 310 }, { id: 3, x: 0, y: 0 })).toEqual({ x: 165, y: 310 });
+  });
+
+  it('falls back to the pointerup position without a matching pointerdown', () => {
+    expect(tapPoint(null, { id: 3, x: 40, y: 50 })).toEqual({ x: 40, y: 50 });
+    expect(tapPoint({ id: 2, x: 165, y: 310 }, { id: 3, x: 40, y: 50 })).toEqual({ x: 40, y: 50 });
   });
 });
