@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, controlsMayIdle, DOUBLE_TAP_MS, idleAfterTap, pairableTap, type Tap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, menuPointerEffect, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -313,7 +313,33 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   const isVideoTouch = (e: PointerEvent<HTMLElement>): boolean => e.pointerType === 'touch' && e.target === canvasRef.current;
 
-  const controlsVisible = !idle || !playing;
+  const inMenu = snapshot.menuActive || snapshot.bdjMenuVisible;
+  const controlsVisible = controlsShown({ idle, playing, inMenu });
+
+  /**
+   * A pointer move or press anywhere in the player. Over a disc menu a mouse or pen wakes the bar only at the bottom edge
+   * (or over the bar it woke) and hides it at once elsewhere (ruling R9); otherwise any move wakes it, and a touch on the
+   * video is left to the tap handling.
+   */
+  const onPlayerPointer = (e: PointerEvent<HTMLDivElement>): void => {
+    if (isVideoTouch(e)) return;
+    const now = controller.getSnapshot();
+    const root = rootRef.current;
+    if (!root || !isHoverPointer(e.pointerType) || !(now.menuActive || now.bdjMenuVisible)) {
+      wake();
+      return;
+    }
+    const bar = controlsVisible ? root.querySelector('.control-bar') : null;
+    const effect = menuPointerEffect({
+      y: e.clientY,
+      playerBottom: root.getBoundingClientRect().bottom,
+      barTop: bar ? bar.getBoundingClientRect().top : null,
+      overControls: e.target instanceof Element && e.target.closest('.control-bar, .remote-pad') !== null,
+      held: pressed || menuOpen || remoteOpen,
+    });
+    if (effect === 'wake') wake();
+    else if (effect === 'hide') setIdle(true);
+  };
   // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading, nor while a
   // BD-J title runs (Java opens its playlists itself; the Playlists button still opens the picker).
   const showPicker = pickerOpen || (snapshot.currentPlaylistId === null && snapshot.engineState !== 'loading' && !snapshot.bdjActive);
@@ -321,16 +347,14 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   return (
     <div
       ref={rootRef}
-      className={`player${controlsVisible ? '' : ' idle'}`}
+      className={`player${controlsVisible ? '' : ' idle'}${inMenu ? ' in-menu' : ''}`}
       data-testid="player"
       data-state={snapshot.engineState}
       data-playlist={snapshot.currentPlaylistId ?? undefined}
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
       data-bdj-menu={snapshot.bdjMenuVisible}
-      onPointerMove={(e) => {
-        if (!isVideoTouch(e)) wake();
-      }}
+      onPointerMove={onPlayerPointer}
       onDragOver={onDragOver}
       onDrop={onDrop}
       onPointerDown={(e) => {
@@ -341,7 +365,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
             window.clearTimeout(tapTimer.current);
             tapTimer.current = null;
           }
-          wake();
+          onPlayerPointer(e);
         } // a touch on the video shows or hides the controls on its own, after the double-tap window
       }}
     >

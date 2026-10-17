@@ -131,6 +131,54 @@ test('a BD-J menu answers clicks on its MouseListener button and keys; a click i
   await expect(player).toHaveAttribute('data-bdj-menu', 'false'); // the menu hid itself
 });
 
+test('the control bar never covers a BD-J menu: the bottom edge wakes it, a click in its empty space reaches the disc (R9)', async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  const player = page.getByTestId('player');
+  const bar = page.getByTestId('control-bar');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+  const box = (await player.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const bottom = box.y + box.height;
+  // over the menu the bar hides at once and the cursor stays
+  await page.mouse.move(x, box.y + box.height / 2);
+  await expect(bar).toHaveClass(/hidden/, { timeout: 1_000 });
+  expect(await player.evaluate((el) => getComputedStyle(el).cursor)).not.toBe('none');
+  // the lowest button (Extras, y 620-719) and the menu area below it do not wake the bar
+  const scale = Math.min(box.width / 1920, box.height / 1080);
+  const top = box.y + (box.height - 1080 * scale) / 2;
+  for (const planeY of [670, 760, 900, 1000]) await page.mouse.move(x, top + planeY * scale);
+  for (const dy of [60, 40, 26]) await page.mouse.move(x, bottom - dy);
+  await page.waitForTimeout(300);
+  await expect(bar).toHaveClass(/hidden/);
+  // a click on Play (its MouseListener repaints) does not wake it either
+  const shown = (await bdjPlane(page))!;
+  await clickPlane(page, 300, 400);
+  await flushedPast(page, shown.flushes);
+  await expect(bar).toHaveClass(/hidden/);
+  // the bottom 24 px wake it; back over the menu it hides at once
+  await page.mouse.move(x, bottom - 10);
+  await expect(bar).not.toHaveClass(/hidden/, { timeout: 1_000 });
+  await page.mouse.move(x, box.y + box.height / 2);
+  await expect(bar).toHaveClass(/hidden/, { timeout: 500 });
+  // with the bar shown, a click in its empty padding at the bottom edge reaches the disc (which ignores it: nothing is
+  // there), so the remote opens; with the remote open the bar stays when the pointer goes back up (Task 8)
+  await page.mouse.move(x, bottom - 10);
+  await expect(bar).not.toHaveClass(/hidden/, { timeout: 1_000 });
+  const barBox = (await bar.boundingBox())!;
+  const pad = { x: barBox.x + 6, y: barBox.y + barBox.height - 4 };
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-testid') ?? null, pad)).toBe('video-canvas');
+  const before = (await bdjPlane(page))!.tapsIgnored;
+  await page.mouse.click(pad.x, pad.y);
+  await expect.poll(async () => (await bdjPlane(page))!.tapsIgnored, { timeout: 5_000 }).toBe(before + 1);
+  await expect(page.getByTestId('remote-pad')).toBeVisible();
+  await page.mouse.move(x, box.y + box.height / 2);
+  await page.waitForTimeout(300);
+  await expect(bar).not.toHaveClass(/hidden/);
+  await expect(page.getByTestId('remote-pad')).toBeVisible();
+});
+
 test('a click on the video with an empty BD-J plane is play/pause, not a menu click; the remote is offered', async ({ page }) => {
   await open(page);
   await reachesState(page, 'playing', 30_000);

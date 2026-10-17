@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, controlsMayIdle, DOUBLE_TAP_MS, idleAfterTap, pairableTap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, MENU_WAKE_ZONE_PX, menuPointerEffect, pairableTap } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -76,5 +76,57 @@ describe('controlsMayIdle', () => {
     expect(controlsMayIdle({ ...base, remoteOpen: true, bdjMenuVisible: true })).toBe(false);
     expect(controlsMayIdle({ ...base, remoteOpen: true })).toBe(true); // over the feature, as before
     expect(controlsMayIdle({ ...base, bdjMenuVisible: true })).toBe(true);
+  });
+});
+
+describe('isHoverPointer', () => {
+  it('is true for a mouse or a pen, false for touch', () => {
+    expect(isHoverPointer('mouse')).toBe(true);
+    expect(isHoverPointer('pen')).toBe(true);
+    expect(isHoverPointer('touch')).toBe(false);
+  });
+});
+
+describe('menuPointerEffect (ruling R9)', () => {
+  // a 720 px tall player whose control bar, when shown, starts at y 640
+  const base = { y: 300, playerBottom: 720, barTop: null, overControls: false, held: false };
+
+  it('uses a 24 px wake zone', () => {
+    expect(MENU_WAKE_ZONE_PX).toBe(24);
+  });
+
+  it('wakes the bar only within 24 px of the bottom edge', () => {
+    expect(menuPointerEffect({ ...base, y: 720 - 24 })).toBe('wake');
+    expect(menuPointerEffect({ ...base, y: 719 })).toBe('wake');
+    expect(menuPointerEffect({ ...base, y: 720 - 25 })).toBe('hide');
+    expect(menuPointerEffect({ ...base, y: 660 })).toBe('hide'); // where the hidden bar would be: the menu's
+  });
+
+  it('hides the bar at once when the pointer goes back up over the menu', () => {
+    expect(menuPointerEffect({ ...base, y: 300, barTop: 640 })).toBe('hide');
+    expect(menuPointerEffect({ ...base, y: 639, barTop: 640 })).toBe('hide');
+  });
+
+  it('keeps a shown bar while the pointer is over it, so its controls can be reached', () => {
+    expect(menuPointerEffect({ ...base, y: 650, barTop: 640 })).toBe('wake');
+    expect(menuPointerEffect({ ...base, y: 500, overControls: true })).toBe('wake'); // on a control (the remote)
+  });
+
+  it('does not hide the bar while a control is held, a bar menu or the remote is open', () => {
+    expect(menuPointerEffect({ ...base, held: true })).toBe('keep');
+    expect(menuPointerEffect({ ...base, y: 710, held: true })).toBe('wake');
+  });
+});
+
+describe('controlsShown', () => {
+  it('shows the controls when not idle, and always while paused outside a menu', () => {
+    expect(controlsShown({ idle: false, playing: true, inMenu: false })).toBe(true);
+    expect(controlsShown({ idle: true, playing: true, inMenu: false })).toBe(false);
+    expect(controlsShown({ idle: true, playing: false, inMenu: false })).toBe(true);
+  });
+
+  it('lets a disc menu hide them while paused (the bar never covers a menu)', () => {
+    expect(controlsShown({ idle: true, playing: false, inMenu: true })).toBe(false);
+    expect(controlsShown({ idle: false, playing: false, inMenu: true })).toBe(true);
   });
 });

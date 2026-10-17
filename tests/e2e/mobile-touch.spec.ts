@@ -38,6 +38,24 @@ test('a tap on a menu button activates it', async ({ page }) => {
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing');
 });
 
+test("the control bar's empty space belongs to the menu under it; a tap there leaves the menu and the bar as they were (R9)", async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
+  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await expectMenu(page, true);
+  const bar = page.getByTestId('control-bar');
+  await page.keyboard.press('Shift'); // any key shows the controls (for another 3 s)
+  await expect(bar).not.toHaveClass(/hidden/);
+  const box = (await bar.boundingBox())!;
+  const pad = { x: box.x + 6, y: box.y + box.height - 4 };
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-testid') ?? null, pad)).toBe('video-canvas');
+  // the tap goes to the menu (no button there), not to the controls: the bar is not toggled
+  await page.touchscreen.tap(pad.x, pad.y);
+  await page.waitForTimeout(500);
+  await expectMenu(page, true);
+  await expect(bar).not.toHaveClass(/hidden/);
+});
+
 test('a double tap on the right third seeks forward', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);

@@ -45,3 +45,34 @@ export function idleAfterTap(idle: boolean, state: PlaybackState): boolean {
 export function controlsMayIdle(ctx: { playing: boolean; pressed: boolean; menuOpen: boolean; remoteOpen: boolean; bdjMenuVisible: boolean }): boolean {
   return ctx.playing && !ctx.pressed && !ctx.menuOpen && !(ctx.remoteOpen && ctx.bdjMenuVisible);
 }
+
+/** Whether a pointer can hover (a mouse or a pen); a touch pointer cannot. */
+export function isHoverPointer(pointerType: string): boolean {
+  return pointerType === 'mouse' || pointerType === 'pen';
+}
+
+/** Over a disc menu, the mouse wakes the control bar only within this many px of the player's bottom edge (ruling R9). */
+export const MENU_WAKE_ZONE_PX = 24;
+
+/** What a hover pointer's move (or press) over a disc menu does to the control bar. */
+export type MenuPointerEffect = 'wake' | 'hide' | 'keep';
+
+/**
+ * The control bar never covers a disc menu (ruling R9). Over a menu a mouse or pen wakes the bar only within
+ * MENU_WAKE_ZONE_PX of the player's bottom edge, or while the pointer is over the shown bar (`barTop`, null when hidden)
+ * or on a control (so its buttons can be reached once it shows). Anywhere else the bar hides at once, unless something
+ * holds it (a control held down, a bar menu open, the remote open), and then it is left as it is.
+ */
+export function menuPointerEffect(p: { y: number; playerBottom: number; barTop: number | null; overControls: boolean; held: boolean }): MenuPointerEffect {
+  if (p.overControls || p.playerBottom - p.y <= MENU_WAKE_ZONE_PX) return 'wake';
+  if (p.barTop !== null && p.y >= p.barTop) return 'wake';
+  return p.held ? 'keep' : 'hide';
+}
+
+/**
+ * Whether the controls show. Outside a menu they always show while paused; over a disc menu an idle bar stays hidden even
+ * while paused, since a real player draws nothing over the menu.
+ */
+export function controlsShown(ctx: { idle: boolean; playing: boolean; inMenu: boolean }): boolean {
+  return !ctx.idle || (!ctx.playing && !ctx.inMenu);
+}
