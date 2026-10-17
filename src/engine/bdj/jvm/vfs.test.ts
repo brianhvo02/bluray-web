@@ -126,6 +126,44 @@ describe('/app/', () => {
   });
 });
 
+describe('lazy /jdk/ files', () => {
+  it('exist with their size before they are fetched, and fetch once on the first read', async () => {
+    let loads = 0;
+    let fail = true;
+    const jdkLazy = new Map([
+      [
+        'lib/fonts/A.ttf',
+        {
+          size: 3,
+          load: () => {
+            loads++;
+            return fail ? Promise.reject(new Error('offline')) : Promise.resolve(new Uint8Array([7, 8, 9]));
+          },
+        },
+      ],
+    ]);
+    const { vfs } = make({ jdkLazy });
+    expect(vfs.stat('/jdk/lib/fonts/A.ttf')).toEqual({ kind: 'file', size: 3, mtimeMs: 0 });
+    expect(vfs.list('/jdk/lib/fonts')).toEqual(['A.ttf']);
+    expect(loads).toBe(0);
+    const h = vfs.open('/jdk/lib/fonts/A.ttf', 'r')!;
+    const out = new Uint8Array(3);
+    await expect(vfs.read(h, out, 0, 3)).rejects.toThrow('offline');
+    expect(h.position).toBe(0);
+    fail = false;
+    expect(await vfs.read(h, out, 0, 2)).toBe(2);
+    expect(vfs.read(h, out, 2, 1)).toBe(1);
+    expect([...out]).toEqual([7, 8, 9]);
+    expect(loads).toBe(2);
+  });
+
+  it('rejects bytes of the wrong size', async () => {
+    const { vfs } = make({ jdkLazy: new Map([['lib/x', { size: 4, load: () => Promise.resolve(new Uint8Array(2)) }]]) });
+    const h = vfs.open('/jdk/lib/x', 'r')!;
+    await expect(vfs.read(h, new Uint8Array(4), 0, 4)).rejects.toThrow(/expected 4 bytes, got 2/);
+  });
+});
+
 describe('memory mounts', () => {
   it('supports mkdir, nested files, sizes, append and mtime', () => {
     const { vfs, clock } = make();

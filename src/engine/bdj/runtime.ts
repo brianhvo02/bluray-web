@@ -12,6 +12,8 @@
 
 import type { ByteSource } from '../disc/byte-source';
 import { BdjError } from './errors';
+import type { FreeType } from './fonts/freetype';
+import { DEFAULT_FONT_PATH, systemFontFiles } from './fonts/system-fonts';
 import type { BdjErrorCode } from './errors';
 import type { BdjHost, TraceEntry } from './host';
 import { Jvm } from './jvm/jvm';
@@ -48,6 +50,17 @@ export interface BdjRuntimeDeps {
   /** JvmOptions.extraIntrinsics: the class library's intrinsics, which the engine does not carry. */
   readonly extraIntrinsics?: (table: NativeTable) => void;
   readonly log: (line: string) => void;
+  /**
+   * Text: FreeType for the font natives and the bundled fallback font (src/engine/ass/default-font.ttf) as the JRE's
+   * font files, both fetched when text first needs them. Without it, BD-J runs as libbluray built without FreeType.
+   */
+  readonly fonts?: BdjFontSources;
+}
+
+export interface BdjFontSources {
+  readonly loadFreeType: () => Promise<FreeType>;
+  /** The bytes of src/engine/ass/default-font.ttf. */
+  readonly loadDefaultFont: () => Promise<Uint8Array>;
 }
 
 export type RunOutcome = 'idle' | 'until' | 'aborted' | 'deadlock';
@@ -123,6 +136,7 @@ export class BdjRuntime {
     );
     this.host = inner;
     const lib = deps.classLibrary;
+    const fonts = deps.fonts;
     this.jvm = new Jvm({
       bootJars: [lib.libbluray, lib.libblurayAwt, lib.rt],
       nowMs: deps.nowMs,
@@ -131,10 +145,20 @@ export class BdjRuntime {
       ...(deps.extraIntrinsics ? { extraIntrinsics: deps.extraIntrinsics } : {}),
       stdout: (s) => this.output(s),
       stderr: (s) => this.output(s),
-      vfs: new Vfs({ disc: deps.disc, discPaths: deps.disc.paths(), jdkLib: ZipArchive.open(lib.rt), nowMs: deps.nowMs }),
+      vfs: new Vfs({
+        disc: deps.disc,
+        discPaths: deps.disc.paths(),
+        jdkLib: ZipArchive.open(lib.rt),
+        nowMs: deps.nowMs,
+        ...(fonts ? { jdkLazy: systemFontFiles(fonts.loadDefaultFont) } : {}),
+      }),
       systemProperties: JVM_PROPERTIES,
     });
-    registerLibblurayNatives(this.jvm.natives, this.logging(inner));
+    registerLibblurayNatives(
+      this.jvm.natives,
+      this.logging(inner),
+      fonts ? { loadFreeType: fonts.loadFreeType, fallbackFontPath: DEFAULT_FONT_PATH, log: deps.log } : { log: deps.log },
+    );
   }
 
   /** Runtime.halt's status, once Java has halted the JVM; nothing runs after that. */

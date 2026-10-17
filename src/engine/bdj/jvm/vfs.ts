@@ -33,6 +33,15 @@ export interface VfsOptions {
   readonly originalNames?: ReadonlyMap<string, string>;
   /** Read-only files served under /app/, keyed by path relative to /app/. */
   readonly app?: ReadonlyMap<string, Uint8Array>;
+  /** More read-only files under /jdk/, keyed by path relative to /jdk/, fetched the first time they are read. */
+  readonly jdkLazy?: ReadonlyMap<string, LazyFile>;
+}
+
+/** A file whose size is known up front and whose bytes are fetched when first read (reads of it return promises). */
+export interface LazyFile {
+  readonly size: number;
+  /** Called on each read until a call succeeds; the bytes must be `size` long. */
+  readonly load: () => Promise<Uint8Array>;
 }
 
 export type VfsMode = 'r' | 'w' | 'a' | 'rw';
@@ -52,12 +61,15 @@ type MemNode = MemDir | MemFile;
 
 type Backing = { readonly type: 'disc' } | { readonly type: 'mem'; readonly root: MemDir } | { readonly type: 'ro'; readonly tree: RoTree };
 
+/** A read-only file's bytes, or a promise of them while they are fetched. */
+type RoBytes = () => Uint8Array | Promise<Uint8Array>;
+
 class RoTree {
-  private readonly files = new Map<string, () => Uint8Array>();
+  private readonly files = new Map<string, RoBytes>();
   private readonly sizes = new Map<string, number>();
   private readonly dirs = new Map<string, Set<string>>([['', new Set()]]);
 
-  add(path: string, size: number, get: () => Uint8Array): void {
+  add(path: string, size: number, get: RoBytes): void {
     const parts = path.split('/').filter((s) => s !== '');
     if (parts.length === 0) return;
     let dir = '';
@@ -85,7 +97,7 @@ class RoTree {
   fileSize(path: string): number | undefined {
     return this.sizes.get(path);
   }
-  bytes(path: string): Uint8Array | undefined {
+  bytes(path: string): Uint8Array | Promise<Uint8Array> | undefined {
     return this.files.get(path)?.();
   }
   list(path: string): string[] | null {
@@ -103,7 +115,7 @@ class Handle implements VfsHandle {
     readonly append: boolean,
     readonly node: MemFile | null,
     readonly discPath: string | null,
-    readonly data: (() => Uint8Array) | null,
+    readonly data: RoBytes | null,
   ) {}
 }
 
@@ -162,6 +174,24 @@ export class Vfs {
           this.jdkCache.set(name, data);
         }
         return data;
+      });
+    }
+    for (const [path, file] of opts.jdkLazy ?? []) {
+      let bytes: Uint8Array | null = null;
+      let loading: Promise<Uint8Array> | null = null;
+      jdk.add(path, file.size, () => {
+        if (bytes) return bytes;
+        loading ??= file.load().then(
+          (b) => {
+            if (b.length !== file.size) throw new Error(`/jdk/${path}: expected ${file.size} bytes, got ${b.length}`);
+            return (bytes = b);
+          },
+          (e: unknown) => {
+            loading = null;
+            throw e;
+          },
+        );
+        return loading;
       });
     }
     this.backings.set('jdk', { type: 'ro', tree: jdk });
@@ -295,7 +325,7 @@ export class Vfs {
     return new Handle(canon, () => disc.size(discPath), false, false, null, discPath, null);
   }
 
-  /** Memory and /jdk/ reads are synchronous; /disc/ reads return a promise. Returns -1 at end of file. */
+  /** Memory and /jdk/ reads are synchronous; /disc/ reads, and lazy /jdk/ files' first reads, return a promise. Returns -1 at end of file. */
   read(h: VfsHandle, out: Uint8Array, offset: number, length: number): number | Promise<number> {
     const handle = h as Handle;
     if (length === 0) return 0;
@@ -308,7 +338,20 @@ export class Vfs {
       return n;
     }
     if (handle.data) {
-      out.set(handle.data().subarray(pos, pos + n), offset);
+      const data = handle.data();
+      if (data instanceof Promise) {
+        return data.then(
+          (bytes) => {
+            out.set(bytes.subarray(pos, pos + n), offset);
+            return n;
+          },
+          (e: unknown) => {
+            handle.position = pos;
+            throw e;
+          },
+        );
+      }
+      out.set(data.subarray(pos, pos + n), offset);
       return n;
     }
     return this.disc!.read(handle.discPath!, pos, n).then((bytes) => {

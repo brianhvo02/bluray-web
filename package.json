@@ -22,6 +22,7 @@
     "vm-trace:golden": "tools/vm-trace/golden.sh",
     "bdj-trace:golden": "tools/bdj-trace/golden.sh",
     "bdj-trace:freetype-golden": "tools/bdj-trace/freetype-golden.sh",
+    "bdj-trace:text-golden": "tools/bdj-trace/text-golden.sh",
     "vm-trace": "tsx tests/vm-trace/run.ts",
     "bdj-trace": "tsx tests/bdj/run.ts",
     "ass-trace:build": "tools/ass-trace/build.sh",

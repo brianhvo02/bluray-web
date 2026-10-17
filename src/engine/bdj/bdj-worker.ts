@@ -60,6 +60,8 @@ export interface BdjWorkerOptions {
    * needed, not at boot: the entry fetches src/wasm/freetype/freetype.wasm. Calls share one load.
    */
   readonly loadFreeType?: () => Promise<FreeType>;
+  /** The bundled fallback font (src/engine/ass/default-font.ttf), the JRE font files' bytes; fetched when first read. */
+  readonly loadDefaultFont?: () => Promise<Uint8Array>;
 }
 
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
@@ -187,6 +189,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         },
         yieldTask: eventLoopTurn(),
         ...(options.extraIntrinsics ? { extraIntrinsics: options.extraIntrinsics } : {}),
+        ...(options.loadFreeType && options.loadDefaultFont
+          ? { fonts: { loadFreeType: options.loadFreeType, loadDefaultFont: options.loadDefaultFont } }
+          : {}),
         log: (line) => {
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });

@@ -377,3 +377,35 @@ export function registerIoNatives(natives: NativeTable): void {
     'sun/nio/fs/UnixNativeDispatcher.getcwd()[B': (ctx) => byteArray(ctx.jvm, new Uint8Array([0x2f])),
   });
 }
+
+/** Reads a whole VFS file, suspending on disc reads; null when it is missing or a read fails. */
+export function readVfsFile(vfs: Vfs, path: string, k: (bytes: Uint8Array | null) => NativeResult): NativeResult {
+  const h = vfs.open(path, 'r');
+  if (!h) return k(null);
+  const out = new Uint8Array(h.size());
+  let off = 0;
+  const done = (bytes: Uint8Array | null): NativeResult => {
+    vfs.close(h);
+    return k(bytes);
+  };
+  const got = (n: number): NativeResult => {
+    if (n <= 0) return done(null);
+    off += n;
+    return step();
+  };
+  const step = (): NativeResult => {
+    while (off < out.length) {
+      const r = vfs.read(h, out, off, out.length - off);
+      if (typeof r !== 'number') {
+        return new Suspend(
+          r.catch(() => -1),
+          (n) => (n instanceof ThrowResult ? n : got(n as number)),
+        );
+      }
+      if (r <= 0) return done(null);
+      off += r;
+    }
+    return done(out);
+  };
+  return step();
+}

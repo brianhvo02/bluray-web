@@ -9,6 +9,7 @@ import { applyPlayerSettings, type PlayerSettings } from '../../src/engine/disc/
 import type { RegisterFile } from '../../src/engine/hdmv/registers';
 import type { BdjHost, TraceEntry } from '../../src/engine/bdj/host';
 import { BdjRuntime } from '../../src/engine/bdj/runtime';
+import { testBdjFonts } from '../helpers/bdj-fonts';
 
 const FIRST_PLAY = 0xffff;
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../src/bdj-classlib/${name}`, import.meta.url))));
@@ -56,6 +57,7 @@ export async function replayBdj(
       return () => clearTimeout(id);
     },
     log: opts.log ?? (() => {}),
+    fonts: testBdjFonts,
   });
   const ac = new AbortController();
   let booted = false;

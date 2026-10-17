@@ -13,6 +13,7 @@ import type { EngineEvent } from '../../src/engine/protocol';
 import { fakeVideoCodecApi } from '../helpers/fake-video-decoder';
 import { directoryEntries } from '../helpers/file-blob';
 import { HARNESS_SETTINGS } from './replay';
+import { testBdjFonts } from '../helpers/bdj-fonts';
 
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../src/bdj-classlib/${name}`, import.meta.url))));
 
@@ -82,7 +83,7 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
       handle?.runtime?.jvm.threads.halt();
     },
   };
-  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics });
+  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts });
   return worker;
 }
 

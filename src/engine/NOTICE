@@ -52,9 +52,11 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
                           bdpriv_get_uo_mask, bd_tell_time, bd_get_disc_info, bd_get_playlist_info) and
                           bdj/native/org_videolan_Libbluray.c (getAacsDataN)
     bdj/jvm/natives/libbluray.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c, bdjo.c, util.c,
-                          org_videolan_Logger.c, java_awt_BDFontMetrics.c and java_awt_BDGraphics.c (font and text
-                          natives as fixed-metric stubs), bdj/bdjo_parse.c (bdjo_get), disc/disc.c
+                          org_videolan_Logger.c, bdj/bdjo_parse.c (bdjo_get), disc/disc.c
                           (disc_cache_bdrom_file, disc_open_dir) and file/file.c (file_mkdirs)
+    bdj/jvm/natives/fonts.ts from src/libbluray/bdj/native/java_awt_BDFontMetrics.c (initN, destroyN,
+                          unloadFontConfigN, resolveFontN, getFontFamilyAndStyleN, loadFontN, destroyFontN,
+                          charWidthN, stringWidthN, charsWidthN) and java_awt_BDGraphics.c (drawStringN)
     bdj/runtime.ts        from src/libbluray/bdj/bdj.c (bdj_open, _create_jvm properties, _bdj_init,
                           bdj_process_event, bdj_close) and bluray.c (_start_bdj, _stop_bdj)
     bdj/events.ts         from src/libbluray/bluray.c (_process_psr_write_event, _process_psr_change_event, BD-J event sites)
