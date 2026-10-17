@@ -11,9 +11,13 @@ export interface Config {
   nightlyScanAt: { hour: number; minute: number };
   /** Pause between directory reads of a scan. */
   scanPauseMs: number;
+  /** This server's API as devices reach it, registered with each pairing code. */
+  publicBase: string;
 }
 
-/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`) and `SCAN_PAUSE_MS`. */
+const DEFAULT_PUBLIC_BASE = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
+
+/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS` and `PUBLIC_BASE`. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const roots = (env.LIBRARY_ROOTS ?? '')
     .split(',')
@@ -29,7 +33,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     if (seen.has(name)) throw new Error(`LIBRARY_ROOTS names "${name}" twice`);
     seen.add(name);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE) };
 }
 
 function parsePort(value: string | undefined): number {
@@ -50,4 +54,16 @@ function parsePause(value: string | undefined): number {
   if (value === undefined) return 10;
   if (!/^\d+$/.test(value)) throw new Error(`SCAN_PAUSE_MS "${value}" is not a number of milliseconds`);
   return Number(value);
+}
+
+function parseBase(value: string | undefined): string {
+  if (value === undefined) return DEFAULT_PUBLIC_BASE;
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    url = undefined;
+  }
+  if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) throw new Error(`PUBLIC_BASE "${value}" is not an http(s) URL`);
+  return value;
 }

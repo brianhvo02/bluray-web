@@ -30,6 +30,7 @@
     "fixture:synthetic": "tsx scripts/make-audio-fixtures.ts && tsx scripts/make-fixture-disc.ts fixtures/synthetic/disc1 && tsx scripts/make-error-fixtures.ts && tsx scripts/make-bframe-disc.ts fixtures/synthetic/disc2 && tsx scripts/make-audio-disc.ts fixtures/synthetic/disc3 && tsx scripts/make-vm-disc.ts fixtures/synthetic/disc-vm && tsx scripts/make-menu-disc.ts fixtures/synthetic/disc-menu && tsx scripts/make-subs-disc.ts fixtures/synthetic/disc-subs && tsx scripts/make-bdj-disc.ts fixtures/synthetic/disc-bdj && tsx scripts/make-bdj-mixed-disc.ts fixtures/synthetic/disc-bdj-mixed"
   },
   "dependencies": {
+    "qrcode-generator": "2.0.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

@@ -1,0 +1,26 @@
+import { createHash } from 'node:crypto';
+import { PAIRING_ALPHABET, PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../src/engine/disc/pairing-code';
+
+export { PAIRING_ALPHABET, formatCode, normalizeCode };
+
+/** Where a code is registered so a device can find this NAS from the code alone (Task 5's rendezvous client). */
+export interface CodeRegistrar {
+  registerCode(codeHash: string, routes: { https: string }, expiresAt: number): Promise<void>;
+}
+
+/** A fresh code; 32 symbols divide 256, so masking each byte is unbiased (60 bits in all). */
+export function newCode(random: (n: number) => Uint8Array): string {
+  return Array.from(random(PAIRING_CODE_LENGTH), (byte) => PAIRING_ALPHABET[byte & 31]).join('');
+}
+
+/** Hex SHA-256 of the normalized code. Throws on a string that isn't a code. */
+export function codeHash(code: string): string {
+  const normalized = normalizeCode(code);
+  if (normalized === null) throw new Error('not a pairing code');
+  return createHash('sha256').update(normalized).digest('hex');
+}
+
+/** What the QR encodes and the app opens straight into pairing. */
+export function pairingLink(code: string): string {
+  return `https://bluray-web.pages.dev/?pair=${normalizeCode(code) ?? code}`;
+}
