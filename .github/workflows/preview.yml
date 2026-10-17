@@ -1,0 +1,45 @@
+name: Preview deploy
+
+# manual only: deploys the branch the run was started on as a Cloudflare Pages preview.
+# main is refused here; production deploys stay in ci.yml, gated on the tests.
+on:
+  workflow_dispatch:
+
+jobs:
+  preview:
+    name: Deploy preview to Cloudflare Pages
+    if: github.ref_name != 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11.19.0 # allowScripts in package.json needs npm 11.19
+      - run: npm ci
+      - run: npm run build
+      # dist/_headers carries COOP/COEP; without them SharedArrayBuffer is unavailable
+      - run: test -f dist/_headers
+      - uses: cloudflare/wrangler-action@v3
+        id: deploy
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=bluray-web --branch=${{ github.ref_name }}
+      - name: Job summary
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+          ALIAS_URL: ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+        run: |
+          {
+            echo "### Preview deployed"
+            echo ""
+            echo "Branch: \`${{ github.ref_name }}\`"
+            echo ""
+            echo "- Alias: ${ALIAS_URL:-not reported}"
+            echo "- Deployment: ${DEPLOYMENT_URL:-not reported}"
+          } >> "$GITHUB_STEP_SUMMARY"
