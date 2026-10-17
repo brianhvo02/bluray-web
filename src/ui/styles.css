@@ -111,6 +111,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 @media (pointer: coarse) {
   button, .audio-menu-list button { min-width: 44px; min-height: 44px; }
+  .audio-menu-list .subtitle-adjust button { min-width: 44px; } /* beats the 32 px desktop rule's specificity */
   .seek-bar input { height: 44px; margin: 0; }
   .control-row input[data-role='volume'] { display: none; } /* phones have hardware volume buttons */
   .subtitle-adjust output { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }

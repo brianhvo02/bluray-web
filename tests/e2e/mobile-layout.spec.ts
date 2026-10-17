@@ -54,10 +54,21 @@ for (const size of [
     for (const menu of ['audio-menu', 'subtitle-menu', 'shader-menu']) {
       test(`the ${menu} opens inside the viewport`, async ({ page }) => {
         await play(page, DISC, 'playlist-00000');
+        if (menu === 'subtitle-menu') {
+          // a loaded file adds the offset and size adjusters (UTF-8, so no encoding prompt)
+          const srt = Buffer.from('1\n00:00:06,000 --> 00:00:08,000\nHello\n', 'utf8');
+          await page.getByTestId('subtitle-file-input').setInputFiles({ name: 'utf8.srt', mimeType: 'text/plain', buffer: srt });
+        }
         await page.getByTestId(menu).click();
         await expect(page.locator('[data-testid=control-bar] .audio-menu-list')).toBeVisible();
         await inViewport(page, menu);
         if (menu === 'subtitle-menu') {
+          for (const id of ['subtitle-offset-minus', 'subtitle-offset-plus', 'subtitle-size-minus', 'subtitle-size-plus']) {
+            const b = (await page.getByTestId(id).boundingBox())!;
+            expect(b, id).toBeTruthy();
+            expect(b.width, `${id} width`).toBeGreaterThanOrEqual(MIN_TARGET);
+            expect(b.height, `${id} height`).toBeGreaterThanOrEqual(MIN_TARGET);
+          }
           const items = page.locator('[data-testid=subtitle-menu] ~ .audio-menu-list button:visible');
           expect(await items.count()).toBeGreaterThan(1);
           for (let i = 0; i < (await items.count()); i++) {
@@ -72,9 +83,13 @@ for (const size of [
 
     test('the encoding prompt stays above the bottom sheets', async ({ page }) => {
       await play(page, 'fixtures/synthetic/disc-subs');
+      // open a bottom sheet first, so the prompt has something to stack above
+      await page.getByTestId('subtitle-menu').click();
+      await expect(page.locator('[data-testid=control-bar] .audio-menu-list')).toBeVisible();
       const latin1 = Buffer.from('1\n00:00:06,000 --> 00:00:08,000\nCaf\u00e9\n', 'latin1');
       await page.getByTestId('subtitle-file-input').setInputFiles({ name: 'latin1.srt', mimeType: 'text/plain', buffer: latin1 });
       await expect(page.getByTestId('encoding-prompt')).toBeVisible();
+      await expect(page.locator('[data-testid=control-bar] .audio-menu-list')).toBeVisible();
       const top = await page.evaluate(() => {
         const prompt = document.querySelector('[data-testid=encoding-prompt]')!;
         const r = prompt.getBoundingClientRect();
