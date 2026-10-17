@@ -1,0 +1,9 @@
+Notices for server/
+===================
+
+The NAS disc server is distributed under the GNU Lesser General Public
+License, version 2.1 or later (LGPL-2.1-or-later); see LICENSE.
+
+It imports code from src/engine/, which ports or derives from third-party
+projects (libbluray and others). Those projects, their copyright holders and
+the derived files are listed in src/engine/NOTICE.

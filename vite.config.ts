@@ -36,7 +36,7 @@ export default defineConfig({
   worker: { format: 'es' },
   build: { rollupOptions: { input: { main: resolve(root, 'index.html'), probe: resolve(root, 'probe.html') } } },
   test: {
-    include: ['src/**/*.test.ts', 'tests/local/**/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'tests/local/**/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts', 'server/**/*.test.ts'],
     environment: 'node',
     passWithNoTests: true,
   },
