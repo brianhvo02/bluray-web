@@ -197,11 +197,20 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
     await expect(mum.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
     await mum.getByTestId('nas-open').click();
     await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
+    // A guest: the listing is up, and there is no way into the settings.
+    await expect(mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
+    await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
 
     // The owner sees both devices: this one and Mum (other tests' devices share the server).
     const mumRow = page.locator(`[data-testid="nas-device"][data-device-id="${deviceId}"]`);
     await expect(mumRow).toContainText(/^Mum · paired .+ · last seen just now/, { timeout: 15_000 });
-    await expect(page.getByTestId('nas-device').filter({ hasText: '(this device)' })).toHaveCount(1);
+    const ownRow = page.getByTestId('nas-device').filter({ hasText: '(this device)' });
+    await expect(ownRow).toHaveCount(1);
+    // This device's own row asks first.
+    await ownRow.getByTestId('nas-revoke').click();
+    await expect(ownRow).toContainText('Revoke this device?');
+    await ownRow.getByTestId('nas-revoke-cancel').click();
+    await expect(ownRow.getByTestId('nas-revoke')).toBeVisible();
     await mumRow.getByTestId('nas-revoke').click();
     await expect(mumRow).toHaveCount(0);
 
@@ -216,4 +225,23 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
 
   await page.getByTestId('nas-rescan').click();
   await expect(page.getByTestId('nas-admin-status')).toHaveText('Rescanning…');
+
+  // Ticking Owner mints an owner code. The answer is stubbed: a second code per browser registered with the
+  // rendezvous service would pass its 5-live-codes cap on this server's key (redeeming one is tested in server/).
+  await page.getByTestId('nas-owner-code').check();
+  const origin = new URL(page.url()).origin;
+  let minted: unknown;
+  await page.route('**/api/admin/codes', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    minted = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: { 'Access-Control-Allow-Origin': origin },
+      body: JSON.stringify({ code: 'K7QM-4XP2-R9TD', link: 'https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD', expiresAt: Date.now() + 600_000, rendezvous: false }),
+    });
+  });
+  await page.getByTestId('nas-new-code').click();
+  await expect(codeText).toHaveText('K7QM-4XP2-R9TD');
+  expect(minted).toEqual({ owner: true });
 });

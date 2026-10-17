@@ -11,6 +11,8 @@ export interface DeviceRow {
   readonly id: string;
   /** `name · paired <date> · last seen <relative>`, the name followed by `(this device)` on this device's row. */
   readonly text: string;
+  /** This device's own row: revoking it asks for confirmation first. */
+  readonly thisDevice: boolean;
 }
 
 const MINUTE = 60_000;
@@ -31,8 +33,9 @@ export function lastSeen(at: number, now: number): string {
 /** A device's row; `dates` sets the locale and time zone of the pairing date (the browser's by default). */
 export function deviceRow(device: NasDevice, now: number, thisDeviceId: string | null, dates: { locale?: string; timeZone?: string } = {}): DeviceRow {
   const paired = new Intl.DateTimeFormat(dates.locale, { dateStyle: 'medium', timeZone: dates.timeZone }).format(device.pairedAt);
-  const name = device.id === thisDeviceId ? `${device.name} (this device)` : device.name;
-  return { id: device.id, text: `${name} · paired ${paired} · last seen ${lastSeen(device.lastSeen, now)}` };
+  const thisDevice = device.id === thisDeviceId;
+  const name = thisDevice ? `${device.name} (this device)` : device.name;
+  return { id: device.id, text: `${name} · paired ${paired} · last seen ${lastSeen(device.lastSeen, now)}`, thisDevice };
 }
 
 /** Time left on a pairing code, `Expires in m:ss` (seconds rounded up), or `Expired`. */

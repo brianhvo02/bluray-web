@@ -416,6 +416,17 @@ describe('HTTP', () => {
     expect(scan).toHaveBeenCalledOnce();
   });
 
+  it('pairs an owner with a code minted with owner: true, and a guest with owner: false', async () => {
+    await start();
+    const headers = { Authorization: `Bearer ${await pairedToken(true)}` };
+    for (const owner of [true, false]) {
+      const { code } = (await (await post('/api/admin/codes', { owner }, headers)).json()) as { code: string };
+      const redeemed = await post('/api/pair/redeem', { code, deviceName: 'Mum', publicKeyJwk: (await deviceKey()).jwk });
+      expect(redeemed.status).toBe(200);
+      expect(((await redeemed.json()) as { owner: boolean }).owner).toBe(owner);
+    }
+  });
+
   it('still returns the code when the rendezvous registration fails, or with no registrar', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await start({ registrar: { registerCode: async () => Promise.reject(new Error('down')) } });

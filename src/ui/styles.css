@@ -27,6 +27,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .library-actions { display: flex; gap: 8px; }
 .admin-new-code, .admin-device { display: flex; align-items: center; gap: 12px; }
 .admin-device { justify-content: space-between; }
+.admin-confirm { flex: none; display: flex; align-items: center; gap: 8px; }
 .admin-owner { display: inline-flex; align-items: center; gap: 6px; }
 .admin-qr { display: block; width: min(240px, 100%); height: auto; }
 .admin-code-text { font-size: 1.4em; letter-spacing: 0.05em; }

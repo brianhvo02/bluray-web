@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { countdown, deviceRow, newCode, revoke } from './admin-model';
 import type { NasClient, NasDevice } from './nas-client';
 import { qrSvg } from './qr';
@@ -33,18 +33,28 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now }: Admi
   const [minting, setMinting] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Rows whose revoke is in flight: their button is disabled, so a double tap sends one request. */
+  const [revoking, setRevoking] = useState<ReadonlySet<string>>(new Set());
+  /** This device's row asks "Revoke this device?" before revoking. */
+  const [confirmingSelf, setConfirmingSelf] = useState(false);
+  const codeRef = useRef<HTMLElement>(null);
   const [, setTick] = useState(0);
 
-  const loadDevices = useCallback((): Promise<void> => nas.admin.devices().then(setDevices, (err: unknown) => setError(message(err))), [nas]);
+  /** Loads the devices. A failing poll only shows its error when no other is showing, so it can't hide a refusal unread. */
+  const loadDevices = useCallback(
+    (poll: boolean): Promise<void> =>
+      nas.admin.devices().then(setDevices, (err: unknown) => setError((shown) => (poll && shown !== null ? shown : message(err)))),
+    [nas],
+  );
   useEffect(() => {
-    void loadDevices();
+    void loadDevices(false);
   }, [loadDevices]);
 
   const live = code !== null && now() < code.expiresAt;
   useEffect(() => {
     if (!live) return;
     const tick = window.setInterval(() => setTick((t) => t + 1), 1_000);
-    const poll = window.setInterval(() => void loadDevices(), DEVICE_POLL_MS);
+    const poll = window.setInterval(() => void loadDevices(true), DEVICE_POLL_MS);
     return () => {
       window.clearInterval(tick);
       window.clearInterval(poll);
@@ -67,23 +77,46 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now }: Admi
     );
   };
 
+  /** Without a clipboard (no secure context, some webviews), or when writing fails, the code is selected instead. */
+  const canCopy = typeof navigator.clipboard?.writeText === 'function';
+  const selectCode = (): void => {
+    const el = codeRef.current;
+    if (el) window.getSelection()?.selectAllChildren(el);
+  };
   const onCopy = (): void => {
     if (!code) return;
-    navigator.clipboard.writeText(code.code).then(
+    let writing: Promise<void>;
+    try {
+      writing = navigator.clipboard.writeText(code.code);
+    } catch {
+      selectCode();
+      return;
+    }
+    writing.then(
       () => setCopied(true),
-      () => setCopied(false),
+      () => {
+        setCopied(false);
+        selectCode();
+      },
     );
   };
 
   const onRevoke = (id: string): void => {
     setError(null);
+    setConfirmingSelf(false);
+    setRevoking((ids) => new Set(ids).add(id));
     void revoke(nas.admin, id).then((failed) => {
+      setRevoking((ids) => {
+        const next = new Set(ids);
+        next.delete(id);
+        return next;
+      });
       if (failed) {
         setError(failed);
         return;
       }
       setDevices((list) => list?.filter((d) => d.id !== id) ?? null);
-      void loadDevices();
+      void loadDevices(false);
     });
   };
 
@@ -127,12 +160,14 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now }: Admi
             <path d={code.qr.path} fill="#000" />
           </svg>
           <p>
-            <code className="admin-code-text" data-testid="nas-code">
+            <code ref={codeRef} className="admin-code-text" data-testid="nas-code">
               {code.code}
             </code>{' '}
-            <button type="button" data-testid="nas-code-copy" onClick={onCopy}>
-              {copied ? 'Copied' : 'Copy'}
-            </button>
+            {canCopy && (
+              <button type="button" data-testid="nas-code-copy" onClick={onCopy}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            )}
           </p>
           <p className="status" data-testid="nas-code-expiry">
             {countdown(code.expiresAt, at)}
@@ -149,9 +184,26 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now }: Admi
             return (
               <li key={row.id} className="admin-device" data-testid="nas-device" data-device-id={row.id}>
                 <span className="library-name">{row.text}</span>
-                <button type="button" data-testid="nas-revoke" onClick={() => onRevoke(row.id)}>
-                  Revoke
-                </button>
+                {row.thisDevice && confirmingSelf ? (
+                  <span className="admin-confirm">
+                    Revoke this device?{' '}
+                    <button type="button" data-testid="nas-revoke-confirm" disabled={revoking.has(row.id)} onClick={() => onRevoke(row.id)}>
+                      Revoke
+                    </button>{' '}
+                    <button type="button" data-testid="nas-revoke-cancel" onClick={() => setConfirmingSelf(false)}>
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="nas-revoke"
+                    disabled={revoking.has(row.id)}
+                    onClick={() => (row.thisDevice ? setConfirmingSelf(true) : onRevoke(row.id))}
+                  >
+                    Revoke
+                  </button>
+                )}
               </li>
             );
           })}
