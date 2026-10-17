@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { scanPg } from '../helpers/pg-scan';
 import { collectWindows, expectInSync, telemetry } from './telemetry';
-import { CHROME_ONLY } from './support';
+import { CHROME_ONLY, skipWithoutH264 } from './support';
 
 test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
@@ -72,6 +72,7 @@ for (const name of discs) {
     test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
     test.setTimeout(900_000);
     await page.goto('/?telemetry=1');
+    await skipWithoutH264(page);
     await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
     const first = await firstScreen(page);
     if (first === 'picker') {

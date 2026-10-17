@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { skipWithoutH264 } from './support';
 
 // Small-screen layout (Pixel 7 emulation, touch). The controls container is [data-testid=control-bar] (.control-bar).
 const DISC = 'fixtures/synthetic/disc3'; // several audio tracks
@@ -7,6 +8,7 @@ const MIN_TARGET = 44;
 
 async function play(page: Page, disc: string, playlist?: string): Promise<void> {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(disc);
   if (playlist) await page.getByTestId(playlist).click();
   await expect(page.getByTestId('player')).toBeVisible({ timeout: 10_000 });

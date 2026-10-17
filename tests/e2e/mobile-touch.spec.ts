@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { telemetry } from './telemetry';
+import { skipWithoutH264 } from './support';
 
 const HIDE_CONTROLS_MS = 3000; // PlayerScreen's idle timeout
 
@@ -22,6 +23,7 @@ async function menuPoint(page: Page, x: number, y: number): Promise<{ x: number;
 
 test('a tap on a menu button activates it', async ({ page }) => {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
   await expectMenu(page, true);
   const a = await menuPoint(page, 232, 216);
@@ -38,6 +40,7 @@ test('a tap on a menu button activates it', async ({ page }) => {
 
 test('a double tap on the right third seeks forward', async ({ page }) => {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
@@ -57,6 +60,7 @@ test('a double tap on the right third seeks forward', async ({ page }) => {
 // disc1 is 8 s, so this seeks back (a forward seek would end playback and show the controls).
 test('a double tap on the left third seeks back while the controls are hidden and leaves them hidden', async ({ page }) => {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
