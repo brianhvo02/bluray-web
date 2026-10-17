@@ -116,6 +116,18 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
   return { index, usesBdj, playlists, summaries, clips, movieObjects, sounds, warnings };
 }
 
+/**
+ * Whether index.bdmv names a BD-J object, read ahead of openDisc so the BD-J class library can load meanwhile; false
+ * when it is missing or damaged (openDisc reports that).
+ */
+export async function peekUsesBdj(source: ByteSource): Promise<boolean> {
+  try {
+    return source.exists(INDEX_PATH) && indexUsesBdj(parseIndex(await readWhole(source, INDEX_PATH)));
+  } catch {
+    return false;
+  }
+}
+
 /** bdid_get: the first of id.bdmv and its backup that reads and parses (bdj_org_id and bdj_disc_id); null when neither does. */
 export async function readBdid(source: ByteSource): Promise<BdidData | null> {
   for (const path of BDID_PATHS) {

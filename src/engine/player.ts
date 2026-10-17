@@ -18,7 +18,7 @@ import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
 import { FileSource } from './disc/file-source';
-import { checkStreamReadable, loadClips, openDisc, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
+import { checkStreamReadable, loadClips, openDisc, peekUsesBdj, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
@@ -530,6 +530,8 @@ export class Player {
     this.teardownSession();
     this.setState('loading');
     const source = new FileSource(normalizeDiscPaths(entries));
+    // the class library (megabytes) loads while the disc opens
+    if (this.bdjSupported) void peekUsesBdj(source).then((usesBdj) => usesBdj && this.loadClassLibrary());
     const disc = await openDisc(source);
     this.source = source;
     this.disc = disc;

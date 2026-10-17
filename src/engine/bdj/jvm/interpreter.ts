@@ -111,8 +111,12 @@ export function andThen(
 }
 
 function newFrame(m: JMethod): JFrame {
-  const code = m.code!;
-  return new JFrame(m, new Array<JValue>(Math.max(code.maxLocals, m.argSlots)).fill(null), new Array<JValue>(code.maxStack).fill(null));
+  let t = m.frameTemplate;
+  if (t === undefined) {
+    const code = m.code!;
+    t = m.frameTemplate = { locals: new Array<JValue>(Math.max(code.maxLocals, m.argSlots)).fill(null), stack: new Array<JValue>(code.maxStack).fill(null) };
+  }
+  return new JFrame(m, t.locals.slice(), t.stack.slice());
 }
 
 /** Applies a native's result to the thread's top frame, or ends the thread when it has none. */
@@ -369,9 +373,95 @@ function ldc2(cls: JClass, index: number): number | bigint {
   throw new PendingThrow('java/lang/ClassFormatError', `bad ldc2_w constant ${index}`);
 }
 
+/**
+ * A method whose whole bytecode is one of a few shapes that cannot throw or call anything (javac's empty methods and
+ * constructors chaining to one, constant returns, field getters and setters on `this`), which a call can do without a
+ * frame. Shapes with a constant-pool reference count only once it is resolved, so recognising one has no effects.
+ */
+export type Tiny =
+  | { readonly kind: 'void' }
+  | { readonly kind: 'const'; readonly value: JValue }
+  | { readonly kind: 'get'; readonly slot: number; readonly wide: boolean }
+  | { readonly kind: 'length'; readonly slot: number }
+  | { readonly kind: 'set'; readonly slot: number };
+
+const TINY_VOID: Tiny = { kind: 'void' };
+const RETURNS = new Set([0xac, 0xad, 0xae, 0xaf, 0xb0]);
+
+/** m's Tiny shape, null when it has none; undefined (and nothing cached) while a reference it needs is unresolved. */
+function tinyOf(m: JMethod): Tiny | null | undefined {
+  if (m.tiny !== undefined) return m.tiny;
+  const code = m.code?.code;
+  if (!code || m.isNative || m.isSynchronized || m.intrinsic !== undefined || m.loopHooks !== undefined || code.length > 6) return (m.tiny = null);
+  // the getfield or putfield's resolved field (resolved entries of a Fieldref are JFields, which alone have a slot)
+  const resolvedField = (at: number): JField | undefined | null => {
+    const hit = m.cls.resolved[(code[at]! << 8) | code[at + 1]!] as JField | undefined;
+    if (hit === undefined) return undefined;
+    return typeof hit.slot === 'number' && !hit.isStatic ? hit : null;
+  };
+  let tiny: Tiny | null | undefined = null;
+  if (code.length === 1 && code[0] === 0xb1) tiny = TINY_VOID;
+  else if (code.length === 2 && code[0]! >= 0x02 && code[0]! <= 0x08 && code[1] === 0xac) tiny = { kind: 'const', value: code[0]! - 0x03 };
+  else if (code.length === 2 && code[0] === 0x01 && code[1] === 0xb0) tiny = { kind: 'const', value: null };
+  else if (!m.isStatic && code[0] === 0x2a && code[1] === 0xb4 && code.length === 5 && RETURNS.has(code[4]!)) {
+    const fld = resolvedField(2);
+    tiny = fld ? { kind: 'get', slot: fld.slot, wide: fld.wide } : fld;
+  } else if (!m.isStatic && code[0] === 0x2a && code[1] === 0xb4 && code.length === 6 && code[4] === 0xbe && code[5] === 0xac) {
+    const fld = resolvedField(2);
+    tiny = fld ? { kind: 'length', slot: fld.slot } : fld;
+  } else if (!m.isStatic && code[0] === 0x2a && code.length === 6 && code[2] === 0xb5 && code[5] === 0xb1 && [0x1b, 0x1f, 0x23, 0x27, 0x2b].includes(code[1]!)) {
+    const fld = resolvedField(3);
+    tiny = fld ? { kind: 'set', slot: fld.slot } : fld;
+  } else if (!m.isStatic && m.name === '<init>' && code.length === 5 && code[0] === 0x2a && code[1] === 0xb7 && code[4] === 0xb1) {
+    // a constructor that only chains to an empty no-argument one
+    const hit = m.cls.resolved[(code[2]! << 8) | code[3]!] as JMethod | undefined;
+    if (hit === undefined) tiny = undefined;
+    else if (hit.name === '<init>' && hit.desc === '()V') {
+      const inner = tinyOf(hit);
+      tiny = inner === undefined ? undefined : inner?.kind === 'void' ? TINY_VOID : null;
+    }
+  }
+  if (tiny !== undefined) m.tiny = tiny;
+  return tiny;
+}
+
 /** Pops the arguments for `m` from `f` and calls it: a new frame for Java code, the native function otherwise. */
 function call(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void {
   if (profile) profile.calls.set(m, (profile.calls.get(m) ?? 0) + 1);
+  const tiny = m.tiny === null ? null : tinyOf(m);
+  if (tiny && t.frames.length < MAX_FRAMES) {
+    const base = f.sp - m.argSlots;
+    switch (tiny.kind) {
+      case 'void':
+        f.sp = base;
+        break;
+      case 'const':
+        f.stack[base] = tiny.value;
+        f.sp = base + 1;
+        break;
+      case 'get':
+        f.stack[base] = (f.stack[base] as JObject).fields[tiny.slot]!;
+        f.sp = base + (tiny.wide ? 2 : 1);
+        break;
+      case 'length': {
+        const arr = (f.stack[base] as JObject).fields[tiny.slot] as JArray | null;
+        if (arr === null) return callFrame(jvm, t, f, m, nextPc); // the bytecode throws the NullPointerException
+        f.stack[base] = arr.data.length;
+        f.sp = base + 1;
+        break;
+      }
+      case 'set':
+        (f.stack[base] as JObject).fields[tiny.slot] = f.stack[base + 1]!;
+        f.sp = base;
+        break;
+    }
+    f.pc = nextPc;
+    return;
+  }
+  callFrame(jvm, t, f, m, nextPc);
+}
+
+function callFrame(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void {
   const intrinsic = m.intrinsic;
   if (intrinsic !== undefined) {
     const base = f.sp - m.argSlots;
@@ -563,8 +653,11 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
           if (prof) prof.bytecodes.set(f.method, (prof.bytecodes.get(f.method) ?? 0) + (profBudget - budget - 1));
           return 'budget';
         }
-        f.pc = pc;
         const op = code[pc]!;
+        // The frame's pc is needed by what can see it: calls, class initialisation and loading, exceptions made on
+        // the spot, monitors (all from getstatic on, and ldc). The other instructions throw only PendingThrow, whose
+        // catch below stores it.
+        if (op >= 0xb2 || op === 0x12 || op === 0x13) f.pc = pc;
         switch (op) {
           case 0x00: // nop
             pc++;
@@ -1393,6 +1486,7 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
         }
       }
     } catch (e) {
+      f.pc = pc;
       if (e instanceof LoadPending) {
         // A Java class loader must load a class, or Java code link a call site or constant, first; the instruction
         // runs again afterwards.

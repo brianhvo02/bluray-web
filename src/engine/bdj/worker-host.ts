@@ -21,6 +21,7 @@ export interface WorkerBdjHostOptions {
   readonly regs: SharedRegisterView;
   readonly status: StatusBlockReader;
   readonly call: (name: BdjCallName, args: readonly BdjWireValue[]) => Promise<number | string>;
+  /** Read only once Java asks for disc information (the worker boots the JDK while it loads these). */
   readonly disc: DiscModel;
   readonly clips: ReadonlyMap<string, Clpi>;
   readonly log: (line: string, error: boolean) => void;
@@ -30,11 +31,9 @@ const toInt = (v: number | string): number => Number(v) | 0;
 const toLong = (v: number | string): bigint => BigInt(v);
 
 export class WorkerBdjHost implements BdjHost {
-  private readonly titles: readonly (TitleInfo | null)[];
+  private titles: readonly (TitleInfo | null)[] | null = null;
 
-  constructor(private readonly opts: WorkerBdjHostOptions) {
-    this.titles = titleInfos(opts.disc);
-  }
+  constructor(private readonly opts: WorkerBdjHostOptions) {}
 
   private int(name: BdjCallName, args: readonly BdjWireValue[]): Promise<number> {
     return this.opts.call(name, args).then(toInt);
@@ -92,7 +91,7 @@ export class WorkerBdjHost implements BdjHost {
   }
 
   getTitleInfos(): readonly (TitleInfo | null)[] {
-    return this.titles;
+    return (this.titles ??= titleInfos(this.opts.disc));
   }
 
   getPlaylistInfo(playlist: number): PlaylistInfo | null {

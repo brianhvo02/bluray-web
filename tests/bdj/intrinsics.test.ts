@@ -389,6 +389,114 @@ describe('DirectColorModel.getRGB(int)', () => {
   });
 });
 
+describe('SHA.implCompress0', () => {
+  it('expands W and adds the block into state as the Java rounds do', async () => {
+    const key = 'sun/security/provider/SHA.implCompress0([BI)V';
+    for (let i = 0; i < 60; i++) {
+      const r = rng(17000 + i);
+      const w = Array.from({ length: i < 3 ? int(r, 70, 80) : 80 }, () => anyInt(r));
+      const state = Array.from({ length: i === 3 ? 4 : 5 }, () => anyInt(r));
+      const res = await both(async (s) => {
+        const sha = await s.construct('sun/security/provider/SHA', '()V', []);
+        const W = s.intArray(w);
+        const st = s.intArray(state);
+        s.jvm.setField(sha, 'W', '[I', W);
+        s.jvm.setField(sha, 'state', '[I', st);
+        const out = await s.call('sun/security/provider/SHA', 'implCompress0([BI)V', [sha, null, 0]);
+        return { out, W: [...(W.data as Int32Array)], state: [...(st.data as Int32Array)] };
+      });
+      expect(res.on, `block ${i}`).toEqual(res.off);
+    }
+    // the four short-array cases ran the bytecode (and threw); the rest ran the intrinsic
+    expect(bytecodesIn(key)).toBeLessThan(bytecodesIn(key, 'off') / 10);
+  });
+});
+
+describe('BigInteger.implMulAdd', () => {
+  it('multiply-accumulates words and returns the carry as the Java loop does, throwing where it throws', async () => {
+    const key = 'java/math/BigInteger.implMulAdd([I[IIII)I';
+    let intrinsic = 0;
+    for (let i = 0; i < 300; i++) {
+      const r = rng(19000 + i);
+      const word = (): number => pick(r, [anyInt(r), anyInt(r), -1, 0, 1, -2147483648]);
+      const out = r() < 0.02 ? null : Array.from({ length: int(r, 0, 12) }, word);
+      const input = r() < 0.02 ? null : Array.from({ length: int(r, 0, 12) }, word);
+      // mostly in range: offset counts from the end of out, len words of in
+      const len = r() < 0.8 && input ? int(r, 0, input.length) : int(r, -1, 13);
+      const offset = r() < 0.8 && out ? int(r, 0, Math.max(0, out.length - Math.max(len, 0))) : int(r, -2, 13);
+      const args = [offset, len, word()];
+      const before = bytecodesIn(key);
+      const res = await both(async (s) => {
+        const o = out ? s.intArray(out) : null;
+        const ret = await s.call('java/math/BigInteger', 'implMulAdd([I[IIII)I', [o, input ? s.intArray(input) : null, args[0]!, args[1]!, args[2]!]);
+        return { ret, out: o ? [...(o.data as Int32Array)] : null };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (bytecodesIn(key) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(150);
+  });
+});
+
+describe('String methods and the UTF-8 decoder', () => {
+  /** A random string: ASCII mostly, sometimes Latin-1, BMP and surrogate chars. */
+  const randomString = (r: () => number, max = 12): string =>
+    Array.from({ length: int(r, 0, max) }, () => String.fromCharCode(pick(r, [int(r, 97, 100), int(r, 32, 126), int(r, 0x80, 0xff), int(r, 0x100, 0xd7ff), int(r, 0xd800, 0xdfff)]))).join('');
+
+  it('hashCode, charAt, equals, indexOf, lastIndexOf and startsWith return what the Java code returns', async () => {
+    const S = 'java/lang/String';
+    for (let i = 0; i < 300; i++) {
+      const r = rng(21000 + i);
+      const a = randomString(r);
+      const b = r() < 0.3 ? a : r() < 0.5 ? a.slice(0, int(r, 0, a.length)) : randomString(r);
+      const ch = pick(r, [a.charCodeAt(int(r, 0, Math.max(0, a.length - 1))) || 97, int(r, 97, 100), -1, 0x10000 + int(r, 0, 0xfff), 0xffff]);
+      const from = pick(r, [int(r, -3, a.length + 3), 0, -0x80000000, 0x7fffffff]);
+      const at = int(r, -2, a.length + 1);
+      const other = pick(r, ['b', 'a', null] as const);
+      const prefix = r() < 0.05 ? null : 'b';
+      const offset = pick(r, [0, int(r, -2, a.length + 2)]);
+      const res = await both(async (s) => {
+        const sa = s.jvm.heap.newString(a);
+        const sb = s.jvm.heap.newString(b);
+        const out: Outcome[] = [];
+        out.push(await s.call(S, 'hashCode()I', [sa]));
+        out.push(await s.call(S, 'hashCode()I', [sa])); // cached
+        out.push(await s.call(S, 'charAt(I)C', [sa, at]));
+        out.push(await s.call(S, 'equals(Ljava/lang/Object;)Z', [sa, other === 'b' ? sb : other === 'a' ? sa : null]));
+        out.push(await s.call(S, 'equals(Ljava/lang/Object;)Z', [sa, s.jvm.mirror(s.cls(S))])); // not a String
+        out.push(await s.call(S, 'indexOf(II)I', [sa, ch, from]));
+        out.push(await s.call(S, 'lastIndexOf(II)I', [sa, ch, from]));
+        out.push(await s.call(S, 'startsWith(Ljava/lang/String;I)Z', [sa, prefix === null ? null : sb, offset]));
+        return { out, hash: s.field(sa, 'hash', 'I') };
+      });
+      expect(res.on, `case ${i}: ${JSON.stringify([a, b])}`).toEqual(res.off);
+    }
+  });
+
+  it('UTF_8.Decoder.decode copies ASCII as the Java loops do, and leaves the rest to them', async () => {
+    const key = 'sun/nio/cs/UTF_8$Decoder.decode([BII[C)I';
+    let intrinsic = 0;
+    for (let i = 0; i < 200; i++) {
+      const r = rng(23000 + i);
+      const bytes = Array.from({ length: int(r, 0, 24) }, () => (r() < 0.9 ? int(r, 0, 127) : int(r, -128, -1)));
+      const sp = r() < 0.8 ? int(r, 0, bytes.length) : int(r, -2, bytes.length + 2);
+      const len = r() < 0.8 ? int(r, 0, Math.max(0, bytes.length - Math.max(sp, 0))) : int(r, -2, 30);
+      const daLen = r() < 0.8 ? Math.max(len, 0) + int(r, 0, 3) : int(r, 0, 30);
+      const before = bytecodesIn(key);
+      const res = await both(async (s) => {
+        const charset = (await s.call('java/nio/charset/Charset', 'forName(Ljava/lang/String;)Ljava/nio/charset/Charset;', [s.jvm.heap.newString('UTF-8')])).ret as JObject;
+        const decoder = (await s.call(charset.cls.name, 'newDecoder()Ljava/nio/charset/CharsetDecoder;', [charset])).ret as JObject;
+        const da = s.jvm.heap.newArray(s.jvm.loader.arrayOf(s.jvm.loader.primitive('C')), daLen);
+        const out = await s.call('sun/nio/cs/UTF_8$Decoder', 'decode([BII[C)I', [decoder, s.byteArray(bytes), sp, len, da]);
+        return { out, da: [...(da.data as Uint16Array)] };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (bytecodesIn(key) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(60);
+  });
+});
+
 /** A PNG of random filtered rows: crc and zlib from Node, the image data random bytes after each filter type byte. */
 function randomPng(r: () => number, opts: { colorType: number; depth: number; interlace: boolean; trns: boolean }): Uint8Array {
   const width = int(r, 1, 64);

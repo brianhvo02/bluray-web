@@ -15,7 +15,7 @@ import type { JObject, JValue } from './values';
 import type { JThread } from './threads';
 import type { Jvm } from './jvm';
 import { Invoke, ThrowResult, andThen } from './interpreter';
-import type { NativeResult } from './interpreter';
+import type { NativeResult, Tiny } from './interpreter';
 import type { NativeFn } from './natives/index';
 import type { IntrinsicFn, LoopHook, LoopHookFn } from './natives/intrinsics/index';
 import { HOOKED_GOTO, codeChecksum } from './natives/intrinsics/common';
@@ -65,6 +65,10 @@ export interface JMethod {
   readonly intrinsic?: IntrinsicFn | undefined;
   /** Loop hooks (natives/intrinsics) by the pc of the goto they replace in `code`. */
   readonly loopHooks?: ReadonlyMap<number, LoopHookFn> | undefined;
+  /** The interpreter's frameless shape of a trivial method (null: none; undefined: not known yet). */
+  tiny?: Tiny | null | undefined;
+  /** Null-filled locals and operand stack a new frame copies (the interpreter's cache). */
+  frameTemplate?: { readonly locals: readonly JValue[]; readonly stack: readonly JValue[] } | undefined;
   /** Per invokedynamic instruction (by pc), the linked call site. */
   callSites?: Map<number, JMethod>;
 }
@@ -220,6 +224,8 @@ export class JClass {
         native: undefined,
         intrinsic: init.intrinsics?.get(key),
         loopHooks: hooks ? new Map(hooks.map((h) => [h.pc, h.fn])) : undefined,
+        frameTemplate: undefined,
+        tiny: undefined,
       });
     }
     this.methods = methods;

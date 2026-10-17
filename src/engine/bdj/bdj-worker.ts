@@ -6,8 +6,10 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import type { Clpi } from '../bdmv/clpi-parser';
 import { FileSource } from '../disc/file-source';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
+import type { DiscModel } from '../disc/open-disc';
 import { normalizeDiscPaths } from '../disc/paths';
 import { BdjError } from './errors';
 import { BdjRuntime } from './runtime';
@@ -112,10 +114,17 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
     const t0 = performance.now();
     try {
       const source = new FileSource(normalizeDiscPaths(m.discFiles));
-      const disc = await openDisc(source);
-      const clipIds = new Set([...disc.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
-      const clips = await loadClips(source, [...clipIds].filter((id) => source.exists(clipInfoPath(id))));
-      if (ended) return;
+      // the disc model loads while the JDK starts up; the host reads it once Libbluray.init asks for disc info
+      let model: { readonly disc: DiscModel; readonly clips: ReadonlyMap<string, Clpi> } | null = null;
+      const loading = (async () => {
+        const disc = await openDisc(source);
+        const clipIds = new Set([...disc.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
+        model = { disc, clips: await loadClips(source, [...clipIds].filter((id) => source.exists(clipInfoPath(id)))) };
+      })();
+      const loaded = (): NonNullable<typeof model> => {
+        if (!model) throw new Error('the disc model is not loaded yet');
+        return model;
+      };
       rt = new BdjRuntime({
         disc: source,
         discId: m.discId,
@@ -125,8 +134,12 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
             regs: new SharedRegisterView(m.registers),
             status: new StatusBlockReader(m.status),
             call,
-            disc,
-            clips,
+            get disc() {
+              return loaded().disc;
+            },
+            get clips() {
+              return loaded().clips;
+            },
             log: (line, error) => {
               hostLine = line;
               post({ type: 'log', line, error });
@@ -143,6 +156,9 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
           else post({ type: 'log', line, error: false });
         },
       });
+      // boot() reports a JDK failure itself, with its BdjError code
+      await Promise.all([loading, rt.bootJdk().catch(() => undefined)]);
+      if (ended) return;
       await rt.boot();
     } catch (e) {
       fail(e);

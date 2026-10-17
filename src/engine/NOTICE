@@ -181,7 +181,8 @@ fdlibm 5.3 (the C library behind the JDK's StrictMath)
   The rest of bdj/jvm/ (interpreter, loader, heap, threads, VFS and the other
   natives, except natives/libbluray.ts and the libbluray-derived intrinsics
   above) is original code. The intrinsics for class-library methods
-  (natives/intrinsics/color-model.ts, png.ts, arrays.ts, and the
-  Rectangle.intersection arithmetic in graphics.ts) are written from the JVM
+  (natives/intrinsics/color-model.ts, png.ts, arrays.ts, crypto.ts,
+  strings.ts, and the Rectangle.intersection arithmetic in graphics.ts) are
+  written from the JVM
   semantics of those methods' bytecode in src/bdj-classlib/rt-bdj.jar; they
   contain no OpenJDK source.

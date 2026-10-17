@@ -416,6 +416,8 @@ function syntheticMethod(cls: JClass, name: string, desc: string, isStatic: bool
     native: fn,
     intrinsic: undefined,
     loopHooks: undefined,
+    frameTemplate: undefined,
+    tiny: undefined,
   };
 }
 

@@ -100,6 +100,7 @@ export class BdjRuntime {
   readonly jvm: Jvm;
   private booted = false;
   private booting: Promise<void> | null = null;
+  private jdkBooting: Promise<void> | null = null;
   private until: ((e: TraceEntry) => boolean) | null = null;
   private matched = false;
   /** Aborts the drive in progress (run, or stop's). */
@@ -139,9 +140,17 @@ export class BdjRuntime {
     return (this.booting ??= this.open());
   }
 
+  /**
+   * Starts JDK startup on its own, which reaches no host native, so a caller can load what the host needs meanwhile;
+   * boot() goes on from it and reports its failure.
+   */
+  bootJdk(): Promise<void> {
+    return (this.jdkBooting ??= this.jvm.boot());
+  }
+
   private async open(): Promise<void> {
     try {
-      await this.jvm.boot();
+      await this.bootJdk();
       const heap = this.jvm.heap;
       await this.call('init', '(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V', [
         1n,
