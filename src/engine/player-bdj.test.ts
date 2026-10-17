@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fakeVideoCodecApi } from '../../tests/helpers/fake-video-decoder';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
 import { VirtualClock, storedZip } from '../../tests/helpers/jvm-asm';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
@@ -11,37 +12,12 @@ import { ZipArchive } from './bdj/jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './bdj/runtime';
 import type { WorkerLike } from './bdj/session';
 import type { FromBdj, ToBdj } from './bdj/worker-protocol';
+import { SharedRegisterView } from './bdj/shared-registers';
+import type { PlayerSettings } from './disc/player-settings';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
-import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
 import { Player } from './player';
 import type { EngineEvent, PlaybackState } from './protocol';
-
-class FakeDecoder implements VideoDecoderLike {
-  state: CodecState = 'unconfigured';
-  decodeQueueSize = 0;
-  constructor(private readonly init: VideoDecoderInit) {}
-  configure(): void {
-    this.state = 'configured';
-  }
-  decode(chunk: EncodedVideoChunk): void {
-    const { timestamp } = chunk as unknown as EncodedVideoChunkInit;
-    this.init.output({ timestamp, displayWidth: 320, displayHeight: 180, close: () => undefined } as unknown as VideoFrame);
-  }
-  async flush(): Promise<void> {}
-  reset(): void {
-    this.state = 'unconfigured';
-  }
-  close(): void {
-    this.state = 'closed';
-  }
-}
-
-const fakeApi: VideoCodecApi = {
-  create: (init) => new FakeDecoder(init),
-  isConfigSupported: async (config) => ({ supported: true, config }),
-  makeChunk: (init) => init as unknown as EncodedVideoChunk,
-};
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const CLASSES: ClassLibrarySource = {
@@ -96,6 +72,7 @@ interface HarnessOptions {
   /** A worker the test drives by hand instead of the in-process one. */
   readonly worker?: WorkerLike;
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
+  readonly playerSettings?: PlayerSettings;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -107,7 +84,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   const clock = { ms: 1000 };
   const player = new Player({
     emit: (e) => events.push(e),
-    videoCodecApi: fakeApi,
+    videoCodecApi: fakeVideoCodecApi,
     nowMs: () => clock.ms,
     requestFrame: () => undefined,
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
@@ -138,6 +115,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
       return worker;
     },
     loadClassLibrary: async () => classes,
+    ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
@@ -291,6 +269,15 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     const types = h.events.map((e) => (e.type === 'state' ? `state:${e.state}` : e.type));
     const titles = types.indexOf('titles');
     expect(types.indexOf('bdjActive', titles)).toBeLessThan(types.indexOf('state:idle', titles));
+  });
+
+  it("writes the application's player settings to the registers Java reads (bd_set_player_setting_str)", async () => {
+    const w = handWorker();
+    await harness(bdjDisc(), { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    const regs = new SharedRegisterView(boot.type === 'boot' ? boot.registers : new SharedArrayBuffer(0));
+    expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
   });
 
   it('falls back with a timeout bdj-failed 20,000 ms after a boot that never completes', async () => {

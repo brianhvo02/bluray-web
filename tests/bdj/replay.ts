@@ -5,7 +5,7 @@ import { normalizeDiscPaths } from '../../src/engine/disc/paths';
 import { FileSource } from '../../src/engine/disc/file-source';
 import { loadClips, openDisc, readBdid } from '../../src/engine/disc/open-disc';
 import { RecordingHost } from '../../src/engine/bdj/host';
-import { PSR } from '../../src/engine/hdmv/registers';
+import { applyPlayerSettings, type PlayerSettings } from '../../src/engine/disc/player-settings';
 import type { RegisterFile } from '../../src/engine/hdmv/registers';
 import type { BdjHost, TraceEntry } from '../../src/engine/bdj/host';
 import { BdjRuntime } from '../../src/engine/bdj/runtime';
@@ -13,15 +13,11 @@ import { BdjRuntime } from '../../src/engine/bdj/runtime';
 const FIRST_PLAY = 0xffff;
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../src/bdj-classlib/${name}`, import.meta.url))));
 
-/** str_to_uint: a language or country code packed big-endian, as bd_set_player_setting_str stores it. */
-const code = (s: string): number => [...s].reduce((v, c) => ((v << 8) | c.charCodeAt(0)) >>> 0, 0);
-
 /** tools/bdj-trace/bdj_trace.c's bd_set_player_setting_str calls before bd_play: country us, languages eng. */
+export const HARNESS_SETTINGS: PlayerSettings = { audioLanguage: 'eng', pgLanguage: 'eng', menuLanguage: 'eng', country: 'us' };
+
 export function applyHarnessSettings(registers: RegisterFile): void {
-  registers.psrSettingWrite(PSR.COUNTRY, code('us'));
-  registers.psrSettingWrite(PSR.AUDIO_LANG, code('eng'));
-  registers.psrSettingWrite(PSR.PG_AND_SUB_LANG, code('eng'));
-  registers.psrSettingWrite(PSR.MENU_LANG, code('eng'));
+  applyPlayerSettings(registers, HARNESS_SETTINGS);
 }
 
 export interface BdjReplay {

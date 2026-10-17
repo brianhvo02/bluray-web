@@ -16,6 +16,7 @@ import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecA
 import { M2tsReader } from './demux/m2ts-reader';
 import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
+import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
 import { FileSource } from './disc/file-source';
 import { checkStreamReadable, loadClips, openDisc, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
@@ -83,6 +84,8 @@ export interface PlayerDeps {
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
   /** The BD-J runtime's log lines (Java's System.out and uncaught exceptions). */
   readonly bdjLog?: (line: string, error: boolean) => void;
+  /** bd_set_player_setting_str's languages and country, written to each disc's registers when it opens. */
+  readonly playerSettings?: PlayerSettings;
 }
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
@@ -535,7 +538,7 @@ export class Player {
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
     this.pgRegs = new RegisterFile();
-    applyDiscProfile(this.pgRegs, disc.index);
+    this.initRegs(this.pgRegs, disc);
     this.bindPg(this.pgRegs);
     this.resetTextSubtitles();
     this.emitSubtitles();
@@ -557,11 +560,17 @@ export class Player {
     return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined;
   }
 
+  /** _fill_disc_info's profile switch (bd_open), then the player settings an application sets before bd_play. */
+  private initRegs(regs: RegisterFile, disc: DiscModel): void {
+    applyDiscProfile(regs, disc.index);
+    if (this.deps.playerSettings) applyPlayerSettings(regs, this.deps.playerSettings);
+  }
+
   /** The registers of the disc's program (HDMV or BD-J), shared with a BD-J worker when the disc can run BD-J. */
   private newProgramRegs(disc: DiscModel): RegisterFile {
     const shared = disc.usesBdj && this.bdjSupported ? new SharedArrayBuffer(REGISTER_WORDS * 4) : undefined;
     const regs = new RegisterFile(shared ? { shared } : {});
-    applyDiscProfile(regs, disc.index);
+    this.initRegs(regs, disc);
     regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
     return regs;
   }
