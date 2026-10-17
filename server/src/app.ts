@@ -5,7 +5,7 @@ import type { Handler } from './http';
 import type { Library } from './library';
 import { adminRoutes, bearerToken } from './routes/admin';
 import { libraryRoute } from './routes/library';
-import { isPrivateAddress, pairRoutes } from './routes/pair';
+import { pairRoutes } from './routes/pair';
 
 export interface AppOptions {
   auth: Auth;
@@ -13,7 +13,7 @@ export interface AppOptions {
   publicBase: string;
   registrar?: CodeRegistrar;
   now?: () => number;
-  /** Whether a peer is the reverse proxy, whose `X-Forwarded-For` names the client. Default: private addresses (Caddy's Docker network). */
+  /** Whether a peer is the reverse proxy, whose `X-Forwarded-For` names the client (see `trustedProxy`). Default: no peer. */
   trustProxy?: (address: string) => boolean;
 }
 
@@ -29,7 +29,7 @@ export function requireToken(auth: Auth): Handler {
 export function appHandlers(opts: AppOptions): Handler[] {
   const { auth } = opts;
   return [
-    pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? isPrivateAddress }),
+    pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false) }),
     requireToken(auth),
     adminRoutes(auth, { library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar }),
     libraryRoute(opts.library),

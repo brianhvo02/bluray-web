@@ -57,7 +57,11 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       }
       case 'DELETE devices/:id': {
         const target = decode(id!);
-        if (!auth.devices().some((d) => d.id === target)) return json(404, { error: 'unknown device' });
+        const devices = auth.devices();
+        const found = devices.find((d) => d.id === target);
+        if (!found) return json(404, { error: 'unknown device' });
+        // Synchronous from here to the revoke, so two owners can't remove each other at once. `owner-code` recovers anyway.
+        if (found.owner && devices.filter((d) => d.owner).length === 1) return json(409, { error: 'last-owner' });
         auth.revokeDevice(target);
         return { status: 204 };
       }

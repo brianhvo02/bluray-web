@@ -13,6 +13,7 @@ describe('loadConfig', () => {
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
+      trustedProxy: 'caddy',
     });
   });
 
@@ -24,6 +25,7 @@ describe('loadConfig', () => {
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
+      trustedProxy: 'caddy',
     });
   });
 
@@ -59,5 +61,13 @@ describe('loadConfig', () => {
 
   it.each(['', 'nas/api', 'ftp://nas/api/'])('rejects PUBLIC_BASE=%j', (value) => {
     expect(() => loadConfig({ PUBLIC_BASE: value })).toThrow(`PUBLIC_BASE "${value}" is not an http(s) URL`);
+  });
+
+  it('reads TRUSTED_PROXY', () => {
+    expect(loadConfig({ TRUSTED_PROXY: '172.18.0.2' }).trustedProxy).toBe('172.18.0.2');
+  });
+
+  it.each(['', 'a b', 'caddy,evil'])('rejects TRUSTED_PROXY=%j', (value) => {
+    expect(() => loadConfig({ TRUSTED_PROXY: value })).toThrow(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   });
 });
