@@ -170,6 +170,7 @@ what would change that decision.
 - **Canvas-to-`<video>` fullscreen/PiP experiment, left open.** Capturing the canvas into a `<video>` might give iPhone fullscreen and Picture-in-Picture; not tried.
 - **Probe-dependent steps still open until the probe is run on devices:** audio resampling if a device runs a rate other than 48 kHz, a main-thread frame tick if worker rAF is janky, an ASS letter-spacing fallback if `letterSpacing` is missing.
 - **Playwright reuses a running preview server on :4173 locally** (`reuseExistingServer`); stop a stale one after changing source.
+- **WebKit on Linux CI runs no real-time playback tests.** On GitHub's GPU-less runners, Playwright's Linux WebKit missed a different set of timing windows on every run (frames presented, remote presses, pauses landing), even on a runner of its own. Tests that need real-time playback skip there (`LINUX_WEBKIT_REALTIME` in `tests/e2e/support.ts`); the landing, capability, folder-picking, layout and offline tests still run. They all run in WebKit on macOS, and real Safari is covered by the real-device test.
 
 ### Device probe results
 

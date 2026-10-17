@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { isLinuxWebKit, LINUX_WEBKIT_REALTIME } from './support';
 import { bdjStartup, telemetry } from './telemetry';
 
 // fixtures/synthetic/disc-bdj (scripts/make-bdj-disc.ts): First Play is a BD-J object whose xlet starts TitleXlet,
@@ -16,6 +17,8 @@ async function open(page: Page, query = ''): Promise<void> {
   await page.goto(`/?telemetry=1${query}`);
   await page.getByTestId('folder-input').setInputFiles(DISC);
 }
+
+test.beforeEach(({ browserName }) => test.skip(isLinuxWebKit(browserName), LINUX_WEBKIT_REALTIME));
 
 test("plays the playlist the disc's Java selects, with the menu-hidden notice and no picker", async ({ page }) => {
   await open(page);
