@@ -1,0 +1,53 @@
+{
+ "disc-bdj": [
+  "disc-bdj/BDMV/BDJO/00000.bdjo",
+  "disc-bdj/BDMV/BDJO/00001.bdjo",
+  "disc-bdj/BDMV/CLIPINF/00000.clpi",
+  "disc-bdj/BDMV/JAR/00000.jar",
+  "disc-bdj/BDMV/PLAYLIST/00000.mpls",
+  "disc-bdj/BDMV/STREAM/00000.m2ts",
+  "disc-bdj/BDMV/index.bdmv",
+  "disc-bdj/CERTIFICATE/app.discroot.crt",
+  "disc-bdj/CERTIFICATE/bu.discroot.crt"
+ ],
+ "disc-menu": [
+  "disc-menu/BDMV/AUXDATA/sound.bdmv",
+  "disc-menu/BDMV/CLIPINF/00001.clpi",
+  "disc-menu/BDMV/CLIPINF/00002.clpi",
+  "disc-menu/BDMV/MovieObject.bdmv",
+  "disc-menu/BDMV/PLAYLIST/00000.mpls",
+  "disc-menu/BDMV/PLAYLIST/00001.mpls",
+  "disc-menu/BDMV/STREAM/00001.m2ts",
+  "disc-menu/BDMV/STREAM/00002.m2ts",
+  "disc-menu/BDMV/index.bdmv"
+ ],
+ "disc-subs": [
+  "disc-subs/BDMV/CLIPINF/00001.clpi",
+  "disc-subs/BDMV/MovieObject.bdmv",
+  "disc-subs/BDMV/PLAYLIST/00000.mpls",
+  "disc-subs/BDMV/PLAYLIST/00001.mpls",
+  "disc-subs/BDMV/STREAM/00001.m2ts",
+  "disc-subs/BDMV/index.bdmv"
+ ],
+ "disc1": [
+  "disc1/BDMV/CLIPINF/00001.clpi",
+  "disc1/BDMV/CLIPINF/00002.clpi",
+  "disc1/BDMV/PLAYLIST/00000.mpls",
+  "disc1/BDMV/PLAYLIST/00001.mpls",
+  "disc1/BDMV/STREAM/00001.m2ts",
+  "disc1/BDMV/STREAM/00002.m2ts",
+  "disc1/BDMV/index.bdmv"
+ ],
+ "disc2": [
+  "disc2/BDMV/CLIPINF/00001.clpi",
+  "disc2/BDMV/PLAYLIST/00000.mpls",
+  "disc2/BDMV/STREAM/00001.m2ts",
+  "disc2/BDMV/index.bdmv"
+ ],
+ "disc3": [
+  "disc3/BDMV/CLIPINF/00001.clpi",
+  "disc3/BDMV/PLAYLIST/00000.mpls",
+  "disc3/BDMV/STREAM/00001.m2ts",
+  "disc3/BDMV/index.bdmv"
+ ]
+}
