@@ -332,6 +332,17 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
   });
 
+  it('applies the player settings when an HDMV program hands over to a BD-J title, before the worker boots (R9)', async () => {
+    const w = handWorker();
+    const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(1))] }]);
+    const files = bdjDisc({ movieObjects, index: { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'bdj', name: '00001' }] } });
+    await harness(files, { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    const regs = new SharedRegisterView(boot.type === 'boot' ? boot.registers : new SharedArrayBuffer(0));
+    expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
+  });
+
   it('falls back with a timeout bdj-failed 20,000 ms after a boot that never completes', async () => {
     const clock = new VirtualClock();
     const w = handWorker();

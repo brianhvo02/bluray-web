@@ -86,7 +86,7 @@ export interface PlayerDeps {
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
   /** The BD-J runtime's log lines (Java's System.out and uncaught exceptions). */
   readonly bdjLog?: (line: string, error: boolean) => void;
-  /** bd_set_player_setting_str's languages and country, written to each disc's registers when it opens. */
+  /** bd_set_player_setting_str's languages and country, written to the program's registers when a BD-J title is entered. */
   readonly playerSettings?: PlayerSettings;
 }
 
@@ -588,9 +588,16 @@ export class Player {
     return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined;
   }
 
-  /** _fill_disc_info's profile switch (bd_open), then the player settings an application sets before bd_play. */
+  /** _fill_disc_info's profile switch (bd_open). */
   private initRegs(regs: RegisterFile, index: IndexBdmv): void {
     applyDiscProfile(regs, index);
+  }
+
+  /**
+   * The player settings an application sets with bd_set_player_setting_str, written only when a BD-J title is entered
+   * (before its worker boots): HDMV discs keep the registers' defaults (ruling R9).
+   */
+  private applyBdjSettings(regs: RegisterFile): void {
     if (this.deps.playerSettings) applyPlayerSettings(regs, this.deps.playerSettings);
   }
 
@@ -616,6 +623,7 @@ export class Player {
     const createWorker = this.deps.createBdjWorker;
     if (index.firstPlay.kind !== 'bdj' || !library || !createWorker) return null;
     const early: EarlyBdj = { worker: new EarlyBdjWorker(createWorker()), regs: this.newProgramRegs(index, true), status: new StatusBlockWriter(createStatusBlock()) };
+    this.applyBdjSettings(early.regs);
     this.earlyBdj = early;
     void (async () => {
       try {
@@ -654,6 +662,7 @@ export class Player {
     if (early && this.earlyBdj !== early) early = null; // dropped meanwhile
     this.earlyBdj = null;
     const programRegs = early?.regs ?? (regs?.shared ? regs : this.newProgramRegs(disc.index, disc.usesBdj));
+    if (!early) this.applyBdjSettings(programRegs); // an early worker's registers have them already
     const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
     let entry: BdjTitle | null = null;
     let ended = false;

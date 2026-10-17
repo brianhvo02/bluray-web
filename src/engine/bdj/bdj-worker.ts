@@ -143,7 +143,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       const loading = (async () => {
         const disc = await openDisc(source);
         const clipIds = new Set([...disc.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
-        model = { disc, clips: await loadClips(source, [...clipIds].filter((id) => source.exists(clipInfoPath(id)))) };
+        // openDisc has already parsed the clips of a disc with movie objects; only the rest are read here
+        const rest = await loadClips(source, [...clipIds].filter((id) => !disc.clips.has(id) && source.exists(clipInfoPath(id))));
+        model = { disc, clips: new Map([...disc.clips, ...rest]) };
       })();
       loading.catch(() => undefined); // awaited below; this only keeps a failure while the runtime is set up from going unhandled
       const loaded = (): NonNullable<typeof model> => {

@@ -123,13 +123,13 @@ what would change that decision.
   `sound.bdmv`: libbluray loads `bd->sound_effects` lazily (on the first `bd_get_sound_effect`), so until then
   `bdpriv_sound_effect` returns 0 for any id up to 255, where `RecordingHost` returns -1 for ids at or past the disc's
   sound count.
-- **Player settings come from the browser's locale (5c).** The engine worker passes `bd_set_player_setting_str`'s
-  audio, PG and menu languages and the country from `navigator.language` (`playerSettingsForLocale`): the language as
-  ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs label streams with), the region in lowercase (`us`); anything it
-  cannot map stays unset (libbluray's default). This applies to every disc, so HDMV discs now get libbluray's
-  language-based first stream choice too (PSR16/17 against the STN table): for example, with an English browser a
-  Japanese-audio disc with English subtitles starts with those subtitles on, as a player set to English does. There
-  is no settings UI yet.
+- **Player settings come from the browser's locale, under BD-J only (5c, ruling R9).** The engine worker derives
+  `bd_set_player_setting_str`'s audio, PG and menu languages and the country from `navigator.language`
+  (`playerSettingsForLocale`): the language as ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs label streams with),
+  the region in lowercase (`us`); anything it cannot map stays unset. They are written to the program's registers only
+  when a BD-J title is entered, before its worker boots, so HDMV discs keep the registers' defaults (PSR16-19) and
+  their first stream choice is unchanged. libbluray applies them for every disc; an HDMV disc that later enters a
+  BD-J title gets them from then on. There is no settings UI yet.
 
 ## Audio
 

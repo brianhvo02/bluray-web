@@ -104,7 +104,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index'] } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings'] } = {},
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
@@ -133,6 +133,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     createAudioDecoder: opts.createAudioDecoder ?? noWasmFactory,
     createAssDeps: opts.createAssDeps ?? fakeAssDeps(),
     createShaderBackend: opts.createShaderBackend,
+    ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
@@ -1071,6 +1072,15 @@ describe('Player with HDMV navigation', () => {
       const nav = await harness(undefined, { movieObjects, index: hdmvIndex });
       expect(profile(regsOf(plain, 'pgRegs'))).toEqual(profile(new RegisterFile()));
       expect(profile(regsOf(nav, 'navRegs'))).toEqual(profile(new RegisterFile()));
+    });
+
+    it('leaves the language and country PSRs of an HDMV disc at their defaults (player settings apply under BD-J only, R9)', async () => {
+      const playerSettings = { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fre', country: 'jp' };
+      const langs = (r: { psrRead(i: number): number }): number[] => [16, 17, 18, 19].map((i) => r.psrRead(i));
+      const plain = await harness(undefined, { playerSettings });
+      const nav = await harness(undefined, { movieObjects, index: hdmvIndex, playerSettings });
+      expect(langs(regsOf(plain, 'pgRegs'))).toEqual(langs(new RegisterFile()));
+      expect(langs(regsOf(nav, 'navRegs'))).toEqual(langs(new RegisterFile()));
     });
 
     it('applies the UHD profile to a 0300 index, with and without a navigator', async () => {

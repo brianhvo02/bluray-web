@@ -63,10 +63,12 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
 
   const playlists = new Map<string, Mpls>();
   const warnings: string[] = [];
-  for (const name of playlistFiles) {
-    const id = name.slice(0, -'.MPLS'.length);
+  // all reads go out at once (a disc can have hundreds of small files); parsing stays in name order
+  const ids = playlistFiles.map((name) => name.slice(0, -'.MPLS'.length));
+  const playlistBytes = await Promise.all(ids.map((id) => readWhole(source, playlistPath(id))));
+  for (const [i, id] of ids.entries()) {
     try {
-      playlists.set(id, parseMpls(await readWhole(source, playlistPath(id))));
+      playlists.set(id, parseMpls(playlistBytes[i]!));
     } catch (err) {
       if (!(err instanceof ParseError)) throw err;
       warnings.push(`Skipped playlist ${id}: ${err.message}`);
@@ -96,11 +98,11 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
 
   const clips = new Map<string, Clpi>();
   if (movieObjects) {
-    const clipIds = [...new Set([...playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)))];
-    for (const clipId of clipIds) {
-      if (!source.exists(clipInfoPath(clipId))) continue;
+    const clipIds = [...new Set([...playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)))].filter((id) => source.exists(clipInfoPath(id)));
+    const clipBytes = await Promise.all(clipIds.map((id) => readWhole(source, clipInfoPath(id))));
+    for (const [i, clipId] of clipIds.entries()) {
       try {
-        clips.set(clipId, parseClpi(await readWhole(source, clipInfoPath(clipId))));
+        clips.set(clipId, parseClpi(clipBytes[i]!));
       } catch (err) {
         if (!(err instanceof ParseError)) throw err;
       }
@@ -158,13 +160,12 @@ function summarize(source: ByteSource, id: string, mpls: Mpls): PlaylistSummary 
 }
 
 export async function loadClips(source: ByteSource, clipIds: readonly string[]): Promise<Map<string, Clpi>> {
-  const clips = new Map<string, Clpi>();
   for (const clipId of clipIds) {
     const path = clipInfoPath(clipId);
     if (!source.exists(path)) throw new DiscError('missing-file', `Missing clip info ${path}`, [path]);
-    clips.set(clipId, parseClpi(await readWhole(source, path)));
   }
-  return clips;
+  const bytes = await Promise.all(clipIds.map((id) => readWhole(source, clipInfoPath(id))));
+  return new Map(clipIds.map((id, i) => [id, parseClpi(bytes[i]!)]));
 }
 
 /** Encrypted aligned units keep only the first 16 bytes in the clear, so later packets lose their sync byte. */
