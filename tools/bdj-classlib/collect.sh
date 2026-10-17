@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Grows src/bdj-classlib/classes.txt and tests/bdj/natives.txt from real runs: each BD-J disc runs through libbluray up
-# to its first playlist selection with -verbose:class and -verbose:jni. Names are only ever added.
+# to its first playlist selection with -verbose:class and -verbose:jni, and a synthetic disc with key scripts
+# (tests/bdj/scripts/<disc>.<name>.keys) runs each script to its end as well. Names are only ever added.
+#   collect.sh [disc...]: only these discs (folder names under fixtures/synthetic or paths); default: disc-bdj,
+#                         disc-bdj-menu and every BD-J disc under fixtures/local
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -10,10 +13,15 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 
 DISCS=()
-[ -d fixtures/synthetic/disc-bdj/BDMV ] && DISCS+=(fixtures/synthetic/disc-bdj)
-for d in fixtures/local/*; do
-  [ -d "$d/BDMV/BDJO" ] && DISCS+=("$d")
-done
+if [ $# -gt 0 ]; then
+  for d in "$@"; do
+    if [ -d "$d" ]; then DISCS+=("$d"); else DISCS+=("fixtures/synthetic/$d"); fi
+  done
+else
+  for d in fixtures/synthetic/disc-bdj fixtures/synthetic/disc-bdj-menu fixtures/local/*; do
+    [ -d "$d/BDMV/BDJO" ] && DISCS+=("$d")
+  done
+fi
 
 : > "$T/loaded"
 : > "$T/natives"
@@ -22,6 +30,12 @@ for d in "${DISCS[@]}"; do
   # HotSpot prints -verbose output on stdout, between the trace lines
   tools/bdj-trace/run.sh "$d" --until selectPlaylistN --jvm-option -verbose:class --jvm-option -verbose:jni \
     > "$T/out" 2> "$T/err" || true
+  for k in tests/bdj/scripts/"$(basename "$d")".*.keys; do
+    [ -f "$k" ] || continue
+    echo "collecting from $d with $k" >&2
+    tools/bdj-trace/run.sh "$d" --keys "$k" --seconds 120 --wait-timeout 60 --jvm-option -verbose:class \
+      --jvm-option -verbose:jni >> "$T/out" 2>> "$T/err" || true
+  done
   # classes of rt.jar ("shared objects file" is the CDS archive, also built from rt.jar), jsse.jar and jce.jar (the
   # JAR signature check's providers and javax.crypto); pack.sh takes them from the same three jars
   { grep -E '^\[Loaded [^ ]+ from (/usr/lib/jvm/[^]]*/(rt|jsse|jce)\.jar|shared objects file)\]' "$T/out" || true; } \

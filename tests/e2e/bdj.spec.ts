@@ -56,6 +56,51 @@ test('a BD-J runtime that cannot boot (?bdjfail=1) falls back to the picker with
   await reachesState(page, 'playing', 15_000);
 });
 
+// fixtures/synthetic/disc-bdj-menu (scripts/make-bdj-menu-disc.ts): MenuXlet plays playlist 00001 behind a menu of three
+// buttons (Play, Chapters, Extras, at x 160-679 and y 360-459, 490-589, 620-719 of the 1920x1080 plane), Play focused.
+// A click inside Play changes its text (a MouseListener); Enter on Play hides the menu and plays playlist 00000.
+const MENU_DISC = 'fixtures/synthetic/disc-bdj-menu';
+
+/** Clicks the canvas at a point of the 1920x1080 menu plane (the picture is fitted into the canvas, as toMenuSpace). */
+async function clickPlane(page: Page, x: number, y: number): Promise<void> {
+  const box = (await page.getByTestId('video-canvas').boundingBox())!;
+  const scale = Math.min(box.width / 1920, box.height / 1080);
+  const left = box.x + (box.width - 1920 * scale) / 2;
+  const top = box.y + (box.height - 1080 * scale) / 2;
+  await page.mouse.click(left + (x + 0.5) * scale, top + (y + 0.5) * scale);
+}
+
+test('a BD-J menu answers clicks on its MouseListener button and keys; a click it ignores offers the remote', async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  const player = page.getByTestId('player');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
+  await expect(player).toHaveAttribute('data-playlist', '00001'); // the menu's background playlist
+  await expect(page.getByTestId('playlist-picker')).toBeHidden();
+
+  // Play's MouseListener reacts (a flush within the tap window): no notice, no remote
+  await clickPlane(page, 300, 400);
+  await page.waitForTimeout(1000);
+  await expect(notice(page, /doesn't respond to taps/)).toHaveCount(0);
+  await expect(page.getByTestId('remote-pad')).toBeHidden();
+
+  // empty plane: the disc ignores the click, so the player says so and opens the remote
+  await clickPlane(page, 1400, 540);
+  await expect(notice(page, /This disc's menu doesn't respond to taps here\. Use the remote\./)).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByTestId('remote-pad')).toBeVisible();
+
+  // Down moves the focus to Chapters, where Enter does nothing; Up goes back to Play, where Enter plays 00000
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(1000);
+  await expect(player).toHaveAttribute('data-playlist', '00001');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Enter');
+  await expect(player).toHaveAttribute('data-playlist', '00000', { timeout: 10_000 });
+  await expect(player).toHaveAttribute('data-bdj-menu', 'false'); // the menu hid itself
+});
+
 test('a click on the video with an empty BD-J plane is play/pause, not a menu click; the remote is offered', async ({ page }) => {
   await open(page);
   await reachesState(page, 'playing', 30_000);

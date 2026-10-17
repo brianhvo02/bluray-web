@@ -6,6 +6,9 @@
 #                         ends)
 #   disc-bdj-mixed.jsonl: up to its first playlist selection from Java (PlaylistXlet in BD-J title 2, after First Play's
 #                         selectTitleN of HDMV title 1 and that title's playlist and JumpTitle 2)
+#   disc-bdj-menu.<script>.jsonl: the run of tests/bdj/scripts/disc-bdj-menu.<script>.keys, reduced by settled.py to the
+#                         control calls and the plane hash at each `wait still` step and at the end (flush counts vary
+#                         between runs)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,5 +26,14 @@ golden() { # <disc> <selectPlaylistN count>
   echo "wrote tests/bdj/golden/$1.jsonl"
 }
 
+golden_keys() { # <disc> <script name>
+  local out="$ROOT/tests/bdj/golden/$1.$2.jsonl"
+  "$ROOT/tools/bdj-trace/run.sh" "$1" --keys "$ROOT/tests/bdj/scripts/$1.$2.keys" --seconds 120 --wait-timeout 60 \
+    | python3 -I "$ROOT/tools/bdj-trace/settled.py" > "$out"
+  echo "wrote tests/bdj/golden/$1.$2.jsonl"
+}
+
 golden disc-bdj 2
 golden disc-bdj-mixed 1
+golden_keys disc-bdj-menu arrows
+golden_keys disc-bdj-menu mouse

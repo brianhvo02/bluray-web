@@ -306,18 +306,26 @@ export class GraphicsPlaneReader extends PlaneViews {
   hash(): string {
     this.acquire(Infinity);
     try {
-      const px = this.pixels;
-      let h = 0x811c9dc5;
-      for (let i = 0; i < PIXELS; i++) {
-        const v = px[i]!;
-        h = Math.imul(h ^ (v & 255), 0x01000193);
-        h = Math.imul(h ^ ((v >>> 8) & 255), 0x01000193);
-        h = Math.imul(h ^ ((v >>> 16) & 255), 0x01000193);
-        h = Math.imul(h ^ (v >>> 24), 0x01000193);
-      }
-      return (h >>> 0).toString(16).padStart(8, '0');
+      return planeHash(this.buffer);
     } finally {
       this.release();
     }
   }
+}
+
+/**
+ * GraphicsPlaneReader.hash without taking the lock, for a caller that holds it already (the writer at a flush): FNV-1a
+ * 32 over the plane's ARGB words, as tools/bdj-trace prints it.
+ */
+export function planeHash(buffer: SharedArrayBuffer): string {
+  const px = new Int32Array(buffer, HEADER_BYTES, PIXELS);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < PIXELS; i++) {
+    const v = px[i]!;
+    h = Math.imul(h ^ (v & 255), 0x01000193);
+    h = Math.imul(h ^ ((v >>> 8) & 255), 0x01000193);
+    h = Math.imul(h ^ ((v >>> 16) & 255), 0x01000193);
+    h = Math.imul(h ^ (v >>> 24), 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
 }
