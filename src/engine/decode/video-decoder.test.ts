@@ -123,6 +123,37 @@ describe('WebCodecsVideoDecoder', () => {
     expect(errors[3].message).toBe(HEVC_MESSAGE);
   });
 
+  it('reports a generic fatal error, not the HEVC message, once HEVC frames have been decoded', async () => {
+    const { api, created } = setup();
+    const dec = new WebCodecsVideoDecoder(api);
+    const errors: DecoderError[] = [];
+    const out: VideoFrame[] = [];
+    dec.onError = (e) => errors.push(e);
+    dec.onOutput = (f) => out.push(f);
+    await dec.configure({ codingType: CodingType.HEVC, firstUnit: HEVC_IDR });
+    dec.decode({ data: HEVC_IDR, ptsUs: 0, discard: false });
+    expect(out).toHaveLength(1);
+    for (let i = 0; i < 4; i++) created[created.length - 1].fail(`boom ${i}`);
+    expect(errors.map((e) => e.fatal)).toEqual([false, false, false, true]);
+    expect(errors[3].message).toBe('Video decoding failed: boom 3');
+  });
+
+  it('treats a rejected support check as unsupported and tries the next codec string', async () => {
+    const { api, created } = setup();
+    const checked: string[] = [];
+    const rejecting: VideoCodecApi = {
+      ...api,
+      isConfigSupported: async (c) => {
+        checked.push(c.codec);
+        if (c.codec.startsWith('hvc1.')) throw new TypeError('unsupported codec string');
+        return { supported: true, config: c };
+      },
+    };
+    await new WebCodecsVideoDecoder(rejecting).configure({ codingType: CodingType.HEVC, firstUnit: HEVC_IDR });
+    expect(checked).toEqual(['hvc1.1.6.L93.90', 'hev1.1.6.L93.90']);
+    expect(created[0].config?.codec).toBe('hev1.1.6.L93.90');
+  });
+
   it('configures AVC with a codec string from the SPS', async () => {
     const { api, created, checked } = setup();
     const dec = new WebCodecsVideoDecoder(api);

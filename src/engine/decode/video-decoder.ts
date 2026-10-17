@@ -78,6 +78,8 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   /** PTS of a non-IDR (open-GOP) random access point whose leading pictures must still be skipped. */
   private leadingKeyPtsUs: number | null = null;
   private consecutiveErrors = 0;
+  /** A frame came out since configure(): a later fatal error is a decode failure, not a missing codec. */
+  private hasOutput = false;
   /**
    * Timestamps fed since the last reset, mapped to whether their frame is discarded. A frame whose timestamp
    * is missing was decoded before a reset() and delivered late; WebCodecs does not promise to drop those.
@@ -113,7 +115,8 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     for (const codec of ops.codecStrings(info.sps)) {
       const candidate: VideoDecoderConfig = { codec };
       if (software) candidate.hardwareAcceleration = 'prefer-software';
-      const support = await this.api.isConfigSupported(candidate);
+      // a rejection (e.g. a codec string the browser can't parse) counts as unsupported
+      const support = await this.api.isConfigSupported(candidate).catch(() => ({ supported: false }));
       if (this.closed) return; // closed while support was being checked: don't open a decoder nobody owns
       if (support.supported) {
         vdc = candidate;
@@ -131,6 +134,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     this.ops = ops;
     this.config = vdc;
     this.consecutiveErrors = 0;
+    this.hasOutput = false;
     this.requireIdr = false;
     this.lastKeyWasIdr = true;
     this.open();
@@ -228,6 +232,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
       return;
     }
     this.consecutiveErrors = 0;
+    this.hasOutput = true;
     const discard = this.pending.get(frame.timestamp);
     this.pending.delete(frame.timestamp);
     if (discard !== false) {
@@ -249,7 +254,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     if (!this.lastKeyWasIdr) this.requireIdr = true;
     if (this.consecutiveErrors > MAX_CONSECUTIVE_ERRORS) {
       this.decoder = null;
-      this.onError(new DecoderError(this.codingType === CodingType.HEVC ? HEVC_UNSUPPORTED_MESSAGE : `Video decoding failed: ${err.message}`, true));
+      this.onError(new DecoderError(this.codingType === CodingType.HEVC && !this.hasOutput ? HEVC_UNSUPPORTED_MESSAGE : `Video decoding failed: ${err.message}`, true));
       return;
     }
     this.open();
