@@ -121,6 +121,18 @@ async function pause(page: Page): Promise<void> {
   await page.getByTestId('player').hover();
   await page.getByTestId('play-toggle').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
+  // The picture can still step one frame after the state says paused (seen on a loaded machine: the frame due at the
+  // paused clock reached the screen late). Wait until two shots 250 ms apart match before a test takes its own.
+  let last = await canvasShot(page);
+  await expect
+    .poll(async () => {
+      await page.waitForTimeout(250);
+      const next = await canvasShot(page);
+      const moved = diffFraction(last, next);
+      last = next;
+      return moved;
+    }, { timeout: 10_000, intervals: [0] })
+    .toBe(0);
 }
 
 /** Sets the seek bar as a user would by dragging it (see subtitles.spec.ts). */
