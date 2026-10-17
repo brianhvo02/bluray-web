@@ -15,6 +15,10 @@ export interface PlayerSnapshot {
   readonly engineState: PlaybackState;
   readonly playlists: readonly PlaylistSummary[];
   readonly usesBdj: boolean;
+  /** The engine runs BD-J titles. */
+  readonly bdjSupported: boolean;
+  /** A BD-J title drives playback (its menu is not drawn): no playlist yet is no reason to show the picker. */
+  readonly bdjActive: boolean;
   readonly warnings: readonly string[];
   readonly currentPlaylistId: string | null;
   readonly durationUs: number;
@@ -75,6 +79,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   engineState: 'idle',
   playlists: [],
   usesBdj: false,
+  bdjSupported: false,
+  bdjActive: false,
   warnings: [],
   currentPlaylistId: null,
   durationUs: 0,
@@ -105,7 +111,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
@@ -136,6 +142,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, encodingPrompt: { names: e.names } };
     case 'uoMask':
       return { ...s, uoMask: e.masked };
+    case 'bdjActive':
+      return { ...s, bdjActive: e.active };
     case 'indexTitles':
       return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':
@@ -256,9 +264,10 @@ export class PlayerController {
   playPlaylist(playlistId: string): void {
     this.startAudio();
     // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
-    // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay.
+    // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay;
+    // the picked playlist stops a BD-J title, so its menu-hidden notice goes.
     const playlistScoped = (code: string): boolean =>
-      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track';
+      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-menu-hidden';
     this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
     this.post({ type: 'playPlaylist', playlistId });
   }

@@ -68,6 +68,11 @@ export class RegisterFile {
     if (this.mirror) for (let i = 0; i < PSR_COUNT; i++) Atomics.store(this.mirror, i, this.psr[i]!);
   }
 
+  /** The shared buffer the registers are mirrored to, if any. */
+  get shared(): SharedArrayBuffer | null {
+    return (this.mirror?.buffer as SharedArrayBuffer | undefined) ?? null;
+  }
+
   private mirrorPsr(i: number): void {
     if (this.mirror) Atomics.store(this.mirror, i, this.psr[i]!);
   }

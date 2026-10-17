@@ -48,6 +48,7 @@ const player = new Player({
     const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);
     return { rt, libbluray, libblurayAwt };
   },
+  bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {
     const response = await fetch(defaultFontUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) });

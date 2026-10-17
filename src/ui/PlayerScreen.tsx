@@ -217,8 +217,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   };
 
   const controlsVisible = !idle || !playing;
-  // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading.
-  const showPicker = pickerOpen || (snapshot.currentPlaylistId === null && snapshot.engineState !== 'loading');
+  // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading, nor while a
+  // BD-J title runs (Java opens its playlists itself; the Playlists button still opens the picker).
+  const showPicker = pickerOpen || (snapshot.currentPlaylistId === null && snapshot.engineState !== 'loading' && !snapshot.bdjActive);
 
   return (
     <div
@@ -263,6 +264,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         <PlaylistPicker
           playlists={snapshot.playlists}
           usesBdj={snapshot.usesBdj}
+          bdjSupported={snapshot.bdjSupported}
           titles={snapshot.indexTitles?.titles}
           onPickTitle={(title) => {
             setPickerOpen(false);
@@ -273,7 +275,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
             setPickerOpen(false);
             controller.playPlaylist(id);
           }}
-          onClose={snapshot.currentPlaylistId === null ? undefined : () => setPickerOpen(false)}
+          onClose={snapshot.currentPlaylistId === null && !snapshot.bdjActive ? undefined : () => setPickerOpen(false)}
           onCloseDisc={() => controller.closeDisc()}
         />
       )}

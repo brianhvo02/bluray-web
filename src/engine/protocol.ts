@@ -5,7 +5,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts';
+export type NoticeCode = 'bdj' | 'bdj-menu-hidden' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts';
 export type ErrorCode = DiscErrorCode | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
 export interface Telemetry {
@@ -116,7 +116,7 @@ export type EngineCommand =
   | { readonly type: 'setSubtitleScale'; readonly scale: number }
   | { readonly type: 'nextChapter' }
   | { readonly type: 'prevChapter' }
-  /** HDMV discs only: 0 = top menu. */
+  /** 0 = top menu. */
   | { readonly type: 'playTitle'; readonly title: number }
   | { readonly type: 'menuCall' }
   | { readonly type: 'menuKey'; readonly key: MenuKey }
@@ -128,7 +128,10 @@ export type EngineCommand =
   | { readonly type: 'setVideoShaders'; readonly set: ShaderSetData | null };
 
 export type EngineEvent =
-  | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly warnings: readonly string[] }
+  /** `bdjSupported`: this engine runs BD-J titles. */
+  | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly bdjSupported: boolean; readonly warnings: readonly string[] }
+  /** A BD-J title started (the disc's Java code drives playback; its menu is not drawn) or BD-J stopped. */
+  | { readonly type: 'bdjActive'; readonly active: boolean }
   /** After 'titles', for discs whose First Play is an HDMV object. */
   | { readonly type: 'indexTitles'; readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>; readonly hasTopMenu: boolean }
   | { readonly type: 'uoMask'; readonly masked: readonly UoOp[] }

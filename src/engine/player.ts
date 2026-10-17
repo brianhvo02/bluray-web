@@ -1,8 +1,12 @@
 import { AudioWriter } from './audio/audio-writer';
 import { OUTPUT_SAMPLE_RATE, RingWriter, ringViews } from './audio/ring';
 import { type PlayItem } from './bdmv/mpls-parser';
+import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
+import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
-import type { WorkerLike } from './bdj/session';
+import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
+import { REGISTER_WORDS } from './bdj/shared-registers';
+import { StatusBlockWriter, createStatusBlock } from './bdj/status-block';
 import { codingName, isVideoCoding } from './bdmv/stream-types';
 import { MasterClock } from './clock/master-clock';
 import { Decimator } from './decode/decimator';
@@ -41,13 +45,14 @@ import { TextSubtitleRenderer, type TextRenderOptions } from './subs/text-render
 import { episodeStarts, sortByName, TextSet, TextSetRenderer, type SetFile } from './subs/text-set';
 import { VideoPresenter } from './render/video-presenter';
 import { ParseError } from './util/byte-reader';
-import { pts90ToUs, ticks45ToUs } from './util/time';
+import { pts90ToUs, ticks45ToUs, usToTicks45 } from './util/time';
 
 const UO_MASKED_MESSAGE = "The disc doesn't allow this here.";
 const NO_SUBTITLES_MESSAGE = 'this file has no subtitles we can read';
 const SOME_SUBTITLES_MESSAGE = 'Some lines of this file could not be read';
 const PLACE_FILES_MESSAGE = "Place each subtitle file at its episode's start in the subtitle menu";
 const NO_SHADER_BACKEND_MESSAGE = 'Shaders are unavailable here';
+const BDJ_MENU_HIDDEN_MESSAGE = "This disc's menu isn't shown yet. The disc is playing on its own; choose a playlist to take over.";
 const MIN_TEXT_SCALE = 0.5;
 const MAX_TEXT_SCALE = 2;
 /** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
@@ -74,7 +79,16 @@ export interface PlayerDeps {
   readonly createBdjWorker?: () => WorkerLike;
   /** The BD-J class library jars; fetched once, as soon as a BD-J disc is opened. */
   readonly loadClassLibrary?: () => Promise<ClassLibrarySource>;
+  /** One-shot timer, cancelled by the returned function (the BD-J first-playlist timeout); setTimeout by default. */
+  readonly setTimer?: (ms: number, fn: () => void) => () => void;
+  /** The BD-J runtime's log lines (Java's System.out and uncaught exceptions). */
+  readonly bdjLog?: (line: string, error: boolean) => void;
 }
+
+const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
+  const id = setTimeout(fn, ms);
+  return () => clearTimeout(id);
+};
 
 export interface AssDeps {
   readonly loader: FontLoader;
@@ -120,6 +134,12 @@ const SCR_PER_MS = 90;
 /** libbluray does not preload sub-path clips larger than this (PRELOAD_SIZE_LIMIT). */
 const PRELOAD_SIZE_LIMIT = 512 * 1024 * 1024;
 const INDEX_ID_NONE = 0xffff;
+const TITLE_FIRST_PLAY = 0xffff;
+/** bd_set_rate's BLURAY_RATE_PAUSED and BLURAY_RATE_NORMAL. */
+const RATE_PAUSED = 0;
+const RATE_NORMAL = 90_000;
+/** UO_MASK_MENU_CALL_INDEX, UO_MASK_TITLE_SEARCH_INDEX */
+const UO_INDEX: Partial<Record<UoOp, number>> = { menuCall: 0, titleSearch: 1 };
 
 /** Who opened a playlist: the user's pick, the HDMV navigator, or a BD-J title. */
 type PlaylistCaller = 'user' | 'navigator' | 'bdj';
@@ -153,6 +173,24 @@ export interface BdjPlaybackPort {
   playlistOpen(): boolean;
   playSound(id: number): void;
   setListener(listener: BdjPlaybackListener | null): void;
+}
+
+/**
+ * A running BD-J title: libbluray's title_type bdj. The worker lives from entering BD-J until it is left (a playlist
+ * picked, an HDMV title, the disc closed) or fails; title changes inside BD-J reuse it.
+ */
+interface BdjTitle {
+  readonly session: BdjSession;
+  readonly host: PlayerBdjHost;
+  readonly events: BdjPlaybackEvents;
+  /** The title registers, shared with the BD-J worker (the navigator's, when HDMV handed over). */
+  readonly regs: RegisterFile;
+  readonly status: StatusBlockWriter;
+  /** Cuts the title off from the player: its port, events and callbacks do nothing afterwards. */
+  readonly end: () => void;
+  /** The title to start once the worker has booted; null once booted. */
+  pendingTitle: number | null;
+  booted: boolean;
 }
 
 interface Session {
@@ -239,10 +277,13 @@ export class Player {
   /** PG subtitles of the open disc, on the navigator's registers or, without a navigator, on pgRegs. */
   private pg: PgStreamControl | null = null;
   private pgRegs: RegisterFile | null = null;
-  /** The disc ID BD-J's host will need (id.bdmv); not private only until something reads it (noUnusedLocals). */
-  protected bdjDiscId: string | null = null;
-  /** The class library, loading from the first BD-J disc on; not private only until something reads it. */
-  protected bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
+  /** The disc ID BD-J's host will need (id.bdmv). */
+  private bdjDiscId: string | null = null;
+  /** The class library, loading from the first BD-J disc on. */
+  private bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
+  /** The open disc's files as the user gave them, for the BD-J worker's own disc model. */
+  private discEntries: ReadonlyArray<readonly [string, Blob]> = [];
+  private bdj: BdjTitle | null = null;
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -293,16 +334,17 @@ export class Player {
           if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
           break;
         case 'playPlaylist':
+          this.stopBdj();
           this.stopNavigator();
           await this.playPlaylist(cmd.playlistId);
           break;
         case 'playTitle':
-          if (this.refused(cmd.title === 0 ? 'menuCall' : 'titleSearch')) break;
-          this.playTitle(cmd.title);
+          if (this.bdj) this.bdjPlayTitle(this.bdj, cmd.title);
+          else if (!this.refused(cmd.title === 0 ? 'menuCall' : 'titleSearch')) this.playTitle(cmd.title);
           break;
         case 'menuCall':
-          if (this.refused('menuCall')) break;
-          this.playTitle(0);
+          if (this.bdj) this.bdjPlayTitle(this.bdj, 0);
+          else if (!this.refused('menuCall')) this.playTitle(0);
           break;
         case 'menuKey':
           this.menuKey(cmd.key);
@@ -312,10 +354,13 @@ export class Player {
           break;
         case 'play':
           await this.play();
+          this.bdj?.host.setRate(RATE_NORMAL);
           break;
         case 'pause':
-          if (this.refused('pauseOn')) break;
+          // under a BD-J title pause, seeks and chapter skips are never refused (UO restriction RELAXED)
+          if (!this.bdj && this.refused('pauseOn')) break;
           this.pause();
+          this.bdj?.host.setRate(RATE_PAUSED);
           break;
         case 'close':
           this.close();
@@ -324,7 +369,7 @@ export class Player {
           this.setVideoShaders(cmd.set);
           break;
         case 'seek':
-          if (this.refused('timeSearch')) break;
+          if (!this.bdj && this.refused('timeSearch')) break;
           this.notifySeeked(cmd.timeUs);
           // ASS collision memory belongs to what was on screen before the seek
           for (const f of this.textTrack?.files ?? []) if (f.renderer instanceof AssRenderer) f.renderer.reset();
@@ -360,11 +405,11 @@ export class Player {
           this.subtitlesChanged();
           break;
         case 'nextChapter':
-          if (this.refused('skipToNextPoint')) break;
+          if (!this.bdj && this.refused('skipToNextPoint')) break;
           await this.skipChapter(1);
           break;
         case 'prevChapter':
-          if (this.refused('skipBackToPreviousPoint')) break;
+          if (!this.bdj && this.refused('skipBackToPreviousPoint')) break;
           await this.skipChapter(-1);
           break;
       }
@@ -376,6 +421,10 @@ export class Player {
   /** One render tick (requestAnimationFrame in the worker; called directly by tests). */
   tick(): void {
     this.navigator?.tick(this.clock.nowUs());
+    if (this.bdj) {
+      this.bdj.status.setTime45(this.titleTime45());
+      this.bdj.status.setPlaylistOpen(this.session !== null);
+    }
     const s = this.session;
     if (!s) return;
     this.updatePlayback(s);
@@ -473,6 +522,7 @@ export class Player {
   }
 
   private async open(entries: ReadonlyArray<readonly [string, Blob]>): Promise<void> {
+    this.stopBdj();
     this.stopNavigator();
     this.teardownSession();
     this.setState('loading');
@@ -480,6 +530,7 @@ export class Player {
     const disc = await openDisc(source);
     this.source = source;
     this.disc = disc;
+    this.discEntries = entries;
     this.soundsPlayed = 0;
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
@@ -488,15 +539,173 @@ export class Player {
     this.bindPg(this.pgRegs);
     this.resetTextSubtitles();
     this.emitSubtitles();
-    this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, warnings: disc.warnings });
+    this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, bdjSupported: this.bdjSupported, warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
-    if (disc.usesBdj) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
+    if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
     this.setState('idle');
-    if (disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
+    if (disc.index.firstPlay.kind === 'bdj' && this.bdjSupported) {
+      this.enterBdj(TITLE_FIRST_PLAY, null);
+    } else if (disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
+  }
+
+  private get bdjSupported(): boolean {
+    return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined;
+  }
+
+  /** The registers of the disc's program (HDMV or BD-J), shared with a BD-J worker when the disc can run BD-J. */
+  private newProgramRegs(disc: DiscModel): RegisterFile {
+    const shared = disc.usesBdj && this.bdjSupported ? new SharedArrayBuffer(REGISTER_WORDS * 4) : undefined;
+    const regs = new RegisterFile(shared ? { shared } : {});
+    applyDiscProfile(regs, disc.index);
+    regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
+    return regs;
+  }
+
+  /** The program's registers: the navigator's or the BD-J title's. */
+  private get programRegs(): RegisterFile | null {
+    return this.navRegs ?? this.bdj?.regs ?? null;
+  }
+
+  /**
+   * Enters BD-J (_play_title → _play_bdj → _start_bdj): a new worker boots, then title `title` starts. `regs`: the
+   * navigator's registers when an HDMV title hands over (libbluray has one register file), else new ones.
+   */
+  private enterBdj(title: number, regs: RegisterFile | null): void {
+    const { disc, source } = this;
+    const createWorker = this.deps.createBdjWorker;
+    this.loadClassLibrary();
+    const library = this.bdjClassLibrary;
+    if (!disc || !source || !createWorker || !library) return;
+    const programRegs = regs?.shared ? regs : this.newProgramRegs(disc);
+    const status = new StatusBlockWriter(createStatusBlock());
+    let entry: BdjTitle | null = null;
+    let ended = false;
+    const live = (): boolean => !ended;
+    const sink = (ev: number, param: number): void => {
+      if (live()) entry?.session.event(ev, param);
+    };
+    const events = bdjPlaybackEvents(sink);
+    const host: PlayerBdjHost = new PlayerBdjHost({
+      port: this.bdjPort(live),
+      regs: programRegs,
+      disc,
+      source,
+      events,
+      psrEvents: sink,
+      startTitle: (t) => {
+        if (live() && entry) this.startBdjTitle(entry, t);
+      },
+      playHdmvTitle: (t) => live() && entry !== null && this.bdjToHdmv(entry, t),
+      uoMaskChanged: (bits) => {
+        status.setUoMask(bits);
+        if (live()) this.emitBdjUoMask(host);
+      },
+    });
+    const session = new BdjSession({
+      worker: createWorker(),
+      host,
+      regs: programRegs.shared!,
+      status,
+      time45: () => this.titleTime45(),
+      onFailed: (code, message) => {
+        if (live()) this.bdjFailed(code, message);
+      },
+      onLog: this.deps.bdjLog,
+      nowMs: () => this.deps.nowMs(),
+      setTimer: this.deps.setTimer ?? defaultSetTimer,
+    });
+    entry = { session, host, events, regs: programRegs, status, end: () => void (ended = true), pendingTitle: null, booted: false };
+    this.bdj = entry;
+    this.bindPg(programRegs);
+    this.deps.emit({ type: 'bdjActive', active: true });
+    this.deps.emit({ type: 'uoMask', masked: [] });
+    this.notice('bdj-menu-hidden', BDJ_MENU_HIDDEN_MESSAGE);
+    void host.handle('selectTitle', [title]); // _play_title: PSR4, then the title's object
+    void this.bootBdj(entry, library);
+  }
+
+  private async bootBdj(entry: BdjTitle, library: Promise<ClassLibrarySource>): Promise<void> {
+    let classes: ClassLibrarySource;
+    try {
+      classes = await library;
+    } catch (err) {
+      if (this.bdj === entry) this.bdjFailed('internal', `the class library could not be loaded: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    if (this.bdj !== entry) return;
+    await entry.session.boot(this.discEntries, this.bdjDiscId, classes);
+    if (this.bdj !== entry) return;
+    entry.booted = true;
+    const title = entry.pendingTitle;
+    entry.pendingTitle = null;
+    if (title !== null) entry.session.start(title);
+  }
+
+  /** _start_bdj on a running BD-J: BDJ_EVENT_START, held until the worker has booted. */
+  private startBdjTitle(entry: BdjTitle, title: number): void {
+    if (entry.booted) entry.session.start(title);
+    else entry.pendingTitle = title;
+  }
+
+  /**
+   * bd_play_title / bd_menu_call (title 0) under a BD-J title: at UO restriction RELAXED only title search and menu call
+   * are checked (_try_play_title, _try_menu_call); a refused one is BDJ_EVENT_UO_MASKED for Java.
+   */
+  private bdjPlayTitle(entry: BdjTitle, title: number): void {
+    const op: UoOp = title === 0 ? 'menuCall' : 'titleSearch';
+    if (entry.host.isUoMasked(op)) {
+      entry.events.uoMasked(UO_INDEX[op]!);
+      this.notice('uo-masked', UO_MASKED_MESSAGE);
+      return;
+    }
+    void entry.host.handle('selectTitle', [title]);
+  }
+
+  /** _play_hdmv from a BD-J title (_stop_bdj): BD-J stops and the navigator runs the title on the same registers. */
+  private bdjToHdmv(entry: BdjTitle, title: number): boolean {
+    const disc = this.disc;
+    if (!disc?.movieObjects) return false;
+    this.stopBdj();
+    this.stopNavigator();
+    const nav = this.createNavigator(disc, entry.regs);
+    this.navigator = nav;
+    if (nav.startTitle(title)) return true;
+    this.stopNavigator();
+    return false;
+  }
+
+  /** Spec §5: BD-J stops; what is playing keeps playing, and the user chooses from the picker. */
+  private bdjFailed(code: BdjFailureCode, message: string): void {
+    this.stopBdj();
+    this.notice('bdj-failed', `BD-J couldn't start this disc (${code}: ${message}). Choose a playlist to play.`);
+  }
+
+  /** Leaves BD-J: the worker is terminated, and nothing it still sends or started reaches the player. */
+  private stopBdj(): void {
+    const entry = this.bdj;
+    if (!entry) return;
+    entry.host.dispose();
+    entry.end();
+    this.bdj = null;
+    entry.session.stop();
+    if (this.pgRegs && this.navRegs !== entry.regs) this.bindPg(this.pgRegs);
+    this.deps.emit({ type: 'bdjActive', active: false });
+    this.deps.emit({ type: 'uoMask', masked: [] });
+  }
+
+  /** The UI hears only of the operations checked under a BD-J title. */
+  private emitBdjUoMask(host: PlayerBdjHost): void {
+    this.deps.emit({ type: 'uoMask', masked: [...host.uoMask].filter((op) => op in UO_INDEX) });
+  }
+
+  /** bd_tell_time: the title time of the presentation position, in 45 kHz ticks. */
+  private titleTime45(): bigint {
+    const s = this.session;
+    return s ? BigInt(usToTicks45(Math.min(Math.max(0, this.clock.nowUs()), s.timeline.durationUs))) : 0n;
   }
 
   /** Starts fetching the jars while the rest of the disc opens; a failed load is retried with the next BD-J disc. */
@@ -516,10 +725,7 @@ export class Player {
     this.deps.emit({ type: 'indexTitles', titles, hasTopMenu });
   }
 
-  private createNavigator(disc: DiscModel): Navigator {
-    const regs = new RegisterFile();
-    applyDiscProfile(regs, disc.index);
-    regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
+  private createNavigator(disc: DiscModel, regs = this.newProgramRegs(disc)): Navigator {
     this.navRegs = regs;
     this.bindPg(regs);
     this.menuActive = false;
@@ -582,15 +788,25 @@ export class Player {
       return;
     }
     const disc = this.disc;
-    if (!disc?.movieObjects || disc.index.firstPlay.kind !== 'hdmv') return;
+    if (!disc) return;
+    const object = title === 0 ? disc.index.topMenu : disc.index.titles[title - 1]?.object;
+    if (object?.kind === 'bdj' && this.bdjSupported) {
+      this.enterBdj(title, null);
+      return;
+    }
+    if (!disc.movieObjects || (disc.index.firstPlay.kind !== 'hdmv' && !this.bdjSupported)) return;
     this.navigator = this.createNavigator(disc);
     if (!this.navigator.startTitle(title)) this.stopNavigator();
   }
 
   private menuKey(key: MenuKey): void {
+    if (this.bdj) {
+      if (key === 'topMenu') this.bdjPlayTitle(this.bdj, 0); // other keys reach Java in 5d
+      return;
+    }
     const nav = this.navigator;
     if (!nav) return;
-    const op = MENU_KEY_UO[key] ?? (key === 'popup' ? (this.menuActive && this.popupAvailable ? 'popupOff' : 'popupOn') : undefined);
+    const op = MENU_KEY_UO[key] ??(key === 'popup' ? (this.menuActive && this.popupAvailable ? 'popupOff' : 'popupOn') : undefined);
     if (op && this.refused(op)) return;
     if (key === 'topMenu') this.playTitle(0);
     else nav.userInput(MENU_KEY_VK[key]);
@@ -619,7 +835,8 @@ export class Player {
         this.updateMenuState(this.menuActive, e.available);
         break;
       case 'bdjTitle':
-        this.notice('bdj', 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.');
+        if (this.bdjSupported) this.navigatorToBdj(e.title);
+        else this.notice('bdj', 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.');
         break;
       case 'error':
         // The picker shows an 'error' event's message (PlayerScreen reads snapshot.error) once the session is gone.
@@ -635,6 +852,21 @@ export class Player {
       default:
         break; // 'title' is for the menu UI
     }
+  }
+
+  /**
+   * HDMV → BD-J (the navigator's _play_bdj). libbluray keeps the HDMV VM suspended under title_type bdj; here the
+   * navigator is dropped once it has returned and the BD-J title runs on its registers, so GPRs and PSRs carry over. An
+   * HDMV title selected later gets a new navigator on the same registers (_play_hdmv selects its movie object afresh).
+   */
+  private navigatorToBdj(title: number): void {
+    const nav = this.navigator;
+    this.enqueue(async () => {
+      if (!nav || this.navigator !== nav) return;
+      const regs = this.navRegs;
+      this.stopNavigator();
+      this.enterBdj(title, regs);
+    });
   }
 
   private updateMenuState(active: boolean, popupAvailable: boolean): void {
@@ -655,31 +887,39 @@ export class Player {
     };
   }
 
-  /** The port a BD-J title (PlayerBdjHost) drives playback through. */
-  bdjPort(): BdjPlaybackPort {
+  /** The port a BD-J title (PlayerBdjHost) drives playback through; it does nothing once `live` turns false. */
+  bdjPort(live: () => boolean = () => true): BdjPlaybackPort {
     return {
-      playPlaylist: (id, at) => this.playPlaylistFor('bdj', id, at),
-      seekPlayItem: (item) => this.seekPlayItem(item),
-      seekMark: (mark) => this.seekMark(mark),
+      playPlaylist: (id, at) => (live() ? this.playPlaylistFor('bdj', id, at) : Promise.resolve(false)),
+      seekPlayItem: (item) => {
+        if (live()) this.seekPlayItem(item);
+      },
+      seekMark: (mark) => {
+        if (live()) this.seekMark(mark);
+      },
       seekTime45: (t) => {
         const s = this.session;
-        if (s && t >= 0 && t < s.timeline.duration45) this.enqueueNavSeek(s, ticks45ToUs(t));
+        if (live() && s && t >= 0 && t < s.timeline.duration45) this.enqueueNavSeek(s, ticks45ToUs(t));
       },
-      stopPlaylist: () => this.stopPlaylist(),
+      stopPlaylist: () => {
+        if (live()) this.stopPlaylist();
+      },
       setRate: (rate) =>
         this.enqueue(async () => {
-          if (!this.session || this.state === 'ended' || this.state === 'error') return;
+          // repeated starts are harmless: play() while playing changes nothing
+          if (!live() || this.session?.owner !== 'bdj' || this.state === 'ended' || this.state === 'error') return;
           if (rate === 0) this.pause();
           else await this.play();
         }),
-      currentClipTime45: () => this.currentClipTime45(),
-      playlistOpen: () => this.session !== null,
+      currentClipTime45: () => (live() ? this.currentClipTime45() : undefined),
+      playlistOpen: () => live() && this.session !== null,
       playSound: (id) => {
+        if (!live()) return;
         this.soundsPlayed++;
         this.deps.emit({ type: 'soundEffect', id });
       },
       setListener: (listener) => {
-        this.bdjListener = listener;
+        if (live()) this.bdjListener = listener;
       },
     };
   }
@@ -777,7 +1017,7 @@ export class Player {
 
   /** PSR1 (primary audio stream) selects the audio: the registers are the single source of the selection. */
   private onPsrEvent(e: PsrEvent, regs: RegisterFile): void {
-    if (e.type !== 'change' || e.psr !== PSR.PRIMARY_AUDIO_ID || regs !== this.navRegs) return;
+    if (e.type !== 'change' || e.psr !== PSR.PRIMARY_AUDIO_ID || regs !== this.programRegs) return;
     const index = regs.psrRead(PSR.PRIMARY_AUDIO_ID) & 0xfff;
     this.enqueue(() => this.applyAudio(index));
   }
@@ -884,10 +1124,10 @@ export class Player {
     if (!isSupportedVideoCoding(choice.video.codingType)) {
       throw new UnsupportedCodecError(choice.video.codingType, `${codingName(choice.video.codingType)} video is not supported.`);
     }
-    // With a navigator the audio stream register (PSR1) decides, when it names a playable stream
+    // With a disc program (HDMV or BD-J) the audio stream register (PSR1) decides, when it names a playable stream
     let audioIndex = choice.audioIndex;
     let audioEntry = choice.audio;
-    const wanted = this.navRegs ? this.navRegs.psrRead(PSR.PRIMARY_AUDIO_ID) & 0xfff : 0;
+    const wanted = (this.programRegs?.psrRead(PSR.PRIMARY_AUDIO_ID) ?? 0) & 0xfff;
     const wantedEntry = wanted > 0 ? audioEntryFor(mpls.playItems[startItem], wanted) : null;
     if (wantedEntry && PLAYABLE_AUDIO.has(wantedEntry.codingType)) {
       audioIndex = wanted;
@@ -1007,7 +1247,7 @@ export class Player {
     const pg = this.pg;
     const item = s.playItems[index];
     if (!pg || !item || this.session !== s) return;
-    pg.playItemStarted(item, this.navRegs === null, startUs);
+    pg.playItemStarted(item, this.programRegs === null, startUs);
     s.pipeline.setPgStream(pg.pid);
     if (JSON.stringify(pg.tracks()) !== this.sentPgTracks) this.emitSubtitles();
   }
@@ -1258,12 +1498,12 @@ export class Player {
 
   /** Switching is a re-seek to the current time with the new stream (a brief video refill). */
   private async selectAudio(index: number): Promise<void> {
-    const nav = this.navigator;
+    const regs = this.programRegs;
     const s = this.session;
-    if (nav && this.navRegs) {
+    if (regs) {
       // The register change selects (applyAudio); a masked primaryAudioChange refuses the user's request
       if (this.refused('primaryAudioChange') || !s?.tracks.find((t) => t.index === index)?.playable) return;
-      this.navRegs.psrWrite(PSR.PRIMARY_AUDIO_ID, index);
+      regs.psrWrite(PSR.PRIMARY_AUDIO_ID, index);
       await this.applyAudio(index); // the register event queued the same switch behind this command: it finds nothing to do
       return;
     }
@@ -1369,6 +1609,7 @@ export class Player {
   }
 
   private close(): void {
+    this.stopBdj();
     this.stopNavigator();
     this.teardownSession();
     this.stopPg();

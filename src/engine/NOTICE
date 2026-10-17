@@ -58,6 +58,8 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdj/events.ts         from src/libbluray/bluray.c (_process_psr_write_event, _process_psr_change_event, BD-J event sites)
     bdj/player-host.ts    from src/libbluray/bluray.c (bdpriv_*, _open_playlist, bd_set_rate, _play_title, _update_uo_mask,
                           _close_playlist, _seek_internal, bd_get_sound_effect, bd_select_angle, _bd_set_virtual_package)
+    player.ts (BD-J titles) from src/libbluray/bluray.c (_play_bdj, _start_bdj, _stop_bdj via _play_hdmv,
+                          _try_play_title and _try_menu_call at UO restriction RELAXED, bd_set_rate's BDJ_EVENT_RATE)
     hdmv/uo-mask.ts uoMaskBits from src/libbluray/bluray.c (bdpriv_get_uo_mask)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.

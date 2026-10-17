@@ -47,7 +47,7 @@ const summary = { id: '00000', durationUs: 8_000_000, chapterCount: 4, clipIds: 
 
 describe('reduceEvent', () => {
   it('tracks titles, chapters, state and time', () => {
-    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'titles', playlists: [summary], usesBdj: false, warnings: [] });
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'titles', playlists: [summary], usesBdj: false, bdjSupported: false, warnings: [] });
     s = reduceEvent(s, { type: 'chapters', playlistId: '00000', durationUs: 8_000_000, chapters: [{ index: 0, startUs: 0 }] });
     s = reduceEvent(s, { type: 'state', state: 'playing' });
     s = reduceEvent(s, { type: 'time', timeUs: 1_500_000 });
@@ -78,7 +78,7 @@ describe('playlist lifecycle', () => {
   it('closes the disc in the engine, not just the UI', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
-    worker.emit({ type: 'titles', playlists: [summary], usesBdj: false, warnings: [] });
+    worker.emit({ type: 'titles', playlists: [summary], usesBdj: false, bdjSupported: false, warnings: [] });
     c.closeDisc();
     expect(worker.posted).toEqual([{ type: 'close' }]);
     expect(c.getSnapshot().playlists).toEqual([]);
@@ -332,7 +332,29 @@ describe('titles and the top menu', () => {
   it('keeps the index titles and whether there is a top menu', () => {
     const s = reduceEvent(INITIAL_SNAPSHOT, { type: 'indexTitles', titles: [{ number: 1, kind: 'hdmv' }, { number: 2, kind: 'bdj' }], hasTopMenu: true });
     expect(s.indexTitles).toEqual({ titles: [{ number: 1, kind: 'hdmv' }, { number: 2, kind: 'bdj' }], hasTopMenu: true });
-    expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, warnings: [] }).indexTitles).toBeNull();
+    expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] }).indexTitles).toBeNull();
+  });
+
+  it('records BD-J support and whether a BD-J title runs, and keeps the BD-J notices', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'titles', playlists: [summary], usesBdj: true, bdjSupported: true, warnings: [] });
+    expect(s).toMatchObject({ usesBdj: true, bdjSupported: true, bdjActive: false });
+    s = reduceEvent(s, { type: 'bdjActive', active: true });
+    s = reduceEvent(s, { type: 'notice', code: 'bdj-menu-hidden', message: 'hidden' });
+    expect(s).toMatchObject({ bdjActive: true, notices: [{ code: 'bdj-menu-hidden', message: 'hidden' }] });
+    s = reduceEvent(s, { type: 'bdjActive', active: false });
+    s = reduceEvent(s, { type: 'notice', code: 'bdj-failed', message: 'failed' });
+    expect(s.bdjActive).toBe(false);
+    expect(s.notices.map((n) => n.code)).toEqual(['bdj-menu-hidden', 'bdj-failed']);
+    s = reduceEvent(s, { type: 'bdjActive', active: true });
+    expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] })).toMatchObject({ bdjActive: false, bdjSupported: false });
+  });
+
+  it('drops the menu-hidden notice when the user picks a playlist (BD-J stops)', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'notice', code: 'bdj-menu-hidden', message: 'hidden' });
+    c.playPlaylist('00000');
+    expect(c.getSnapshot().notices).toEqual([]);
   });
 
   it('posts playTitle and menuCall', () => {
@@ -368,7 +390,7 @@ describe('subtitles', () => {
     s = reduceEvent(s, { type: 'subtitleEncodingNeeded', names: ['a.srt', 'b.ass'] });
     expect(s.subtitles).toEqual({ pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: oneFile, selected: { pg: 2 }, scale: 1 });
     expect(s.encodingPrompt).toEqual({ names: ['a.srt', 'b.ass'] });
-    s = reduceEvent(s, { type: 'titles', playlists: [summary], usesBdj: false, warnings: [] });
+    s = reduceEvent(s, { type: 'titles', playlists: [summary], usesBdj: false, bdjSupported: false, warnings: [] });
     expect(s.subtitles).toBeNull();
     expect(s.encodingPrompt).toBeNull();
   });
