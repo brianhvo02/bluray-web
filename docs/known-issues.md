@@ -122,7 +122,8 @@ what would change that decision.
   presented frame whose BD-J plane holds a publication made after it. The first publication presented after an input
   answers it (and any earlier one still waiting): BD-J cannot say which flush answers which input, so on a menu that
   animates by itself an input that changes nothing is answered by the next animation frame; one unanswered for 5 s is
-  dropped. The main thread to engine worker hop is not included. Arrows and Enter on A_NEW_ERA's main menu and on
+  dropped. The main thread to engine worker hop is not included, and the measure ends at the OffscreenCanvas draw,
+  so up to one vsync of display after it is not counted either. Arrows and Enter on A_NEW_ERA's main menu and on
   RENTAL_FAMILY's picker and main menu show in 3-23 ms (bar 200 ms; `local-bdj-menus.spec.ts`). A_NEW_ERA's menu has no
   mouse handling: a click is forwarded and the ignored-tap rule opens the remote. Its buttons lie along the bottom edge,
   under the player's control bar while that shows, so a click there hits the bar. Pointer moves stay forwarded for the
@@ -130,14 +131,22 @@ what would change that decision.
   Start-up: A_NEW_ERA warm `firstFrameMs` went from median 4,966 ms (max 4,997, 5 runs) to median 4,790-4,828 ms (max
   4,800-4,916, three sets of 7 runs) through intrinsics and loop hooks for the start-up path. Most of A_NEW_ERA's Java
   time before its animation is the JDK opening its signed jar again and again: each `JarFile` parses the 32 KB
-  manifest and verifies the signature file (PKCS7 parse, RSA), about a third of the interpreted time. About 4.0 s of
-  the 4.8 s is the disc's own animation and `Thread.sleep(3000)`.
+  manifest and verifies the signature file (PKCS7 parse, RSA), about a third of the interpreted time. That count
+  matches HotSpot (ruling R10): up to the first `selectPlaylistN`, libbluray on HotSpot constructs a `ZipFile` on
+  `00000.jar` 5 times (a JVMTI breakpoint on `ZipFile(File, int, Charset)` in the bdj-trace image), and so does our
+  JVM (5 `ZipFile.open` calls), in the same order. No cross-open cache was added: JDK 8 keeps verifier state per
+  `JarFile`. About 4.0 s of the 4.8 s is the disc's own animation and `Thread.sleep(3000)`.
 - **Open on purpose in the JVM core.** Weak and soft references hold strongly, reference queues stay empty and
   finalizers never run. `long` is a `bigint`. A failed `invokedynamic` call site re-links on each execution (JDK 8
   behaviour, not JVMS §5.4.3). Deep method-handle nesting (about 60k) can overflow the JS stack. `rt-bdj.jar` has no
   socket implementation, so sockets fail with `NoClassDefFoundError` (5e decides network). `SecureRandom` has no
-  entropy source (no `/dev/urandom`), so its first use fails. JAR signatures are not verified on the j2se stack path
-  we run; whether libbluray checks them elsewhere was not examined. There is no bytecode verifier and there are no
+  entropy source (no `/dev/urandom`), so its first use fails. Signed disc JARs are checked as on HotSpot: the JDK's
+  `JarVerifier` and `SignatureFileVerifier` check the signature block and the entry digests, and libbluray's
+  `VFSCache.isJarVerifiable` strips the signature of a JAR that fails, which then runs unsigned. libbluray itself
+  enforces no BD-J authentication: the signer is never checked against the disc's root certificate
+  (`BDMV/CERTIFICATE/app.discroot.crt` is not read), the permission request files (`bluray.*.perm`) are mounted but
+  not used to grant anything (`BDJSecurityManager` applies one fixed sandbox to every xlet), and `DSMCCObject.getSigners`
+  is unimplemented. We run the same code, so the same holds here. There is no bytecode verifier and there are no
   access checks: no `IllegalAccessError`, no `IncompatibleClassChangeError` for `invokevirtual` on a static method, no
   check that a final method is not overridden.
 - **Player settings come from the browser's locale, under BD-J only (5c, ruling R9).** The engine worker derives

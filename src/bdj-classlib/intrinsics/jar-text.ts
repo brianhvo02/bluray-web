@@ -2,7 +2,7 @@
  * Intrinsics and loop hooks for the text and byte scanning the JDK does while it opens, verifies and mounts a signed
  * disc jar (manifest lines, manifest sections, attribute names, java.security, file paths), and that a disc's own
  * start-up code does reading its data files (DataInputStream over a ByteArrayInputStream), with the HashMap sizing and
- * BigInteger word helpers that the jar signature check runs: the start-up path of a BD-J disc. Each does what its Java
+ * BigInteger word helpers (and the one BigInteger(String) uses) that the jar signature check runs: the start-up path of a BD-J disc. Each does what its Java
  * code does, or declines to it.
  *
  * Derived from OpenJDK 8 (the class library in src/bdj-classlib/rt-bdj.jar, whose source is named in
@@ -498,10 +498,46 @@ const addOne: IntrinsicFn = (_jvm, _t, _m, stack, base) => {
   return 1;
 };
 
+/**
+ * java.math.BigInteger.destructiveMulAdd(int[] x, int y, int z) (static), which BigInteger(String) runs per digit
+ * group: x = x * y + z, x a big-endian magnitude of unsigned 32-bit words, y and z unsigned words; the carry out of
+ * the top word is dropped. The 64-bit products are split into 16-bit halves so every step is exact in doubles.
+ */
+const destructiveMulAdd: IntrinsicFn = (_jvm, _t, _m, stack, base) => {
+  const xArr = stack[base] as JArray | null;
+  if (xArr === null || xArr.data.length === 0) return DECLINE; // the bytecode throws
+  const x = xArr.data as Int32Array;
+  const y = (stack[base + 1] as number) >>> 0;
+  const z = (stack[base + 2] as number) >>> 0;
+  const yl = y & 0xffff;
+  const yh = y >>> 16;
+  const len = x.length;
+  let carry = 0;
+  for (let i = len - 1; i >= 0; i--) {
+    const a = x[i]! >>> 0;
+    const al = a & 0xffff;
+    const ah = a >>> 16;
+    const mid = ah * yl + al * yh; // < 2^33
+    const lo = al * yl + carry + (mid % 65536) * 65536; // < 2^34
+    x[i] = lo % 4294967296;
+    carry = ah * yh + Math.floor(mid / 65536) + Math.floor(lo / 4294967296); // < 2^32
+  }
+  let sum = (x[len - 1]! >>> 0) + z;
+  x[len - 1] = sum % 4294967296;
+  carry = Math.floor(sum / 4294967296);
+  for (let i = len - 2; i >= 0; i--) {
+    sum = (x[i]! >>> 0) + carry;
+    x[i] = sum % 4294967296;
+    carry = Math.floor(sum / 4294967296);
+  }
+  return undefined;
+};
+
 export const jarTextIntrinsics: Readonly<Record<string, IntrinsicFn>> = {
   'java/util/HashMap.tableSizeFor(I)I': tableSizeFor,
   'java/math/BigInteger.mulAdd([I[IIII)I': checkedMulAdd,
   'java/math/BigInteger.addOne([IIII)I': addOne,
+  'java/math/BigInteger.destructiveMulAdd([III)V': destructiveMulAdd,
   'sun/security/util/Cache$EqualByteArray.hashCode()I': equalBytesHash,
   'java/util/jar/Manifest$FastInputStream.readLine([BII)I': fastReadLine,
   'java/util/HashMap.hash(Ljava/lang/Object;)I': hashMapHash,

@@ -2,8 +2,7 @@
  * Original code for bluray-web: intrinsics for the arithmetic under jar signature checks, which the JDK runs on every
  * signed disc jar: sun.security.provider.SHA.implCompress0 (one SHA-1 block over the W and state fields) and
  * java.math.BigInteger.implMulAdd (a multiply-accumulate row of RSA's modPow). Both implement the specified algorithm
- * (FIPS 180-4's SHA-1 compression; schoolbook multi-word multiply-accumulate), as does BigInteger.destructiveMulAdd
- * (x = x * y + z over unsigned words, which BigInteger(String) runs per digit group); checked against the class library by the
+ * (FIPS 180-4's SHA-1 compression; schoolbook multi-word multiply-accumulate); checked against the class library by the
  * equivalence tests (tests/bdj/intrinsics.test.ts), int for int.
  *
  * Copyright (C) 2026 bluray-web contributors
@@ -90,42 +89,7 @@ export const mulAdd: IntrinsicFn = (_jvm, _t, _m, stack, base) => {
   return carry | 0;
 };
 
-/**
- * BigInteger.destructiveMulAdd(int[] x, int y, int z) (static): x = x * y + z, x a big-endian magnitude of unsigned
- * 32-bit words, y and z unsigned words; the carry out of the top word is dropped. Products split as in mulAdd.
- */
-const destructiveMulAdd: IntrinsicFn = (_jvm, _t, _m, stack, base) => {
-  const xArr = stack[base] as JArray | null;
-  if (xArr === null || xArr.data.length === 0) return DECLINE; // the bytecode throws
-  const x = xArr.data as Int32Array;
-  const y = (stack[base + 1] as number) >>> 0;
-  const z = (stack[base + 2] as number) >>> 0;
-  const yl = y & 0xffff;
-  const yh = y >>> 16;
-  const len = x.length;
-  let carry = 0;
-  for (let i = len - 1; i >= 0; i--) {
-    const a = x[i]! >>> 0;
-    const al = a & 0xffff;
-    const ah = a >>> 16;
-    const mid = ah * yl + al * yh; // < 2^33
-    const lo = al * yl + carry + (mid % 65536) * 65536; // < 2^34
-    x[i] = lo % TWO_32;
-    carry = ah * yh + Math.floor(mid / 65536) + Math.floor(lo / TWO_32); // < 2^32
-  }
-  let sum = (x[len - 1]! >>> 0) + z;
-  x[len - 1] = sum % TWO_32;
-  carry = Math.floor(sum / TWO_32);
-  for (let i = len - 2; i >= 0; i--) {
-    sum = (x[i]! >>> 0) + carry;
-    x[i] = sum % TWO_32;
-    carry = Math.floor(sum / TWO_32);
-  }
-  return undefined;
-};
-
 export const cryptoIntrinsics: Readonly<Record<string, IntrinsicFn>> = {
   'sun/security/provider/SHA.implCompress0([BI)V': shaCompress,
   'java/math/BigInteger.implMulAdd([I[IIII)I': mulAdd,
-  'java/math/BigInteger.destructiveMulAdd([III)V': destructiveMulAdd,
 };
