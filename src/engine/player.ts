@@ -1,6 +1,6 @@
 import { AudioWriter } from './audio/audio-writer';
 import { OUTPUT_SAMPLE_RATE, RingWriter, ringViews } from './audio/ring';
-import { type PlayItem } from './bdmv/mpls-parser';
+import type { Mpls, PlayItem } from './bdmv/mpls-parser';
 import { BackgroundStill, type DecodeImage } from './bdj/background';
 import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
 import { PlayerBdjHost } from './bdj/player-host';
@@ -30,7 +30,7 @@ import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
 import type { UoOp } from './hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
-import { lookupSpn } from './nav/packets';
+import { itemPackets, lookupSpn, markTitlePkt, nextPlaymark } from './nav/packets';
 import { PgStreamControl } from './nav/subtitles';
 import { bootDiscFields } from './bdj/worker-protocol';
 import { Timeline, type Chapter } from './nav/timeline';
@@ -147,6 +147,8 @@ const NEXT_CHAPTER_GUARD_US = 500_000;
 const PREV_CHAPTER_RESTART_US = 3_000_000;
 /** A still play item is held this close to its end, so the last frame stays on screen. */
 const STILL_MARGIN_US = 40_000;
+/** mpls still_mode 1: a time still of still_time seconds (2 is an infinite still). */
+const STILL_TIME = 1;
 const SCR_PER_MS = 90;
 const INDEX_ID_NONE = 0xffff;
 const TITLE_FIRST_PLAY = 0xffff;
@@ -301,6 +303,12 @@ export class Player {
   private held = false;
   /** The play item whose end was reported to the navigator; reset on an item change and on every seek. */
   private navEndReported: number | null = null;
+  /**
+   * A BD-J title's playlist holds at the end of a still play item (_bd_read_locked returns nothing more): for ever for an
+   * infinite still, or until `untilMs` (nowMs) for a time still, after which presentation goes on as bd_read_skip_still
+   * lets it. Released by a new playlist, a seek and the end of BD-J.
+   */
+  private bdjStill: { readonly item: number; readonly untilMs: number | null } | null = null;
   private menuActive = false;
   /** Draw operations of the last repaint of the IG plane. */
   private igDraws = 0;
@@ -874,6 +882,7 @@ export class Player {
     entry.end();
     entry.taps.cancel();
     this.bdj = null;
+    this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
     // the menu goes at once (Review Focus 2): nothing of the plane or the background still is drawn again
@@ -1289,14 +1298,22 @@ export class Player {
     }
   }
 
-  /** syncNavigator for a BD-J title: item changes, the marks passed and the position (bd_set_scr). */
+  /** syncNavigator for a BD-J title: item changes, the marks passed and the position (bd_set_scr), and play-item stills. */
   private syncBdj(s: Session): void {
     const listener = this.bdjListener;
-    if (!listener || (this.state !== 'playing' && this.state !== 'paused') || this.held) return;
+    if (!listener || (this.state !== 'playing' && this.state !== 'paused')) return;
+    const still = this.bdjStill;
+    if (still) {
+      // a time still ends as a player's bd_read_skip_still after BD_EVENT_STILL_TIME ends it: on into the next item
+      if (still.untilMs === null || this.deps.nowMs() < still.untilMs) return;
+      this.releaseBdjStill();
+    }
+    if (this.held) return;
     const now = this.clock.nowUs();
     const { item, clipTime45 } = s.timeline.locate(now);
     if (item.index !== this.navItem) {
       this.navItem = item.index;
+      this.navEndReported = null;
       listener.playItemChanged(item.index);
     }
     const marks: number[] = [];
@@ -1306,12 +1323,52 @@ export class Player {
     }
     if (marks.length > 0) listener.marksReached(marks, item.index, lookupSpn(this.disc?.clips.get(s.playItems[item.index]!.clipId), clipTime45, true));
     if (this.navSeeksPending === 0) listener.position(item.index, clipTime45); // not the old position while a seek is queued
+    // _bd_read_locked: at the end of a still play item the read stops (BD_EVENT_STILL_TIME), under BD-J as under HDMV
+    const pi = s.playItems[item.index];
+    if (this.state === 'playing' && pi && pi.stillMode !== 0 && this.navEndReported !== item.index && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
+      this.navEndReported = item.index;
+      this.bdjStill = { item: item.index, untilMs: pi.stillMode === STILL_TIME ? this.deps.nowMs() + pi.stillTime * 1000 : null };
+      this.setHold(true);
+    }
   }
 
-  /** _find_next_playmark: the first mark after `timeUs`. */
-  private nextMarkAfter(timeline: Timeline, timeUs: number): number {
-    for (let i = 0; i < timeline.markCount; i++) if (timeline.markTimeUs(i) > timeUs) return i;
-    return -1;
+  private releaseBdjStill(): void {
+    if (!this.bdjStill) return;
+    this.bdjStill = null;
+    this.setHold(false);
+  }
+
+  /**
+   * _find_next_playmark at read position `sPos` (title packets): the first mark whose packet lies after it. Marks are
+   * then reached by time (syncNavigator, syncBdj).
+   */
+  private nextMarkAt(mpls: Mpls, sPos: number): number {
+    return nextPlaymark(sPos, mpls.marks, mpls.playItems, this.disc?.clips);
+  }
+
+  /** s_pos after _seek_internal to playlist time `timeUs`: the title packet of the EP map entry at or before it. */
+  private titlePktAt(timeline: Timeline, playItems: readonly PlayItem[], timeUs: number): number {
+    const clips = this.disc?.clips;
+    const { item, clipTime45 } = timeline.locate(timeUs);
+    const geometry = itemPackets(playItems, clips)[item.index]!;
+    const clip = clips?.get(playItems[item.index]!.clipId);
+    return geometry.titlePkt + (clip ? lookupSpn(clip, clipTime45, true) - geometry.startPkt : 0);
+  }
+
+  /**
+   * s_pos once a playlist opened at `at` (_open_playlist, then bd_seek_playitem / bd_seek_mark / bd_seek): 0 at its
+   * start, an item's title_pkt, a mark's, or the packet of a time.
+   */
+  private openTitlePkt(mpls: Mpls, timeline: Timeline, at: PlayAt, startUs: number): number {
+    const clips = this.disc?.clips;
+    if (at.item !== undefined && at.item >= 0 && at.item < timeline.items.length) {
+      if (at.clipTime45 !== undefined) return this.titlePktAt(timeline, mpls.playItems, startUs);
+      return itemPackets(mpls.playItems, clips)[at.item]!.titlePkt;
+    }
+    if (at.mark !== undefined && at.mark >= 0 && at.mark < mpls.marks.length) {
+      return markTitlePkt(mpls.marks[at.mark]!, itemPackets(mpls.playItems, clips), mpls.playItems, clips);
+    }
+    return 0;
   }
 
   /**
@@ -1335,7 +1392,9 @@ export class Player {
     const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
     this.navItem = startItem;
     this.navEndReported = null;
-    this.navNextMark = this.nextMarkAfter(timeline, startUs);
+    this.releaseBdjStill();
+    const openPkt = this.openTitlePkt(mpls, timeline, at, startUs);
+    this.navNextMark = this.nextMarkAt(mpls, openPkt);
     if (caller === 'navigator' && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
     if (caller === 'bdj') this.bdjListener?.playlistStarted(playlistId, startItem);
     this.setState('loading');
@@ -1443,7 +1502,7 @@ export class Player {
     this.sentPgTracks = '';
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
-    await this.startAt(startUs, caller !== 'bdj');
+    await this.startAt(startUs, caller !== 'bdj', openPkt);
     return true;
   }
 
@@ -1457,7 +1516,7 @@ export class Player {
         // like an audio switch: re-read from now with the new PID, so the current subtitle shows without waiting for the next
         const s = this.session;
         if (s) this.enqueue(async () => {
-          if (this.session === s) await this.startAt(this.clock.nowUs(), this.wantPlaying);
+          if (this.session === s) await this.startAt(this.clock.nowUs(), this.wantPlaying, 'keep');
         });
       },
     });
@@ -1717,6 +1776,7 @@ export class Player {
     if (!s) return;
     this.session = null;
     this.codedWidth = 0;
+    this.releaseBdjStill();
     this.deps.emit({ type: 'playlistCleared' });
     this.seekGeneration++;
     s.pipeline.stop();
@@ -1758,16 +1818,25 @@ export class Player {
     s.audioErrorDisabled = false;
     s.audioStalledBeat = null;
     this.emitTracks(s);
-    await this.startAt(this.clock.nowUs(), this.wantPlaying);
+    await this.startAt(this.clock.nowUs(), this.wantPlaying, 'keep');
   }
 
-  private async startAt(targetUs: number, autoplay: boolean): Promise<void> {
+  /**
+   * Restarts presentation at `targetUs`. `marks`: where mark tracking resumes (_find_next_playmark): by default from the
+   * target's packet (a seek), from the given title packet (a playlist open), or `keep` for a re-read at the current
+   * position that libbluray never makes (an audio or subtitle switch, an audio rebase).
+   */
+  private async startAt(targetUs: number, autoplay: boolean, marks?: number | 'keep'): Promise<void> {
     const s = this.session;
     if (!s) return;
     const gen = ++this.seekGeneration;
     this.navEndReported = null;
+    this.releaseBdjStill();
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
-    this.navNextMark = this.nextMarkAfter(s.timeline, t);
+    if (marks !== 'keep') {
+      const mpls = this.disc?.playlists.get(s.playlistId);
+      this.navNextMark = mpls ? this.nextMarkAt(mpls, marks ?? this.titlePktAt(s.timeline, s.playItems, t)) : -1;
+    }
     s.pipeline.stop();
     this.navigator?.seekGraphics(); // queued units from the old read position are dropped; the menu stays
     this.pg?.seek(); // GC_CTRL_PG_RESET in _seek_internal: the subtitle on screen goes
@@ -1835,7 +1904,7 @@ export class Player {
       return;
     }
     if (this.state === 'paused' && this.audioRecovered(s)) {
-      await this.startAt(this.clock.nowUs(), true); // rebase onto the recovered audio output
+      await this.startAt(this.clock.nowUs(), true, 'keep'); // rebase onto the recovered audio output
       return;
     }
     this.wantPlaying = true;

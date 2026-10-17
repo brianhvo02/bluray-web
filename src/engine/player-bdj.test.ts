@@ -236,6 +236,34 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(bdjEvents(h, BdjEvent.SEEK)).toEqual([1.2 * 45_000, 2 * 45_000]);
   }, 90_000);
 
+  /** disc-bdj with playlist 00000's one 4 s play item a still: Java plays 00000 and selects it again when it ends. */
+  const stillDisc = (still: { mode: number; time?: number }) =>
+    bdjDisc({
+      playlists: [
+        { id: '00000', clipIds: ['00000'], chapterEverySeconds: 1, uoMask: PLAYBACK_MASKED, stills: { 0: still } },
+        { id: '00001', clipIds: ['00001'], chapterEverySeconds: 1 },
+      ],
+    });
+  const clockUs = (h: Harness): number => h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : [])).at(-1) ?? 0;
+
+  it('holds at the end of an infinite still play item, as _bd_read_locked does under BD-J: no END_OF_PLAYLIST', async () => {
+    const h = await playing(stillDisc({ mode: 2 }));
+    await h.play(8000);
+    expect(bdjEvents(h, BdjEvent.END_OF_PLAYLIST)).toEqual([]);
+    expect(playlistsPlayed(h)).toEqual(['00000']);
+    expect(clockUs(h)).toBeGreaterThanOrEqual(3_600_000);
+    expect(clockUs(h)).toBeLessThan(4_000_000);
+  }, 90_000);
+
+  it('holds a time still for its still_time, then the playlist ends (bd_read_skip_still)', async () => {
+    const h = await playing(stillDisc({ mode: 1, time: 2 }));
+    await until(h, () => clockUs(h) >= 3_600_000);
+    await h.play(1500);
+    expect(bdjEvents(h, BdjEvent.END_OF_PLAYLIST)).toEqual([]);
+    await until(h, () => bdjEvents(h, BdjEvent.END_OF_PLAYLIST).length > 0);
+    expect(playlistsPlayed(h).length).toBeGreaterThanOrEqual(1);
+  }, 90_000);
+
   it("refuses a menu call masked by Java's UO mask, with uo-masked and UO_MASKED to Java", async () => {
     const h = await playing();
     h.inject({ type: 'call', id: 9001, name: 'setUOMask', args: [true, false] });

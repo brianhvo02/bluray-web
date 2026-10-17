@@ -250,6 +250,7 @@ java/awt/event/ActionListener
 java/awt/event/AdjustmentListener
 java/awt/event/ComponentEvent
 java/awt/event/ComponentListener
+java/awt/event/ContainerEvent
 java/awt/event/ContainerListener
 java/awt/event/FocusEvent
 java/awt/event/FocusListener
@@ -517,6 +518,7 @@ java/lang/ThreadLocal$ThreadLocalMap
 java/lang/ThreadLocal$ThreadLocalMap$Entry
 java/lang/Throwable
 java/lang/Throwable$PrintStreamOrWriter
+java/lang/Throwable$WrappedPrintStream
 java/lang/Throwable$WrappedPrintWriter
 java/lang/UnsatisfiedLinkError
 java/lang/UnsupportedClassVersionError
@@ -1078,6 +1080,7 @@ java/util/concurrent/AbstractExecutorService
 java/util/concurrent/BlockingQueue
 java/util/concurrent/Callable
 java/util/concurrent/ConcurrentHashMap
+java/util/concurrent/ConcurrentHashMap$BaseIterator
 java/util/concurrent/ConcurrentHashMap$CollectionView
 java/util/concurrent/ConcurrentHashMap$CounterCell
 java/util/concurrent/ConcurrentHashMap$EntrySetView
@@ -1086,6 +1089,8 @@ java/util/concurrent/ConcurrentHashMap$KeySetView
 java/util/concurrent/ConcurrentHashMap$Node
 java/util/concurrent/ConcurrentHashMap$ReservationNode
 java/util/concurrent/ConcurrentHashMap$Segment
+java/util/concurrent/ConcurrentHashMap$Traverser
+java/util/concurrent/ConcurrentHashMap$ValueIterator
 java/util/concurrent/ConcurrentHashMap$ValuesView
 java/util/concurrent/ConcurrentMap
 java/util/concurrent/ConcurrentNavigableMap
@@ -1833,6 +1838,9 @@ sun/util/locale/provider/NumberFormatProviderImpl
 sun/util/locale/provider/ResourceBundleBasedAdapter
 sun/util/locale/provider/SPILocaleProviderAdapter
 sun/util/locale/provider/SPILocaleProviderAdapter$1
+sun/util/locale/provider/TimeZoneNameProviderImpl
+sun/util/locale/provider/TimeZoneNameUtility
+sun/util/locale/provider/TimeZoneNameUtility$TimeZoneNameGetter
 sun/util/logging/LoggingProxy
 sun/util/logging/LoggingSupport
 sun/util/logging/LoggingSupport$1
@@ -1852,6 +1860,9 @@ sun/util/resources/LocaleNamesBundle
 sun/util/resources/OpenListResourceBundle
 sun/util/resources/ParallelListResourceBundle
 sun/util/resources/ParallelListResourceBundle$KeySet
+sun/util/resources/TimeZoneNames
+sun/util/resources/TimeZoneNamesBundle
 sun/util/resources/en/CalendarData_en
 sun/util/resources/en/CurrencyNames_en_US
+sun/util/resources/en/TimeZoneNames_en
 sun/util/spi/CalendarProvider

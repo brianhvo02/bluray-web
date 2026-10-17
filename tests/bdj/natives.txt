@@ -21,6 +21,7 @@ java/io/FileDescriptor.initIDs()V
 java/io/FileOutputStream.close0()V
 java/io/FileOutputStream.initIDs()V
 java/io/FileOutputStream.open0(Ljava/lang/String;Z)V
+java/io/FileOutputStream.write(IZ)V
 java/io/FileOutputStream.writeBytes([BIIZ)V
 java/io/ObjectStreamClass.initNative()V
 java/io/RandomAccessFile.close0()V

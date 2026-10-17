@@ -21,7 +21,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     hdmv/uo-mask.ts       from src/libbluray/bdnav/uo_mask.c, uo_mask.h, uo_mask_table.h
     hdmv/vm.ts            from src/libbluray/hdmv/hdmv_vm.c
     nav/timeline.ts      derived from libbluray navigation time math
-    nav/packets.ts       derived from libbluray navigation.c (_fill_clip, _fill_mark) and clpi_parse.c (clpi_lookup_spn)
+    nav/packets.ts       derived from libbluray navigation.c (_fill_clip, _fill_mark), clpi_parse.c (clpi_lookup_spn) and bluray.c (_find_next_playmark)
     nav/navigator.ts      from src/libbluray/bluray.c (HDMV title and navigation parts, _find_ig_stream, _preload_ig_subpath, _preload_subpaths, _init_ig_stream, bd_user_input, bd_mouse_select)
     nav/subtitles.ts      from src/libbluray/bluray.c (_find_pg_stream, _init_pg_stream, _select_pg_textst_stream, PSR2 events)
     nav/stream-psrs.ts    from src/libbluray/bluray.c (_update_stream_psr_by_lang)
