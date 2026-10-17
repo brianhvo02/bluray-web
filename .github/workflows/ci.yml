@@ -87,6 +87,34 @@ jobs:
             playwright-report/
           retention-days: 7
 
+  # The pairing-code rendezvous Worker (rendezvous/wrangler.toml). Its own job, so a failure here never blocks the Pages deploy.
+  deploy-rendezvous:
+    name: Deploy the rendezvous Worker
+    needs: [check, e2e, ass]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-rendezvous
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11.19.0
+      - run: npm ci
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # wrangler 4 (Node >= 22) deploys SQLite-backed Durable Objects (`new_sqlite_classes`); pinned, not the action's 3.x default
+          wranglerVersion: '4.148.0'
+          workingDirectory: rendezvous
+          command: deploy
+
   deploy:
     name: Deploy to Cloudflare Pages
     needs: [check, e2e, ass]
@@ -106,13 +134,6 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0
       - run: npm ci
-      # the pairing-code rendezvous Worker (rendezvous/wrangler.toml), deployed before the app that looks codes up
-      - uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: rendezvous
-          command: deploy
       - run: npm run build
         env:
           # the Worker's workers.dev URL, a repository variable set after its first deploy; unset, pairing by code reports the service unavailable

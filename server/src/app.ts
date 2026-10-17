@@ -12,6 +12,7 @@ export interface AppOptions {
   library: Library;
   publicBase: string;
   registrar?: CodeRegistrar;
+  registrarDeadlineMs?: number;
   now?: () => number;
   /** Whether a peer is the reverse proxy, whose `X-Forwarded-For` names the client (see `trustedProxy`). Default: no peer. */
   trustProxy?: (address: string) => boolean;
@@ -31,7 +32,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
   return [
     pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false) }),
     requireToken(auth),
-    adminRoutes(auth, { library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar }),
+    adminRoutes(auth, { library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs }),
     libraryRoute(opts.library),
   ];
 }

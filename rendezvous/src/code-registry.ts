@@ -6,7 +6,7 @@ export interface RegistryStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<boolean>;
-  list<T>(options: { prefix: string }): Promise<Map<string, T>>;
+  list<T>(options: { prefix: string; limit?: number; startAfter?: string }): Promise<Map<string, T>>;
   getAlarm(): Promise<number | null>;
   setAlarm(scheduledTime: number): Promise<void>;
 }
@@ -17,6 +17,10 @@ export interface RegistryState {
 
 interface NasRecord {
   publicKeyJwk: EcPublicJwk;
+  /** The last accepted `POST /codes` (or the registration); the record expires `NAS_TTL_MS` after it. */
+  lastSeen: number;
+  /** This NAS's codes by hash → expiry, pruned as they expire; at most `CODES_PER_NAS` live ones. */
+  codes: Record<string, number>;
 }
 
 interface CodeRecord {
@@ -27,16 +31,29 @@ interface CodeRecord {
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
-const LOOKUPS_PER_IP_PER_MINUTE = 10;
-const LOOKUPS_PER_HOUR = 1_000;
-const MAX_BODY_BYTES = 4_096;
-const MAX_ROUTE_LENGTH = 512;
+const DAY = 24 * HOUR;
 
-/** Storage keys: NAS public keys, codes by hash (never the code), and the lookup rate-limit logs. */
+/** Per-client sliding-window limits, checked before a request body is parsed. */
+const LIMITS = {
+  lookup: { max: 10, windowMs: MINUTE },
+  nas: { max: 5, windowMs: HOUR },
+  codes: { max: 30, windowMs: HOUR },
+} as const;
+type Route = keyof typeof LIMITS;
+const ROUTES: Readonly<Record<string, Route>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
+
+/** Failed lookups allowed per hour across all clients; successful ones need a valid 60-bit code and don't count. */
+const FAILED_LOOKUPS_PER_HOUR = 1_000;
+const CODES_PER_NAS = 5;
+const NAS_TTL_MS = 90 * DAY;
+const MAX_ROUTE_LENGTH = 512;
+const ALARM_PAGE = 500;
+
+/** Storage keys: NAS public keys, codes by hash (never the code), and the rate-limit logs. */
 const nasKey = (nasId: string): string => `nas:${nasId}`;
 const codeKey = (codeHash: string): string => `code:${codeHash}`;
-const ipKey = (ip: string): string => `rate:ip:${ip}`;
-const ALL_KEY = 'rate:all';
+const rateKey = (route: Route, client: string): string => `rate:${route}:${client}`;
+const FAILED_KEY = 'global:failed-lookups';
 
 export function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -68,9 +85,30 @@ function publicJwk(value: unknown): EcPublicJwk | null {
 }
 
 /**
+ * The rate-limit bucket of a client address: an IPv4 address as is, an IPv6 address by its /64
+ * (one subscriber usually holds a whole /64), and an IPv4 address embedded in IPv6 as that IPv4 address.
+ */
+export function clientBucket(ip: string | null): string {
+  if (!ip) return 'unknown';
+  const address = ip.trim().toLowerCase().split('%')[0]!.slice(0, 64);
+  if (!address.includes(':')) return address;
+  if (address.includes('.')) return address.slice(address.lastIndexOf(':') + 1);
+  const halves = address.split('::');
+  if (halves.length > 2) return address;
+  const groups = (part: string): string[] => (part === '' ? [] : part.split(':'));
+  const head = groups(halves[0]!);
+  const tail = halves.length === 2 ? groups(halves[1]!) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return address;
+  const all = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...tail];
+  if (!all.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return address;
+  return `${all.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, '')).join(':')}::/64`;
+}
+
+/**
  * The rendezvous Durable Object (one instance, `idFromName('registry')`): NAS public keys, pairing codes
- * by hash with their routes and expiry, and lookup rate limits. An alarm deletes expired codes and stale
- * rate-limit entries. The Worker in `index.ts` routes and adds CORS; this class answers the three POSTs.
+ * by hash with their routes and expiry, and rate limits. An alarm deletes expired codes, expired NAS
+ * records and stale rate-limit logs. The Worker in `index.ts` adds CORS and bounds request bodies.
  */
 export class CodeRegistry {
   private readonly storage: RegistryStorage;
@@ -80,37 +118,50 @@ export class CodeRegistry {
   }
 
   async fetch(request: Request): Promise<Response> {
-    const path = new URL(request.url).pathname;
+    const route = ROUTES[new URL(request.url).pathname];
+    if (route === undefined) return json(404, { error: 'not found' });
     if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
-    switch (path) {
-      case '/nas':
-        return this.registerNas(await readJson(request));
-      case '/codes':
-        return this.registerCode(await readJson(request));
-      case '/codes/lookup': {
-        const ip = (request.headers.get('CF-Connecting-IP') ?? 'unknown').slice(0, 64);
-        if (!(await this.allowLookup(ip))) return json(429, { error: 'too many lookups' });
-        return this.lookup(await readJson(request));
-      }
-      default:
-        return json(404, { error: 'not found' });
+    const client = clientBucket(request.headers.get('CF-Connecting-IP'));
+    if (!(await this.allow(rateKey(route, client), LIMITS[route]))) return json(429, { error: 'too many requests' });
+    const body = await readJson(request);
+    switch (route) {
+      case 'nas':
+        return this.registerNas(body);
+      case 'codes':
+        return this.registerCode(body);
+      case 'lookup':
+        return this.lookup(body);
     }
   }
 
-  /** Deletes expired codes and stale rate-limit entries, then wakes again for the next one. */
+  /** Deletes expired codes, expired NAS records and stale rate logs page by page, then wakes again for the next one. */
   async alarm(): Promise<void> {
     const now = this.now();
+    const next = Math.min(
+      await this.sweep<CodeRecord>('code:', now, (record) => record.expiresAt),
+      await this.sweep<NasRecord>('nas:', now, (record) => record.lastSeen + NAS_TTL_MS),
+      await this.sweep<number[]>('rate:', now, (hits, key) => Math.max(...hits) + windowOf(key)),
+    );
+    const failed = ((await this.storage.get<number[]>(FAILED_KEY)) ?? []).filter((t) => t > now - HOUR);
+    if (failed.length === 0) await this.storage.delete(FAILED_KEY);
+    else await this.storage.put(FAILED_KEY, failed);
+    if (next !== Infinity) await this.armAlarm(next);
+  }
+
+  /** Deletes the records under `prefix` whose deadline has passed; answers the earliest deadline left. */
+  private async sweep<T>(prefix: string, now: number, deadline: (value: T, key: string) => number): Promise<number> {
     let next = Infinity;
-    for (const [key, record] of await this.storage.list<CodeRecord>({ prefix: codeKey('') })) {
-      if (record.expiresAt <= now) await this.storage.delete(key);
-      else next = Math.min(next, record.expiresAt);
+    let startAfter: string | undefined;
+    for (;;) {
+      const page = await this.storage.list<T>(startAfter === undefined ? { prefix, limit: ALARM_PAGE } : { prefix, limit: ALARM_PAGE, startAfter });
+      for (const [key, value] of page) {
+        const at = deadline(value, key);
+        if (at <= now) await this.storage.delete(key);
+        else next = Math.min(next, at);
+        startAfter = key;
+      }
+      if (page.size < ALARM_PAGE) return next;
     }
-    for (const [key, hits] of await this.storage.list<number[]>({ prefix: ipKey('') })) {
-      const stale = Math.max(...hits) + MINUTE;
-      if (stale <= now) await this.storage.delete(key);
-      else next = Math.min(next, stale);
-    }
-    if (next !== Infinity) await this.storage.setAlarm(next);
   }
 
   /** `POST /nas { publicKeyJwk }` → `{ nasId }`; the id is the key's thumbprint, so this is idempotent. */
@@ -123,8 +174,10 @@ export class CodeRegistry {
       return json(400, { error: 'bad request' });
     }
     const nasId = await nasIdOf(jwk);
-    if ((await this.storage.get<NasRecord>(nasKey(nasId))) === undefined) {
-      await this.storage.put<NasRecord>(nasKey(nasId), { publicKeyJwk: jwk });
+    const now = this.now();
+    if (!live(await this.storage.get<NasRecord>(nasKey(nasId)), now)) {
+      await this.storage.put<NasRecord>(nasKey(nasId), { publicKeyJwk: jwk, lastSeen: now, codes: {} });
+      await this.armAlarm(now + NAS_TTL_MS);
     }
     return json(200, { nasId });
   }
@@ -148,63 +201,82 @@ export class CodeRegistry {
       return json(400, { error: 'bad request' });
     }
     // A signed request stays valid only until its code expires, so a captured one can't be replayed later.
-    const now = this.now();
-    if (expiresAt <= now || expiresAt > now + MAX_CODE_AHEAD_MS) return json(400, { error: 'bad expiry' });
+    if (expiresAt <= this.now() || expiresAt > this.now() + MAX_CODE_AHEAD_MS) return json(400, { error: 'bad expiry' });
 
-    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
-    if (!nas) return json(401, { error: 'unknown nas' });
-    const key = await crypto.subtle.importKey('jwk', nas.publicKeyJwk, ECDSA_KEY, false, ['verify']);
+    const known = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(known, this.now())) return json(401, { error: 'unknown nas' });
+    const key = await crypto.subtle.importKey('jwk', known.publicKeyJwk, ECDSA_KEY, false, ['verify']);
     const signed = { nasId, codeHash, routes: routes.https === undefined ? {} : { https: routes.https }, expiresAt };
     const sig = fromBase64url(signature);
     if (sig === null || sig.length !== 64 || !(await crypto.subtle.verify(ECDSA_SIGN, key, sig, signedMessage(signed)))) {
       return json(401, { error: 'bad signature' });
     }
 
+    // Storage operations only from here on, so no other request interleaves with this update.
+    const now = this.now();
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, now)) return json(401, { error: 'unknown nas' });
     const existing = await this.storage.get<CodeRecord>(codeKey(codeHash));
     if (existing && existing.nasId !== nasId && existing.expiresAt > now) return json(409, { error: 'code taken' });
+    const liveCodes = Object.entries(nas.codes).filter(([hash, at]) => at > now && hash !== codeHash);
+    if (liveCodes.length >= CODES_PER_NAS) return json(429, { error: 'too many codes' });
+    await this.storage.put<NasRecord>(nasKey(nasId), {
+      publicKeyJwk: nas.publicKeyJwk,
+      lastSeen: now,
+      codes: Object.fromEntries([...liveCodes, [codeHash, expiresAt]]),
+    });
     await this.storage.put<CodeRecord>(codeKey(codeHash), { nasId, routes: signed.routes, expiresAt });
     await this.armAlarm(expiresAt);
     return new Response(null, { status: 204 });
   }
 
-  /** `POST /codes/lookup { code }` → `{ nasId, routes }`; never anything for an unknown or expired code. */
+  /**
+   * `POST /codes/lookup { code }` → `{ nasId, routes }`; never anything for an unknown or expired code.
+   * Failed lookups share an hourly budget: once it is spent they answer 429, while valid codes still resolve.
+   */
   private async lookup(body: unknown): Promise<Response> {
     if (!isObject(body) || typeof body.code !== 'string' || body.code.length > 64) return json(400, { error: 'bad request' });
+    const now = this.now();
     const hash = await codeHashOf(body.code);
     const record = hash === null ? undefined : await this.storage.get<CodeRecord>(codeKey(hash));
-    if (!record || record.expiresAt <= this.now()) return json(404, { error: 'unknown code' });
-    const answer: CodeLookup = { nasId: record.nasId, routes: record.routes };
-    return json(200, answer);
+    if (record && record.expiresAt > now) {
+      const answer: CodeLookup = { nasId: record.nasId, routes: record.routes };
+      return json(200, answer);
+    }
+    if (!(await this.allow(FAILED_KEY, { max: FAILED_LOOKUPS_PER_HOUR, windowMs: HOUR }))) return json(429, { error: 'too many lookups' });
+    return json(404, { error: 'unknown code' });
   }
 
-  /** Sliding-window limits: 10 lookups per minute per client IP and 1,000 per hour overall. Refused tries don't count. */
-  private async allowLookup(ip: string): Promise<boolean> {
+  /** A sliding-window log under `key`: records this try unless `max` tries fell within `windowMs` already. */
+  private async allow(key: string, limit: { max: number; windowMs: number }): Promise<boolean> {
     const now = this.now();
-    const ipHits = ((await this.storage.get<number[]>(ipKey(ip))) ?? []).filter((t) => t > now - MINUTE);
-    const allHits = ((await this.storage.get<number[]>(ALL_KEY)) ?? []).filter((t) => t > now - HOUR);
-    if (ipHits.length >= LOOKUPS_PER_IP_PER_MINUTE || allHits.length >= LOOKUPS_PER_HOUR) return false;
-    ipHits.push(now);
-    allHits.push(now);
-    await this.storage.put(ipKey(ip), ipHits);
-    await this.storage.put(ALL_KEY, allHits);
-    await this.armAlarm(now + MINUTE);
+    const hits = ((await this.storage.get<number[]>(key)) ?? []).filter((t) => t > now - limit.windowMs);
+    if (hits.length >= limit.max) return false;
+    hits.push(now);
+    await this.storage.put(key, hits);
+    await this.armAlarm(now + limit.windowMs);
     return true;
   }
 
+  /** Moves the alarm earlier, never later. */
   private async armAlarm(time: number): Promise<void> {
     const current = await this.storage.getAlarm();
     if (current === null || current > time) await this.storage.setAlarm(time);
   }
 }
 
-/** The request's JSON body, or undefined when it is too long or not JSON. */
+function live(nas: NasRecord | undefined, now: number): nas is NasRecord {
+  return nas !== undefined && nas.lastSeen + NAS_TTL_MS > now;
+}
+
+function windowOf(rateKey: string): number {
+  return LIMITS[rateKey.split(':')[1] as Route]?.windowMs ?? HOUR;
+}
+
+/** The request's JSON body (the Worker has already bounded its size), or undefined when it isn't JSON. */
 async function readJson(request: Request): Promise<unknown> {
-  const declared = Number(request.headers.get('Content-Length') ?? 0);
-  if (declared > MAX_BODY_BYTES) return undefined;
-  const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) return undefined;
   try {
-    return JSON.parse(text) as unknown;
+    return JSON.parse(await request.text()) as unknown;
   } catch {
     return undefined;
   }

@@ -18,6 +18,8 @@ export interface Env {
   CODE_REGISTRY: RegistryNamespace;
 }
 
+const MAX_BODY_BYTES = 4_096;
+
 const ROUTES = new Set(['/nas', '/codes', '/codes/lookup']);
 
 const PREFLIGHT_HEADERS: Readonly<Record<string, string>> = {
@@ -34,8 +36,38 @@ async function route(request: Request, env: Env): Promise<Response> {
     response.headers.set('Allow', 'POST, OPTIONS');
     return response;
   }
+  const body = await boundedBody(request);
+  if (body === null) return json(413, { error: 'body too large' });
+  const headers = new Headers(request.headers);
+  headers.delete('Content-Length');
   const registry = env.CODE_REGISTRY;
-  return registry.get(registry.idFromName('registry')).fetch(request);
+  return registry.get(registry.idFromName('registry')).fetch(new Request(request.url, { method: 'POST', headers, body }));
+}
+
+/** The body's bytes, counted as they stream in; null once they pass `MAX_BODY_BYTES`. */
+async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  }
+  const body = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return body;
 }
 
 export default {
