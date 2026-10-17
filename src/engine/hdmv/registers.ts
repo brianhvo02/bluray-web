@@ -7,8 +7,8 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-const PSR_COUNT = 128;
-const GPR_COUNT = 4096;
+export const PSR_COUNT = 128;
+export const GPR_COUNT = 4096;
 
 export const PSR = {
   IG_STREAM_ID: 0, PRIMARY_AUDIO_ID: 1, PG_STREAM: 2, ANGLE_NUMBER: 3, TITLE_NUMBER: 4, CHAPTER: 5, PLAYLIST: 6,
@@ -61,6 +61,16 @@ export class RegisterFile {
   private readonly listeners: ((e: PsrEvent) => void)[] = [];
   /** Trace hook: fires for every successful bd_gpr_write and bd_psr_setting_write, not for save/restore copies. */
   onWrite: ((w: RegisterWrite) => void) | null = null;
+  private readonly mirror: Int32Array | null;
+
+  constructor(options: { readonly shared?: SharedArrayBuffer } = {}) {
+    this.mirror = options.shared ? new Int32Array(options.shared) : null;
+    if (this.mirror) for (let i = 0; i < PSR_COUNT; i++) Atomics.store(this.mirror, i, this.psr[i]!);
+  }
+
+  private mirrorPsr(i: number): void {
+    if (this.mirror) Atomics.store(this.mirror, i, this.psr[i]!);
+  }
 
   /** bd_psr_register_cb / bd_psr_unregister_cb (no duplicates). */
   onPsrEvent(listener: (e: PsrEvent) => void): () => void {
@@ -78,6 +88,7 @@ export class RegisterFile {
   gprWrite(i: number, v: number): number {
     if (!(i >= 0 && i < GPR_COUNT)) return -1;
     this.gpr[i] = v;
+    if (this.mirror) Atomics.store(this.mirror, PSR_COUNT + i, this.gpr[i]!);
     this.onWrite?.({ kind: 'gpr', index: i, value: this.gpr[i]! });
     return 0;
   }
@@ -95,6 +106,7 @@ export class RegisterFile {
     if (!(i >= 0 && i < PSR_COUNT)) return -1;
     const old = this.psr[i]!;
     this.psr[i] = v;
+    this.mirrorPsr(i);
     const next = this.psr[i]!;
     this.emit({ type: old === next ? 'write' : 'change', psr: i, oldValue: old, newValue: next });
     this.onWrite?.({ kind: 'psr', index: i, value: next });
@@ -145,12 +157,13 @@ export class RegisterFile {
   saveState(): void {
     this.psr.copyWithin(36, 4, 9);
     this.psr.copyWithin(42, 10, 13);
+    for (let i = 36; i <= 44; i++) this.mirrorPsr(i);
     this.emit({ type: 'save', psr: -1, oldValue: 0, newValue: 0 });
   }
 
   /** bd_psr_reset_backup_registers */
   resetBackupRegisters(): void {
-    for (const i of [36, 37, 38, 39, 40, 42, 43, 44]) this.psr[i] = PSR_INIT[i]!;
+    for (const i of [36, 37, 38, 39, 40, 42, 43, 44]) { this.psr[i] = PSR_INIT[i]!; this.mirrorPsr(i); }
   }
 
   /** bd_psr_restore_state */
@@ -158,6 +171,7 @@ export class RegisterFile {
     const oldPsr = this.psr.slice(0, 13);
     this.psr.copyWithin(4, 36, 41);
     this.psr.copyWithin(10, 42, 45);
+    for (let i = 4; i < 13; i++) this.mirrorPsr(i);
     const newPsr = this.psr.slice(0, 13);
     this.resetBackupRegisters();
     for (let i = 4; i < 13; i++) {
