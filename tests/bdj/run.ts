@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { compareBdjTraces } from './compare';
 import { parseKeyScript, parseScriptOptions, type SettledStep } from './key-script';
 import type { EngineEvent } from '../../src/engine/protocol';
-import { diffSettled, parseSettledGolden, untilGolden } from './settled';
+import { diffSettled, parseSettledGolden, TAIL_MS, untilGolden } from './settled';
 import { CONTROL_CALLS, parseBdjTrace } from './format';
 import type { TraceEntry } from './format';
 import { replayBdj } from './replay';
@@ -100,7 +100,7 @@ if (keys !== undefined) {
   let r: Awaited<ReturnType<typeof replayPlayerBdj>> | null = null;
   try {
     const options = parseScriptOptions(readFileSync(keys, 'utf8'));
-    r = await replayPlayerBdj(discDir, { ...untilGolden(g, options), script: parseKeyScript(readFileSync(keys, 'utf8')), timeoutMs: 300_000 });
+    r = await replayPlayerBdj(discDir, { ...untilGolden(g, options), script: parseKeyScript(readFileSync(keys, 'utf8')), tailMs: TAIL_MS, timeoutMs: 300_000 });
     diff = diffSettled(g, r, options);
   } catch (e) {
     failed = e;

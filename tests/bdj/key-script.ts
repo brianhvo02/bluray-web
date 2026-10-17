@@ -43,22 +43,31 @@ export function parseKeyScript(source: string): KeyStep[] {
 
 /**
  * What a script says about its own comparison, in `#!` lines that the harness reads as comments:
- * `#! vary gpr <n>...` names general-purpose registers whose written values depend on timing (a disc saving its
- * playback position as it plays), so their writeRegN calls are left out of the comparison, as settled.py leaves them out
- * of the golden.
+ * `#! vary gpr <n>... [after playlist <p>]` names general-purpose registers whose written values depend on timing (a disc
+ * saving its playback position as it plays). Their writeRegN calls, from Java's selectPlaylistN of playlist <p> on (or
+ * from the start), are left out of the comparison, as settled.py leaves them out of the golden; whether any such write
+ * happened is still compared (settled.py's `vary` lines).
  */
-export interface ScriptOptions {
-  readonly varyGprs: readonly number[];
+export interface VaryRule {
+  readonly gprs: readonly number[];
+  /** Only writes after Java selects this playlist; null: all of them. */
+  readonly afterPlaylist: number | null;
 }
 
+export interface ScriptOptions {
+  readonly vary: readonly VaryRule[];
+}
+
+export const VARY_LINE = /^\s*#!\s*vary\s+gpr((?:\s+\d+)+?)(?:\s+after\s+playlist\s+(\d+))?\s*(?:#.*)?$/;
+
 export function parseScriptOptions(source: string): ScriptOptions {
-  const varyGprs: number[] = [];
+  const vary: VaryRule[] = [];
   for (const raw of source.split('\n')) {
-    const m = /^\s*#!\s*vary\s+gpr((?:\s+\d+)+)\s*(?:#.*)?$/.exec(raw);
-    if (m) varyGprs.push(...m[1]!.trim().split(/\s+/).map(Number));
+    const m = VARY_LINE.exec(raw);
+    if (m) vary.push({ gprs: m[1]!.trim().split(/\s+/).map(Number), afterPlaylist: m[2] === undefined ? null : Number(m[2]) });
     else if (/^\s*#!/.test(raw)) throw new Error(`key script: unsupported option "${raw.trim()}"`);
   }
-  return { varyGprs };
+  return { vary };
 }
 
 /** A script step as it ran, in tools/bdj-trace/settled.py's form: a `wait still` step carries the settled plane's hash. */

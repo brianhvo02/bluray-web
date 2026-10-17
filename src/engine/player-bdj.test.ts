@@ -264,6 +264,20 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(playlistsPlayed(h).length).toBeGreaterThanOrEqual(1);
   }, 90_000);
 
+  it('a pause and play from Java during a still hold go back to playing, and the time still still ends', async () => {
+    const h = await playing(stillDisc({ mode: 1, time: 5 }));
+    await until(h, () => clockUs(h) >= 3_600_000);
+    await h.play(300); // held at the item's end
+    h.inject({ type: 'call', id: 9101, name: 'selectRate', args: [0, 0] }); // a rate change, not BDJ_PLAYBACK_STOP
+    await until(h, () => lastState(h) === 'paused');
+    h.inject({ type: 'call', id: 9102, name: 'selectRate', args: [1, 0] });
+    await until(h, () => h.sent.some((m) => m.type === 'reply' && m.id === 9102));
+    await h.play(100);
+    expect(lastState(h)).toBe('playing');
+    expect(bdjEvents(h, BdjEvent.END_OF_PLAYLIST)).toEqual([]);
+    await until(h, () => bdjEvents(h, BdjEvent.END_OF_PLAYLIST).length > 0); // still_time (5 s) passed: on to the end
+  }, 90_000);
+
   it("refuses a menu call masked by Java's UO mask, with uo-masked and UO_MASKED to Java", async () => {
     const h = await playing();
     h.inject({ type: 'call', id: 9001, name: 'setUOMask', args: [true, false] });

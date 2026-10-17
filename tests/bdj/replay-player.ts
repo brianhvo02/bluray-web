@@ -132,6 +132,8 @@ export async function replayPlayerBdj(
     untilPlane?: (plane: GraphicsPlaneReader) => boolean;
     /** Also ends the run once it returns true for the calls traced so far (checked after each reply). */
     untilTrace?: (trace: readonly TraceEntry[]) => boolean;
+    /** Once the run would end, go on this long (wall time), still tracing, so calls past the end show up. */
+    tailMs?: number;
     /** The player's compositor (default: one that draws nothing). */
     compositor?: CompositorLike;
     /** PlayerDeps.decodeImage, for background stills (default: none, so none are shown). */
@@ -156,6 +158,8 @@ export async function replayPlayerBdj(
   const clock = { ms: 1000 };
   let seen = 0;
   let done = false;
+  /** Tracing stops at `done`, or, with a tail, when the tail is over. */
+  let traced = false;
   let firstPlaylistAt: number | null = null;
   let t0 = 0;
   let plane: GraphicsPlaneReader | null = null;
@@ -174,13 +178,16 @@ export async function replayPlayerBdj(
   };
   const onToBdj = (m: ToBdj): void => {
     if (m.type === 'boot') plane = new GraphicsPlaneReader(m.plane);
-    if (m.type !== 'reply' || done) return;
+    if (m.type !== 'reply' || traced) return;
     const c = calls.get(m.id);
     if (!c) return;
     calls.delete(m.id);
     const e = traceEntryOf(c.name, c.args, m.value);
     trace.push(e);
-    if ((e.call === opts.until && ++seen >= occurrence) || opts.untilTrace?.(trace)) done = true;
+    if ((e.call === opts.until && ++seen >= occurrence) || opts.untilTrace?.(trace)) {
+      done = true;
+      if (!opts.tailMs) traced = true;
+    }
   };
 
   const player = new Player({
@@ -251,7 +258,12 @@ export async function replayPlayerBdj(
     t0 = performance.now();
     stepFrom = { events: 0, flushes: 0, at: t0 };
     await player.handle({ type: 'open', entries: await directoryEntries(dir) });
-    while (!done || stepIdx < script.length) {
+    let tailFrom: number | null = null;
+    for (;;) {
+      if (done && stepIdx >= script.length) {
+        tailFrom ??= performance.now();
+        if (performance.now() - tailFrom >= (opts.tailMs ?? 0)) break;
+      }
       if (performance.now() - t0 > timeoutMs) throw fail(`timed out after ${timeoutMs} ms`);
       const failed = events.find((e) => e.type === 'notice' && e.code === 'bdj-failed');
       if (failed?.type === 'notice') throw fail(`BD-J failed (${failed.message})`);
@@ -266,6 +278,7 @@ export async function replayPlayerBdj(
       if (opts.untilPlane && plane && opts.untilPlane(plane)) done = true;
       await runSteps();
     }
+    traced = true;
     const end = performance.now();
     return {
       trace,

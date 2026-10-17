@@ -18,6 +18,8 @@
 {"call":"writeRegN","args":[0,554,0,-1],"ret":0}
 {"call":"writeRegN","args":[0,552,0,-1],"ret":0}
 {"call":"writeRegN","args":[0,553,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,518,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,519,0,-1],"ret":0}
 {"call":"setUOMaskN","args":[true,true],"ret":null}
 {"call":"setKeyInterestN","args":[0],"ret":null}
 {"call":"writeRegN","args":[1,4,2,-1],"ret":0}
@@ -70,6 +72,8 @@
 {"call":"selectRateN","args":[1,1],"ret":1}
 {"call":"writeRegN","args":[0,513,1,-1],"ret":0}
 {"call":"writeRegN","args":[0,517,800,-1],"ret":0}
+{"script":"vary","gpr":518,"after":800,"written":true}
+{"script":"vary","gpr":519,"after":800,"written":true}
 {"script":"step","n":0,"step":"wait still 1500","hash":"4055a182"}
 {"script":"step","n":1,"step":"key ok"}
 {"script":"step","n":2,"step":"wait playlist 149"}

@@ -158,8 +158,9 @@ what would change that decision.
   and to CHAPTERS, chapter 2) and RENTAL_FAMILY (language picker, English, main menu, PLAY) to the feature and compares
   the control calls and the plane at every settled point with libbluray's committed runs (`tests/bdj/golden/local/`).
   One check is restricted: RENTAL_FAMILY saves its playback position in GPR 518/519 about once a second during the
-  feature, and the values depend on when that timer fires, so those writes are left out on both sides
-  (`#! vary gpr` in its script). Intermediate animation frames are not compared (ruling R3). At rest with no input,
+  feature, and the values depend on when that timer fires, so its writes after the feature's playlist starts are left
+  out on both sides; that both sides made some is still checked, and its start-up writes of 0 are compared
+  (`#! vary gpr 518 519 after playlist 800` in its script). Intermediate animation frames are not compared (ruling R3). At rest with no input,
   neither disc's menus flush: 0 flushes in 15 s in libbluray on A_NEW_ERA's main menu and on RENTAL_FAMILY's picker
   (43 s) and main menu, and in ours one repeat of the settled frame in 10 s, so animated menus do not defeat the
   ignored-tap rule on these discs (ruling R6). Found on the way and fixed: `java.awt.event.ContainerEvent` and ten other

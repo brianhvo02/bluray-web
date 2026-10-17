@@ -1327,6 +1327,7 @@ export class Player {
     const pi = s.playItems[item.index];
     if (this.state === 'playing' && pi && pi.stillMode !== 0 && this.navEndReported !== item.index && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
       this.navEndReported = item.index;
+      // the time still's timer runs on wall time (nowMs): libbluray leaves it to the application (BD_EVENT_STILL_TIME)
       this.bdjStill = { item: item.index, untilMs: pi.stillMode === STILL_TIME ? this.deps.nowMs() + pi.stillTime * 1000 : null };
       this.setHold(true);
     }
@@ -1908,7 +1909,9 @@ export class Player {
       return;
     }
     this.wantPlaying = true;
-    if (this.state === 'paused') this.setState('buffering');
+    // during a still the read is stopped on purpose (_bd_read_locked returns nothing): playing, with the output held
+    // until the still ends, not buffering for data that never comes
+    if (this.state === 'paused') this.setState(this.held ? 'playing' : 'buffering');
   }
 
   /** Audio was disabled by a stalled output that has since started running again. */
