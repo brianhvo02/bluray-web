@@ -11,6 +11,25 @@ export interface AdminOptions {
   publicBase: string;
   /** Absent until the rendezvous client exists: codes then come back with `rendezvous: false`. */
   registrar?: CodeRegistrar;
+  /** How long a code waits for its rendezvous registration before it is returned with `rendezvous: false`. */
+  registrarDeadlineMs?: number;
+}
+
+const REGISTRAR_DEADLINE_MS = 5_000;
+
+/** `promise`, or a rejection once `ms` have passed. */
+async function withDeadline<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} took over ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The bearer token of `Authorization`, if any. */
@@ -47,7 +66,11 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
         let rendezvous = false;
         if (opts.registrar) {
           try {
-            await opts.registrar.registerCode(record.hash, { https: opts.publicBase }, record.expiresAt);
+            await withDeadline(
+              opts.registrar.registerCode(record.hash, { https: opts.publicBase }, record.expiresAt),
+              opts.registrarDeadlineMs ?? REGISTRAR_DEADLINE_MS,
+              'rendezvous registration',
+            );
             rendezvous = true;
           } catch (err) {
             console.error('rendezvous registration failed', err);

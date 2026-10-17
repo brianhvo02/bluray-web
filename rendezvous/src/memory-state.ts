@@ -20,8 +20,12 @@ export class MemoryStorage implements RegistryStorage {
     return this.data.delete(key);
   }
 
-  async list<T>(options: { prefix: string }): Promise<Map<string, T>> {
-    const keys = [...this.data.keys()].filter((k) => k.startsWith(options.prefix)).sort();
+  async list<T>(options: { prefix: string; limit?: number; startAfter?: string }): Promise<Map<string, T>> {
+    const { prefix, limit = Infinity, startAfter } = options;
+    const keys = [...this.data.keys()]
+      .filter((k) => k.startsWith(prefix) && (startAfter === undefined || k > startAfter))
+      .sort()
+      .slice(0, limit);
     return new Map(keys.map((k) => [k, structuredClone(this.data.get(k)) as T]));
   }
 
@@ -32,6 +36,12 @@ export class MemoryStorage implements RegistryStorage {
   async setAlarm(time: number): Promise<void> {
     this.alarm = time;
   }
+}
+
+/** Runs the registry's alarm as the runtime does: the pending alarm is cleared before the handler runs. */
+export async function fireAlarm(storage: MemoryStorage, registry: { alarm(): Promise<void> }): Promise<void> {
+  storage.alarm = null;
+  await registry.alarm();
 }
 
 export function memoryState(): RegistryState & { storage: MemoryStorage } {

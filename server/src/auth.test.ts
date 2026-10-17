@@ -298,11 +298,13 @@ describe('HTTP', () => {
   let library: Library;
   afterEach(() => close?.());
 
-  async function start(opts: { registrar?: CodeRegistrar; trustProxy?: (address: string) => boolean } = {}): Promise<void> {
+  async function start(
+    opts: { registrar?: CodeRegistrar; registrarDeadlineMs?: number; trustProxy?: (address: string) => boolean } = {},
+  ): Promise<void> {
     auth = new Auth(new Store(join(tmp, 'data')), now);
     library = new Library([], join(tmp, 'data', 'library.json'), { scanPauseMs: 0 });
     const server = createServer(
-      appHandlers({ auth, library, now, publicBase: 'https://nas.example/bluray/api/', registrar: opts.registrar, trustProxy: opts.trustProxy }),
+      appHandlers({ auth, library, now, publicBase: 'https://nas.example/bluray/api/', registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs, trustProxy: opts.trustProxy }),
     );
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -427,6 +429,18 @@ describe('HTTP', () => {
     await start();
     const res2 = await post('/api/admin/codes', { owner: false }, { Authorization: `Bearer ${await pairedToken(true)}` });
     expect(((await res2.json()) as { rendezvous: boolean }).rendezvous).toBe(false);
+  });
+
+  it('returns the code with rendezvous: false when the registration misses its deadline', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await start({ registrar: { registerCode: () => new Promise<void>(() => {}) }, registrarDeadlineMs: 50 });
+    const started = Date.now();
+    const res = await post('/api/admin/codes', { owner: false }, { Authorization: `Bearer ${await pairedToken(true)}` });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { rendezvous: boolean }).rendezvous).toBe(false);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(errors).toHaveBeenCalledWith('rendezvous registration failed', expect.objectContaining({ message: 'rendezvous registration took over 50 ms' }));
+    errors.mockRestore();
   });
 
   it('refuses an admin token passed in the query', async () => {
