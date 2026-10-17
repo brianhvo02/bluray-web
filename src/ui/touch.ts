@@ -1,4 +1,6 @@
 import type { PlaybackState } from '../engine/protocol';
+import { fitRect } from '../engine/render/compositor';
+import { MENU_HEIGHT, MENU_WIDTH } from './pointer';
 
 /** A touch tap on the video: where it landed horizontally and when. */
 export interface Tap {
@@ -11,22 +13,35 @@ export type TapAction = 'toggleControls' | 'seekBack' | 'seekForward' | 'menuCli
 /** Two taps within this many ms make a double tap. */
 export const DOUBLE_TAP_MS = 300;
 
-/** Over a disc menu with the controls hidden, a tap within this many px of the player's bottom edge shows them (ruling R12). */
+/** The band at the player's bottom edge, this many px tall, whose letterbox part shows the controls over a menu (R12, R13). */
 export const MENU_TAP_ZONE_PX = 48;
 
 /**
+ * Whether a tap at `y` (client px) on the canvas falls in the menu wake band (ruling R13): within MENU_TAP_ZONE_PX of the
+ * bottom edge and below the picture, as the compositor fits the 1920×1080 menu into the canvas (the rectangle taps are
+ * mapped through). Where the picture reaches the bottom edge (landscape on a phone) the band is empty: a tap on the picture
+ * always goes to the disc.
+ */
+export function inMenuWakeBand(y: number, canvas: { readonly top: number; readonly width: number; readonly height: number }): boolean {
+  const fit = fitRect(MENU_WIDTH, MENU_HEIGHT, canvas.width, canvas.height);
+  const local = y - canvas.top;
+  return local < canvas.height && canvas.height - local <= MENU_TAP_ZONE_PX && local >= fit.y + fit.height;
+}
+
+/**
  * What a tap on the video does. While a disc menu is shown (an HDMV menu, or a BD-J plane with anything visible) a tap is
- * a click on the menu, except that with the controls hidden a tap in the bottom MENU_TAP_ZONE_PX (`fromBottom`, px from
- * the player's bottom edge) shows them: a touch-only user has no other way to bring them back (ruling R12). Otherwise a
- * single tap toggles the controls, and a second tap within DOUBLE_TAP_MS in the left or right third seeks back or forward.
+ * a click on the menu, except that with the controls hidden a tap in the menu wake band (`inWakeBand`, inMenuWakeBand)
+ * shows them: a touch-only user has another way to bring them back besides a tap the disc doesn't take (rulings R12, R13).
+ * Otherwise a single tap toggles the controls, and a second tap within DOUBLE_TAP_MS in the left or right third seeks back
+ * or forward.
  */
 export function classifyTap(
   prev: Tap | null,
   tap: Tap,
-  ctx: { width: number; menuActive: boolean; bdjMenuVisible?: boolean; fromBottom?: number; controlsShown?: boolean },
+  ctx: { width: number; menuActive: boolean; bdjMenuVisible?: boolean; inWakeBand?: boolean; controlsShown?: boolean },
 ): TapAction {
   if (ctx.menuActive || ctx.bdjMenuVisible) {
-    if (ctx.controlsShown === false && ctx.fromBottom !== undefined && ctx.fromBottom <= MENU_TAP_ZONE_PX) return 'showControls';
+    if (ctx.controlsShown === false && ctx.inWakeBand === true) return 'showControls';
     return 'menuClick';
   }
   if (prev && tap.timeMs - prev.timeMs <= DOUBLE_TAP_MS && ctx.width > 0) {
@@ -56,6 +71,14 @@ export function idleAfterTap(idle: boolean, state: PlaybackState): boolean {
  */
 export function controlsMayIdle(ctx: { playing: boolean; pressed: boolean; menuOpen: boolean; remoteOpen: boolean; inMenu: boolean }): boolean {
   return ctx.playing && !ctx.pressed && !ctx.menuOpen && !(ctx.remoteOpen && ctx.inMenu);
+}
+
+/**
+ * Whether a menu click the disc didn't take (an HDMV tap on no button) shows the controls (ruling R13): for a touch, which
+ * has no other way to bring them back over the picture. A mouse or pen click leaves them as they are (ruling R9).
+ */
+export function missedMenuTapShowsControls(pointerType: string): boolean {
+  return pointerType === 'touch';
 }
 
 /** Whether a pointer can hover (a mouse or a pen); a touch pointer cannot. */

@@ -1071,9 +1071,15 @@ export class Player {
     }
     const nav = this.navigator;
     if (!nav) return;
+    // the button under the pointer on the page shown now, before the move or the activation can change the page
+    const hit = nav.hitTest(px, py);
     nav.mouseSelect(px, py);
-    if (kind === 'click') nav.userInput(BdVk.MOUSE_ACTIVATE);
-    else this.deps.emit({ type: 'pointerTarget', button: nav.hitTest(px, py) });
+    if (kind === 'move') {
+      this.deps.emit({ type: 'pointerTarget', button: hit });
+      return;
+    }
+    nav.userInput(BdVk.MOUSE_ACTIVATE);
+    if (hit === null && this.menuActive) this.deps.emit({ type: 'menuTapMissed' }); // the UI shows its controls for a touch that missed (ruling R13)
   }
 
   private onNavigatorEvent(e: NavigatorEvent): void {

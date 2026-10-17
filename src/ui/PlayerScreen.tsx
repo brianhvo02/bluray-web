@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction, keyWakesControls } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, menuPointerEffect, pairableTap, type Tap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, inMenuWakeBand, isHoverPointer, menuPointerEffect, missedMenuTapShowsControls, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -221,6 +221,19 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   // The first tap a BD-J menu ignores opens the remote, with the controls it sits over, once per menu (with the notice):
   // a remote the user closes stays closed until the next menu.
+  // A touch on an HDMV menu that hit no button shows the controls (ruling R13); a mouse click that missed leaves them.
+  // (On a BD-J menu the ignored-tap rule below opens the remote with them.)
+  const lastMenuClickPointer = useRef('mouse');
+  const tapMisses = snapshot.menuTapMisses;
+  const seenTapMisses = useRef(tapMisses);
+  useEffect(() => {
+    if (tapMisses === seenTapMisses.current) return;
+    seenTapMisses.current = tapMisses;
+    if (!missedMenuTapShowsControls(lastMenuClickPointer.current)) return;
+    setIdle(false);
+    setActivity((a) => a + 1);
+  }, [tapMisses]);
+
   const remoteRequests = snapshot.bdjRemoteRequests;
   const seenRemoteRequests = useRef(remoteRequests);
   useEffect(() => {
@@ -271,7 +284,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       width: rect.width,
       menuActive: now.menuActive,
       bdjMenuVisible: now.bdjMenuVisible,
-      fromBottom: rect.bottom - e.clientY, // the canvas fills the player
+      inWakeBand: inMenuWakeBand(e.clientY, rect), // the letterbox at the bottom edge (the canvas fills the player)
       controlsShown: controlsVisibleRef.current,
     });
     lastTap.current = pairableTap(action, tap);
@@ -282,7 +295,10 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     switch (action) {
       case 'menuClick': {
         const point = toMenuSpace(e.clientX, e.clientY, rect);
-        if (point) controller.pointer('click', point.x, point.y);
+        if (point) {
+          lastMenuClickPointer.current = e.pointerType;
+          controller.pointer('click', point.x, point.y);
+        }
         break;
       }
       case 'showControls':
@@ -323,7 +339,10 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       return;
     }
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
-    if (point) controller.pointer('click', point.x, point.y);
+    if (point) {
+      lastMenuClickPointer.current = 'mouse'; // a click event from a mouse or pen (a touch's is ignored above)
+      controller.pointer('click', point.x, point.y);
+    }
   };
 
   /** A menu key from the control bar or the remote: checked against the UO mask like the keyboard. */

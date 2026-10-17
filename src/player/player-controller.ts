@@ -32,6 +32,8 @@ export interface PlayerSnapshot {
   readonly bdjRemoteRequests: number;
   /** The current BD-J menu has already opened the remote for an ignored tap. */
   readonly bdjRemoteOpenedInMenu: boolean;
+  /** Clicks on an HDMV menu that hit no button, counted since the page loaded (a touch that missed shows the controls). */
+  readonly menuTapMisses: number;
   readonly warnings: readonly string[];
   readonly currentPlaylistId: string | null;
   readonly durationUs: number;
@@ -98,6 +100,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   bdjTapsIgnored: 0,
   bdjRemoteRequests: 0,
   bdjRemoteOpenedInMenu: false,
+  menuTapMisses: 0,
   warnings: [],
   currentPlaylistId: null,
   durationUs: 0,
@@ -150,6 +153,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, menuActive: e.active, popupAvailable: e.popupAvailable, pointerButton: e.active ? s.pointerButton : null };
     case 'pointerTarget':
       return { ...s, pointerButton: e.button };
+    case 'menuTapMissed':
+      return { ...s, menuTapMisses: s.menuTapMisses + 1 };
     case 'soundEffects':
     case 'soundEffect':
       return s; // handed to the audio output by the controller

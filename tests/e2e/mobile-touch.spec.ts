@@ -62,18 +62,46 @@ async function bottomEdge(page: Page, fromBottom: number): Promise<{ x: number; 
   return { x: box.x + box.width / 2, y: box.y + box.height - fromBottom };
 }
 
-test('over an HDMV menu, a tap in the bottom 48 px brings back the controls that idled out; a higher tap goes to the menu (R12)', async ({ page }) => {
+/** Phone landscape (Pixel 7 turned): the 16:9 picture is pillarboxed and reaches the bottom edge. */
+const LANDSCAPE = { width: 839, height: 412 };
+
+test('portrait, HDMV menu: a tap in the letterbox band at the bottom brings back the controls that idled out (R12, R13)', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
   await expectMenu(page, true);
   const bar = page.getByTestId('control-bar');
   await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000); // idled out by the timer
+  // letterbox above the 48 px band: nothing
+  const high = await bottomEdge(page, 100);
+  await page.touchscreen.tap(high.x, high.y);
+  await page.waitForTimeout(500);
+  await expectBarHidden(bar);
   const edge = await bottomEdge(page, 10);
   await page.touchscreen.tap(edge.x, edge.y);
   await expectBarShown(bar, 1_000);
   await expectMenu(page, true);
-  // a tap on button A, above the zone, still activates it
+  // a tap on button A still activates it
+  const a = await menuPoint(page, 232, 216);
+  await page.touchscreen.tap(a.x, a.y);
+  await expectMenu(page, false);
+});
+
+test('landscape, HDMV menu: a tap on empty picture brings back the controls; a tap on a button activates it at once (R13)', async ({ page }) => {
+  await page.setViewportSize(LANDSCAPE);
+  await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
+  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await expectMenu(page, true);
+  const bar = page.getByTestId('control-bar');
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
+  // a tap on the picture that hits no button is a missed tap, which shows the controls
+  const empty = await menuPoint(page, 1400, 540);
+  await page.touchscreen.tap(empty.x, empty.y);
+  await expectBarShown(bar, 2_000);
+  await expectMenu(page, true);
+  // with the controls hidden again, one tap on button A activates it
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
   const a = await menuPoint(page, 232, 216);
   await page.touchscreen.tap(a.x, a.y);
   await expectMenu(page, false);
@@ -85,7 +113,30 @@ const BDJ_MENU_DISC = 'fixtures/synthetic/disc-bdj-menu';
 const bdjPlane = (page: Page): Promise<{ flushes: number; tapsIgnored: number } | null> =>
   page.evaluate(() => (window as unknown as { __blurayTelemetry?: { bdjPlane: { flushes: number; tapsIgnored: number } | null } | null }).__blurayTelemetry?.bdjPlane ?? null);
 
-test('over a BD-J menu, a tap in the bottom 48 px brings back the controls without reaching the disc; a higher tap reaches it (R12)', async ({ page }) => {
+test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignored tap brings the remote and the controls (R13)', async ({ page }) => {
+  await page.setViewportSize(LANDSCAPE);
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
+  const player = page.getByTestId('player');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+  const bar = page.getByTestId('control-bar');
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
+  // one tap on Play reaches Java (its MouseListener repaints); the controls stay hidden
+  const before = (await bdjPlane(page))!.flushes;
+  const play = await menuPoint(page, 300, 400);
+  await page.touchscreen.tap(play.x, play.y);
+  await expect.poll(async () => (await bdjPlane(page))!.flushes, { timeout: 5_000 }).toBeGreaterThan(before);
+  await expectBarHidden(bar);
+  // a tap on empty picture at the bottom edge goes to Java too, which ignores it: the remote opens with the controls
+  const empty = await menuPoint(page, 1400, 1060);
+  await page.touchscreen.tap(empty.x, empty.y);
+  await expect.poll(async () => (await bdjPlane(page))!.tapsIgnored, { timeout: 5_000 }).toBe(1);
+  await expect(page.getByTestId('remote-pad')).toBeVisible();
+  await expectBarShown(bar);
+});
+
+test('portrait, BD-J menu: a tap in the letterbox band brings back the controls without reaching the disc; a tap on the picture reaches it (R12, R13)', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
   const player = page.getByTestId('player');

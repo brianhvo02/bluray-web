@@ -313,6 +313,12 @@ describe('menus', () => {
     expect(s.pointerButton).toBeNull();
   });
 
+  it('counts menu clicks that missed every button', () => {
+    let s = reduceEvent({ ...INITIAL_SNAPSHOT, menuActive: true }, { type: 'menuTapMissed' });
+    s = reduceEvent(s, { type: 'menuTapMissed' });
+    expect(s.menuTapMisses).toBe(2);
+  });
+
   it('posts menu keys and pointer moves and clicks', () => {
     const { worker, controller } = make();
     controller.menuKey('ok');

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, MENU_TAP_ZONE_PX, MENU_WAKE_ZONE_PX, menuPointerEffect, pairableTap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, inMenuWakeBand, MENU_TAP_ZONE_PX, MENU_WAKE_ZONE_PX, menuPointerEffect, missedMenuTapShowsControls, pairableTap } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -138,31 +138,62 @@ describe('controlsShown', () => {
   });
 });
 
-describe('classifyTap at the bottom edge over a menu (ruling R12)', () => {
-  const menu = { width: 400, menuActive: true, controlsShown: false };
-  it('uses a 48 px zone', () => {
+describe('inMenuWakeBand (rulings R12, R13)', () => {
+  it('uses a 48 px band', () => {
     expect(MENU_TAP_ZONE_PX).toBe(48);
   });
 
-  it('shows the hidden controls on a tap within 48 px of the bottom edge, HDMV or BD-J', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, fromBottom: 0 })).toBe('showControls');
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, fromBottom: 48 })).toBe('showControls');
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, bdjMenuVisible: true, fromBottom: 10 })).toBe('showControls');
+  it('is the bottom 48 px of a letterbox under the picture (portrait)', () => {
+    const canvas = { top: 100, width: 400, height: 800 }; // the picture is 400x225 at y 287-512
+    expect(inMenuWakeBand(100 + 799.5, canvas)).toBe(true);
+    expect(inMenuWakeBand(100 + 800, canvas)).toBe(false); // past the canvas
+    expect(inMenuWakeBand(100 + 800 - 48, canvas)).toBe(true);
+    expect(inMenuWakeBand(100 + 800 - 49, canvas)).toBe(false); // letterbox, but above the band
+    expect(inMenuWakeBand(100 + 400, canvas)).toBe(false); // the picture
   });
 
-  it('sends a higher tap to the menu', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, fromBottom: 49 })).toBe('menuClick');
+  it('is only the part of the band below the picture when the letterbox is thinner than the band', () => {
+    const canvas = { top: 0, width: 400, height: 265 }; // the picture is 400x225 at y 20-245
+    expect(inMenuWakeBand(250, canvas)).toBe(true);
+    expect(inMenuWakeBand(245, canvas)).toBe(true);
+    expect(inMenuWakeBand(244, canvas)).toBe(false); // in the band, but on the picture
   });
 
-  it('sends a bottom-edge tap to the menu when the controls already show (a control, or empty bar space)', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, controlsShown: true, fromBottom: 10 })).toBe('menuClick');
+  it('is empty where the picture reaches the bottom edge (landscape)', () => {
+    const canvas = { top: 0, width: 839, height: 412 }; // pillarboxed: the picture is full height
+    for (const y of [411.5, 400, 380, 364]) expect(inMenuWakeBand(y, canvas)).toBe(false);
+  });
+});
+
+describe('classifyTap in the menu wake band (rulings R12, R13)', () => {
+  const menu = { width: 400, menuActive: true, controlsShown: false };
+  it('shows the hidden controls on a tap in the band, HDMV or BD-J', () => {
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, inWakeBand: true })).toBe('showControls');
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, bdjMenuVisible: true, inWakeBand: true })).toBe('showControls');
+  });
+
+  it('sends any other tap to the menu, the picture included', () => {
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, inWakeBand: false })).toBe('menuClick');
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, menu)).toBe('menuClick');
+  });
+
+  it('sends a tap in the band to the menu when the controls already show (a control, or empty bar space)', () => {
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, controlsShown: true, inWakeBand: true })).toBe('menuClick');
   });
 
   it('leaves taps outside a menu as they were', () => {
-    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, fromBottom: 10 })).toBe('toggleControls');
+    expect(classifyTap(null, { x: 200, timeMs: 0 }, { ...menu, menuActive: false, inWakeBand: true })).toBe('toggleControls');
   });
 
   it('never pairs a tap that showed the controls into a double tap', () => {
     expect(pairableTap('showControls', { x: 390, timeMs: 0 })).toBeNull();
+  });
+});
+
+describe('missedMenuTapShowsControls (ruling R13)', () => {
+  it('shows the controls for a touch that missed, not for a mouse or pen click', () => {
+    expect(missedMenuTapShowsControls('touch')).toBe(true);
+    expect(missedMenuTapShowsControls('mouse')).toBe(false);
+    expect(missedMenuTapShowsControls('pen')).toBe(false);
   });
 });

@@ -178,6 +178,8 @@ export type EngineEvent =
   | { readonly type: 'soundEffect'; readonly id: number }
   /** After a pointer move: the menu button under the pointer, for the cursor. */
   | { readonly type: 'pointerTarget'; readonly button: number | null }
+  /** A pointer click on an HDMV menu hit no button of the shown page (the graphics controller's hit test): the disc took no action. */
+  | { readonly type: 'menuTapMissed' }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
   /** Files of a load are not UTF-8 and no encoding was given: ask the user, then send addTextSubtitles again with one. */
