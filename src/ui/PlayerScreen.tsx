@@ -8,6 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
+import { classifyTap, DOUBLE_TAP_MS, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -57,6 +58,20 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const playing = snapshot.engineState === 'playing';
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
+  /** Touch state: the previous tap, the delayed single-tap timer, whether the controls were hidden when the current touch began, and whether the last pointerup was touch (its synthesized click is ignored). */
+  const lastTap = useRef<Tap | null>(null);
+  const tapTimer = useRef<number | null>(null);
+  const idleAtTouchStart = useRef(false);
+  const idleRef = useRef(idle);
+  idleRef.current = idle;
+  const lastUpWasTouch = useRef(false);
+
+  useEffect(
+    () => () => {
+      if (tapTimer.current !== null) window.clearTimeout(tapTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -192,7 +207,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   }, [controller, maskedNotice]);
 
   const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
-    if (!snapshot.menuActive) return;
+    if (e.pointerType === 'touch' || !snapshot.menuActive) return;
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
     if (!point) return;
     const first = pendingMove.current === null;
@@ -205,7 +220,59 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  const onCanvasPointerDown = (e: PointerEvent<HTMLCanvasElement>): void => {
+    // Runs before the player's own pointerdown wakes the controls, so it sees whether they were hidden.
+    if (e.pointerType === 'touch') idleAtTouchStart.current = idleRef.current;
+  };
+
+  const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
+    lastUpWasTouch.current = e.pointerType === 'touch';
+    if (e.pointerType !== 'touch') return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
+    const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: snapshot.menuActive });
+    lastTap.current = tap;
+    if (tapTimer.current !== null) {
+      window.clearTimeout(tapTimer.current);
+      tapTimer.current = null;
+    }
+    switch (action) {
+      case 'menuClick': {
+        const point = toMenuSpace(e.clientX, e.clientY, rect);
+        if (point) controller.pointer('click', point.x, point.y);
+        break;
+      }
+      case 'seekBack':
+      case 'seekForward': {
+        const op = keyActionUo({ type: 'seekBy', deltaUs: 0 }, uoContext(controller));
+        if (op && !controller.allow(op)) break;
+        controller.seekBy(action === 'seekForward' ? 10_000_000 : -10_000_000);
+        break;
+      }
+      case 'toggleControls': {
+        const wasIdle = idleAtTouchStart.current;
+        // Delayed so that the first tap of a double tap doesn't flash the controls.
+        tapTimer.current = window.setTimeout(() => {
+          tapTimer.current = null;
+          if (wasIdle) {
+            setIdle(false);
+            setActivity((a) => a + 1);
+          } else {
+            setIdle(true);
+          }
+        }, DOUBLE_TAP_MS);
+        break;
+      }
+      case 'none':
+        break;
+    }
+  };
+
   const onCanvasClick = (e: MouseEvent<HTMLCanvasElement>): void => {
+    if (lastUpWasTouch.current) {
+      lastUpWasTouch.current = false; // the click the browser synthesized after a tap, already handled on pointerup
+      return;
+    }
     if (!snapshot.menuActive) {
       controller.togglePlay();
       return;
@@ -251,6 +318,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
         data-testid="video-canvas"
         onPointerMove={onCanvasPointerMove}
+        onPointerDown={onCanvasPointerDown}
+        onPointerUp={onCanvasPointerUp}
         onClick={onCanvasClick}
       />
       <div className="notices">
