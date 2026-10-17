@@ -1,0 +1,28 @@
+# Lives on the NAS as ~/bluray-server/compose.yaml; written by deploy.sh.
+services:
+  bluray-server:
+    image: bluray-server:latest
+    container_name: bluray-server
+    restart: unless-stopped
+    environment:
+      LIBRARY_ROOTS: drv0=/library/drv0,drv2=/library/drv2,drv3=/library/drv3,drv5=/library/drv5,drv6=/library/drv6,drv7=/library/drv7,drv8=/library/drv8
+      DATA_DIR: /data
+      PORT: "8080"
+    volumes:
+      - /mnt/drv0/BDMVs:/library/drv0:ro
+      - /mnt/drv2/BDMVs:/library/drv2:ro
+      - /mnt/drv3/BDMVs:/library/drv3:ro
+      - /mnt/drv5/BDMVs:/library/drv5:ro
+      - /mnt/drv6/BDMVs:/library/drv6:ro
+      - /mnt/drv7/BDMVs:/library/drv7:ro
+      - /mnt/drv8/BDMVs:/library/drv8:ro
+      - bluray-data:/data
+    networks:
+      - caddy_default
+
+volumes:
+  bluray-data:
+
+networks:
+  caddy_default:
+    external: true
