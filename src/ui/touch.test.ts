@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, DOUBLE_TAP_MS } from './touch';
+import { classifyTap, DOUBLE_TAP_MS, pairableTap } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -25,5 +25,15 @@ describe('classifyTap', () => {
 
   it('treats a second tap after the window as a fresh tap', () => {
     expect(classifyTap({ x: 800, timeMs: 0 }, { x: 800, timeMs: DOUBLE_TAP_MS + 1 }, ctx)).toBe('toggleControls');
+  });
+});
+
+describe('pairableTap', () => {
+  it('keeps a tap for pairing unless it clicked a menu button', () => {
+    const tap = { x: 800, timeMs: 0 };
+    expect(pairableTap('toggleControls', tap)).toBe(tap);
+    expect(pairableTap('menuClick', tap)).toBeNull();
+    // a quick tap after a menu click is a fresh tap, not a seek
+    expect(classifyTap(pairableTap('menuClick', tap), { x: 800, timeMs: 100 }, ctx)).toBe('toggleControls');
   });
 });

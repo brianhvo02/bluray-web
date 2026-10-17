@@ -21,3 +21,8 @@ export function classifyTap(prev: Tap | null, tap: Tap, ctx: { width: number; me
   }
   return 'toggleControls';
 }
+
+/** The tap a following tap pairs with: a tap that clicked a menu button never starts a double tap. */
+export function pairableTap(action: TapAction, tap: Tap): Tap | null {
+  return action === 'menuClick' ? null : tap;
+}

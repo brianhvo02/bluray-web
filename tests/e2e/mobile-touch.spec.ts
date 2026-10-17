@@ -1,6 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { telemetry } from './telemetry';
 
+const HIDE_CONTROLS_MS = 3000; // PlayerScreen's idle timeout
+
 // Touch input on the video (Pixel 7 emulation, pointerType 'touch').
 const MENU_DISC = 'fixtures/synthetic/disc-menu'; // see menus.spec.ts for its layout
 const DISC = 'fixtures/synthetic/disc1'; // playlist 00000 is 8 s long
@@ -26,6 +28,12 @@ test('a tap on a menu button activates it', async ({ page }) => {
   await page.touchscreen.tap(a.x, a.y);
   await expectMenu(page, false);
   await expect(page.getByTestId('popup')).toBeVisible({ timeout: 5_000 });
+  // A's activated sound plays once per activation: a second click (the browser's synthesized one) would add a sound
+  // or, outside the menu, pause the title.
+  await page.waitForTimeout(1_000);
+  const t = await page.evaluate(() => (window as unknown as { __blurayTelemetry?: { soundsPlayed: number } }).__blurayTelemetry);
+  expect(t?.soundsPlayed).toBe(1);
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing');
 });
 
 test('a double tap on the right third seeks forward', async ({ page }) => {
@@ -42,4 +50,24 @@ test('a double tap on the right third seeks forward', async ({ page }) => {
   await page.touchscreen.tap(x, y);
   // +10 s is clamped to the 8 s playlist: the clock jumps far past ordinary playback within the poll window.
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 1_500, intervals: [50] }).toBeGreaterThanOrEqual(6_000_000);
+  // The clamped seek reaches the end of the 8 s playlist; what matters is that the taps never paused it.
+  await expect(page.getByTestId('player')).not.toHaveAttribute('data-state', 'paused');
+});
+
+// disc1 is 8 s, so this seeks back (a forward seek would end playback and show the controls).
+test('a double tap on the left third seeks back while the controls are hidden and leaves them hidden', async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await page.getByTestId('playlist-00000').click();
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
+  await expect(page.getByTestId('player')).toHaveClass(/idle/, { timeout: HIDE_CONTROLS_MS + 2_000 });
+  const before = (await telemetry(page))?.clockUs ?? 0;
+  const box = (await page.getByTestId('video-canvas').boundingBox())!;
+  const x = box.x + box.width * 0.15;
+  const y = box.y + box.height / 2;
+  await page.touchscreen.tap(x, y);
+  await page.touchscreen.tap(x, y);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? Infinity, { timeout: 2_000 }).toBeLessThanOrEqual(before - 2_000_000);
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId('player')).toHaveClass(/idle/);
 });

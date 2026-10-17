@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, DOUBLE_TAP_MS, type Tap } from './touch';
+import { classifyTap, DOUBLE_TAP_MS, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -58,10 +58,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const playing = snapshot.engineState === 'playing';
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
-  /** Touch state: the previous tap, the delayed single-tap timer, whether the controls were hidden when the current touch began, and whether the last pointerup was touch (its synthesized click is ignored). */
+  /** Touch state: the previous tap, the delayed single-tap timer, whether the last pointerup was touch (its synthesized click is ignored). */
   const lastTap = useRef<Tap | null>(null);
   const tapTimer = useRef<number | null>(null);
-  const idleAtTouchStart = useRef(false);
   const idleRef = useRef(idle);
   idleRef.current = idle;
   const lastUpWasTouch = useRef(false);
@@ -220,18 +219,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
-  const onCanvasPointerDown = (e: PointerEvent<HTMLCanvasElement>): void => {
-    // Runs before the player's own pointerdown wakes the controls, so it sees whether they were hidden.
-    if (e.pointerType === 'touch') idleAtTouchStart.current = idleRef.current;
-  };
-
   const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
     lastUpWasTouch.current = e.pointerType === 'touch';
     if (e.pointerType !== 'touch') return;
     const rect = e.currentTarget.getBoundingClientRect();
     const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
     const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: snapshot.menuActive });
-    lastTap.current = tap;
+    lastTap.current = pairableTap(action, tap);
     if (tapTimer.current !== null) {
       window.clearTimeout(tapTimer.current);
       tapTimer.current = null;
@@ -250,11 +244,10 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         break;
       }
       case 'toggleControls': {
-        const wasIdle = idleAtTouchStart.current;
         // Delayed so that the first tap of a double tap doesn't flash the controls.
         tapTimer.current = window.setTimeout(() => {
           tapTimer.current = null;
-          if (wasIdle) {
+          if (idleRef.current) {
             setIdle(false);
             setActivity((a) => a + 1);
           } else {
@@ -293,6 +286,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     setActivity((a) => a + 1);
   };
 
+  const isVideoTouch = (e: PointerEvent<HTMLElement>): boolean => e.pointerType === 'touch' && e.target === canvasRef.current;
+
   const controlsVisible = !idle || !playing;
   // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading.
   const showPicker = pickerOpen || (snapshot.currentPlaylistId === null && snapshot.engineState !== 'loading');
@@ -305,12 +300,14 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       data-state={snapshot.engineState}
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
-      onPointerMove={wake}
+      onPointerMove={(e) => {
+        if (!isVideoTouch(e)) wake();
+      }}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      onPointerDown={() => {
+      onPointerDown={(e) => {
         setPressed(true);
-        wake();
+        if (!isVideoTouch(e)) wake(); // a touch on the video shows or hides the controls on its own, after the double-tap window
       }}
     >
       <canvas
@@ -318,7 +315,6 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
         data-testid="video-canvas"
         onPointerMove={onCanvasPointerMove}
-        onPointerDown={onCanvasPointerDown}
         onPointerUp={onCanvasPointerUp}
         onClick={onCanvasClick}
       />
