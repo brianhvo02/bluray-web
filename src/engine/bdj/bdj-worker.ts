@@ -139,6 +139,7 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
         const clipIds = new Set([...disc.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
         model = { disc, clips: await loadClips(source, [...clipIds].filter((id) => source.exists(clipInfoPath(id)))) };
       })();
+      loading.catch(() => undefined); // awaited below; this only keeps a failure while the runtime is set up from going unhandled
       const loaded = (): NonNullable<typeof model> => {
         if (!model) throw new Error('the disc model is not loaded yet');
         return model;

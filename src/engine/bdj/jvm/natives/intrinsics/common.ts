@@ -54,7 +54,7 @@ export function slotOf(cls: JClass, name: string, desc: string, isStatic = false
 
 /** Per-class data an intrinsic computes once (field slots), with a one-entry fast path. */
 export function perClass<T>(make: (cls: JClass) => T): (cls: JClass) => T {
-  const all = new Map<JClass, T>();
+  const all = new WeakMap<JClass, T>();
   let lastCls: JClass | null = null;
   let last: T | undefined;
   return (cls) => {

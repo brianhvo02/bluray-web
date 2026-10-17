@@ -11,7 +11,8 @@ import { Invoke, setBytecodeProfile } from '../../src/engine/bdj/jvm/interpreter
 import type { BytecodeProfile } from '../../src/engine/bdj/jvm/interpreter';
 import { Jvm } from '../../src/engine/bdj/jvm/jvm';
 import type { StackTrace } from '../../src/engine/bdj/jvm/jvm';
-import type { JClass } from '../../src/engine/bdj/jvm/loader';
+import { JClass } from '../../src/engine/bdj/jvm/loader';
+import { parseClassFile } from '../../src/engine/bdj/jvm/classfile';
 import { Vfs } from '../../src/engine/bdj/jvm/vfs';
 import { ZipArchive } from '../../src/engine/bdj/jvm/zip';
 import type { JArray, JObject, JValue } from '../../src/engine/bdj/jvm/values';
@@ -185,6 +186,35 @@ const pixel = (r: () => number): number => {
   const a = pick(r, [0, 255, int(r, 1, 254)]);
   return ((a << 24) | int(r, 0, 0xffffff)) | 0;
 };
+
+describe('scope', () => {
+  it("applies only to the class library's classes, not to a disc's class of the same name", () => {
+    const jvm = sides.on.jvm;
+    const bytes = assembleClass('sun/awt/image/PNGImageDecoder', [
+      { name: 'update_crc', desc: '(I[BII)I', code: [0x03, 0xac] },
+      { name: 'produceImage', desc: '()V', access: 0x0001, code: [0xb1] },
+    ]);
+    const object = jvm.bootClass('java/lang/Object');
+    const cls = new JClass({
+      name: 'sun/awt/image/PNGImageDecoder',
+      file: parseClassFile(bytes),
+      superClass: object,
+      interfaces: [],
+      loader: jvm.heap.newObject(object), // a disc's class loader
+      protectionDomain: null,
+      componentType: null,
+      primitive: false,
+      objectClass: object,
+      intrinsics: jvm.natives.intrinsics,
+      loopHooks: jvm.natives.loopHooks,
+    });
+    expect(cls.methods.get('update_crc(I[BII)I')!.intrinsic).toBeUndefined();
+    expect(cls.methods.get('produceImage()V')!.loopHooks).toBeUndefined();
+    const boot = jvm.bootClass('sun/awt/image/PNGImageDecoder');
+    expect(boot.methods.get('update_crc(I[BII)I')!.intrinsic).toBeDefined();
+    expect(boot.methods.get('produceImage()V')!.loopHooks).toBeDefined();
+  });
+});
 
 describe('BDGraphicsBase.drawSpanN', () => {
   interface Graphics {

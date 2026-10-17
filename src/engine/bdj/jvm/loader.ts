@@ -205,7 +205,10 @@ export class JClass {
       let argSlots = isStatic ? 0 : 1;
       for (const a of args) argSlots += isWide(a) ? 2 : 1;
       const key = `${init.name}.${m.name}${m.desc}`;
-      const hooks = init.loopHooks?.get(key);
+      // intrinsics and loop hooks are written for the class library's own classes, never for a disc's class that
+      // happens to have the same name
+      const boot = init.loader === null;
+      const hooks = boot ? init.loopHooks?.get(key) : undefined;
       methods.set(m.name + m.desc, {
         cls: this,
         name: m.name,
@@ -222,7 +225,7 @@ export class JClass {
         isSynchronized: (m.access & ACC_SYNCHRONIZED) !== 0,
         nativeKey: `${init.name}.${m.name}${m.desc}`,
         native: undefined,
-        intrinsic: init.intrinsics?.get(key),
+        intrinsic: boot ? init.intrinsics?.get(key) : undefined,
         loopHooks: hooks ? new Map(hooks.map((h) => [h.pc, h.fn])) : undefined,
         frameTemplate: undefined,
         tiny: undefined,
@@ -236,7 +239,7 @@ export class JClass {
       const m = methods.get(key.slice(init.name.length + 1));
       if (!m?.code) throw new Error(`replaced native ${key} names no method with code in ${init.name}`);
     }
-    for (const key of init.intrinsics?.keys() ?? []) {
+    for (const key of init.loader === null ? (init.intrinsics?.keys() ?? []) : []) {
       if (!key.startsWith(`${init.name}.`)) continue;
       // An intrinsic whose key no longer names a Java method would silently stop applying; one on a synchronized
       // method would skip its monitor.
