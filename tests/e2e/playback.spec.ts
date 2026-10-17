@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { CHROME_ONLY, skipWithoutH264 } from './support';
-import { collectWindows, expectInSync, telemetry, type TelemetrySample } from './telemetry';
+import { collectWindows, expectInSync, pausedClockUs, recordTelemetrySamples, telemetry, telemetrySamples, type TelemetrySample } from './telemetry';
 
 const DISC = 'fixtures/synthetic/disc1';
 async function openDisc(page: Page, folder = DISC): Promise<void> {
@@ -92,15 +92,15 @@ test('a key press brings the hidden controls back', async ({ page }) => {
 });
 
 test('pauses and resumes', async ({ page }) => {
+  await recordTelemetrySamples(page);
   await openDisc(page);
   await startPlaylist(page, '00000');
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5000 }).toBeGreaterThan(500_000);
+  const beforePause = (await telemetrySamples(page)).length;
   await page.keyboard.press('Space');
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
-  await page.waitForTimeout(300); // let the last pre-pause telemetry sample land
-  const pausedSample = await telemetry(page);
-  expect(pausedSample).not.toBeNull();
-  const paused = (pausedSample as TelemetrySample).clockUs;
+  // Not the latest sample: up to 500 ms after the pause that is still one taken while playing.
+  const paused = await pausedClockUs(page, beforePause);
   expect(paused).toBeGreaterThan(0);
   await page.waitForTimeout(1000);
   const after = await telemetry(page);
