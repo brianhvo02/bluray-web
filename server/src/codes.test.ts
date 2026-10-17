@@ -39,4 +39,9 @@ describe('pairing codes', () => {
     expect(codeHash('k7qm-4xp2-r9td')).toBe(expected);
     expect(() => codeHash('nope')).toThrow();
   });
+
+  it('codeHash matches the rendezvous Worker on the shared test vector', () => {
+    // Same vector as rendezvous/src/worker.test.ts, which hashes with WebCrypto.
+    expect(codeHash('k7qm-4xp2-r9td')).toBe('0f54f555d41af4fe0469424a47ffcbfb19a84d3629a0cbc0ffa8385557ea6dbf');
+  });
 });

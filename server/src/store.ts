@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Device, PairingCode } from './auth';
 
 export interface AuthData {
@@ -43,6 +43,23 @@ function syncDir(dir: string): void {
     }
   } catch {
     // Best effort.
+  }
+}
+
+/**
+ * Creates the mode-600 file `path` holding `data` unless it already exists. link() rather than rename():
+ * a whole file appears or nothing, and a file another process made first is kept.
+ */
+export function createOnce(path: string, data: string | Buffer): void {
+  const temp = `${path}.${process.pid}.tmp`;
+  writeSynced(temp, data);
+  try {
+    linkSync(temp, path);
+    syncDir(dirname(path));
+  } catch (err) {
+    if (!isCode(err, 'EEXIST')) throw err;
+  } finally {
+    unlinkSync(temp);
   }
 }
 
@@ -89,17 +106,7 @@ export class Store {
   secret(): Buffer {
     if (this.secretBytes) return this.secretBytes;
     const path = join(this.dir, 'secret');
-    const temp = `${path}.${process.pid}.tmp`;
-    writeSynced(temp, randomBytes(SECRET_BYTES));
-    try {
-      // link() rather than rename(): a whole file appears or nothing, and a secret another process made first is kept.
-      linkSync(temp, path);
-      syncDir(this.dir);
-    } catch (err) {
-      if (!isCode(err, 'EEXIST')) throw err;
-    } finally {
-      unlinkSync(temp);
-    }
+    createOnce(path, randomBytes(SECRET_BYTES));
     const secret = readFileSync(path);
     if (secret.length !== SECRET_BYTES) throw new Error(`${path} is not a ${SECRET_BYTES}-byte secret`);
     this.secretBytes = secret;
