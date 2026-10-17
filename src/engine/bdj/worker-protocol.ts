@@ -7,7 +7,6 @@
  */
 
 import type { BdjErrorCode } from './errors';
-import type { TitleInfo } from './host';
 import type { ClassLibrarySource } from './runtime';
 
 /** A call argument or reply value; a Java long crosses as a decimal string. */
@@ -21,7 +20,6 @@ export type ToBdj =
       readonly discFiles: readonly (readonly [string, Blob])[];
       readonly discId: string | null;
       readonly classLibrary: ClassLibrarySource;
-      readonly titles: readonly (TitleInfo | null)[];
       readonly playerSettings?: unknown;
     }
   | { readonly type: 'start'; readonly title: number }
@@ -33,7 +31,9 @@ export type FromBdj =
   | { readonly type: 'booted'; readonly bootMs: number }
   | { readonly type: 'call'; readonly id: number; readonly name: BdjCallName; readonly args: readonly BdjWireValue[] }
   | { readonly type: 'log'; readonly line: string; readonly error: boolean }
-  | { readonly type: 'failed'; readonly code: BdjErrorCode | 'halted' | 'timeout'; readonly message: string };
+  | { readonly type: 'failed'; readonly code: BdjFailureCode; readonly message: string };
+
+export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';
 
 /** The natives the engine answers; getPlaylistInfoN is answered in the BD-J worker from its own disc model. */
 export type BdjCallName =

@@ -1,6 +1,8 @@
 import { AudioWriter } from './audio/audio-writer';
 import { OUTPUT_SAMPLE_RATE, RingWriter, ringViews } from './audio/ring';
 import { type PlayItem } from './bdmv/mpls-parser';
+import type { ClassLibrarySource } from './bdj/runtime';
+import type { WorkerLike } from './bdj/session';
 import { codingName, isVideoCoding } from './bdmv/stream-types';
 import { MasterClock } from './clock/master-clock';
 import { Decimator } from './decode/decimator';
@@ -68,6 +70,10 @@ export interface PlayerDeps {
   readonly createAssDeps?: () => Promise<AssDeps>;
   /** The GPU backend for video shaders, or why there is none; created once, when the first set is chosen. */
   readonly createShaderBackend?: (events: { lost(): void; restored(): void }) => ShaderBackend | string;
+  /** A new BD-J worker (bdj/bdj-worker.ts) for each BD-J session. */
+  readonly createBdjWorker?: () => WorkerLike;
+  /** The BD-J class library jars; fetched once, as soon as a BD-J disc is opened. */
+  readonly loadClassLibrary?: () => Promise<ClassLibrarySource>;
 }
 
 export interface AssDeps {
@@ -235,6 +241,8 @@ export class Player {
   private pgRegs: RegisterFile | null = null;
   /** The disc ID BD-J's host will need (id.bdmv); not private only until something reads it (noUnusedLocals). */
   protected bdjDiscId: string | null = null;
+  /** The class library, loading from the first BD-J disc on; not private only until something reads it. */
+  protected bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -473,6 +481,7 @@ export class Player {
     this.source = source;
     this.disc = disc;
     this.soundsPlayed = 0;
+    if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
     this.pgRegs = new RegisterFile();
     applyDiscProfile(this.pgRegs, disc.index);
@@ -488,6 +497,16 @@ export class Player {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
+  }
+
+  /** Starts fetching the jars while the rest of the disc opens; a failed load is retried with the next BD-J disc. */
+  private loadClassLibrary(): void {
+    if (this.bdjClassLibrary || !this.deps.loadClassLibrary) return;
+    const loading = this.deps.loadClassLibrary();
+    this.bdjClassLibrary = loading;
+    loading.catch(() => {
+      if (this.bdjClassLibrary === loading) this.bdjClassLibrary = null;
+    });
   }
 
   private emitIndexTitles(disc: DiscModel): void {

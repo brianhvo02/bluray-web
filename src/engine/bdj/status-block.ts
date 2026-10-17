@@ -22,7 +22,7 @@ class StatusBlockViews {
   protected readonly longs: BigInt64Array;
   protected readonly ints: Int32Array;
 
-  constructor(buffer: SharedArrayBuffer) {
+  constructor(readonly buffer: SharedArrayBuffer) {
     this.longs = new BigInt64Array(buffer, 0, BIGINT_WORDS);
     this.ints = new Int32Array(buffer, INT_OFFSET, INT_WORDS);
   }

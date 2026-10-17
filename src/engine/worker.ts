@@ -1,4 +1,7 @@
 import audioWasmUrl from '../wasm/audio/audio.wasm?url';
+import rtJarUrl from '../bdj-classlib/rt-bdj.jar?url';
+import libblurayJarUrl from '../bdj-classlib/libbluray-j2se.jar?url';
+import libblurayAwtJarUrl from '../bdj-classlib/libbluray-awt-j2se.jar?url';
 import defaultFontUrl from './ass/default-font.ttf?url';
 import { readFontFile } from './ass/font-tables';
 import { createFontFaceLoader } from './ass/fonts';
@@ -21,6 +24,12 @@ interface WorkerScope {
 const scope = self as unknown as WorkerScope;
 const WASM_FETCH_TIMEOUT_MS = 20_000;
 
+async function fetchBytes(url: string): Promise<Uint8Array> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 const player = new Player({
   emit: (event) => scope.postMessage(event),
   videoCodecApi: browserVideoCodecApi,
@@ -34,6 +43,11 @@ const player = new Player({
   createShaderBackend: (events) => createWebGlBackend((w, h) => new OffscreenCanvas(w, h), events),
   // Commands run one at a time, so a stalled download would block every later one: give up and report it instead.
   createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) }))),
+  createBdjWorker: () => new Worker(new URL('./bdj/bdj-worker.ts', import.meta.url), { type: 'module' }),
+  loadClassLibrary: async () => {
+    const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);
+    return { rt, libbluray, libblurayAwt };
+  },
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {
     const response = await fetch(defaultFontUrl, { signal: AbortSignal.timeout(WASM_FETCH_TIMEOUT_MS) });
