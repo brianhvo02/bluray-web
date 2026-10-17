@@ -14,9 +14,9 @@
  */
 
 import type { Mpls } from '../bdmv/mpls-parser';
-import { parseSoundBdmv, type SoundData } from '../bdmv/sound-parser';
-import { readWhole, type ByteSource } from '../disc/byte-source';
-import { SOUND_PATH, type DiscModel } from '../disc/open-disc';
+import type { SoundData } from '../bdmv/sound-parser';
+import type { ByteSource } from '../disc/byte-source';
+import type { DiscModel } from '../disc/open-disc';
 import { PSR, type RegisterFile } from '../hdmv/registers';
 import { EMPTY_UO_MASK, combineUoMasks, parseUoMaskTable, uoMaskBits, type UoMask, type UoOp } from '../hdmv/uo-mask';
 import type { PlayAt } from '../nav/navigator';
@@ -61,8 +61,6 @@ const MAX_ANGLE = 8;
 const MAX_SOUND_ID = 0xff;
 const BDJ_PLAYBACK_START = 1;
 const BDJ_PLAYBACK_STOP = 2;
-const BLURAY_RATE_PAUSED = 0;
-const BLURAY_RATE_NORMAL = 90000;
 
 const num = (v: BdjWireValue | undefined): number => Number(v ?? 0);
 const long = (v: BdjWireValue | undefined): bigint => BigInt(String(v ?? 0));
@@ -82,14 +80,12 @@ export class PlayerBdjHost {
   private pendingSteps: readonly SeekStep[] = [];
   private waitStart = false;
   private still = false;
-  private playing = false;
   private lastTime45 = -1;
   private titleUo: UoMask = EMPTY_UO_MASK;
   private st0Uo: UoMask = EMPTY_UO_MASK;
   private uoMaskValue: UoMask = EMPTY_UO_MASK;
   private uoBits = 0n;
   private sounds: SoundData | null = null;
-  private soundLoad: Promise<SoundData | null> | null = null;
   private readonly unbindPsrs: (() => void) | null;
 
   constructor(private readonly deps: PlayerBdjHostDeps) {
@@ -194,7 +190,6 @@ export class PlayerBdjHost {
     const opened = this.deps.port.playPlaylist(id, last && mpls ? playAtOf(mpls, last) : {});
     this.pendingSteps = [];
     this.waitStart = true; // playback is triggered by bdpriv_select_rate()
-    this.playing = false;
     const ok = await opened;
     if (seq !== this.openSeq) return 1; // a later selection or close superseded this one
     if (!ok) {
@@ -323,30 +318,30 @@ export class PlayerBdjHost {
 
   // ---- the other calls ----
 
-  /** bd_select_angle(angle - 1) at RELAXED (no UO check): nav_set_angle, then PSR3 and the clip reopened. */
+  /**
+   * bd_select_angle(angle - 1) at RELAXED (no UO check): nav_set_angle, PSR3, then _open_m2ts reopens the clip (its UO
+   * mask and PSRs). The player itself does not switch angle streams.
+   */
   private selectAngle(angle: number): number {
     if (!this.playlist) return 0;
     const a = (angle - 1) >>> 0;
     if (a > MAX_ANGLE || a === this.angle) return 1;
     this.angle = a;
     this.deps.regs.psrWrite(PSR.ANGLE_NUMBER, a + 1);
+    this.openClip(this.currentItem);
     return 1;
   }
 
   /**
    * bdpriv_select_rate: BD_EVENT_STILL for the application, which pauses or plays; bdj_wait_start holds a newly
-   * selected playlist until a START. The application's rate change is then bd_set_rate (BDJ_EVENT_RATE).
+   * selected playlist until a START. No BDJ_EVENT_RATE: that comes from the application's own bd_set_rate (setRate).
+   * The player is told every time, so a pause or end it reached by itself does not hide Java's START.
    */
   private selectRate(rate: number, reason: number): number {
     if (reason === BDJ_PLAYBACK_STOP) return 1;
     if (reason === BDJ_PLAYBACK_START) this.waitStart = false;
     this.still = rate < 0.5;
-    const playing = !this.waitStart && !this.still;
-    if (playing !== this.playing && this.playlist) {
-      this.playing = playing;
-      this.deps.port.setRate(playing ? 1 : 0);
-      this.setRate(playing ? BLURAY_RATE_NORMAL : BLURAY_RATE_PAUSED);
-    }
+    if (this.playlist) this.deps.port.setRate(!this.waitStart && !this.still ? 1 : 0);
     return 1;
   }
 
@@ -360,31 +355,17 @@ export class PlayerBdjHost {
   private soundEffect(id: number): number {
     if (this.sounds && id >= this.sounds.clips.length) return -1;
     if (id < 0 || id > MAX_SOUND_ID) return -1;
-    void this.playSound(id);
+    this.playSound(id);
     return 0;
   }
 
-  /** The application's BD_EVENT_SOUND_EFFECT: bd_get_sound_effect loads the sounds on first use. */
-  private async playSound(id: number): Promise<void> {
-    const sounds = this.sounds ?? (await this.loadSounds());
-    if (sounds && id < sounds.clips.length) this.deps.port.playSound(id);
-  }
-
-  /** sound_get; a failed load is tried again on the next sound, as bd->sound_effects stays NULL. */
-  private loadSounds(): Promise<SoundData | null> {
-    this.soundLoad ??= (async () => {
-      const source = this.deps.source;
-      try {
-        return source.exists(SOUND_PATH) ? parseSoundBdmv(await readWhole(source, SOUND_PATH)) : null;
-      } catch {
-        return null; // sound_get fails on a missing, unreadable or damaged file
-      }
-    })().then((sounds) => {
-      this.sounds = sounds;
-      if (!sounds) this.soundLoad = null;
-      return sounds;
-    });
-    return this.soundLoad;
+  /**
+   * The application's BD_EVENT_SOUND_EFFECT: bd_get_sound_effect loads the sounds on first use (sound_get; the disc model
+   * parsed them at open). Without a usable sound.bdmv nothing is loaded and ids stay unchecked, as in libbluray.
+   */
+  private playSound(id: number): void {
+    this.sounds ??= this.deps.disc.sounds;
+    if (this.sounds && id < this.sounds.clips.length) this.deps.port.playSound(id);
   }
 
   /** _bd_set_virtual_package: refused while a playlist is open or outside a BD-J title. No virtual package is mounted. */

@@ -163,7 +163,7 @@ describe('PlayerBdjHost', () => {
     await h.play(500);
     expect(h.regs.psrRead(PSR.TIME)).toBeGreaterThan(inTime + 45_000 * 0.3);
     expect(h.of(BdjEvent.PTS).length).toBeGreaterThan(5);
-    expect(h.of(BdjEvent.RATE)).toEqual([90_000]);
+    expect(h.of(BdjEvent.RATE)).toEqual([]); // Java's own rate change is not echoed (bdpriv_select_rate)
   });
 
   it('raises PLAYITEM and updates PSR7 when playback crosses into the next play item', async () => {
@@ -209,17 +209,46 @@ describe('PlayerBdjHost', () => {
     expect(h.of(BdjEvent.SEEK)).toEqual([firstItem.outTime - firstItem.inTime, mark1.time - firstItem.inTime]);
   });
 
-  it('selectRate(0) pauses and raises RATE; STOP does nothing', async () => {
+  it('selectRate(0) pauses and a later rate plays again; STOP does nothing; no RATE echo', async () => {
     const h = await setup();
     await startPlaylist(h, 0);
     expect(await h.host.handle('selectRate', [0, 0])).toBe(1);
     await untilState(h, 'paused');
-    expect(h.of(BdjEvent.RATE)).toEqual([90_000, 0]);
-    await h.host.handle('selectRate', [0, STOP]);
-    expect(h.of(BdjEvent.RATE)).toEqual([90_000, 0]);
+    await h.host.handle('selectRate', [1, STOP]);
+    await h.play(300);
+    expect(h.state()).toBe('paused');
     await h.host.handle('selectRate', [1, 0]);
     await untilState(h, 'playing');
-    expect(h.of(BdjEvent.RATE)).toEqual([90_000, 0, 90_000]);
+    expect(h.of(BdjEvent.RATE)).toEqual([]);
+  });
+
+  it("raises RATE for the application's own rate changes (bd_set_rate)", async () => {
+    const h = await setup();
+    expect(h.host.setRate(0)).toBe(-1); // no playlist
+    await startPlaylist(h, 0);
+    expect(h.host.setRate(0)).toBe(0);
+    expect(h.host.setRate(90_000)).toBe(0);
+    expect(h.of(BdjEvent.RATE)).toEqual([0, 90_000]);
+  });
+
+  it('restarts a playlist that ended when Java seeks back and starts it again (menu loop)', async () => {
+    const h = await setup();
+    await startPlaylist(h, 1);
+    await untilState(h, 'ended', 20_000);
+    await h.host.handle('selectRate', [0, STOP]); // the JMF Handler's doStop at end of media
+    await h.host.handle('seek', [-1, -1, '0']);
+    await untilState(h, 'paused');
+    expect(await h.host.handle('selectRate', [1, START])).toBe(1);
+    await untilState(h, 'playing');
+  }, 30_000);
+
+  it('starts again after the player was paused from outside', async () => {
+    const h = await setup();
+    await startPlaylist(h, 0);
+    await h.player.handle({ type: 'pause' });
+    expect(h.state()).toBe('paused');
+    expect(await h.host.handle('selectRate', [1, START])).toBe(1);
+    await untilState(h, 'playing');
   });
 
   it('refuses playlist 100000 without closing the playing one', async () => {
@@ -310,6 +339,7 @@ describe('PlayerBdjHost', () => {
     expect(await h.host.handle('selectAngle', [2])).toBe(1);
     expect(h.regs.psrRead(PSR.ANGLE_NUMBER)).toBe(2);
     expect(h.of(BdjEvent.ANGLE).at(-1)).toBe(2);
+    expect(h.regs.psrRead(PSR.TIME)).toBe(h.disc.playlists.get('00000')!.playItems[0]!.inTime); // _open_m2ts again
   });
 
   it('sets the virtual package only without a playlist', async () => {

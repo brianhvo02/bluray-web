@@ -812,7 +812,7 @@ export class Player {
       this.navNextMark = this.navNextMark + 1 < s.timeline.markCount ? this.navNextMark + 1 : -1;
     }
     if (marks.length > 0) listener.marksReached(marks, item.index, lookupSpn(this.disc?.clips.get(s.playItems[item.index]!.clipId), clipTime45, true));
-    listener.position(item.index, clipTime45);
+    if (this.navSeeksPending === 0) listener.position(item.index, clipTime45); // not the old position while a seek is queued
   }
 
   /** _find_next_playmark: the first mark after `timeUs`. */

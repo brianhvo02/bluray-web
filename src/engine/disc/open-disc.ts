@@ -12,7 +12,7 @@ import { chooseMainTitle, hasRepeatedSegments } from './main-title';
 
 const INDEX_PATH = 'BDMV/INDEX.BDMV';
 const MOVIE_OBJECT_PATH = 'BDMV/MOVIEOBJECT.BDMV';
-export const SOUND_PATH = 'BDMV/AUXDATA/SOUND.BDMV';
+const SOUND_PATH = 'BDMV/AUXDATA/SOUND.BDMV';
 /** bdid_get: id.bdmv, then its backup. */
 const BDID_PATHS = ['CERTIFICATE/ID.BDMV', 'CERTIFICATE/BACKUP/ID.BDMV'];
 
