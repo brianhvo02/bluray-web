@@ -59,6 +59,21 @@ describe('PlatformSession', () => {
     expect(t.release).toHaveBeenCalledTimes(1);
   });
 
+  it('holds the wake lock through buffering', async () => {
+    const t = setup({ deferLock: true });
+    t.set({ engineState: 'buffering' });
+    expect(t.request).toHaveBeenCalledWith('screen');
+    t.resolveLock(); // granted while still buffering: kept, not released
+    await t.flush();
+    expect(t.release).not.toHaveBeenCalled();
+    t.set({ engineState: 'playing' });
+    t.set({ engineState: 'buffering' });
+    expect(t.request).toHaveBeenCalledTimes(1);
+    expect(t.release).not.toHaveBeenCalled();
+    t.set({ engineState: 'paused' });
+    expect(t.release).toHaveBeenCalledTimes(1);
+  });
+
   it('does not request twice while pending or held', async () => {
     const t = setup();
     t.set({ engineState: 'playing' });

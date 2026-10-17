@@ -79,24 +79,26 @@ export class PlatformSession {
         // Unsupported action in this browser.
       }
     };
-    const playing = (): boolean => {
-      const st = this.controller.getSnapshot().engineState;
-      return st === 'playing' || st === 'buffering';
-    };
     set('play', () => {
-      if (!playing()) this.controller.togglePlay();
+      if (!this.playing()) this.controller.togglePlay();
     });
     set('pause', () => {
-      if (playing()) this.controller.togglePlay();
+      if (this.playing()) this.controller.togglePlay();
     });
     set('seekbackward', (d) => this.controller.seekBy(-(d?.seekOffset ?? SEEK_SECONDS) * 1_000_000));
     set('seekforward', (d) => this.controller.seekBy((d?.seekOffset ?? SEEK_SECONDS) * 1_000_000));
   }
 
+  /** Playing or buffering: the wake lock and the Media Session both treat buffering as playing. */
+  private playing(): boolean {
+    const st = this.controller.getSnapshot().engineState;
+    return st === 'playing' || st === 'buffering';
+  }
+
   private sync(): void {
     if (this.disposed) return;
     const s = this.controller.getSnapshot();
-    if (s.engineState === 'playing') {
+    if (this.playing()) {
       if (!this.visibility.hidden()) this.requestLock();
     } else {
       this.releaseLock();
@@ -118,7 +120,7 @@ export class PlatformSession {
     p.then(
       (sentinel) => {
         this.pending = false;
-        if (this.disposed || this.controller.getSnapshot().engineState !== 'playing') {
+        if (this.disposed || !this.playing()) {
           sentinel.release().catch(() => {});
           return;
         }
