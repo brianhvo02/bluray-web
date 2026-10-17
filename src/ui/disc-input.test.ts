@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { collectFromDirectoryHandle, collectFromFileList, directoryFromDataTransfer } from './disc-input';
+import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
+import { normalizeDiscPaths } from '../engine/disc/paths';
 
 function file(name: string, relative = ''): File {
   const f = new File(['x'], name);
@@ -39,8 +40,37 @@ describe('disc input', () => {
   it('finds a dropped directory handle', async () => {
     const handle = dir('Movie', {});
     const dt = { items: [{ kind: 'file', getAsFileSystemHandle: async () => handle }] } as unknown as DataTransfer;
-    expect(await directoryFromDataTransfer(dt)).toBe(handle);
+    expect(await discFromDataTransfer(dt)).toEqual({ kind: 'handle', handle });
     const noHandles = { items: [{ kind: 'string' }] } as unknown as DataTransfer;
-    expect(await directoryFromDataTransfer(noHandles)).toBeNull();
+    expect(await discFromDataTransfer(noHandles)).toBeNull();
+  });
+
+  it('falls back to webkitGetAsEntry when items lack getAsFileSystemHandle', async () => {
+    const idx = new File([], 'index.bdmv');
+    const bdmv = {
+      isFile: false,
+      isDirectory: true,
+      name: 'BDMV',
+      createReader() {
+        let done = false;
+        return {
+          readEntries(ok: (e: unknown[]) => void) {
+            ok(done ? [] : [{ isFile: true, isDirectory: false, name: 'index.bdmv', file: (cb: (f: File) => void) => cb(idx) }]);
+            done = true;
+          },
+        };
+      },
+    };
+    const dt = { items: [{ kind: 'file', webkitGetAsEntry: () => bdmv }] } as unknown as DataTransfer;
+    expect(await discFromDataTransfer(dt)).toEqual({ kind: 'entries', entries: [['BDMV/index.bdmv', idx]] });
+  });
+
+  it('keeps names and BDMV-rooted paths from a file list so the disc still normalizes', () => {
+    const names = ['BDMV/index.bdmv', 'BDMV/PLAYLIST/00000.mpls', 'BDMV/CLIPINF/00001.clpi', 'BDMV/STREAM/00001.m2ts'];
+    const entries = collectFromFileList(names.map((n) => file(n.split('/').pop()!, n)));
+    expect(entries.map(([p]) => p)).toEqual(names);
+    expect([...normalizeDiscPaths(entries).keys()]).toEqual(names.map((n) => n.toUpperCase()));
+    const bare = file('index.bdmv');
+    expect(collectFromFileList([bare])).toEqual([['index.bdmv', bare]]);
   });
 });

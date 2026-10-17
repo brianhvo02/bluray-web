@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities } from './capabilities';
-import { collectFromDirectoryHandle, collectFromFileList, directoryFromDataTransfer } from './disc-input';
+import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
 interface LandingScreenProps {
@@ -68,14 +68,15 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
     setDragging(false);
     setLocalError(null);
     controller.startAudio();
-    const pending = directoryFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
+    const pending = discFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
     run(
-      pending.then(async (handle) => {
-        if (!handle) {
+      pending.then(async (dropped) => {
+        if (!dropped) {
           setLocalError('Drop the disc folder itself (the folder that contains BDMV).');
           return;
         }
-        await openHandle(handle);
+        if (dropped.kind === 'entries') controller.open(dropped.entries);
+        else await openHandle(dropped.handle);
       }),
     );
   };
@@ -135,7 +136,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
           )}
         </div>
       )}
-      {recent.length > 0 && (
+      {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>
           <ul>
