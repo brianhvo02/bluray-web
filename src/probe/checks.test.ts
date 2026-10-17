@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runChecks, type ProbeEnv, type WorkerProbe } from './checks';
 
 const GIB = 2 ** 30;
@@ -15,9 +15,7 @@ function fakeBigFile(name: string, size: number, wrap: boolean): File {
         arrayBuffer: async () => {
           const bytes = new Uint8Array(b - a);
           bytes[4] = 0x47;
-          const effective = wrap ? a % 2 ** 32 : a;
-          // sync is only valid when the offset survived; a wrapped read lands elsewhere
-          if (wrap && effective !== a) bytes[4] = 0;
+          if (wrap && a >= 2 ** 32) bytes[4] = 0; // a wrapped read lands elsewhere
           new DataView(bytes.buffer).setFloat64(8, a, true);
           return bytes.buffer;
         },
@@ -41,6 +39,8 @@ function env(over: Partial<ProbeEnv> & { files?: File[]; rate?: number } = {}): 
     globals: over.globals ?? {},
   };
 }
+
+afterEach(() => vi.useRealTimers());
 
 const find = async (e: ProbeEnv, name: string) => (await runChecks(e)).find((r) => r.name === name);
 
@@ -68,6 +68,37 @@ describe('runChecks', () => {
   it('keeps going when a check throws', async () => {
     const r = await runChecks(env({ worker: async () => { throw new Error('boom'); } }));
     expect(r.find((x) => x.name === 'hevc')?.ok).toBe(false);
+    expect(r.find((x) => x.name === 'audio-sample-rate')?.ok).toBe(true);
+  });
+
+  it('reports no m2ts over 4 GiB as untested and not ok', async () => {
+    const r = await find(env({ files: [fakeBigFile('00001.m2ts', GIB, false)] }), 'blob-slice-over-4gib');
+    expect(r?.ok).toBe(false);
+    expect(r?.detail.startsWith('untested:')).toBe(true);
+  });
+
+  it('hevc: hev1-only passes, decode failure and worker error fail, no clip fails', async () => {
+    const w = (hevc: WorkerProbe['hevc']) => async (): Promise<WorkerProbe> => ({ ...okWorker, hevc });
+    expect(await find(env({ worker: w({ hvc1: false, hev1: true, decoded: true }) }), 'hevc')).toEqual({ name: 'hevc', ok: true, detail: 'hev1' });
+    expect(await find(env({ worker: w({ hvc1: true, hev1: true, decoded: false }) }), 'hevc')).toEqual({ name: 'hevc', ok: false, detail: 'hvc1, first GOP did not decode' });
+    expect(await find(env({ worker: w({ hvc1: false, hev1: false, decoded: false, error: 'bad sps' }) }), 'hevc')).toEqual({ name: 'hevc', ok: false, detail: 'error: bad sps' });
+    expect(await find(env({ worker: w(null) }), 'hevc')).toEqual({ name: 'hevc', ok: false, detail: 'no HEVC clip in the folder' });
+  });
+
+  it('passes [path, File] entries to the worker', async () => {
+    const file = fakeBigFile('00001.m2ts', 5 * GIB, false);
+    let seen: ReadonlyArray<readonly [string, File]> = [];
+    await runChecks(env({ files: [file], worker: async (entries) => { seen = entries; return okWorker; } }));
+    expect(seen[0][0]).toBe('disc/BDMV/STREAM/00001.m2ts');
+    expect(seen[0][1]).toBe(file);
+  });
+
+  it('worker rows report timed out after 15 s while other rows still run', async () => {
+    vi.useFakeTimers();
+    const pending = runChecks(env({ worker: () => new Promise<WorkerProbe>(() => undefined) }));
+    await vi.advanceTimersByTimeAsync(15000);
+    const r = await pending;
+    for (const name of ['worker-raf', 'hevc', 'webgl2-float']) expect(r.find((x) => x.name === name)).toMatchObject({ ok: false, detail: 'timed out' });
     expect(r.find((x) => x.name === 'audio-sample-rate')?.ok).toBe(true);
   });
 });

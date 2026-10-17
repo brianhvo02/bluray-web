@@ -20,15 +20,20 @@ function pickFolder(): Promise<File[]> {
   });
 }
 
-function worker(files: readonly File[]): Promise<WorkerProbe> {
+function worker(entries: ReadonlyArray<readonly [string, File]>): Promise<WorkerProbe> {
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL('./probe-worker.ts', import.meta.url), { type: 'module' });
     w.onmessage = (e: MessageEvent<WorkerProbe>) => {
       resolve(e.data);
       w.terminate();
     };
-    w.onerror = (e) => reject(new Error(e.message || 'worker failed'));
-    w.postMessage({ files });
+    const fail = (message: string) => (): void => {
+      reject(new Error(message));
+      w.terminate();
+    };
+    w.onerror = fail('worker failed');
+    w.onmessageerror = fail('worker message failed');
+    w.postMessage({ entries });
   });
 }
 
@@ -39,7 +44,7 @@ const env: ProbeEnv = {
   globals: globalThis as unknown as Record<string, unknown>,
 };
 
-void runChecks(env).then((results) => {
+runChecks(env).then((results) => {
   root.replaceChildren();
   const table = document.createElement('table');
   for (const r of results) {
@@ -57,4 +62,6 @@ void runChecks(env).then((results) => {
     void navigator.clipboard.writeText(json).catch(() => window.prompt('Copy:', json));
   });
   root.append(table, copy);
+}).catch((err: unknown) => {
+  root.textContent = `Probe failed: ${err instanceof Error ? err.message : String(err)}`;
 });

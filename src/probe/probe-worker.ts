@@ -43,8 +43,7 @@ async function supported(codec: string): Promise<boolean> {
   }
 }
 
-async function hevc(files: readonly File[]): Promise<WorkerProbe['hevc']> {
-  const entries = files.map((f) => [f.webkitRelativePath || f.name, f] as const);
+async function hevc(entries: ReadonlyArray<readonly [string, File]>): Promise<WorkerProbe['hevc']> {
   const source = new FileSource(normalizeDiscPaths(entries));
   let target: { clip: string; pid: number } | null = null;
   for (const name of source.list('BDMV/CLIPINF')) {
@@ -98,7 +97,15 @@ async function hevc(files: readonly File[]): Promise<WorkerProbe['hevc']> {
   try {
     decoder.configure({ codec: chosen });
     for (const u of units) decoder.decode(new EncodedVideoChunk({ type: u.key ? 'key' : 'delta', timestamp: u.pts, data: u.data }));
-    await Promise.race([decoder.flush(), new Promise((resolve) => setTimeout(resolve, 5000))]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(resolve, 5000);
+    });
+    try {
+      await Promise.race([decoder.flush(), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   } catch {
     // leaves decoded false
   }
@@ -107,12 +114,12 @@ async function hevc(files: readonly File[]): Promise<WorkerProbe['hevc']> {
   return result;
 }
 
-scope.onmessage = async (event: MessageEvent<{ files: File[] }>) => {
-  const { files } = event.data;
+scope.onmessage = async (event: MessageEvent<{ entries: Array<readonly [string, File]> }>) => {
+  const { entries } = event.data;
   const [raf, gl, hevcResult] = await Promise.all([
     timerP95(),
     Promise.resolve().then(webgl).catch(() => ({ float: false, half: false })),
-    hevc(files).catch(() => null),
+    hevc(entries).catch((err: unknown) => ({ hvc1: false, hev1: false, decoded: false, error: err instanceof Error ? err.message : String(err) })),
   ]);
   const probe: WorkerProbe = { hevc: hevcResult, raf, webgl: gl };
   scope.postMessage(probe);

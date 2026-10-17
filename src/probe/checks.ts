@@ -5,8 +5,8 @@ export interface ProbeResult {
 }
 
 export interface WorkerProbe {
-  /** null when the folder has no HEVC clip. */
-  readonly hevc: { hvc1: boolean; hev1: boolean; decoded: boolean } | null;
+  /** null only when the folder has no HEVC clip; `error` is set when probing it failed. */
+  readonly hevc: { hvc1: boolean; hev1: boolean; decoded: boolean; error?: string } | null;
   readonly raf: { present: boolean; p95Ms: number };
   readonly webgl: { float: boolean; half: boolean };
 }
@@ -14,18 +14,19 @@ export interface WorkerProbe {
 export interface ProbeEnv {
   pickFolder(): Promise<File[]>;
   createAudioContext(): BaseAudioContext;
-  worker(files: readonly File[]): Promise<WorkerProbe>;
+  worker(entries: ReadonlyArray<readonly [string, File]>): Promise<WorkerProbe>;
   globals: Record<string, unknown>;
 }
 
 const FOUR_GIB = 2 ** 32;
+const WORKER_TIMEOUT_MS = 15000;
 const SOURCE_PACKET = 192;
 const ALIGNED_UNIT = SOURCE_PACKET * 32;
 
 async function blobSlice(files: readonly File[]): Promise<ProbeResult> {
   const name = 'blob-slice-over-4gib';
   const big = files.filter((f) => f.name.toLowerCase().endsWith('.m2ts')).sort((a, b) => b.size - a.size)[0];
-  if (!big || big.size <= FOUR_GIB + SOURCE_PACKET) return { name, ok: true, detail: 'untested: no .m2ts over 4 GiB in the folder' };
+  if (!big || big.size <= FOUR_GIB + SOURCE_PACKET) return { name, ok: false, detail: 'untested: no .m2ts over 4 GiB in the folder' };
   const offset = Math.floor((big.size - SOURCE_PACKET) / ALIGNED_UNIT) * ALIGNED_UNIT;
   const bytes = new Uint8Array(await big.slice(offset, offset + SOURCE_PACKET).arrayBuffer());
   const ok = bytes.length === SOURCE_PACKET && bytes[4] === 0x47;
@@ -61,11 +62,27 @@ function canvasEffect(globals: Record<string, unknown>, prop: 'filter' | 'letter
   return { name, ok: changed > 0, detail: `${changed} channel values differ` };
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out')), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
+}
+
 async function attempt(name: string, fn: () => Promise<ProbeResult> | ProbeResult): Promise<ProbeResult> {
   try {
     return await fn();
   } catch (err) {
-    return { name, ok: false, detail: `threw: ${err instanceof Error ? err.message : String(err)}` };
+    return { name, ok: false, detail: err instanceof Error && err.message === 'timed out' ? 'timed out' : `threw: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
@@ -73,13 +90,16 @@ export async function runChecks(env: ProbeEnv): Promise<ProbeResult[]> {
   const files = await env.pickFolder();
   const g = env.globals;
   const nav = g.navigator as object | undefined;
-  const workerProbe = env.worker(files);
+  const entries = files.map((f) => [f.webkitRelativePath || f.name, f] as const);
+  const workerProbe = withTimeout(env.worker(entries), WORKER_TIMEOUT_MS);
   workerProbe.catch(() => undefined); // each worker-backed check reports the failure itself
 
   return [
     await attempt('blob-slice-over-4gib', () => blobSlice(files)),
     await attempt('audio-sample-rate', () => {
-      const rate = env.createAudioContext().sampleRate;
+      const context = env.createAudioContext();
+      const rate = context.sampleRate;
+      void (context as { close?: () => Promise<void> }).close?.().catch(() => undefined);
       return { name: 'audio-sample-rate', ok: rate === 48000, detail: String(rate) };
     }),
     await attempt('audio-session', () => {
@@ -93,6 +113,7 @@ export async function runChecks(env: ProbeEnv): Promise<ProbeResult[]> {
     await attempt('hevc', async () => {
       const { hevc } = await workerProbe;
       if (!hevc) return { name: 'hevc', ok: false, detail: 'no HEVC clip in the folder' };
+      if (hevc.error) return { name: 'hevc', ok: false, detail: `error: ${hevc.error}` };
       const form = hevc.hvc1 ? 'hvc1' : hevc.hev1 ? 'hev1' : 'unsupported';
       return { name: 'hevc', ok: (hevc.hvc1 || hevc.hev1) && hevc.decoded, detail: hevc.decoded ? form : `${form}, first GOP did not decode` };
     }),
