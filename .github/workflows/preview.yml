@@ -5,15 +5,27 @@ name: Preview deploy
 on:
   workflow_dispatch:
 
+# one preview run per branch; a newer dispatch supersedes the one still running
+concurrency:
+  group: preview-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   preview:
     name: Deploy preview to Cloudflare Pages
-    if: github.ref_name != 'main'
+    if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     steps:
+      # the branch name goes into a shell command and a Pages branch flag, so accept only plain names
+      - name: Validate branch name
+        shell: bash
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::unsupported branch name: $BRANCH"; exit 1; }
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -32,13 +44,14 @@ jobs:
           command: pages deploy dist --project-name=bluray-web --branch=${{ github.ref_name }}
       - name: Job summary
         env:
+          BRANCH: ${{ github.ref_name }}
           DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
           ALIAS_URL: ${{ steps.deploy.outputs.pages-deployment-alias-url }}
         run: |
           {
             echo "### Preview deployed"
             echo ""
-            echo "Branch: \`${{ github.ref_name }}\`"
+            echo "Branch: \`$BRANCH\`"
             echo ""
             echo "- Alias: ${ALIAS_URL:-not reported}"
             echo "- Deployment: ${DEPLOYMENT_URL:-not reported}"
