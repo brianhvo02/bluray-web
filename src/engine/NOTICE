@@ -25,6 +25,9 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     nav/navigator.ts      from src/libbluray/bluray.c (HDMV title and navigation parts, _find_ig_stream, _preload_ig_subpath, _preload_subpaths, _init_ig_stream, bd_user_input, bd_mouse_select)
     nav/subtitles.ts      from src/libbluray/bluray.c (_find_pg_stream, _init_pg_stream, _select_pg_textst_stream, PSR2 events)
     nav/stream-psrs.ts    from src/libbluray/bluray.c (_update_stream_psr_by_lang)
+    nav/playback-psrs.ts  from src/libbluray/bluray.c (_update_playlist_psrs, _update_clip_psrs, _update_time_psr,
+                          _update_chapter_psr, _is_interactive_title) and bdnav/navigation.c (nav_clip_time_search,
+                          nav_chapter_get_current), moved out of nav/navigator.ts
     demux/pes-assembler.ts derived from src/libbluray/decoders/m2ts_demux.c (PES completion by PES_packet_length)
     playback/pipeline.ts  derived from src/libbluray/bdnav/navigation.c (_fill_clip start packet)
     graphics/segments.ts  from src/libbluray/decoders/graphics_processor.c (segment joining), pg_decode.c, pg.h

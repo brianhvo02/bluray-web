@@ -10,7 +10,7 @@
  */
 
 import type { IndexObject } from '../bdmv/index-parser';
-import { MarkType, type Mpls, type StreamEntry } from '../bdmv/mpls-parser';
+import type { Mpls, StreamEntry } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
 import { BdVk, GraphicsController, GcStatus, type GcCtrl as GraphicsCtrl } from '../graphics/graphics-controller';
 import { IgSegmentDecoder, type IgDisplaySet } from '../graphics/ig-decoder';
@@ -18,8 +18,11 @@ import { OverlayPlane, type OverlayOp } from '../graphics/overlay-plane';
 import { PSR, type PsrEvent, type RegisterFile } from '../hdmv/registers';
 import { combineUoMasks, EMPTY_UO_MASK, parseUoMaskTable, type UoMask, type UoOp } from '../hdmv/uo-mask';
 import { HdmvEventType, HdmvVm, type HdmvEvent } from '../hdmv/vm';
-import { itemPackets, lookupSpn, type ItemPackets } from './packets';
-import { langToUint32, updateStreamPsrByLang } from './stream-psrs';
+import { itemPackets, type ItemPackets } from './packets';
+import {
+  clipTimeSearch, indexObjectOf, markTitlePkt, titlePkt, updateChapterPsrAtPkt, updateClipPsrs, updatePlaylistPsrs, updateTimePsr,
+  type PlaybackPsrContext, type TitleType,
+} from './playback-psrs';
 
 export interface PlaybackPort {
   /**
@@ -82,10 +85,8 @@ const MAX_INVALID_PL = 10;
 const HDMV_MENU_CALL_MASK = 1;
 const HDMV_TITLE_SEARCH_MASK = 2;
 const INDEX_ID_NONE = 0xffff;
-const INDEX_PLAYBACK_INTERACTIVE = [1, 3]; // indx_hdmv_playback_type_interactive, indx_bdj_playback_type_interactive
 const NO_PLAYLIST = 0xffff;
 
-type TitleType = 'undef' | 'hdmv' | 'bdj';
 /** gc_ctrl_e values the navigator sends to the graphics controller. */
 type GcCtrl = 'INIT_MENU' | 'ENABLE_BUTTON' | 'DISABLE_BUTTON' | 'SET_BUTTON_PAGE' | 'POPUP' | 'IG_END' | 'NOP' | 'VK_KEY' | 'MOUSE_MOVE';
 
@@ -320,12 +321,12 @@ export class Navigator {
     this.st0UoMask = EMPTY_UO_MASK;
     this.gcUoMask = EMPTY_UO_MASK;
     // _open_playlist opens the first clip, then bd_seek_playitem / bd_seek_mark moves on
-    this.updatePlaylistPsrs(playlistId, 0);
+    updatePlaylistPsrs(this.psrs, playlistId, 0);
     const restoredTime = this.keepTime;
     this.keepTime = null;
     this.openClip(0);
     this.startSubPathPreload(); // _preload_subpaths follows the first _open_m2ts
-    this.updateChapterPsrAtPkt(0);
+    updateChapterPsrAtPkt(this.psrs, 0);
     if (at) this.emitSeek(at);
     if (item !== 0) this.openClip(item);
     if (at) this.seekChapterUpdates(at);
@@ -344,7 +345,7 @@ export class Navigator {
    * item `item`. Updates the chapter PSR (_update_chapter_psr) even when the chapter is unchanged.
    */
   markReached(item: number, clipPkt: number): void {
-    this.updateChapterPsrAtPkt(this.titlePkt(item, clipPkt));
+    updateChapterPsrAtPkt(this.psrs, titlePkt(this.psrs, item, clipPkt));
   }
 
   /**
@@ -352,8 +353,8 @@ export class Navigator {
    * _find_next_playmark updates the chapter PSR for the packet the EP map gives for that time (nav_clip_time_search).
    */
   seeked(item: number, clipTime45: number): void {
-    const pkt = this.clipTimeSearch(item, clipTime45);
-    if (pkt !== undefined) this.updateChapterPsrAtPkt(this.titlePkt(item, pkt));
+    const pkt = clipTimeSearch(this.psrs, item, clipTime45);
+    if (pkt !== undefined) updateChapterPsrAtPkt(this.psrs, titlePkt(this.psrs, item, pkt));
   }
 
   /** The last play item ended (see playItemEnded). */
@@ -397,13 +398,6 @@ export class Navigator {
 
   // ---- titles ----
 
-  private objectOf(title: number): IndexObject | undefined {
-    const { index } = this.deps.disc;
-    if (title === TITLE_FIRST_PLAY) return index.firstPlay;
-    if (title === TITLE_TOP_MENU) return index.topMenu;
-    return index.titles[title - 1]?.object;
-  }
-
   /** disc_info.first_play_supported / top_menu_supported: a BD-J object is handed to the application. */
   private isSupported(object: IndexObject): boolean {
     return object.kind === 'bdj' || (object.kind === 'hdmv' && object.movieObjectId !== INDEX_ID_NONE);
@@ -432,7 +426,7 @@ export class Navigator {
     }
 
     if (title <= index.titles.length) {
-      const object = this.objectOf(title);
+      const object = indexObjectOf(this.deps.disc, title);
       if (!object) return false;
       this.deps.regs.psrWrite(PSR.TITLE_NUMBER, title); // 5.2.3.3
       return this.playObject(object, title);
@@ -895,12 +889,13 @@ export class Navigator {
 
   // ---- UO masks ----
 
-  /** _update_time_psr: PSR8 follows the presentation position, within the play item's IN and OUT time. */
+  private get psrs(): PlaybackPsrContext {
+    return { regs: this.deps.regs, disc: this.deps.disc, playlist: this.playlist, geometry: this.geometry, titleType: this.titleType };
+  }
+
+  /** _update_time_psr from the presentation position. */
   private updateTimePsr(): void {
-    const t = this.deps.port.currentClipTime45();
-    const pi = this.playlist?.playItems[this.currentItem];
-    if (t === undefined || !pi || t < pi.inTime || t > pi.outTime) return;
-    this.deps.regs.psrWrite(PSR.TIME, t);
+    updateTimePsr(this.psrs, this.currentItem, this.deps.port.currentClipTime45());
   }
 
   private openClip(item: number): void {
@@ -913,7 +908,7 @@ export class Navigator {
     }
     this.st0UoMask = combineUoMasks(parseUoMaskTable(pl.uoMask), parseUoMaskTable(pi.uoMask));
     this.updateUoMask();
-    this.updateClipPsrs(pl, item);
+    updateClipPsrs(this.psrs, pl, item);
   }
 
   /** _update_uo_mask */
@@ -939,59 +934,6 @@ export class Navigator {
     return this.titleType !== 'undef' && this.uoMaskValue.has(op);
   }
 
-  // ---- PSRs ----
-
-  /** _update_playlist_psrs */
-  private updatePlaylistPsrs(playlistId: string, item: number): void {
-    const regs = this.deps.regs;
-    regs.psrWrite(PSR.PLAYLIST, parseInt(playlistId, 10) || 0);
-    regs.psrWrite(PSR.ANGLE_NUMBER, 1);
-    regs.psrWrite(PSR.CHAPTER, 0xffff);
-
-    const pi = this.playlist?.playItems[item];
-    if (pi && this.titleType === 'undef') {
-      // Without menus, pick audio and subtitles from the language settings
-      regs.psrWrite(PSR.PLAYITEM, item);
-      let audioLang = 0;
-      if (pi.stn.audio.length > 0) {
-        audioLang = updateStreamPsrByLang(regs, PSR.AUDIO_LANG, PSR.PRIMARY_AUDIO_ID, 0, pi.stn.audio, 0);
-      }
-      if (pi.stn.pg.length > 0) {
-        updateStreamPsrByLang(regs, PSR.PG_AND_SUB_LANG, PSR.PG_STREAM, 0x80000000, pi.stn.pg, audioLang);
-      }
-    }
-  }
-
-  /** _update_clip_psrs */
-  private updateClipPsrs(pl: Mpls, item: number): void {
-    const regs = this.deps.regs;
-    const pi = pl.playItems[item]!;
-    const stn = pi.stn;
-    let audioLang = 0;
-
-    regs.psrWrite(PSR.PLAYITEM, item);
-    regs.psrWrite(PSR.TIME, pi.inTime);
-
-    if (stn.audio.length > 0) {
-      const v = regs.psrRead(PSR.PRIMARY_AUDIO_ID);
-      if (v === 0 || v > stn.audio.length) {
-        audioLang = updateStreamPsrByLang(regs, PSR.AUDIO_LANG, PSR.PRIMARY_AUDIO_ID, 0, stn.audio, 0);
-      } else {
-        audioLang = langToUint32(stn.audio[v - 1]!.lang);
-      }
-    }
-    if (stn.pg.length > 0) {
-      const v = regs.psrRead(PSR.PG_STREAM) & 0xfff;
-      if (v === 0 || v > stn.pg.length) {
-        updateStreamPsrByLang(regs, PSR.PG_AND_SUB_LANG, PSR.PG_STREAM, 0x80000000, stn.pg, audioLang);
-      }
-    }
-    if (stn.ig.length > 0 && this.titleType !== 'undef') {
-      const v = regs.psrRead(PSR.IG_STREAM_ID);
-      if (v === 0 || v > stn.ig.length) regs.psrWrite(PSR.IG_STREAM_ID, 1);
-    }
-  }
-
   // ---- chapter PSR ----
 
   /** The accepted bd_seek_mark / bd_seek_playitem request (before the clip is reopened). */
@@ -1014,67 +956,15 @@ export class Navigator {
     if (!pl) return;
     if (at.mark !== undefined) {
       const mark = pl.marks[at.mark];
-      if (mark) this.updateChapterPsrAtPkt(this.markTitlePkt(mark));
+      if (mark) updateChapterPsrAtPkt(this.psrs, markTitlePkt(this.psrs, mark));
       return;
     }
     const pi = at.item !== undefined ? pl.playItems[at.item] : undefined;
-    if (at.item !== undefined && pi) this.updateChapterPsrAtPkt(this.geometry[at.item]?.titlePkt ?? 0); // out_pkt = clip->title_pkt
+    if (at.item !== undefined && pi) updateChapterPsrAtPkt(this.psrs, this.geometry[at.item]?.titlePkt ?? 0); // out_pkt = clip->title_pkt
     if (at.clipTime45 !== undefined && at.item !== undefined && pi && at.clipTime45 < pi.outTime) {
       this.deps.emit({ type: 'seek', what: 'time', value: at.clipTime45 });
-      const pkt = this.clipTimeSearch(at.item, at.clipTime45);
-      if (pkt !== undefined) this.updateChapterPsrAtPkt(this.titlePkt(at.item, pkt));
+      const pkt = clipTimeSearch(this.psrs, at.item, at.clipTime45);
+      if (pkt !== undefined) updateChapterPsrAtPkt(this.psrs, titlePkt(this.psrs, at.item, pkt));
     }
-  }
-
-  /** nav_clip_time_search: the clip packet for a clip time within the play item. */
-  private clipTimeSearch(item: number, clipTime45: number): number | undefined {
-    const pi = this.playlist?.playItems[item];
-    const geo = this.geometry[item];
-    if (!pi || !geo) return undefined;
-    if (clipTime45 >= pi.outTime) return geo.endPkt;
-    return Math.max(lookupSpn(this.deps.disc.clips?.get(pi.clipId), clipTime45, true), geo.startPkt);
-  }
-
-  /** s_pos in packets: title_pkt + clip_pkt - start_pkt. */
-  private titlePkt(item: number, clipPkt: number): number {
-    const geo = this.geometry[item];
-    return geo ? geo.titlePkt + clipPkt - geo.startPkt : clipPkt;
-  }
-
-  /** _fill_mark: the mark's title_pkt. */
-  private markTitlePkt(mark: Mpls['marks'][number]): number {
-    const ref = mark.playItemRef >= this.geometry.length ? 0 : mark.playItemRef;
-    const geo = this.geometry[ref];
-    const pi = this.playlist?.playItems[ref];
-    if (!geo || !pi) return 0;
-    const clip = this.deps.disc.clips?.get(pi.clipId);
-    const clipPkt = clip ? lookupSpn(clip, mark.time, true) : geo.startPkt;
-    return geo.titlePkt + clipPkt - geo.startPkt;
-  }
-
-  /** nav_chapter_get_current over the ENTRY marks; 0-based. */
-  private chapterAtPkt(titlePkt: number): number {
-    const chapters = (this.playlist?.marks ?? []).filter((m) => m.type === MarkType.ENTRY).map((m) => this.markTitlePkt(m));
-    for (let i = 0; i < chapters.length; i++) {
-      if (chapters[i]! <= titlePkt) {
-        if (i === chapters.length - 1) return i;
-        if (chapters[i + 1]! > titlePkt) return i;
-      }
-    }
-    return 0;
-  }
-
-  /** _update_chapter_psr at packet position `titlePkt`. */
-  private updateChapterPsrAtPkt(titlePkt: number): void {
-    const hasChapters = this.playlist?.marks.some((m) => m.type === MarkType.ENTRY) ?? false;
-    if (!this.isInteractiveTitle() && hasChapters) this.deps.regs.psrWrite(PSR.CHAPTER, this.chapterAtPkt(titlePkt) + 1);
-  }
-
-  /** _is_interactive_title */
-  private isInteractiveTitle(): boolean {
-    if (this.titleType === 'undef') return false;
-    const title = this.deps.regs.psrRead(PSR.TITLE_NUMBER);
-    const object = title === TITLE_FIRST_PLAY || title <= this.deps.disc.index.titles.length ? this.objectOf(title) : undefined;
-    return object !== undefined && object.kind !== 'unknown' && INDEX_PLAYBACK_INTERACTIVE.includes(object.playbackType);
   }
 }
