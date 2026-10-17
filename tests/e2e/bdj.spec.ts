@@ -20,6 +20,7 @@ async function open(page: Page, query = ''): Promise<void> {
 test("plays the playlist the disc's Java selects, with the menu-hidden notice and no picker", async ({ page }) => {
   await open(page);
   await reachesState(page, 'playing', 30_000);
+  await expect(page.getByTestId('player')).toHaveAttribute('data-playlist', '00000'); // the playlist Java selected
   await expect(page.getByTestId('playlist-picker')).toBeHidden();
   await expect(notice(page, /menu isn't shown yet/)).toBeVisible();
   await expect.poll(async () => (await bdjStartup(page))?.firstFrameMs ?? null, { timeout: 10_000 }).not.toBeNull();

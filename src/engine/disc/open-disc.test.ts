@@ -111,6 +111,29 @@ describe('openDisc', () => {
     expect(clips.get('00001')?.epMaps[0].entries).toEqual([{ pts: 0, spn: 0 }]);
   });
 
+  /** A source whose reads of `failing` reject: the first-by-name late, the others at once. */
+  function failingReads(source: FileSource, failing: readonly string[]): FileSource {
+    const read = source.read.bind(source);
+    source.read = (path, offset, length, signal) => {
+      const i = failing.indexOf(path);
+      if (i < 0) return read(path, offset, length, signal);
+      return new Promise((_, reject) => setTimeout(() => reject(new Error(`unreadable ${path}`)), i === 0 ? 20 : 0));
+    };
+    return source;
+  }
+
+  it('reports the first unreadable playlist by name, though its read fails last', async () => {
+    const source = failingReads(disc(baseFiles()), ['BDMV/PLAYLIST/00000.MPLS', 'BDMV/PLAYLIST/00001.MPLS']);
+    await expect(openDisc(source)).rejects.toThrow('unreadable BDMV/PLAYLIST/00000.MPLS');
+  });
+
+  it('reports the first unreadable clip info by name, though its read fails last', async () => {
+    const failing = ['BDMV/CLIPINF/00001.CLPI', 'BDMV/CLIPINF/00002.CLPI'];
+    await expect(loadClips(failingReads(disc(baseFiles()), failing), ['00001', '00002'])).rejects.toThrow('unreadable BDMV/CLIPINF/00001.CLPI');
+    const files = { ...baseFiles(), 'Movie/BDMV/MovieObject.bdmv': buildMovieObjects([{ cmds: [asm.nop()] }]) };
+    await expect(openDisc(failingReads(disc(files), failing))).rejects.toThrow('unreadable BDMV/CLIPINF/00001.CLPI');
+  });
+
   it('loads movie objects and sounds', async () => {
     const files = baseFiles();
     files['Movie/BDMV/MovieObject.bdmv'] = buildMovieObjects([{ cmds: [asm.nop()] }]);

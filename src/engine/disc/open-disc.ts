@@ -65,7 +65,7 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
   const warnings: string[] = [];
   // all reads go out at once (a disc can have hundreds of small files); parsing stays in name order
   const ids = playlistFiles.map((name) => name.slice(0, -'.MPLS'.length));
-  const playlistBytes = await Promise.all(ids.map((id) => readWhole(source, playlistPath(id))));
+  const playlistBytes = await readAllInOrder(source, ids.map(playlistPath));
   for (const [i, id] of ids.entries()) {
     try {
       playlists.set(id, parseMpls(playlistBytes[i]!));
@@ -99,7 +99,7 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
   const clips = new Map<string, Clpi>();
   if (movieObjects) {
     const clipIds = [...new Set([...playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)))].filter((id) => source.exists(clipInfoPath(id)));
-    const clipBytes = await Promise.all(clipIds.map((id) => readWhole(source, clipInfoPath(id))));
+    const clipBytes = await readAllInOrder(source, clipIds.map(clipInfoPath));
     for (const [i, clipId] of clipIds.entries()) {
       try {
         clips.set(clipId, parseClpi(clipBytes[i]!));
@@ -159,12 +159,24 @@ function summarize(source: ByteSource, id: string, mpls: Mpls): PlaylistSummary 
   };
 }
 
+/**
+ * Reads the files at once; when reads fail, the error is the first failure in the given order (as reading them one by
+ * one would report), whichever settled first.
+ */
+async function readAllInOrder(source: ByteSource, paths: readonly string[]): Promise<Uint8Array[]> {
+  const results = await Promise.allSettled(paths.map((path) => readWhole(source, path)));
+  return results.map((r) => {
+    if (r.status === 'rejected') throw r.reason;
+    return r.value;
+  });
+}
+
 export async function loadClips(source: ByteSource, clipIds: readonly string[]): Promise<Map<string, Clpi>> {
   for (const clipId of clipIds) {
     const path = clipInfoPath(clipId);
     if (!source.exists(path)) throw new DiscError('missing-file', `Missing clip info ${path}`, [path]);
   }
-  const bytes = await Promise.all(clipIds.map((id) => readWhole(source, clipInfoPath(id))));
+  const bytes = await readAllInOrder(source, clipIds.map(clipInfoPath));
   return new Map(clipIds.map((id, i) => [id, parseClpi(bytes[i]!)]));
 }
 
