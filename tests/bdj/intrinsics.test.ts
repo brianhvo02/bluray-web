@@ -141,6 +141,17 @@ const XOR_COLOR = assembleClass(
   'java/awt/Color',
 );
 
+/** A disc's own ColorModel: getRGB(pixel) = pixel ^ 0x5a5a5a5a, which the setPixels hooks decline. */
+const ODD_MODEL = assembleClass(
+  'OddModel',
+  [
+    { name: '<init>', desc: '(I)V', access: 0x0001, code: [0x2a, 0x1b, 0xb7, { c: ['method', 'java/awt/image/ColorModel', '<init>', '(I)V'] }, 0xb1] },
+    { name: 'getRGB', desc: '(I)I', access: 0x0001, maxStack: 2, maxLocals: 2, code: [0x1b, 0x13, { c: ['int', 0x5a5a5a5a] }, 0x82, 0xac] },
+  ],
+  [],
+  'java/awt/image/ColorModel',
+);
+
 /** Calls from bytecode (the interpreter's invoke path; Side.call starts methods through an Invoke). */
 const CALLS = assembleClass('IntrinsicCalls', [
   {
@@ -174,6 +185,7 @@ beforeAll(async () => {
     jvm.loader.define('XorColor', XOR_COLOR, null, null);
     jvm.loader.define('IntrinsicCalls', CALLS, null, null);
     jvm.loader.define('Deep', DEEP, null, null);
+    jvm.loader.define('OddModel', ODD_MODEL, null, null);
   }
   sides.off = new Side(off);
   sides.on = new Side(on);
@@ -381,6 +393,101 @@ describe('BDGraphicsBase.drawSpanN', () => {
     expect(counts.thrown).toBeGreaterThan(5);
     expect(counts.drawn).toBeGreaterThan(100);
     expect(counts.intrinsic).toBeGreaterThan(counts.drawn * 0.7);
+  });
+});
+
+describe('BDGraphicsBase.drawSpanN reading its own back buffer (src aliases backBuffer)', () => {
+  it('reads pixels the same span has already overwritten exactly as the Java loop does, flipped or not', async () => {
+    const key = 'java/awt/BDGraphicsBase.drawSpanN(III[IIZ)V';
+    let drawn = 0;
+    let overlapping = 0;
+    const before = bytecodesIn(key);
+    for (let i = 0; i < 300; i++) {
+      const r = rng(40000 + i);
+      const width = int(r, 2, 40);
+      const height = int(r, 1, 5);
+      const buf = Array.from({ length: width * height }, () => pixel(r));
+      const y = int(r, 0, height - 1);
+      const x = int(r, -2, width - 1);
+      const length = int(r, 1, width + 2);
+      // a source offset near the destination, so the source and destination ranges overlap either way
+      const srcOffset = y * width + x + int(r, -4, 4);
+      const flip = int(r, 0, 1);
+      const rule = pick(r, [2, 3, 3, 1]);
+      const extraAlpha = pick(r, [1, 0.5, Math.fround(r())]);
+      if (Math.abs(srcOffset - (y * width + x)) < length) overlapping++;
+      const res = await both(async (s) => {
+        const rect = s.cls('java/awt/Rectangle');
+        if (rect.state !== 'initialized') await s.construct('java/awt/Rectangle', '()V', []);
+        const composite = (await s.call('java/awt/AlphaComposite', 'getInstance(IF)Ljava/awt/AlphaComposite;', [rule, extraAlpha])).ret as JObject;
+        const back = s.intArray(buf);
+        const o = s.object('java/awt/BDGraphicsBase', {
+          width: ['I', width],
+          backBuffer: ['[I', back],
+          actualClip: ['Ljava/awt/Rectangle;', s.object('java/awt/Rectangle', { x: ['I', 0], y: ['I', 0], width: ['I', width], height: ['I', height] })],
+          dirty: ['Ljava/awt/Area;', s.object('java/awt/Area', { x0: ['I', 0x7fffffff], y0: ['I', 0x7fffffff], x1: ['I', -1], y1: ['I', -1] })],
+          composite: ['Ljava/awt/AlphaComposite;', composite],
+          xorColor: ['Ljava/awt/Color;', null],
+        });
+        const out = await s.call('java/awt/BDGraphicsBase', key.slice(key.indexOf('.') + 1), [o, x, y, length, back, srcOffset, flip]);
+        return { out, buf: [...(back.data as Int32Array)] };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (res.off.buf.some((v, k) => v !== buf[k])) drawn++;
+    }
+    expect(overlapping).toBeGreaterThan(150);
+    expect(drawn).toBeGreaterThan(150);
+    // the intrinsic ran these, not the bytecode
+    expect(bytecodesIn(key) - before).toBe(0);
+  });
+});
+
+describe('BDImageConsumer.setPixels: every colour model gives the pixels the Java loop gives', () => {
+  /** A contiguous mask of `bits` bits at `shift`. */
+  const mask = (bits: number, shift: number): number => (bits === 0 ? 0 : (((2 ** bits - 1) * 2 ** shift) | 0));
+
+  /** Kinds: a DirectColorModel (random sRGB masks, with or without alpha), the default RGB model, or a disc's own. */
+  async function model(s: Side, r: () => number, kind: number): Promise<JObject> {
+    if (kind === 1) return (await s.call('java/awt/image/ColorModel', 'getRGBdefault()Ljava/awt/image/ColorModel;', [])).ret as JObject;
+    if (kind === 2) return s.construct('OddModel', '(I)V', [32]);
+    const bits = [int(r, 1, 8), int(r, 1, 8), int(r, 1, 8), pick(r, [0, 8, int(r, 1, 8)])];
+    const masks = bits.map((b, k) => mask(b, [24, 16, 8, 32][k]! - b));
+    // (a premultiplied model needs sun.java2d.cmm, which the trimmed class library leaves out)
+    return s.construct('java/awt/image/DirectColorModel', '(IIIII)V', [32, masks[0]!, masks[1]!, masks[2]!, masks[3]!]);
+  }
+
+  it.each([['int[]', false], ['byte[]', true]] as const)('%s pixels: identical back buffers, and exceptions where Java throws', async (_name, bytes) => {
+    const key = `java/awt/BDImageConsumer.setPixels(IIIILjava/awt/image/ColorModel;${bytes ? '[B' : '[I'}II)V`;
+    const kinds = [0, 0, 0];
+    const before = [bytecodesIn(key), bytecodesIn(key, 'off')];
+    for (let i = 0; i < 150; i++) {
+      const r = rng((bytes ? 52000 : 51000) + i);
+      const kind = i % 3;
+      const width = int(r, 1, 24);
+      const height = int(r, 1, 8);
+      const w = int(r, 0, width);
+      const h = int(r, 0, height);
+      const x = r() < 0.9 ? int(r, 0, width - w) : int(r, -2, width);
+      const y = r() < 0.9 ? int(r, 0, height - h) : int(r, -2, height);
+      const scansize = w + int(r, 0, 3);
+      const count = h * scansize + int(r, -2, 4);
+      const pixels = Array.from({ length: Math.max(0, count) }, () => (bytes ? int(r, -128, 127) : anyInt(r)));
+      const seed = r() * 1e9;
+      const res = await both(async (s) => {
+        const cm = await model(s, rng(seed), kind);
+        const image = await s.construct('java/awt/BDImageConsumer', '(Ljava/awt/image/ImageProducer;)V', [null]);
+        const dims = await s.call('java/awt/BDImageConsumer', 'setDimensions(II)V', [image, width, height]);
+        const px = bytes ? s.byteArray(pixels) : s.intArray(pixels);
+        const out = await s.call('java/awt/BDImageConsumer', key.slice(key.indexOf('.') + 1), [image, x, y, w, h, cm, px, 0, scansize]);
+        const buf = s.field(image, 'backBuffer', '[I') as JArray | null;
+        return { dims, out, buf: buf ? [...(buf.data as Int32Array)] : null };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (!res.off.out.thrown && w > 0 && h > 0) kinds[kind]!++;
+    }
+    // each kind drew images, through the hook (Direct, default) or the bytecode (the disc's model, a third of them)
+    expect(kinds.every((n) => n > 25)).toBe(true);
+    expect(bytecodesIn(key) - before[0]!).toBeLessThan((bytecodesIn(key, 'off') - before[1]!) * 0.75);
   });
 });
 

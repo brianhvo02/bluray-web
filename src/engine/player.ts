@@ -5,6 +5,7 @@ import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
 import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
 import { EarlyBdjWorker } from './bdj/early-worker';
+import { GraphicsPlaneReader, createGraphicsPlane } from './bdj/graphics-plane';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
 import { REGISTER_WORDS } from './bdj/shared-registers';
 import { StatusBlockWriter, createStatusBlock } from './bdj/status-block';
@@ -190,6 +191,7 @@ interface EarlyBdj {
   readonly worker: EarlyBdjWorker;
   readonly regs: RegisterFile;
   readonly status: StatusBlockWriter;
+  readonly plane: GraphicsPlaneReader;
 }
 
 /**
@@ -203,6 +205,8 @@ interface BdjTitle {
   /** The title registers, shared with the BD-J worker (the navigator's, when HDMV handed over). */
   readonly regs: RegisterFile;
   readonly status: StatusBlockWriter;
+  /** The graphics plane Java draws into (one per worker: a terminated worker can never write into the next one's). */
+  readonly plane: GraphicsPlaneReader;
   /** Cuts the title off from the player: its port, events and callbacks do nothing afterwards. */
   readonly end: () => void;
   /** The title to start once the worker has booted; null once booted. */
@@ -327,6 +331,8 @@ export class Player {
   private shaderStage: ShaderStage | null = null;
   /** The shader set changed: the next paint redraws the current frame even when nothing else changed. */
   private shadersDirty = false;
+  /** The video under the BD-J plane was redrawn without it (no playlist): the next paint draws the plane again. */
+  private bdjDirty = false;
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
@@ -358,10 +364,7 @@ export class Player {
           break;
         case 'resize':
           this.compositor?.resize(cmd.width, cmd.height);
-          this.compositor?.drawVideo(this.presenter.current);
-          if (this.pg) this.compositor?.drawPg?.(this.pg.plane);
-          if (this.textOn && this.textTrack) this.compositor?.drawText?.(this.textTrack.renderer, this.clock.nowUs(), this.textOptions());
-          if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
+          this.repaint();
           break;
         case 'playPlaylist':
           this.stopBdj();
@@ -459,7 +462,11 @@ export class Player {
       this.bdj.status.setTime45(this.titleTime45());
     }
     const s = this.session;
-    if (!s) return;
+    if (!s) {
+      // a BD-J menu can show with no playlist playing
+      if (this.bdj) this.paint(null, this.clock.nowUs());
+      return;
+    }
     this.updatePlayback(s);
     this.syncNavigator(s);
     const now = this.clock.nowUs();
@@ -485,21 +492,34 @@ export class Player {
     this.maybeEmitTelemetry(s);
   }
 
+  /** Redraws the current picture at once: the video and every plane over it. */
+  private repaint(): void {
+    this.compositor?.drawVideo(this.presenter.current);
+    if (this.pg) this.compositor?.drawPg?.(this.pg.plane);
+    if (this.textOn && this.textTrack) this.compositor?.drawText?.(this.textTrack.renderer, this.clock.nowUs(), this.textOptions());
+    if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
+    if (this.bdj) this.compositor?.drawBdj?.(this.bdj.plane);
+  }
+
   /**
-   * Video, then the PG plane, the text subtitles and the IG plane. A change to any of them repaints the video and
-   * everything over it (an overlay replaces pixels, it does not blend with what it covered).
+   * Video, then the PG plane, the text subtitles, the IG plane and the BD-J plane. A change to any of them repaints the
+   * video and everything over it (an overlay replaces pixels, it does not blend with what it covered). The BD-J plane
+   * changes only when Java flushes (or opens or closes it), so a half-drawn menu never shows.
    */
   private paint(frame: VideoFrame | null, nowUs: number): void {
     const nav = this.navigator;
     const pg = this.pg?.plane ?? null;
     const ig = nav?.igPlane ?? null;
+    const bdj = this.bdj?.plane ?? null;
+    const bdjChanged = bdj !== null && (bdj.pending() || this.bdjDirty);
+    this.bdjDirty = false;
     const text = this.textOn && this.compositor?.drawText ? this.textTrack : null;
     const textOpts = this.textOptions();
     const pgChanged = pg !== null && pg.dirty() !== null;
     const igChanged = ig !== null && ig.dirty() !== null;
     const textChanged = this.subtitlesDirty || (text !== null && text.renderer.changed(nowUs, textOpts));
     this.subtitlesDirty = false;
-    const changed = pgChanged || igChanged || textChanged || this.shadersDirty;
+    const changed = pgChanged || igChanged || textChanged || bdjChanged || this.shadersDirty;
     this.shadersDirty = false;
     if (frame) this.compositor?.drawVideo(frame);
     else if (changed) this.compositor?.drawVideo(this.presenter.current);
@@ -515,6 +535,7 @@ export class Player {
       else ig.takeDirty();
     }
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
+    if (bdj && (bdjChanged || bdj.visible())) this.compositor?.drawBdj?.(bdj);
   }
 
   private setVideoShaders(set: ShaderSetData | null): void {
@@ -644,7 +665,12 @@ export class Player {
     const library = this.bdjClassLibrary;
     const createWorker = this.deps.createBdjWorker;
     if (index.firstPlay.kind !== 'bdj' || !library || !createWorker) return null;
-    const early: EarlyBdj = { worker: new EarlyBdjWorker(createWorker()), regs: this.newProgramRegs(index, true), status: new StatusBlockWriter(createStatusBlock()) };
+    const early: EarlyBdj = {
+      worker: new EarlyBdjWorker(createWorker()),
+      regs: this.newProgramRegs(index, true),
+      status: new StatusBlockWriter(createStatusBlock()),
+      plane: new GraphicsPlaneReader(createGraphicsPlane()),
+    };
     this.applyBdjSettings(early.regs);
     this.earlyBdj = early;
     void (async () => {
@@ -652,7 +678,15 @@ export class Player {
         const [classLibrary, bdid] = await Promise.all([library, readBdid(source)]);
         // once adopted, the session sends the same boot itself (EarlyBdjWorker passes only the first)
         if (this.earlyBdj !== early) return;
-        early.worker.boot({ type: 'boot', registers: early.regs.shared!, status: early.status.buffer, ...bootDiscFields(ref), discId: bdid?.discId ?? null, classLibrary });
+        early.worker.boot({
+          type: 'boot',
+          registers: early.regs.shared!,
+          status: early.status.buffer,
+          plane: early.plane.buffer,
+          ...bootDiscFields(ref),
+          discId: bdid?.discId ?? null,
+          classLibrary,
+        });
       } catch {
         // a class library that does not load fails the session (bootBdj)
       }
@@ -686,6 +720,7 @@ export class Player {
     const programRegs = early?.regs ?? (regs?.shared ? regs : this.newProgramRegs(disc.index, disc.usesBdj));
     if (!early) this.applyBdjSettings(programRegs); // an early worker's registers have them already
     const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
+    const plane = early?.plane ?? new GraphicsPlaneReader(createGraphicsPlane());
     let entry: BdjTitle | null = null;
     let ended = false;
     const live = (): boolean => !ended;
@@ -713,6 +748,7 @@ export class Player {
       host,
       regs: programRegs.shared!,
       status,
+      plane: plane.buffer,
       time45: () => this.titleTime45(),
       onFailed: (code, message) => {
         if (live()) this.bdjFailed(code, message);
@@ -721,7 +757,7 @@ export class Player {
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
     });
-    entry = { session, host, events, regs: programRegs, status, end: () => void (ended = true), pendingTitle: null, booted: false };
+    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false };
     this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
@@ -799,6 +835,9 @@ export class Player {
     this.bdj = null;
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
+    // the menu goes at once (Review Focus 2): nothing of the plane is drawn again
+    this.compositor?.clearBdj?.();
+    this.repaint();
     if (this.pgRegs && this.navRegs !== entry.regs) this.bindPg(this.pgRegs);
     this.deps.emit({ type: 'bdjActive', active: false });
     this.deps.emit({ type: 'uoMask', masked: [] });
@@ -1610,6 +1649,7 @@ export class Player {
     this.presenter.clear();
     this.ring?.setPlaying(false);
     this.compositor?.drawVideo(null);
+    this.bdjDirty = true;
     this.wantPlaying = false;
   }
 

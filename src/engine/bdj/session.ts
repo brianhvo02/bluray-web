@@ -28,6 +28,8 @@ export interface BdjSessionDeps {
   /** The register file's shared buffer (RegisterFile({ shared })). */
   readonly regs: SharedArrayBuffer;
   readonly status: StatusBlockWriter;
+  /** The graphics plane's shared buffer (createGraphicsPlane). */
+  readonly plane: SharedArrayBuffer;
   /** bd_tell_time's position in 45 kHz ticks, published before selectPlaylist and seek reply. */
   readonly time45: () => bigint;
   readonly onFailed: (code: BdjFailureCode, message: string) => void;
@@ -62,7 +64,7 @@ export class BdjSession {
       if (this.stopped) return resolve();
       this.armTimeout();
       this.bootDone = resolve;
-      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, ...bootDiscFields(disc), discId, classLibrary });
+      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, plane: this.deps.plane, ...bootDiscFields(disc), discId, classLibrary });
     });
   }
 

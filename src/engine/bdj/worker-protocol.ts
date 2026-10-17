@@ -18,6 +18,8 @@ export type ToBdj =
       readonly type: 'boot';
       readonly registers: SharedArrayBuffer;
       readonly status: SharedArrayBuffer;
+      /** The graphics plane (graphics-plane.ts) Java's updateGraphicN draws into. */
+      readonly plane: SharedArrayBuffer;
       /** The picked files; empty when the disc is served over HTTP (`discHttp`): Blobs of remote files cannot cross. */
       readonly discFiles: readonly (readonly [string, Blob])[];
       /** A disc served over HTTP: the BD-J worker opens its own HttpSource. */

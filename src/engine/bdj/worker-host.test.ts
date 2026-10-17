@@ -6,6 +6,7 @@ import { loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
 import { RegisterFile } from '../hdmv/registers';
 import { playlistInfo, titleInfos } from './disc-info';
+import { GraphicsPlaneReader, GraphicsPlaneWriter, createGraphicsPlane } from './graphics-plane';
 import { SharedRegisterView, createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
 import { WorkerBdjHost } from './worker-host';
@@ -24,6 +25,7 @@ describe('WorkerBdjHost', () => {
   });
 
   function setup(answer: (name: BdjCallName, args: Args) => Promise<number | string> = () => Promise.resolve(0)) {
+    const planeBuf = createGraphicsPlane();
     const regBuf = createRegisterBuffer();
     const statusBuf = createStatusBlock();
     const engine = new RegisterFile({ shared: regBuf });
@@ -40,9 +42,21 @@ describe('WorkerBdjHost', () => {
       disc,
       clips,
       log: (line, error) => void logs.push([line, error]),
+      plane: new GraphicsPlaneWriter(planeBuf),
     });
-    return { host, engine, status, calls, logs };
+    return { host, engine, status, calls, logs, plane: new GraphicsPlaneReader(planeBuf) };
   }
+
+  it("draws updateGraphicN into the shared plane, locally (no engine call)", () => {
+    const { host, plane, calls } = setup();
+    host.updateGraphic(1920, 1080, null, 0, 0, 0, 0);
+    host.updateGraphic(1920, 1080, new Int32Array(1920 * 1080).fill(-1), 4, 5, 6, 7);
+    expect(plane.flushCount()).toBe(1);
+    expect(plane.visible()).toBe(true);
+    host.updateGraphic(0, 0, null, 0, 0, 0, 0);
+    expect(plane.visible()).toBe(false);
+    expect(calls).toEqual([]);
+  });
 
   it('reads registers, time and the UO mask synchronously from the shared buffers', () => {
     const { host, engine, status, calls } = setup();

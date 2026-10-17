@@ -15,6 +15,7 @@ import { normalizeDiscPaths } from '../disc/paths';
 import { BdjError } from './errors';
 import type { FreeType } from './fonts/freetype';
 import type { NativeTable } from './jvm/natives/index';
+import { GraphicsPlaneWriter } from './graphics-plane';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
@@ -169,6 +170,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
           new WorkerBdjHost({
             regs: new SharedRegisterView(m.registers),
             status: new StatusBlockReader(m.status),
+            plane: new GraphicsPlaneWriter(m.plane),
             call,
             get disc() {
               return loaded().disc;

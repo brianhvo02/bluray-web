@@ -8,6 +8,7 @@ import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './session';
+import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
@@ -96,6 +97,7 @@ function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) 
     },
     regs: createRegisterBuffer(),
     status: new StatusBlockWriter(statusBuf),
+    plane: createGraphicsPlane(),
     time45: () => time45,
     onFailed: (code, message) => void failures.push([code, message]),
     onLog: (line) => void logs.push(line),

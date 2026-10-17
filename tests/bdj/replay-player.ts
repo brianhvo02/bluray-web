@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { createRing, renderQuantum, ringViews } from '../../src/engine/audio/ring';
 import { registerClassLibraryIntrinsics } from '../../src/bdj-classlib/intrinsics/index';
 import { runBdjWorker, type BdjPort, type BdjWorkerHandle } from '../../src/engine/bdj/bdj-worker';
+import { GraphicsPlaneReader } from '../../src/engine/bdj/graphics-plane';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import type { ClassLibrarySource } from '../../src/engine/bdj/runtime';
 import type { WorkerLike } from '../../src/engine/bdj/session';
@@ -31,6 +32,8 @@ export interface PlayerBdjReplay {
   readonly virtualMs: number;
   /** Everything the player emitted up to the end of the run (not the close that follows). */
   readonly events: readonly EngineEvent[];
+  /** The graphics plane of the last BD-J worker started, as the engine reads it. */
+  readonly plane: GraphicsPlaneReader | null;
 }
 
 /** sixDigits: %.6g of a Java float, as trace.patch prints selectRateN's rate. */
@@ -92,12 +95,20 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
  * a render loop), with BD-J in an in-process runBdjWorker and the bdj-trace harness's player settings. The player's
  * clock is virtual and runs ahead in steps as fast as the engine keeps up, so playlists end through the player's own
  * end-of-playlist path in a fraction of their duration. Records Java's calls as the engine replies to them and stops
- * after the `occurrence`-th reply to `until` (a trace name such as selectPlaylistN). A thrown Error carries the trace
- * recorded so far as `trace`.
+ * after the `occurrence`-th reply to `until` (a trace name such as selectPlaylistN), or, with `untilPlane`, once it
+ * returns true for the graphics plane (checked after every step). A thrown Error carries the trace recorded so far as
+ * `trace`.
  */
 export async function replayPlayerBdj(
   discDir: URL | string,
-  opts: { until: string; occurrence?: number; timeoutMs?: number; log?: (line: string) => void; classLibrary?: ClassLibrarySource },
+  opts: {
+    until: string;
+    occurrence?: number;
+    timeoutMs?: number;
+    log?: (line: string) => void;
+    classLibrary?: ClassLibrarySource;
+    untilPlane?: (plane: GraphicsPlaneReader) => boolean;
+  },
 ): Promise<PlayerBdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
   const occurrence = opts.occurrence ?? 1;
@@ -115,6 +126,7 @@ export async function replayPlayerBdj(
   let done = false;
   let firstPlaylistAt: number | null = null;
   let t0 = 0;
+  let plane: GraphicsPlaneReader | null = null;
 
   const onFromBdj = (m: FromBdj): void => {
     if (m.type !== 'call') return;
@@ -122,6 +134,7 @@ export async function replayPlayerBdj(
     if (m.name === 'selectPlaylist' && firstPlaylistAt === null) firstPlaylistAt = performance.now();
   };
   const onToBdj = (m: ToBdj): void => {
+    if (m.type === 'boot') plane = new GraphicsPlaneReader(m.plane);
     if (m.type !== 'reply' || done) return;
     const c = calls.get(m.id);
     if (!c) return;
@@ -166,6 +179,7 @@ export async function replayPlayerBdj(
       for (let q = 0; q < 5; q++) renderQuantum(views, left, right);
       player.tick();
       await new Promise((r) => setTimeout(r, 1));
+      if (opts.untilPlane && plane && opts.untilPlane(plane)) done = true;
     }
     const end = performance.now();
     return {
@@ -174,6 +188,7 @@ export async function replayPlayerBdj(
       untilMs: end - t0,
       virtualMs: clock.ms - start,
       events: [...events], // before the close in finally
+      plane,
     };
   } finally {
     await player.handle({ type: 'close' });

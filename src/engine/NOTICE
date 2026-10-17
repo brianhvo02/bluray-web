@@ -51,6 +51,10 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdj/worker-host.ts    from src/libbluray/bluray.c (the natives answered in the BD-J worker: bdpriv_reg_read,
                           bdpriv_get_uo_mask, bd_tell_time, bd_get_disc_info, bd_get_playlist_info) and
                           bdj/native/org_videolan_Libbluray.c (getAacsDataN)
+    bdj/graphics-plane.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c
+                          (Java_org_videolan_Libbluray_updateGraphicN, _updateGraphic), bluray.c (bdpriv_bdj_osd_cb,
+                          bdpriv_lock_osd_buffer, bdpriv_unlock_osd_buffer) and the ARGB overlay commands of
+                          decoders/overlay.h (BD_ARGB_OVERLAY_INIT, DRAW, FLUSH, CLOSE; BD_ARGB_BUFFER)
     bdj/jvm/natives/libbluray.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c, bdjo.c, util.c,
                           org_videolan_Logger.c, bdj/bdjo_parse.c (bdjo_get), disc/disc.c
                           (disc_cache_bdrom_file, disc_open_dir) and file/file.c (file_mkdirs)

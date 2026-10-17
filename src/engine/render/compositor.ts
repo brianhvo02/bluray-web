@@ -1,3 +1,4 @@
+import { PLANE_HEIGHT, PLANE_WIDTH, type GraphicsPlaneReader } from '../bdj/graphics-plane';
 import type { OverlayPlane } from '../graphics/overlay-plane';
 import type { ShaderStage } from '../shaders/stage';
 import type { TextRenderOptions } from '../subs/text-renderer';
@@ -26,6 +27,14 @@ export interface CompositorLike {
   drawText?(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void;
   /** Draws the IG plane over the video (and PG) just drawn: call it after every drawVideo. */
   drawIg?(plane: OverlayPlane): void;
+  /**
+   * Draws the BD-J graphics plane over everything else (it takes the IG plane's place), scaled to the 1920×1080 menu
+   * rectangle as IG is. Copies only what was published since the last draw (what the BD-J worker publishes while the
+   * copy waits stays pending for the next draw).
+   */
+  drawBdj?(plane: GraphicsPlaneReader): void;
+  /** Forgets the BD-J plane (BD-J stopped): nothing of it is drawn again. */
+  clearBdj?(): void;
   /** Shades every video frame drawn from now on with the stage's set (null: draw frames as they are). */
   setShaderStage?(stage: ShaderStage | null): void;
 }
@@ -43,11 +52,20 @@ export interface TextRendererLike {
 /** A plane's pixels at plane size, updated from its dirty rects. */
 interface PlaneCanvas { readonly canvas: OffscreenCanvas; readonly ctx: OffscreenCanvasRenderingContext2D; readonly plane: OverlayPlane }
 
-/** Draws planes onto the transferred canvas: video, then the PG overlay, then the IG overlay. */
+/** The BD-J plane's pixels at plane size: one canvas and one ImageData, reused for every BD-J session. */
+interface BdjCanvas {
+  readonly canvas: OffscreenCanvas;
+  readonly ctx: OffscreenCanvasRenderingContext2D;
+  readonly image: ImageData;
+  plane: GraphicsPlaneReader | null;
+}
+
+/** Draws planes onto the transferred canvas: video, then the PG overlay, then the IG overlay, then the BD-J plane. */
 export class Compositor implements CompositorLike {
   private readonly ctx: OffscreenCanvasRenderingContext2D;
   private pg: PlaneCanvas | null = null;
   private ig: PlaneCanvas | null = null;
+  private bdj: BdjCanvas | null = null;
   /** Display size of the last frame drawn: text is laid out in its fitted rectangle. */
   private frameSize: { readonly width: number; readonly height: number } | null = null;
   /** Storage (coded, visible) size of the last frame: ASS layout follows it for anamorphic video. */
@@ -91,6 +109,33 @@ export class Compositor implements CompositorLike {
 
   drawIg(plane: OverlayPlane): void {
     this.ig = this.drawPlane(this.ig, plane);
+  }
+
+  drawBdj(plane: GraphicsPlaneReader): void {
+    let b = this.bdj;
+    if (!b) {
+      const canvas = this.createCanvas(PLANE_WIDTH, PLANE_HEIGHT);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('2D canvas context is unavailable');
+      b = this.bdj = { canvas, ctx, image: new ImageData(new Uint8ClampedArray(PLANE_WIDTH * PLANE_HEIGHT * 4), PLANE_WIDTH, PLANE_HEIGHT), plane: null };
+    }
+    const rect = plane.copyDirtyInto(b.image, b.plane !== plane);
+    if (rect) {
+      b.ctx.putImageData(b.image, 0, 0, rect.x, rect.y, rect.width, rect.height);
+      b.plane = plane;
+    }
+    if (b.plane !== plane) return; // a new plane whose first copy waits for the writer: nothing stale is drawn
+    const { width, height } = plane.size();
+    if (width > 0 && height > 0 && plane.visible()) {
+      const r = fitRect(PLANE_WIDTH, PLANE_HEIGHT, this.canvas.width, this.canvas.height);
+      this.ctx.drawImage(b.canvas, 0, 0, width, height, r.x, r.y, r.width, r.height);
+    }
+  }
+
+  clearBdj(): void {
+    if (!this.bdj) return;
+    this.bdj.plane = null;
+    this.bdj.ctx.clearRect(0, 0, PLANE_WIDTH, PLANE_HEIGHT);
   }
 
   drawText(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void {

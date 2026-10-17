@@ -7,6 +7,7 @@ import { createDiscHandler, findDiscs } from '../../../tools/disc-server/server'
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries } from '../../../tests/helpers/synthetic-disc';
 import { runBdjWorker, type BdjPort } from './bdj-worker';
+import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { createStatusBlock } from './status-block';
 import type { FromBdj, ToBdj } from './worker-protocol';
@@ -22,6 +23,7 @@ describe('runBdjWorker', () => {
       type: 'boot',
       registers: createRegisterBuffer(),
       status: createStatusBlock(),
+      plane: createGraphicsPlane(),
       discFiles: discEntries(fixtureDiscFiles('disc-bdj')),
       discId: null,
       classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
@@ -52,6 +54,7 @@ describe('runBdjWorker', () => {
           type: 'boot',
           registers: createRegisterBuffer(),
           status: createStatusBlock(),
+          plane: createGraphicsPlane(),
           discFiles: [],
           discHttp: { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/discs/${id}`, token: 't' },
           discId: null,

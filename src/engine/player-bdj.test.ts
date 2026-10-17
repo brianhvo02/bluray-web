@@ -17,6 +17,8 @@ import type { PlayerSettings } from './disc/player-settings';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { Player } from './player';
+import type { CompositorLike } from './render/compositor';
+import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
@@ -73,6 +75,7 @@ interface HarnessOptions {
   readonly worker?: WorkerLike;
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
   readonly playerSettings?: PlayerSettings;
+  readonly compositor?: CompositorLike;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -88,7 +91,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     nowMs: () => clock.ms,
     requestFrame: () => undefined,
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
-    createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+    createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
     setTimer: opts.setTimer ?? (() => () => undefined),
     createBdjWorker: () => {
       if (opts.worker) return opts.worker;
@@ -382,6 +385,90 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
     return { h, w };
   }
+
+  /** A compositor that records its calls by name; drawBdj also notes the plane's buffer and copies it, as the real one does. */
+  function recordingCompositor(): { readonly compositor: CompositorLike; readonly calls: string[]; readonly planes: SharedArrayBuffer[] } {
+    const calls: string[] = [];
+    const planes: SharedArrayBuffer[] = [];
+    const image = { data: new Uint8ClampedArray(1920 * 1080 * 4), width: 1920, height: 1080 } as ImageData;
+    const compositor: CompositorLike = {
+      resize: () => void calls.push('resize'),
+      drawVideo: () => void calls.push('drawVideo'),
+      drawIg: () => void calls.push('drawIg'),
+      drawBdj: (plane) => {
+        calls.push('drawBdj');
+        planes.push(plane.buffer);
+        plane.copyDirtyInto(image);
+      },
+      clearBdj: () => void calls.push('clearBdj'),
+    };
+    return { compositor, calls, planes };
+  }
+
+  /** A booted hand-driven BD-J title whose Java has drawn a menu into the plane, shown by a recording compositor. */
+  async function menuShown(): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; rec: ReturnType<typeof recordingCompositor>; writer: GraphicsPlaneWriter }> {
+    const w = handWorker();
+    const rec = recordingCompositor();
+    const h = await harness(bdjDisc(), { worker: w.worker, compositor: rec.compositor });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot') throw new Error('no boot');
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    const writer = new GraphicsPlaneWriter(boot.plane);
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 100, 100, 299, 149);
+    await h.play(50);
+    expect(rec.planes.at(-1)).toBe(boot.plane);
+    expect(new GraphicsPlaneReader(boot.plane).visible()).toBe(true);
+    return { h, w, rec, writer };
+  }
+
+  it("draws Java's plane on its flush, with no playlist playing, and not again until it changes", async () => {
+    const { h, rec, writer } = await menuShown();
+    const at = rec.calls.length;
+    await h.play(50);
+    // a visible plane is drawn whenever the picture is; with no playlist nothing changed, so nothing is drawn
+    expect(rec.calls.slice(at)).toEqual([]);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 100, 299, 149); // the menu taken down
+    await h.play(20);
+    expect(rec.calls.slice(at)).toEqual(['drawVideo', 'drawBdj']);
+  });
+
+  it('repaints with the plane drawn last when the window is resized (Review Focus 1)', async () => {
+    const { h, rec } = await menuShown();
+    const at = rec.calls.length;
+    await h.player.handle({ type: 'resize', width: 390, height: 844 });
+    expect(rec.calls.slice(at)).toEqual(['resize', 'drawVideo', 'drawBdj']);
+  });
+
+  /** After `leave`, the plane is cleared at once (a repaint without it) and never drawn again (Review Focus 2). */
+  async function clearedBy(leave: (h: Harness, w: ReturnType<typeof handWorker>) => Promise<void>): Promise<void> {
+    const { h, w, rec, writer } = await menuShown();
+    const at = rec.calls.length;
+    await leave(h, w);
+    const after = rec.calls.slice(at);
+    expect(after.slice(0, 2)).toEqual(['clearBdj', 'drawVideo']);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 0, 0, 9, 9); // a worker still drawing as it dies
+    await h.play(500);
+    expect(rec.calls.slice(at)).not.toContain('drawBdj');
+    expect(w.terminated()).toBe(true);
+  }
+
+  it('clears the plane at once when the user picks a playlist in the picker', async () => {
+    await clearedBy((h) => h.player.handle({ type: 'playPlaylist', playlistId: '00001' }));
+  });
+
+  it('clears the plane at once when the disc closes', async () => {
+    await clearedBy((h) => h.player.handle({ type: 'close' }));
+  });
+
+  it('clears the plane at once when BD-J fails', async () => {
+    await clearedBy(async (h, w) => {
+      w.emit({ type: 'failed', code: 'internal', message: 'boom' });
+      expect(notices(h)).toContain('bdj-failed');
+    });
+  });
 
   it('a playlist Java asked for that is still loading when the disc closes never opens afterwards', async () => {
     const { h, w } = await startedHand();
