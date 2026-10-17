@@ -154,15 +154,23 @@ describe('Compositor.drawVideo with a shader stage', () => {
 });
 
 describe('Compositor.drawBdj', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   function fake(width: number, height: number) {
     const calls: Array<[string, ...unknown[]]> = [];
     const ctx = (name: string) => new Proxy({}, { get: (_t, prop: string) => (...args: unknown[]) => calls.push([`${name}.${prop}`, ...args]) });
-    const bdjCanvas = { getContext: () => ctx('bdj') } as unknown as OffscreenCanvas;
+    const bdjCanvas = { width: 1920, height: 1080, getContext: () => ctx('bdj') } as unknown as OffscreenCanvas;
     const main = { width, height, getContext: () => ctx('main') } as unknown as OffscreenCanvas;
+    const created: OffscreenCanvas[] = [];
     vi.stubGlobal('ImageData', class { constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {} });
-    return { calls, compositor: new Compositor(main, () => bdjCanvas), bdjCanvas, main };
+    const compositor = new Compositor(main, () => {
+      created.push(bdjCanvas);
+      return bdjCanvas;
+    });
+    return { calls, compositor, bdjCanvas, main, created };
   }
 
   function menu(): { writer: GraphicsPlaneWriter; reader: GraphicsPlaneReader } {
@@ -182,8 +190,11 @@ describe('Compositor.drawBdj', () => {
     expect(calls.filter(([n]) => n.startsWith('main.')).map(([n]) => n)).toEqual(['main.fillRect', 'main.drawImage']);
     expect(calls.at(-1)).toEqual(['main.drawImage', bdjCanvas, 0, 0, 1920, 1080, 0, 218, 1000, 563]);
     calls.length = 0;
+    const cas = vi.spyOn(Atomics, 'compareExchange');
     compositor.drawBdj(reader);
-    expect(calls.map(([n]) => n)).toEqual(['main.drawImage']); // nothing new to copy
+    expect(calls.map(([n]) => n)).toEqual(['main.drawImage']); // nothing new to copy: the cached canvas is drawn
+    expect(cas).not.toHaveBeenCalled(); // and the plane's lock is never tried
+    cas.mockRestore();
     updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 5, 6, 7, 8);
     calls.length = 0;
     compositor.drawBdj(reader);
@@ -216,8 +227,26 @@ describe('Compositor.drawBdj', () => {
     expect(calls.at(-1)).toEqual(['main.drawImage', bdjCanvas, 0, 0, 1280, 720, 0, 0, 1920, 1080]);
   });
 
-  it('draws nothing for an empty or closed plane, and clearBdj forgets the plane it drew', () => {
-    const { calls, compositor } = fake(1920, 1080);
+  it('while Java holds the plane, draws the cached picture at once and copies the update on a later draw', () => {
+    const { calls, compositor, bdjCanvas } = fake(1920, 1080);
+    const { writer, reader } = menu();
+    compositor.drawBdj(reader);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 1, 2, 3, 4);
+    writer.lock();
+    calls.length = 0;
+    const t0 = performance.now();
+    compositor.drawBdj(reader);
+    expect(performance.now() - t0).toBeLessThan(5);
+    expect(calls).toEqual([['main.drawImage', bdjCanvas, 0, 0, 1920, 1080, 0, 0, 1920, 1080]]);
+    expect(reader.pending()).toBe(true);
+    writer.unlock();
+    calls.length = 0;
+    compositor.drawBdj(reader);
+    expect(calls.filter(([n]) => n === 'bdj.putImageData').map((c) => c.slice(2))).toEqual([[0, 0, 1, 2, 3, 3]]);
+  });
+
+  it('draws nothing for an empty or closed plane, and clearBdj frees the canvas, made again for the next plane', () => {
+    const { calls, compositor, bdjCanvas, created } = fake(1920, 1080);
     const { writer, reader } = menu();
     updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 200, 109, 204);
     compositor.drawBdj(reader);
@@ -225,11 +254,13 @@ describe('Compositor.drawBdj', () => {
     const other = menu();
     compositor.drawBdj(other.reader);
     expect(calls.filter(([n]) => n === 'main.drawImage')).toHaveLength(1);
+    expect(created).toHaveLength(1);
     compositor.clearBdj();
-    expect(calls.at(-1)).toEqual(['bdj.clearRect', 0, 0, 1920, 1080]);
+    expect([bdjCanvas.width, bdjCanvas.height]).toEqual([0, 0]);
     updateGraphic(other.writer, 0, 0, null, 0, 0, 0, 0);
     calls.length = 0;
     compositor.drawBdj(other.reader);
+    expect(created).toHaveLength(2);
     expect(calls.some(([n]) => n === 'main.drawImage')).toBe(false);
   });
 });

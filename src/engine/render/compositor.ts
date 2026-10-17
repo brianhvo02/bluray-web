@@ -52,7 +52,7 @@ export interface TextRendererLike {
 /** A plane's pixels at plane size, updated from its dirty rects. */
 interface PlaneCanvas { readonly canvas: OffscreenCanvas; readonly ctx: OffscreenCanvasRenderingContext2D; readonly plane: OverlayPlane }
 
-/** The BD-J plane's pixels at plane size: one canvas and one ImageData, reused for every BD-J session. */
+/** The BD-J plane's pixels at plane size: one canvas and one ImageData, reused while BD-J runs. */
 interface BdjCanvas {
   readonly canvas: OffscreenCanvas;
   readonly ctx: OffscreenCanvasRenderingContext2D;
@@ -132,10 +132,11 @@ export class Compositor implements CompositorLike {
     }
   }
 
+  /** Drops the plane's canvas and ImageData (about 16 MB); the next plane allocates them again. */
   clearBdj(): void {
     if (!this.bdj) return;
-    this.bdj.plane = null;
-    this.bdj.ctx.clearRect(0, 0, PLANE_WIDTH, PLANE_HEIGHT);
+    this.bdj.canvas.width = this.bdj.canvas.height = 0; // let the browser free the backing store now
+    this.bdj = null;
   }
 
   drawText(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void {

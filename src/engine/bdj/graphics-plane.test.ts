@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GraphicsPlaneReader, GraphicsPlaneWriter, PLANE_HEIGHT, PLANE_WIDTH, createGraphicsPlane, updateGraphic } from './graphics-plane';
 
 /** A plain RGBA ImageData stand-in (Node has none). */
@@ -71,6 +71,8 @@ describe('updateGraphic (updateGraphicN → _updateGraphic → bdpriv_bdj_osd_cb
 });
 
 describe('GraphicsPlaneWriter / GraphicsPlaneReader', () => {
+  afterEach(() => vi.restoreAllMocks());
+
   it('shows nothing to the reader until flush', () => {
     const { writer, reader } = plane();
     writer.init(1920, 1080);
@@ -162,13 +164,30 @@ describe('GraphicsPlaneWriter / GraphicsPlaneReader', () => {
     expect(reader.hash()).toBe(empty);
   });
 
-  it('the reader gives up on a plane the writer holds, and the update stays pending for its next copy', () => {
+  it('the reader gives up at once on a plane the writer holds, and the update stays pending for its next copy', () => {
     const { writer, reader } = plane();
     writer.init(1920, 1080);
+    const img = image();
     writer.lock();
-    expect(reader.copyDirtyInto(image())).toBeNull();
+    const wait = vi.spyOn(Atomics, 'wait');
+    const t0 = performance.now();
+    expect(reader.copyDirtyInto(img)).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(5);
+    expect(wait).not.toHaveBeenCalled();
     expect(reader.pending()).toBe(true);
     writer.unlock();
-    expect(reader.copyDirtyInto(image())).not.toBeNull();
+    expect(reader.copyDirtyInto(img)).toEqual({ x: 0, y: 0, width: PLANE_WIDTH, height: PLANE_HEIGHT });
+  });
+
+  it('with nothing pending, the reader returns without touching the lock, even while the writer holds it', () => {
+    const { writer, reader } = plane();
+    writer.init(1920, 1080);
+    const img = image();
+    reader.copyDirtyInto(img);
+    writer.lock();
+    const cas = vi.spyOn(Atomics, 'compareExchange');
+    expect(reader.copyDirtyInto(img)).toBeNull();
+    expect(cas).not.toHaveBeenCalled();
+    writer.unlock();
   });
 });

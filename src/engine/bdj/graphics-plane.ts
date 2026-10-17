@@ -36,8 +36,8 @@ const HEADER_WORDS = 16;
 const HEADER_BYTES = HEADER_WORDS * 4;
 const PIXELS = PLANE_WIDTH * PLANE_HEIGHT;
 
-/** How long the reader waits for the writer's lock before it tries again at the next frame. */
-const READER_LOCK_MS = 20;
+/** The reader never waits for the writer's lock (the render path must not block): it tries again at the next frame. */
+const READER_LOCK_MS = 0;
 
 export interface PlaneRect {
   readonly x: number;
@@ -258,9 +258,11 @@ export class GraphicsPlaneReader extends PlaneViews {
 
   /**
    * Copies the area published since the last call (or, with `all`, the whole plane) into `image` (PLANE_WIDTH ×
-   * PLANE_HEIGHT, RGBA) and returns it; null when nothing changed, or when the writer holds the plane (try again later).
+   * PLANE_HEIGHT, RGBA) and returns it; null when nothing changed (without touching the lock), or when the writer
+   * holds the plane: then nothing is waited for, and what was published stays pending for the next call.
    */
   copyDirtyInto(image: ImageData, all = false): PlaneRect | null {
+    if (!all && !this.pending()) return null;
     if (!this.acquire(READER_LOCK_MS)) return null;
     try {
       const hd = this.header;
