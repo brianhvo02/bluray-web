@@ -4,6 +4,9 @@ import { checkCapabilities, showStorageHint } from './capabilities';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
+/** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
+const COPY_NOTICE_DELAY_MS = 1500;
+
 interface LandingScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
@@ -16,10 +19,30 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  /** The folder picker is open or handing over its files (the input fallback); the copy notice shows after COPY_NOTICE_DELAY_MS. */
+  const [awaitingFiles, setAwaitingFiles] = useState(false);
+  const [copyNotice, setCopyNotice] = useState(false);
 
   useEffect(() => {
     listRecentDiscs().then(setRecent, () => setRecent([]));
   }, []);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const cancel = (): void => setAwaitingFiles(false);
+    input.addEventListener('cancel', cancel);
+    return () => input.removeEventListener('cancel', cancel);
+  }, []);
+
+  useEffect(() => {
+    if (!awaitingFiles) {
+      setCopyNotice(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setCopyNotice(true), COPY_NOTICE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [awaitingFiles]);
 
   const run = (task: Promise<void>): void => {
     task.catch((err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
@@ -50,6 +73,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
     setLocalError(null);
     controller.startAudio(); // must happen inside the click gesture
     if (!capabilities.canPickDirectory) {
+      setAwaitingFiles(true);
       inputRef.current?.click();
       return;
     }
@@ -57,6 +81,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   };
 
   const onInput = (e: ChangeEvent<HTMLInputElement>): void => {
+    setAwaitingFiles(false);
     setLocalError(null);
     const files = e.target.files;
     if (files && files.length > 0) controller.open(collectFromFileList(files));
@@ -123,6 +148,11 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         {/* webkitdirectory is rendered, not set in an effect: the input must pick folders from the moment it exists */}
         <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" {...{ webkitdirectory: '' }} onChange={onInput} />
       </div>
+      {copyNotice && (
+        <p className="status" role="status" data-testid="copy-notice">
+          Waiting for the files… On iPhone and iPad, Safari copies the whole folder before the player can read it, so a full disc can take an hour or more from a USB drive.
+        </p>
+      )}
       {snapshot.engineState === 'loading' && <p className="status">Reading disc…</p>}
       {error && (
         <div className="error-banner" role="alert" data-testid="error">
