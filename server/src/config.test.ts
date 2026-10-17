@@ -10,11 +10,19 @@ describe('loadConfig', () => {
       ],
       dataDir: '/d',
       port: 4190,
+      nightlyScanAt: { hour: 4, minute: 0 },
+      scanPauseMs: 10,
     });
   });
 
   it('defaults to no roots, /data and port 8080 when unset', () => {
-    expect(loadConfig({})).toEqual({ roots: [], dataDir: '/data', port: 8080 });
+    expect(loadConfig({})).toEqual({
+      roots: [],
+      dataDir: '/data',
+      port: 8080,
+      nightlyScanAt: { hour: 4, minute: 0 },
+      scanPauseMs: 10,
+    });
   });
 
   it.each(['drv0', '=/library/drv0', 'drv0=', 'drv0=/a,=/b'])('rejects the malformed LIBRARY_ROOTS %j', (value) => {
@@ -23,6 +31,20 @@ describe('loadConfig', () => {
 
   it('rejects duplicate root names', () => {
     expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv0=/b' })).toThrow('LIBRARY_ROOTS names "drv0" twice');
+  });
+
+  it('reads NIGHTLY_SCAN_AT and SCAN_PAUSE_MS', () => {
+    const c = loadConfig({ NIGHTLY_SCAN_AT: '3:30', SCAN_PAUSE_MS: '0' });
+    expect(c.nightlyScanAt).toEqual({ hour: 3, minute: 30 });
+    expect(c.scanPauseMs).toBe(0);
+  });
+
+  it.each(['', '24:00', '4', '04:60', 'ab:cd'])('rejects NIGHTLY_SCAN_AT=%j', (value) => {
+    expect(() => loadConfig({ NIGHTLY_SCAN_AT: value })).toThrow(`NIGHTLY_SCAN_AT "${value}" is not HH:MM`);
+  });
+
+  it.each(['', '-1', '1.5', 'x'])('rejects SCAN_PAUSE_MS=%j', (value) => {
+    expect(() => loadConfig({ SCAN_PAUSE_MS: value })).toThrow('is not a number of milliseconds');
   });
 
   it.each(['', 'abc', '80x', '-1', '1.5', '65536'])('rejects PORT=%j', (value) => {

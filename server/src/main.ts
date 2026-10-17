@@ -7,7 +7,7 @@ import { libraryRoute } from './routes/library';
 const SHUTDOWN_GRACE_MS = 3_000;
 
 const config = loadConfig(process.env);
-const library = new Library(config.roots, join(config.dataDir, 'library.json'));
+const library = new Library(config.roots, join(config.dataDir, 'library.json'), { scanPauseMs: config.scanPauseMs });
 const server = createServer([libraryRoute(library)]);
 
 function scheduleScans(): void {
@@ -19,7 +19,7 @@ function scheduleScans(): void {
     setTimeout(() => {
       run();
       arm();
-    }, nextNightly(new Date()).getTime() - Date.now()).unref();
+    }, nextNightly(new Date(), config.nightlyScanAt).getTime() - Date.now()).unref();
   };
   arm();
 }

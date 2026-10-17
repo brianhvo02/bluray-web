@@ -11,6 +11,8 @@ const SKIPPED = new Set(['bk', 'lost+found']);
 export interface LibraryOptions {
   /** Injected for tests. */
   opendir?: (path: string) => Promise<Dir>;
+  /** Pause between directory reads, which keeps a scan gentle on disks that ignore ionice. Default 10. */
+  scanPauseMs?: number;
 }
 
 interface Node {
@@ -20,9 +22,9 @@ interface Node {
 
 const byName = (a: { name: string }, b: { name: string }): number => a.name.localeCompare(b.name, 'ja');
 
-/** The next 04:00 strictly after `now`, in server local time. */
-export function nextNightly(now: Date): Date {
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 4, 0, 0, 0);
+/** The next `at` (default 04:00) strictly after `now`, in server local time. */
+export function nextNightly(now: Date, at: { hour: number; minute: number } = { hour: 4, minute: 0 }): Date {
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), at.hour, at.minute, 0, 0);
   if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
   return next;
 }
@@ -32,6 +34,8 @@ export class Library {
   private byId = new Map<string, DiscEntry>();
   private running: Promise<void> | null = null;
   private readonly open: (path: string) => Promise<Dir>;
+  private readonly pauseMs: number;
+  private reads = 0;
 
   constructor(
     private readonly roots: readonly { name: string; dir: string }[],
@@ -39,9 +43,10 @@ export class Library {
     options: LibraryOptions = {},
   ) {
     this.open = options.opendir ?? opendir;
+    this.pauseMs = options.scanPauseMs ?? 10;
     try {
       const cached: unknown = JSON.parse(readFileSync(cacheFile, 'utf8'));
-      if (Array.isArray(cached)) this.install(cached as DiscEntry[]);
+      if (Array.isArray(cached)) this.install(cached.filter((e) => this.valid(e)));
     } catch {
       // No usable cache: the first scan fills it.
     }
@@ -75,6 +80,19 @@ export class Library {
     return this.running;
   }
 
+  private valid(e: unknown): e is DiscEntry {
+    if (typeof e !== 'object' || e === null) return false;
+    const d = e as Record<string, unknown>;
+    return (
+      typeof d.id === 'string' &&
+      typeof d.name === 'string' &&
+      typeof d.path === 'string' &&
+      (d.kind === 'folder' || d.kind === 'iso') &&
+      typeof d.sizeBytes === 'number' &&
+      this.roots.some((r) => d.path === r.name || (d.path as string).startsWith(`${r.name}/`))
+    );
+  }
+
   private install(discs: DiscEntry[]): void {
     this.tree = buildTree(discs);
     this.byId = new Map(discs.map((d) => [d.id, d]));
@@ -82,7 +100,13 @@ export class Library {
 
   private async doScan(): Promise<void> {
     const found: DiscEntry[] = [];
-    for (const root of this.roots) await this.scanRoot(root, found);
+    const previous = this.byId;
+    const progressive = previous.size === 0;
+    this.reads = 0;
+    for (const root of this.roots) {
+      await this.scanRoot(root, found, previous);
+      if (progressive) this.install([...found]);
+    }
     this.install(found);
     try {
       const tmp = `${this.cacheFile}.tmp`;
@@ -93,23 +117,27 @@ export class Library {
     }
   }
 
-  private async scanRoot(root: { name: string; dir: string }, out: DiscEntry[]): Promise<void> {
+  private async scanRoot(root: { name: string; dir: string }, out: DiscEntry[], previous: Map<string, DiscEntry>): Promise<void> {
     let queue: { rel: string; abs: string; depth: number }[] = [{ rel: root.name, abs: root.dir, depth: 0 }];
     while (queue.length > 0) {
       const next: typeof queue = [];
       for (const dir of queue) {
         const entries = await this.readDir(dir.abs);
-        if (!entries) continue;
+        if (!entries) {
+          // An unreadable root keeps what it had rather than losing its discs.
+          if (dir.depth === 0) for (const d of previous.values()) if (d.path === root.name || d.path.startsWith(`${root.name}/`)) out.push(d);
+          continue;
+        }
         const bdmv = entries.find((e) => e.isDir && e.name.toLowerCase() === 'bdmv');
         if (bdmv) {
-          const disc = await this.folderDisc(dir.rel, join(dir.abs, bdmv.name));
+          const disc = await this.folderDisc(dir.rel, join(dir.abs, bdmv.name), previous);
           if (disc) {
             out.push(disc);
             continue;
           }
         }
         for (const e of entries) {
-          if (e.name.startsWith('.') || SKIPPED.has(e.name.toLowerCase())) continue;
+          if (e.name.startsWith('.') || SKIPPED.has(e.name.toLowerCase()) || e === bdmv) continue;
           const rel = `${dir.rel}/${e.name}`;
           if (e.isDir) {
             if (dir.depth < MAX_DEPTH) next.push({ rel, abs: join(dir.abs, e.name), depth: dir.depth + 1 });
@@ -128,6 +156,7 @@ export class Library {
   }
 
   private async readDir(abs: string): Promise<{ name: string; isDir: boolean; isFile: boolean }[] | null> {
+    if (this.reads++ > 0 && this.pauseMs > 0) await new Promise((r) => setTimeout(r, this.pauseMs));
     let dir: Dir;
     try {
       dir = await this.open(abs);
@@ -143,8 +172,8 @@ export class Library {
     return entries;
   }
 
-  /** A folder disc if `bdmvDir` holds index.bdmv; its size is that of the clips in STREAM. */
-  private async folderDisc(rel: string, bdmvDir: string): Promise<DiscEntry | null> {
+  /** A folder disc if `bdmvDir` holds index.bdmv; its size is that of the clips in STREAM, carried over from `previous` when the id is unchanged. */
+  private async folderDisc(rel: string, bdmvDir: string, previous: Map<string, DiscEntry>): Promise<DiscEntry | null> {
     const entries = await this.readDir(bdmvDir);
     const index = entries?.find((e) => e.isFile && e.name.toLowerCase() === 'index.bdmv');
     if (!entries || !index) return null;
@@ -154,6 +183,11 @@ export class Library {
     } catch {
       return null;
     }
+    const id = discId(rel, st.size, st.mtimeMs);
+    const name = rel.slice(rel.lastIndexOf('/') + 1);
+    const known = previous.get(id);
+    // Same path, index size and mtime: the disc is unchanged, so skip reading STREAM again.
+    if (known && known.kind === 'folder') return { id, name, path: rel, kind: 'folder', sizeBytes: known.sizeBytes };
     let sizeBytes = 0;
     const stream = entries.find((e) => e.isDir && e.name.toLowerCase() === 'stream');
     const streamDir = stream ? join(bdmvDir, stream.name) : null;
@@ -165,8 +199,7 @@ export class Library {
         // Vanished mid-scan.
       }
     }
-    const name = rel.slice(rel.lastIndexOf('/') + 1);
-    return { id: discId(rel, st.size, st.mtimeMs), name, path: rel, kind: 'folder', sizeBytes };
+    return { id, name, path: rel, kind: 'folder', sizeBytes };
   }
 }
 

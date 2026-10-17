@@ -8,6 +8,8 @@ services:
       LIBRARY_ROOTS: drv0=/library/drv0,drv2=/library/drv2,drv3=/library/drv3,drv5=/library/drv5,drv6=/library/drv6,drv7=/library/drv7,drv8=/library/drv8
       DATA_DIR: /data
       PORT: "8080"
+      TZ: America/Los_Angeles
+      NIGHTLY_SCAN_AT: "04:00"
     volumes:
       - /mnt/drv0/BDMVs:/library/drv0:ro
       - /mnt/drv2/BDMVs:/library/drv2:ro
