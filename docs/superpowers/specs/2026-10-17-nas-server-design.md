@@ -24,10 +24,11 @@ Goals:
 - A read-only disc server on the NAS, deployed and updated by Claude over SSH (user's choice), behind the existing Caddy at `https://mediaserver.tailnet-8e55.ts.net/bluray/`.
 - Folder browsing (user's choice): the seven `BDMVs` folders shown as one tree, as they sit on the drives, down to the discs.
 - Open and play any disc in the library from every supported browser, with everything the local player does (menus, BD-J, subtitles, audio switching), including `.iso` discs.
-- Paired devices only: nothing but "redeem an invite" answers an unpaired device (parent §2 anti-goal), even though the tailnet is private.
+- Paired devices only: nothing but "redeem a pairing code" answers an unpaired device (parent §2 anti-goal), even though the tailnet is private.
+- Pairing by a QR code or a short alphanumeric code (user's choice), the same way on both routes: the one-Tailscale route of step 2 and the browser-only WebRTC route of step 3. A code is looked up through a small matchmaking (rendezvous) service that step 3 extends with WebRTC signalling.
 
 Non-goals (step 2):
-- The WebRTC route and browser-only access for friends (step 3). Step 2 is reachable from the user's own Tailscale devices only.
+- The WebRTC route and browser-only access for friends (step 3, which starts with a throughput spike: 30–50 Mbps over a long-distance data channel, Safari especially, is unproven). Step 2 plays discs on the user's own Tailscale devices only; its pairing and rendezvous service are built so step 3 reuses them unchanged.
 - Transcoding (step 4), and loading the GPU driver.
 - Titles, covers or metadata beyond folder names (a later nicety; the data model shouldn't preclude covers from `BK` scans or `bdmt_*.xml` titles).
 - Writing anything to the drives. Ever.
@@ -49,7 +50,9 @@ Anti-goals:
 | Stack | Node 24 + TypeScript in `server/`, sharing `src/engine/bdmv/` and the UDF reader | Parent §4.1 |
 | ISO | Server-side in step 2 (UDF reader ported from libudfread, in `src/engine/disc/` so the client can use it later); local `.iso` opening deferred | Parent §4.7; deferral my call |
 | Admin | A screen in the app, owner sessions only; the server serves JSON, no HTML | My call |
-| Owner invites | Single-use, minted by `deploy.sh --owner-invite` per device; rerun to recover | My call |
+| Pairing | A 12-character code (Crockford base32, about 60 bits, shown as `K7QM-4XP2-R9TD`) and the same code as a QR, single-use, valid 10 minutes | User (QR or code); my call (format, lifetime) |
+| Code lookup | A rendezvous service: a Cloudflare Worker with one Durable Object for codes and rate limits, deployed by CI next to the Pages site; step 3 adds signalling to it | User (order agreed); my call (Worker + Durable Object) |
+| Owner codes | `deploy.sh --owner-code` mints one owner code per run (printed with a terminal QR); rerun to recover | My call |
 
 ## 5. The server
 
@@ -65,20 +68,23 @@ Anti-goals:
 - `GET discs/<id>/manifest` → every file's path, size and mtime, plus the inlined contents of the metadata the engine reads at open (`index.bdmv`, `MovieObject.bdmv`, every `.mpls` and `.clpi`, `sound.bdmv`, `BDJO`, JAR sizes), so opening is one round trip (parent §4.2). For an ISO, each entry carries its extents in the image.
 - `GET discs/<id>/files/<path>?t=<token>` with a single `Range` → bytes (206). For an ISO the server maps the path's extents. `Cache-Control: private, max-age=3600` on immutable disc bytes.
 - `GET discs/<id>/probe?t=<token>` → 4 MB of the main clip for the throughput measurement (parent §4.4).
-- Pairing and sessions: `POST pair/redeem` (invite secret + device public key), `POST session` (signed challenge → session token valid 1 hour, refreshed by the client before expiry).
-- Admin (owner sessions only, JSON): `GET admin/devices`, `GET admin/invites`, `POST admin/invites`, `DELETE admin/devices/<id>`, `DELETE admin/invites/<id>`, `POST admin/rescan`. These change state and carry a JSON body or a non-GET method, so they go through a CORS preflight (`Access-Control-Max-Age: 600`); only reads must stay preflight-free.
+- Pairing and sessions: `POST pair/redeem` (pairing code + device name + device public key), `POST session` (signed challenge → session token valid 1 hour, refreshed by the client before expiry).
+- Admin (owner sessions only, JSON): `GET admin/devices`, `GET admin/codes`, `POST admin/codes`, `DELETE admin/devices/<id>`, `DELETE admin/codes/<id>`, `POST admin/rescan`. These change state and carry a JSON body or a non-GET method, so they go through a CORS preflight (`Access-Control-Max-Age: 600`); only reads must stay preflight-free.
 - The manifest of an ISO disc lists its files as plain paths and sizes, like a folder disc; the server maps paths to extents itself, so the client needs no UDF reader in step 2.
 - Every response: `Access-Control-Allow-Origin: https://bluray-web.pages.dev` (plus `http://localhost:5173` and `:4173` for development, and preview origins `https://*.bluray-web.pages.dev`), `Cross-Origin-Resource-Policy: cross-origin`, `Vary: Origin`. Range reads use only CORS-safelisted headers, so they need no preflight.
 
 ## 7. Pairing (step 2's part of parent §5.3)
 
-- Owner invites: `deploy.sh --owner-invite` mints one single-use owner invite (a link) per run and prints it; the user runs it once per device, or creates more invites from an already paired owner device. Rerunning it is also the recovery if every owner device is lost or revoked (my call). Redeeming generates a non-extractable WebCrypto P-256 key pair on the device, stored in IndexedDB, and registers the public key.
+- **Codes.** A pairing code is 12 characters of Crockford base32 (no I, L, O, U; about 60 bits), shown in groups of four (`K7QM-4XP2-R9TD`) and typed case-insensitively, with or without dashes. It is single-use and valid 10 minutes. The QR encodes `https://bluray-web.pages.dev/?pair=<code>`, so a phone's camera opens the app straight into pairing; no in-app scanner. Codes are made by the NAS (the server keeps only a hash) when an owner asks for one in the app's NAS settings, or by `deploy.sh --owner-code` for the first owner device and for recovery (printed with a terminal QR). Each code says whether it pairs an owner.
+- **Lookup.** A typed code doesn't say where the NAS is, so the device asks the rendezvous service: `POST /codes/lookup {code}` → `{ nasId, routes: { https: '<base>' } }` (step 3 adds `webrtc`). The NAS registered the code there first (`POST /codes {codeHash, routes, expiresAt}`, signed with the NAS's rendezvous key, made at first start and kept in `/data`). The service stores only the hash, its NAS and routes, forgets them at expiry, and limits lookups to 10 per minute per IP and 1,000 per hour overall. It never sees device keys or disc data. Brute force: about 10^18 codes against at most a few thousand guesses per code lifetime.
+- **Redeem.** With the route in hand, the device generates a non-extractable WebCrypto P-256 key pair (IndexedDB), and posts the code, a device name and its public key to the NAS's `pair/redeem`. The NAS checks the code against its own hash (single use) and registers the device, owner or not as the code says.
+- **Rendezvous service.** `rendezvous/` in this repo: a Cloudflare Worker with a Durable Object `CodeRegistry`, at its `workers.dev` address, CORS-allowing the app origins, deployed by CI with the existing Cloudflare secrets. A NAS registers once (`POST /nas` with its public key) and signs its later requests.
 - A session starts with a signed challenge and yields a session token (HMAC over device ID and expiry with a server secret in `/data`). Tokens ride in the query string of reads; revoking a device rejects its tokens at once.
-- Admin is a screen inside the app (NAS settings: invites, devices with name and last seen, revoke, rescan), calling the admin endpoints with an owner session. The server serves no HTML, so nothing app-like runs on the NAS origin next to Vaultwarden (my call). No admin password in step 2.
+- Admin is a screen inside the app (NAS settings: new pairing code with its QR, devices with name and last seen, revoke, rescan), calling the admin endpoints with an owner session. The server serves no HTML, so nothing app-like runs on the NAS origin next to Vaultwarden (my call). No admin password in step 2.
 
 ## 8. The client
 
-- **Landing**: "Open from NAS" next to "Open disc folder" once a NAS is paired. The NAS address and the device key live in IndexedDB.
+- **Landing**: "Pair with a NAS" (a field for the code) until a NAS is paired, then "Open from NAS" next to "Open disc folder". Opening a `?pair=<code>` link goes straight to pairing. The NAS address and the device key live in IndexedDB.
 - **Library**: a folder browser (breadcrumbs, folders first, discs with size and an "ISO" or "UHD" badge when known), touch-friendly, remembering the last folder.
 - **Engine**: `RemoteSource` with an HTTPS `RangeTransport` in the worker, exactly as parent §4.3; the `open` command gains the `remote` variant. Remote read-ahead and start-up buffering as parent §4.4 (about 30 s ahead, several reads in flight, start after about 3 s buffered).
 - **Pre-flight**: the measured throughput against the disc's peak rate, with a plain warning when it's lower (UHD discs at 60–100+ Mbps will often exceed a hotel connection; step 4 addresses that).
@@ -96,6 +102,7 @@ Anti-goals:
 
 ## 10. Out of step 2
 
+- The WebRTC route and its signalling (step 3).
 - Opening a local `.iso` file on the landing screen (parent §4.7): deferred, since the server handles ISO discs itself and iOS copies picked files anyway (my call).
 
 ## 11. Left to the builder
