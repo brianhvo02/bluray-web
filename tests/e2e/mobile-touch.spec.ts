@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { telemetry } from './telemetry';
-import { skipWithoutH264 } from './support';
+import { expectBarShown, skipWithoutH264 } from './support';
 
 const HIDE_CONTROLS_MS = 3000; // PlayerScreen's idle timeout
 
@@ -45,7 +45,7 @@ test("the control bar's empty space belongs to the menu under it; a tap there le
   await expectMenu(page, true);
   const bar = page.getByTestId('control-bar');
   await page.keyboard.press('Shift'); // any key shows the controls (for another 3 s)
-  await expect(bar).not.toHaveClass(/hidden/);
+  await expectBarShown(bar);
   const box = (await bar.boundingBox())!;
   const pad = { x: box.x + 6, y: box.y + box.height - 4 };
   expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-testid') ?? null, pad)).toBe('video-canvas');
@@ -53,7 +53,7 @@ test("the control bar's empty space belongs to the menu under it; a tap there le
   await page.touchscreen.tap(pad.x, pad.y);
   await page.waitForTimeout(500);
   await expectMenu(page, true);
-  await expect(bar).not.toHaveClass(/hidden/);
+  await expectBarShown(bar);
 });
 
 test('a double tap on the right third seeks forward', async ({ page }) => {

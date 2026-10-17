@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { keyActionUo, keyToAction } from './keyboard';
+import { keyActionUo, keyToAction, keyWakesControls } from './keyboard';
 
 describe('keyToAction', () => {
   it('maps the playback keys from the spec', () => {
@@ -86,5 +86,25 @@ describe('shader key', () => {
       expect(keyToAction('V', ctx)).toEqual({ type: 'cycleShaders' });
     }
     expect(keyActionUo({ type: 'cycleShaders' }, { playing: true, popupShown: false })).toBeNull();
+  });
+});
+
+describe('keyWakesControls (ruling R11)', () => {
+  const menu = { menuActive: true };
+  const wakes = (key: string, inMenu: boolean): boolean => keyWakesControls(keyToAction(key, { menuActive: inMenu }), inMenu);
+
+  it('does not wake the bar for keys that go to a disc menu', () => {
+    for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', '0', '7', 'm', 'M', 'p', 'P']) {
+      expect(keyToAction(key, menu)?.type).toBe('menuKey');
+      expect(wakes(key, true)).toBe(false);
+    }
+  });
+
+  it('wakes it for player shortcuts and unmapped keys in a menu', () => {
+    for (const key of [' ', 'f', 'a', 's', 'v', '[', ']', 'Shift', 'x']) expect(wakes(key, true)).toBe(true);
+  });
+
+  it('wakes it for every key outside a menu, Top Menu and pop-up included', () => {
+    for (const key of ['ArrowLeft', 'ArrowUp', ' ', 'm', 'p', 'Enter', 'Shift']) expect(wakes(key, false)).toBe(true);
   });
 });

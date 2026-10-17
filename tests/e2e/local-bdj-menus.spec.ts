@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
-import { CHROME_ONLY } from './support';
+import { CHROME_ONLY, expectBarHidden } from './support';
 
 /**
  * Menu responsiveness on the developer's BD-J discs (5d spec §4.2): a key press or a click reaches a visible menu
@@ -75,9 +75,20 @@ test('A_NEW_ERA: arrows and Enter on the main menu show within 0.2 s; a click, w
   await expect(player).toHaveAttribute('data-playlist', '00149', { timeout: 60_000 }); // the menu's playlist
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
   await settled(page, 1500); // faded in, PLAY focused
+  // the mouse over the menu hides the control bar at once (ruling R9)
+  const bar = page.getByTestId('control-bar');
+  const pbox = (await player.boundingBox())!;
+  await page.mouse.move(pbox.x + pbox.width / 2, pbox.y + pbox.height / 2);
+  await expectBarHidden(bar, 1_000);
   for (const key of ['ArrowRight', 'ArrowRight', 'ArrowLeft', 'ArrowLeft', 'ArrowRight']) await timedKey(page, 'A_NEW_ERA', key); // CHAPTERS focused
   await timedKey(page, 'A_NEW_ERA', 'Enter'); // the chapters panel opens
   await expect(player).toHaveAttribute('data-playlist', '00149');
+  // keys that go to the menu leave the bar hidden (R11), and so does the mouse over the row of buttons along the bottom
+  // edge, just above the 24 px that wake the bar (R9)
+  await expectBarHidden(bar);
+  for (const fx of [0.2, 0.4, 0.5, 0.6, 0.8]) await page.mouse.move(pbox.x + pbox.width * fx, pbox.y + pbox.height - 40);
+  await page.waitForTimeout(300);
+  await expectBarHidden(bar);
   const max = (await menuTelemetry(page)).latency!.max;
   console.log(`A_NEW_ERA: largest key latency ${max} ms`);
 

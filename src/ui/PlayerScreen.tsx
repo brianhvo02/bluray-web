@@ -6,7 +6,7 @@ import { collectDroppedFiles, splitPick } from '../player/drop-files';
 import { checkCapabilities } from './capabilities';
 import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismissed, safeLocalStorage, toggleFullscreen } from './fullscreen';
 import { EncodingPrompt } from './EncodingPrompt';
-import { keyActionUo, keyToAction } from './keyboard';
+import { keyActionUo, keyToAction, keyWakesControls } from './keyboard';
 import { toMenuSpace } from './pointer';
 import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, menuPointerEffect, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
@@ -87,10 +87,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      // Any key shows the controls again, like mouse movement does.
-      setIdle(false);
-      setActivity((a) => a + 1);
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Any key shows the controls again, like mouse movement does, except a key that goes to a disc menu (ruling R11):
+      // the bar never comes over the menu.
+      const modified = e.ctrlKey || e.metaKey || e.altKey;
+      const shown = controller.getSnapshot();
+      const inMenu = shown.menuActive || shown.bdjMenuVisible;
+      const textEntry = e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLInputElement && e.target.type !== 'range');
+      if (keyWakesControls(modified || textEntry ? null : keyToAction(e.key, { menuActive: inMenu }), inMenu)) {
+        setIdle(false);
+        setActivity((a) => a + 1);
+      }
+      if (modified) return;
       const target = e.target;
       if (target instanceof HTMLTextAreaElement) return;
       if (target instanceof Element && target.closest('.audio-menu-list, .shader-dialog')) return; // an open audio or subtitle menu handles its own keys

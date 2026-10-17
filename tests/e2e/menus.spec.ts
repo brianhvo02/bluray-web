@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { CHROME_ONLY, skipWithoutH264 } from './support';
+import { CHROME_ONLY, expectBarHidden, expectBarShown, skipWithoutH264 } from './support';
 import { collectWindows, expectInSync } from './telemetry';
 
 // fixtures/synthetic/disc-menu (scripts/make-menu-disc.ts): First Play loops the top menu (playlist 00001). Page 0 has
@@ -51,7 +51,7 @@ async function menuPoint(page: Page, x: number, y: number): Promise<{ x: number;
 async function showControls(page: Page): Promise<void> {
   const box = (await page.getByTestId('player').boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height - 4);
-  await expect(page.getByTestId('control-bar')).not.toHaveClass(/hidden/);
+  await expectBarShown(page.getByTestId('control-bar'));
 }
 
 /** A point in the control bar's empty padding (bottom left), which belongs to the video and the menu under it. */
@@ -116,7 +116,7 @@ test('the control bar never covers the menu: only the bottom edge wakes it, it h
   const bottom = box.y + box.height;
   // over the menu the bar hides at once (well inside the 3 s idle timeout) and the cursor stays
   await page.mouse.move(x, box.y + box.height / 2);
-  await expect(bar).toHaveClass(/hidden/, { timeout: 1_000 });
+  await expectBarHidden(bar, 1_000);
   expect(await player.evaluate((el) => getComputedStyle(el).cursor)).not.toBe('none');
   // the mouse still reaches the menu: hovering B selects it, and the bar stays hidden
   const b = await menuPoint(page, 232, 316);
@@ -125,23 +125,39 @@ test('the control bar never covers the menu: only the bottom edge wakes it, it h
   // the lower menu area, where the bar would be, does not wake it
   for (const dy of [160, 100, 60, 40, 26]) await page.mouse.move(x, bottom - dy);
   await page.waitForTimeout(300);
-  await expect(bar).toHaveClass(/hidden/);
+  await expectBarHidden(bar);
   // the bottom 24 px do
   await page.mouse.move(x, bottom - 10);
-  await expect(bar).not.toHaveClass(/hidden/, { timeout: 1_000 });
+  await expectBarShown(bar, 1_000);
   // its empty space belongs to the menu underneath
   const pad = await barPadding(page);
   expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute('data-testid') ?? null, pad)).toBe('video-canvas');
   // back over the menu it hides at once
   await page.mouse.move(x, box.y + box.height / 2);
-  await expect(bar).toHaveClass(/hidden/, { timeout: 500 });
+  await expectBarHidden(bar, 500);
   // a click on a menu button still activates it
   const a = await menuPoint(page, 232, 216);
   await page.mouse.click(a.x, a.y);
   await expectMenu(page, false);
   // outside the menu any move wakes the bar again
   await page.mouse.move(x, box.y + box.height / 3);
-  await expect(bar).not.toHaveClass(/hidden/, { timeout: 1_000 });
+  await expectBarShown(bar, 1_000);
+});
+
+test("keys that go to the menu leave the control bar hidden; a player shortcut shows it (R11)", async ({ page }) => {
+  await openMenuDisc(page);
+  const bar = page.getByTestId('control-bar');
+  const box = (await page.getByTestId('player').boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await expectBarHidden(bar, 1_000);
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(() => menuState(page)).toBe('page 0 button 2');
+  await page.keyboard.press('ArrowUp');
+  await expect.poll(() => menuState(page)).toBe('page 0 button 1');
+  await page.waitForTimeout(300);
+  await expectBarHidden(bar);
+  await page.keyboard.press('a'); // cycle audio: a player shortcut
+  await expectBarShown(bar, 1_000);
 });
 
 test('the on-screen remote drives the menu', async ({ page }) => {
