@@ -641,6 +641,26 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(new SharedRegisterView(boot.registers).gprRead(5)).toBe(42);
   });
 
+  it('does not count a reaction that came just before the tap', async () => {
+    const t = manualTimers();
+    const { h, w, writer } = await menuShown({ setTimer: t.setTimer });
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    w.emit({ type: 'call', id: 1, name: 'writeReg', args: [0, 5, 42, 0] });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([1, 1]);
+  });
+
+  it('a second tap within the window replaces the first: one bdjTapIgnored', async () => {
+    const t = manualTimers();
+    const { h } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 961, y: 540 });
+    expect(t.armed(200)).toHaveLength(1);
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([1, 1]);
+  });
+
   it('forwards a click on an empty plane without watching it: no remote, no notice (Review Focus 3)', async () => {
     const t = manualTimers();
     const { h, w } = await startedHandWith({ setTimer: t.setTimer });

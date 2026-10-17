@@ -151,7 +151,9 @@ what would change that decision.
   notice once per menu. A reaction is a plane publication or anything Java sends (a call or a background still), so
   a menu that animates on its own counts every tap as taken. Deviations: libbluray's `bd_user_input` blocks until
   Java has taken an event; ours does not, so the BD-J worker's event queue merges a held key's repeats (and pointer
-  moves) beyond 8 pending, never other events. Pointer moves are not logged, like PTS. Escape/Back has no key yet.
+  moves) beyond 8 pending, never other events. Pointer moves are not logged, like PTS. Escape/Back is not sent to
+  Java: libbluray defines no Back key (`keys.h`) and Java drops unknown codes; Escape stays with the player UI. The
+  remote opens by itself once per menu, with the notice; one the user closes stays closed until the next menu.
 
 ## Audio
 

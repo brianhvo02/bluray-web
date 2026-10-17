@@ -37,3 +37,11 @@ export function pairableTap(action: TapAction, tap: Tap): Tap | null {
 export function idleAfterTap(idle: boolean, state: PlaybackState): boolean {
   return state === 'playing' || state === 'buffering' ? !idle : idle;
 }
+
+/**
+ * Whether the controls may hide after the idle timeout: only during playback, and not while a control is held, a menu of
+ * the control bar is open, or the remote is open over a BD-J menu (the remote sits with the controls and would go too).
+ */
+export function controlsMayIdle(ctx: { playing: boolean; pressed: boolean; menuOpen: boolean; remoteOpen: boolean; bdjMenuVisible: boolean }): boolean {
+  return ctx.playing && !ctx.pressed && !ctx.menuOpen && !(ctx.remoteOpen && ctx.bdjMenuVisible);
+}

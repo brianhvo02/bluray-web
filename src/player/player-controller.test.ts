@@ -384,6 +384,42 @@ describe('titles and the top menu', () => {
     expect(s.notices).toEqual([]); // the notice is the engine's, once per menu
   });
 
+  it('asks for the remote on the first ignored tap of each BD-J menu only', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'bdjActive', active: true });
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s).toMatchObject({ bdjTapsIgnored: 1, bdjRemoteRequests: 1, bdjRemoteOpenedInMenu: true });
+    // the user closed the remote: later ignored taps in this menu do not force it open again
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s).toMatchObject({ bdjTapsIgnored: 3, bdjRemoteRequests: 1 });
+    // a repeated visible report is the same menu
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s.bdjRemoteRequests).toBe(1);
+    // the plane empties and shows again: a new menu
+    s = reduceEvent(s, { type: 'bdjMenu', visible: false });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' }); // (the engine sends none on an empty plane; still not a new menu)
+    expect(s.bdjRemoteRequests).toBe(1);
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s).toMatchObject({ bdjRemoteRequests: 2, bdjRemoteOpenedInMenu: true });
+    // BD-J stopping ends the menu too
+    s = reduceEvent(s, { type: 'bdjActive', active: false });
+    expect(s.bdjRemoteOpenedInMenu).toBe(false);
+  });
+
+  it('the controller opens the remote once per menu from the engine events', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'bdjActive', active: true });
+    worker.emit({ type: 'bdjMenu', visible: true });
+    worker.emit({ type: 'bdjTapIgnored' });
+    worker.emit({ type: 'notice', code: 'bdj-tap-ignored', message: 'ignored' });
+    worker.emit({ type: 'bdjTapIgnored' });
+    expect(c.getSnapshot()).toMatchObject({ bdjRemoteRequests: 1, bdjTapsIgnored: 2 });
+  });
+
   it('drops the ignored-tap notice when the user picks a playlist (BD-J stops)', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());

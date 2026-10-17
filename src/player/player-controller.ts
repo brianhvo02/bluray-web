@@ -23,8 +23,15 @@ export interface PlayerSnapshot {
   readonly bdjActive: boolean;
   /** The BD-J graphics plane shows something: taps, clicks, arrows, Enter and digits go to the disc. */
   readonly bdjMenuVisible: boolean;
-  /** Taps on a BD-J menu the disc ignored, counted since the page loaded: each one opens the on-screen remote. */
+  /** Taps on a BD-J menu the disc ignored, counted since the page loaded. */
   readonly bdjTapsIgnored: number;
+  /**
+   * Times the on-screen remote was opened for an ignored tap, counted since the page loaded: once per menu (from the
+   * BD-J plane turning visible), with the notice; a remote the user then closes stays closed until the next menu.
+   */
+  readonly bdjRemoteRequests: number;
+  /** The current BD-J menu has already opened the remote for an ignored tap. */
+  readonly bdjRemoteOpenedInMenu: boolean;
   readonly warnings: readonly string[];
   readonly currentPlaylistId: string | null;
   readonly durationUs: number;
@@ -89,6 +96,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   bdjActive: false,
   bdjMenuVisible: false,
   bdjTapsIgnored: 0,
+  bdjRemoteRequests: 0,
+  bdjRemoteOpenedInMenu: false,
   warnings: [],
   currentPlaylistId: null,
   durationUs: 0,
@@ -119,7 +128,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, bdjMenuVisible: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, bdjMenuVisible: false, bdjRemoteOpenedInMenu: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
@@ -152,11 +161,14 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, uoMask: e.masked };
     case 'bdjActive':
       // once BD-J stops, its menu and the notice about it go
-      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, bdjMenuVisible: false, notices: s.notices.filter((n) => n.code !== 'bdj-tap-ignored') };
+      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, bdjMenuVisible: false, bdjRemoteOpenedInMenu: false, notices: s.notices.filter((n) => n.code !== 'bdj-tap-ignored') };
     case 'bdjMenu':
-      return { ...s, bdjMenuVisible: e.visible };
+      // a plane turning visible is a new menu: its first ignored tap opens the remote again
+      return { ...s, bdjMenuVisible: e.visible, bdjRemoteOpenedInMenu: e.visible && !s.bdjMenuVisible ? false : s.bdjRemoteOpenedInMenu };
     case 'bdjTapIgnored':
-      return { ...s, bdjTapsIgnored: s.bdjTapsIgnored + 1 };
+      return s.bdjRemoteOpenedInMenu
+        ? { ...s, bdjTapsIgnored: s.bdjTapsIgnored + 1 }
+        : { ...s, bdjTapsIgnored: s.bdjTapsIgnored + 1, bdjRemoteRequests: s.bdjRemoteRequests + 1, bdjRemoteOpenedInMenu: true };
     case 'indexTitles':
       return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':

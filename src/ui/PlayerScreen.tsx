@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, type Tap } from './touch';
+import { classifyTap, controlsMayIdle, DOUBLE_TAP_MS, idleAfterTap, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -165,10 +165,11 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   }, [pressed]);
 
   useEffect(() => {
-    if (!playing || pressed || menuOpen) return; // holding a control (e.g. the seek thumb) or an open menu keeps the controls up
+    // holding a control (e.g. the seek thumb), an open menu, or the remote over a BD-J menu keeps the controls up
+    if (!controlsMayIdle({ playing, pressed, menuOpen, remoteOpen, bdjMenuVisible: snapshot.bdjMenuVisible })) return;
     const timer = window.setTimeout(() => setIdle(true), HIDE_CONTROLS_MS);
     return () => window.clearTimeout(timer);
-  }, [playing, activity, pressed, menuOpen]);
+  }, [playing, activity, pressed, menuOpen, remoteOpen, snapshot.bdjMenuVisible]);
 
   const trackNotice = snapshot.notices.find((n) => n.code === 'audio-track')?.message;
   useEffect(() => {
@@ -201,16 +202,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
-  // A tap the BD-J menu ignored opens the remote, with the controls it sits over (the notice comes once per menu).
-  const tapsIgnored = snapshot.bdjTapsIgnored;
-  const seenTapsIgnored = useRef(tapsIgnored);
+  // The first tap a BD-J menu ignores opens the remote, with the controls it sits over, once per menu (with the notice):
+  // a remote the user closes stays closed until the next menu.
+  const remoteRequests = snapshot.bdjRemoteRequests;
+  const seenRemoteRequests = useRef(remoteRequests);
   useEffect(() => {
-    if (tapsIgnored === seenTapsIgnored.current) return;
-    seenTapsIgnored.current = tapsIgnored;
+    if (remoteRequests === seenRemoteRequests.current) return;
+    seenRemoteRequests.current = remoteRequests;
     setRemoteOpen(true);
     setIdle(false);
     setActivity((a) => a + 1);
-  }, [tapsIgnored]);
+  }, [remoteRequests]);
 
   const tapNotice = snapshot.notices.find((n) => n.code === 'bdj-tap-ignored');
   useEffect(() => {

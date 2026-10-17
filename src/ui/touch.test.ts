@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap } from './touch';
+import { classifyTap, controlsMayIdle, DOUBLE_TAP_MS, idleAfterTap, pairableTap } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -60,5 +60,21 @@ describe('idleAfterTap', () => {
   it('leaves them alone while paused, where they are always shown', () => {
     expect(idleAfterTap(false, 'paused')).toBe(false);
     expect(idleAfterTap(true, 'paused')).toBe(true);
+  });
+});
+
+describe('controlsMayIdle', () => {
+  const base = { playing: true, pressed: false, menuOpen: false, remoteOpen: false, bdjMenuVisible: false };
+  it('hides the controls only during playback with nothing held or open', () => {
+    expect(controlsMayIdle(base)).toBe(true);
+    expect(controlsMayIdle({ ...base, playing: false })).toBe(false);
+    expect(controlsMayIdle({ ...base, pressed: true })).toBe(false);
+    expect(controlsMayIdle({ ...base, menuOpen: true })).toBe(false);
+  });
+
+  it('keeps the controls (and the remote on them) up while the remote is open over a BD-J menu', () => {
+    expect(controlsMayIdle({ ...base, remoteOpen: true, bdjMenuVisible: true })).toBe(false);
+    expect(controlsMayIdle({ ...base, remoteOpen: true })).toBe(true); // over the feature, as before
+    expect(controlsMayIdle({ ...base, bdjMenuVisible: true })).toBe(true);
   });
 });
