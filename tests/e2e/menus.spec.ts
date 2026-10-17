@@ -1,11 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 import { CHROME_ONLY, skipWithoutH264 } from './support';
-import { collectWindows, expectInSync } from './telemetry';
+import { collectWindows, expectInSync, pausedClockUs, recordTelemetrySamples, telemetrySamples } from './telemetry';
 
 // fixtures/synthetic/disc-menu (scripts/make-menu-disc.ts): First Play loops the top menu (playlist 00001). Page 0 has
 // buttons A (1, 64x32 at (200, 200), jumps to title 1) and B (2, at (200, 300), opens page 1); page 1 has C (3, at
 // (200, 400), back to page 0 on B). Title 1 plays 00000 (time search masked) with a pop-up whose button links to mark 1.
 const DISC = 'fixtures/synthetic/disc-menu';
+/** Title 1's playlist has a mark every 2 s. */
+const MARK_1_US = 2_000_000;
 
 interface MenuTelemetry {
   clockUs: number;
@@ -115,18 +117,20 @@ test('P opens the pop-up menu during the feature and Enter jumps to mark 1', asy
 });
 
 test('Enter after clicking the Pop-up button activates the pop-up button, not the control again', async ({ page }) => {
+  await recordTelemetrySamples(page);
   await openMenuDisc(page);
   await playTitle1(page);
   await page.getByTestId('player').hover();
+  const beforePause = (await telemetrySamples(page)).length;
   await page.getByTestId('play-toggle').click(); // paused: only the button's link to mark 1 can move the clock to 2 s
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
-  const paused = (await menuTelemetry(page))!.clockUs;
-  expect(paused).toBeLessThan(1_900_000);
+  // Wherever a slow browser paused (before or after 2 s), the link moves the paused clock to exactly the mark.
+  expect(await pausedClockUs(page, beforePause)).not.toBe(MARK_1_US);
   await page.getByTestId('popup').click(); // keyboard focus stays on the control
   await expectMenu(page, true);
   await page.keyboard.press('Enter');
   await expectMenu(page, false);
-  await expect.poll(async () => (await menuTelemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(2_000_000);
+  await expect.poll(async () => (await menuTelemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBe(MARK_1_US);
 });
 
 test('Enter after clicking the Top Menu button activates the selected menu button', async ({ page }) => {

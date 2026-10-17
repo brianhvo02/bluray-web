@@ -4,7 +4,8 @@ export default defineConfig({
   testDir: 'tests/e2e',
   timeout: 60_000,
   // The service worker's install and precache would run during the A/V sync tests; offline.spec.ts allows it.
-  use: { baseURL: 'http://localhost:4173', serviceWorkers: 'block' },
+  // CI keeps a trace of each failure (uploaded with test-results/): a stall that only CI shows can be read step by step.
+  use: { baseURL: 'http://localhost:4173', serviceWorkers: 'block', trace: process.env.CI ? 'retain-on-failure' : 'off' },
   projects: [
     {
       name: 'chromium',
