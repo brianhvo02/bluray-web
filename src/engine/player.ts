@@ -7,6 +7,7 @@ import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
 import { EarlyBdjWorker } from './bdj/early-worker';
 import { GraphicsPlaneReader, createGraphicsPlane } from './bdj/graphics-plane';
+import { BDJ_EVENT_MOUSE, TapReactionWatch, UoRestriction, bdjMouseParam, bdjUserInput } from './bdj/input';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
 import { REGISTER_WORDS } from './bdj/shared-registers';
 import { StatusBlockWriter, createStatusBlock } from './bdj/status-block';
@@ -60,7 +61,7 @@ const NO_SUBTITLES_MESSAGE = 'this file has no subtitles we can read';
 const SOME_SUBTITLES_MESSAGE = 'Some lines of this file could not be read';
 const PLACE_FILES_MESSAGE = "Place each subtitle file at its episode's start in the subtitle menu";
 const NO_SHADER_BACKEND_MESSAGE = 'Shaders are unavailable here';
-const BDJ_MENU_HIDDEN_MESSAGE = "This disc's menu isn't shown yet. The disc is playing on its own; choose a playlist to take over.";
+const BDJ_TAP_IGNORED_MESSAGE = "This disc's menu doesn't respond to taps here. Use the remote.";
 const MIN_TEXT_SCALE = 0.5;
 const MAX_TEXT_SCALE = 2;
 /** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
@@ -215,6 +216,10 @@ interface BdjTitle {
   /** The title to start once the worker has booted; null once booted. */
   pendingTitle: number | null;
   booted: boolean;
+  /** The plane's visible() as last reported in a bdjMenu event. */
+  menuVisible: boolean;
+  /** Taps forwarded to Java, waiting for a reaction (the ignored-tap rule). */
+  readonly taps: TapReactionWatch;
 }
 
 interface Session {
@@ -396,7 +401,7 @@ export class Player {
           else if (!this.refused('menuCall')) this.playTitle(0);
           break;
         case 'menuKey':
-          this.menuKey(cmd.key);
+          this.menuKey(cmd.key, cmd.repeat === true);
           break;
         case 'pointer':
           this.pointer(cmd.kind, cmd.x, cmd.y);
@@ -476,6 +481,7 @@ export class Player {
     this.navigator?.tick(this.clock.nowUs());
     if (this.bdj) {
       this.bdj.status.setTime45(this.titleTime45());
+      this.updateBdjMenu(this.bdj);
     }
     const s = this.session;
     if (!s) {
@@ -779,13 +785,22 @@ export class Player {
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
     });
-    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false };
+    const taps = new TapReactionWatch({
+      setTimer: this.deps.setTimer ?? defaultSetTimer,
+      // a plane publication (flush, init, close) or anything Java sent: a call (playback, registers, titles) or a still
+      activity: () => plane.version() + session.activity,
+      ignored: (notice) => {
+        if (!live()) return;
+        this.deps.emit({ type: 'bdjTapIgnored' });
+        if (notice) this.notice('bdj-tap-ignored', BDJ_TAP_IGNORED_MESSAGE);
+      },
+    });
+    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, taps };
     this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
     this.deps.emit({ type: 'bdjActive', active: true });
     this.deps.emit({ type: 'uoMask', masked: [] });
-    this.notice('bdj-menu-hidden', BDJ_MENU_HIDDEN_MESSAGE);
     void host.handle('selectTitle', [title]); // _play_title: PSR4, then the title's object
     void this.bootBdj(entry, library);
   }
@@ -854,6 +869,7 @@ export class Player {
     if (!entry) return;
     entry.host.dispose();
     entry.end();
+    entry.taps.cancel();
     this.bdj = null;
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
@@ -863,6 +879,7 @@ export class Player {
     this.compositor?.clearBdj?.();
     this.repaint();
     if (this.pgRegs && this.navRegs !== entry.regs) this.bindPg(this.pgRegs);
+    if (entry.menuVisible) this.deps.emit({ type: 'bdjMenu', visible: false });
     this.deps.emit({ type: 'bdjActive', active: false });
     this.deps.emit({ type: 'uoMask', masked: [] });
   }
@@ -975,9 +992,9 @@ export class Player {
     if (!this.navigator.startTitle(title)) this.stopNavigator();
   }
 
-  private menuKey(key: MenuKey): void {
+  private menuKey(key: MenuKey, repeat = false): void {
     if (this.bdj) {
-      if (key === 'topMenu') this.bdjPlayTitle(this.bdj, 0); // other keys reach Java in 5d
+      this.bdjUserInput(this.bdj, key === 'topMenu' ? BdVk.ROOT_MENU : MENU_KEY_VK[key], repeat);
       return;
     }
     const nav = this.navigator;
@@ -988,12 +1005,43 @@ export class Player {
     else nav.userInput(MENU_KEY_VK[key]);
   }
 
+  /**
+   * bd_user_input under a BD-J title: the root menu key is a menu call (bd_menu_call, checked against the menu call
+   * mask), every other key goes to Java as BDJ_EVENT_VK_KEY, unfiltered by key interest and by the UO mask (libbluray
+   * checks neither for BD-J titles at UO restriction RELAXED).
+   */
+  private bdjUserInput(entry: BdjTitle, vk: number, repeat: boolean): void {
+    const input = bdjUserInput(vk, { level: UoRestriction.RELAXED, popupShown: false, isUoMasked: (op) => entry.host.isUoMasked(op) });
+    if (input.kind === 'menuCall') this.bdjPlayTitle(entry, 0);
+    else if (input.kind === 'event') entry.session.event(input.ev, input.param, repeat ? 'repeat' : undefined);
+  }
+
+  /** Reports the plane turning visible or empty; a newly visible plane is a new menu for the ignored-tap rule. */
+  private updateBdjMenu(entry: BdjTitle): void {
+    const visible = entry.plane.visible();
+    if (visible === entry.menuVisible) return;
+    entry.menuVisible = visible;
+    if (visible) entry.taps.menuShown();
+    this.deps.emit({ type: 'bdjMenu', visible });
+  }
+
   /** A move selects the button under the pointer (bd_mouse_select) and reports it; a click also activates it. */
   private pointer(kind: 'move' | 'click', x: number, y: number): void {
-    const nav = this.navigator;
-    if (!nav) return;
     const px = Math.max(0, Math.min(0xffff, Math.round(x)));
     const py = Math.max(0, Math.min(0xffff, Math.round(y)));
+    const entry = this.bdj;
+    if (entry) {
+      // bd_mouse_select → BDJ_EVENT_MOUSE; a click is then bd_user_input(BD_VK_MOUSE_ACTIVATE)
+      entry.session.event(BDJ_EVENT_MOUSE, bdjMouseParam(px, py), kind === 'move' ? 'move' : undefined);
+      if (kind === 'move') return;
+      this.bdjUserInput(entry, BdVk.MOUSE_ACTIVATE, false);
+      this.updateBdjMenu(entry);
+      // only a tap on a shown menu can be ignored (the UI sends others only when the plane is empty)
+      if (entry.menuVisible) entry.taps.tap(this.memory.bdjTapWindowMs);
+      return;
+    }
+    const nav = this.navigator;
+    if (!nav) return;
     nav.mouseSelect(px, py);
     if (kind === 'click') nav.userInput(BdVk.MOUSE_ACTIVATE);
     else this.deps.emit({ type: 'pointerTarget', button: nav.hitTest(px, py) });

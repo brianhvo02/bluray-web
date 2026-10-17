@@ -17,12 +17,13 @@ async function open(page: Page, query = ''): Promise<void> {
   await page.getByTestId('folder-input').setInputFiles(DISC);
 }
 
-test("plays the playlist the disc's Java selects, with the menu-hidden notice and no picker", async ({ page }) => {
+test("plays the playlist the disc's Java selects, with no picker and no notice", async ({ page }) => {
   await open(page);
   await reachesState(page, 'playing', 30_000);
   await expect(page.getByTestId('player')).toHaveAttribute('data-playlist', '00000'); // the playlist Java selected
   await expect(page.getByTestId('playlist-picker')).toBeHidden();
-  await expect(notice(page, /menu isn't shown yet/)).toBeVisible();
+  await expect(notice(page, /menu/)).toHaveCount(0); // 5c's "menu isn't shown yet" is gone
+  await expect(page.getByTestId('player')).toHaveAttribute('data-bdj-menu', 'false'); // disc-bdj draws nothing
   await expect.poll(async () => (await bdjStartup(page))?.firstFrameMs ?? null, { timeout: 10_000 }).not.toBeNull();
   const startup = (await bdjStartup(page))!;
   console.log(`disc-bdj start-up: ${JSON.stringify(startup)}`);
@@ -45,7 +46,6 @@ test('the picker stays reachable under a BD-J title, and a playlist chosen there
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('playlist-picker')).toBeHidden();
   await reachesState(page, 'playing', 15_000);
-  await expect(notice(page, /menu isn't shown yet/)).toBeHidden(); // BD-J stopped
 });
 
 test('a BD-J runtime that cannot boot (?bdjfail=1) falls back to the picker with a notice', async ({ page }) => {
@@ -54,4 +54,15 @@ test('a BD-J runtime that cannot boot (?bdjfail=1) falls back to the picker with
   await expect(notice(page, /^BD-J couldn't start this disc/)).toBeVisible();
   await page.getByTestId('playlist-00000').click();
   await reachesState(page, 'playing', 15_000);
+});
+
+test('a click on the video with an empty BD-J plane is play/pause, not a menu click; the remote is offered', async ({ page }) => {
+  await open(page);
+  await reachesState(page, 'playing', 30_000);
+  await expect(page.getByTestId('player')).toHaveAttribute('data-bdj-menu', 'false');
+  await page.getByTestId('video-canvas').click();
+  await reachesState(page, 'paused', 5_000);
+  await expect(notice(page, /doesn't respond to taps/)).toHaveCount(0);
+  await page.getByTestId('remote-toggle').click();
+  await expect(page.getByTestId('remote-pad')).toBeVisible();
 });

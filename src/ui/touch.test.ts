@@ -10,6 +10,18 @@ describe('classifyTap', () => {
     expect(classifyTap({ x: 800, timeMs: 0 }, { x: 800, timeMs: 100 }, menu)).toBe('menuClick');
   });
 
+  it('sends every tap to a BD-J menu while its plane shows anything (Review Focus 3)', () => {
+    const bdj = { width: 900, menuActive: false, bdjMenuVisible: true };
+    expect(classifyTap(null, { x: 450, timeMs: 0 }, bdj)).toBe('menuClick');
+    expect(classifyTap({ x: 800, timeMs: 0 }, { x: 800, timeMs: 100 }, bdj)).toBe('menuClick');
+  });
+
+  it('toggles the controls on a tap while a BD-J title plays with an empty plane (Review Focus 3)', () => {
+    const feature = { width: 900, menuActive: false, bdjMenuVisible: false };
+    expect(classifyTap(null, { x: 450, timeMs: 0 }, feature)).toBe('toggleControls');
+    expect(classifyTap({ x: 800, timeMs: 0 }, { x: 800, timeMs: 100 }, feature)).toBe('seekForward');
+  });
+
   it('toggles the controls on a single tap', () => {
     expect(classifyTap(null, { x: 800, timeMs: 1000 }, ctx)).toBe('toggleControls');
   });

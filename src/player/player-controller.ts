@@ -19,8 +19,12 @@ export interface PlayerSnapshot {
   readonly usesBdj: boolean;
   /** The engine runs BD-J titles. */
   readonly bdjSupported: boolean;
-  /** A BD-J title drives playback (its menu is not drawn): no playlist yet is no reason to show the picker. */
+  /** A BD-J title drives playback: no playlist yet is no reason to show the picker. */
   readonly bdjActive: boolean;
+  /** The BD-J graphics plane shows something: taps, clicks, arrows, Enter and digits go to the disc. */
+  readonly bdjMenuVisible: boolean;
+  /** Taps on a BD-J menu the disc ignored, counted since the page loaded: each one opens the on-screen remote. */
+  readonly bdjTapsIgnored: number;
   readonly warnings: readonly string[];
   readonly currentPlaylistId: string | null;
   readonly durationUs: number;
@@ -83,6 +87,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   usesBdj: false,
   bdjSupported: false,
   bdjActive: false,
+  bdjMenuVisible: false,
+  bdjTapsIgnored: 0,
   warnings: [],
   currentPlaylistId: null,
   durationUs: 0,
@@ -113,7 +119,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, bdjMenuVisible: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
@@ -145,8 +151,12 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'bdjActive':
-      // once BD-J stops, the disc's playback is no longer its own
-      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, notices: s.notices.filter((n) => n.code !== 'bdj-menu-hidden') };
+      // once BD-J stops, its menu and the notice about it go
+      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, bdjMenuVisible: false, notices: s.notices.filter((n) => n.code !== 'bdj-tap-ignored') };
+    case 'bdjMenu':
+      return { ...s, bdjMenuVisible: e.visible };
+    case 'bdjTapIgnored':
+      return { ...s, bdjTapsIgnored: s.bdjTapsIgnored + 1 };
     case 'indexTitles':
       return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':
@@ -323,9 +333,9 @@ export class PlayerController {
     this.startAudio();
     // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
     // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay;
-    // the picked playlist stops a BD-J title, so its menu-hidden notice goes.
+    // the picked playlist stops a BD-J title, so its ignored-tap notice goes.
     const playlistScoped = (code: string): boolean =>
-      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-menu-hidden';
+      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-tap-ignored';
     this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
     this.post({ type: 'playPlaylist', playlistId });
   }
@@ -563,8 +573,9 @@ export class PlayerController {
     return false;
   }
 
-  menuKey(key: MenuKey): void {
-    this.post({ type: 'menuKey', key });
+  /** `repeat`: a held key's auto-repeat. */
+  menuKey(key: MenuKey, repeat = false): void {
+    this.post(repeat ? { type: 'menuKey', key, repeat } : { type: 'menuKey', key });
   }
 
   /** (x, y) in the 1920×1080 menu space. */

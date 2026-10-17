@@ -144,7 +144,14 @@ what would change that decision.
 - **Disc directory listings are sorted (5c).** `listBdFilesN` (and the VFS's other directory listings, `vfs.ts`)
   return names in sorted order, where libbluray returns readdir order. A folder the browser hands over has no
   canonical readdir order, so sorted is the one order that is the same on every run and machine.
-- **5d picks up:** BD-J graphics (`updateGraphicN`), keys and mouse to Java (VK_KEY, MOUSE), the pop-up key, fonts.
+- **BD-J input (5d).** Keys, clicks and taps reach Java as libbluray sends them (`bd_user_input`,
+  `bd_mouse_select`), and 5c's "menu isn't shown yet" notice is gone. While the BD-J plane shows anything, a tap or
+  click on the video goes to the disc; on an empty plane it shows or hides the controls (desktop: play/pause). A tap
+  on a shown menu that brings no reaction within 0.2 s (constrained profile 0.5 s) opens the on-screen remote, with a
+  notice once per menu. A reaction is a plane publication or anything Java sends (a call or a background still), so
+  a menu that animates on its own counts every tap as taken. Deviations: libbluray's `bd_user_input` blocks until
+  Java has taken an event; ours does not, so the BD-J worker's event queue merges a held key's repeats (and pointer
+  moves) beyond 8 pending, never other events. Pointer moves are not logged, like PTS. Escape/Back has no key yet.
 
 ## Audio
 

@@ -7,7 +7,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'bdj-menu-hidden' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory';
+export type NoticeCode = 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory';
 export type ErrorCode = DiscErrorCode | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
 export interface Telemetry {
@@ -135,8 +135,9 @@ export type EngineCommand =
   /** 0 = top menu. */
   | { readonly type: 'playTitle'; readonly title: number }
   | { readonly type: 'menuCall' }
-  | { readonly type: 'menuKey'; readonly key: MenuKey }
-  /** In the 1920×1080 menu space. */
+  /** `repeat`: a held key's auto-repeat (KeyboardEvent.repeat), which a BD-J title's full input queue may merge. */
+  | { readonly type: 'menuKey'; readonly key: MenuKey; readonly repeat?: boolean }
+  /** In the 1920×1080 menu space. Under a BD-J title a move is BDJ_EVENT_MOUSE, a click also the activate key. */
   | { readonly type: 'pointer'; readonly kind: 'move' | 'click'; readonly x: number; readonly y: number }
   /** Forget the open disc ("Open another disc"). */
   | { readonly type: 'close' }
@@ -147,8 +148,15 @@ export type EngineCommand =
 export type EngineEvent =
   /** `bdjSupported`: this engine runs BD-J titles. */
   | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly bdjSupported: boolean; readonly warnings: readonly string[] }
-  /** A BD-J title started (the disc's Java code drives playback; its menu is not drawn) or BD-J stopped. */
+  /** A BD-J title started (the disc's Java code drives playback and draws its menus) or BD-J stopped. */
   | { readonly type: 'bdjActive'; readonly active: boolean }
+  /**
+   * The BD-J graphics plane turned visible (any pixel with non-zero alpha) or empty; on changes only, and false when
+   * BD-J stops. While it is visible, taps and clicks on the video go to the disc.
+   */
+  | { readonly type: 'bdjMenu'; readonly visible: boolean }
+  /** A tap on a BD-J menu brought no reaction within the window: the UI opens the on-screen remote. */
+  | { readonly type: 'bdjTapIgnored' }
   /** After 'titles', for discs whose First Play is an HDMV object. */
   | { readonly type: 'indexTitles'; readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>; readonly hasTopMenu: boolean }
   | { readonly type: 'uoMask'; readonly masked: readonly UoOp[] }

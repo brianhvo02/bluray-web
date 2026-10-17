@@ -15,6 +15,7 @@ import type { MenuKey } from '../engine/protocol';
 
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
+const TAP_NOTICE_MS = 6000;
 
 
 interface PlayerScreenProps {
@@ -99,7 +100,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         // Only the volume slider keeps its native arrow-key stepping; on the seek bar arrows seek by 10 s.
         if (e.key.startsWith('Arrow') && target.dataset.role === 'volume') return;
       }
-      const menuActive = controller.getSnapshot().menuActive;
+      // a BD-J menu on screen takes the arrows, Enter and digits as an HDMV menu does
+      const now = controller.getSnapshot();
+      const menuActive = now.menuActive || now.bdjMenuVisible;
       if (target instanceof HTMLButtonElement) {
         // A focused button keeps Space and Enter, except that while a disc menu is shown Enter is the menu's OK: after
         // clicking Pop-up or Top Menu the focus stays there, and a second click would close or restart the menu.
@@ -138,7 +141,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           controller.shiftSubtitles(action.deltaMs);
           break;
         case 'menuKey':
-          controller.menuKey(action.key);
+          controller.menuKey(action.key, e.repeat);
           break;
       }
     };
@@ -198,6 +201,24 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  // A tap the BD-J menu ignored opens the remote, with the controls it sits over (the notice comes once per menu).
+  const tapsIgnored = snapshot.bdjTapsIgnored;
+  const seenTapsIgnored = useRef(tapsIgnored);
+  useEffect(() => {
+    if (tapsIgnored === seenTapsIgnored.current) return;
+    seenTapsIgnored.current = tapsIgnored;
+    setRemoteOpen(true);
+    setIdle(false);
+    setActivity((a) => a + 1);
+  }, [tapsIgnored]);
+
+  const tapNotice = snapshot.notices.find((n) => n.code === 'bdj-tap-ignored');
+  useEffect(() => {
+    if (!tapNotice) return;
+    const timer = window.setTimeout(() => controller.dismissNotice('bdj-tap-ignored'), TAP_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [controller, tapNotice]);
+
   const maskedNotice = snapshot.notices.find((n) => n.code === 'uo-masked');
   useEffect(() => {
     if (!maskedNotice) return;
@@ -205,8 +226,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     return () => window.clearTimeout(timer);
   }, [controller, maskedNotice]);
 
+  // A BD-J title hears the mouse wherever it is over the picture (BDJ_EVENT_MOUSE), as libbluray's hosts send it.
   const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
-    if (e.pointerType === 'touch' || !snapshot.menuActive) return;
+    if (e.pointerType === 'touch' || !(snapshot.menuActive || snapshot.bdjActive)) return;
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
     if (!point) return;
     const first = pendingMove.current === null;
@@ -224,7 +246,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     if (e.pointerType !== 'touch') return;
     const rect = e.currentTarget.getBoundingClientRect();
     const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
-    const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: snapshot.menuActive });
+    // the snapshot the engine last sent: the tap is mapped with the canvas rectangle as it is now (after a rotation too)
+    const now = controller.getSnapshot();
+    const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: now.menuActive, bdjMenuVisible: now.bdjMenuVisible });
     lastTap.current = pairableTap(action, tap);
     if (tapTimer.current !== null) {
       window.clearTimeout(tapTimer.current);
@@ -264,7 +288,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       lastUpWasTouch.current = false; // the click the browser synthesized after a tap, already handled on pointerup
       return;
     }
-    if (!snapshot.menuActive) {
+    const now = controller.getSnapshot();
+    if (!(now.menuActive || now.bdjMenuVisible)) {
       controller.togglePlay();
       return;
     }
@@ -300,6 +325,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       data-playlist={snapshot.currentPlaylistId ?? undefined}
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
+      data-bdj-menu={snapshot.bdjMenuVisible}
       onPointerMove={(e) => {
         if (!isVideoTouch(e)) wake();
       }}
@@ -366,7 +392,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           onCloseDisc={() => controller.closeDisc()}
         />
       )}
-      {remoteOpen && controlsVisible && snapshot.indexTitles && <RemotePad onKey={sendMenuKey} />}
+      {remoteOpen && controlsVisible && (snapshot.indexTitles || snapshot.bdjActive) && <RemotePad onKey={sendMenuKey} />}
       {snapshot.encodingPrompt && <EncodingPrompt fileName={snapshot.encodingPrompt.names.join(', ')} onAnswer={answerEncoding} />}
       <ControlBar
         controller={controller}

@@ -9,6 +9,7 @@
 
 import type { ScreenRect } from './background';
 import type { PlayerBdjHost } from './player-host';
+import type { Coalesce } from './input';
 import type { ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
 import type { DiscFiles, DiscSourceRef } from '../disc/http-source';
@@ -55,6 +56,7 @@ export class BdjSession {
   /** Starts (and what follows them) wait for the reply to this call. */
   private holdFor: number | null = null;
   private readonly held: ToBdj[] = [];
+  private activityCount = 0;
 
   constructor(private readonly deps: BdjSessionDeps) {
     deps.worker.onmessage = (e) => this.receive(e.data);
@@ -86,8 +88,16 @@ export class BdjSession {
     this.cancelTimeout = this.deps.setTimer(ms, () => this.fail('timeout', `no playlist was selected within ${ms / 1000} s`));
   }
 
-  event(ev: number, param: number): void {
-    if (!this.stopped) this.send({ type: 'event', ev, param });
+  event(ev: number, param: number, coalesce?: Coalesce): void {
+    if (!this.stopped) this.send({ type: 'event', ev, param, ...(coalesce ? { coalesce } : {}) });
+  }
+
+  /**
+   * Counts what Java sent that shows it acted: every call (playback control, register writes, titles, sounds...) and
+   * every background still. Only its changes matter (the ignored-tap rule, input.ts).
+   */
+  get activity(): number {
+    return this.activityCount;
   }
 
   /** Terminates the worker; nothing it sent afterwards is acted on. */
@@ -112,12 +122,14 @@ export class BdjSession {
         this.bootDone = null;
         break;
       case 'call':
+        this.activityCount++;
         void this.answer(m.id, m.name, m.args);
         break;
       case 'log':
         this.deps.onLog?.(m.line, m.error);
         break;
       case 'background':
+        this.activityCount++;
         this.deps.onBackground?.(m.image, m.rect);
         break;
       case 'failed':

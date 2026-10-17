@@ -136,7 +136,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const deliver = (m: TitleMessage): void => {
     try {
       if (m.type === 'start') rt!.start(m.title);
-      else rt!.processEvent(m.ev, m.param);
+      else rt!.processEvent(m.ev, m.param, m.coalesce);
     } catch (e) {
       fail(e);
       return;

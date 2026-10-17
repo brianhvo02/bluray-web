@@ -9,6 +9,7 @@
 import type { DiscFiles, DiscSourceRef, HttpDiscRef } from '../disc/http-source';
 import type { ScreenRect } from './background';
 import type { BdjErrorCode } from './errors';
+import type { Coalesce } from './input';
 import type { ClassLibrarySource } from './runtime';
 
 /** A call argument or reply value; a Java long crosses as a decimal string. */
@@ -29,7 +30,8 @@ export type ToBdj =
       readonly classLibrary: ClassLibrarySource;
     }
   | { readonly type: 'start'; readonly title: number }
-  | { readonly type: 'event'; readonly ev: number; readonly param: number }
+  /** `coalesce`: a key repeat or pointer move, which may merge with the one before it in a full queue (input.ts). */
+  | { readonly type: 'event'; readonly ev: number; readonly param: number; readonly coalesce?: Coalesce }
   | { readonly type: 'reply'; readonly id: number; readonly value: number | string };
 
 export type FromBdj =

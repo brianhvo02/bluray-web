@@ -67,7 +67,11 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdj/player-host.ts    from src/libbluray/bluray.c (bdpriv_*, _open_playlist, bd_set_rate, _play_title, _update_uo_mask,
                           _close_playlist, _seek_internal, bd_get_sound_effect, bd_select_angle, _bd_set_virtual_package)
     player.ts (BD-J titles) from src/libbluray/bluray.c (_play_bdj, _start_bdj, _stop_bdj via _play_hdmv,
-                          _try_play_title and _try_menu_call at UO restriction RELAXED, bd_set_rate's BDJ_EVENT_RATE)
+                          _try_play_title and _try_menu_call at UO restriction RELAXED, bd_set_rate's BDJ_EVENT_RATE,
+                          bd_mouse_select's and bd_user_input's BD-J branches)
+    bdj/input.ts          from src/libbluray/bluray.c (bd_user_input's BD-J branch, _get_key_uo_index,
+                          bd_mouse_select's BD-J branch) and keys.h; its bounded event queue and ignored-tap
+                          watch are original
     hdmv/uo-mask.ts uoMaskBits from src/libbluray/bluray.c (bdpriv_get_uo_mask)
     bdj/jvm/natives/intrinsics/graphics.ts from src/libbluray/bdj/java/java/awt/BDGraphicsBase.java (drawSpanN,
                           applyComposite, alphaBlend), Area.java (add) and BDRootWindow.java (isBackBufferClear)

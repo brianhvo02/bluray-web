@@ -12,11 +12,12 @@ export type TapAction = 'toggleControls' | 'seekBack' | 'seekForward' | 'menuCli
 export const DOUBLE_TAP_MS = 300;
 
 /**
- * What a tap on the video does. While a disc menu is shown every tap is a click on the menu. Otherwise a single tap
- * toggles the controls, and a second tap within DOUBLE_TAP_MS in the left or right third seeks back or forward.
+ * What a tap on the video does. While a disc menu is shown (an HDMV menu, or a BD-J plane with anything visible) every
+ * tap is a click on the menu. Otherwise a single tap toggles the controls, and a second tap within DOUBLE_TAP_MS in the
+ * left or right third seeks back or forward.
  */
-export function classifyTap(prev: Tap | null, tap: Tap, ctx: { width: number; menuActive: boolean }): TapAction {
-  if (ctx.menuActive) return 'menuClick';
+export function classifyTap(prev: Tap | null, tap: Tap, ctx: { width: number; menuActive: boolean; bdjMenuVisible?: boolean }): TapAction {
+  if (ctx.menuActive || ctx.bdjMenuVisible) return 'menuClick';
   if (prev && tap.timeMs - prev.timeMs <= DOUBLE_TAP_MS && ctx.width > 0) {
     if (tap.x < ctx.width / 3) return 'seekBack';
     if (tap.x >= (ctx.width * 2) / 3) return 'seekForward';

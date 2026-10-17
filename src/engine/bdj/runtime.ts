@@ -12,6 +12,7 @@
 
 import type { ByteSource } from '../disc/byte-source';
 import { BdjError } from './errors';
+import { enqueueBdjEvent, type Coalesce, type QueuedBdjEvent } from './input';
 import type { FreeType } from './fonts/freetype';
 import { DEFAULT_FONT_PATH, systemFontFiles } from './fonts/system-fonts';
 import type { BdjErrorCode } from './errors';
@@ -125,7 +126,7 @@ export class BdjRuntime {
   /** Aborts the drive in progress (run, or stop's). */
   private driving: AbortController | null = null;
   private active: Promise<unknown> | null = null;
-  private readonly events: [number, number][] = [];
+  private readonly events: QueuedBdjEvent[] = [];
   private eventThread: JThread | null = null;
   /** The drive in progress checks whether it is done. */
   private settle: (() => void) | null = null;
@@ -219,11 +220,17 @@ export class BdjRuntime {
    * bdj_process_event: queues Libbluray.processEvent, which the next run() executes on a fresh Java thread. Events
    * run one at a time in order, as libbluray's synchronous calls under bd->mutex do.
    */
-  processEvent(ev: number, param: number): void {
+  processEvent(ev: number, param: number, coalesce?: Coalesce): void {
     this.checkRunning();
     this.logEvent(ev, param);
-    this.events.push([ev | 0, param | 0]);
+    // libbluray's caller waits for Java; ours does not, so held keys and pointer moves are bounded (input.ts)
+    enqueueBdjEvent(this.events, { ev: ev | 0, param: param | 0, ...(coalesce ? { coalesce } : {}) });
     this.pump();
+  }
+
+  /** Events waiting for the event before them to return (tests). */
+  get pendingEvents(): number {
+    return this.events.length;
   }
 
   /** Starts the next queued event once the previous one has returned. */
@@ -233,7 +240,7 @@ export class BdjRuntime {
         this.events.length = 0;
         return;
       }
-      const [ev, param] = this.events.shift()!;
+      const { ev, param } = this.events.shift()!;
       const t = this.spawn('processEvent', '(II)Z', [ev, param]);
       const finished = (): void => {
         if (t.uncaught) this.deps.log(`bdj_process_event(${ev >>> 0},${param >>> 0}) failed (uncaught exception): ${this.jvm.describe(t.uncaught)}`);
@@ -258,7 +265,8 @@ export class BdjRuntime {
 
   private logEvent(ev: number, param: number): void {
     if (ev > BDJ_EVENT_LAST) this.deps.log(`bdj_process_event(${ev},${param}): unknown event`);
-    else if (ev !== BdjEvent.PTS) this.deps.log(`bdj_process_event(${EVENT_NAMES[ev]},${param})`);
+    // PTS and pointer moves come many times a second (libbluray logs all of them at debug level)
+    else if (ev !== BdjEvent.PTS && ev !== BdjEvent.MOUSE) this.deps.log(`bdj_process_event(${EVENT_NAMES[ev]},${param})`);
   }
 
   /**

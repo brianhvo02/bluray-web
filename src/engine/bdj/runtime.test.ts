@@ -198,6 +198,26 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(trace().filter((e) => CONTROL_CALLS.has(e.call)).map((e) => JSON.stringify(e))).toEqual(GOLDEN);
   }, 60_000);
 
+  it("bounds a held key's repeats waiting behind a running event, in order (input.ts)", async () => {
+    const { rt } = runtime();
+    await rt.boot();
+    const threads = rt.jvm.threads;
+    const params: number[] = [];
+    const spawn = threads.spawn.bind(threads);
+    threads.spawn = (javaThread, m, args) => {
+      if (m.name === 'processEvent') params.push(Number(args[1]) >>> 0);
+      return spawn(javaThread, m, args);
+    };
+    rt.start(FIRST_PLAY); // its event runs while the keys wait
+    rt.processEvent(BdjEvent.VK_KEY, 0xe000000d); // DOWN
+    for (let i = 0; i < 40; i++) rt.processEvent(BdjEvent.VK_KEY, 0xe000000d, 'repeat');
+    rt.processEvent(BdjEvent.VK_KEY, 0xe0000010); // ENTER: never dropped
+    expect(rt.pendingEvents).toBe(9);
+    expect(await rt.run({ until: isSelectPlaylist })).toBe('until');
+    await rt.run();
+    expect(params).toEqual([FIRST_PLAY, ...Array(8).fill(0xe000000d), 0xe0000010]);
+  }, 60_000);
+
   it('rejects run() with an internal error when the host throws, with the Java stack at fault', async () => {
     const wrap = (h: RecordingHost): BdjHost =>
       new Proxy(h, {
