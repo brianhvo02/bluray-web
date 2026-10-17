@@ -271,6 +271,43 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(types.indexOf('bdjActive', titles)).toBeLessThan(types.indexOf('state:idle', titles));
   });
 
+  it("boots a BD-J First Play's worker while the disc opens (spec §4.7), once, and the title starts once it has booted", async () => {
+    const order: string[] = [];
+    const w = handWorker();
+    const recording: WorkerLike = {
+      postMessage: (m) => {
+        order.push(`post:${m.type}`);
+        w.worker.postMessage(m);
+      },
+      get onmessage() {
+        return w.worker.onmessage;
+      },
+      set onmessage(fn) {
+        w.worker.onmessage = fn;
+      },
+      terminate: () => w.worker.terminate(),
+    };
+    const player = new Player({
+      emit: (e) => void order.push(`emit:${e.type}`),
+      videoCodecApi: fakeVideoCodecApi,
+      nowMs: () => 1000,
+      requestFrame: () => undefined,
+      createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
+      createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+      setTimer: () => () => undefined,
+      createBdjWorker: () => recording,
+      loadClassLibrary: async () => CLASSES,
+    });
+    players.push(player);
+    await player.handle({ type: 'open', entries: discEntries(bdjDisc()) });
+    await vi.waitFor(() => expect(order).toContain('post:boot'));
+    expect(order.filter((o) => o === 'post:boot')).toHaveLength(1);
+    expect(order.indexOf('post:boot')).toBeLessThan(order.indexOf('emit:titles'));
+    expect(w.sent.some((m) => m.type === 'start')).toBe(false);
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'start')).toEqual([{ type: 'start', title: 0xffff }]));
+  });
+
   it("writes the application's player settings to the registers Java reads (bd_set_player_setting_str)", async () => {
     const w = handWorker();
     await harness(bdjDisc(), { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });

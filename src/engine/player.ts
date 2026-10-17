@@ -4,9 +4,11 @@ import { type PlayItem } from './bdmv/mpls-parser';
 import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
 import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
+import { EarlyBdjWorker } from './bdj/early-worker';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
 import { REGISTER_WORDS } from './bdj/shared-registers';
 import { StatusBlockWriter, createStatusBlock } from './bdj/status-block';
+import { indexUsesBdj, type IndexBdmv } from './bdmv/index-parser';
 import { codingName, isVideoCoding } from './bdmv/stream-types';
 import { MasterClock } from './clock/master-clock';
 import { Decimator } from './decode/decimator';
@@ -18,7 +20,7 @@ import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
 import { FileSource } from './disc/file-source';
-import { checkStreamReadable, loadClips, openDisc, peekUsesBdj, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
+import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
 import { normalizeDiscPaths } from './disc/paths';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
@@ -178,6 +180,13 @@ export interface BdjPlaybackPort {
   setListener(listener: BdjPlaybackListener | null): void;
 }
 
+/** A BD-J First Play's worker started while the disc opens, with the registers and status block its boot carries. */
+interface EarlyBdj {
+  readonly worker: EarlyBdjWorker;
+  readonly regs: RegisterFile;
+  readonly status: StatusBlockWriter;
+}
+
 /**
  * A running BD-J title: libbluray's title_type bdj. The worker lives from entering BD-J until it is left (a playlist
  * picked, an HDMV title, the disc closed) or fails; title changes inside BD-J reuse it.
@@ -287,6 +296,8 @@ export class Player {
   /** The open disc's files as the user gave them, for the BD-J worker's own disc model. */
   private discEntries: ReadonlyArray<readonly [string, Blob]> = [];
   private bdj: BdjTitle | null = null;
+  /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
+  private earlyBdj: EarlyBdj | null = null;
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -526,13 +537,20 @@ export class Player {
 
   private async open(entries: ReadonlyArray<readonly [string, Blob]>): Promise<void> {
     this.stopBdj();
+    this.dropEarlyBdj();
     this.stopNavigator();
     this.teardownSession();
     this.setState('loading');
     const source = new FileSource(normalizeDiscPaths(entries));
-    // the class library (megabytes) loads while the disc opens
-    if (this.bdjSupported) void peekUsesBdj(source).then((usesBdj) => usesBdj && this.loadClassLibrary());
-    const disc = await openDisc(source);
+    // spec §4.7: the class library loads, and a BD-J First Play's worker boots, while the disc opens
+    const early = this.bdjSupported ? await this.startEarlyBdj(source, entries) : null;
+    let disc: DiscModel;
+    try {
+      disc = await openDisc(source);
+    } catch (err) {
+      this.dropEarlyBdj();
+      throw err;
+    }
     this.source = source;
     this.disc = disc;
     this.discEntries = entries;
@@ -540,7 +558,7 @@ export class Player {
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
     this.pgRegs = new RegisterFile();
-    this.initRegs(this.pgRegs, disc);
+    this.initRegs(this.pgRegs, disc.index);
     this.bindPg(this.pgRegs);
     this.resetTextSubtitles();
     this.emitSubtitles();
@@ -550,7 +568,8 @@ export class Player {
     if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
     // bdjActive goes out before 'idle', so the UI never shows the picker in between
     const bdjFirstPlay = disc.index.firstPlay.kind === 'bdj' && this.bdjSupported;
-    if (bdjFirstPlay) this.enterBdj(TITLE_FIRST_PLAY, null);
+    if (bdjFirstPlay) this.enterBdj(TITLE_FIRST_PLAY, null, early);
+    else this.dropEarlyBdj();
     this.setState('idle');
     if (!bdjFirstPlay && disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
       this.navigator = this.createNavigator(disc);
@@ -563,18 +582,51 @@ export class Player {
   }
 
   /** _fill_disc_info's profile switch (bd_open), then the player settings an application sets before bd_play. */
-  private initRegs(regs: RegisterFile, disc: DiscModel): void {
-    applyDiscProfile(regs, disc.index);
+  private initRegs(regs: RegisterFile, index: IndexBdmv): void {
+    applyDiscProfile(regs, index);
     if (this.deps.playerSettings) applyPlayerSettings(regs, this.deps.playerSettings);
   }
 
   /** The registers of the disc's program (HDMV or BD-J), shared with a BD-J worker when the disc can run BD-J. */
-  private newProgramRegs(disc: DiscModel): RegisterFile {
-    const shared = disc.usesBdj && this.bdjSupported ? new SharedArrayBuffer(REGISTER_WORDS * 4) : undefined;
+  private newProgramRegs(index: IndexBdmv, usesBdj: boolean): RegisterFile {
+    const shared = usesBdj && this.bdjSupported ? new SharedArrayBuffer(REGISTER_WORDS * 4) : undefined;
     const regs = new RegisterFile(shared ? { shared } : {});
-    this.initRegs(regs, disc);
+    this.initRegs(regs, index);
     regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
     return regs;
+  }
+
+  /**
+   * Reads index.bdmv ahead of the rest of the disc: a disc that uses BD-J starts loading the class library, and one
+   * whose First Play is BD-J gets its worker, registers and status block now; the worker's boot goes out once the
+   * class library is in, so the JVM boots while the disc opens. enterBdj adopts it.
+   */
+  private async startEarlyBdj(source: FileSource, entries: ReadonlyArray<readonly [string, Blob]>): Promise<EarlyBdj | null> {
+    const index = await peekIndex(source);
+    if (!index || !indexUsesBdj(index)) return null;
+    this.loadClassLibrary();
+    const library = this.bdjClassLibrary;
+    const createWorker = this.deps.createBdjWorker;
+    if (index.firstPlay.kind !== 'bdj' || !library || !createWorker) return null;
+    const early: EarlyBdj = { worker: new EarlyBdjWorker(createWorker()), regs: this.newProgramRegs(index, true), status: new StatusBlockWriter(createStatusBlock()) };
+    this.earlyBdj = early;
+    void (async () => {
+      try {
+        const [classLibrary, bdid] = await Promise.all([library, readBdid(source)]);
+        // once adopted, the session sends the same boot itself (EarlyBdjWorker passes only the first)
+        if (this.earlyBdj !== early) return;
+        early.worker.boot({ type: 'boot', registers: early.regs.shared!, status: early.status.buffer, discFiles: entries, discId: bdid?.discId ?? null, classLibrary });
+      } catch {
+        // a class library that does not load fails the session (bootBdj)
+      }
+    })();
+    return early;
+  }
+
+  /** Terminates an early BD-J worker no title adopted. */
+  private dropEarlyBdj(): void {
+    this.earlyBdj?.worker.terminate();
+    this.earlyBdj = null;
   }
 
   /** The program's registers: the navigator's or the BD-J title's. */
@@ -586,14 +638,16 @@ export class Player {
    * Enters BD-J (_play_title → _play_bdj → _start_bdj): a new worker boots, then title `title` starts. `regs`: the
    * navigator's registers when an HDMV title hands over (libbluray has one register file), else new ones.
    */
-  private enterBdj(title: number, regs: RegisterFile | null): void {
+  private enterBdj(title: number, regs: RegisterFile | null, early: EarlyBdj | null = null): void {
     const { disc, source } = this;
     const createWorker = this.deps.createBdjWorker;
     this.loadClassLibrary();
     const library = this.bdjClassLibrary;
     if (!disc || !source || !createWorker || !library) return;
-    const programRegs = regs?.shared ? regs : this.newProgramRegs(disc);
-    const status = new StatusBlockWriter(createStatusBlock());
+    if (early && this.earlyBdj !== early) early = null; // dropped meanwhile
+    this.earlyBdj = null;
+    const programRegs = early?.regs ?? (regs?.shared ? regs : this.newProgramRegs(disc.index, disc.usesBdj));
+    const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
     let entry: BdjTitle | null = null;
     let ended = false;
     const live = (): boolean => !ended;
@@ -618,7 +672,7 @@ export class Player {
       },
     });
     const session = new BdjSession({
-      worker: createWorker(),
+      worker: early?.worker ?? createWorker(),
       host,
       regs: programRegs.shared!,
       status,
@@ -742,7 +796,7 @@ export class Player {
     this.deps.emit({ type: 'indexTitles', titles, hasTopMenu });
   }
 
-  private createNavigator(disc: DiscModel, regs = this.newProgramRegs(disc)): Navigator {
+  private createNavigator(disc: DiscModel, regs = this.newProgramRegs(disc.index, disc.usesBdj)): Navigator {
     this.navRegs = regs;
     this.bindPg(regs);
     this.menuActive = false;
@@ -1627,6 +1681,7 @@ export class Player {
 
   private close(): void {
     this.stopBdj();
+    this.dropEarlyBdj();
     this.stopNavigator();
     this.teardownSession();
     this.stopPg();

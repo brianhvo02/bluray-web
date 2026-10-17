@@ -117,14 +117,14 @@ export async function openDisc(source: ByteSource): Promise<DiscModel> {
 }
 
 /**
- * Whether index.bdmv names a BD-J object, read ahead of openDisc so the BD-J class library can load meanwhile; false
- * when it is missing or damaged (openDisc reports that).
+ * index.bdmv read ahead of openDisc, so BD-J can start loading meanwhile; null when it is missing or damaged (openDisc
+ * reports that).
  */
-export async function peekUsesBdj(source: ByteSource): Promise<boolean> {
+export async function peekIndex(source: ByteSource): Promise<IndexBdmv | null> {
   try {
-    return source.exists(INDEX_PATH) && indexUsesBdj(parseIndex(await readWhole(source, INDEX_PATH)));
+    return source.exists(INDEX_PATH) ? parseIndex(await readWhole(source, INDEX_PATH)) : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
