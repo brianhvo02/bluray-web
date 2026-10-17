@@ -31,6 +31,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* The bar's empty space (gradient, padding, spacer) passes clicks through to the video and a disc menu (ruling R9). */
 .control-bar { position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 16px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); transition: opacity 0.2s; pointer-events: none; }
+.control-bar.hidden { opacity: 0; }
 .control-bar:not(.hidden) :is(.seek-bar, button, input, select, .audio-menu-list, .shader-report, .shader-dialog) { pointer-events: auto; }
 .control-row { display: flex; align-items: center; gap: 8px; }
 .control-row .spacer { flex: 1; }
