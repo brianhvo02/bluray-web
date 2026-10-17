@@ -3,6 +3,8 @@ import { createController } from '../player/create-controller';
 import type { PlayerController } from '../player/player-controller';
 import { PlatformSession } from '../player/platform-session';
 import { LandingScreen } from './LandingScreen';
+import { NasClient } from './nas/nas-client';
+import { idbNasStore } from './nas/nas-store';
 import { PlayerScreen } from './PlayerScreen';
 import { idbShaderLibrary } from './shader-library';
 import { ShaderModel } from './shader-model';
@@ -13,6 +15,35 @@ let sharedController: PlayerController | null = null;
 function getController(): PlayerController {
   sharedController ??= createController();
   return sharedController;
+}
+
+let sharedNas: NasClient | null = null;
+
+function getNasClient(): NasClient {
+  sharedNas ??= new NasClient({
+    fetch: (input, init) => fetch(input, init),
+    subtle: crypto.subtle,
+    store: idbNasStore(),
+    now: Date.now,
+    rendezvousUrl: import.meta.env.VITE_RENDEZVOUS_URL as string | undefined,
+  });
+  return sharedNas;
+}
+
+let pairCodeTaken = false;
+let takenPairCode: string | undefined;
+
+/** The code of a `?pair=<code>` link, taken out of the address bar (once) so a reload doesn't pair again. */
+function takePairCode(): string | undefined {
+  if (pairCodeTaken) return takenPairCode;
+  pairCodeTaken = true;
+  const url = new URL(window.location.href);
+  takenPairCode = url.searchParams.get('pair') ?? undefined;
+  if (takenPairCode !== undefined) {
+    url.searchParams.delete('pair');
+    window.history.replaceState(window.history.state, '', url);
+  }
+  return takenPairCode;
 }
 
 let sharedShaders: ShaderModel | null = null;
@@ -77,6 +108,8 @@ function UpdatePrompt({ worker }: { worker: ServiceWorker }): ReactElement {
 
 export function App(): ReactElement {
   const [controller] = useState(getController);
+  const [nas] = useState(getNasClient);
+  const [pairCode] = useState(takePairCode);
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useEffect(() => {
     const session = new PlatformSession(
@@ -96,7 +129,7 @@ export function App(): ReactElement {
     <div className="app" data-testid="app">
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 ? (
-        <LandingScreen controller={controller} snapshot={snapshot} />
+        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} pairCode={pairCode} />
       ) : (
         <PlayerScreen controller={controller} snapshot={snapshot} shaderModel={shaders} shaderState={shaderState} />
       )}
