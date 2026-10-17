@@ -60,3 +60,13 @@ export interface CodeRegistration {
   readonly expiresAt: number;
   readonly signature: string;
 }
+
+/** `GET /api/discs/<id>/manifest`: a folder disc's files, with the small ones the engine reads whole inlined. */
+export interface DiscManifest {
+  readonly discId: string;
+  readonly name: string;
+  /** Paths upper-case and relative to the disc folder, like `normalizeDiscPaths`: 'BDMV/STREAM/00001.M2TS'. */
+  readonly files: readonly { readonly path: string; readonly size: number }[];
+  /** Path → base64 of the whole file. */
+  readonly inline: Readonly<Record<string, string>>;
+}

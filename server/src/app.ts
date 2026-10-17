@@ -4,6 +4,7 @@ import { json } from './http';
 import type { Handler } from './http';
 import type { Library } from './library';
 import { adminRoutes, bearerToken } from './routes/admin';
+import { discRoutes } from './routes/discs';
 import { libraryRoute } from './routes/library';
 import { pairRoutes } from './routes/pair';
 
@@ -34,5 +35,6 @@ export function appHandlers(opts: AppOptions): Handler[] {
     requireToken(auth),
     adminRoutes(auth, { library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs }),
     libraryRoute(opts.library),
+    discRoutes(opts.library),
   ];
 }
