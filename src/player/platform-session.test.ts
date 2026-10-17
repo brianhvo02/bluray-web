@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot, type VisibilityLike } from './player-controller';
 import { PlatformSession, type NavigatorLike } from './platform-session';
 
-function setup(opts: { wakeLock?: boolean; mediaSession?: boolean; rejectLock?: boolean } = {}) {
+function setup(opts: { wakeLock?: boolean; mediaSession?: boolean; rejectLock?: boolean; deferLock?: boolean } = {}) {
   let snap: PlayerSnapshot = INITIAL_SNAPSHOT;
   const listeners = new Set<() => void>();
   const controller = {
@@ -19,7 +19,16 @@ function setup(opts: { wakeLock?: boolean; mediaSession?: boolean; rejectLock?: 
     listeners.forEach((l) => l());
   };
   const release = vi.fn(() => Promise.resolve());
-  const request = vi.fn(() => (opts.rejectLock ? Promise.reject(new Error('no')) : Promise.resolve({ release })));
+  const releaseListeners: Array<() => void> = [];
+  const sentinel = { release, addEventListener: (_t: 'release', cb: () => void) => void releaseListeners.push(cb) };
+  let deferred: ((v: typeof sentinel) => void) | null = null;
+  const request = vi.fn(() =>
+    opts.rejectLock
+      ? Promise.reject(new Error('no'))
+      : opts.deferLock
+        ? new Promise<typeof sentinel>((r) => void (deferred = r))
+        : Promise.resolve(sentinel),
+  );
   const handlers = new Map<string, ((d?: { seekOffset?: number }) => void) | null>();
   const mediaSession = {
     metadata: null as unknown,
@@ -37,7 +46,7 @@ function setup(opts: { wakeLock?: boolean; mediaSession?: boolean; rejectLock?: 
   const visibility: VisibilityLike = { hidden: () => hidden, onChange: (cb) => void (onVis = cb) };
   const session = new PlatformSession(nav, controller, visibility);
   const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
-  return { session, controller, set, request, release, handlers, mediaSession, flush, setHidden: (h: boolean) => { hidden = h; onVis(); } };
+  return { resolveLock: () => deferred?.(sentinel), fireRelease: () => releaseListeners.forEach((l) => l()), session, controller, set, request, release, handlers, mediaSession, flush, setHidden: (h: boolean) => { hidden = h; onVis(); } };
 }
 
 describe('PlatformSession', () => {
@@ -71,6 +80,34 @@ describe('PlatformSession', () => {
     expect(t.request).toHaveBeenCalledTimes(1); // hidden: no request
     t.setHidden(false);
     expect(t.request).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-requests after the platform releases the lock on hide, with no pause', async () => {
+    const t = setup();
+    t.set({ engineState: 'playing' });
+    await t.flush();
+    t.setHidden(true);
+    t.fireRelease();
+    t.setHidden(false);
+    expect(t.request).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases a lock that resolves after pause', async () => {
+    const t = setup({ deferLock: true });
+    t.set({ engineState: 'playing' });
+    t.set({ engineState: 'paused' });
+    t.resolveLock();
+    await t.flush();
+    expect(t.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a lock that resolves after dispose', async () => {
+    const t = setup({ deferLock: true });
+    t.set({ engineState: 'playing' });
+    t.session.dispose();
+    t.resolveLock();
+    await t.flush();
+    expect(t.release).toHaveBeenCalledTimes(1);
   });
 
   it('swallows a rejected request', async () => {

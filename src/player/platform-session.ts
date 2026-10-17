@@ -2,6 +2,7 @@ import type { PlayerController, PlayerSnapshot, VisibilityLike } from './player-
 
 interface SentinelLike {
   release(): Promise<void>;
+  addEventListener?(type: 'release', cb: () => void): void;
 }
 
 type ActionHandler = (details?: { seekOffset?: number }) => void;
@@ -44,7 +45,11 @@ export class PlatformSession {
   ) {
     this.installHandlers();
     this.unsubscribe = controller.subscribe(() => this.sync());
-    visibility.onChange(() => this.sync());
+    visibility.onChange(() => {
+      // The platform releases the lock when the page hides.
+      if (visibility.hidden()) this.sentinel = null;
+      this.sync();
+    });
     this.sync();
   }
 
@@ -118,6 +123,9 @@ export class PlatformSession {
           return;
         }
         this.sentinel = sentinel;
+        sentinel.addEventListener?.('release', () => {
+          if (this.sentinel === sentinel) this.sentinel = null;
+        });
       },
       () => {
         this.pending = false; // No user activation or battery saver: stay silent.
