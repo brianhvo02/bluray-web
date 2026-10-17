@@ -33,6 +33,15 @@ async function blobSlice(files: readonly File[]): Promise<ProbeResult> {
   return { name, ok, detail: `offset ${offset} in ${big.name}: ${ok ? 'sync byte found' : `byte 4 is 0x${(bytes[4] ?? 0).toString(16)}`}` };
 }
 
+/** iOS folder picks may carry no folder paths; `normalizeDiscPaths` needs `BDMV/` in them to open a disc. */
+function relativePath(files: readonly File[]): ProbeResult {
+  const name = 'relative-path';
+  const paths = files.map((f) => f.webkitRelativePath);
+  const empty = paths.filter((p) => !p).length;
+  const ok = paths.some((p) => p !== '' && (p.includes('/BDMV/') || p.startsWith('BDMV/')));
+  return { name, ok, detail: `${paths[0] || '(empty)'} — ${empty}/${paths.length} empty` };
+}
+
 function proto(globals: Record<string, unknown>, key: string): object | undefined {
   const ctor = globals[key] as { prototype?: object } | undefined;
   return ctor?.prototype;
@@ -132,5 +141,6 @@ export async function runChecks(env: ProbeEnv): Promise<ProbeResult[]> {
       const ok = !!p && 'webkitdirectory' in p;
       return { name: 'webkitdirectory', ok, detail: String(ok) };
     }),
+    await attempt('relative-path', () => relativePath(files)),
   ];
 }

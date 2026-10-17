@@ -25,6 +25,11 @@ function fakeBigFile(name: string, size: number, wrap: boolean): File {
   return blob as unknown as File;
 }
 
+/** A picked file with only the fields the relative-path check reads. */
+function pathed(webkitRelativePath: string): File {
+  return { name: webkitRelativePath.split('/').pop() ?? '', size: 1, webkitRelativePath } as unknown as File;
+}
+
 const okWorker: WorkerProbe = {
   hevc: { hvc1: true, hev1: false, decoded: true },
   raf: { present: true, p95Ms: 16.7 },
@@ -83,6 +88,25 @@ describe('runChecks', () => {
     expect(await find(env({ worker: w({ hvc1: true, hev1: true, decoded: false }) }), 'hevc')).toEqual({ name: 'hevc', ok: false, detail: 'hvc1, first GOP did not decode' });
     expect(await find(env({ worker: w({ hvc1: false, hev1: false, decoded: false, error: 'bad sps' }) }), 'hevc')).toEqual({ name: 'hevc', ok: false, detail: 'error: bad sps' });
     expect(await find(env({ worker: w(null) }), 'hevc')).toEqual({ name: 'hevc', ok: false, detail: 'no HEVC clip in the folder' });
+  });
+
+  it('relative-path: paths under a disc folder pass and report the first path and empty count', async () => {
+    const files = [pathed('disc1/BDMV/index.bdmv'), pathed('disc1/BDMV/PLAYLIST/00000.mpls'), pathed('')];
+    expect(await find(env({ files }), 'relative-path')).toEqual({ name: 'relative-path', ok: true, detail: 'disc1/BDMV/index.bdmv — 1/3 empty' });
+    const all = [pathed('disc1/BDMV/index.bdmv'), pathed('disc1/BDMV/STREAM/00001.m2ts')];
+    expect((await find(env({ files: all }), 'relative-path'))?.detail).toBe('disc1/BDMV/index.bdmv — 0/2 empty');
+  });
+
+  it('relative-path: all-empty paths fail with (empty) in the detail', async () => {
+    const r = await find(env({ files: [pathed(''), pathed('')] }), 'relative-path');
+    expect(r?.ok).toBe(false);
+    expect(r?.detail.startsWith('(empty) — ')).toBe(true);
+    expect(r?.detail).toBe('(empty) — 2/2 empty');
+  });
+
+  it('relative-path: paths rooted at BDMV pass', async () => {
+    const r = await find(env({ files: [pathed('BDMV/index.bdmv'), pathed('BDMV/STREAM/00001.m2ts')] }), 'relative-path');
+    expect(r).toEqual({ name: 'relative-path', ok: true, detail: 'BDMV/index.bdmv — 0/2 empty' });
   });
 
   it('passes [path, File] entries to the worker', async () => {
