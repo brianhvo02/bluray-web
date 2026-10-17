@@ -43,10 +43,22 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
 
 **Files:**
 - Create: `probe.html`, `src/probe/main.ts`, `src/probe/checks.ts`, `src/probe/checks.test.ts`, `src/probe/probe-worker.ts`
+- Create: `.github/workflows/preview.yml` (lands on `main` first, Step 0)
 - Modify: `vite.config.ts` (second build input `probe.html`)
 
 **Interfaces:**
 - Produces: `interface ProbeResult { readonly name: string; readonly ok: boolean; readonly detail: string }`; `runChecks(env: ProbeEnv): Promise<ProbeResult[]>` where `ProbeEnv` injects `pickFolder(): Promise<File[]>`, `createAudioContext(): BaseAudioContext`, `worker(): Promise<WorkerProbe>`, `globals: Record<string, unknown>`; `interface WorkerProbe { readonly hevc: { hvc1: boolean; hev1: boolean; decoded: boolean } | null; readonly raf: { present: boolean; p95Ms: number }; readonly webgl: { float: boolean; half: boolean } }` (`hevc` is null when the folder has no HEVC clip).
+
+- [ ] **Step 0: Preview deploys from CI.** Add `.github/workflows/preview.yml`:
+  - Trigger: `workflow_dispatch` only, with no inputs; the branch to deploy is the run's ref.
+  - Job: the same setup as the `deploy` job in `ci.yml` (Node 24, `npm install -g npm@11.19.0`, `npm ci`, `npm run build`, `test -f dist/_headers`).
+  - Deploy: `cloudflare/wrangler-action@v3` with the existing `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets and `command: pages deploy dist --project-name=bluray-web --branch=${{ github.ref_name }}`.
+  - It must refuse `main` (`if: github.ref_name != 'main'`): production deploys stay in `ci.yml`, gated on the tests.
+  - The job summary prints the preview URL, `https://<branch alias>.bluray-web.pages.dev`. Cloudflare lowercases the branch and replaces `/` and other non-alphanumerics with `-`; print the alias from wrangler's output rather than computing it.
+
+  GitHub only offers `workflow_dispatch` for workflows on the default branch, so open this file as its own small PR to `main` (`ci: manual preview deploys`), merge it, then rebase this branch.
+
+  Verify with `gh workflow run preview.yml --ref spec/cross-browser-remote`, then `gh run watch`. Expected: the run succeeds and the printed URL serves the app with `crossOriginIsolated === true` (check with `curl -sI <url> | grep -i cross-origin`).
 
 - [ ] **Step 1: Write failing tests** in `src/probe/checks.test.ts` with a fake `ProbeEnv`:
   - `largeFileRead`: given a fake `File` of size `5 * 2**30` whose `slice(a, b).arrayBuffer()` returns bytes encoding `a`, the result for `'blob-slice-over-4gib'` is `ok: true` and `detail` contains the offset read (`4294967296` or above). A fake that returns the bytes of `a % 2**32` gives `ok: false`.
@@ -68,7 +80,7 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
   `src/probe/main.ts` renders a "Pick a disc folder" button (`<input type=file webkitdirectory multiple>`), then the results as a table and a "Copy as JSON" button.
 - [ ] **Step 4: Run** the tests again. Expected: PASS. `npm run build` emits `dist/probe.html`.
 - [ ] **Step 5: Commit** `feat(probe): device capability probe page`.
-- [ ] **Step 6 (user, manual): run the probe on devices.** Deploy a preview with `npx wrangler pages deploy dist --project-name bluray-web --branch probe`, which needs the user's Cloudflare login. Open `https://probe.bluray-web.pages.dev/probe.html` on the iPhone and iPad and pick a disc folder from the USB drive in Files. Do the same on Safari macOS, Firefox desktop and the Android emulator. Also open a BD-J disc in the main app on the iPhone with `?telemetry=1` and record its time from open to first frame against M5's target.
+- [ ] **Step 6 (user, manual): run the probe on devices.** Deploy this branch with `gh workflow run preview.yml --ref <this branch>` (Step 0); no local Cloudflare login is needed. Open `<preview URL>/probe.html` on the iPhone and iPad and pick a disc folder from the USB drive in Files. Do the same on Safari macOS, Firefox desktop and the Android emulator. Also open a BD-J disc in the main app on the iPhone with `?telemetry=1` and record its time from open to first frame against M5's target.
 - [ ] **Step 7: Record results** in a new "Device probe results (date)" table in `docs/known-issues.md`.
 
   These results decide:
@@ -405,7 +417,7 @@ A page the user opens on iPhone and iPad (over HTTPS) that measures what this pl
 
 ### Task 17: Real-device gate (user, manual)
 
-- [ ] **Step 1: Deploy a preview** of the branch (as in Task 1 Step 6).
+- [ ] **Step 1: Deploy a preview** of the branch with `gh workflow run preview.yml --ref <this branch>` (Task 1 Step 0).
 - [ ] **Step 2: Run the spec §3.7 gate** on iPhone (iOS 26), iPad (iPadOS 26, USB drive in Files), Safari macOS and Firefox desktop.
 
   Per device:
