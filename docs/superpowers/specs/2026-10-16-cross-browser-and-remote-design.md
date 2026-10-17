@@ -198,6 +198,8 @@ Only the UDF versions found on Blu-ray (2.50/2.60, metadata partition) are neede
 
 ## 5. Step 3: WebRTC route, invites and pairing
 
+> Revised 2026-10-17: pairing is by QR or short code (`2026-10-17-nas-server-design.md` §7), built in step 2 together with the rendezvous service; step 3 adds WebRTC signalling to that service and starts with a throughput spike.
+
 ### 5.1 Why
 
 Browser-only access: no Tailscale needed for family and friends, or for the user on a device without it. The device and the NAS connect directly (DTLS-encrypted data channel); the NAS only makes outbound connections, so no port forwarding.
