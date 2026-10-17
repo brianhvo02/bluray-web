@@ -1,6 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { ASS_OVER_BUDGET_SHARE, collectWindows, expectInSync } from './telemetry';
+import { CHROME_ONLY } from './support';
+
+test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
 // fixtures/synthetic/disc1: playlist 00000 is two 4 s play items (an "episode" each here) with chapters every 2 s.
 const DISC = 'fixtures/synthetic/disc1';

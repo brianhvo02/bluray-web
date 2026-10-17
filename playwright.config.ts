@@ -11,6 +11,16 @@ export default defineConfig({
       use: { channel: 'chrome', launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] } },
     },
     {
+      name: 'firefox',
+      testIgnore: /mobile-.*\.spec\.ts/,
+      use: { ...devices['Desktop Firefox'], launchOptions: { firefoxUserPrefs: { 'media.autoplay.default': 0 } } },
+    },
+    {
+      name: 'webkit',
+      testIgnore: /mobile-.*\.spec\.ts/,
+      use: { ...devices['Desktop Safari'] },
+    },
+    {
       name: 'mobile-chromium',
       testMatch: /mobile-.*\.spec\.ts/,
       use: { ...devices['Pixel 7'], channel: 'chrome', hasTouch: true, launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] } },

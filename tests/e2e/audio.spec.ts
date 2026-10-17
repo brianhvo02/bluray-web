@@ -1,5 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { collectWindows, expectInSync, telemetry } from './telemetry';
+import { CHROME_ONLY } from './support';
+
+test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
 const DISC = 'fixtures/synthetic/disc3';
 const TRACKS = [

@@ -3,6 +3,9 @@ import { expect, test, type Page } from '@playwright/test';
 import pixelmatch from 'pixelmatch';
 import { decodePng } from '../ass-trace/png';
 import { collectWindows, expectInSync, telemetry, type TelemetrySample } from './telemetry';
+import { CHROME_ONLY } from './support';
+
+test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
 // fixtures/synthetic/disc1: an 8 s 640×360 testsrc2 feature (playlist 00000). disc-subs: First Play turns on the English
 // PG stream, whose caption shows at 1–3 s.

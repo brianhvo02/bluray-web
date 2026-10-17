@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { CHROME_ONLY, skipWithoutH264 } from './support';
 import { collectWindows, expectInSync, telemetry, type TelemetrySample } from './telemetry';
 
 const DISC = 'fixtures/synthetic/disc1';
@@ -9,6 +10,7 @@ async function openDisc(page: Page, folder = DISC): Promise<void> {
 }
 
 async function startPlaylist(page: Page, id: string): Promise<void> {
+  await skipWithoutH264(page);
   await page.getByTestId(`playlist-${id}`).click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
 }
@@ -20,7 +22,8 @@ test('lists playlists with the main feature first', async ({ page }) => {
   await expect(page.getByTestId('playlist-00001')).toContainText('0:04');
 });
 
-test('plays in sync across the play-item boundary to the end', async ({ page }) => {
+test('plays in sync across the play-item boundary to the end', async ({ page, browserName, isMobile }) => {
+  test.skip(browserName !== 'chromium' || isMobile, CHROME_ONLY);
   await openDisc(page);
   await startPlaylist(page, '00000');
   const windows = await collectWindows(page, 7_000_000);
@@ -31,7 +34,8 @@ test('plays in sync across the play-item boundary to the end', async ({ page }) 
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'ended', { timeout: 10_000 });
 });
 
-test('skips to the next chapter and is back in sync within a second', async ({ page }) => {
+test('skips to the next chapter and is back in sync within a second', async ({ page, browserName, isMobile }) => {
+  test.skip(browserName !== 'chromium' || isMobile, CHROME_ONLY);
   await openDisc(page);
   await startPlaylist(page, '00000');
   const before = await telemetry(page);
@@ -91,7 +95,8 @@ test('pauses and resumes', async ({ page }) => {
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5000 }).toBeGreaterThan(paused + 200_000);
 });
 
-test('plays a B-frame, open-GOP disc in sync and seeks without decoder errors', async ({ page }) => {
+test('plays a B-frame, open-GOP disc in sync and seeks without decoder errors', async ({ page, browserName, isMobile }) => {
+  test.skip(browserName !== 'chromium' || isMobile, CHROME_ONLY);
   await openDisc(page, 'fixtures/synthetic/disc2');
   await startPlaylist(page, '00000');
   const windows = await collectWindows(page, 1_000_000);
@@ -133,7 +138,8 @@ test('arrow keys on a focused seek bar seek by 10 s instead of stepping the slid
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 3000 }).toBeLessThan(1_500_000);
 });
 
-test('stays in sync for ten minutes (nightly)', async ({ page }) => {
+test('stays in sync for ten minutes (nightly)', async ({ page, browserName, isMobile }) => {
+  test.skip(browserName !== 'chromium' || isMobile, CHROME_ONLY);
   test.skip(!process.env.NIGHTLY, 'Set NIGHTLY=1 after generating fixtures/local/long-disc (see the README "Nightly sync test" section).');
   test.setTimeout(13 * 60_000);
   await page.goto('/?telemetry=1');

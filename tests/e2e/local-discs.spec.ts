@@ -3,6 +3,9 @@ import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { scanPg } from '../helpers/pg-scan';
 import { collectWindows, expectInSync, telemetry } from './telemetry';
+import { CHROME_ONLY } from './support';
+
+test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
 const LOCAL = 'fixtures/local';
 const SEEK_FRACTIONS = [0.13, 0.31, 0.52, 0.27, 0.74, 0.08, 0.91, 0.45];
