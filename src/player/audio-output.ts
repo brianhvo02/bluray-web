@@ -21,11 +21,18 @@ export class AudioOutput implements AudioOutputLike {
     private readonly nav: { audioSession?: { type: string } } | undefined = (globalThis as unknown as { navigator?: { audioSession?: { type: string } } }).navigator,
   ) {}
 
+  private stateListener: ((state: AudioContextState | 'interrupted') => void) | null = null;
+
+  onStateChange(cb: (state: AudioContextState | 'interrupted') => void): void {
+    this.stateListener = cb;
+  }
+
   ensureStarted(): Promise<SharedArrayBuffer> {
     let attempt = this.started;
     if (!attempt) {
       this.setAudioSession();
       const context = this.createContext({ sampleRate: OUTPUT_SAMPLE_RATE, latencyHint: 'playback' });
+      context.onstatechange = () => this.stateListener?.(context.state);
       const created = { context, ready: this.setUp(context) };
       attempt = created;
       this.started = created;
