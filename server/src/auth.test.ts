@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appHandlers } from './app';
 import { Auth } from './auth';
 import { ownerCode } from './cli';
+import { codeHash } from './codes';
 import type { CodeRegistrar } from './codes';
 import { createServer } from './http';
 import { Library } from './library';
@@ -530,7 +531,7 @@ describe('HTTP', () => {
 describe('owner-code', () => {
   it('prints an owner code that the server in the same data dir redeems', async () => {
     const lines: string[] = [];
-    ownerCode(tmp, now, (line) => lines.push(line));
+    await ownerCode(tmp, now, (line) => lines.push(line));
     const code = /^Owner pairing code: ([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)?.[1];
     expect(code).toBeDefined();
     expect(lines[1]).toBe(`Pairing link: https://bluray-web.pages.dev/?pair=${code!.replaceAll('-', '')}`);
@@ -538,5 +539,21 @@ describe('owner-code', () => {
     expect(lines[4]).toMatch(/^[█▀▄ \n]+$/);
     const server = new Auth(new Store(tmp), now);
     expect(server.redeem(code!, 'Mac', (await deviceKey()).jwk)?.owner).toBe(true);
+    expect(lines.at(-1)).toBe('Rendezvous: not configured (RENDEZVOUS_URL is unset)');
+  });
+
+  it('registers the code with the rendezvous service, and still prints it when that fails', async () => {
+    const lines: string[] = [];
+    const registrar = { registerCode: vi.fn(async () => {}) };
+    await ownerCode(tmp, now, (line) => lines.push(line), { registrar, publicBase: 'https://nas.example/bluray/api/' });
+    const code = /([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)![1]!;
+    expect(registrar.registerCode).toHaveBeenCalledWith(codeHash(code), { https: 'https://nas.example/bluray/api/' }, clock + 10 * MINUTE);
+    expect(lines.at(-1)).toBe('Rendezvous: registered');
+
+    lines.length = 0;
+    const down = { registerCode: async () => Promise.reject(new Error('fetch failed')) };
+    await ownerCode(tmp, now, (line) => lines.push(line), { registrar: down, publicBase: 'https://nas.example/bluray/api/' });
+    expect(lines[0]).toMatch(/^Owner pairing code: /);
+    expect(lines.at(-1)).toBe('Rendezvous: not registered (fetch failed)');
   });
 });

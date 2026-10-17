@@ -106,7 +106,17 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0
       - run: npm ci
+      # the pairing-code rendezvous Worker (rendezvous/wrangler.toml), deployed before the app that looks codes up
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: rendezvous
+          command: deploy
       - run: npm run build
+        env:
+          # the Worker's workers.dev URL, a repository variable set after its first deploy; unset, pairing by code reports the service unavailable
+          VITE_RENDEZVOUS_URL: ${{ vars.RENDEZVOUS_URL }}
       # dist/_headers carries COOP/COEP; without them SharedArrayBuffer is unavailable
       - run: test -f dist/_headers
       - uses: cloudflare/wrangler-action@v3

@@ -70,4 +70,16 @@ describe('loadConfig', () => {
   it.each(['', 'a b', 'caddy,evil'])('rejects TRUSTED_PROXY=%j', (value) => {
     expect(() => loadConfig({ TRUSTED_PROXY: value })).toThrow(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   });
+
+  it('reads RENDEZVOUS_URL, treating unset or empty as no rendezvous', () => {
+    expect(loadConfig({ RENDEZVOUS_URL: 'https://bluray-rendezvous.example.workers.dev' }).rendezvousUrl).toBe(
+      'https://bluray-rendezvous.example.workers.dev',
+    );
+    expect(loadConfig({}).rendezvousUrl).toBeUndefined();
+    expect(loadConfig({ RENDEZVOUS_URL: '' }).rendezvousUrl).toBeUndefined();
+  });
+
+  it.each(['rendezvous', 'ftp://r.example/'])('rejects RENDEZVOUS_URL=%j', (value) => {
+    expect(() => loadConfig({ RENDEZVOUS_URL: value })).toThrow(`RENDEZVOUS_URL "${value}" is not an http(s) URL`);
+  });
 });

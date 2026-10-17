@@ -1,0 +1,14 @@
+# The pairing-code rendezvous Worker. CI deploys it (`wrangler deploy`, .github/workflows/ci.yml);
+# its workers.dev URL is the app's VITE_RENDEZVOUS_URL and the NAS server's RENDEZVOUS_URL.
+name = "bluray-rendezvous"
+main = "src/index.ts"
+compatibility_date = "2026-10-17"
+
+[[durable_objects.bindings]]
+name = "CODE_REGISTRY"
+class_name = "CodeRegistry"
+
+# SQLite-backed storage, available on the Workers free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CodeRegistry"]
