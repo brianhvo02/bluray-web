@@ -764,12 +764,8 @@ export class Player {
 
   /** Spec §5: BD-J stops; what is playing keeps playing, and the user chooses from the picker. */
   private bdjFailed(code: BdjFailureCode, message: string): void {
-    this.stopBdj();
-    if (!this.session) {
-      // a playlist Java asked for and still loading is not playback that runs: it does not open behind the picker
-      this.openGeneration++;
-      this.setState('idle');
-    }
+    this.stopBdj(); // also cancels a playlist Java asked for that is still loading: it does not open behind the picker
+    if (!this.session) this.setState('idle');
     this.notice('bdj-failed', `BD-J couldn't start this disc (${code}: ${message}). Choose a playlist to play.`);
   }
 
@@ -780,6 +776,7 @@ export class Player {
     entry.host.dispose();
     entry.end();
     this.bdj = null;
+    this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
     if (this.pgRegs && this.navRegs !== entry.regs) this.bindPg(this.pgRegs);
     this.deps.emit({ type: 'bdjActive', active: false });

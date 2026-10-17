@@ -196,6 +196,8 @@ export class PlayerBdjHost {
       this.closePlaylist();
       return 0;
     }
+    // a START (or still) that came while the playlist loaded found nothing to play; it applies now
+    this.deps.port.setRate(!this.waitStart && !this.still ? 1 : 0);
     return 1;
   }
 

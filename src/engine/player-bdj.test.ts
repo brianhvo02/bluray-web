@@ -373,6 +373,61 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(notices(h)).toContain('bdj-failed');
   });
 
+  /** A hand-driven BD-J worker that has booted and started its title. */
+  async function startedHand(): Promise<{ readonly h: Harness; readonly w: ReturnType<typeof handWorker> }> {
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    return { h, w };
+  }
+
+  it('a playlist Java asked for that is still loading when the disc closes never opens afterwards', async () => {
+    const { h, w } = await startedHand();
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    expect(lastState(h)).toBe('loading');
+    await h.player.handle({ type: 'close' });
+    const at = h.events.length;
+    await h.play(500);
+    const after = h.events.slice(at).map((e) => e.type);
+    expect(after).not.toContain('chapters');
+    expect(after).not.toContain('tracks');
+    expect(after).not.toContain('state');
+    expect(lastState(h)).toBe('idle');
+  });
+
+  it('a playlist Java asked for that is still loading when another disc opens never plays on the new disc', async () => {
+    const { h, w } = await startedHand();
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    expect(lastState(h)).toBe('loading');
+    const other = buildSyntheticDisc({ clips: [syntheticClip('00009', 4, { audio: CodingType.LPCM })], playlists: [{ id: '00009', clipIds: ['00009'] }] });
+    const at = h.events.length;
+    await h.player.handle({ type: 'open', entries: discEntries(other) });
+    await h.play(500);
+    expect(h.events.slice(at).some((e) => e.type === 'chapters' || e.type === 'tracks')).toBe(false);
+    expect(lastState(h)).toBe('idle');
+  });
+
+  it('a second Java playlist still loading when BD-J fails during playback never starts', async () => {
+    const { h, w } = await startedHand();
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    await until(h, () => playlistsPlayed(h).length === 1 && lastState(h) === 'paused');
+    w.emit({ type: 'call', id: 2, name: 'selectPlaylist', args: [1, -1, -1, '-1'] });
+    w.emit({ type: 'failed', code: 'internal', message: 'boom' });
+    await h.play(500);
+    expect(playlistsPlayed(h)).toEqual(['00000']);
+    expect(notices(h)).toContain('bdj-failed');
+  });
+
+  it("plays a playlist once loaded when Java's START came while it was still loading", async () => {
+    const { h, w } = await startedHand();
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    expect(lastState(h)).toBe('loading');
+    w.emit({ type: 'call', id: 2, name: 'selectRate', args: [1, START] });
+    await until(h, () => lastState(h) === 'playing' && playlistsPlayed(h).length === 1, 10_000);
+  }, 30_000);
+
   it('falls back to the picker with bdj-failed when BD-J cannot boot', async () => {
     const z = ZipArchive.open(CLASSES.libbluray);
     const entries = z.names.filter((n) => n !== 'org/videolan/Libbluray.class').map((n) => [n, z.read(n)!] as const);
