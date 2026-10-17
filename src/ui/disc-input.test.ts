@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { normalizeDiscPaths } from '../engine/disc/paths';
 
 function file(name: string, relative = ''): File {
@@ -65,12 +67,32 @@ describe('disc input', () => {
     expect(await discFromDataTransfer(dt)).toEqual({ kind: 'entries', entries: [['BDMV/index.bdmv', idx]] });
   });
 
-  it('keeps names and BDMV-rooted paths from a file list so the disc still normalizes', () => {
-    const names = ['BDMV/index.bdmv', 'BDMV/PLAYLIST/00000.mpls', 'BDMV/CLIPINF/00001.clpi', 'BDMV/STREAM/00001.m2ts'];
-    const entries = collectFromFileList(names.map((n) => file(n.split('/').pop()!, n)));
-    expect(entries.map(([p]) => p)).toEqual(names);
-    expect([...normalizeDiscPaths(entries).keys()]).toEqual(names.map((n) => n.toUpperCase()));
-    const bare = file('index.bdmv');
-    expect(collectFromFileList([bare])).toEqual([['index.bdmv', bare]]);
+  it('returns null when only plain files are dropped', async () => {
+    const f = new File([], 'a.srt');
+    const dt = { items: [{ kind: 'file', webkitGetAsEntry: () => ({ isFile: true, isDirectory: false, name: 'a.srt', file: (cb: (x: File) => void) => cb(f) }) }] } as unknown as DataTransfer;
+    expect(await discFromDataTransfer(dt)).toBeNull();
+  });
+
+  describe('fixtures/synthetic/disc1 picked from a file list', () => {
+    const walk = (dir: string, prefix: string): string[] =>
+      readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? walk(join(dir, n), `${prefix}${n}/`) : [`${prefix}${n}`]));
+    const listed = walk('fixtures/synthetic/disc1', ''); // BDMV/index.bdmv, ...
+    const pick = (rootPrefix: string | null) =>
+      collectFromFileList(listed.map((rel) => file(rel.split('/').pop()!, rootPrefix === null ? '' : `${rootPrefix}${rel}`)));
+    const expected = listed.map((r) => r.toUpperCase()).sort();
+
+    it('finds the root when paths are rooted at BDMV (iOS Files pick of the BDMV folder)', () => {
+      expect([...normalizeDiscPaths(pick('')).keys()].sort()).toEqual(expected);
+    });
+
+    it('finds the root when paths are rooted at disc1/BDMV', () => {
+      expect([...normalizeDiscPaths(pick('disc1/')).keys()].sort()).toEqual(expected);
+    });
+
+    it('fails with not-bdmv when every webkitRelativePath is empty (bare names lose the folder structure)', () => {
+      const entries = pick(null);
+      expect(entries.map(([p]) => p)).toEqual(listed.map((r) => r.split('/').pop()));
+      expect(() => normalizeDiscPaths(entries)).toThrowError(expect.objectContaining({ code: 'not-bdmv' }));
+    });
   });
 });

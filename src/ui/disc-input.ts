@@ -2,6 +2,7 @@ import { walkEntries, type EntryLike } from './entry-walk';
 
 export type DiscEntries = Array<[string, File]>;
 
+/** Shared boundary: the directory-handle walker and the dropped-entry walker (discFromDataTransfer) descend equally deep. */
 const MAX_DEPTH = 6;
 
 export function collectFromFileList(files: Iterable<File>): DiscEntries {
@@ -32,6 +33,6 @@ export async function discFromDataTransfer(dt: DataTransfer): Promise<DroppedDis
     const handle = await promise;
     if (handle && handle.kind === 'directory') return { kind: 'handle', handle: handle as FileSystemDirectoryHandle };
   }
-  if (entries.length === 0) return null;
+  if (!entries.some((e) => e.isDirectory)) return null; // plain files dropped: not a disc folder
   return { kind: 'entries', entries: await walkEntries(entries, MAX_DEPTH) };
 }
