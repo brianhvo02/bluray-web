@@ -72,6 +72,12 @@ export class Library {
     return this.byId.get(id) ?? null;
   }
 
+  /** Where a disc's folder (or ISO file) is on this machine, or null if its root is no longer configured. */
+  locate(disc: DiscEntry): string | null {
+    const root = this.roots.find((r) => disc.path.startsWith(`${r.name}/`));
+    return root ? join(root.dir, disc.path.slice(root.name.length + 1)) : null;
+  }
+
   /** Rescans every root; list() keeps answering from the previous tree meanwhile. A scan already running is joined. */
   scan(): Promise<void> {
     this.running ??= this.doScan().finally(() => {
