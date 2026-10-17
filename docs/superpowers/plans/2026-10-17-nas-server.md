@@ -276,7 +276,7 @@
 ### Task 10: Folder browser, pre-flight and playing from the NAS
 
 **Files:**
-- Create: `src/ui/nas/LibraryScreen.tsx`, `src/ui/nas/library-model.ts`, `src/ui/nas/library-model.test.ts`, `src/ui/nas/Preflight.tsx`, `tests/e2e/nas.spec.ts`, `tests/e2e/nas-server.ts` (starts the built server on port 4190 with `fixtures/synthetic` as root `syn`, and the rendezvous Worker's fetch handler with in-memory storage on port 4191; the E2E build sets `VITE_RENDEZVOUS_URL=http://localhost:4191`)
+- Create: `src/ui/nas/LibraryScreen.tsx`, `src/ui/nas/library-model.ts`, `src/ui/nas/library-model.test.ts`, `src/ui/nas/Preflight.tsx`, `tests/e2e/nas.spec.ts`, `tests/e2e/nas-server.ts` (starts the built server on port 4192 (4190 is a Fetch bad port) with `fixtures/synthetic` as root `syn`, and the rendezvous Worker's fetch handler with in-memory storage on port 4191; the E2E build sets `VITE_RENDEZVOUS_URL=http://localhost:4191`)
 - Modify: `src/ui/LandingScreen.tsx` ("Open from NAS" when paired), `src/player/player-controller.ts` (`openRemote`, token relay, mapping `nas-waiting` and the remote errors to notices/errors with the Global Constraints copy), `playwright.config.ts` (second `webServer` for the NAS server), `src/ui/styles.css`
 
 **Interfaces:**
