@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { NAS_PORT, RENDEZVOUS_URL } from './tests/e2e/nas-server';
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -28,10 +29,21 @@ export default defineConfig({
       use: { ...devices['Pixel 7'], channel: 'chrome', hasTouch: true, launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] } },
     },
   ],
-  webServer: {
-    command: 'npm run build && npm run preview -- --port 4173 --strictPort',
-    url: 'http://localhost:4173',
-    reuseExistingServer: !process.env.CI,
-    timeout: 180_000,
-  },
+  webServer: [
+    {
+      command: 'npm run build && npm run preview -- --port 4173 --strictPort',
+      url: 'http://localhost:4173',
+      // nas.spec.ts pairs through the rendezvous stand-in that tests/e2e/nas-server.ts starts.
+      env: { VITE_RENDEZVOUS_URL: RENDEZVOUS_URL },
+      reuseExistingServer: !process.env.CI,
+      timeout: 180_000,
+    },
+    {
+      // The built NAS server over a copy of fixtures/synthetic, and the rendezvous Worker (nas.spec.ts).
+      command: 'npm run server:build && npx tsx tests/e2e/nas-server.ts',
+      url: `http://localhost:${NAS_PORT}/api/health`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+  ],
 });

@@ -75,6 +75,30 @@ export class RemoteSource implements ByteSource {
     return this.held;
   }
 
+  /**
+   * Bytes of `path` landed after the chunk of the last read (the reader holds that one), up to the first chunk not yet
+   * landed, and whether they run to the end of the file. Nothing when the last read was in another file.
+   */
+  bufferedAhead(path: string): { bytes: number; toEnd: boolean } {
+    const key = path.toUpperCase();
+    const c = this.cursor;
+    if (!c || c.path !== key) return { bytes: 0, toEnd: false };
+    const count = Math.ceil((this.sizes.get(key) ?? 0) / this.opts.chunkBytes);
+    let bytes = 0;
+    let i = c.index + 1;
+    for (; i < count; i++) {
+      const chunk = this.chunks.get(chunkKey(key, i));
+      if (!chunk?.bytes) break;
+      bytes += chunk.size;
+    }
+    return { bytes, toEnd: i >= count };
+  }
+
+  /** Read-ahead (or a read) is still fetching; false once the budget is full or the file is read to its end. */
+  get readingAhead(): boolean {
+    return this.fetching > 0;
+  }
+
   exists(path: string): boolean {
     return this.sizes.has(path.toUpperCase());
   }

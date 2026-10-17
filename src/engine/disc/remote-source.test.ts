@@ -202,4 +202,47 @@ describe('RemoteSource', () => {
     transport.answer(0);
     expectBytes(await again, clip.subarray(0, 10));
   });
+
+  it('counts the landed bytes after the last read, up to the first chunk still missing, and says when read-ahead stops', async () => {
+    const clip = pattern(10 * MiB + 100);
+    const files = new Map([['C', clip], ['D', pattern(MiB)]]);
+    const transport = new FakeTransport(files);
+    const s = new RemoteSource(manifest(files), transport, { readAheadBytes: 8 * MiB, chunkBytes: CHUNK, inFlight: 2 });
+    expect(s.bufferedAhead('C')).toEqual({ bytes: 0, toEnd: false });
+    const first = s.read('C', 0, 100);
+    expect(s.readingAhead).toBe(true);
+    transport.answer(0);
+    await first;
+    await tick();
+    expect(s.bufferedAhead('C')).toEqual({ bytes: 0, toEnd: false }); // the chunk read is the reader's, not ahead of it
+    transport.answer(4 * MiB); // lands out of order: not contiguous yet
+    await tick();
+    expect(s.bufferedAhead('C')).toEqual({ bytes: 0, toEnd: false });
+    transport.answer(2 * MiB);
+    await tick();
+    expect(s.bufferedAhead('C')).toEqual({ bytes: 2 * CHUNK, toEnd: false });
+    expect(s.bufferedAhead('c').bytes).toBe(2 * CHUNK); // paths are case-insensitive
+    expect(s.bufferedAhead('D')).toEqual({ bytes: 0, toEnd: false }); // not the file being read
+    // The budget (8 MiB) holds chunks 1 to 4 once chunk 0 is dropped; read-ahead stops when they have landed.
+    transport.answer(6 * MiB);
+    await tick();
+    expect(s.readingAhead).toBe(true);
+    transport.answer(8 * MiB);
+    await tick();
+    expect(transport.inFlight()).toHaveLength(0);
+    expect(s.readingAhead).toBe(false);
+    expect(s.bufferedAhead('C')).toEqual({ bytes: 4 * CHUNK, toEnd: false });
+  });
+
+  it('says when the bytes ahead run to the end of the file', async () => {
+    const clip = pattern(5 * MiB);
+    const files = new Map([['C', clip]]);
+    const transport = new FakeTransport(files, true);
+    const s = new RemoteSource(manifest(files), transport, { readAheadBytes: 16 * MiB, chunkBytes: CHUNK, inFlight: 4 });
+    await s.read('C', 0, 100);
+    await tick();
+    await tick();
+    expect(s.bufferedAhead('C')).toEqual({ bytes: 3 * MiB, toEnd: true });
+    expect(s.readingAhead).toBe(false);
+  });
 });

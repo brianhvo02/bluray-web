@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
+import { LibraryScreen } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
 import type { NasClient } from './nas/nas-client';
 import type { NasPairing } from './nas/nas-store';
@@ -36,6 +37,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   /** undefined while loading; null when this device isn't paired. */
   const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
   const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
+  const [browsing, setBrowsing] = useState(false);
   const loadPairing = (): void => {
     nas.pairing().then(setPairing, () => setPairing(null));
   };
@@ -44,6 +46,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   useEffect(() => nas.onUnpaired(loadPairing), [nas]);
   const forgetNas = (): void => {
     setPairRequested(false);
+    setBrowsing(false);
     nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
 
@@ -141,6 +144,8 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   };
 
   const error = localError ?? snapshot.error?.message ?? null;
+  const nasWaiting = snapshot.engineState === 'loading' ? snapshot.notices.find((n) => n.code === 'nas-waiting') : undefined;
+  const paired = pairing !== undefined && pairing !== null && !pairRequested;
   const errorPaths = localError ? [] : (snapshot.error?.paths ?? []);
 
   return (
@@ -174,6 +179,11 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
         </p>
       )}
       {snapshot.engineState === 'loading' && <p className="status">Reading disc…</p>}
+      {nasWaiting && (
+        <p className="status" role="status" data-testid="nas-waiting">
+          {nasWaiting.message}
+        </p>
+      )}
       {error && (
         <div className="error-banner" role="alert" data-testid="error">
           {error}
@@ -201,11 +211,24 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
         ) : (
           <p className="status" data-testid="nas-paired">
             Paired with the NAS as {pairing.deviceName}.{' '}
+            {!browsing && (
+              <button
+                type="button"
+                data-testid="nas-open"
+                onClick={() => {
+                  setLocalError(null);
+                  setBrowsing(true);
+                }}
+              >
+                Open from NAS
+              </button>
+            )}{' '}
             <button type="button" data-testid="nas-forget" onClick={forgetNas}>
               Forget this NAS
             </button>
           </p>
         ))}
+      {paired && browsing && <LibraryScreen nas={nas} controller={controller} onClose={() => setBrowsing(false)} />}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>
