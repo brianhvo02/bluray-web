@@ -33,7 +33,7 @@ export interface BdjSessionDeps {
   readonly onLog?: (line: string, error: boolean) => void;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
-  /** How long after the first start Java has to select a playlist. */
+  /** How long after boot (or the first start) Java has to select a playlist. */
   readonly selectTimeoutMs?: number;
 }
 
@@ -59,6 +59,7 @@ export class BdjSession {
   boot(files: readonly (readonly [string, Blob])[], discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
     return new Promise((resolve) => {
       if (this.stopped) return resolve();
+      this.armTimeout();
       this.bootDone = resolve;
       this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, discFiles: files, discId, classLibrary });
     });
@@ -66,13 +67,17 @@ export class BdjSession {
 
   start(title: number): void {
     if (this.stopped) return;
-    if (this.startedAt === null) {
-      this.startedAt = this.deps.nowMs();
-      const ms = this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
-      this.cancelTimeout = this.deps.setTimer(ms, () => this.fail('timeout', `no playlist was selected within ${ms / 1000} s`));
-    }
+    this.armTimeout();
     if (this.holdFor === null && this.callInHand !== null) this.holdFor = this.callInHand;
     this.send({ type: 'start', title });
+  }
+
+  /** The first-playlist timeout runs from boot (or the first start, without a boot), so a hung boot falls back too. */
+  private armTimeout(): void {
+    if (this.startedAt !== null) return;
+    this.startedAt = this.deps.nowMs();
+    const ms = this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
+    this.cancelTimeout = this.deps.setTimer(ms, () => this.fail('timeout', `no playlist was selected within ${ms / 1000} s`));
   }
 
   event(ev: number, param: number): void {
@@ -141,7 +146,7 @@ export class BdjSession {
     if (this.startedAt === null || this.cancelTimeout === null) return;
     this.cancelTimeout();
     this.cancelTimeout = null;
-    this.deps.onLog?.(`BD-J selected its first playlist ${Math.round(this.deps.nowMs() - this.startedAt)} ms after start`, false);
+    this.deps.onLog?.(`BD-J selected its first playlist ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot`, false);
   }
 
   private send(m: ToBdj): void {

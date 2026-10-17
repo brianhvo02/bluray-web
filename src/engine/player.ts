@@ -543,10 +543,11 @@ export class Player {
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
     if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
+    // bdjActive goes out before 'idle', so the UI never shows the picker in between
+    const bdjFirstPlay = disc.index.firstPlay.kind === 'bdj' && this.bdjSupported;
+    if (bdjFirstPlay) this.enterBdj(TITLE_FIRST_PLAY, null);
     this.setState('idle');
-    if (disc.index.firstPlay.kind === 'bdj' && this.bdjSupported) {
-      this.enterBdj(TITLE_FIRST_PLAY, null);
-    } else if (disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
+    if (!bdjFirstPlay && disc.movieObjects && disc.index.firstPlay.kind === 'hdmv') {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
@@ -681,6 +682,11 @@ export class Player {
   /** Spec §5: BD-J stops; what is playing keeps playing, and the user chooses from the picker. */
   private bdjFailed(code: BdjFailureCode, message: string): void {
     this.stopBdj();
+    if (!this.session) {
+      // a playlist Java asked for and still loading is not playback that runs: it does not open behind the picker
+      this.openGeneration++;
+      this.setState('idle');
+    }
     this.notice('bdj-failed', `BD-J couldn't start this disc (${code}: ${message}). Choose a playlist to play.`);
   }
 
@@ -806,7 +812,7 @@ export class Player {
     }
     const nav = this.navigator;
     if (!nav) return;
-    const op = MENU_KEY_UO[key] ??(key === 'popup' ? (this.menuActive && this.popupAvailable ? 'popupOff' : 'popupOn') : undefined);
+    const op = MENU_KEY_UO[key] ?? (key === 'popup' ? (this.menuActive && this.popupAvailable ? 'popupOff' : 'popupOn') : undefined);
     if (op && this.refused(op)) return;
     if (key === 'topMenu') this.playTitle(0);
     else nav.userInput(MENU_KEY_VK[key]);

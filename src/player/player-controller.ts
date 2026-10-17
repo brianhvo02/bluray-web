@@ -143,7 +143,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'bdjActive':
-      return { ...s, bdjActive: e.active };
+      // once BD-J stops, the disc's playback is no longer its own
+      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, notices: s.notices.filter((n) => n.code !== 'bdj-menu-hidden') };
     case 'indexTitles':
       return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':

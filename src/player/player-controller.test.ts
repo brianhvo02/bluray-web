@@ -335,7 +335,7 @@ describe('titles and the top menu', () => {
     expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] }).indexTitles).toBeNull();
   });
 
-  it('records BD-J support and whether a BD-J title runs, and keeps the BD-J notices', () => {
+  it('records BD-J support and whether a BD-J title runs; the menu-hidden notice goes when BD-J stops', () => {
     let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'titles', playlists: [summary], usesBdj: true, bdjSupported: true, warnings: [] });
     expect(s).toMatchObject({ usesBdj: true, bdjSupported: true, bdjActive: false });
     s = reduceEvent(s, { type: 'bdjActive', active: true });
@@ -344,7 +344,7 @@ describe('titles and the top menu', () => {
     s = reduceEvent(s, { type: 'bdjActive', active: false });
     s = reduceEvent(s, { type: 'notice', code: 'bdj-failed', message: 'failed' });
     expect(s.bdjActive).toBe(false);
-    expect(s.notices.map((n) => n.code)).toEqual(['bdj-menu-hidden', 'bdj-failed']);
+    expect(s.notices.map((n) => n.code)).toEqual(['bdj-failed']);
     s = reduceEvent(s, { type: 'bdjActive', active: true });
     expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] })).toMatchObject({ bdjActive: false, bdjSupported: false });
   });

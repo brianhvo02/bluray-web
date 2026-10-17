@@ -187,6 +187,18 @@ describe('BdjSession rules', () => {
     expect(f.terminated()).toBe(true);
   });
 
+  it('fails with timeout 20,000 ms after a boot that never completes', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    const booted = h.session.boot(DISC_FILES, null, CLASSES);
+    h.clock.advance(19_999);
+    expect(h.failures).toEqual([]);
+    h.clock.advance(1);
+    expect(h.failures.map(([c]) => c)).toEqual(['timeout']);
+    expect(f.terminated()).toBe(true);
+    await booted; // settles at the stop
+  });
+
   it('a selected playlist cancels the timeout', async () => {
     const f = fakeWorker();
     const h = session(f.worker);

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
-import { storedZip } from '../../tests/helpers/jvm-asm';
+import { VirtualClock, storedZip } from '../../tests/helpers/jvm-asm';
 import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { buildSyntheticDisc, discEntries, lpcmStream, syntheticClip, type SyntheticDiscSpec } from '../../tests/helpers/synthetic-disc';
 import { createRing, renderQuantum, ringViews } from './audio/ring';
@@ -91,7 +91,15 @@ afterEach(async () => {
   for (const p of players.splice(0)) await p.handle({ type: 'close' });
 });
 
-async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, classes: ClassLibrarySource = CLASSES): Promise<Harness> {
+interface HarnessOptions {
+  readonly classes?: ClassLibrarySource;
+  /** A worker the test drives by hand instead of the in-process one. */
+  readonly worker?: WorkerLike;
+  readonly setTimer?: (ms: number, fn: () => void) => () => void;
+}
+
+async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
+  const classes = opts.classes ?? CLASSES;
   const events: EngineEvent[] = [];
   const sent: ToBdj[] = [];
   let terminated = false;
@@ -104,8 +112,9 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, classes: Cla
     requestFrame: () => undefined,
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
     createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
-    setTimer: () => () => undefined,
+    setTimer: opts.setTimer ?? (() => () => undefined),
     createBdjWorker: () => {
+      if (opts.worker) return opts.worker;
       const { port1, port2 } = new MessageChannel();
       runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0]);
       toEngine = port2;
@@ -153,6 +162,14 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, classes: Cla
       }
     },
   };
+}
+
+/** A BD-J worker the test drives by hand. */
+function handWorker(): { readonly worker: WorkerLike; readonly sent: ToBdj[]; emit(m: FromBdj): void; readonly terminated: () => boolean } {
+  const sent: ToBdj[] = [];
+  let terminated = false;
+  const worker: WorkerLike = { postMessage: (m) => void sent.push(m), onmessage: null, terminate: () => void (terminated = true) };
+  return { worker, sent, emit: (m) => worker.onmessage?.({ data: m } as MessageEvent<FromBdj>), terminated: () => terminated };
 }
 
 const lastState = (h: Harness): PlaybackState | undefined => h.events.flatMap((e) => (e.type === 'state' ? [e.state] : [])).at(-1);
@@ -269,10 +286,47 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(h.sent.some((m) => m.type === 'start')).toBe(false);
   }, 90_000);
 
+  it('says BD-J is active before the player goes idle, so the picker never flashes on First Play', async () => {
+    const h = await harness(bdjDisc(), { worker: handWorker().worker });
+    const types = h.events.map((e) => (e.type === 'state' ? `state:${e.state}` : e.type));
+    const titles = types.indexOf('titles');
+    expect(types.indexOf('bdjActive', titles)).toBeLessThan(types.indexOf('state:idle', titles));
+  });
+
+  it('falls back with a timeout bdj-failed 20,000 ms after a boot that never completes', async () => {
+    const clock = new VirtualClock();
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer });
+    await vi.waitFor(() => expect(w.sent.map((m) => m.type)).toEqual(['boot']));
+    clock.advance(19_999);
+    expect(notices(h)).not.toContain('bdj-failed');
+    clock.advance(1);
+    expect(h.events.find((e) => e.type === 'notice' && e.code === 'bdj-failed')).toMatchObject({
+      message: "BD-J couldn't start this disc (timeout: no playlist was selected within 20 s). Choose a playlist to play.",
+    });
+    expect(h.events.filter((e) => e.type === 'bdjActive').at(-1)).toEqual({ type: 'bdjActive', active: false });
+    expect(w.terminated()).toBe(true);
+  });
+
+  it('a playlist Java asked for that is still loading when BD-J fails does not open behind the picker', async () => {
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    expect(lastState(h)).toBe('loading');
+    w.emit({ type: 'failed', code: 'internal', message: 'boom' });
+    await h.play(500);
+    expect(playlistsPlayed(h)).toEqual([]);
+    expect(lastState(h)).toBe('idle');
+    expect(notices(h)).toContain('bdj-failed');
+  });
+
   it('falls back to the picker with bdj-failed when BD-J cannot boot', async () => {
     const z = ZipArchive.open(CLASSES.libbluray);
     const entries = z.names.filter((n) => n !== 'org/videolan/Libbluray.class').map((n) => [n, z.read(n)!] as const);
-    const h = await harness(bdjDisc(), { ...CLASSES, libbluray: storedZip(entries) });
+    const h = await harness(bdjDisc(), { classes: { ...CLASSES, libbluray: storedZip(entries) } });
     await until(h, () => notices(h).includes('bdj-failed'));
     const failed = h.events.find((e) => e.type === 'notice' && e.code === 'bdj-failed');
     expect(failed).toMatchObject({ message: expect.stringMatching(/^BD-J couldn't start this disc \(class-not-found: .*org\/videolan\/Libbluray.*\)\. Choose a playlist to play\.$/) });
