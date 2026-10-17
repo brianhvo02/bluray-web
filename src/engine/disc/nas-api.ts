@@ -3,7 +3,7 @@
 export interface DiscEntry {
   readonly id: string;
   readonly name: string;
-  /** Root-relative, e.g. 'drv5/[250226] きみの色'. */
+  /** Root-relative, e.g. 'drv5/[250226] きみの色'. This is the key: names can repeat across roots. */
   readonly path: string;
   readonly kind: 'folder' | 'iso';
   readonly sizeBytes: number;
