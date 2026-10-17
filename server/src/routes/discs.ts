@@ -1,10 +1,13 @@
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
+import type { Readable } from 'node:stream';
+import type { DiscEntry } from '../../../src/engine/disc/nas-api';
 import { json } from '../http';
 import type { Handler, Response } from '../http';
+import { IsoTrees, isoFileStream, isoUnchanged } from '../iso';
 import type { Library } from '../library';
-import { buildManifest, discUnchanged, largestClip, resolveDiscFile } from '../manifest';
+import { buildIsoManifest, buildManifest, discUnchanged, largestClip, largestIsoClip, resolveDiscFile, resolveIsoFile } from '../manifest';
 import { parseRange } from '../ranges';
 
 const PROBE_BYTES = 4_194_304;
@@ -22,11 +25,22 @@ function bytesHeaders(length: number): Record<string, string> {
   };
 }
 
-/** `[start, end]` of `file` (inclusive) as a streamed body; nothing for HEAD or an empty span. */
-function bytes(req: IncomingMessage, file: string, status: number, start: number, end: number, headers: Record<string, string> = {}): Response {
+/** Opens bytes `[start, end]` (inclusive) of a file. */
+type OpenBytes = (start: number, end: number) => Readable;
+
+/** `[start, end]` (inclusive) as a streamed body; nothing for HEAD or an empty span. */
+function bytes(req: IncomingMessage, open: OpenBytes, status: number, start: number, end: number, headers: Record<string, string> = {}): Response {
   const length = end - start + 1;
-  const body = req.method === 'HEAD' || length === 0 ? undefined : createReadStream(file, { start, end });
+  const body = req.method === 'HEAD' || length === 0 ? undefined : open(start, end);
   return { status, headers: { ...bytesHeaders(length), ...headers }, body };
+}
+
+/** A file of `size` bytes: the `Range` asked for, or all of it. */
+function serveBytes(req: IncomingMessage, size: number, open: OpenBytes): Response {
+  const range = parseRange(req.headers.range, size);
+  if (range === 'unsatisfiable') return { status: 416, headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': '0' } };
+  if (range === null) return bytes(req, open, 200, 0, size - 1);
+  return bytes(req, open, 206, range.start, range.end, { 'Content-Range': `bytes ${range.start}-${range.end}/${size}` });
 }
 
 async function serveFile(req: IncomingMessage, file: string): Promise<Response> {
@@ -36,17 +50,39 @@ async function serveFile(req: IncomingMessage, file: string): Promise<Response> 
   } catch {
     return notFound();
   }
-  const range = parseRange(req.headers.range, size);
-  if (range === 'unsatisfiable') return { status: 416, headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': '0' } };
-  if (range === null) return bytes(req, file, 200, 0, size - 1);
-  return bytes(req, file, 206, range.start, range.end, { 'Content-Range': `bytes ${range.start}-${range.end}/${size}` });
+  return serveBytes(req, size, (start, end) => createReadStream(file, { start, end }));
 }
+
+const ISO_TREES = 32;
 
 /**
  * `GET /api/discs/<id>/manifest`, `GET|HEAD /api/discs/<id>/files/<path>` (a `Range` or the whole file) and
  * `GET|HEAD /api/discs/<id>/probe` (the first 4 MiB of the largest clip); `appHandlers` puts the token guard in front.
  */
 export function discRoutes(library: Library): Handler {
+  const isoTrees = new IsoTrees(ISO_TREES);
+
+  /** The same three actions for an ISO disc, from its UDF tree (parsed once per disc id). */
+  const isoRoute = async (req: IncomingMessage, disc: DiscEntry, action: string, encodedPath: string | undefined): Promise<Response> => {
+    const abs = library.locate(disc);
+    if (!abs || !(await isoUnchanged(disc, abs))) return discChanged();
+    const tree = await isoTrees.get(disc.id, abs);
+    if (action === 'manifest') return json(200, await buildIsoManifest(abs, tree, disc));
+    if (action === 'probe') {
+      const clip = largestIsoClip(tree);
+      if (!clip) return notFound();
+      return bytes(req, (start, end) => isoFileStream(abs, clip, start, end), 200, 0, Math.min(clip.size, PROBE_BYTES) - 1);
+    }
+    let path: string;
+    try {
+      path = decodeURIComponent(encodedPath!);
+    } catch {
+      return notFound();
+    }
+    const file = resolveIsoFile(tree, path);
+    return file ? serveBytes(req, file.size, (start, end) => isoFileStream(abs, file, start, end)) : notFound();
+  };
+
   return async (req, url) => {
     const match = ROUTE.exec(url.pathname);
     if (!match) return null;
@@ -56,7 +92,7 @@ export function discRoutes(library: Library): Handler {
 
     const disc = library.disc(id);
     if (!disc) return discChanged();
-    if (disc.kind === 'iso') return json(501, { error: 'iso-not-yet' });
+    if (disc.kind === 'iso') return isoRoute(req, disc, action, encodedPath);
     const dir = library.locate(disc);
     if (!dir || !(await discUnchanged(disc, dir))) return discChanged();
 
@@ -64,7 +100,7 @@ export function discRoutes(library: Library): Handler {
     if (action === 'probe') {
       const clip = await largestClip(dir);
       if (!clip) return notFound();
-      return bytes(req, clip.abs, 200, 0, Math.min(clip.size, PROBE_BYTES) - 1);
+      return bytes(req, (start, end) => createReadStream(clip.abs, { start, end }), 200, 0, Math.min(clip.size, PROBE_BYTES) - 1);
     }
     let path: string;
     try {

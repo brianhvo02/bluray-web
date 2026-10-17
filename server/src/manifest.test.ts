@@ -1,10 +1,11 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { DiscManifest } from '../../src/engine/disc/nas-api';
+import { buildUdf250 } from '../../tests/helpers/udf-image';
 import { appHandlers } from './app';
 import type { Auth } from './auth';
 import { createServer } from './http';
@@ -69,6 +70,8 @@ describe('disc routes', () => {
   let server: http.Server;
   let library: Library;
   const ids: Record<string, string> = {};
+  /** A UDF 2.50 image whose 00001.M2TS has four extents out of order. */
+  const multi = buildUdf250(3000);
 
   beforeAll(async () => {
     tmp = mkdtempSync(join(tmpdir(), 'discs-'));
@@ -80,7 +83,11 @@ describe('disc routes', () => {
     cpSync(join(FIXTURES, 'disc1'), join(root, 'big'), { recursive: true });
     writeFileSync(join(root, 'big/BDMV/STREAM/00003.m2ts'), Buffer.alloc(PROBE_BYTES + 1000, 7));
     writeFileSync(join(root, 'big/BDMV/STREAM/empty.m2ts'), '');
-    writeFileSync(join(root, 'disc.iso'), 'iso');
+    copyFileSync(join(FIXTURES, 'disc1.iso'), join(root, 'disc.iso'));
+    copyFileSync(join(FIXTURES, 'disc1.iso'), join(root, 'gone.iso'));
+    const fd = openSync(join(root, 'multi.iso'), 'w');
+    for (const [lba, block] of multi.image.blocks) writeSync(fd, block, 0, block.length, lba * 2048);
+    closeSync(fd);
     library = new Library([{ name: 'drvA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0 });
     await library.scan();
     for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
@@ -231,11 +238,62 @@ describe('disc routes', () => {
     }
   });
 
-  it('answers 501 iso-not-yet for ISO discs', async () => {
+  it('serves the manifest of an ISO disc like that of the same folder disc', async () => {
+    const res = await fetch(`${base}/${ids['disc.iso']}/manifest`);
+    expect(res.status).toBe(200);
+    const manifest = (await res.json()) as DiscManifest;
+    const folder = await buildManifest(join(FIXTURES, 'disc1'), { id: 'x', name: 'x' });
+    expect(manifest.discId).toBe(ids['disc.iso']);
+    expect(manifest.name).toBe('disc.iso');
+    expect(manifest.files).toEqual(folder.files);
+    expect(manifest.inline).toEqual(folder.inline);
+  });
+
+  it('serves ranges of ISO files, across extents too, and HEAD, 416 and unknown paths', async () => {
+    const clipBytes = readFileSync(join(FIXTURES, 'disc1/BDMV/STREAM/00001.m2ts'));
+    const one = await fetch(`${base}/${ids['disc.iso']}/files/bdmv/stream/00001.m2ts`, { headers: { Range: 'bytes=100-5000' } });
+    expect(one.status).toBe(206);
+    expect(one.headers.get('content-range')).toBe(`bytes 100-5000/${clipBytes.length}`);
+    expect(Buffer.from(await one.arrayBuffer()).equals(clipBytes.subarray(100, 5001))).toBe(true);
+    const whole = await fetch(`${base}/${ids['disc.iso']}/files/BDMV/STREAM/00001.M2TS`);
+    expect(whole.status).toBe(200);
+    expect(Buffer.from(await whole.arrayBuffer()).equals(clipBytes)).toBe(true);
+
+    // 3 * 2048 - 10 .. 5 * 2048 + 20 spans the first three extents.
+    const start = 3 * 2048 - 10;
+    const end = 5 * 2048 + 20;
+    const across = await fetch(`${base}/${ids['multi.iso']}/files/BDMV/STREAM/00001.M2TS`, { headers: { Range: `bytes=${start}-${end - 1}` } });
+    expect(across.status).toBe(206);
+    expect(Buffer.from(await across.arrayBuffer()).equals(Buffer.from(multi.m2ts.subarray(start, end)))).toBe(true);
+    const clpi = await fetch(`${base}/${ids['multi.iso']}/files/BDMV/CLIPINF/00001.CLPI`);
+    expect(Buffer.from(await clpi.arrayBuffer()).equals(Buffer.from(multi.clpi))).toBe(true);
+
+    const head = await fetch(`${base}/${ids['disc.iso']}/files/BDMV/STREAM/00001.M2TS`, { method: 'HEAD' });
+    expect(head.headers.get('content-length')).toBe(String(clipBytes.length));
+    const past = await fetch(`${base}/${ids['disc.iso']}/files/BDMV/STREAM/00001.M2TS`, { headers: { Range: `bytes=${clipBytes.length}-` } });
+    expect(past.status).toBe(416);
+    for (const path of ['BDMV/STREAM/99999.M2TS', 'BDMV/STREAM', 'BDMV%2F..%2FBDMV%2FINDEX.BDMV', 'OTHER/X']) {
+      expect((await fetch(`${base}/${ids['disc.iso']}/files/${path}`)).status, path).toBe(404);
+    }
+  });
+
+  it('probes the largest clip of an ISO disc', async () => {
+    const res = await fetch(`${base}/${ids['multi.iso']}/probe`);
+    expect(res.status).toBe(200);
+    expect(Buffer.from(await res.arrayBuffer()).equals(Buffer.from(multi.m2ts))).toBe(true);
+    const disc1 = await fetch(`${base}/${ids['disc.iso']}/probe`);
+    const sizes = ['00001.m2ts', '00002.m2ts'].map((n) => readFileSync(join(FIXTURES, 'disc1/BDMV/STREAM', n)));
+    const largest = sizes.reduce((a, b) => (b.length > a.length ? b : a));
+    expect(Buffer.from(await disc1.arrayBuffer()).equals(largest.subarray(0, PROBE_BYTES))).toBe(true);
+  });
+
+  it('answers 404 disc-changed for an ISO removed or rewritten after the scan', async () => {
+    expect((await fetch(`${base}/${ids['gone.iso']}/manifest`)).status).toBe(200);
+    writeFileSync(join(tmp, 'root', 'gone.iso'), Buffer.concat([readFileSync(join(FIXTURES, 'disc1.iso')), Buffer.alloc(2048)]));
     for (const path of ['manifest', 'probe', 'files/BDMV/INDEX.BDMV']) {
-      const res = await fetch(`${base}/${ids['disc.iso']}/${path}`);
-      expect(res.status, path).toBe(501);
-      expect(await res.json()).toEqual({ error: 'iso-not-yet' });
+      const res = await fetch(`${base}/${ids['gone.iso']}/${path}`);
+      expect(res.status, path).toBe(404);
+      expect(await res.json()).toEqual({ error: 'disc-changed' });
     }
   });
 });

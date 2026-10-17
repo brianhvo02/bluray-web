@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as udf from '../../src/engine/disc/udf';
 import { discId } from './disc-id';
 import { createServer } from './http';
 import { Library, nextNightly } from './library';
@@ -25,7 +26,8 @@ beforeEach(() => {
   touch(join(a, 'movie.mkv'));
   touch(join(a, 'x.torrent'));
   mkdirSync(join(a, 'lost+found'));
-  touch(join(a, 'disc.iso'), 'iso-bytes');
+  copyFileSync(join(import.meta.dirname, '../../fixtures/synthetic/disc1.iso'), join(a, 'disc.iso'));
+  touch(join(a, 'junk.iso'), 'iso-bytes'.repeat(100_000));
   touch(join(tmp, 'b/Other/BDMV/index.bdmv'));
 });
 afterEach(() => rmSync(tmp, { recursive: true, force: true }));
@@ -156,6 +158,20 @@ describe('Library scan behaviour', () => {
     const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
     await lib.scan();
     expect(lib.list('drvA/Odd')).toBeNull();
+  });
+
+  it('lists an .iso only when its UDF tree has BDMV/INDEX.BDMV, and reads each image once', async () => {
+    touch(join(tmp, 'a/no-bdmv.iso'), '');
+    const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
+    await lib.scan();
+    const isos = lib.list('drvA')!.discs.filter((d) => d.kind === 'iso');
+    expect(isos.map((d) => d.name)).toEqual(['disc.iso']);
+    expect(isos[0]!.sizeBytes).toBe(statSync(join(tmp, 'a/disc.iso')).size);
+    const reads = vi.spyOn(udf.UdfImage, 'open');
+    await lib.scan();
+    expect(reads).not.toHaveBeenCalled();
+    expect(lib.list('drvA')!.discs.filter((d) => d.kind === 'iso').map((d) => d.name)).toEqual(['disc.iso']);
+    reads.mockRestore();
   });
 
   it('drops invalid cache entries and entries of unconfigured roots', () => {
