@@ -31,6 +31,24 @@ export interface BdjWorkerHandle {
 type BootMessage = Extract<ToBdj, { type: 'boot' }>;
 type TitleMessage = Extract<ToBdj, { type: 'start' | 'event' }>;
 
+/**
+ * A macrotask turn without timer clamping, for the JVM scheduler's periodic yield: a MessageChannel message in a
+ * browser (setTimeout(0) there waits 4 ms once timers nest), setImmediate where it exists.
+ */
+function eventLoopTurn(): () => Promise<void> {
+  const immediate = (globalThis as { setImmediate?: (fn: () => void) => unknown }).setImmediate;
+  if (immediate) return () => new Promise<void>((resolve) => void immediate(resolve));
+  if (typeof MessageChannel !== 'function') return () => new Promise<void>((resolve) => void setTimeout(resolve, 0));
+  const channel = new MessageChannel();
+  const waiting: (() => void)[] = [];
+  channel.port1.onmessage = () => waiting.shift()?.();
+  return () =>
+    new Promise<void>((resolve) => {
+      waiting.push(resolve);
+      channel.port2.postMessage(null);
+    });
+}
+
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
 export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
   let rt: BdjRuntime | null = null;
@@ -151,6 +169,7 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
           const id = setTimeout(fn, ms);
           return () => clearTimeout(id);
         },
+        yieldTask: eventLoopTurn(),
         log: (line) => {
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });

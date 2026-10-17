@@ -42,6 +42,8 @@ export interface BdjRuntimeDeps {
   readonly host: (startTitle: (title: number) => void, onTrace: (e: TraceEntry) => void) => BdjHost;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
+  /** The JVM scheduler's periodic turn of the event loop (SchedulerOptions.yieldTask). */
+  readonly yieldTask?: () => Promise<void>;
   readonly log: (line: string) => void;
 }
 
@@ -122,6 +124,7 @@ export class BdjRuntime {
       bootJars: [lib.libbluray, lib.libblurayAwt, lib.rt],
       nowMs: deps.nowMs,
       setTimer: deps.setTimer,
+      ...(deps.yieldTask ? { yieldTask: deps.yieldTask } : {}),
       stdout: (s) => this.output(s),
       stderr: (s) => this.output(s),
       vfs: new Vfs({ disc: deps.disc, discPaths: deps.disc.paths(), jdkLib: ZipArchive.open(lib.rt), nowMs: deps.nowMs }),

@@ -104,6 +104,11 @@ export interface SchedulerOptions {
   readonly slice: number;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
+  /**
+   * A turn of the event loop for the scheduler's periodic yield; setTimer(0) by default, which browsers clamp to
+   * 4 ms once timers nest.
+   */
+  readonly yieldTask?: () => Promise<void>;
 }
 
 /** Slices between yields to the event loop, so that I/O promises settle. */
@@ -414,7 +419,7 @@ export class Scheduler {
             }
             if (t.state === 'runnable') this.enqueue(t);
           }
-          if (++slices % YIELD_EVERY === 0) await new Promise<void>((r) => this.opts.setTimer(0, r));
+          if (++slices % YIELD_EVERY === 0) await (this.opts.yieldTask ? this.opts.yieldTask() : new Promise<void>((r) => this.opts.setTimer(0, r)));
           continue;
         }
         if (this.io > 0) {

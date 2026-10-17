@@ -144,6 +144,35 @@ function setup(): { jvm: Jvm; clock: VirtualClock; spawn: (name: string, desc?: 
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
+describe('yielding to the event loop', () => {
+  it('takes its periodic turn through yieldTask when one is given, instead of a zero-delay timer', async () => {
+    const clock = new VirtualClock();
+    let turns = 0;
+    let zeroTimers = 0;
+    const jvm = new Jvm({
+      bootJars: BOOT,
+      nowMs: clock.nowMs,
+      setTimer: (ms, fn) => {
+        if (ms === 0) zeroTimers++;
+        return clock.setTimer(ms, fn);
+      },
+      yieldTask: () => {
+        turns++;
+        return new Promise((r) => setImmediate(r));
+      },
+      stdout: () => {},
+      stderr: () => {},
+    });
+    jvm.loader.define('T', assembleClass('T', T_METHODS, [['n', 'I'], ['done', 'I'], ['flag', 'I'], ['caught', 'I']]), null, null);
+    jvm.threads.slice = 10;
+    const t = jvm.threads.spawn(null, jvm.loader.loadBoot('T')!.methods.get('count()V')!, []);
+    expect(await jvm.threads.run()).toBe('idle');
+    expect(t.state).toBe('terminated');
+    expect(turns).toBeGreaterThan(5);
+    expect(zeroTimers).toBe(0);
+  });
+});
+
 describe('monitors', () => {
   it('two threads incrementing under the same monitor reach 20,000', async () => {
     const { jvm, clock, spawn, get } = setup();

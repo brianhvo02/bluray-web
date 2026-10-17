@@ -24,6 +24,8 @@ export interface JvmOptions {
   readonly bootJars: readonly Uint8Array[];
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
+  /** The scheduler's periodic turn of the event loop (SchedulerOptions.yieldTask). */
+  readonly yieldTask?: () => Promise<void>;
   readonly stdout: (s: string) => void;
   readonly stderr: (s: string) => void;
   readonly vfs?: Vfs;
@@ -64,7 +66,7 @@ export class Jvm {
     registerSchedulerNatives(this.natives);
     registerJdkNatives(this.natives);
     if (opts.intrinsics !== false) registerIntrinsics(this.natives);
-    this.threads = new Scheduler(this, { slice: TIME_SLICE, nowMs: opts.nowMs, setTimer: opts.setTimer });
+    this.threads = new Scheduler(this, { slice: TIME_SLICE, nowMs: opts.nowMs, setTimer: opts.setTimer, ...(opts.yieldTask ? { yieldTask: opts.yieldTask } : {}) });
   }
 
   /** Runs a static method on a new Java thread to completion; rejects with the uncaught exception's toString(). */
