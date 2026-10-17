@@ -116,6 +116,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         onDrop={onDrop}
       >
         <p>Drop a decrypted Blu-ray folder here: the disc folder, or the BDMV folder inside it.</p>
+        <p className="hint">On Safari, add the app to your Home Screen or Dock so your settings aren't cleared after 7 days without a visit.</p>
         <button type="button" data-testid="open-folder" disabled={!capabilities.core.ok} onClick={onPickFolder}>
           Open disc folder
         </button>

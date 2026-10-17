@@ -17,5 +17,6 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client"]
   },
-  "include": ["src", "tests/helpers"]
+  "include": ["src", "tests/helpers"],
+  "exclude": ["src/sw.ts"]
 }

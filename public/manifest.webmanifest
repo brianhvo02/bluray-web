@@ -1,0 +1,16 @@
+{
+  "name": "Blu-ray Player",
+  "short_name": "Blu-ray",
+  "description": "Plays decrypted Blu-ray folders in the browser. Nothing is uploaded.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0b0d",
+  "theme_color": "#0b0b0d",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
