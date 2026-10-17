@@ -2,6 +2,7 @@ import { splitPick } from './drop-files';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
+import type { MemoryProfileName } from '../engine/memory-profile';
 import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 import { DROP_WARN_RATE, DropMeter } from './drop-meter';
@@ -169,6 +170,25 @@ export interface AudioOutputLike {
   loadEffects(clips: ReadonlyArray<{ readonly channels: 1 | 2; readonly samples: Int16Array }>): void;
   /** Plays a loaded sound through the volume and mute; an unknown id is ignored. */
   playEffect(id: number): void;
+  /** Reports every change of the audio context's state; 'interrupted' is WebKit's (phone call, Siri). */
+  onStateChange(cb: (state: AudioContextState | 'interrupted') => void): void;
+}
+
+/** Page visibility, injectable so Node tests need no `document`. */
+export interface VisibilityLike {
+  hidden(): boolean;
+  onChange(cb: () => void): void;
+}
+
+const BACKGROUND_PAUSE_MESSAGE = 'Playback paused while the app was in the background.';
+
+function documentVisibility(): VisibilityLike {
+  return {
+    hidden: () => typeof document !== 'undefined' && document.hidden,
+    onChange: (cb) => {
+      if (typeof document !== 'undefined') document.addEventListener('visibilitychange', cb);
+    },
+  };
 }
 
 /** Main-thread facade over the engine worker; an external store for React. */
@@ -181,12 +201,20 @@ export class PlayerController {
   private pendingSubtitleLoad: readonly File[] | null = null;
 
   private readonly dropMeter = new DropMeter();
+  private readonly visibility: VisibilityLike;
+  /** The platform suspended audio while the page was hidden and we paused; the notice waits for the page to return. */
+  private backgroundPaused = false;
 
   constructor(
     private readonly worker: WorkerLike,
     private readonly audio: AudioOutputLike,
-    private readonly options: { readonly nowMs?: () => number } = {},
+    private readonly options: { readonly nowMs?: () => number; readonly visibility?: VisibilityLike } = {},
   ) {
+    this.visibility = options.visibility ?? documentVisibility();
+    audio.onStateChange((state) => this.onAudioState(state));
+    this.visibility.onChange(() => {
+      if (this.backgroundPaused && !this.visibility.hidden()) this.showBackgroundPause();
+    });
     worker.onmessage = (event: MessageEvent<EngineEvent>) => {
       const e = event.data;
       if (e.type === 'soundEffects') audio.loadEffects(e.clips);
@@ -195,6 +223,27 @@ export class PlayerController {
     };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
     worker.onmessageerror = () => this.reportInternalError('The player engine sent a message that could not be read.');
+  }
+
+  /**
+   * Nothing here ever suspends the audio context, so any suspension is the platform's. The player pauses (never
+   * resumes by itself) when it was playing and audio is suspended while hidden, or interrupted at any time.
+   * A running context while hidden (desktop Chrome) keeps playing.
+   */
+  private onAudioState(state: AudioContextState | 'interrupted'): void {
+    const playing = this.snapshot.engineState === 'playing' || this.snapshot.engineState === 'buffering';
+    if (!playing) return;
+    const hidden = this.visibility.hidden();
+    if (state === 'interrupted' || (state === 'suspended' && hidden)) {
+      this.pause();
+      this.backgroundPaused = true;
+      if (!hidden) this.showBackgroundPause();
+    }
+  }
+
+  private showBackgroundPause(): void {
+    this.backgroundPaused = false;
+    this.update(withNotice(this.snapshot, { code: 'background-pause', message: BACKGROUND_PAUSE_MESSAGE }));
   }
 
   /** Feeds the drop meter from telemetry while a shader set is active; any shader status change starts a new window. */
@@ -471,6 +520,11 @@ export class PlayerController {
     const scale = Math.round(Math.max(MIN_SUBTITLE_SCALE, Math.min(MAX_SUBTITLE_SCALE, subs.scale + delta)) * 10) / 10;
     this.post({ type: 'setSubtitleScale', scale });
     this.update({ ...this.snapshot, subtitles: { ...subs, scale } });
+  }
+
+  /** Tells the engine which memory limits to use (sent once, before a disc opens). */
+  setMemoryProfile(profile: MemoryProfileName): void {
+    this.post({ type: 'setMemoryProfile', profile });
   }
 
   /** Applies a shader set to the video; null turns shaders off. */

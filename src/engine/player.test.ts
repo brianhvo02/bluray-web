@@ -20,6 +20,7 @@ import { ShaderStage } from './shaders/stage';
 import { UNAVAILABLE, type CompiledSet, type ShaderBackend } from './shaders/webgl-backend';
 
 const decoders: FakeDecoder[] = [];
+const fakeCodedWidth = { value: 320 };
 
 class FakeDecoder implements VideoDecoderLike {
   state: CodecState = 'unconfigured';
@@ -32,7 +33,7 @@ class FakeDecoder implements VideoDecoderLike {
   }
   decode(chunk: EncodedVideoChunk): void {
     const { timestamp } = chunk as unknown as EncodedVideoChunkInit;
-    this.init.output({ timestamp, displayWidth: 320, displayHeight: 180, close: () => undefined } as unknown as VideoFrame);
+    this.init.output({ timestamp, codedWidth: fakeCodedWidth.value, displayWidth: 320, displayHeight: 180, close: () => undefined } as unknown as VideoFrame);
   }
   async flush(): Promise<void> {}
   reset(): void {
@@ -105,6 +106,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
 }
 
 async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings'] } = {},
+  memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
   const files = buildSyntheticDisc({
@@ -160,6 +162,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   });
   const ring = createRing(48_000, 2);
   const views: RingViews = ringViews(ring);
+  if (memory) await player.handle({ type: 'setMemoryProfile', profile: memory });
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
   const entries = discEntries(files);
@@ -765,8 +768,8 @@ describe('Player with HDMV navigation', () => {
     { id: '00000', clipIds: ['00001'], chapterEverySeconds: 1 },
     { id: '00001', clipIds: ['00002'], chapterEverySeconds: 1 },
   ];
-  const nav = (objects: Array<{ cmds: Uint8Array[] }>, extra: Parameters<typeof harness>[1] = {}) =>
-    harness(CodingType.LPCM, { playlists: shortPlaylists, movieObjects: buildMovieObjects(objects), ...extra });
+  const nav = (objects: Array<{ cmds: Uint8Array[] }>, extra: Parameters<typeof harness>[1] = {}, memory?: 'constrained') =>
+    harness(CodingType.LPCM, { playlists: shortPlaylists, movieObjects: buildMovieObjects(objects), ...extra }, memory);
   const selectedAudio = (h: Harness) => h.events.flatMap((e) => (e.type === 'tracks' ? [e.selectedAudio] : [])).at(-1);
   const chapterIds = (h: Harness) => h.events.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : []));
 
@@ -984,6 +987,42 @@ describe('Player with HDMV navigation', () => {
       expect(menuEvents(h)).toContainEqual({ type: 'menuActive', active: true, popupAvailable: false });
       expect(lastTelemetry(h)!.igErrors).toBe(0);
       expect(h.igDraws.length).toBeGreaterThan(0);
+    });
+
+    describe('memory profile', () => {
+      const MESSAGE = "This disc's menus need more memory than this device allows.";
+      const big = { 'BDMV/STREAM/00009.m2ts': new Uint8Array(65 * 1024 * 1024) };
+      const memoryNotices = (h: Harness) => h.events.filter((e) => e.type === 'notice' && e.code === 'menu-memory');
+
+      it('tells the user when constrained refuses a 65 MB sub-path clip, and keeps playing', async () => {
+        const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { igUnits: menuAt(0.2), subPathIg: { clipId: '00009', units: menuAt(0.2) }, extraFiles: big }, 'constrained');
+        await untilPlaying(h);
+        await h.play(700);
+        expect(memoryNotices(h)).toEqual([{ type: 'notice', code: 'menu-memory', message: MESSAGE }]);
+        expect(lastState(h)).toBe('playing');
+        expect(lastTelemetry(h)).toMatchObject({ menu: null, igErrors: 1 });
+      });
+
+      it('preloads the same clip under desktop without a notice', async () => {
+        const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], { igUnits: menuAt(0.2), subPathIg: { clipId: '00009', units: menuAt(0.2) }, extraFiles: big });
+        await untilPlaying(h);
+        await h.play(700);
+        expect(memoryNotices(h)).toEqual([]);
+        expect(lastTelemetry(h)?.igErrors).toBe(0);
+      });
+
+      it('caps the decoded frame queue at 4 for a 3840-wide stream under constrained', async () => {
+        fakeCodedWidth.value = 3840;
+        try {
+          const h = await harness(undefined, {}, 'constrained');
+          await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+          await h.play(1500, { render: false, audio: false });
+          const size = (h.player as unknown as { presenter: { size: number } }).presenter.size;
+          expect(size).toBe(4);
+        } finally {
+          fakeCodedWidth.value = 320;
+        }
+      });
     });
 
     it('keeps playing without a menu when the sub-path clip cannot be read', async () => {
@@ -1438,6 +1477,7 @@ function fakeAssDeps(gate?: Promise<void>): NonNullable<PlayerDeps['createAssDep
     measurer: createFixedMeasurer(0.5),
     createCanvas: () => ({}) as OffscreenCanvas,
     Path2D: class {} as unknown as typeof Path2D,
+    canvasFilter: true,
   });
 }
 

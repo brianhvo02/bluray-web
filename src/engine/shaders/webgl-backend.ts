@@ -9,6 +9,7 @@
 import { fragmentSource, VERTEX_SHADER } from './codegen';
 import type { ShaderPass } from './parse';
 import { planFrame, type PlanStage, type Size, type TexRef } from './plan';
+import { floatTargetExtension, floatTargetSupport } from './webgl-support';
 
 export interface CompiledSet {
   readonly passes: readonly ShaderPass[];
@@ -62,7 +63,7 @@ export interface ShaderBackend {
   render(set: CompiledSet, frame: VideoFrame, output: Size): RenderResult;
 }
 
-export const UNAVAILABLE = "Shaders need WebGL2 with float render targets, which this browser doesn't provide.";
+export const UNAVAILABLE = 'Not available on this device';
 
 const STAGES: readonly PlanStage[] = ['NATIVE', 'MAIN', 'PREKERNEL'];
 const COMPLETION_STATUS_KHR = 0x91b1;
@@ -138,8 +139,9 @@ export function createWebGlBackend(
   });
   if (!ctx) return UNAVAILABLE;
   const gl = ctx as WebGL2RenderingContext;
-  if (!gl.getExtension('EXT_color_buffer_float')) return UNAVAILABLE;
-  return new WebGlBackend(canvas, gl, events);
+  const support = floatTargetSupport((name) => gl.getExtension(name) !== null);
+  if (!support) return UNAVAILABLE;
+  return new WebGlBackend(canvas, gl, events, floatTargetExtension(support));
 }
 
 class WebGlBackend implements ShaderBackend {
@@ -160,6 +162,7 @@ class WebGlBackend implements ShaderBackend {
     private readonly canvas: OffscreenCanvas,
     private readonly gl: WebGL2RenderingContext,
     events: { lost(): void; restored(): void },
+    private readonly targetExtension: string,
   ) {
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
@@ -176,7 +179,7 @@ class WebGlBackend implements ShaderBackend {
   /** (Re)creates the per-context state; extensions must be enabled again after a restore. */
   private init(): void {
     const gl = this.gl;
-    gl.getExtension('EXT_color_buffer_float');
+    gl.getExtension(this.targetExtension);
     this.parallel = gl.getExtension('KHR_parallel_shader_compile') !== null;
     this.maxTextureSize = (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number | null) ?? Infinity;
     this.timer = gl.getExtension('EXT_disjoint_timer_query_webgl2');

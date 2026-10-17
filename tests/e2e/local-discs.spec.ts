@@ -4,6 +4,9 @@ import { expect, test, type Page } from '@playwright/test';
 import { parseIndex } from '../../src/engine/bdmv/index-parser';
 import { scanPg } from '../helpers/pg-scan';
 import { bdjStartup, collectWindows, expectInSync, telemetry, type BdjStartupSample } from './telemetry';
+import { CHROME_ONLY, skipWithoutH264 } from './support';
+
+test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
 const LOCAL = 'fixtures/local';
 const SEEK_FRACTIONS = [0.13, 0.31, 0.52, 0.27, 0.74, 0.08, 0.91, 0.45];
@@ -146,6 +149,7 @@ for (const name of discs) {
     test.skip(!process.env.LOCAL_DISCS, 'Set LOCAL_DISCS=1 to play the discs under fixtures/local in the browser.');
     test.setTimeout(900_000);
     await page.goto('/?telemetry=1');
+    await skipWithoutH264(page);
     await page.getByTestId('folder-input').setInputFiles(join(LOCAL, name));
     const first = bdjFirstPlay(name) ? 'bdj' : await firstScreen(page);
     if (first === 'bdj') {

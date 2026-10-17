@@ -157,6 +157,28 @@ what would change that decision.
   the next one starts.
 - **AC-3 at 44.1 or 32 kHz is ignored** (treated as no sync). Blu-ray AC-3 is always 48 kHz.
 
+## Browsers and devices
+
+- **BD-J on real discs is verified in desktop Chromium only.** Cross-browser support (step 1 of `docs/superpowers/specs/2026-10-16-cross-browser-and-remote-design.md`) was built in parallel with milestone 5 (BD-J). With 5c merged, BD-J titles play in desktop Chromium, on real discs too. The synthetic BD-J disc's E2E tests (`bdj.spec.ts`) also pass in Playwright's Firefox and WebKit, but real BD-J discs in Safari and Firefox, and BD-J on phones and tablets, are unverified and is part of milestone 5's remaining work: the requirements are in that spec's §3.9 (time to first frame on iPhone within M5's target, touch navigation, the BD-J worker in Safari and Firefox, JVM caches in the constrained memory profile). A failed BD-J boot still falls back to the playlist picker.
+- **iPhone has no element fullscreen.** Use the installed app (Add to Home Screen); WebKit bug 206854.
+- **No background audio on iOS.** Playback pauses when the platform suspends audio.
+- **If WebKit reports the AudioContext `suspended` only after the page is visible again,** no pause happens and audio stays suspended while the engine plays, until the user acts.
+- **Firefox Android is unsupported.**
+- **Android HEVC and USB OTG are unverified.**
+- **The iPadOS detection is the one user-agent exception.** `navigator.platform === 'MacIntel'` with touch points in `src/ui/memory-profile.ts`, because iPadOS reports a Mac.
+- **Constrained memory profile: IG sub-paths over 64 MB don't preload.** The user sees "This disc's menus need more memory than this device allows." and the disc plays without menus.
+- **Canvas-to-`<video>` fullscreen/PiP experiment, left open.** Capturing the canvas into a `<video>` might give iPhone fullscreen and Picture-in-Picture; not tried.
+- **Probe-dependent steps still open until the probe is run on devices:** audio resampling if a device runs a rate other than 48 kHz, a main-thread frame tick if worker rAF is janky, an ASS letter-spacing fallback if `letterSpacing` is missing.
+- **Playwright reuses a running preview server on :4173 locally** (`reuseExistingServer`); stop a stale one after changing source.
+
+### Device probe results
+
+Fill in from `probe.html` on each device.
+
+| Device | Browser/OS | blob-slice-over-4gib | audio-sample-rate | audio-session | worker-raf | hevc | webgl2-float | canvas-filter | letter-spacing | fullscreen | webkitdirectory | relative-path |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+|  |  |  |  |  |  |  |  |  |  |  |  |  |
+
 ## Resolved (for reference)
 
 - **Resolved: large animated text missed the libass pixel budget without GPU canvas rasterization (2026-10-16).**

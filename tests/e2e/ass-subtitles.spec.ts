@@ -1,6 +1,9 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { ASS_OVER_BUDGET_SHARE, collectWindows, expectInSync } from './telemetry';
+import { CHROME_ONLY, skipWithoutH264 } from './support';
+
+test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
 // fixtures/synthetic/disc1: playlist 00000 is two 4 s play items (an "episode" each here) with chapters every 2 s.
 const DISC = 'fixtures/synthetic/disc1';
@@ -32,6 +35,7 @@ async function sampleBetween(page: Page, fromUs: number, toUs: number): Promise<
 
 async function play(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await page.getByTestId('folder-input').setInputFiles(DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });

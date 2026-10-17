@@ -37,6 +37,7 @@ import { AssFonts, type FontLoader } from './ass/fonts';
 import type { GlyphMeasurer } from './ass/measure';
 import { looksLikeAss, parseAss } from './ass/parse';
 import { AssRenderer } from './ass/renderer';
+import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
 import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
@@ -101,6 +102,8 @@ export interface AssDeps {
   readonly measurer: GlyphMeasurer;
   readonly createCanvas: (w: number, h: number) => OffscreenCanvas;
   readonly Path2D: typeof Path2D;
+  /** Whether canvases honour `ctx.filter`. */
+  readonly canvasFilter: boolean;
   readonly warp?: (target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number) => void;
 }
 
@@ -115,8 +118,8 @@ interface TextTrack {
 }
 
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
-const MAX_QUEUED_FRAMES = 8;
 const MAX_DECODE_QUEUE = 8;
+const MENU_MEMORY_MESSAGE = "This disc's menus need more memory than this device allows.";
 /**
  * Read-ahead budget for compressed video waiting to enter the decoder. Discs may multiplex video
  * well ahead of its audio (≥ 0.5 s seen on real discs), so reading must be able to run this far
@@ -136,8 +139,6 @@ const PREV_CHAPTER_RESTART_US = 3_000_000;
 /** A still play item is held this close to its end, so the last frame stays on screen. */
 const STILL_MARGIN_US = 40_000;
 const SCR_PER_MS = 90;
-/** libbluray does not preload sub-path clips larger than this (PRELOAD_SIZE_LIMIT). */
-const PRELOAD_SIZE_LIMIT = 512 * 1024 * 1024;
 const INDEX_ID_NONE = 0xffff;
 const TITLE_FIRST_PLAY = 0xffff;
 /** bd_set_rate's BLURAY_RATE_PAUSED and BLURAY_RATE_NORMAL. */
@@ -255,6 +256,11 @@ export class Player {
   private audioWriter: AudioWriter | null = null;
   private compositor: CompositorLike | null = null;
   private readonly presenter = new VideoPresenter<VideoFrame>();
+  /** Limits for this device; desktop (libbluray's) until the UI says otherwise. */
+  private memory: MemoryProfile = MEMORY_PROFILES.desktop;
+  private memoryName: MemoryProfileName = 'desktop';
+  /** Coded width of the last decoded frame (0 before the first). */
+  private codedWidth = 0;
   private readonly clock: MasterClock;
   private seekGeneration = 0;
   private renderLoopStarted = false;
@@ -381,6 +387,10 @@ export class Player {
           break;
         case 'close':
           this.close();
+          break;
+        case 'setMemoryProfile':
+          this.memory = MEMORY_PROFILES[cmd.profile];
+          this.memoryName = cmd.profile;
           break;
         case 'setVideoShaders':
           this.setVideoShaders(cmd.set);
@@ -821,7 +831,10 @@ export class Player {
       port: this.navigationPort(),
       emit: (e) => this.onNavigatorEvent(e),
       nowScr: () => this.deps.nowMs() * SCR_PER_MS,
-      preloadSubPathIg: (clipId, signal) => this.preloadSubPathIg(clipId, signal),
+      preloadSubPathIg: (clipId, signal) => this.preloadSubPathIg(clipId, signal).catch((err: unknown) => {
+        if (err instanceof DiscError && err.message === MENU_MEMORY_MESSAGE) this.notice('menu-memory', MENU_MEMORY_MESSAGE);
+        throw err;
+      }),
     });
   }
 
@@ -830,7 +843,10 @@ export class Player {
     const source = this.source;
     const path = streamPath(clipId);
     if (!source || !source.exists(path)) throw new DiscError('missing-file', `Missing sub-path clip ${path}`, [path]);
-    if (source.size(path) > PRELOAD_SIZE_LIMIT) throw new DiscError('unreadable-stream', `Sub-path clip ${path} is too large to preload`, [path]);
+    if (source.size(path) > this.memory.igPreloadLimitBytes) {
+      // desktop keeps libbluray's behaviour and message (PRELOAD_SIZE_LIMIT)
+      throw new DiscError('unreadable-stream', this.memoryName === 'constrained' ? MENU_MEMORY_MESSAGE : `Sub-path clip ${path} is too large to preload`, [path]);
+    }
     const reader = new M2tsReader({ source, path, startSpn: 0, pids: new Set(Array.from({ length: 0x20 }, (_, k) => 0x1400 + k)) });
     const cancel = (): void => reader.cancel();
     signal.addEventListener('abort', cancel, { once: true });
@@ -1284,7 +1300,10 @@ export class Player {
     };
     ref.current = session;
     decoder.onOutput = (frame) => {
-      if (this.session === session) this.presenter.push(frame);
+      if (this.session === session) {
+        this.codedWidth = frame.codedWidth;
+        this.presenter.push(frame);
+      }
       else frame.close();
     };
     decoder.onError = (err) => this.onDecoderError(session, err);
@@ -1453,7 +1472,7 @@ export class Player {
         name: p.name, format: 'ass', cues: p.track.events.length,
         renderer: new AssRenderer(p.track, fonts!, {
           measurer: deps!.measurer, createCanvas: deps!.createCanvas, nowMs: () => this.deps.nowMs(), Path2D: deps!.Path2D,
-          colorMatrix: 'video', ...(deps!.warp ? { warp: deps!.warp } : {}),
+          colorMatrix: 'video', limits: this.memory, canvasFilter: deps!.canvasFilter, ...(deps!.warp ? { warp: deps!.warp } : {}),
         }),
       })));
     this.dropTextTrack();
@@ -1567,6 +1586,7 @@ export class Player {
     const s = this.session;
     if (!s) return;
     this.session = null;
+    this.codedWidth = 0;
     this.deps.emit({ type: 'playlistCleared' });
     this.seekGeneration++;
     s.pipeline.stop();
@@ -1868,7 +1888,7 @@ export class Player {
   private feedDecoder(s: Session): void {
     if (s.videoState !== 'configured') return;
     let fed = 0;
-    while (fed < s.pendingVideo.length && this.presenter.size < MAX_QUEUED_FRAMES && s.decoder.queueSize < MAX_DECODE_QUEUE) {
+    while (fed < s.pendingVideo.length && this.presenter.size < this.memory.maxQueuedFrames(this.codedWidth) && s.decoder.queueSize < MAX_DECODE_QUEUE) {
       s.decoder.decode(s.pendingVideo[fed]);
       fed++;
     }

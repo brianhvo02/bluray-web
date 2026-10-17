@@ -1,10 +1,10 @@
 # bluray-web
 
-Client-side Blu-ray (BDMV) player for Chromium. Design: `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`.
+Client-side Blu-ray (BDMV) player for the browser. Supported: Safari 26 (macOS, iOS, iPadOS), Chrome and Firefox on desktop (stable and stable−2), Chrome on Android. Firefox on Android is not supported. It works by touch, installs as an app and runs offline. Design: `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`.
 
 - `src/engine/` is derived from libbluray and licensed LGPL-2.1 (see `src/engine/LICENSE`).
 - `npm run dev`: dev server (cross-origin isolated).
-- `npm test`: unit tests. `npm run test:e2e`: Playwright (requires Google Chrome and a working audio output).
+- `npm test`: unit tests. `npm run test:e2e`: Playwright (the `chromium` and `mobile-chromium` projects require Google Chrome; all projects need a working audio output; `--project=firefox|webkit|mobile-chromium` runs the others).
   The A/V sync checks allow 20 ms mean and 50 ms max offset; `SYNC_TOLERANCE_SCALE=2` doubles both on slower machines.
 - `npm run wasm:build` rebuilds `src/wasm/audio/audio.wasm` (FFmpeg n9.0.2 AC-3, E-AC-3 and DTS decoders plus `shim.c`) in Docker.
   It needs Docker. The build is reproducible, and `.github/workflows/wasm.yml` checks that the committed `audio.wasm` matches.

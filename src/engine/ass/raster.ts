@@ -156,6 +156,10 @@ export interface RasterContext {
   readonly masks?: MaskCache;
   /** Each animated run's last shape (its mask key without position): a run whose shape changes every frame is drawn directly. */
   readonly lastShapes?: Map<string, string>;
+  /** Whether canvases honour `ctx.filter`; without it a blurred run is never drawn directly (the blur runs on the mask in JS). */
+  readonly canvasFilter: boolean;
+  /** Cap of the per-side text supersampling (default 8). */
+  readonly maxTextSupersampling?: number;
   /** Coloured run layers by mask and colours (libass's composite cache): a run that only moves is one drawImage. */
   readonly layers?: LayerCache;
 }
@@ -334,19 +338,19 @@ const ANIMATED_SS = 2;
 /**
  * Chrome draws text under about 256 device px from a glyph cache that snaps the baseline to whole pixels (and x to
  * quarter pixels); larger text is filled as exact paths. Text runs are supersampled enough to reach that size, up
- * to MAX_TEXT_SS, where the snapping is at most 1/16 px.
+ * to the cap (8 by default), where the snapping is at most 1/16 px.
  */
 const PATH_TEXT_PX = 256;
-const MAX_TEXT_SS = 8;
+const DEFAULT_MAX_TEXT_SS = 8;
 
 /** The supersampling factor for a run's masks. */
-export function textSupersampling(base: number, glyphs: readonly GlyphInfo[], mats: readonly Mat3[]): number {
+export function textSupersampling(base: number, glyphs: readonly GlyphInfo[], mats: readonly Mat3[], maxSs = DEFAULT_MAX_TEXT_SS): number {
   let ss = base;
   glyphs.forEach((g, k) => {
     if (g.drawingText !== null || !g.face || g.emPx <= 0) return;
     const t = glyphAffine(mats[k]!, g);
     const px = g.emPx * Math.sqrt(Math.abs(t[0] * t[3] - t[1] * t[2]));
-    if (px > 0) ss = Math.max(ss, Math.min(MAX_TEXT_SS, Math.ceil(PATH_TEXT_PX / px)));
+    if (px > 0) ss = Math.max(ss, Math.min(maxSs, Math.ceil(PATH_TEXT_PX / px)));
   });
   return ss;
 }
@@ -447,7 +451,7 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   const s = ev.layout.text.state;
   const glyphs = idx.map((i) => ev.layout.text.glyphs[i]!);
   const mats = quantizePositions(glyphs, idx.map((i) => normalize(ev.matrices[i]!)));
-  const ss = textSupersampling(ev.animated ? ANIMATED_SS : STATIC_SS, glyphs, mats);
+  const ss = textSupersampling(ev.animated ? ANIMATED_SS : STATIC_SS, glyphs, mats, rc.maxTextSupersampling);
   const first = glyphs[0]!;
   const flags = runFlags(first);
   const c = first.c.map((v) => { const f = applyFade(v, first.fade); return rc.mapColor ? rc.mapColor(f) : f; });
@@ -513,7 +517,7 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   const direct = reshaped && mats.every(isAffine) && !(flags & FILTER_BORDER_STYLE_3)
     && (!(flags & FILTER_NONZERO_BORDER) || (flags & FILTER_FILL_IN_BORDER) !== 0)
     && (!(flags & FILTER_NONZERO_SHADOW) || (flags & FILTER_FILL_IN_SHADOW) !== 0);
-  if (direct && !rc.masks?.get(key)) return directLayers();
+  if (direct && (rc.canvasFilter || sigma < 0.03) && !rc.masks?.get(key)) return directLayers();
 
   const type = first.effectType;
   const kTiming = first.effectTiming;
@@ -554,7 +558,7 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
     // text supersampled on the GPU past the glyph cache's baseline snapping, then scaled down (and blurred) there;
     // a power of two, halved step by step: a bilinear 2:1 step is the 2×2 box filter of `supersampled` on CPU and
     // GPU canvases alike, where 'high' smoothing filters differently on each (and failed the libass budget on CPU)
-    const dss = 2 ** Math.ceil(Math.log2(textSupersampling(1, glyphs, mats)));
+    const dss = 2 ** Math.ceil(Math.log2(textSupersampling(1, glyphs, mats, rc.maxTextSupersampling)));
     const shapes = (borderWidthOf: ((k: number) => number) | null, blurred: boolean): OffscreenCanvas => {
       const draw = (ctx: OffscreenCanvasRenderingContext2D, scale: number): void => {
         ctx.fillStyle = '#fff';

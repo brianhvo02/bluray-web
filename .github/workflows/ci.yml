@@ -25,7 +25,7 @@ jobs:
       - run: npm test
 
   e2e:
-    name: Browser tests (Chrome)
+    name: Browser tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -36,7 +36,7 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0
       - run: npm ci
-      - run: npx playwright install --with-deps chrome
+      - run: npx playwright install --with-deps chrome firefox webkit
       - run: scripts/ci-audio.sh
       - run: npm run test:e2e
         env:

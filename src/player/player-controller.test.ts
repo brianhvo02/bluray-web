@@ -41,6 +41,10 @@ class FakeAudio implements AudioOutputLike {
   playEffect(id: number): void {
     this.played.push(id);
   }
+  stateCb: ((state: AudioContextState | 'interrupted') => void) | null = null;
+  onStateChange(cb: (state: AudioContextState | 'interrupted') => void): void {
+    this.stateCb = cb;
+  }
 }
 
 const summary = { id: '00000', durationUs: 8_000_000, chapterCount: 4, clipIds: ['00001'], playable: true, missingPaths: [], looped: false };
@@ -587,5 +591,52 @@ describe('shaders', () => {
     worker.emit({ type: 'shaderStatus', state: 'active', set: 'A', error: null });
     feed(1, 0.2); // under 1 s of fresh samples
     expect(c.getSnapshot().shaderDropWarning).toBeNull();
+  });
+});
+
+describe('platform audio suspension', () => {
+  function setup() {
+    const worker = new FakeWorker();
+    const audio = new FakeAudio();
+    let hidden = false;
+    let onVis: () => void = () => undefined;
+    const c = new PlayerController(worker, audio, { visibility: { hidden: () => hidden, onChange: (cb) => (onVis = cb) } });
+    worker.emit({ type: 'state', state: 'playing' });
+    return { worker, audio, c, setHidden: (h: boolean) => { hidden = h; onVis(); } };
+  }
+  const message = 'Playback paused while the app was in the background.';
+
+  it('pauses when hidden and suspended, and shows the notice when the page is visible again', () => {
+    const { worker, audio, c, setHidden } = setup();
+    setHidden(true);
+    audio.stateCb?.('suspended');
+    expect(worker.posted).toEqual([{ type: 'pause' }]);
+    expect(c.getSnapshot().notices).toEqual([]);
+    setHidden(false);
+    expect(c.getSnapshot().notices).toEqual([{ code: 'background-pause', message }]);
+    expect(worker.posted).toEqual([{ type: 'pause' }]); // never auto-resumes
+  });
+
+  it('keeps playing when hidden while the audio stays running', () => {
+    const { worker, audio, c, setHidden } = setup();
+    setHidden(true);
+    audio.stateCb?.('running');
+    setHidden(false);
+    expect(worker.posted).toEqual([]);
+    expect(c.getSnapshot().notices).toEqual([]);
+  });
+
+  it('pauses with the notice at once on an interruption while visible', () => {
+    const { worker, audio, c } = setup();
+    audio.stateCb?.('interrupted');
+    expect(worker.posted).toEqual([{ type: 'pause' }]);
+    expect(c.getSnapshot().notices).toEqual([{ code: 'background-pause', message }]);
+  });
+
+  it('keeps the notice when a playlist starts', () => {
+    const { audio, c } = setup();
+    audio.stateCb?.('interrupted');
+    c.playPlaylist('00000');
+    expect(c.getSnapshot().notices.map((n) => n.code)).toContain('background-pause');
   });
 });

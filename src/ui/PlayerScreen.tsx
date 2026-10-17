@@ -3,9 +3,12 @@ import type { PlayerController, PlayerSnapshot } from '../player/player-controll
 import { ControlBar } from './ControlBar';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { collectDroppedFiles, splitPick } from '../player/drop-files';
+import { checkCapabilities } from './capabilities';
+import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismissed, safeLocalStorage, toggleFullscreen } from './fullscreen';
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
+import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -30,9 +33,15 @@ function uoContext(controller: PlayerController): { playing: boolean; popupShown
   return { playing: now.engineState === 'playing' || now.engineState === 'buffering', popupShown: now.menuActive && now.popupAvailable };
 }
 
-function toggleFullscreen(element: HTMLElement | null): void {
-  if (document.fullscreenElement) void document.exitFullscreen();
-  else void element?.requestFullscreen();
+function Notice({ message, onDismiss, testId }: { message: string; onDismiss(): void; testId?: string }): ReactElement {
+  return (
+    <div className="notice" role="status" data-testid={testId}>
+      {message}
+      <button type="button" aria-label="Dismiss" onClick={onDismiss}>
+        ×
+      </button>
+    </div>
+  );
 }
 
 export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }: PlayerScreenProps): ReactElement {
@@ -44,9 +53,24 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const [pressed, setPressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
+  const [fullscreen] = useState(() => checkCapabilities().fullscreen);
+  const [hintVisible, setHintVisible] = useState(() => evaluateFullscreenHint(fullscreen));
   const playing = snapshot.engineState === 'playing';
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
+  /** Touch state: the previous tap, the delayed single-tap timer, whether the last pointerup was touch (its synthesized click is ignored). */
+  const lastTap = useRef<Tap | null>(null);
+  const tapTimer = useRef<number | null>(null);
+  const idleRef = useRef(idle);
+  idleRef.current = idle;
+  const lastUpWasTouch = useRef(false);
+
+  useEffect(
+    () => () => {
+      if (tapTimer.current !== null) window.clearTimeout(tapTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -99,7 +123,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           controller.adjustVolume(action.delta);
           break;
         case 'fullscreen':
-          toggleFullscreen(rootRef.current);
+          if (fullscreen && rootRef.current) toggleFullscreen(document, rootRef.current, fullscreen);
           break;
         case 'cycleAudio':
           controller.cycleAudio();
@@ -182,7 +206,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   }, [controller, maskedNotice]);
 
   const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
-    if (!snapshot.menuActive) return;
+    if (e.pointerType === 'touch' || !snapshot.menuActive) return;
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
     if (!point) return;
     const first = pendingMove.current === null;
@@ -195,7 +219,51 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
+    lastUpWasTouch.current = e.pointerType === 'touch';
+    if (e.pointerType !== 'touch') return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
+    const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: snapshot.menuActive });
+    lastTap.current = pairableTap(action, tap);
+    if (tapTimer.current !== null) {
+      window.clearTimeout(tapTimer.current);
+      tapTimer.current = null;
+    }
+    switch (action) {
+      case 'menuClick': {
+        const point = toMenuSpace(e.clientX, e.clientY, rect);
+        if (point) controller.pointer('click', point.x, point.y);
+        break;
+      }
+      case 'seekBack':
+      case 'seekForward': {
+        const op = keyActionUo({ type: 'seekBy', deltaUs: 0 }, uoContext(controller));
+        if (op && !controller.allow(op)) break;
+        controller.seekBy(action === 'seekForward' ? 10_000_000 : -10_000_000);
+        break;
+      }
+      case 'toggleControls': {
+        // Delayed so that the first tap of a double tap doesn't flash the controls.
+        tapTimer.current = window.setTimeout(() => {
+          tapTimer.current = null;
+          const next = idleAfterTap(idleRef.current, controller.getSnapshot().engineState);
+          if (next === idleRef.current) return;
+          setIdle(next);
+          if (!next) setActivity((a) => a + 1);
+        }, DOUBLE_TAP_MS);
+        break;
+      }
+      case 'none':
+        break;
+    }
+  };
+
   const onCanvasClick = (e: MouseEvent<HTMLCanvasElement>): void => {
+    if (lastUpWasTouch.current) {
+      lastUpWasTouch.current = false; // the click the browser synthesized after a tap, already handled on pointerup
+      return;
+    }
     if (!snapshot.menuActive) {
       controller.togglePlay();
       return;
@@ -216,6 +284,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     setActivity((a) => a + 1);
   };
 
+  const isVideoTouch = (e: PointerEvent<HTMLElement>): boolean => e.pointerType === 'touch' && e.target === canvasRef.current;
+
   const controlsVisible = !idle || !playing;
   // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading, nor while a
   // BD-J title runs (Java opens its playlists itself; the Playlists button still opens the picker).
@@ -230,12 +300,21 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       data-playlist={snapshot.currentPlaylistId ?? undefined}
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
-      onPointerMove={wake}
+      onPointerMove={(e) => {
+        if (!isVideoTouch(e)) wake();
+      }}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      onPointerDown={() => {
+      onPointerDown={(e) => {
         setPressed(true);
-        wake();
+        if (!isVideoTouch(e)) {
+          // A touch off the video cancels a pending single tap: it would otherwise hide the controls just woken.
+          if (tapTimer.current !== null) {
+            window.clearTimeout(tapTimer.current);
+            tapTimer.current = null;
+          }
+          wake();
+        } // a touch on the video shows or hides the controls on its own, after the double-tap window
       }}
     >
       <canvas
@@ -243,6 +322,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
         data-testid="video-canvas"
         onPointerMove={onCanvasPointerMove}
+        onPointerUp={onCanvasPointerUp}
         onClick={onCanvasClick}
       />
       <div className="notices">
@@ -252,13 +332,19 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           </div>
         )}
         {snapshot.notices.map((n) => (
-          <div key={n.code} className="notice" role="status">
-            {n.message}
-            <button type="button" aria-label="Dismiss" onClick={() => controller.dismissNotice(n.code)}>
-              ×
-            </button>
-          </div>
+          <Notice key={n.code} message={n.message} onDismiss={() => controller.dismissNotice(n.code)} />
         ))}
+        {hintVisible && (
+          <Notice
+            message={FULLSCREEN_HINT_TEXT}
+            testId="fullscreen-hint"
+            onDismiss={() => {
+              setHintVisible(false);
+              const storage = safeLocalStorage();
+              if (storage) markFullscreenHintDismissed(storage);
+            }}
+          />
+        )}
       </div>
       {snapshot.engineState === 'buffering' && <div className="spinner" aria-label="Buffering" />}
       {showPicker && (
@@ -289,7 +375,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         shaderState={shaderState}
         visible={controlsVisible}
         onOpenPlaylists={() => setPickerOpen(true)}
-        onFullscreen={() => toggleFullscreen(rootRef.current)}
+        onFullscreen={
+          fullscreen
+            ? () => {
+                if (rootRef.current) toggleFullscreen(document, rootRef.current, fullscreen);
+              }
+            : undefined
+        }
         onMenuKey={sendMenuKey}
         remoteOpen={remoteOpen}
         onToggleRemote={() => setRemoteOpen((o) => !o)}

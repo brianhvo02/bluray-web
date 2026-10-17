@@ -15,9 +15,12 @@ import type { GlyphMeasurer } from './measure';
 import { renderEvent, type CachedLayers, type RasterContext, type RenderedEvent, type RunMasks } from './raster';
 import type { RenderSettings } from './state';
 import type { Mat3 } from './transform';
+import type { MemoryProfile } from '../memory-profile';
 import { YCbCr, type AssTrack, type YCbCrMatrix } from './types';
 
 export interface AssRenderStats { readonly events: number; readonly animated: number; readonly renderMs: number; readonly overBudget: number; readonly renders: number }
+
+export type AssRendererLimits = Pick<MemoryProfile, 'assEventCacheBytes' | 'assLayerCacheBytes' | 'assMaskCacheBytes' | 'maxTextSupersampling'>;
 
 export interface AssRendererDeps {
   readonly measurer: GlyphMeasurer;
@@ -27,6 +30,10 @@ export interface AssRendererDeps {
   /** 'video': convert BT.601 scripts' colours to the BT.709 video, as players do (libass does not); 'none': as written. */
   readonly colorMatrix: 'video' | 'none';
   readonly warp?: (target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number) => void;
+  /** Cache byte budgets and the text supersampling cap (the memory profile's). */
+  readonly limits: AssRendererLimits;
+  /** Whether canvases honour `ctx.filter` (false on Safari): blurred runs then take the mask path. */
+  readonly canvasFilter: boolean;
   /** For tests: replaces the raster. */
   readonly renderEvent?: (rc: RasterContext, ev: FrameEvent, frame: { readonly width: number; readonly height: number }) => RenderedEvent | null;
 }
@@ -35,9 +42,6 @@ const CACHE_SIZE = 64;
 const BUDGET_MS = 8;
 const SEEK_MS = 1000;
 const ANIMATION_STEP_MS = 40;
-const MASK_CACHE_BYTES = 64 * 1024 * 1024;
-const LAYER_CACHE_BYTES = 128 * 1024 * 1024;
-const EVENT_CACHE_BYTES = 128 * 1024 * 1024;
 
 /** Least recently used values within a byte budget (libass bounds its bitmap caches the same way). */
 class SizedLru<V> {
@@ -104,9 +108,9 @@ export class AssRenderer implements TextRendererLike {
   private builder: FrameBuilder;
   private readonly rc: RasterContext;
   /** Static events, composited (null: nothing to draw). */
-  private readonly cache = new SizedLru<RenderedEvent | null>(EVENT_CACHE_BYTES, eventBytes, CACHE_SIZE);
-  private readonly masks = new SizedLru<RunMasks>(MASK_CACHE_BYTES, maskBytes);
-  private readonly layers = new SizedLru<CachedLayers>(LAYER_CACHE_BYTES, layerBytes);
+  private readonly cache: SizedLru<RenderedEvent | null>;
+  private readonly masks: SizedLru<RunMasks>;
+  private readonly layers: SizedLru<CachedLayers>;
   private cacheSettings: RenderSettings | null = null;
   private lastActive = '';
   private lastAnimated = false;
@@ -120,12 +124,17 @@ export class AssRenderer implements TextRendererLike {
 
   constructor(private readonly track: AssTrack, private readonly fonts: AssFonts, private readonly deps: AssRendererDeps) {
     this.builder = new FrameBuilder(track, fonts, deps.measurer);
+    this.cache = new SizedLru(deps.limits.assEventCacheBytes, eventBytes, CACHE_SIZE);
+    this.masks = new SizedLru(deps.limits.assMaskCacheBytes, maskBytes);
+    this.layers = new SizedLru(deps.limits.assLayerCacheBytes, layerBytes);
     this.rc = {
       createCanvas: deps.createCanvas,
       Path2D: deps.Path2D,
       masks: this.masks,
       layers: this.layers,
       lastShapes: new Map(),
+      maxTextSupersampling: deps.limits.maxTextSupersampling,
+      canvasFilter: deps.canvasFilter,
       ...(deps.warp ? { warp: deps.warp } : {}),
       ...(deps.colorMatrix === 'video' ? { mapColor: (c: number) => convertColor(c, track.ycbcrMatrix, 'video') } : {}),
     };

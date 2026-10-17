@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ParseError } from '../util/byte-reader';
-import { analyzeHevc, hevcCodecString } from './hevc';
+import { analyzeHevc, hevcCodecString, hevcCodecStrings } from './hevc';
 
 // Escaped SPS prefixes (emulation-prevention bytes included, as on disc).
 const MAIN_SPS = new Uint8Array([0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x5d]);
@@ -18,6 +18,11 @@ describe('HEVC analysis', () => {
   it('derives codec strings from escaped SPS bytes', () => {
     expect(hevcCodecString(MAIN_SPS)).toBe('hev1.1.6.L93.90');
     expect(hevcCodecString(MAIN10_SPS)).toBe('hev1.2.4.L120.90');
+  });
+
+  it('offers the hvc1 form before the hev1 form', () => {
+    const expected = 'hev1.1.6.L93.90';
+    expect(hevcCodecStrings(MAIN_SPS)).toEqual([expected.replace(/^hev1/, 'hvc1'), expected]);
   });
 
   it('classifies IRAP pictures', () => {

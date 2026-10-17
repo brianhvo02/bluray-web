@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
-import { checkCapabilities } from './capabilities';
-import { collectFromDirectoryHandle, collectFromFileList, directoryFromDataTransfer } from './disc-input';
+import { checkCapabilities, showStorageHint } from './capabilities';
+import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
 interface LandingScreenProps {
@@ -11,6 +11,7 @@ interface LandingScreenProps {
 
 export function LandingScreen({ controller, snapshot }: LandingScreenProps): ReactElement {
   const [capabilities] = useState(() => checkCapabilities());
+  const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -68,14 +69,15 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
     setDragging(false);
     setLocalError(null);
     controller.startAudio();
-    const pending = directoryFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
+    const pending = discFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
     run(
-      pending.then(async (handle) => {
-        if (!handle) {
+      pending.then(async (dropped) => {
+        if (!dropped) {
           setLocalError('Drop the disc folder itself (the folder that contains BDMV).');
           return;
         }
-        await openHandle(handle);
+        if (dropped.kind === 'entries') controller.open(dropped.entries);
+        else await openHandle(dropped.handle);
       }),
     );
   };
@@ -100,9 +102,9 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   return (
     <main className="landing" data-testid="landing">
       <h1>Blu-ray Player</h1>
-      {!capabilities.ok && (
+      {!capabilities.core.ok && (
         <div className="error-banner" role="alert">
-          This browser is missing: {capabilities.missing.join(', ')}. Use a recent desktop Chrome or Edge.
+          This browser is missing: {capabilities.core.missing.join(', ')}. Use Chrome, Edge, Safari or Firefox (desktop), or Chrome on Android.
         </div>
       )}
       <div
@@ -115,7 +117,8 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         onDrop={onDrop}
       >
         <p>Drop a decrypted Blu-ray folder here: the disc folder, or the BDMV folder inside it.</p>
-        <button type="button" data-testid="open-folder" disabled={!capabilities.ok} onClick={onPickFolder}>
+        {storageHint && <p className="hint">On Safari, add the app to your Home Screen or Dock so your settings aren't cleared after 7 days without a visit.</p>}
+        <button type="button" data-testid="open-folder" disabled={!capabilities.core.ok} onClick={onPickFolder}>
           Open disc folder
         </button>
         <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" onChange={onInput} />
@@ -135,7 +138,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
           )}
         </div>
       )}
-      {recent.length > 0 && (
+      {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>
           <ul>

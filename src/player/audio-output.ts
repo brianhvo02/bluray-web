@@ -14,10 +14,25 @@ export class AudioOutput implements AudioOutputLike {
   /** AudioBuffers of effectClips, built on first use (the context exists only after a user gesture). */
   private effectBuffers = new Map<number, AudioBuffer>();
 
+  private sessionSet = false;
+
+  constructor(
+    private readonly createContext: (opts: AudioContextOptions) => AudioContext = (opts) => new AudioContext(opts),
+    private readonly nav: { audioSession?: { type: string } } | undefined = (globalThis as unknown as { navigator?: { audioSession?: { type: string } } }).navigator,
+  ) {}
+
+  private stateListener: ((state: AudioContextState | 'interrupted') => void) | null = null;
+
+  onStateChange(cb: (state: AudioContextState | 'interrupted') => void): void {
+    this.stateListener = cb;
+  }
+
   ensureStarted(): Promise<SharedArrayBuffer> {
     let attempt = this.started;
     if (!attempt) {
-      const context = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE, latencyHint: 'playback' });
+      this.setAudioSession();
+      const context = this.createContext({ sampleRate: OUTPUT_SAMPLE_RATE, latencyHint: 'playback' });
+      context.onstatechange = () => this.stateListener?.(context.state);
       const created = { context, ready: this.setUp(context) };
       attempt = created;
       this.started = created;
@@ -29,6 +44,17 @@ export class AudioOutput implements AudioOutputLike {
     }
     void attempt.context.resume();
     return attempt.ready;
+  }
+
+  /** iOS Safari: without the 'playback' session type the ringer switch mutes the output. */
+  private setAudioSession(): void {
+    if (this.sessionSet) return;
+    this.sessionSet = true;
+    try {
+      if (this.nav?.audioSession) this.nav.audioSession.type = 'playback';
+    } catch {
+      // WebKit may throw on unsupported types; playback still works with the default session
+    }
   }
 
   setVolume(volume: number): void {

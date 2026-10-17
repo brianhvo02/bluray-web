@@ -3,8 +3,8 @@ import type { ShaderModel, ShaderModelState } from './shader-model';
 import { missingLabel } from './shader-sets';
 import type { PlayerSnapshot } from '../player/player-controller';
 
-/** Shown when the engine reports no WebGL2 with float render targets (same text as the engine's UNAVAILABLE). */
-const UNAVAILABLE_TEXT = "Shaders need WebGL2 with float render targets, which this browser doesn't provide.";
+/** Shown when the engine reports no usable WebGL2 render targets (same text as the engine's UNAVAILABLE). */
+const UNAVAILABLE_TEXT = 'Not available on this device';
 
 interface ShaderMenuProps {
   readonly model: ShaderModel;

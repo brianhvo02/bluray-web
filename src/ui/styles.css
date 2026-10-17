@@ -13,12 +13,15 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .landing { max-width: 720px; margin: 0 auto; padding: 48px 24px; display: flex; flex-direction: column; gap: 20px; }
 .drop-zone { border: 2px dashed #4a4a55; border-radius: 12px; padding: 40px; text-align: center; }
 .drop-zone.dragging { border-color: #6ea8ff; background: #14182a; }
+.drop-zone .hint { font-size: 0.9em; opacity: 0.7; }
+.update-prompt { position: fixed; z-index: 60; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; background: rgba(30, 30, 36, 0.96); border: 1px solid #3a3a42; border-radius: 8px; }
 .error-banner { background: #3a1518; border: 1px solid #7a2a30; border-radius: 8px; padding: 12px 16px; }
 .recent ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
 
 .player { position: relative; height: 100%; background: #000; overflow: hidden; }
-.player.idle { cursor: none; }
-.player-canvas { width: 100%; height: 100%; display: block; }
+.player.idle { cursor: auto; }
+@media (hover: hover) { .player.idle { cursor: none; } }
+.player-canvas { width: 100%; height: 100%; display: block; touch-action: manipulation; } /* no double-tap zoom competing with double-tap seek */
 .player-canvas.over-button { cursor: pointer; }
 .notices { position: absolute; z-index: 20; top: 12px; left: 12px; right: 12px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .notices > * { pointer-events: auto; }
@@ -86,3 +89,33 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .shader-dialog h3 { margin: 8px 0 4px; font-size: 1em; }
 .shader-dialog ul { margin: 0; padding: 0; list-style: none; max-height: 30vh; overflow: auto; }
 .shader-dialog li { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 2px 0; }
+
+/* Phones and tablets: 44 px hit targets, wrapping controls, safe areas, menus as bottom sheets. */
+@media (max-width: 600px), (pointer: coarse) {
+  .control-bar { padding: 12px max(16px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  .notices { top: max(12px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left)); right: max(12px, env(safe-area-inset-right)); }
+  .control-row { flex-wrap: wrap; row-gap: 4px; }
+  .audio-menu-list, .shader-report, .shader-dialog {
+    position: fixed; left: 0; right: 0; bottom: 0; min-width: 0; max-width: none; max-height: 60vh; overflow: auto;
+    border-radius: 12px 12px 0 0; z-index: 40;
+    padding: 4px max(4px, env(safe-area-inset-right)) max(4px, env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left));
+  }
+  .shader-report, .shader-dialog { padding: 8px max(12px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+  .audio-menu-list button { white-space: normal; }
+  .picker-backdrop { align-items: flex-end; z-index: 25; }
+  .picker-backdrop.encoding-backdrop { z-index: 50; } /* the modal prompt stays above the bottom sheets (z-index 40) */
+  .picker { min-width: 0; width: 100%; box-sizing: border-box; max-height: 85%; border-radius: 12px 12px 0 0; padding: 16px max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  .playlist { grid-template-columns: 56px 64px 1fr auto; gap: 8px; }
+  .encoding-prompt ul { grid-template-columns: 1fr; }
+  .remote-pad { right: max(16px, env(safe-area-inset-right)); bottom: calc(max(12px, env(safe-area-inset-bottom)) + 150px); }
+}
+@media (pointer: coarse) {
+  button, .audio-menu-list button { min-width: 44px; min-height: 44px; }
+  .audio-menu-list .subtitle-adjust button { min-width: 44px; } /* beats the 32 px desktop rule's specificity */
+  .seek-bar input { height: 44px; margin: 0; }
+  .control-row input[data-role='volume'] { display: none; } /* phones have hardware volume buttons */
+  .subtitle-adjust output { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+  .remote-arrows { grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); }
+  .remote-digits { grid-template-columns: repeat(5, 44px); }
+  .subtitle-file select, .shader-dialog select { min-height: 44px; }
+}

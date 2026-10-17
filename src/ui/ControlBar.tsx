@@ -108,7 +108,8 @@ interface ControlBarProps {
   readonly shaderState: ShaderModelState;
   readonly visible: boolean;
   onOpenPlaylists(): void;
-  onFullscreen(): void;
+  /** Absent where the browser has no fullscreen API: the button is not shown. */
+  onFullscreen?(): void;
   /** Top Menu / Pop-up and the remote send menu keys through the same UO check as the keyboard. */
   onMenuKey(key: 'topMenu' | 'popup'): void;
   readonly remoteOpen: boolean;
@@ -205,9 +206,11 @@ export function ControlBar({ controller, snapshot, shaderModel, shaderState, vis
         <button type="button" data-testid={hdmv ? 'titles' : undefined} onClick={onOpenPlaylists}>
           {hdmv ? 'Titles' : 'Playlists'}
         </button>
-        <button type="button" aria-label="Fullscreen" onClick={onFullscreen}>
-          ⛶
-        </button>
+        {onFullscreen && (
+          <button type="button" aria-label="Fullscreen" onClick={onFullscreen}>
+            ⛶
+          </button>
+        )}
       </div>
     </div>
   );
