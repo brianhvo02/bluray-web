@@ -38,7 +38,7 @@ A user on Chromium desktop can:
 | AACS / BD+ decryption (as a `ByteSource` decrypt stage with a user-supplied key DB and no bundled keys; legal review required before shipping) | Later |
 | JASSUB/libass fallback for ASS | Only if golden-image tests show the native renderer is unacceptable |
 | Safari / Firefox support | After Chromium v1 |
-| BD-J | Milestone 5 series: 5b JVM core done; 5c–5e planned (spec `2026-10-15-m5b-bdj-jvm-core-design.md`). BD-J titles still fall back to the title list |
+| BD-J | Milestone 5 series: 5b JVM core and 5c playback done; 5d (graphics, keys, fonts) and 5e (storage, network, speed) planned. |
 | HDR tone mapping, 3D/MVC, multi-angle, PiP secondary video, mobile | Not planned for v1 |
 
 ## 2. Architecture

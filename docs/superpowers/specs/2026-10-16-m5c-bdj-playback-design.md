@@ -1,7 +1,7 @@
 # Milestone 5c: BD-J Titles Drive Playback — Design Spec
 
 Date: 2026-10-16
-Status: Draft, awaiting review.
+Status: Implemented (2026-10-17); plan `docs/superpowers/plans/2026-10-16-m5c-bdj-playback.md`. See §9.
 Builds on: `2026-10-15-m5b-bdj-jvm-core-design.md` (the JVM, `BdjHost`, `BdjRuntime`; see its §9 deviations) and
 `2026-10-14-m3-hdmv-menus-design.md` (Navigator, register file, UO masks). Parent: `2026-10-12-bluray-web-player-design.md`.
 
@@ -243,3 +243,19 @@ The work is staged (user's decision):
 - Which intrinsics and interpreter fast paths reach the 5 s bar (profile first; keep each one tested against the Java
   it replaces).
 - The fallback timeout's default if 20 s proves wrong.
+
+## 9. Deviations (recorded during planning and implementation)
+
+1. **No RATE event from Java's own `selectRateN`.** libbluray's `bdpriv_select_rate` only queues `BD_EVENT_STILL`; RATE comes only from app or user pause and play (the `bd_set_rate` path).
+2. **Java-selected playlists open paused** until Java's `selectRate(START)`, as libbluray's `bdj_wait_start` does.
+3. **Playback PSR updates are shared with the Navigator** (`src/engine/nav/playback-psrs.ts`).
+4. **The 20 s fallback timer** covers boot start to the first `selectPlaylist`, so a hung boot falls back too. A new `BdjSession` is made per BD-J entry, and the timer arms on a session's first start.
+5. **A new BD-J worker and JVM per BD-J entry**, where libbluray keeps one JVM across HDMV and BD-J handoffs.
+6. **The HDMV Navigator is dropped, not suspended,** while BD-J runs. libbluray's resume of a suspended object across a BD-J title is lost on mixed discs.
+7. **`getPlaylistInfo` is answered inside the BD-J worker** from its own disc model; the boot message carries no title list.
+8. **Player languages and country come from the browser locale** (ISO 639-2/B, two-letter country) and are written only when a BD-J title is entered; HDMV discs keep the default PSR16-19. New `PlayerDeps.playerSettings` (a port of `bd_set_player_setting_str`).
+9. **Java's `System.currentTimeMillis` is wall-clock** (`performance.timeOrigin + now`).
+10. **Start-up speed.** Intrinsics are registered with `NativeTable.intrinsify` and `hookLoops`, keeping the bytecode fallback. Three OpenJDK-derived intrinsics (`DirectColorModel.getRGB`, `Rectangle.intersection`, the `PNGImageDecoder` row loop) live in `src/bdj-classlib/intrinsics/` under GPLv2+Classpath Exception and are injected through `JvmOptions.extraIntrinsics`. Intrinsics of a specified algorithm stay in `src/engine`.
+11. **Stage 2 (JIT) was not built.** Stage 1 met the bar: A_NEW_ERA warm 4,934-4,988 ms over 5 runs, cold 5,006-5,013 ms; RENTAL_FAMILY warm 843-884 ms, cold 875-916 ms. A speculative pre-boot before disc open gained at most 25 ms and was not built; disc-model and clip reads were parallelised instead.
+12. **No vm-trace golden for the mixed HDMV and BD-J disc,** because the vm-trace harness's libbluray has no JVM. Parity rests on its bdj-trace golden and a player test.
+13. **SEEK and PSR8 report the requested position,** not the EP-map-aligned one. END_OF_PLAYLIST fires once per presentation end (libbluray: once per open).

@@ -103,13 +103,20 @@ what would change that decision.
 - **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
   (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
 
-## BD-J (milestone 5b)
+## BD-J (milestones 5b-5c)
 
-- **5b timings (Node, one machine).** A_NEW_ERA boots in about 180 ms and reaches its first `selectPlaylistN(833)` in
-  about 26 s; RENTAL_FAMILY boots in about 175 ms and reaches `selectPlaylistN(1611)` in about 1.9 s. The target is
-  15 s. About 18.6 s of A_NEW_ERA's time is its first menu draw: roughly 100M interpreted calls in libbluray's
-  per-pixel compositing (`BDGraphicsBase.applyComposite` about 20.5M, the `DirectColorModel` getters). *Revisit in*
-  5d/5e: a JS intrinsic for the compositing paths, or a fast path for trivial methods.
+- **5c timings (Chrome, production build, this machine).** Time from opening the disc to the first frame of the
+  title's playlist, as `bdj.firstFrameMs`:
+
+  | Disc | Warm | Cold |
+  |---|---|---|
+  | A_NEW_ERA | 4,934-4,988 ms (5 runs) | 5,006-5,013 ms |
+  | RENTAL_FAMILY | 843-884 ms | 875-916 ms |
+
+  The margin to the 5 s target on A_NEW_ERA is 12-66 ms. About 4.0 s of its time is the disc's own animation and a
+  `Thread.sleep(3000)`; about 0.7 s is interpretation. On a slower machine the local 5 s check may fail. *Revisit in*
+  5e: the JIT (spec 5c section 4.7, stage 2) is the lever if the margin is needed; stage 1 (intrinsics) replaced the
+  5b figure of about 26 s in Node.
 - **Open on purpose in the JVM core.** Weak and soft references hold strongly, reference queues stay empty and
   finalizers never run. `long` is a `bigint`. A failed `invokedynamic` call site re-links on each execution (JDK 8
   behaviour, not JVMS §5.4.3). Deep method-handle nesting (about 60k) can overflow the JS stack. `rt-bdj.jar` has no
@@ -118,11 +125,6 @@ what would change that decision.
   we run; whether libbluray checks them elsewhere was not examined. There is no bytecode verifier and there are no
   access checks: no `IllegalAccessError`, no `IncompatibleClassChangeError` for `invokevirtual` on a static method, no
   check that a final method is not overridden.
-- **`RecordingHost` shortcuts that 5c's real host must not copy.** It writes no playback PSRs (3, 6, 7, 8), returns
-  `listBdFilesN` sorted (libbluray uses readdir order), and checks `soundEffectN` ids against the eagerly parsed
-  `sound.bdmv`: libbluray loads `bd->sound_effects` lazily (on the first `bd_get_sound_effect`), so until then
-  `bdpriv_sound_effect` returns 0 for any id up to 255, where `RecordingHost` returns -1 for ids at or past the disc's
-  sound count.
 - **Player settings come from the browser's locale, under BD-J only (5c, ruling R9).** The engine worker derives
   `bd_set_player_setting_str`'s audio, PG and menu languages and the country from `navigator.language`
   (`playerSettingsForLocale`): the language as ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs label streams with),
@@ -130,6 +132,16 @@ what would change that decision.
   when a BD-J title is entered, before its worker boots, so HDMV discs keep the registers' defaults (PSR16-19) and
   their first stream choice is unchanged. libbluray applies them for every disc; an HDMV disc that later enters a
   BD-J title gets them from then on. There is no settings UI yet.
+- **Open on purpose in 5c.** A new BD-J worker and JVM start for every BD-J entry, where libbluray keeps one JVM
+  across HDMV and BD-J handoffs (deviation 5). The HDMV Navigator is dropped, not suspended, while BD-J runs, so
+  libbluray's resume of a suspended object across a BD-J title is lost on mixed discs (deviation 6). The mixed
+  HDMV/BD-J synthetic disc has no vm-trace golden, because that harness's libbluray has no JVM (deviation 12).
+  SEEK and PSR8 report the requested position, not the EP-map-aligned one, and END_OF_PLAYLIST fires once per
+  presentation end where libbluray fires once per open (deviation 13). JVM timers run on the real clock while the
+  Node replay's player uses a virtual clock (no effect seen). The intrinsics' loop hooks are pinned by checksum to the
+  committed jars: a rebuilt class library fails loudly until the hooks are re-checked. `openDisc` and `loadClips`
+  have no read-concurrency cap.
+- **5d picks up:** BD-J graphics (`updateGraphicN`), keys and mouse to Java (VK_KEY, MOUSE), the pop-up key, fonts.
 
 ## Audio
 
