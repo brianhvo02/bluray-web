@@ -12,6 +12,7 @@ import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
 import { normalizeDiscPaths } from '../disc/paths';
 import { BdjError } from './errors';
+import type { NativeTable } from './jvm/natives/index';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
@@ -49,8 +50,13 @@ function eventLoopTurn(): () => Promise<void> {
     });
 }
 
+export interface BdjWorkerOptions {
+  /** JvmOptions.extraIntrinsics: the class library's intrinsics (src/bdj-classlib/intrinsics), which the engine does not carry. */
+  readonly extraIntrinsics?: (table: NativeTable) => void;
+}
+
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
-export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
+export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): BdjWorkerHandle {
   let rt: BdjRuntime | null = null;
   let booted = false;
   let ended = false;
@@ -171,6 +177,7 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
           return () => clearTimeout(id);
         },
         yieldTask: eventLoopTurn(),
+        ...(options.extraIntrinsics ? { extraIntrinsics: options.extraIntrinsics } : {}),
         log: (line) => {
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });
@@ -221,9 +228,4 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
       return rt;
     },
   };
-}
-
-const workerScope = globalThis as { WorkerGlobalScope?: abstract new () => unknown };
-if (workerScope.WorkerGlobalScope && globalThis instanceof workerScope.WorkerGlobalScope) {
-  runBdjWorker(globalThis as unknown as BdjPort);
 }

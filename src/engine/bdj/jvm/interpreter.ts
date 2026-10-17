@@ -139,7 +139,7 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
         r = andThen(unlocking(jvm, t, lock, callNative(jvm, t, m, inv.args)), inv.then, inv.onThrow);
         continue;
       }
-      if (m.intrinsic !== undefined && m.argSlots === inv.args.length) {
+      if (m.intrinsic !== undefined && m.argSlots === inv.args.length && t.frames.length < MAX_FRAMES) {
         // one slot per argument (no long or double), so the arguments are laid out as on an operand stack
         const v = m.intrinsic(jvm, t, m, inv.args, 0);
         if (v !== DECLINE) {
@@ -463,7 +463,8 @@ function call(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void
 
 function callFrame(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void {
   const intrinsic = m.intrinsic;
-  if (intrinsic !== undefined) {
+  // at the frame limit the call throws StackOverflowError, as the bytecode's frame would
+  if (intrinsic !== undefined && t.frames.length < MAX_FRAMES) {
     const base = f.sp - m.argSlots;
     const v = intrinsic(jvm, t, m, f.stack, base);
     if (v !== DECLINE) {

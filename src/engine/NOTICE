@@ -180,9 +180,15 @@ fdlibm 5.3 (the C library behind the JDK's StrictMath)
                                    fdlibmRemainder, from e_remainder.c (__ieee754_remainder)
   The rest of bdj/jvm/ (interpreter, loader, heap, threads, VFS and the other
   natives, except natives/libbluray.ts and the libbluray-derived intrinsics
-  above) is original code. The intrinsics for class-library methods
-  (natives/intrinsics/color-model.ts, png.ts, arrays.ts, crypto.ts,
-  strings.ts, and the Rectangle.intersection arithmetic in graphics.ts) are
-  written from the JVM
-  semantics of those methods' bytecode in src/bdj-classlib/rt-bdj.jar; they
-  contain no OpenJDK source.
+  above) is original code. The engine's intrinsics for class-library methods
+  are reimplementations of specified behaviour: SHA-1 compression
+  (natives/intrinsics/crypto.ts), BigInteger.implMulAdd's word
+  multiply-accumulate (crypto.ts), PNGImageDecoder.update_crc (the PNG
+  specification's CRC-32, png.ts), the java.lang.String methods and the UTF-8
+  decoder's ASCII copy (strings.ts), Arrays.fill (arrays.ts) and
+  IndexColorModel.getRGB's palette lookup (color-model.ts). Intrinsics that
+  derive from OpenJDK's code (DirectColorModel.getRGB, Rectangle.intersection,
+  PNGImageDecoder.produceImage's row loop) are not part of the engine: they
+  live with the class library in src/bdj-classlib/intrinsics/, under GPLv2
+  with the Classpath Exception, and a JVM gets them only through
+  JvmOptions.extraIntrinsics (the BD-J worker's entry passes them).

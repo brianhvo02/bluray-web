@@ -14,24 +14,26 @@
 
 import type { NativeTable } from '../index';
 import { arrayIntrinsics } from './arrays';
-import { colorModelIntrinsics } from './color-model';
+import { engineColorModels } from './color-model';
 import { cryptoIntrinsics } from './crypto';
 import { graphicsIntrinsics } from './graphics';
 import { imageLoopHooks } from './image';
-import { pngIntrinsics, pngLoopHooks } from './png';
+import { pngIntrinsics } from './png';
 import { stringIntrinsics } from './strings';
 
 export { DECLINE } from './common';
-export type { IntrinsicFn, LoopHook, LoopHookFn } from './common';
+export type { ClassLibraryHelpers, IntrinsicFn, LoopHook, LoopHookFn, Span } from './common';
 
-/** Installs every intrinsic and loop hook (JvmOptions.intrinsics turns them off). */
+/**
+ * Installs the engine's intrinsics and loop hooks (JvmOptions.intrinsics turns them off). Those derived from the class
+ * library's own code live with it (src/bdj-classlib/intrinsics) and come in through JvmOptions.extraIntrinsics.
+ */
 export function registerIntrinsics(table: NativeTable): void {
   table.intrinsify(graphicsIntrinsics);
-  table.intrinsify(colorModelIntrinsics);
   table.intrinsify(pngIntrinsics);
   table.intrinsify(arrayIntrinsics);
   table.intrinsify(cryptoIntrinsics);
   table.intrinsify(stringIntrinsics);
   table.hookLoops(imageLoopHooks);
-  table.hookLoops(pngLoopHooks);
+  for (const [name, convert] of engineColorModels) table.helpers.pixelConverters.set(name, convert);
 }

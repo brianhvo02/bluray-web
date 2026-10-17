@@ -1,5 +1,6 @@
 /**
- * Each intrinsic and loop hook (src/engine/bdj/jvm/natives/intrinsics) against the Java it replaces: the same calls on
+ * Each intrinsic and loop hook (src/engine/bdj/jvm/natives/intrinsics, and the class library's own in
+ * src/bdj-classlib/intrinsics) against the Java it replaces: the same calls on
  * seeded random inputs, in a JVM with intrinsics off and one with them on, must leave the same arrays, fields, return
  * values and exceptions (class, message and stack trace).
  */
@@ -17,12 +18,15 @@ import { Vfs } from '../../src/engine/bdj/jvm/vfs';
 import { ZipArchive } from '../../src/engine/bdj/jvm/zip';
 import type { JArray, JObject, JValue } from '../../src/engine/bdj/jvm/values';
 import { assembleClass } from '../helpers/jvm-asm';
+import { MAX_FRAMES } from '../../src/engine/bdj/jvm/interpreter';
+import { registerClassLibraryIntrinsics } from '../../src/bdj-classlib/intrinsics/index';
 
 const file = (rel: string): Uint8Array => readFileSync(fileURLToPath(new URL(rel, import.meta.url)));
 const RT = file('../../src/bdj-classlib/rt-bdj.jar');
 const BOOT_JARS = [file('../../src/bdj-classlib/libbluray-j2se.jar'), file('../../src/bdj-classlib/libbluray-awt-j2se.jar'), RT];
 
-function newJvm(intrinsics: boolean): Jvm {
+/** intrinsics: 'off', the engine's only, or with the class library's (as the BD-J worker runs). */
+function newJvm(intrinsics: 'off' | 'engine' | 'all'): Jvm {
   return new Jvm({
     bootJars: BOOT_JARS,
     nowMs: () => 0,
@@ -34,7 +38,8 @@ function newJvm(intrinsics: boolean): Jvm {
     stderr: () => {},
     vfs: new Vfs({ disc: null, jdkLib: ZipArchive.open(RT), nowMs: () => 0 }),
     systemProperties: new Map([['awt.toolkit', 'java.awt.BDToolkit']]),
-    intrinsics,
+    intrinsics: intrinsics !== 'off',
+    ...(intrinsics === 'all' ? { extraIntrinsics: registerClassLibraryIntrinsics } : {}),
   });
 }
 
@@ -145,17 +150,30 @@ const CALLS = assembleClass('IntrinsicCalls', [
   },
 ]);
 
+/** static int d(int n) { return n == 0 ? "x".hashCode() : d(n - 1); }: an intrinsic called at a chosen depth. */
+const DEEP = assembleClass('Deep', [
+  {
+    name: 'd',
+    desc: '(I)I',
+    maxStack: 2,
+    maxLocals: 1,
+    code: [0x1a, 0x9a, 0, 10, 0x13, { c: ['string', 'x'] }, 0xb6, { c: ['method', 'java/lang/String', 'hashCode', '()I'] }, 0xac,
+      0x1a, 0x04, 0x64, 0xb8, { c: ['method', 'Deep', 'd', '(I)I'] }, 0xac],
+  },
+]);
+
 const sides: { off: Side; on: Side } = {} as { off: Side; on: Side };
 let profile: BytecodeProfile;
 
 beforeAll(async () => {
-  const off = newJvm(false);
-  const on = newJvm(true);
+  const off = newJvm('off');
+  const on = newJvm('all');
   await off.boot();
   await on.boot();
   for (const jvm of [off, on]) {
     jvm.loader.define('XorColor', XOR_COLOR, null, null);
     jvm.loader.define('IntrinsicCalls', CALLS, null, null);
+    jvm.loader.define('Deep', DEEP, null, null);
   }
   sides.off = new Side(off);
   sides.on = new Side(on);
@@ -213,6 +231,40 @@ describe('scope', () => {
     const boot = jvm.bootClass('sun/awt/image/PNGImageDecoder');
     expect(boot.methods.get('update_crc(I[BII)I')!.intrinsic).toBeDefined();
     expect(boot.methods.get('produceImage()V')!.loopHooks).toBeDefined();
+  });
+});
+
+describe('frame limit', () => {
+  it('an intrinsic called at the frame limit throws StackOverflowError where the bytecode would', async () => {
+    // d(n) calls hashCode from frame n + 1: at MAX_FRAMES frames the call overflows, one below it does not
+    for (const n of [MAX_FRAMES - 2, MAX_FRAMES - 1]) {
+      const res = await both((s) => s.call('Deep', 'd(I)I', [n]));
+      expect(res.on, `n = ${n}`).toEqual(res.off);
+      expect(res.off.thrown?.startsWith('java.lang.StackOverflowError') ?? false).toBe(n === MAX_FRAMES - 1);
+    }
+  });
+});
+
+describe('without the class library intrinsics', () => {
+  it("the engine's drawSpanN declines without Rectangle.intersection, and the bytecode draws", async () => {
+    const jvm = newJvm('engine');
+    await jvm.boot();
+    expect(jvm.natives.helpers.rectangleIntersection).toBeUndefined();
+    expect(jvm.natives.helpers.pixelConverters.has('java/awt/image/DirectColorModel')).toBe(false);
+    expect(jvm.bootClass('sun/awt/image/PNGImageDecoder').methods.get('produceImage()V')!.loopHooks).toBeUndefined();
+    const s = new Side(jvm);
+    await s.construct('java/awt/Rectangle', '()V', []);
+    const buf = s.intArray([0, 0, 0, 0]);
+    const g = s.object('java/awt/BDGraphicsBase', {
+      width: ['I', 4],
+      backBuffer: ['[I', buf],
+      actualClip: ['Ljava/awt/Rectangle;', s.object('java/awt/Rectangle', { width: ['I', 4], height: ['I', 1] })],
+      dirty: ['Ljava/awt/Area;', s.object('java/awt/Area', { x0: ['I', 0x7fffffff], y0: ['I', 0x7fffffff], x1: ['I', -1], y1: ['I', -1] })],
+      composite: ['Ljava/awt/AlphaComposite;', (await s.call('java/awt/AlphaComposite', 'getInstance(IF)Ljava/awt/AlphaComposite;', [2, 1])).ret as JObject],
+      xorColor: ['Ljava/awt/Color;', null],
+    });
+    expect(await s.call('java/awt/BDGraphicsBase', 'drawSpanN(IIII)V', [g, 1, 0, 2, 0x11223344])).toEqual({ ret: undefined, thrown: null });
+    expect([...(buf.data as Int32Array)]).toEqual([0, 0x11223344, 0x11223344, 0]);
   });
 });
 
@@ -509,8 +561,10 @@ describe('String methods and the UTF-8 decoder', () => {
     for (let i = 0; i < 200; i++) {
       const r = rng(23000 + i);
       const bytes = Array.from({ length: int(r, 0, 24) }, () => (r() < 0.9 ? int(r, 0, 127) : int(r, -128, -1)));
-      const sp = r() < 0.8 ? int(r, 0, bytes.length) : int(r, -2, bytes.length + 2);
-      const len = r() < 0.8 ? int(r, 0, Math.max(0, bytes.length - Math.max(sp, 0))) : int(r, -2, 30);
+      // the last cases: sp + len wraps past sp, so the bytecode reads (and throws) though len <= 0
+      const wrap = i >= 195;
+      const sp = wrap ? -2147483000 - i : r() < 0.8 ? int(r, 0, bytes.length) : int(r, -2, bytes.length + 2);
+      const len = wrap ? -1000 : r() < 0.8 ? int(r, 0, Math.max(0, bytes.length - Math.max(sp, 0))) : int(r, -2, 30);
       const daLen = r() < 0.8 ? Math.max(len, 0) + int(r, 0, 3) : int(r, 0, 30);
       const before = bytecodesIn(key);
       const res = await both(async (s) => {

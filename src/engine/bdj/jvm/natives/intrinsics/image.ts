@@ -26,7 +26,7 @@ const consumerSlots = perClass((cls) => ({ width: slotOf(cls, 'width', 'I'), bac
  * `bytes`: the byte[] overload, whose pixels are taken & 0xFF. Returns `exit`, the pc after the loops.
  */
 function setPixelsHook(bytes: boolean, exit: number): LoopHookFn {
-  return (_jvm, _t, m, locals: JValue[]) => {
+  return (jvm, _t, m, locals: JValue[]) => {
     const self = locals[0] as JObject;
     const x = locals[1] as number;
     const y = locals[2] as number;
@@ -42,7 +42,7 @@ function setPixelsHook(bytes: boolean, exit: number): LoopHookFn {
     const bufArr = self.fields[s.backBuffer] as JArray | null;
     const width = self.fields[s.width] as number;
     if (cm === null || pixelsArr === null || bufArr === null) return DECLINE;
-    const toRGB = pixelToRGB(cm);
+    const toRGB = pixelToRGB(jvm.natives.helpers, cm);
     if (toRGB === null) return DECLINE;
     const xEnd = (x + w) | 0;
     const yEnd = (y + h) | 0;

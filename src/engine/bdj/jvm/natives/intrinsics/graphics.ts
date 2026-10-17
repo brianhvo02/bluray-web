@@ -1,6 +1,7 @@
 /*
  * Intrinsics for libbluray's AWT back buffer: java.awt.BDGraphicsBase's span drawing (drawSpanN with its
- * applyComposite and alphaBlend, the Rectangle.intersection and Area.add it calls) and
+ * applyComposite and alphaBlend, the Area.add it calls; the Rectangle.intersection it calls is the class library's
+ * helper, NativeTable.helpers.rectangleIntersection) and
  * java.awt.BDRootWindow.isBackBufferClear. They compute what libbluray's Java does, pixel for pixel.
  *
  * Derived from libbluray, src/libbluray/bdj/java/java/awt/BDGraphicsBase.java, Area.java and BDRootWindow.java.
@@ -14,8 +15,9 @@
 import type { JClass, JMethod } from '../../loader';
 import type { JThread } from '../../threads';
 import type { JArray, JObject } from '../../values';
+import type { Jvm } from '../../jvm';
 import { DECLINE, f2i, monitorFree, perClass, slotOf } from './common';
-import type { IntrinsicFn } from './common';
+import type { IntrinsicFn, Span } from './common';
 
 const CLEAR = 1;
 const SRC = 2;
@@ -30,13 +32,6 @@ const graphicsSlots = perClass((cls) => ({
   xorColor: slotOf(cls, 'xorColor', 'Ljava/awt/Color;'),
   actualClip: slotOf(cls, 'actualClip', 'Ljava/awt/Rectangle;'),
 }));
-
-/** java.awt.Rectangle's fields; null for a subclass, whose intersection could be overridden. */
-const rectangleSlots = perClass((cls) =>
-  cls.name === 'java/awt/Rectangle' && cls.loader === null
-    ? { x: slotOf(cls, 'x', 'I'), y: slotOf(cls, 'y', 'I'), width: slotOf(cls, 'width', 'I'), height: slotOf(cls, 'height', 'I') }
-    : null,
-);
 
 /** libbluray's java.awt.Area; null for anything else. */
 const areaSlots = perClass((cls) =>
@@ -84,43 +79,15 @@ export function alphaBlend(dest: number, src: number): number {
   return (Ad << 24) | (R << 16) | (G << 8) | B;
 }
 
-/** The span after clipping, as Rectangle.intersection computes it (in longs, then narrowed). */
-interface Span {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 const span: Span = { x: 0, y: 0, width: 0, height: 0 };
 
 /**
- * Rectangle.intersection of the clip with (x, y, w, h), into `span`; false when the clip is not a plain Rectangle, or
- * Rectangle is not initialised yet (the bytecode's `new Rectangle` would initialise it).
+ * actualClip.intersection(new Rectangle(x, y, w, 1)) into `span`, through the class library's helper; false when there
+ * is none or it declines.
  */
-function intersect(clip: JObject, x: number, y: number, w: number, h: number): boolean {
-  const r = rectangleSlots(clip.cls);
-  if (r === null || clip.cls.state !== 'initialized') return false;
-  const f = clip.fields;
-  let tx1 = f[r.x] as number;
-  let ty1 = f[r.y] as number;
-  let tx2 = tx1 + (f[r.width] as number); // exact: the sums of two ints are the longs Java computes
-  let ty2 = ty1 + (f[r.height] as number);
-  const rx2 = x + w;
-  const ry2 = y + h;
-  if (tx1 < x) tx1 = x;
-  if (ty1 < y) ty1 = y;
-  if (tx2 > rx2) tx2 = rx2;
-  if (ty2 > ry2) ty2 = ry2;
-  tx2 -= tx1;
-  ty2 -= ty1;
-  if (tx2 < -2147483648) tx2 = -2147483648;
-  if (ty2 < -2147483648) ty2 = -2147483648;
-  span.x = tx1;
-  span.y = ty1;
-  span.width = tx2 | 0; // l2i keeps the low 32 bits
-  span.height = ty2 | 0;
-  return true;
+function intersect(jvm: Jvm, clip: JObject, x: number, y: number, w: number, h: number): boolean {
+  const f = jvm.natives.helpers.rectangleIntersection;
+  return f !== undefined && f(clip, x, y, w, h, span);
 }
 
 /** Whether `dirty.add(rect)` can be done here: libbluray's Area, its monitor free for `t`. */
@@ -141,7 +108,7 @@ function addDirty(dirty: JObject, s: Span): void {
 }
 
 /** BDGraphicsBase.drawSpanN(int x, int y, int length, int rgb): one colour along a clipped span. */
-const drawSpanColor: IntrinsicFn = (_jvm, t, m: JMethod, stack, base) => {
+const drawSpanColor: IntrinsicFn = (jvm, t, m: JMethod, stack, base) => {
   const self = stack[base] as JObject;
   let x = stack[base + 1] as number;
   const y = stack[base + 2] as number;
@@ -150,7 +117,7 @@ const drawSpanColor: IntrinsicFn = (_jvm, t, m: JMethod, stack, base) => {
   const g = graphicsSlots(m.cls);
   const fields = self.fields;
   const clip = fields[g.actualClip] as JObject | null;
-  if (clip === null || !intersect(clip, x, y, length, 1)) return DECLINE;
+  if (clip === null || !intersect(jvm, clip, x, y, length, 1)) return DECLINE;
   const buf = fields[g.backBuffer] as JArray | null;
   if (span.width <= 0 || span.height <= 0 || span.x < 0 || span.y < 0 || buf === null) return undefined;
   x = span.x;
@@ -190,7 +157,7 @@ const drawSpanColor: IntrinsicFn = (_jvm, t, m: JMethod, stack, base) => {
 };
 
 /** BDGraphicsBase.drawSpanN(int x, int y, int length, int[] src, int srcOffset, boolean flipX): pixels along a span. */
-const drawSpanPixels: IntrinsicFn = (_jvm, t, m: JMethod, stack, base) => {
+const drawSpanPixels: IntrinsicFn = (jvm, t, m: JMethod, stack, base) => {
   const self = stack[base] as JObject;
   let x = stack[base + 1] as number;
   const y = stack[base + 2] as number;
@@ -212,7 +179,7 @@ const drawSpanPixels: IntrinsicFn = (_jvm, t, m: JMethod, stack, base) => {
   const g = graphicsSlots(m.cls);
   const fields = self.fields;
   const clip = fields[g.actualClip] as JObject | null;
-  if (clip === null || !intersect(clip, x, y, length, 1)) return DECLINE;
+  if (clip === null || !intersect(jvm, clip, x, y, length, 1)) return DECLINE;
   const buf = fields[g.backBuffer] as JArray | null;
   if (span.width <= 0 || span.height <= 0 || span.x < 0 || span.y < 0 || buf === null) return undefined;
   srcOffset = (srcOffset + ((span.x - x) | 0)) | 0;

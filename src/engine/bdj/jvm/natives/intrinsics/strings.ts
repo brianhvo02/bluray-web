@@ -115,7 +115,10 @@ const utf8Decode: IntrinsicFn = (jvm, _t, _m, stack, base) => {
   const len = stack[base + 3] as number;
   const daArr = stack[base + 4] as JArray | null;
   if (saArr === null || daArr === null || !mathReady(jvm)) return DECLINE;
-  if (len <= 0) return 0;
+  if (len <= 0) {
+    // nothing to copy unless sp + len wraps past sp, in which case the bytecode reads (and throws)
+    return ((sp + len) | 0) <= sp ? 0 : DECLINE;
+  }
   const sa = saArr.data as Int8Array;
   const da = daArr.data as Uint16Array;
   if (sp < 0 || sp + len > sa.length || len > da.length) return DECLINE;

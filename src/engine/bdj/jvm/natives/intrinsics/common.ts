@@ -45,6 +45,25 @@ export function codeChecksum(code: Uint8Array): number {
   return h >>> 0;
 }
 
+/** A rectangle's x, y, width and height, as Rectangle.intersection leaves them. */
+export interface Span {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Computations of the class library's code that the engine's intrinsics call but do not carry. */
+export interface ClassLibraryHelpers {
+  /**
+   * clip.intersection(new Rectangle(x, y, w, h)) into `out` for a plain java.awt.Rectangle clip; false (nothing
+   * changed) otherwise. Without it, the drawSpanN intrinsics decline.
+   */
+  rectangleIntersection?: (clip: JObject, x: number, y: number, w: number, h: number, out: Span) => boolean;
+  /** By class-library class name: that class's getRGB(int) as a function of the pixel, or null where it could throw. */
+  readonly pixelConverters: Map<string, (cm: JObject) => ((pixel: number) => number) | null>;
+}
+
 /** The slot of an instance field (or, with `isStatic`, a static one) found from `cls` as getfield resolves it. */
 export function slotOf(cls: JClass, name: string, desc: string, isStatic = false): number {
   const f = cls.findField(name, desc);

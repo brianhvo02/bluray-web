@@ -21,7 +21,7 @@ import { registerReflectNatives } from './reflect';
 import { registerStrictMathNatives } from './strictmath';
 import { registerUnsafeNatives } from './unsafe';
 import { registerZipNatives } from './zip';
-import type { IntrinsicFn, LoopHook } from './intrinsics/index';
+import type { ClassLibraryHelpers, IntrinsicFn, LoopHook } from './intrinsics/index';
 
 export interface NativeContext {
   readonly jvm: Jvm;
@@ -37,6 +37,8 @@ export class NativeTable {
   private readonly replacedKeys = new Set<string>();
   private readonly intrinsicFns = new Map<string, IntrinsicFn>();
   private readonly hooks = new Map<string, readonly LoopHook[]>();
+  /** What the class library's intrinsics module lends the engine's intrinsics. */
+  readonly helpers: ClassLibraryHelpers = { pixelConverters: new Map() };
 
   /** Keys are 'java/lang/Object.hashCode()I'. */
   register(entries: Readonly<Record<string, NativeFn>>): void {

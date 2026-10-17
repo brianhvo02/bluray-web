@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createRing, renderQuantum, ringViews } from '../../src/engine/audio/ring';
+import { registerClassLibraryIntrinsics } from '../../src/bdj-classlib/intrinsics/index';
 import { runBdjWorker, type BdjPort, type BdjWorkerHandle } from '../../src/engine/bdj/bdj-worker';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import type { ClassLibrarySource } from '../../src/engine/bdj/runtime';
@@ -81,7 +82,7 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
       handle?.runtime?.jvm.threads.halt();
     },
   };
-  handle = runBdjWorker(port);
+  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics });
   return worker;
 }
 

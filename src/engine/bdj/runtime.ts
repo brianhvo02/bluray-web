@@ -18,6 +18,7 @@ import { Jvm } from './jvm/jvm';
 import { externalName } from './jvm/loader';
 import type { JMethod } from './jvm/loader';
 import { lineNumber } from './jvm/natives/lang';
+import type { NativeTable } from './jvm/natives/index';
 import { registerLibblurayNatives } from './jvm/natives/libbluray';
 import type { StackTrace } from './jvm/jvm';
 import type { JThread } from './jvm/threads';
@@ -44,6 +45,8 @@ export interface BdjRuntimeDeps {
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** The JVM scheduler's periodic turn of the event loop (SchedulerOptions.yieldTask). */
   readonly yieldTask?: () => Promise<void>;
+  /** JvmOptions.extraIntrinsics: the class library's intrinsics, which the engine does not carry. */
+  readonly extraIntrinsics?: (table: NativeTable) => void;
   readonly log: (line: string) => void;
 }
 
@@ -125,6 +128,7 @@ export class BdjRuntime {
       nowMs: deps.nowMs,
       setTimer: deps.setTimer,
       ...(deps.yieldTask ? { yieldTask: deps.yieldTask } : {}),
+      ...(deps.extraIntrinsics ? { extraIntrinsics: deps.extraIntrinsics } : {}),
       stdout: (s) => this.output(s),
       stderr: (s) => this.output(s),
       vfs: new Vfs({ disc: deps.disc, discPaths: deps.disc.paths(), jdkLib: ZipArchive.open(lib.rt), nowMs: deps.nowMs }),

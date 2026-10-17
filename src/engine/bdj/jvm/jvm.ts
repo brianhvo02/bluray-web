@@ -33,6 +33,11 @@ export interface JvmOptions {
   readonly systemProperties?: ReadonlyMap<string, string>;
   /** JS fast paths for hot class-library methods (natives/intrinsics); default true. */
   readonly intrinsics?: boolean;
+  /**
+   * Installs intrinsics kept outside the engine (the class library's, src/bdj-classlib/intrinsics, under its own
+   * licence), after the engine's; skipped when `intrinsics` is false.
+   */
+  readonly extraIntrinsics?: (table: NativeTable) => void;
 }
 
 /** A Throwable's stack, innermost first, kept in its nativeData. */
@@ -65,7 +70,10 @@ export class Jvm {
     registerBootstrapNatives(this.natives);
     registerSchedulerNatives(this.natives);
     registerJdkNatives(this.natives);
-    if (opts.intrinsics !== false) registerIntrinsics(this.natives);
+    if (opts.intrinsics !== false) {
+      registerIntrinsics(this.natives);
+      opts.extraIntrinsics?.(this.natives);
+    }
     this.threads = new Scheduler(this, { slice: TIME_SLICE, nowMs: opts.nowMs, setTimer: opts.setTimer, ...(opts.yieldTask ? { yieldTask: opts.yieldTask } : {}) });
   }
 
