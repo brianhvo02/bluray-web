@@ -15,6 +15,7 @@ import type { JArray, JObject, JValue } from './values';
 import type { JThread } from './threads';
 import type { Jvm } from './jvm';
 import { linkCallSite, resolveConstant, signaturePolymorphic } from './natives/invoke';
+import { DECLINE } from './natives/intrinsics/common';
 
 export interface Frame {
   readonly method: JMethod;
@@ -133,6 +134,14 @@ export function complete(jvm: Jvm, t: JThread, r: NativeResult): void {
         }
         r = andThen(unlocking(jvm, t, lock, callNative(jvm, t, m, inv.args)), inv.then, inv.onThrow);
         continue;
+      }
+      if (m.intrinsic !== undefined && m.argSlots === inv.args.length) {
+        // one slot per argument (no long or double), so the arguments are laid out as on an operand stack
+        const v = m.intrinsic(jvm, t, m, inv.args, 0);
+        if (v !== DECLINE) {
+          r = inv.then(v);
+          continue;
+        }
       }
       const thrown = (e: JObject): NativeResult => (inv.onThrow ? inv.onThrow(e) : new ThrowResult(e));
       if (!m.code) {
@@ -362,6 +371,21 @@ function ldc2(cls: JClass, index: number): number | bigint {
 
 /** Pops the arguments for `m` from `f` and calls it: a new frame for Java code, the native function otherwise. */
 function call(jvm: Jvm, t: JThread, f: JFrame, m: JMethod, nextPc: number): void {
+  if (profile) profile.calls.set(m, (profile.calls.get(m) ?? 0) + 1);
+  const intrinsic = m.intrinsic;
+  if (intrinsic !== undefined) {
+    const base = f.sp - m.argSlots;
+    const v = intrinsic(jvm, t, m, f.stack, base);
+    if (v !== DECLINE) {
+      f.sp = base;
+      if (v !== undefined) {
+        f.stack[base] = v;
+        f.sp = base + (m.returnType === 'J' || m.returnType === 'D' ? 2 : 1);
+      }
+      f.pc = nextPc;
+      return;
+    }
+  }
   if (m.isNative) {
     let s = f.sp - m.argSlots;
     const lock = m.isSynchronized ? (m.isStatic ? jvm.mirror(m.cls) : (f.stack[s] as JObject)) : null;
@@ -479,6 +503,19 @@ function multiArray(jvm: Jvm, cls: JClass, counts: readonly number[], d: number)
 
 const NEWARRAY_TYPES = ['', '', '', '', 'Z', 'C', 'F', 'D', 'B', 'S', 'I', 'J'];
 
+/** Per-method counts while profiling (a debug aid): bytecodes run in the method itself, and calls of it. */
+export interface BytecodeProfile {
+  readonly bytecodes: Map<JMethod, number>;
+  readonly calls: Map<JMethod, number>;
+}
+
+let profile: BytecodeProfile | null = null;
+
+/** Starts counting bytecodes and calls per method (null stops); the counts slow the interpreter down. */
+export function setBytecodeProfile(p: BytecodeProfile | null): void {
+  profile = p;
+}
+
 export function execute(jvm: Jvm, t: JThread, budget: number): ExitReason {
   if (t.state === 'terminated') return 'finished';
   if (t.state !== 'runnable') return 'blocked';
@@ -492,7 +529,14 @@ export function execute(jvm: Jvm, t: JThread, budget: number): ExitReason {
 }
 
 function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
+  const prof = profile;
+  let profMethod: JMethod | null = null;
+  let profBudget = budget;
   outer: for (;;) {
+    if (prof && profMethod) {
+      prof.bytecodes.set(profMethod, (prof.bytecodes.get(profMethod) ?? 0) + (profBudget - budget));
+      profMethod = null;
+    }
     if (t.state === 'terminated') return 'finished';
     if (t.state !== 'runnable') return 'blocked';
     if (jvm.threads.preempted) return 'budget';
@@ -500,6 +544,10 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
     if (!f) {
       t.state = 'terminated';
       return 'finished';
+    }
+    if (prof) {
+      profMethod = f.method;
+      profBudget = budget;
     }
     const cls = f.method.cls;
     const code = f.method.code!.code;
@@ -512,6 +560,7 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
         if (--budget < 0) {
           f.pc = pc;
           f.sp = sp;
+          if (prof) prof.bytecodes.set(f.method, (prof.bytecodes.get(f.method) ?? 0) + (profBudget - budget - 1));
           return 'budget';
         }
         f.pc = pc;
@@ -1325,6 +1374,11 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
           case 0xc6: case 0xc7: { // ifnull, ifnonnull
             const isNull = stack[--sp] === null;
             pc += isNull === (op === 0xc6) ? (((code[pc + 1]! << 8) | code[pc + 2]!) << 16) >> 16 : 3;
+            break;
+          }
+          case 0xcb: { // a goto with a loop hook (natives/intrinsics)
+            const next = f.method.loopHooks!.get(pc)!(jvm, t, f.method, locals);
+            pc = next === DECLINE ? pc + ((((code[pc + 1]! << 8) | code[pc + 2]!) << 16) >> 16) : next;
             break;
           }
           case 0xc8: // goto_w

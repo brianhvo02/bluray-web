@@ -15,6 +15,7 @@ import { Invoke, ThrowResult, andThen } from './interpreter';
 import type { NativeResult } from './interpreter';
 import { JThread, Scheduler } from './threads';
 import { NativeTable, registerBootstrapNatives, registerJdkNatives, registerSchedulerNatives } from './natives/index';
+import { registerIntrinsics } from './natives/intrinsics/index';
 import { JavaThrowable } from './values';
 import type { JArray, JObject, JValue } from './values';
 import type { Vfs } from './vfs';
@@ -28,6 +29,8 @@ export interface JvmOptions {
   readonly vfs?: Vfs;
   /** Added to the JDK's own (initProperties), as the runtime's -D options are. */
   readonly systemProperties?: ReadonlyMap<string, string>;
+  /** JS fast paths for hot class-library methods (natives/intrinsics); default true. */
+  readonly intrinsics?: boolean;
 }
 
 /** A Throwable's stack, innermost first, kept in its nativeData. */
@@ -60,6 +63,7 @@ export class Jvm {
     registerBootstrapNatives(this.natives);
     registerSchedulerNatives(this.natives);
     registerJdkNatives(this.natives);
+    if (opts.intrinsics !== false) registerIntrinsics(this.natives);
     this.threads = new Scheduler(this, { slice: TIME_SLICE, nowMs: opts.nowMs, setTimer: opts.setTimer });
   }
 

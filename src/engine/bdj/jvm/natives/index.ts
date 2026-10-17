@@ -21,6 +21,7 @@ import { registerReflectNatives } from './reflect';
 import { registerStrictMathNatives } from './strictmath';
 import { registerUnsafeNatives } from './unsafe';
 import { registerZipNatives } from './zip';
+import type { IntrinsicFn, LoopHook } from './intrinsics/index';
 
 export interface NativeContext {
   readonly jvm: Jvm;
@@ -34,6 +35,8 @@ export type NativeFn = (ctx: NativeContext, ...args: JValue[]) => NativeResult;
 export class NativeTable {
   private readonly fns = new Map<string, NativeFn>();
   private readonly replacedKeys = new Set<string>();
+  private readonly intrinsicFns = new Map<string, IntrinsicFn>();
+  private readonly hooks = new Map<string, readonly LoopHook[]>();
 
   /** Keys are 'java/lang/Object.hashCode()I'. */
   register(entries: Readonly<Record<string, NativeFn>>): void {
@@ -48,6 +51,27 @@ export class NativeTable {
 
   get replaced(): ReadonlySet<string> {
     return this.replacedKeys;
+  }
+
+  /**
+   * Gives Java methods a JS fast path (natives/intrinsics): classes defined afterwards try it before their bytecode,
+   * which still runs whenever the intrinsic declines.
+   */
+  intrinsify(entries: Readonly<Record<string, IntrinsicFn>>): void {
+    for (const [key, fn] of Object.entries(entries)) this.intrinsicFns.set(key, fn);
+  }
+
+  get intrinsics(): ReadonlyMap<string, IntrinsicFn> {
+    return this.intrinsicFns;
+  }
+
+  /** Hooks loops inside Java methods (natives/intrinsics): classes defined afterwards run them at those gotos. */
+  hookLoops(entries: Readonly<Record<string, readonly LoopHook[]>>): void {
+    for (const [key, list] of Object.entries(entries)) this.hooks.set(key, list);
+  }
+
+  get loopHooks(): ReadonlyMap<string, readonly LoopHook[]> {
+    return this.hooks;
   }
 
   get(key: string): NativeFn | undefined {

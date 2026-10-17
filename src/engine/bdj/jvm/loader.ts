@@ -17,6 +17,8 @@ import type { Jvm } from './jvm';
 import { Invoke, ThrowResult, andThen } from './interpreter';
 import type { NativeResult } from './interpreter';
 import type { NativeFn } from './natives/index';
+import type { IntrinsicFn, LoopHook, LoopHookFn } from './natives/intrinsics/index';
+import { HOOKED_GOTO, codeChecksum } from './natives/intrinsics/common';
 
 export const ACC_PUBLIC = 0x0001;
 export const ACC_PRIVATE = 0x0002;
@@ -59,6 +61,10 @@ export interface JMethod {
   /** The native table key, 'java/lang/Object.hashCode()I'. */
   readonly nativeKey: string;
   native: NativeFn | undefined;
+  /** A JS fast path the interpreter tries before the bytecode (natives/intrinsics); it may decline. */
+  readonly intrinsic?: IntrinsicFn | undefined;
+  /** Loop hooks (natives/intrinsics) by the pc of the goto they replace in `code`. */
+  readonly loopHooks?: ReadonlyMap<number, LoopHookFn> | undefined;
   /** Per invokedynamic instruction (by pc), the linked call site. */
   callSites?: Map<number, JMethod>;
 }
@@ -79,6 +85,21 @@ export function parseMethodDescriptor(desc: string): { args: string[]; ret: stri
 /** 'java/lang/String' → 'java.lang.String', as Class.getName prints it. */
 export const externalName = (name: string): string => name.replace(/\//g, '.');
 
+/**
+ * A copy of a method's code with each hooked goto rewritten to HOOKED_GOTO; the hooks were written for this exact
+ * bytecode, so any other code is a build error.
+ */
+function hookedCode(key: string, code: CodeAttr, hooks: readonly LoopHook[]): CodeAttr {
+  const bytes = code.code.slice();
+  for (const h of hooks) {
+    if (codeChecksum(code.code) !== h.checksum || bytes[h.pc] !== 0xa7) {
+      throw new Error(`loop hook ${key}@${h.pc} does not match the bytecode (checksum ${codeChecksum(code.code).toString(16)})`);
+    }
+    bytes[h.pc] = HOOKED_GOTO;
+  }
+  return { ...code, code: bytes };
+}
+
 const packageOf = (name: string): string => name.slice(0, Math.max(0, name.lastIndexOf('/')));
 
 interface JClassInit {
@@ -96,6 +117,10 @@ interface JClassInit {
   readonly objectClass: JClass | null;
   /** Native-table keys of Java methods the VM implements natively instead of running their bytecode. */
   readonly replaced?: ReadonlySet<string>;
+  /** Intrinsics by native-table key: Java methods with a JS fast path that falls back to their bytecode. */
+  readonly intrinsics?: ReadonlyMap<string, IntrinsicFn>;
+  /** Loop hooks by native-table key. */
+  readonly loopHooks?: ReadonlyMap<string, readonly LoopHook[]>;
 }
 
 export class JClass {
@@ -175,12 +200,14 @@ export class JClass {
       const isStatic = (m.access & ACC_STATIC) !== 0;
       let argSlots = isStatic ? 0 : 1;
       for (const a of args) argSlots += isWide(a) ? 2 : 1;
+      const key = `${init.name}.${m.name}${m.desc}`;
+      const hooks = init.loopHooks?.get(key);
       methods.set(m.name + m.desc, {
         cls: this,
         name: m.name,
         desc: m.desc,
         access: m.access,
-        code: m.code,
+        code: hooks && m.code ? hookedCode(key, m.code, hooks) : m.code,
         argSlots,
         argTypes: args,
         returnType: ret,
@@ -191,6 +218,8 @@ export class JClass {
         isSynchronized: (m.access & ACC_SYNCHRONIZED) !== 0,
         nativeKey: `${init.name}.${m.name}${m.desc}`,
         native: undefined,
+        intrinsic: init.intrinsics?.get(key),
+        loopHooks: hooks ? new Map(hooks.map((h) => [h.pc, h.fn])) : undefined,
       });
     }
     this.methods = methods;
@@ -200,6 +229,13 @@ export class JClass {
       // A replacement whose key no longer names a Java method would silently leave the bytecode running.
       const m = methods.get(key.slice(init.name.length + 1));
       if (!m?.code) throw new Error(`replaced native ${key} names no method with code in ${init.name}`);
+    }
+    for (const key of init.intrinsics?.keys() ?? []) {
+      if (!key.startsWith(`${init.name}.`)) continue;
+      // An intrinsic whose key no longer names a Java method would silently stop applying; one on a synchronized
+      // method would skip its monitor.
+      const m = methods.get(key.slice(init.name.length + 1));
+      if (!m?.code || m.isSynchronized) throw new Error(`intrinsic ${key} names no unsynchronized method with code in ${init.name}`);
     }
   }
 
@@ -603,6 +639,8 @@ export class Loader {
       primitive: false,
       objectClass,
       replaced: this.jvm.natives.replaced,
+      intrinsics: this.jvm.natives.intrinsics,
+      loopHooks: this.jvm.natives.loopHooks,
     });
   }
 

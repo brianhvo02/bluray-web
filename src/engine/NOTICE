@@ -63,6 +63,9 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     player.ts (BD-J titles) from src/libbluray/bluray.c (_play_bdj, _start_bdj, _stop_bdj via _play_hdmv,
                           _try_play_title and _try_menu_call at UO restriction RELAXED, bd_set_rate's BDJ_EVENT_RATE)
     hdmv/uo-mask.ts uoMaskBits from src/libbluray/bluray.c (bdpriv_get_uo_mask)
+    bdj/jvm/natives/intrinsics/graphics.ts from src/libbluray/bdj/java/java/awt/BDGraphicsBase.java (drawSpanN,
+                          applyComposite, alphaBlend), Area.java (add) and BDRootWindow.java (isBackBufferClear)
+    bdj/jvm/natives/intrinsics/image.ts from src/libbluray/bdj/java/java/awt/BDImageConsumer.java (setPixels)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
   subs/srt.ts and subs/text-renderer.ts (SubRip subtitles) are original
@@ -176,4 +179,9 @@ fdlibm 5.3 (the C library behind the JDK's StrictMath)
     bdj/jvm/natives/strictmath.ts  fdlibmExp, from e_exp.c (__ieee754_exp)
                                    fdlibmRemainder, from e_remainder.c (__ieee754_remainder)
   The rest of bdj/jvm/ (interpreter, loader, heap, threads, VFS and the other
-  natives, except natives/libbluray.ts above) is original code.
+  natives, except natives/libbluray.ts and the libbluray-derived intrinsics
+  above) is original code. The intrinsics for class-library methods
+  (natives/intrinsics/color-model.ts, png.ts, arrays.ts, and the
+  Rectangle.intersection arithmetic in graphics.ts) are written from the JVM
+  semantics of those methods' bytecode in src/bdj-classlib/rt-bdj.jar; they
+  contain no OpenJDK source.

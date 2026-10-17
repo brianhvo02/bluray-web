@@ -414,6 +414,8 @@ function syntheticMethod(cls: JClass, name: string, desc: string, isStatic: bool
     isSynchronized: false,
     nativeKey: `${cls.name}.${name}${desc}`,
     native: fn,
+    intrinsic: undefined,
+    loopHooks: undefined,
   };
 }
 
