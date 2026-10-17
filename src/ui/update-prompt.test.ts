@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldPromptUpdate } from './update-prompt';
+import { isWaitingWorker, reloadAction, shouldPromptUpdate } from './update-prompt';
 
 describe('shouldPromptUpdate', () => {
   it('waits while the engine is playing', () => {
@@ -20,5 +20,25 @@ describe('shouldPromptUpdate', () => {
 
   it('never prompts without a waiting worker', () => {
     expect(shouldPromptUpdate({ waiting: false, engineState: 'paused' })).toBe(false);
+  });
+});
+
+describe('isWaitingWorker', () => {
+  it('counts only an installed worker as waiting', () => {
+    expect(isWaitingWorker('installed')).toBe(true);
+    for (const state of ['parsed', 'installing', 'activating', 'activated', 'redundant'] as const) {
+      expect(isWaitingWorker(state)).toBe(false);
+    }
+  });
+});
+
+describe('reloadAction', () => {
+  it('asks a waiting worker to take over', () => {
+    expect(reloadAction('installed')).toBe('skip-waiting');
+  });
+
+  it('reloads at once when another tab already let the worker take over', () => {
+    expect(reloadAction('activating')).toBe('reload');
+    expect(reloadAction('activated')).toBe('reload');
   });
 });

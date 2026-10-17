@@ -20,18 +20,39 @@ function withIsolation(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-// Navigations are network-first, so a deploy shows up on the next visit; offline they fall back to the cached shell.
-// Registered before the precache route so it wins for '/' as well.
+/** How long a navigation waits for the network before the cached shell is served instead. */
+const NAVIGATION_TIMEOUT_MS = 3000;
+
+/** The precached app shell, or the network response when the shell is missing. */
+async function shellOr(network: Promise<Response>): Promise<Response> {
+  const shell = await matchPrecache('/index.html');
+  return withIsolation(shell ?? (await network));
+}
+
+// Navigations are network-first, so a deploy shows up on the next visit. Offline, or when the network takes longer
+// than NAVIGATION_TIMEOUT_MS, they get the cached shell. Registered before the precache route so it wins for '/' too.
+// The diagnostics page is not precached and must never be answered with the player's shell.
 registerRoute(
-  new NavigationRoute(async ({ request }) => {
-    try {
-      return withIsolation(await fetch(request));
-    } catch (e) {
-      const shell = await matchPrecache('/index.html');
-      if (!shell) throw e;
-      return withIsolation(shell);
-    }
-  }),
+  new NavigationRoute(
+    async ({ request }) => {
+      const network = fetch(request);
+      network.catch(() => undefined); // a late failure after the timeout is not an error
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), NAVIGATION_TIMEOUT_MS);
+      });
+      try {
+        const response = await Promise.race([network, timeout]);
+        if (response) return withIsolation(response);
+      } catch {
+        // offline: fall through to the shell
+      } finally {
+        clearTimeout(timer);
+      }
+      return shellOr(network);
+    },
+    { denylist: [/^\/probe(\.html)?$/] },
+  ),
 );
 
 addPlugins([{ handlerWillRespond: async ({ response }) => withIsolation(response) }]);

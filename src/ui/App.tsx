@@ -6,7 +6,7 @@ import { LandingScreen } from './LandingScreen';
 import { PlayerScreen } from './PlayerScreen';
 import { idbShaderLibrary } from './shader-library';
 import { ShaderModel } from './shader-model';
-import { shouldPromptUpdate } from './update-prompt';
+import { isWaitingWorker, reloadAction, shouldPromptUpdate } from './update-prompt';
 
 let sharedController: PlayerController | null = null;
 
@@ -34,7 +34,9 @@ function useWaitingWorker(): ServiceWorker | null {
     const track = (worker: ServiceWorker | null): void => {
       if (!worker || !container.controller) return;
       const check = (): void => {
-        if (!cancelled && worker.state === 'installed') setWaiting(worker);
+        if (cancelled) return;
+        if (isWaitingWorker(worker.state)) setWaiting(worker);
+        else setWaiting((current) => (current === worker ? null : current));
       };
       check();
       worker.addEventListener('statechange', check);
@@ -56,6 +58,10 @@ function useWaitingWorker(): ServiceWorker | null {
 
 function UpdatePrompt({ worker }: { worker: ServiceWorker }): ReactElement {
   const reload = (): void => {
+    if (reloadAction(worker.state) === 'reload') {
+      window.location.reload();
+      return;
+    }
     navigator.serviceWorker.addEventListener('controllerchange', () => window.location.reload(), { once: true });
     worker.postMessage({ type: 'skip-waiting' });
   };
