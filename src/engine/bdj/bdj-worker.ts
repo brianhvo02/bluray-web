@@ -132,7 +132,8 @@ export function runBdjWorker(port: BdjPort): BdjWorkerHandle {
               post({ type: 'log', line, error });
             },
           }),
-        nowMs: () => performance.now(),
+        // the wall clock (System.currentTimeMillis), kept monotonic: Java's timers and dates both read it
+        nowMs: () => performance.timeOrigin + performance.now(),
         setTimer: (ms, fn) => {
           const id = setTimeout(fn, ms);
           return () => clearTimeout(id);
