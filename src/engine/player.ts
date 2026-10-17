@@ -76,6 +76,8 @@ export interface AssDeps {
   readonly measurer: GlyphMeasurer;
   readonly createCanvas: (w: number, h: number) => OffscreenCanvas;
   readonly Path2D: typeof Path2D;
+  /** Whether canvases honour `ctx.filter`. */
+  readonly canvasFilter: boolean;
   readonly warp?: (target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number) => void;
 }
 
@@ -1009,7 +1011,7 @@ export class Player {
         name: p.name, format: 'ass', cues: p.track.events.length,
         renderer: new AssRenderer(p.track, fonts!, {
           measurer: deps!.measurer, createCanvas: deps!.createCanvas, nowMs: () => this.deps.nowMs(), Path2D: deps!.Path2D,
-          colorMatrix: 'video', limits: this.memory, ...(deps!.warp ? { warp: deps!.warp } : {}),
+          colorMatrix: 'video', limits: this.memory, canvasFilter: deps!.canvasFilter, ...(deps!.warp ? { warp: deps!.warp } : {}),
         }),
       })));
     this.dropTextTrack();

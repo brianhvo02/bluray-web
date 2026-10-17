@@ -1,7 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
+import { readFontFile } from './font-tables';
+import { AssFonts } from './fonts';
+import { FrameBuilder } from './frame';
+import { createFixedMeasurer } from './measure';
+import { parseAss } from './parse';
+import type { RenderSettings } from './state';
 import {
   blurVariance, dilate, FILTER_BORDER_STYLE_3, FILTER_FILL_IN_BORDER, FILTER_FILL_IN_SHADOW, FILTER_NONZERO_BORDER,
-  FILTER_NONZERO_SHADOW, fixOutline, gaussianBlur, layerKey, quantizePositions, quantizeShadow, runFlags,
+  FILTER_NONZERO_SHADOW, fixOutline, gaussianBlur, layerKey, quantizePositions, quantizeShadow, renderEvent, runFlags,
+  type RasterContext,
 } from './raster';
 
 const glyph = (over: Record<string, number | number[]> = {}) => ({
@@ -127,5 +135,53 @@ describe('layerKey', () => {
     expect(layerKey('m', [1, 2, 3, 4], 0, 1, 64, 64)).not.toBe(base);
     expect(layerKey('m', [1, 2, 3, 4], 0, 0, 128, 64)).not.toBe(base); // \xshad changed, same masks
     expect(layerKey('m', [1, 2, 3, 4], 0, 0, 64, -64)).not.toBe(base);
+  });
+});
+
+describe('renderEvent without canvas filters', () => {
+  const settings: RenderSettings = { frameWidth: 1920, frameHeight: 1080, storageWidth: 1920, storageHeight: 1080, fontScale: 1 };
+  const script = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,DejaVu Sans,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,2,40,40,50,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,{\\blur2\\t(0,4000,\\frz90)}blurred
+`;
+  const fakeCanvas = (w: number, h: number): OffscreenCanvas => {
+    const ctx = new Proxy({}, { get: (_t, k) => (k === 'getImageData' ? () => ({ data: new Uint8ClampedArray(w * h * 4) }) : () => undefined) });
+    return { width: w, height: h, getContext: () => ctx } as unknown as OffscreenCanvas;
+  };
+  async function load(): Promise<FrameBuilder> {
+    const fonts = new AssFonts({ load: async () => {}, unload: () => {} }, await readFontFile('DejaVuSans.ttf', new Uint8Array(readFileSync('fixtures/ass/fonts/DejaVuSans.ttf'))));
+    return new FrameBuilder(parseAss(script), fonts, createFixedMeasurer(0.5));
+  }
+  let builder: FrameBuilder;
+  beforeAll(async () => {
+    vi.stubGlobal('ImageData', class { readonly data: Uint8ClampedArray; constructor(readonly width: number, readonly height: number) { this.data = new Uint8ClampedArray(width * height * 4); } });
+    builder = await load();
+  });
+  afterAll(() => { vi.unstubAllGlobals(); });
+  function runShapeChange(canvasFilter: boolean): number {
+    let masksSet = 0;
+    const masks = new Map<string, never>();
+    const rc: RasterContext = {
+      createCanvas: fakeCanvas,
+      Path2D: class { addPath() {} moveTo() {} lineTo() {} bezierCurveTo() {} closePath() {} rect() {} } as unknown as typeof Path2D,
+      masks: { get: (k) => masks.get(k), set: (k, v) => { masksSet++; masks.set(k, v as never); } },
+      lastShapes: new Map(),
+      canvasFilter,
+    };
+    for (const t of [500, 1500, 2500]) renderEvent(rc, builder.build(t, settings).events[0]!, { width: 1920, height: 1080 });
+    return masksSet;
+  }
+  it('draws a reshaped blurred run directly where canvases filter, through the masks where they do not', () => {
+    expect(runShapeChange(true)).toBe(1); // only the first frame, before the shape changes
+    expect(runShapeChange(false)).toBe(3);
   });
 });

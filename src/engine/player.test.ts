@@ -1417,6 +1417,7 @@ function fakeAssDeps(gate?: Promise<void>): NonNullable<PlayerDeps['createAssDep
     measurer: createFixedMeasurer(0.5),
     createCanvas: () => ({}) as OffscreenCanvas,
     Path2D: class {} as unknown as typeof Path2D,
+    canvasFilter: true,
   });
 }
 

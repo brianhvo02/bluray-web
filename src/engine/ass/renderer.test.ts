@@ -49,6 +49,7 @@ function renderer(track = script([ev('0:00:01.00', '0:00:03.00', 'static'), ev('
     Path2D: class {} as unknown as typeof Path2D,
     colorMatrix,
     limits: MEMORY_PROFILES.desktop,
+    canvasFilter: true,
     renderEvent: (_rc, e): RenderedEvent => { rendered.push(e.index); return { canvas, x: 0, y: 0 }; },
   });
   return { r, rendered };

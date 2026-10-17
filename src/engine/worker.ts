@@ -44,6 +44,7 @@ const player = new Player({
       measurer: createCanvasMeasurer(new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true })!),
       createCanvas: (w, h) => new OffscreenCanvas(w, h),
       Path2D,
+      canvasFilter: supportsCanvasFilter(),
       warp: drawWarped,
     };
   },
@@ -52,3 +53,17 @@ const player = new Player({
 scope.onmessage = (event) => {
   void player.handle(event.data);
 };
+
+/** Whether a 2D canvas applies `ctx.filter` (Safari ignores it): a blurred dot must spread to its neighbour. */
+function supportsCanvasFilter(): boolean {
+  try {
+    const canvas = new OffscreenCanvas(9, 9);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.filter = 'blur(2px)';
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(4, 4, 1, 1);
+    return ctx.getImageData(5, 4, 1, 1).data[3]! > 0;
+  } catch {
+    return false;
+  }
+}

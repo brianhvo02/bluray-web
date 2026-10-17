@@ -32,6 +32,8 @@ export interface AssRendererDeps {
   readonly warp?: (target: OffscreenCanvasRenderingContext2D, source: OffscreenCanvas, m: Mat3, originX: number, originY: number) => void;
   /** Cache byte budgets and the text supersampling cap (the memory profile's). */
   readonly limits: AssRendererLimits;
+  /** Whether canvases honour `ctx.filter` (false on Safari): blurred runs then take the mask path. */
+  readonly canvasFilter: boolean;
   /** For tests: replaces the raster. */
   readonly renderEvent?: (rc: RasterContext, ev: FrameEvent, frame: { readonly width: number; readonly height: number }) => RenderedEvent | null;
 }
@@ -132,6 +134,7 @@ export class AssRenderer implements TextRendererLike {
       layers: this.layers,
       lastShapes: new Map(),
       maxTextSupersampling: deps.limits.maxTextSupersampling,
+      canvasFilter: deps.canvasFilter,
       ...(deps.warp ? { warp: deps.warp } : {}),
       ...(deps.colorMatrix === 'video' ? { mapColor: (c: number) => convertColor(c, track.ycbcrMatrix, 'video') } : {}),
     };

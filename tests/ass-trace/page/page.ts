@@ -38,6 +38,7 @@ const page: AssTracePage = {
       colorMatrix: 'none', // goldens are libass's colours, unconverted
       warp: drawWarped,
       limits: MEMORY_PROFILES.desktop,
+      canvasFilter: true,
     });
     const events = [];
     const frames: string[] = [];
@@ -95,7 +96,7 @@ const sessionPage: AssSessionPage = {
     await fonts.ready();
     session = {
       builder: new FrameBuilder(track, fonts, createCanvasMeasurer(measureCtx)),
-      renderer: new AssRenderer(track, fonts, { measurer: createCanvasMeasurer(measureCtx), createCanvas: (w, h) => new OffscreenCanvas(w, h), nowMs: () => performance.now(), Path2D, colorMatrix: 'none', warp: drawWarped, limits: MEMORY_PROFILES.desktop }),
+      renderer: new AssRenderer(track, fonts, { measurer: createCanvasMeasurer(measureCtx), createCanvas: (w, h) => new OffscreenCanvas(w, h), nowMs: () => performance.now(), Path2D, colorMatrix: 'none', warp: drawWarped, limits: MEMORY_PROFILES.desktop, canvasFilter: true }),
       fonts,
       settings,
       // drawn on a GPU canvas like the player's, copied to a CPU one for the comparison

@@ -156,6 +156,8 @@ export interface RasterContext {
   readonly masks?: MaskCache;
   /** Each animated run's last shape (its mask key without position): a run whose shape changes every frame is drawn directly. */
   readonly lastShapes?: Map<string, string>;
+  /** Whether canvases honour `ctx.filter`; without it a blurred run is never drawn directly (the blur runs on the mask in JS). */
+  readonly canvasFilter: boolean;
   /** Cap of the per-side text supersampling (default 8). */
   readonly maxTextSupersampling?: number;
   /** Coloured run layers by mask and colours (libass's composite cache): a run that only moves is one drawImage. */
@@ -515,7 +517,7 @@ function renderRun(rc: RasterContext, ev: FrameEvent, idx: readonly number[], ru
   const direct = reshaped && mats.every(isAffine) && !(flags & FILTER_BORDER_STYLE_3)
     && (!(flags & FILTER_NONZERO_BORDER) || (flags & FILTER_FILL_IN_BORDER) !== 0)
     && (!(flags & FILTER_NONZERO_SHADOW) || (flags & FILTER_FILL_IN_SHADOW) !== 0);
-  if (direct && !rc.masks?.get(key)) return directLayers();
+  if (direct && (rc.canvasFilter || sigma < 0.03) && !rc.masks?.get(key)) return directLayers();
 
   const type = first.effectType;
   const kTiming = first.effectTiming;
