@@ -3,6 +3,8 @@ import type { PlayerController, PlayerSnapshot } from '../player/player-controll
 import { ControlBar } from './ControlBar';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { collectDroppedFiles, splitPick } from '../player/drop-files';
+import { checkCapabilities } from './capabilities';
+import { FULLSCREEN_HINT_TEXT, isFullscreenHintDismissed, markFullscreenHintDismissed, shouldShowFullscreenHint, toggleFullscreen, type FullscreenKind } from './fullscreen';
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction } from './keyboard';
 import { toMenuSpace } from './pointer';
@@ -30,9 +32,18 @@ function uoContext(controller: PlayerController): { playing: boolean; popupShown
   return { playing: now.engineState === 'playing' || now.engineState === 'buffering', popupShown: now.menuActive && now.popupAvailable };
 }
 
-function toggleFullscreen(element: HTMLElement | null): void {
-  if (document.fullscreenElement) void document.exitFullscreen();
-  else void element?.requestFullscreen();
+/** The storage and media queries behind the fullscreen hint; each can throw or be missing, which means "don't show". */
+function initialHintVisible(fullscreen: FullscreenKind | null): boolean {
+  try {
+    return shouldShowFullscreenHint({
+      fullscreen,
+      coarsePointer: window.matchMedia('(pointer: coarse)').matches,
+      standalone: window.matchMedia('(display-mode: standalone)').matches,
+      dismissed: isFullscreenHintDismissed(window.localStorage),
+    });
+  } catch {
+    return false;
+  }
 }
 
 export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }: PlayerScreenProps): ReactElement {
@@ -44,6 +55,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const [pressed, setPressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [remoteOpen, setRemoteOpen] = useState(false);
+  const [fullscreen] = useState(() => checkCapabilities().fullscreen);
+  const [hintVisible, setHintVisible] = useState(() => initialHintVisible(fullscreen));
   const playing = snapshot.engineState === 'playing';
   /** The latest pointer position waiting for the next animation frame (moves are sent at most once per frame). */
   const pendingMove = useRef<{ x: number; y: number } | null>(null);
@@ -99,7 +112,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           controller.adjustVolume(action.delta);
           break;
         case 'fullscreen':
-          toggleFullscreen(rootRef.current);
+          if (fullscreen && rootRef.current) toggleFullscreen(document, rootRef.current, fullscreen);
           break;
         case 'cycleAudio':
           controller.cycleAudio();
@@ -257,6 +270,21 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
             </button>
           </div>
         ))}
+        {hintVisible && (
+          <div className="notice" role="status" data-testid="fullscreen-hint">
+            {FULLSCREEN_HINT_TEXT}
+            <button
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => {
+                markFullscreenHintDismissed(window.localStorage);
+                setHintVisible(false);
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
       {snapshot.engineState === 'buffering' && <div className="spinner" aria-label="Buffering" />}
       {showPicker && (
@@ -286,7 +314,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         shaderState={shaderState}
         visible={controlsVisible}
         onOpenPlaylists={() => setPickerOpen(true)}
-        onFullscreen={() => toggleFullscreen(rootRef.current)}
+        onFullscreen={fullscreen ? () => rootRef.current && toggleFullscreen(document, rootRef.current, fullscreen) : undefined}
         onMenuKey={sendMenuKey}
         remoteOpen={remoteOpen}
         onToggleRemote={() => setRemoteOpen((o) => !o)}
