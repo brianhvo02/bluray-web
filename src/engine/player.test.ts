@@ -16,6 +16,8 @@ import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
 import { OverlayPlane } from './graphics/overlay-plane';
 import { RegisterFile } from './hdmv/registers';
 import { Navigator } from './nav/navigator';
+import { DEFAULT_CHUNK_PACKETS } from './demux/m2ts-reader';
+import { SOURCE_PACKET_SIZE } from './demux/constants';
 import { Player, type PlayerDeps } from './player';
 import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
 import { ShaderStage } from './shaders/stage';
@@ -107,7 +109,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas; noOpen?: boolean } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteChunkBytes?: number; noOpen?: boolean } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
@@ -120,6 +122,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
   for (const [path, bytes] of Object.entries(opts.extraFiles ?? {})) files.set(path, bytes);
+  const remote = typeof opts.remote === 'function' ? opts.remote(files) : opts.remote;
   const events: EngineEvent[] = [];
   const drawn: number[] = [];
   const igDraws: OverlayPlane[] = [];
@@ -138,7 +141,8 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     createAssDeps: opts.createAssDeps ?? fakeAssDeps(),
     createShaderBackend: opts.createShaderBackend,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
-    ...(opts.remote ? { fetch: opts.remote.fetch } : {}),
+    ...(remote ? { fetch: remote.fetch } : {}),
+    ...(opts.remoteChunkBytes ? { remoteChunkBytes: opts.remoteChunkBytes } : {}),
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
@@ -169,7 +173,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
   const entries = discEntries(files);
-  if (!opts.noOpen) await player.handle({ type: 'open', disc: opts.remote ? opts.remote.spec : { kind: 'files', entries } });
+  if (!opts.noOpen) await player.handle({ type: 'open', disc: remote ? remote.spec : { kind: 'files', entries } });
   const left = new Float32Array(128);
   const right = new Float32Array(128);
   return {
@@ -1834,6 +1838,44 @@ describe('Player with a disc on the NAS', () => {
     const h = await harness(undefined, { remote: changed });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     expect(h.events).toContainEqual({ type: 'error', code: 'disc-changed', message: 'This disc changed on the NAS. Open its folder again.', paths: ['BDMV/STREAM/00001.M2TS'] });
+  });
+
+  it("starts the clock only once 3 s of stream at the clip's TS_recording_rate are read ahead", async () => {
+    const RATE = 500_000; // TS_recording_rate, bytes per second
+    const CHUNK = 64 * 1024;
+    // 3 s at RATE, in 192-byte source packets: 24 chunks of 64 KiB. The reader holds its read and its prefetch;
+    // read-ahead after them is counted from the first chunk past the prefetch.
+    const needed = Math.ceil((3 * RATE * 192) / 188 / CHUNK);
+    const prefetchEnd = 2 * DEFAULT_CHUNK_PACKETS * SOURCE_PACKET_SIZE;
+    const firstAhead = Math.ceil(prefetchEnd / CHUNK) * CHUNK;
+    const gate = firstAhead + (needed - 1) * CHUNK; // everything up to one chunk short of 3 s lands; the rest waits
+    let open!: () => void;
+    const opened = new Promise<void>((r) => (open = r));
+    const h = await harness(undefined, {
+      frameBytes: 70_000, // clips of about 7 MB, well past the gate
+      remoteChunkBytes: CHUNK,
+      remote: (files) => {
+        const clpi = files.get('BDMV/CLIPINF/00001.clpi')!;
+        new DataView(clpi.buffer, clpi.byteOffset).setUint32(52, RATE);
+        const nas = fakeNas(files);
+        const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const from = Number(/^bytes=(\d+)-/.exec(new Headers(init?.headers).get('Range') ?? '')?.[1] ?? 0);
+          if (String(input).includes('00001.M2TS') && from >= gate) await opened;
+          return nas.fetch(input, init);
+        }) as typeof globalThis.fetch;
+        return { ...nas, fetch };
+      },
+    });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await vi.waitFor(async () => {
+      await h.play(20);
+      expect(lastTelemetry(h)?.framesPresented ?? 0).toBeGreaterThan(0); // the first picture is up: video is ready
+    });
+    await h.play(1000);
+    expect(lastState(h)).toBe('buffering');
+    expect(states(h)).not.toContain('playing');
+    open();
+    await untilPlaying(h);
   });
 
   it('shows "Waiting for the NAS drive…" while a read takes over 3 s, and clears it when the read lands', async () => {

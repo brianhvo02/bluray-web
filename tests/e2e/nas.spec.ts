@@ -1,0 +1,142 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { expect, test, type Page } from '@playwright/test';
+import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, SERVER, restoreChangedDisc } from './nas-server';
+import { skipWithoutH264 } from './support';
+
+// The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
+// library's top level lists), and the rendezvous Worker that turns a code into the server's address.
+
+const sleep = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** Runs `fn` while no other worker does (the browsers' projects run side by side). */
+function exclusively<T>(fn: () => T): T {
+  const lock = join(NAS_E2E_DIR, 'owner-code.lock');
+  for (let tries = 0; ; tries++) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || tries > 600) throw err;
+      sleep(50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A fresh owner code, minted the way the NAS owner does: `node server.mjs owner-code` against the server's data.
+ * The rendezvous service holds at most 5 live codes per NAS and a run mints about 20 within its 10 minutes, so each
+ * code is registered under a new NAS key (the server makes one when its key file is gone).
+ */
+function ownerCode(): string {
+  const out = exclusively(() => {
+    rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true });
+    return execFileSync(process.execPath, [SERVER, 'owner-code'], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
+  });
+  expect(out).toContain('Rendezvous: registered');
+  return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
+}
+
+/** Chrome asks before a page reaches the local network; the tests answer for the user where the browser supports it. */
+async function allowLocalNetwork(page: Page, browserName: string): Promise<void> {
+  if (browserName === 'chromium') await page.context().grantPermissions(['local-network-access']);
+}
+
+async function pairByLink(page: Page): Promise<void> {
+  const code = ownerCode();
+  await page.goto(`/?pair=${code}&telemetry=1`);
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+}
+
+/** Pairs, then opens the library at its top. */
+async function openLibrary(page: Page, browserName: string): Promise<void> {
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  await page.getByTestId('nas-open').click();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+}
+
+const discRow = (page: Page, name: string) => page.locator(`[data-testid="nas-disc"][data-name="${name}"]`);
+
+/** Opens a disc's pre-flight and plays it. */
+async function playFromNas(page: Page, name: string): Promise<void> {
+  await discRow(page, name).click();
+  await expect(page.getByTestId('nas-preflight')).toBeVisible();
+  await page.getByTestId('nas-play').click();
+}
+
+const playerState = (page: Page) => page.getByTestId('player');
+
+test('pairs from a ?pair= link with an owner code', async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  await expect(page.getByTestId('pair-screen')).toBeHidden();
+  expect(new URL(page.url()).searchParams.has('pair')).toBe(false);
+});
+
+test("pairs with a code typed into the landing screen's field", async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  const code = ownerCode();
+  await page.goto('/');
+  await page.getByTestId('pair-code').fill(code.replaceAll('-', '').toLowerCase());
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+});
+
+test("plays disc1 from the NAS after a pre-flight showing this connection's throughput", async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await discRow(page, 'disc1').click();
+  await expect(page.getByTestId('nas-preflight-line').first()).toHaveText(/^This connection: \d+ Mbps$/, { timeout: 15_000 });
+  await page.getByTestId('nas-play').click();
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId('playlist-00000').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
+});
+
+test('opens disc-menu from the NAS into its menu', async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await playFromNas(page, 'disc-menu');
+  await expect(playerState(page)).toHaveAttribute('data-menu-active', 'true', { timeout: 15_000 });
+});
+
+test('plays the playlist the Java of disc-bdj selects, from the NAS', async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page);
+  await playFromNas(page, 'disc-bdj');
+  await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 30_000 });
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+});
+
+test('plays disc1.iso from the NAS', async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await expect(discRow(page, 'disc1.iso')).toContainText('ISO');
+  await playFromNas(page, 'disc1.iso');
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  await page.getByTestId('playlist-00000').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
+});
+
+test('a disc deleted after its folder was listed says so', async ({ page, browserName }, testInfo) => {
+  const project = testInfo.project.name;
+  const dir = restoreChangedDisc(project); // listed by the server's scan at start
+  await openLibrary(page, browserName);
+  await page.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText(`NAS › syn › ${CHANGED_FOLDER}`);
+  await expect(discRow(page, project)).toBeVisible();
+  rmSync(dir, { recursive: true, force: true });
+  await discRow(page, project).click();
+  await expect(page.getByTestId('nas-error')).toHaveText('This disc changed on the NAS. Open its folder again.');
+  await expect(page.getByTestId('nas-play')).toBeDisabled();
+});

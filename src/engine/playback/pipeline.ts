@@ -60,6 +60,8 @@ export class PlaybackPipeline {
   private continuityErrors = 0;
   /** Reader for the item being read; its counts join the totals when the item ends or a new read starts. */
   private current: M2tsReader | null = null;
+  /** The stream file `current` reads and its clip's TS_recording_rate. */
+  private currentClip: { readonly path: string; readonly recordingRate: number } | null = null;
   private audioStream: number | null;
   private igStream: number | null;
   private pgPid: number | null = null;
@@ -88,6 +90,11 @@ export class PlaybackPipeline {
     this.audioStream = stream;
   }
 
+  /** The clip being read: its stream file and TS_recording_rate (bytes per second); null between reads. */
+  get reading(): { readonly path: string; readonly recordingRate: number } | null {
+    return this.currentClip;
+  }
+
   get stats(): DemuxStats {
     const live = this.current?.stats;
     return { corruptPackets: this.corruptPackets + (live?.corruptPackets ?? 0), continuityErrors: this.continuityErrors + (live?.continuityErrors ?? 0) };
@@ -97,7 +104,10 @@ export class PlaybackPipeline {
     if (!reader) return;
     this.corruptPackets += reader.stats.corruptPackets;
     this.continuityErrors += reader.stats.continuityErrors;
-    if (this.current === reader) this.current = null;
+    if (this.current === reader) {
+      this.current = null;
+      this.currentClip = null;
+    }
   }
 
   start(fromUs: number): void {
@@ -147,6 +157,7 @@ export class PlaybackPipeline {
       this.current?.cancel();
       this.retire(this.current); // a stopped earlier read keeps its counts
       this.current = reader;
+      this.currentClip = { path: streamPath(item.clipId), recordingRate: clip.recordingRate };
 
       for (;;) {
         while (this.sinks.isFull()) {

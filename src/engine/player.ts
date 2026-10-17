@@ -15,6 +15,7 @@ import { Decimator } from './decode/decimator';
 import { UnsupportedCodecError, type DecoderError } from './decode/decoder';
 import { type AudioDecodeResult, type AudioDecoder, type AudioDecoderFactory } from './decode/audio-decoder';
 import { WebCodecsVideoDecoder, hasSps, isSupportedVideoCoding, type VideoCodecApi, type VideoUnit } from './decode/video-decoder';
+import { SOURCE_PACKET_SIZE, TS_PACKET_SIZE } from './demux/constants';
 import { M2tsReader } from './demux/m2ts-reader';
 import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
@@ -93,6 +94,8 @@ export interface PlayerDeps {
   readonly playerSettings?: PlayerSettings;
   /** Reads a NAS disc's files (HttpTransport); the global fetch by default. */
   readonly fetch?: typeof fetch;
+  /** Size of a NAS disc's range requests; REMOTE_CHUNK_BYTES by default. */
+  readonly remoteChunkBytes?: number;
 }
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
@@ -125,6 +128,8 @@ interface TextTrack {
 const MAX_DECODE_QUEUE = 8;
 const MENU_MEMORY_MESSAGE = "This disc's menus need more memory than this device allows.";
 const NAS_WAITING_MESSAGE = 'Waiting for the NAS drive…';
+/** A NAS disc starts once this much stream is read ahead (Global Constraints). */
+const REMOTE_START_SECONDS = 3;
 /**
  * Read-ahead budget for compressed video waiting to enter the decoder. Discs may multiplex video
  * well ahead of its audio (≥ 0.5 s seen on real discs), so reading must be able to run this far
@@ -616,6 +621,7 @@ export class Player {
     const source: FileSource | RemoteSource = createByteSource(spec, {
       fetch: this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
       readAheadBytes: this.memory.remoteReadAheadBytes,
+      ...(this.deps.remoteChunkBytes ? { chunkBytes: this.deps.remoteChunkBytes } : {}),
       onWaiting: (waiting) => {
         if (this.remote !== source) return; // a disc closed meanwhile
         if (waiting) this.notice('nas-waiting', NAS_WAITING_MESSAGE);
@@ -2026,7 +2032,7 @@ export class Player {
         (this.audioWriter?.queuedChunks ?? 0) > 0 ||
         (ring.buffered() * 1e6) / ring.sampleRate >= AUDIO_PREBUFFER_US;
       const videoReady = this.presenter.size > 0 || this.presenter.current !== null || s.eof || s.videoState === 'failed';
-      if (!audioReady || !videoReady) return;
+      if (!audioReady || !videoReady || !this.remoteReadAhead(s)) return;
       if (ring) {
         ring.setPlaying(true);
         this.lastHeartbeat = ring.heartbeat();
@@ -2057,6 +2063,19 @@ export class Player {
       ring.setPlaying(false);
       this.setState('buffering');
     }
+  }
+
+  /**
+   * A NAS disc starts (and resumes) once REMOTE_START_SECONDS of stream, at the clip's TS_recording_rate, are read
+   * ahead of the reader, or read-ahead can go no further (its budget is full, or the clip's file is read to its end).
+   */
+  private remoteReadAhead(s: Session): boolean {
+    const remote = this.remote;
+    const reading = s.pipeline.reading;
+    if (!remote || !reading || s.eof) return true;
+    const ahead = remote.bufferedAhead(reading.path);
+    const needed = (REMOTE_START_SECONDS * reading.recordingRate * SOURCE_PACKET_SIZE) / TS_PACKET_SIZE;
+    return ahead.bytes >= needed || ahead.toEnd || !remote.readingAhead;
   }
 
   private disableAudio(s: Session, message: string, notify = true): void {

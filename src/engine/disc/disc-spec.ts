@@ -28,6 +28,8 @@ export interface RemoteDiscSpec {
 export interface ByteSourceDeps {
   readonly fetch: typeof fetch;
   readonly readAheadBytes: number;
+  /** Size of one range request; REMOTE_CHUNK_BYTES by default. */
+  readonly chunkBytes?: number;
   onWaiting(waiting: boolean): void;
   /** A fresh session token after a 401; without it a 401 means unpaired. */
   refreshToken?(): Promise<string>;
@@ -45,7 +47,7 @@ export function createByteSource(spec: DiscSpec, deps: ByteSourceDeps): FileSour
   });
   return new RemoteSource(spec.manifest, transport, {
     readAheadBytes: deps.readAheadBytes,
-    chunkBytes: REMOTE_CHUNK_BYTES,
+    chunkBytes: deps.chunkBytes ?? REMOTE_CHUNK_BYTES,
     inFlight: REMOTE_IN_FLIGHT,
     onWaiting: (waiting) => deps.onWaiting(waiting),
   });
