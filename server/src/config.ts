@@ -20,7 +20,17 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       if (eq <= 0 || eq === entry.length - 1) throw new Error(`LIBRARY_ROOTS entry "${entry}" is not name=dir`);
       return { name: entry.slice(0, eq), dir: entry.slice(eq + 1) };
     });
-  const port = Number(env.PORT ?? '8080');
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`PORT "${env.PORT}" is not a port number`);
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port };
+  const seen = new Set<string>();
+  for (const { name } of roots) {
+    if (seen.has(name)) throw new Error(`LIBRARY_ROOTS names "${name}" twice`);
+    seen.add(name);
+  }
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT) };
+}
+
+function parsePort(value: string | undefined): number {
+  if (value === undefined) return 8080;
+  const port = Number(value);
+  if (!/^\d+$/.test(value) || port > 65535) throw new Error(`PORT "${value}" is not a port number`);
+  return port;
 }
