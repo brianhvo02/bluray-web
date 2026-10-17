@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import type { DiscEntry } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { breadcrumbs, discBadges, folderMemory, formatSize, sortRows, type DiscFacts, type LibraryRow } from './library-model';
+import { AdminScreen } from './AdminScreen';
 import { NasHttpError, type NasClient } from './nas-client';
+import type { NasPairing } from './nas-store';
 import { Preflight } from './Preflight';
 
 interface LibraryScreenProps {
@@ -31,6 +33,23 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<DiscEntry | null>(null);
   const [, setUhdVersion] = useState(0);
+  const [pairing, setPairing] = useState<NasPairing | null>(null);
+  const [settings, setSettings] = useState(false);
+  /** Bumped on leaving the settings, so a rescan started there shows in the listing. */
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    nas.pairing().then(
+      (p) => {
+        if (live) setPairing(p);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [nas]);
 
   useEffect(() => {
     let live = true;
@@ -53,7 +72,7 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
     return () => {
       live = false;
     };
-  }, [nas, path, memory]);
+  }, [nas, path, memory, reload]);
 
   const onFacts = useCallback((discId: string, facts: DiscFacts) => {
     if (uhdDiscs.get(discId) === facts.uhd) return;
@@ -65,6 +84,19 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
     setSelected(null);
     setPath(folder);
   };
+
+  if (settings) {
+    return (
+      <AdminScreen
+        nas={nas}
+        thisDeviceId={pairing?.deviceId ?? null}
+        onClose={() => {
+          setSettings(false);
+          setReload((r) => r + 1);
+        }}
+      />
+    );
+  }
 
   const crumbs = breadcrumbs(path);
 
@@ -85,9 +117,16 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
             </span>
           ))}
         </nav>
-        <button type="button" onClick={onClose}>
-          Close
-        </button>
+        <div className="library-actions">
+          {pairing?.owner && (
+            <button type="button" data-testid="nas-settings" onClick={() => setSettings(true)}>
+              NAS settings
+            </button>
+          )}
+          <button type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
       </div>
       {scanning && (
         <p className="status" role="status">

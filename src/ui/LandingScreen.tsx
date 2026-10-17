@@ -3,7 +3,7 @@ import type { PlayerController, PlayerSnapshot } from '../player/player-controll
 import { checkCapabilities, showStorageHint } from './capabilities';
 import { LibraryScreen } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
-import type { NasClient } from './nas/nas-client';
+import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import type { NasPairing } from './nas/nas-store';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
@@ -42,8 +42,16 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     nas.pairing().then(setPairing, () => setPairing(null));
   };
   useEffect(loadPairing, [nas]);
-  // A NAS call that finds this device revoked clears the pairing: show the code field again.
-  useEffect(() => nas.onUnpaired(loadPairing), [nas]);
+  // A NAS call that finds this device revoked clears the pairing: say so and show the code field again.
+  useEffect(
+    () =>
+      nas.onUnpaired(() => {
+        setBrowsing(false);
+        setLocalError(NAS_MESSAGES.unpaired);
+        loadPairing();
+      }),
+    [nas],
+  );
   const forgetNas = (): void => {
     setPairRequested(false);
     setBrowsing(false);
@@ -205,6 +213,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
             initialCode={pairCode}
             onPaired={() => {
               setPairRequested(false);
+              setLocalError(null);
               loadPairing();
             }}
           />

@@ -169,3 +169,51 @@ test('a disc deleted after its pre-flight fails to open, and Play works again', 
   await expect(page.getByTestId('error')).toContainText('This disc changed on the NAS. Open its folder again.', { timeout: 15_000 });
   await expect(page.getByTestId('nas-play')).toBeEnabled();
 });
+
+test('the owner mints a code, pairs a second browser as Mum, revokes it, and rescans', async ({ page, browser, browserName }) => {
+  await openLibrary(page, browserName);
+  await page.getByTestId('nas-settings').click();
+  await expect(page.getByTestId('nas-admin')).toBeVisible();
+  await expect(page.getByTestId('nas-owner-code')).not.toBeChecked();
+  await page.getByTestId('nas-new-code').click();
+  const codeText = page.getByTestId('nas-code');
+  await expect(codeText).toHaveText(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/, { timeout: 15_000 });
+  await expect(page.getByTestId('nas-code-qr')).toBeVisible();
+  await expect(page.getByTestId('nas-code-expiry')).toHaveText(/^Expires in (10:00|9:[0-5]\d)$/);
+  await expect(page.getByTestId('nas-code-copy')).toBeVisible();
+  const code = (await codeText.textContent())!;
+
+  // A second browser, as the person the owner pairs.
+  const mumContext = await browser.newContext();
+  try {
+    const mum = await mumContext.newPage();
+    await allowLocalNetwork(mum, browserName);
+    await mum.goto('/');
+    await mum.getByTestId('pair-code').fill(code);
+    await mum.getByTestId('pair-device-name').fill('Mum');
+    const redeemed = mum.waitForResponse((r) => r.url().endsWith('/pair/redeem') && r.request().method() === 'POST');
+    await mum.getByTestId('pair-button').click();
+    const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
+    await expect(mum.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await mum.getByTestId('nas-open').click();
+    await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
+
+    // The owner sees both devices: this one and Mum (other tests' devices share the server).
+    const mumRow = page.locator(`[data-testid="nas-device"][data-device-id="${deviceId}"]`);
+    await expect(mumRow).toContainText(/^Mum · paired .+ · last seen just now/, { timeout: 15_000 });
+    await expect(page.getByTestId('nas-device').filter({ hasText: '(this device)' })).toHaveCount(1);
+    await mumRow.getByTestId('nas-revoke').click();
+    await expect(mumRow).toHaveCount(0);
+
+    // Mum's next library request finds the device revoked: back to the landing screen.
+    await mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+    await expect(mum.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
+    await expect(mum.getByTestId('pair-screen')).toBeVisible();
+    await expect(mum.getByTestId('nas-library')).toHaveCount(0);
+  } finally {
+    await mumContext.close();
+  }
+
+  await page.getByTestId('nas-rescan').click();
+  await expect(page.getByTestId('nas-admin-status')).toHaveText('Rescanning…');
+});
