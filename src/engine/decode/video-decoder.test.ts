@@ -57,7 +57,7 @@ class FakeDecoder implements VideoDecoderLike {
   }
 }
 
-function setup(supported = true): { api: VideoCodecApi; created: FakeDecoder[]; checked: VideoDecoderConfig[] } {
+function setup(supported: boolean | ((codec: string) => boolean) = true): { api: VideoCodecApi; created: FakeDecoder[]; checked: VideoDecoderConfig[] } {
   const created: FakeDecoder[] = [];
   const checked: VideoDecoderConfig[] = [];
   const api: VideoCodecApi = {
@@ -68,7 +68,7 @@ function setup(supported = true): { api: VideoCodecApi; created: FakeDecoder[]; 
     },
     isConfigSupported: async (config) => {
       checked.push(config);
-      return { supported, config };
+      return { supported: typeof supported === 'function' ? supported(config.codec) : supported, config };
     },
     makeChunk: (init) => init as unknown as EncodedVideoChunk,
   };
@@ -86,7 +86,43 @@ async function configured(): Promise<{ dec: WebCodecsVideoDecoder; created: Fake
   return { dec, created, out, errors };
 }
 
+const HEVC_SPS = [0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x5d];
+const HEVC_IDR = new Uint8Array([0, 0, 0, 1, ...HEVC_SPS, 0, 0, 0, 1, 0x26, 0x01, 0xaf]);
+const HEVC_MESSAGE = "This device can't decode HEVC (4K) video.";
+
 describe('WebCodecsVideoDecoder', () => {
+  it('opens HEVC with the hev1 string when only that one is supported', async () => {
+    const { api, created, checked } = setup((codec) => codec.startsWith('hev1.'));
+    const dec = new WebCodecsVideoDecoder(api);
+    await dec.configure({ codingType: CodingType.HEVC, firstUnit: HEVC_IDR });
+    expect(checked.map((c) => c.codec)).toEqual(['hvc1.1.6.L93.90', 'hev1.1.6.L93.90']);
+    expect(created[0].config?.codec).toBe('hev1.1.6.L93.90');
+  });
+
+  it('prefers hvc1 when both HEVC strings are supported', async () => {
+    const { api, created } = setup();
+    await new WebCodecsVideoDecoder(api).configure({ codingType: CodingType.HEVC, firstUnit: HEVC_IDR });
+    expect(created[0].config?.codec).toBe('hvc1.1.6.L93.90');
+  });
+
+  it('reports the HEVC message when no HEVC string is supported', async () => {
+    const { api } = setup(false);
+    const err = await new WebCodecsVideoDecoder(api).configure({ codingType: CodingType.HEVC, firstUnit: HEVC_IDR }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnsupportedCodecError);
+    expect((err as Error).message).toBe(HEVC_MESSAGE);
+  });
+
+  it('carries the HEVC message on the fatal error after repeated HEVC decode failures', async () => {
+    const { api, created } = setup();
+    const dec = new WebCodecsVideoDecoder(api);
+    const errors: DecoderError[] = [];
+    dec.onError = (e) => errors.push(e);
+    await dec.configure({ codingType: CodingType.HEVC, firstUnit: HEVC_IDR });
+    for (let i = 0; i < 4; i++) created[created.length - 1].fail(`boom ${i}`);
+    expect(errors.map((e) => e.fatal)).toEqual([false, false, false, true]);
+    expect(errors[3].message).toBe(HEVC_MESSAGE);
+  });
+
   it('configures AVC with a codec string from the SPS', async () => {
     const { api, created, checked } = setup();
     const dec = new WebCodecsVideoDecoder(api);

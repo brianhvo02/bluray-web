@@ -39,6 +39,12 @@ export function hevcCodecString(sps: Uint8Array): string {
   return s;
 }
 
+/** The `hvc1.` form, then the `hev1.` form: browsers differ in which one they accept. */
+export function hevcCodecStrings(sps: Uint8Array): readonly [string, string] {
+  const hev1 = hevcCodecString(sps);
+  return [hev1.replace(/^hev1/, 'hvc1'), hev1];
+}
+
 export function analyzeHevc(data: Uint8Array): AccessUnitInfo {
   let key = false;
   let idr = false;

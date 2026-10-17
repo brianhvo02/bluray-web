@@ -1,7 +1,7 @@
 import { CodingType, codingName } from '../bdmv/stream-types';
 import { DecoderError, UnsupportedCodecError, type Decoder, type StreamConfig } from './decoder';
 import { analyzeAvc, avcCodecString, avcIsInterlaced, type AccessUnitInfo } from './h264';
-import { analyzeHevc, hevcCodecString } from './hevc';
+import { analyzeHevc, hevcCodecStrings } from './hevc';
 
 export interface VideoUnit {
   readonly data: Uint8Array;
@@ -34,16 +34,18 @@ export const browserVideoCodecApi: VideoCodecApi = {
 
 interface CodecOps {
   analyze(data: Uint8Array): AccessUnitInfo;
-  codecString(sps: Uint8Array): string;
+  /** Candidate codec strings in order of preference; the first one the browser supports is used. */
+  codecStrings(sps: Uint8Array): readonly string[];
   /** Chrome's hardware decoders reject interlaced streams ("Decoding error"); its software decoder handles them. */
   needsSoftware?(sps: Uint8Array): boolean;
 }
 
 const CODECS: ReadonlyMap<number, CodecOps> = new Map<number, CodecOps>([
-  [CodingType.AVC, { analyze: analyzeAvc, codecString: avcCodecString, needsSoftware: avcIsInterlaced }],
-  [CodingType.HEVC, { analyze: analyzeHevc, codecString: hevcCodecString }],
+  [CodingType.AVC, { analyze: analyzeAvc, codecStrings: (sps) => [avcCodecString(sps)], needsSoftware: avcIsInterlaced }],
+  [CodingType.HEVC, { analyze: analyzeHevc, codecStrings: hevcCodecStrings }],
 ]);
 
+const HEVC_UNSUPPORTED_MESSAGE = "This device can't decode HEVC (4K) video.";
 const MAX_CONSECUTIVE_ERRORS = 3;
 /** Above this many fed-but-unseen timestamps, forget ones far behind the newest output (the decoder dropped them). */
 const PENDING_PRUNE_SIZE = 64;
@@ -69,6 +71,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   private config: VideoDecoderConfig | null = null;
   private closed = false;
   private ops: CodecOps | null = null;
+  private codingType: number | null = null;
   private needKey = true;
   private requireIdr = false;
   private lastKeyWasIdr = true;
@@ -104,14 +107,27 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     if (!config.firstUnit) throw new Error('video configure() needs the first access unit');
     const info = ops.analyze(config.firstUnit);
     if (!info.sps) throw new Error('first video access unit has no SPS');
-    const vdc: VideoDecoderConfig = { codec: ops.codecString(info.sps) };
-    if (ops.needsSoftware?.(info.sps)) vdc.hardwareAcceleration = 'prefer-software';
+    const software = ops.needsSoftware?.(info.sps) === true;
     this.closed = false;
-    const support = await this.api.isConfigSupported(vdc);
-    if (this.closed) return; // closed while support was being checked: don't open a decoder nobody owns
-    if (!support.supported) {
-      throw new UnsupportedCodecError(config.codingType, `This browser cannot decode ${codingName(config.codingType)} (${vdc.codec}).`);
+    let vdc: VideoDecoderConfig | null = null;
+    for (const codec of ops.codecStrings(info.sps)) {
+      const candidate: VideoDecoderConfig = { codec };
+      if (software) candidate.hardwareAcceleration = 'prefer-software';
+      const support = await this.api.isConfigSupported(candidate);
+      if (this.closed) return; // closed while support was being checked: don't open a decoder nobody owns
+      if (support.supported) {
+        vdc = candidate;
+        break;
+      }
     }
+    if (!vdc) {
+      const message =
+        config.codingType === CodingType.HEVC
+          ? HEVC_UNSUPPORTED_MESSAGE
+          : `This browser cannot decode ${codingName(config.codingType)} (${ops.codecStrings(info.sps).join(', ')}).`;
+      throw new UnsupportedCodecError(config.codingType, message);
+    }
+    this.codingType = config.codingType;
     this.ops = ops;
     this.config = vdc;
     this.consecutiveErrors = 0;
@@ -233,7 +249,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     if (!this.lastKeyWasIdr) this.requireIdr = true;
     if (this.consecutiveErrors > MAX_CONSECUTIVE_ERRORS) {
       this.decoder = null;
-      this.onError(new DecoderError(`Video decoding failed: ${err.message}`, true));
+      this.onError(new DecoderError(this.codingType === CodingType.HEVC ? HEVC_UNSUPPORTED_MESSAGE : `Video decoding failed: ${err.message}`, true));
       return;
     }
     this.open();
