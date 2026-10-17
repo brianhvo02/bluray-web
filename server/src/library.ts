@@ -4,6 +4,7 @@ import type { Dir } from 'node:fs';
 import { join } from 'node:path';
 import type { DiscEntry, FolderEntry } from '../../src/engine/disc/nas-api';
 import { discId } from './disc-id';
+import { isoIsDisc } from './iso';
 
 const MAX_DEPTH = 6;
 const SKIPPED = new Set(['bk', 'lost+found']);
@@ -36,6 +37,8 @@ export class Library {
   private readonly open: (path: string) => Promise<Dir>;
   private readonly pauseMs: number;
   private reads = 0;
+  /** Ids of `.iso` files whose UDF tree has no BDMV/INDEX.BDMV (or that aren't UDF), so a rescan doesn't read them again. */
+  private readonly notDiscs = new Set<string>();
 
   constructor(
     private readonly roots: readonly { name: string; dir: string }[],
@@ -148,12 +151,8 @@ export class Library {
           if (e.isDir) {
             if (dir.depth < MAX_DEPTH) next.push({ rel, abs: join(dir.abs, e.name), depth: dir.depth + 1 });
           } else if (e.isFile && e.name.toLowerCase().endsWith('.iso')) {
-            try {
-              const st = await stat(join(dir.abs, e.name));
-              out.push({ id: discId(rel, st.size, st.mtimeMs), name: e.name, path: rel, kind: 'iso', sizeBytes: st.size });
-            } catch {
-              // Vanished mid-scan.
-            }
+            const disc = await this.isoDisc(rel, join(dir.abs, e.name), e.name, previous);
+            if (disc) out.push(disc);
           }
         }
       }
@@ -176,6 +175,31 @@ export class Library {
       return null;
     }
     return entries;
+  }
+
+  /**
+   * An ISO disc if the image's UDF tree has BDMV/INDEX.BDMV. Its id is made from the path, image size and mtime; an
+   * image whose id is already known either way (a disc in `previous`, or not a disc) isn't read again.
+   */
+  private async isoDisc(rel: string, abs: string, name: string, previous: Map<string, DiscEntry>): Promise<DiscEntry | null> {
+    let st;
+    try {
+      st = await stat(abs);
+    } catch {
+      return null; // Vanished mid-scan.
+    }
+    const id = discId(rel, st.size, st.mtimeMs);
+    const disc: DiscEntry = { id, name, path: rel, kind: 'iso', sizeBytes: st.size };
+    if (previous.get(id)?.kind === 'iso') return disc;
+    if (this.notDiscs.has(id)) return null;
+    try {
+      if (await isoIsDisc(abs)) return disc;
+      this.notDiscs.add(id);
+    } catch (err) {
+      // A read error: left out of this scan, and tried again on the next.
+      console.error(`could not read ${abs}`, err);
+    }
+    return null;
   }
 
   /** A folder disc if `bdmvDir` holds index.bdmv; its size is that of the clips in STREAM, carried over from `previous` when the id is unchanged. */

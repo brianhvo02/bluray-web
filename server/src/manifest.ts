@@ -2,7 +2,9 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import type { DiscEntry, DiscManifest } from '../../src/engine/disc/nas-api';
+import type { UdfFile } from '../../src/engine/disc/udf';
 import { discId } from './disc-id';
+import { readIsoFiles } from './iso';
 
 /** The top-level folders of a disc that the manifest lists and the files route serves. */
 const DISC_FOLDERS = new Set(['BDMV', 'CERTIFICATE']);
@@ -43,15 +45,28 @@ export async function discUnchanged(entry: DiscEntry, dir: string): Promise<bool
   }
 }
 
+/** The segments of a disc-relative path under BDMV or CERTIFICATE, or null for any other or an odd path. */
+function discSegments(path: string): string[] | null {
+  const segments = path.split('/');
+  if (!DISC_FOLDERS.has(segments[0]!.toUpperCase())) return null;
+  if (segments.some((s) => s === '' || s === '.' || s === '..' || s.includes('\\') || s.includes('\0'))) return null;
+  return segments;
+}
+
+/** The file of an ISO disc's tree for a disc-relative path in any case, under BDMV or CERTIFICATE only. */
+export function resolveIsoFile(tree: ReadonlyMap<string, UdfFile>, path: string): UdfFile | null {
+  const segments = discSegments(path);
+  return segments ? (tree.get(segments.join('/').toUpperCase()) ?? null) : null;
+}
+
 /**
  * The real file under the disc folder `dir` for a disc-relative path in any case ('BDMV/STREAM/00001.M2TS'), found by
  * listing each directory, so the path never reaches the filesystem as given. Null unless it names a regular file
  * under BDMV or CERTIFICATE.
  */
 export async function resolveDiscFile(dir: string, path: string): Promise<string | null> {
-  const segments = path.split('/');
-  if (!DISC_FOLDERS.has(segments[0]!.toUpperCase())) return null;
-  if (segments.some((s) => s === '' || s === '.' || s === '..' || s.includes('\\') || s.includes('\0'))) return null;
+  const segments = discSegments(path);
+  if (!segments) return null;
   let current: string | null = dir;
   for (const [i, segment] of segments.entries()) {
     current = await child(current, segment, i === segments.length - 1 ? 'file' : 'dir');
@@ -98,6 +113,28 @@ export async function buildManifest(dir: string, disc: { id: string; name: strin
     }
   }
   return { discId: disc.id, name: disc.name, files, inline };
+}
+
+/** The manifest of the ISO disc at `abs` whose UDF tree is `tree`: the same shape as a folder disc's. */
+export async function buildIsoManifest(abs: string, tree: ReadonlyMap<string, UdfFile>, disc: { id: string; name: string }): Promise<DiscManifest> {
+  // As for a folder disc: files under BDMV and CERTIFICATE, none hidden.
+  const listed = [...tree.values()]
+    .filter((f) => resolveIsoFile(tree, f.path) === f && !f.path.split('/').some((s) => s.startsWith('.')))
+    .sort((a, b) => (a.path < b.path ? -1 : 1));
+  const bytes = await readIsoFiles(
+    abs,
+    listed.filter((f) => INLINED.test(f.path) && f.size <= MAX_INLINE_BYTES),
+  );
+  const inline: Record<string, string> = {};
+  for (const [path, buf] of bytes) inline[path] = buf.toString('base64');
+  return { discId: disc.id, name: disc.name, files: listed.map(({ path, size }) => ({ path, size })), inline };
+}
+
+/** The largest `.M2TS` in an ISO disc's BDMV/STREAM. */
+export function largestIsoClip(tree: ReadonlyMap<string, UdfFile>): UdfFile | null {
+  let best: UdfFile | null = null;
+  for (const f of tree.values()) if (/^BDMV\/STREAM\/[^/]+\.M2TS$/.test(f.path) && (!best || f.size > best.size)) best = f;
+  return best;
 }
 
 /** The largest `.M2TS` under the disc folder's BDMV/STREAM, with its size. */

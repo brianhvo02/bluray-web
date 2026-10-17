@@ -1,0 +1,113 @@
+import { createReadStream } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import type { DiscEntry } from '../../src/engine/disc/nas-api';
+import { UdfError, UdfImage, readUdf, udfPieces } from '../../src/engine/disc/udf';
+import type { UdfExtent, UdfFile, UdfRead } from '../../src/engine/disc/udf';
+import { discId } from './disc-id';
+
+/** Runs `fn` with a reader over the image at `abs`, open for that long. */
+async function withImage<T>(abs: string, fn: (read: UdfRead) => Promise<T>): Promise<T> {
+  const handle = await open(abs, 'r');
+  try {
+    return await fn(async (offset, length) => {
+      const buf = Buffer.alloc(length);
+      let got = 0;
+      while (got < length) {
+        const { bytesRead } = await handle.read(buf, got, length - got, offset + got);
+        if (bytesRead === 0) break;
+        got += bytesRead;
+      }
+      return buf.subarray(0, got);
+    });
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Whether the image at `abs` is a Blu-ray disc: its UDF tree has BDMV/INDEX.BDMV. Reads only the volume descriptors,
+ * the root and BDMV directories and one file entry. False for an image that isn't UDF; read errors propagate.
+ */
+export async function isoIsDisc(abs: string): Promise<boolean> {
+  try {
+    return await withImage(abs, async (read) => (await (await UdfImage.open(read)).find('BDMV/INDEX.BDMV')) !== null);
+  } catch (err) {
+    if (err instanceof UdfError) return false;
+    throw err;
+  }
+}
+
+/** Whether the ISO disc `entry` at `abs` is still the image the library scanned (same size and mtime). */
+export async function isoUnchanged(entry: DiscEntry, abs: string): Promise<boolean> {
+  try {
+    const st = await stat(abs);
+    return st.isFile() && discId(entry.path, st.size, st.mtimeMs) === entry.id;
+  } catch {
+    return false;
+  }
+}
+
+/** The parsed UDF trees of the last `max` ISO discs used, by disc id (path → file), so range reads don't re-parse. */
+export class IsoTrees {
+  private readonly trees = new Map<string, Promise<ReadonlyMap<string, UdfFile>>>();
+
+  constructor(private readonly max = 32) {}
+
+  get(id: string, abs: string): Promise<ReadonlyMap<string, UdfFile>> {
+    let tree = this.trees.get(id);
+    if (tree) {
+      this.trees.delete(id);
+    } else {
+      tree = withImage(abs, readUdf).then((files) => new Map(files.map((f) => [f.path, f])));
+      // A failed parse isn't kept: the next request tries again.
+      tree.catch(() => {
+        if (this.trees.get(id) === tree) this.trees.delete(id);
+      });
+    }
+    this.trees.set(id, tree);
+    for (const oldest of this.trees.keys()) {
+      if (this.trees.size <= this.max) break;
+      this.trees.delete(oldest);
+    }
+    return tree;
+  }
+}
+
+const ZEROS = Buffer.alloc(64 * 1024);
+
+/** Image pieces (offset -1: zeros) as one stream, each piece read from the image in turn. */
+function piecesStream(abs: string, pieces: readonly UdfExtent[]): Readable {
+  async function* chunks(): AsyncGenerator<Buffer> {
+    for (const piece of pieces) {
+      if (piece.offset < 0) {
+        for (let left = piece.length; left > 0; left -= ZEROS.length) yield ZEROS.subarray(0, Math.min(left, ZEROS.length));
+      } else {
+        yield* createReadStream(abs, { start: piece.offset, end: piece.offset + piece.length - 1 }) as AsyncIterable<Buffer>;
+      }
+    }
+  }
+  return Readable.from(chunks(), { objectMode: false });
+}
+
+/** Bytes `[start, end]` (inclusive) of `file` in the image at `abs`, as a stream. */
+export function isoFileStream(abs: string, file: UdfFile, start: number, end: number): Readable {
+  return piecesStream(abs, udfPieces(file, start, end + 1));
+}
+
+/** The whole of each of `files` in the image at `abs`, read through one open handle. */
+export async function readIsoFiles(abs: string, files: readonly UdfFile[]): Promise<Map<string, Buffer>> {
+  return withImage(abs, async (read) => {
+    const out = new Map<string, Buffer>();
+    for (const file of files) {
+      const buf = Buffer.alloc(file.size);
+      let at = 0;
+      for (const piece of udfPieces(file, 0, file.size)) {
+        if (piece.offset >= 0) buf.set(await read(piece.offset, piece.length), at);
+        at += piece.length;
+      }
+      out.set(file.path, buf);
+    }
+    return out;
+  });
+}
