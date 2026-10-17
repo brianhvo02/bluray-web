@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { Invoke, Suspend } from './interpreter';
+import { Invoke, Suspend, ThrowResult } from './interpreter';
 import { Jvm } from './jvm';
 import { withMonitor } from './natives/util';
 import type { JMethod } from './loader';
 import type { JThread } from './threads';
-import type { JValue } from './values';
+import { JavaThrowable } from './values';
+import type { JObject, JValue } from './values';
 import { ACC_PUBLIC_STATIC, ACC_SYNCHRONIZED, VirtualClock, assembleClass, runWithClock } from '../../../../tests/helpers/jvm-asm';
 import type { AsmMethod, Const } from '../../../../tests/helpers/jvm-asm';
 
@@ -223,6 +224,43 @@ describe('suspension', () => {
     expect(await runWithClock(jvm, clock)).toBe('idle');
     expect(b.uncaught).toBeNull();
     expect(get('done')).toBe(6);
+  });
+  it('step() runs a stored continuation when the resumed result throws', async () => {
+    const { jvm, clock, spawn } = setup();
+    const t = jvm.loader.loadBoot('T')!;
+    const lock = jvm.mirror(t);
+    const guard = jvm.mirror(jvm.loader.loadBoot('java/lang/String')!);
+    const seen: JObject[] = [];
+    jvm.natives.register({
+      'T.inner()I': (ctx) =>
+        withMonitor(ctx.jvm, ctx.thread, lock, () => {
+          ctx.jvm.threads.monitorExit(ctx.thread, lock);
+          throw new JavaThrowable(ctx.jvm.throwNew('java/lang/RuntimeException', 'boom').exception);
+        }),
+      'T.outer()I': (ctx) => {
+        ctx.jvm.threads.monitorEnter(ctx.thread, guard);
+        return new Invoke(
+          ctx.method.cls.methods.get('inner()I')!,
+          [],
+          (v) => {
+            ctx.jvm.threads.monitorExit(ctx.thread, guard);
+            return v;
+          },
+          (e) => {
+            seen.push(e);
+            ctx.jvm.threads.monitorExit(ctx.thread, guard);
+            return new ThrowResult(e);
+          },
+        );
+      },
+    });
+    spawn('holdAndScale');
+    const b = spawn('callOuter');
+    await runWithClock(jvm, clock);
+    expect(b.uncaught).not.toBeNull();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(b.uncaught);
+    expect(jvm.threads.monitorEnter(spawn('burn'), guard)).toBe(true);
   });
 });
 

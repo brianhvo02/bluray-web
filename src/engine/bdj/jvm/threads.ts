@@ -445,7 +445,7 @@ export class Scheduler {
           r = !k ? v : v instanceof Invoke || v instanceof Suspend ? andThen(v, k, (e) => k(new ThrowResult(e))) : k(v);
         } catch (e) {
           if (!(e instanceof JavaThrowable)) throw e;
-          r = new ThrowResult(e.obj);
+          r = k ? k(new ThrowResult(e.obj)) : new ThrowResult(e.obj);
         }
         complete(this.jvm, t, r);
       });
