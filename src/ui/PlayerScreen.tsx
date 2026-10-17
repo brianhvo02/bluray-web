@@ -49,7 +49,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [idle, setIdle] = useState(false);
+  const [idle, setIdleState] = useState(false);
+  /** Whether a hover pointer (moving over a disc menu) hid the controls, rather than the idle timer or a tap (ruling R12). */
+  const [hiddenByHover, setHiddenByHover] = useState(false);
+  const setIdle = (next: boolean, byHover = false): void => {
+    setIdleState(next);
+    setHiddenByHover(next && byHover);
+  };
   const [activity, setActivity] = useState(0);
   const [pressed, setPressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -65,6 +71,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const idleRef = useRef(idle);
   idleRef.current = idle;
   const lastUpWasTouch = useRef(false);
+  /** Whether the controls showed at the last render (a tap at the bottom edge of a menu shows hidden ones, ruling R12). */
+  const controlsVisibleRef = useRef(true);
 
   useEffect(
     () => () => {
@@ -172,11 +180,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   }, [pressed]);
 
   useEffect(() => {
-    // holding a control (e.g. the seek thumb), an open menu, or the remote over a BD-J menu keeps the controls up
-    if (!controlsMayIdle({ playing, pressed, menuOpen, remoteOpen, bdjMenuVisible: snapshot.bdjMenuVisible })) return;
-    const timer = window.setTimeout(() => setIdle(true), HIDE_CONTROLS_MS);
+    // holding a control (e.g. the seek thumb), an open menu, or the remote over a disc menu keeps the controls up
+    if (!controlsMayIdle({ playing, pressed, menuOpen, remoteOpen, inMenu: snapshot.menuActive || snapshot.bdjMenuVisible })) return;
+    const timer = window.setTimeout(() => {
+      if (!idleRef.current) setIdle(true); // controls a hover pointer already hid stay marked as hidden by it
+    }, HIDE_CONTROLS_MS);
     return () => window.clearTimeout(timer);
-  }, [playing, activity, pressed, menuOpen, remoteOpen, snapshot.bdjMenuVisible]);
+  }, [playing, activity, pressed, menuOpen, remoteOpen, snapshot.menuActive, snapshot.bdjMenuVisible]);
 
   const trackNotice = snapshot.notices.find((n) => n.code === 'audio-track')?.message;
   useEffect(() => {
@@ -257,7 +267,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
     // the snapshot the engine last sent: the tap is mapped with the canvas rectangle as it is now (after a rotation too)
     const now = controller.getSnapshot();
-    const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: now.menuActive, bdjMenuVisible: now.bdjMenuVisible });
+    const action = classifyTap(lastTap.current, tap, {
+      width: rect.width,
+      menuActive: now.menuActive,
+      bdjMenuVisible: now.bdjMenuVisible,
+      fromBottom: rect.bottom - e.clientY, // the canvas fills the player
+      controlsShown: controlsVisibleRef.current,
+    });
     lastTap.current = pairableTap(action, tap);
     if (tapTimer.current !== null) {
       window.clearTimeout(tapTimer.current);
@@ -269,6 +285,10 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         if (point) controller.pointer('click', point.x, point.y);
         break;
       }
+      case 'showControls':
+        setIdle(false);
+        setActivity((a) => a + 1);
+        break;
       case 'seekBack':
       case 'seekForward': {
         const op = keyActionUo({ type: 'seekBy', deltaUs: 0 }, uoContext(controller));
@@ -321,7 +341,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const isVideoTouch = (e: PointerEvent<HTMLElement>): boolean => e.pointerType === 'touch' && e.target === canvasRef.current;
 
   const inMenu = snapshot.menuActive || snapshot.bdjMenuVisible;
-  const controlsVisible = controlsShown({ idle, playing, inMenu });
+  const controlsVisible = controlsShown({ idle, playing, inMenu, hiddenByHover });
+  controlsVisibleRef.current = controlsVisible;
 
   /**
    * A pointer move or press anywhere in the player. Over a disc menu a mouse or pen wakes the bar only at the bottom edge
@@ -345,7 +366,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       held: pressed || menuOpen || remoteOpen,
     });
     if (effect === 'wake') wake();
-    else if (effect === 'hide') setIdle(true);
+    else if (effect === 'hide') setIdle(true, true);
   };
   // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading, nor while a
   // BD-J title runs (Java opens its playlists itself; the Playlists button still opens the picker).

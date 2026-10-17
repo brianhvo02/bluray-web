@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { telemetry } from './telemetry';
-import { expectBarShown, skipWithoutH264 } from './support';
+import { expectBarHidden, expectBarShown, skipWithoutH264 } from './support';
 
 const HIDE_CONTROLS_MS = 3000; // PlayerScreen's idle timeout
 
@@ -54,6 +54,56 @@ test("the control bar's empty space belongs to the menu under it; a tap there le
   await page.waitForTimeout(500);
   await expectMenu(page, true);
   await expectBarShown(bar);
+});
+
+/** A point `fromBottom` px above the player's bottom edge, centred. */
+async function bottomEdge(page: Page, fromBottom: number): Promise<{ x: number; y: number }> {
+  const box = (await page.getByTestId('player').boundingBox())!;
+  return { x: box.x + box.width / 2, y: box.y + box.height - fromBottom };
+}
+
+test('over an HDMV menu, a tap in the bottom 48 px brings back the controls that idled out; a higher tap goes to the menu (R12)', async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
+  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await expectMenu(page, true);
+  const bar = page.getByTestId('control-bar');
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000); // idled out by the timer
+  const edge = await bottomEdge(page, 10);
+  await page.touchscreen.tap(edge.x, edge.y);
+  await expectBarShown(bar, 1_000);
+  await expectMenu(page, true);
+  // a tap on button A, above the zone, still activates it
+  const a = await menuPoint(page, 232, 216);
+  await page.touchscreen.tap(a.x, a.y);
+  await expectMenu(page, false);
+});
+
+// fixtures/synthetic/disc-bdj-menu: see bdj.spec.ts (Play at x 160-679, y 360-459 of the plane, with a MouseListener)
+const BDJ_MENU_DISC = 'fixtures/synthetic/disc-bdj-menu';
+
+const bdjPlane = (page: Page): Promise<{ flushes: number; tapsIgnored: number } | null> =>
+  page.evaluate(() => (window as unknown as { __blurayTelemetry?: { bdjPlane: { flushes: number; tapsIgnored: number } | null } | null }).__blurayTelemetry?.bdjPlane ?? null);
+
+test('over a BD-J menu, a tap in the bottom 48 px brings back the controls without reaching the disc; a higher tap reaches it (R12)', async ({ page }) => {
+  await page.goto('/?telemetry=1');
+  await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
+  const player = page.getByTestId('player');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+  const bar = page.getByTestId('control-bar');
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
+  const edge = await bottomEdge(page, 10);
+  await page.touchscreen.tap(edge.x, edge.y);
+  await expectBarShown(bar, 1_000);
+  await page.waitForTimeout(1_000);
+  expect((await bdjPlane(page))!.tapsIgnored).toBe(0); // the tap never reached Java
+  await expect(page.getByTestId('remote-pad')).toBeHidden();
+  // a tap on Play (above the zone) reaches Java: its MouseListener repaints
+  const before = (await bdjPlane(page))!.flushes;
+  const play = await menuPoint(page, 300, 400);
+  await page.touchscreen.tap(play.x, play.y);
+  await expect.poll(async () => (await bdjPlane(page))!.flushes, { timeout: 5_000 }).toBeGreaterThan(before);
 });
 
 test('a double tap on the right third seeks forward', async ({ page }) => {
