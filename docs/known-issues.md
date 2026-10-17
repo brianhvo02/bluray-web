@@ -154,6 +154,18 @@ what would change that decision.
   moves) beyond 8 pending, never other events. Pointer moves are not logged, like PTS. Escape/Back is not sent to
   Java: libbluray defines no Back key (`keys.h`) and Java drops unknown codes; Escape stays with the player UI. The
   remote opens by itself once per menu, with the notice; one the user closes stays closed until the next menu.
+- **Local BD-J discs against libbluray (5d).** `tests/local/bdj-menus.test.ts` drives A_NEW_ERA (main menu to PLAY,
+  and to CHAPTERS, chapter 2) and RENTAL_FAMILY (language picker, English, main menu, PLAY) to the feature and compares
+  the control calls and the plane at every settled point with libbluray's committed runs (`tests/bdj/golden/local/`).
+  One check is restricted: RENTAL_FAMILY saves its playback position in GPR 518/519 about once a second during the
+  feature, and the values depend on when that timer fires, so those writes are left out on both sides
+  (`#! vary gpr` in its script). Intermediate animation frames are not compared (ruling R3). At rest with no input,
+  neither disc's menus flush: 0 flushes in 15 s in libbluray on A_NEW_ERA's main menu and on RENTAL_FAMILY's picker
+  (43 s) and main menu, and in ours one repeat of the settled frame in 10 s, so animated menus do not defeat the
+  ignored-tap rule on these discs (ruling R6). Found on the way and fixed: `java.awt.event.ContainerEvent` and ten other
+  classes were missing from the class library; a still play item did not hold under BD-J (RENTAL_FAMILY's picker plays
+  over an infinite still); a mark at the first play item's IN time never reached Java (`_find_next_playmark` works on
+  packets, and the first item starts at packet 0, before that mark's EP map entry).
 
 ## Audio
 

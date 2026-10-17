@@ -10,8 +10,12 @@ Reads the run on stdin and prints:
 Flush lines are left out: libbluray's root window flushes on a 40 ms timer, so how many flushes a change takes, and where
 the calls fall between them, differs between runs (tools/bdj-trace/README.md, Planes). Exits 1 when the script did not
 run to its end.
+
+  settled.py [SCRIPT]: with the run's key script, its `#! vary gpr <n>...` lines name general-purpose registers whose
+  written values depend on timing; their writeRegN calls are left out (tests/bdj/settled.ts leaves them out of our run).
 """
 import json
+import re
 import sys
 
 CONTROL = {
@@ -20,7 +24,18 @@ CONTROL = {
 }
 
 
+def vary_gprs(path):
+    out = set()
+    with open(path) as f:
+        for raw in f:
+            m = re.match(r'^\s*#!\s*vary\s+gpr((?:\s+\d+)+)\s*(?:#.*)?$', raw)
+            if m:
+                out.update(int(n) for n in m.group(1).split())
+    return out
+
+
 def main():
+    vary = vary_gprs(sys.argv[1]) if len(sys.argv) > 1 else set()
     calls = []
     steps = []
     last = None
@@ -34,6 +49,8 @@ def main():
         except ValueError:
             continue
         if o.get('call') in CONTROL:
+            if o['call'] == 'writeRegN' and o['args'][0] == 0 and o['args'][1] in vary:
+                continue
             if end is None:  # after the end line come bd_close's (the title stopping), not the run's
                 calls.append(line)
         elif o.get('plane') == 'flush':

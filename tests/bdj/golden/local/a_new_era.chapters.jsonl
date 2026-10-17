@@ -1,0 +1,131 @@
+{"call":"setUOMaskN","args":[true,true],"ret":null}
+{"call":"setKeyInterestN","args":[0],"ret":null}
+{"call":"writeRegN","args":[1,4,65535,-1],"ret":0}
+{"call":"writeRegN","args":[0,912,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,902,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,916,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,918,-1,-1],"ret":0}
+{"call":"writeRegN","args":[0,503,1283425,-1],"ret":0}
+{"call":"writeRegN","args":[0,502,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,501,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,500,-2013265920,-1],"ret":0}
+{"call":"writeRegN","args":[0,504,2,-1],"ret":0}
+{"call":"writeRegN","args":[0,505,6647399,-1],"ret":0}
+{"call":"writeRegN","args":[0,506,30067,-1],"ret":0}
+{"call":"writeRegN","args":[0,507,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,508,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,800,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,801,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,517,40,-1],"ret":0}
+{"call":"setUOMaskN","args":[true,true],"ret":null}
+{"call":"setKeyInterestN","args":[0],"ret":null}
+{"call":"writeRegN","args":[1,4,6,-1],"ret":0}
+{"call":"selectPlaylistN","args":[833,-1,-1,"-1"],"ret":1}
+{"call":"writeRegN","args":[1,1,1,-1],"ret":0}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"call":"selectRateN","args":[0,2],"ret":1}
+{"call":"writeRegN","args":[0,500,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,501,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,502,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,503,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,504,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,505,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,506,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,507,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,508,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,509,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,510,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,511,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,512,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,513,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,514,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,515,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,516,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,517,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,518,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,519,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,520,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,521,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,522,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,523,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,524,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,525,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,526,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,527,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,528,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,529,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,530,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,531,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,532,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,533,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,534,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,535,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,536,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,537,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,538,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,539,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,540,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,541,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,542,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,543,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,544,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,545,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,546,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,547,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,548,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,549,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,550,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,551,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,552,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,701,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,503,1283425,-1],"ret":0}
+{"call":"writeRegN","args":[0,502,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,501,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,500,-2013265920,-1],"ret":0}
+{"call":"writeRegN","args":[0,504,2,-1],"ret":0}
+{"call":"writeRegN","args":[0,505,6647399,-1],"ret":0}
+{"call":"writeRegN","args":[0,506,30067,-1],"ret":0}
+{"call":"writeRegN","args":[0,507,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,508,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,800,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,801,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,703,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,511,0,-1],"ret":0}
+{"call":"setUOMaskN","args":[true,true],"ret":null}
+{"call":"setKeyInterestN","args":[0],"ret":null}
+{"call":"writeRegN","args":[1,4,0,-1],"ret":0}
+{"call":"selectPlaylistN","args":[149,-1,-1,"-1"],"ret":1}
+{"call":"writeRegN","args":[1,1,1,-1],"ret":0}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"call":"writeRegN","args":[0,703,1,-1],"ret":0}
+{"call":"seekN","args":[-1,250,"-1"],"ret":"1"}
+{"call":"writeRegN","args":[0,511,1,-1],"ret":0}
+{"call":"selectRateN","args":[0,2],"ret":1}
+{"call":"selectPlaylistN","args":[-1,-1,-1,"-1"],"ret":1}
+{"call":"setUOMaskN","args":[false,true],"ret":null}
+{"call":"setKeyInterestN","args":[0],"ret":null}
+{"call":"writeRegN","args":[1,4,1,-1],"ret":0}
+{"call":"writeRegN","args":[0,551,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,553,0,-1],"ret":0}
+{"call":"writeRegN","args":[0,523,1,-1],"ret":0}
+{"call":"writeRegN","args":[0,527,1,-1],"ret":0}
+{"call":"selectPlaylistN","args":[40,-1,1,"-1"],"ret":1}
+{"call":"writeRegN","args":[1,1,1,-1],"ret":0}
+{"call":"writeRegN","args":[1,2,1,4095],"ret":0}
+{"call":"writeRegN","args":[1,2,0,-2147483648],"ret":0}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"call":"writeRegN","args":[0,513,1,-1],"ret":0}
+{"call":"writeRegN","args":[0,517,40,-1],"ret":0}
+{"script":"step","n":0,"step":"wait playlist 149"}
+{"script":"step","n":1,"step":"wait still 1500","hash":"4bc306b4"}
+{"script":"step","n":2,"step":"key right"}
+{"script":"step","n":3,"step":"wait still 1000","hash":"7408dc88"}
+{"script":"step","n":4,"step":"key ok"}
+{"script":"step","n":5,"step":"wait still 1500","hash":"cece7ded"}
+{"script":"step","n":6,"step":"key ok"}
+{"script":"step","n":7,"step":"wait still 1000","hash":"49466ab7"}
+{"script":"step","n":8,"step":"key down"}
+{"script":"step","n":9,"step":"wait still 1000","hash":"63fcbe92"}
+{"script":"step","n":10,"step":"key ok"}
+{"script":"step","n":11,"step":"wait playlist 40"}
+{"script":"end","hash":"4521ddc5"}

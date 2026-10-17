@@ -119,7 +119,7 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
  * returns true for the graphics plane (checked after every step). With `script` (tools/bdj-trace's key scripts), the
  * steps run as the harness runs them, in wall time (`wait still`) and on the player's events (`wait playlist`: a
  * `chapters` event), keys and clicks going in as the UI sends them (menuKey, pointer), and the player's clock kept to
- * wall time, as libbluray's reads are; the run then ends only once the script has finished too. A thrown Error carries the trace recorded so far as `trace`.
+ * wall time, as libbluray's reads are; the run then ends only once the script has finished too. A thrown Error carries what was recorded so far as `trace`, `steps`, `flushes` and `events`.
  */
 export async function replayPlayerBdj(
   discDir: URL | string,
@@ -130,6 +130,8 @@ export async function replayPlayerBdj(
     log?: (line: string) => void;
     classLibrary?: ClassLibrarySource;
     untilPlane?: (plane: GraphicsPlaneReader) => boolean;
+    /** Also ends the run once it returns true for the calls traced so far (checked after each reply). */
+    untilTrace?: (trace: readonly TraceEntry[]) => boolean;
     /** The player's compositor (default: one that draws nothing). */
     compositor?: CompositorLike;
     /** PlayerDeps.decodeImage, for background stills (default: none, so none are shown). */
@@ -178,7 +180,7 @@ export async function replayPlayerBdj(
     calls.delete(m.id);
     const e = traceEntryOf(c.name, c.args, m.value);
     trace.push(e);
-    if (e.call === opts.until && ++seen >= occurrence) done = true;
+    if ((e.call === opts.until && ++seen >= occurrence) || opts.untilTrace?.(trace)) done = true;
   };
 
   const player = new Player({
@@ -197,7 +199,7 @@ export async function replayPlayerBdj(
     playerSettings: HARNESS_SETTINGS,
   });
   const fail = (why: string): Error =>
-    Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), { trace: [...trace] });
+    Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), { trace: [...trace], steps: [...steps], flushes: [...flushes], events: [...events] });
   /** Runs the script's steps from the current one while their waits hold (bdj_trace.c's step loop). */
   const runSteps = async (): Promise<void> => {
     while (stepIdx < script.length) {

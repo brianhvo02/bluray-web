@@ -41,6 +41,26 @@ export function parseKeyScript(source: string): KeyStep[] {
   return steps;
 }
 
+/**
+ * What a script says about its own comparison, in `#!` lines that the harness reads as comments:
+ * `#! vary gpr <n>...` names general-purpose registers whose written values depend on timing (a disc saving its
+ * playback position as it plays), so their writeRegN calls are left out of the comparison, as settled.py leaves them out
+ * of the golden.
+ */
+export interface ScriptOptions {
+  readonly varyGprs: readonly number[];
+}
+
+export function parseScriptOptions(source: string): ScriptOptions {
+  const varyGprs: number[] = [];
+  for (const raw of source.split('\n')) {
+    const m = /^\s*#!\s*vary\s+gpr((?:\s+\d+)+)\s*(?:#.*)?$/.exec(raw);
+    if (m) varyGprs.push(...m[1]!.trim().split(/\s+/).map(Number));
+    else if (/^\s*#!/.test(raw)) throw new Error(`key script: unsupported option "${raw.trim()}"`);
+  }
+  return { varyGprs };
+}
+
 /** A script step as it ran, in tools/bdj-trace/settled.py's form: a `wait still` step carries the settled plane's hash. */
 export interface SettledStep {
   readonly script: 'step';

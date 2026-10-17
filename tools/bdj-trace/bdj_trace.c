@@ -383,7 +383,7 @@ int main(int argc, char **argv)
   }
 
   static unsigned char buf[6144 * 32];
-  double playlist_wall = 0, script_done = -1, step_start = 0; /* step_start: when the current step became current */
+  double playlist_wall = 0, script_done = -1, step_start = 0, resume_at = 0; /* step_start: when the current step became current */
   const char *why = "limit";
   while (now_s() < limit) {
     /* the script: each step runs once its wait holds; key and mouse steps run at once */
@@ -408,12 +408,22 @@ int main(int argc, char **argv)
       }
     }
 
+    if (now_s() < resume_at) {
+      double s = resume_at - now_s();
+      usleep((useconds_t)((s > 0.1 ? 0.1 : s) * 1e6));
+      continue;
+    }
+
     BD_EVENT ev;
     int n = bd_read_ext(bd, buf, sizeof buf, &ev);
     for (;;) {
       if (ev.event == BD_EVENT_PLAYLIST) {
         playlist_wall = now_s();
         note_event(1, ev.param);
+      } else if (ev.event == BD_EVENT_SEEK) {
+        /* a seek (a chapter, or a playlist started at a mark): pace from its media time (45 kHz) on */
+        playlist_wall = now_s() - (double)ev.param / 45000.0;
+        resume_at = 0;
       } else if (ev.event == BD_EVENT_TITLE) {
         note_event(0, ev.param);
       }
@@ -430,10 +440,11 @@ int main(int argc, char **argv)
       usleep(40000);
       continue;
     }
-    /* pace: stream time since the playlist started must not run ahead of wall time */
+    /* pace: stream time since the playlist started (or the last seek) must not run ahead of wall time; the wait is
+       taken in steps of at most 100 ms at the top of the loop, so the script and --seconds are checked during it */
     double ahead = (double)bd_tell_time(bd) / 90000.0 - (now_s() - playlist_wall);
     if (ahead > 0.5) {
-      usleep((useconds_t)((ahead - 0.5) * 1e6));
+      resume_at = now_s() + ahead - 0.5;
     }
   }
   int status = 0;
