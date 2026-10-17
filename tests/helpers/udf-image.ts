@@ -41,13 +41,13 @@ export class SparseImage {
   };
 }
 
-const le = (b: Uint8Array, o: number, v: number, bytes: number): void => {
+export const le = (b: Uint8Array, o: number, v: number, bytes: number): void => {
   for (let i = 0; i < bytes; i++) b[o + i] = Math.floor(v / 256 ** i) % 256;
 };
 const text = (b: Uint8Array, o: number, s: string): void => {
   for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i);
 };
-function tag(b: Uint8Array, id: number, at = 0): void {
+export function tag(b: Uint8Array, id: number, at = 0): void {
   le(b, at, id, 2);
   le(b, at + 2, 3, 2);
   let sum = 0;
@@ -63,29 +63,46 @@ const longAd = (b: Uint8Array, o: number, length: number, lba: number, partition
   le(b, o + 8, partition, 2);
 };
 
-/** An (Extended) File Entry: `kind` 0 short ADs, 1 long ADs, 3 embedded. Returns where its AD area starts. */
-function fileEntry(b: Uint8Array, opts: { ext: boolean; fileType: number; kind: number; length: number; lAd: number }): number {
+/**
+ * An (Extended) File Entry: `kind` 0 short ADs, 1 long ADs, 3 embedded, with `lEa` bytes of extended attributes.
+ * Returns where its AD area starts.
+ */
+function fileEntry(b: Uint8Array, opts: { ext: boolean; fileType: number; kind: number; length: number; lAd: number; lEa?: number }): number {
+  const lEa = opts.lEa ?? 0;
   le(b, 16 + 4, 4, 2); // strategy 4
   b[16 + 11] = opts.fileType;
   le(b, 16 + 18, opts.kind, 2);
   le(b, 56, opts.length, 8);
+  le(b, opts.ext ? 208 : 168, lEa, 4);
   le(b, opts.ext ? 212 : 172, opts.lAd, 4);
-  return opts.ext ? 216 : 176;
+  return (opts.ext ? 216 : 176) + lEa;
 }
 
-/** File identifiers (parent first) of a directory: [name, metadata block, is a dir]. */
-function fids(entries: [string, number, boolean][]): Uint8Array {
+type Fid = [name: string, lba: number, dir: boolean, deleted?: boolean];
+
+/**
+ * File identifiers (parent first) of a directory, with `lIu` bytes of implementation use, and names in 16-bit CS0
+ * when `cs16`.
+ */
+function fids(entries: Fid[], opts: { lIu?: number; cs16?: boolean } = {}): Uint8Array {
+  const lIu = opts.lIu ?? 0;
   const parts: Uint8Array[] = [];
-  for (const [name, lba, dir] of [['', 0, true] as [string, number, boolean], ...entries]) {
+  for (const [name, lba, dir, deleted] of [['', 0, true] as Fid, ...entries]) {
     const parent = name === '';
-    const lFi = parent ? 0 : name.length + 1;
-    const fid = new Uint8Array(4 * Math.ceil((38 + lFi) / 4));
-    fid[18] = (dir ? 0x02 : 0) | (parent ? 0x08 : 0);
+    const lFi = parent ? 0 : opts.cs16 ? 2 * name.length + 1 : name.length + 1;
+    const fid = new Uint8Array(4 * Math.ceil((38 + lIu + lFi) / 4));
+    fid[18] = (dir ? 0x02 : 0) | (deleted ? 0x04 : 0) | (parent ? 0x08 : 0);
     fid[19] = lFi;
     longAd(fid, 20, BLOCK, lba, 1);
-    if (!parent) {
-      fid[38] = 8;
-      text(fid, 39, name);
+    le(fid, 36, lIu, 2);
+    fid.fill(0xee, 38, 38 + lIu);
+    const at = 38 + lIu;
+    if (!parent && opts.cs16) {
+      fid[at] = 16;
+      for (let i = 0; i < name.length; i++) le(fid, at + 1 + 2 * i, name.charCodeAt(i) * 256 + Math.floor(name.charCodeAt(i) / 256), 2);
+    } else if (!parent) {
+      fid[at] = 8;
+      text(fid, at + 1, name);
     }
     tag(fid, 257);
     parts.push(fid);
@@ -171,6 +188,7 @@ export function buildUdf250(partitionStart = UDF250_PARTITION_START): { image: S
     ['index.bdmv', 4, false],
     ['STREAM', 5, true],
     ['CLIPINF', 9, true],
+    ['LINK', 14, false], // a symbolic link: not a regular file
   ]);
   mb(3).set(bdmvFids, fileEntry(mb(3), { ext: true, fileType: 4, kind: 3, length: bdmvFids.length, lAd: bdmvFids.length }));
   tag(mb(3), 266);
@@ -178,12 +196,22 @@ export function buildUdf250(partitionStart = UDF250_PARTITION_START): { image: S
   const index = new TextEncoder().encode('INDX0200 embedded');
   mb(4).set(index, fileEntry(mb(4), { ext: true, fileType: 5, kind: 3, length: index.length, lAd: index.length }));
   tag(mb(4), 266);
-  // 5: STREAM, data at 6.
-  const streamFids = fids([['00001.m2ts', 7, false]]);
-  shortAd(mb(5), fileEntry(mb(5), { ext: true, fileType: 4, kind: 0, length: streamFids.length, lAd: 8 }), streamFids.length, 6);
+  // 5: STREAM, data at 12-13: more than a block of identifiers, most of them deleted, then 00001.m2ts and an entry
+  // whose size (2^44) is taken as corrupt.
+  const deleted: Fid[] = Array.from({ length: 45 }, (_, i) => [`DEL${String(i).padStart(5, '0')}.M2TS`, 7, false, true]);
+  const streamFids = fids([...deleted, ['00001.m2ts', 7, false], ['HUGE.M2TS', 15, false]]);
+  if (streamFids.length <= BLOCK) throw new Error('STREAM should span two blocks');
+  shortAd(mb(5), fileEntry(mb(5), { ext: true, fileType: 4, kind: 0, length: streamFids.length, lAd: 8 }), streamFids.length, 12);
   tag(mb(5), 266);
-  mb(6).set(streamFids);
-  // 7: 00001.m2ts, four extents out of order; the last two through an allocation extent descriptor at 8.
+  mb(12).set(streamFids.subarray(0, BLOCK));
+  mb(13).set(streamFids.subarray(BLOCK));
+  // 14: LINK, a symbolic link entry; 15: HUGE.M2TS.
+  shortAd(mb(14), fileEntry(mb(14), { ext: true, fileType: 12, kind: 0, length: 10, lAd: 8 }), 10, 4000);
+  tag(mb(14), 266);
+  shortAd(mb(15), fileEntry(mb(15), { ext: true, fileType: 5, kind: 0, length: 2 ** 44, lAd: 8 }), BLOCK, 4000);
+  tag(mb(15), 266);
+  // 7: 00001.m2ts (with extended attributes), four extents out of order; the last two through an allocation extent
+  // descriptor at 8.
   const extents: [number, number][] = [
     [3 * BLOCK, 2000],
     [2 * BLOCK, 1500],
@@ -191,7 +219,7 @@ export function buildUdf250(partitionStart = UDF250_PARTITION_START): { image: S
     [1000, 2500],
   ];
   const m2tsSize = extents.reduce((n, [len]) => n + len, 0);
-  const fe7 = fileEntry(mb(7), { ext: true, fileType: 5, kind: 0, length: m2tsSize, lAd: 24 });
+  const fe7 = fileEntry(mb(7), { ext: true, fileType: 5, kind: 0, length: m2tsSize, lAd: 24, lEa: 64 });
   shortAd(mb(7), fe7, extents[0]![0], extents[0]![1]);
   shortAd(mb(7), fe7 + 8, extents[1]![0], extents[1]![1]);
   shortAd(mb(7), fe7 + 16, BLOCK, 8, 3);
@@ -200,8 +228,9 @@ export function buildUdf250(partitionStart = UDF250_PARTITION_START): { image: S
   shortAd(mb(8), 24, extents[2]![0], extents[2]![1]);
   shortAd(mb(8), 32, extents[3]![0], extents[3]![1]);
   tag(mb(8), 258);
-  // 9: CLIPINF, data at 10; 11: 00001.clpi, a plain File Entry with long ADs and an unrecorded extent.
-  const clipFids = fids([['00001.clpi', 11, false]]);
+  // 9: CLIPINF, data at 10, identifiers with implementation use and 16-bit names; 11: 00001.clpi, a plain File
+  // Entry with long ADs and an unrecorded extent.
+  const clipFids = fids([['00001.clpi', 11, false]], { lIu: 32, cs16: true });
   shortAd(mb(9), fileEntry(mb(9), { ext: true, fileType: 4, kind: 0, length: clipFids.length, lAd: 8 }), clipFids.length, 10);
   tag(mb(9), 266);
   mb(10).set(clipFids);
@@ -232,4 +261,16 @@ export function buildUdf250(partitionStart = UDF250_PARTITION_START): { image: S
   img.block(partitionStart + 4001).set(clpi.subarray(BLOCK, 2 * BLOCK));
   dataBlocks.push(partitionStart + 4000, partitionStart + 4001);
   return { image: img, m2ts, clpi, index, dataBlocks };
+}
+
+/**
+ * Changes metadata block `n` of a `buildUdf250(partitionStart)` image in the main copy and the mirror with `edit`,
+ * then recomputes its tag checksum.
+ */
+export function patchMetadata(image: SparseImage, partitionStart: number, n: number, edit: (b: Uint8Array) => void): void {
+  for (const base of [UDF250_META, MIRROR]) {
+    const b = image.block(partitionStart + base + n);
+    edit(b);
+    tag(b, b[0]! + b[1]! * 256);
+  }
 }

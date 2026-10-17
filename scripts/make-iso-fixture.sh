@@ -6,7 +6,7 @@
 # `-as mkisofs -udf` ("Unsupported option"): it writes no UDF at all. A UDF 2.50 image with a metadata partition
 # would need `mkudffs --media-type=bdr` and then a mount to copy files in, which an unprivileged container cannot
 # do (udfclient 0.8.11 does not recognise the formatted image either). The metadata partition is covered by the
-# images that src/engine/disc/udf.test.ts builds in memory.
+# UDF 2.50 images that tests/helpers/udf-image.ts builds in memory for the engine and server tests.
 #
 # genisoimage writes time() and clock() into the UDF volume set id, so it runs under faketime with clock() pinned
 # to 0 by a preloaded shim, and with the file times pinned: rebuilding gives the same bytes.

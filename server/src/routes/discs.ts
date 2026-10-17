@@ -66,7 +66,14 @@ export function discRoutes(library: Library): Handler {
   const isoRoute = async (req: IncomingMessage, disc: DiscEntry, action: string, encodedPath: string | undefined): Promise<Response> => {
     const abs = library.locate(disc);
     if (!abs || !(await isoUnchanged(disc, abs))) return discChanged();
-    const tree = await isoTrees.get(disc.id, abs);
+    let tree;
+    try {
+      tree = await isoTrees.get(disc.id, abs);
+    } catch (err) {
+      // Replaced while we read it: the client should rescan. Otherwise it is a real failure.
+      if (!(await isoUnchanged(disc, abs))) return discChanged();
+      throw err;
+    }
     if (action === 'manifest') return json(200, await buildIsoManifest(abs, tree, disc));
     if (action === 'probe') {
       const clip = largestIsoClip(tree);

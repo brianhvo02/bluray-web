@@ -1,9 +1,9 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { UdfImage, readUdf, udfPieces } from './udf';
+import { UdfError, UdfImage, readUdf, udfPieces } from './udf';
 import type { UdfFile, UdfRead } from './udf';
-import { UDF250_META as META, UDF250_PARTITION_START as PSTART, buildUdf250 } from '../../../tests/helpers/udf-image';
+import { UDF250_META as META, UDF250_PARTITION_START as PSTART, buildUdf250, le, patchMetadata, tag } from '../../../tests/helpers/udf-image';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
 const BLOCK = 2048;
@@ -113,5 +113,59 @@ describe('readUdf over a UDF 2.50 image with a metadata partition', () => {
     expect(file?.size).toBe(m2ts.length);
     image.blocks.delete(PSTART + 0); // no metadata file entry: everything comes from the mirror
     expect((await readUdf(image.read)).map((f) => f.path)).toHaveLength(3);
+  });
+
+  it('reads identifiers with implementation use and 16-bit names, extended attributes and a directory over a block', async () => {
+    const { image, m2ts, clpi } = buildUdf250();
+    const udf = await UdfImage.open(image.read);
+    // CLIPINF: L_IU 32 and 16-bit CS0 names; 00001.m2ts: L_EA 64, last in a STREAM directory of two blocks.
+    expect((await udf.find('BDMV/CLIPINF/00001.CLPI'))?.size).toBe(clpi.length);
+    expect((await udf.find('BDMV/STREAM/00001.M2TS'))?.size).toBe(m2ts.length);
+  });
+
+  it('leaves out deleted identifiers, entries that are not byte streams and sizes over 2^43', async () => {
+    const { image } = buildUdf250();
+    const udf = await UdfImage.open(image.read);
+    const paths = (await udf.files()).map((f) => f.path);
+    expect(paths.some((p) => p.includes('DEL'))).toBe(false);
+    expect(await udf.find('BDMV/LINK')).toBeNull();
+    expect(await udf.find('BDMV/STREAM/HUGE.M2TS')).toBeNull();
+    expect(await udf.find('BDMV/STREAM/DEL00000.M2TS')).toBeNull();
+  });
+});
+
+describe('readUdf over corrupt images', () => {
+  /** Rejects quickly with a UdfError, never asking for more than 64 KiB at once. */
+  async function rejectsQuickly(image: ReturnType<typeof buildUdf250>['image'], message: string): Promise<void> {
+    const started = Date.now();
+    const err = await readUdf(image.read).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UdfError);
+    expect((err as Error).message).toBe(message);
+    expect(Math.max(...image.reads.map(([, length]) => length))).toBeLessThanOrEqual(64 * 1024);
+    expect(Date.now() - started).toBeLessThan(1000);
+  }
+
+  it('refuses a directory over 16 MiB', async () => {
+    const { image } = buildUdf250();
+    patchMetadata(image, PSTART, 5, (b) => le(b, 216, 0x3fff0000, 4)); // STREAM's extent length
+    await rejectsQuickly(image, 'UDF: directory too large');
+  });
+
+  it('refuses an allocation extent over one block', async () => {
+    const { image } = buildUdf250();
+    patchMetadata(image, PSTART, 7, (b) => le(b, 216 + 64 + 16, 3 * 0x40000000 + 0x100000, 4)); // the AED pointer
+    await rejectsQuickly(image, 'UDF: allocation extent longer than a block');
+  });
+
+  it('reads at most 256 blocks of a volume descriptor sequence extent', async () => {
+    const { image } = buildUdf250();
+    const anchor = image.block(256);
+    for (const at of [16, 24]) {
+      le(anchor, at, 0xfffff800, 4); // 2^21 blocks
+      le(anchor, at + 4, 1000, 4); // where there is nothing
+    }
+    tag(anchor, 2);
+    await rejectsQuickly(image, 'not a UDF image');
+    expect(image.reads.length).toBeLessThanOrEqual(240 + 1 + 2 * 256);
   });
 });
