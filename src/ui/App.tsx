@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { createController } from '../player/create-controller';
 import type { PlayerController } from '../player/player-controller';
+import { PlatformSession } from '../player/platform-session';
 import { LandingScreen } from './LandingScreen';
 import { PlayerScreen } from './PlayerScreen';
 import { idbShaderLibrary } from './shader-library';
@@ -23,6 +24,13 @@ function getShaderModel(controller: PlayerController): ShaderModel {
 export function App(): ReactElement {
   const [controller] = useState(getController);
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  useEffect(() => {
+    const session = new PlatformSession(
+      { wakeLock: navigator.wakeLock, mediaSession: navigator.mediaSession, MediaMetadata: globalThis.MediaMetadata },
+      controller,
+    );
+    return () => session.dispose();
+  }, [controller]);
   const [shaders] = useState(() => getShaderModel(controller));
   const shaderState = useSyncExternalStore(shaders.subscribe, shaders.getSnapshot);
   useEffect(() => {
