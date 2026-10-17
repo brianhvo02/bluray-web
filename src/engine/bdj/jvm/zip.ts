@@ -26,15 +26,18 @@ export interface ZipEntry {
   readonly comment: Uint8Array;
 }
 
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
+/** Slicing-by-4 tables: CRC_TABLES[k][b] is the CRC of b followed by k zero bytes. */
+const CRC_TABLES = (() => {
+  const t = Array.from({ length: 4 }, () => new Int32Array(256));
   for (let n = 0; n < 256; n++) {
     let c = n;
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c >>> 0;
+    t[0]![n] = c;
   }
+  for (let n = 0; n < 256; n++) for (let k = 1; k < 4; k++) t[k]![n] = t[0]![t[k - 1]![n]! & 0xff]! ^ (t[k - 1]![n]! >>> 8);
   return t;
 })();
+const CRC_TABLE = CRC_TABLES[0]!;
 
 export function adler32(data: Uint8Array, start = 0, end = data.length, seed = 1): number {
   let a = seed & 0xffff;
@@ -52,8 +55,14 @@ export function adler32(data: Uint8Array, start = 0, end = data.length, seed = 1
 }
 
 export function crc32(data: Uint8Array, start = 0, end = data.length, seed = 0): number {
+  const [t0, t1, t2, t3] = CRC_TABLES as [Int32Array, Int32Array, Int32Array, Int32Array];
   let c = ~seed;
-  for (let i = start; i < end; i++) c = CRC_TABLE[(c ^ data[i]!) & 0xff]! ^ (c >>> 8);
+  let i = start;
+  for (; i + 4 <= end; i += 4) {
+    c ^= data[i]! | (data[i + 1]! << 8) | (data[i + 2]! << 16) | (data[i + 3]! << 24);
+    c = t3[c & 0xff]! ^ t2[(c >>> 8) & 0xff]! ^ t1[(c >>> 16) & 0xff]! ^ t0[c >>> 24]!;
+  }
+  for (; i < end; i++) c = CRC_TABLE[(c ^ data[i]!) & 0xff]! ^ (c >>> 8);
   return ~c >>> 0;
 }
 
@@ -281,12 +290,44 @@ export function inflateRaw(): InflateCoroutine {
         const li = sym - 257;
         const lx = LEN_EXTRA[li]!;
         let length = LEN_BASE[li]!;
-        if (lx > 0) length += yield* getBits(lx);
-        const ds = yield* getSymbol(dist);
-        if (ds > 29) throw new ZipError('inflate: invalid distance symbol');
-        const dx = DIST_EXTRA[ds]!;
-        let d = DIST_BASE[ds]!;
-        if (dx > 0) d += yield* getBits(dx);
+        let ds: number;
+        let d: number;
+        if (inLen - inPos >= 6) {
+          // The length's extra bits, the distance code and its extra bits take at most 33 bits: decode them here
+          // rather than through the generators, which only matter when input can run out.
+          while (bitcnt <= 24 && inPos < inLen) {
+            bitbuf |= inBuf[inPos++]! << bitcnt;
+            bitcnt += 8;
+          }
+          length += bitbuf & ((1 << lx) - 1);
+          bitbuf >>>= lx;
+          bitcnt -= lx;
+          while (bitcnt <= 24 && inPos < inLen) {
+            bitbuf |= inBuf[inPos++]! << bitcnt;
+            bitcnt += 8;
+          }
+          const de = dist.table[bitbuf & dist.mask]!;
+          if (de === 0) throw new ZipError('inflate: invalid Huffman code');
+          bitbuf >>>= de & 15;
+          bitcnt -= de & 15;
+          ds = de >> 4;
+          if (ds > 29) throw new ZipError('inflate: invalid distance symbol');
+          const dx = DIST_EXTRA[ds]!;
+          while (bitcnt <= 24 && inPos < inLen) {
+            bitbuf |= inBuf[inPos++]! << bitcnt;
+            bitcnt += 8;
+          }
+          d = DIST_BASE[ds]! + (bitbuf & ((1 << dx) - 1));
+          bitbuf >>>= dx;
+          bitcnt -= dx;
+        } else {
+          if (lx > 0) length += yield* getBits(lx);
+          ds = yield* getSymbol(dist);
+          if (ds > 29) throw new ZipError('inflate: invalid distance symbol');
+          const dx = DIST_EXTRA[ds]!;
+          d = DIST_BASE[ds]!;
+          if (dx > 0) d += yield* getBits(dx);
+        }
         if (d > wpos) throw new ZipError('inflate: distance too far back');
         let from = wpos - d;
         for (let i = 0; i < length; i++) ring[wpos++ & RING_MASK] = ring[from++ & RING_MASK]!;
@@ -349,26 +390,151 @@ export function inflateRaw(): InflateCoroutine {
   };
 }
 
+/**
+ * Inflates a whole raw DEFLATE stream in one pass, straight into the output (matches copy from the output itself), for
+ * zip entries read whole; inflateRaw's coroutine serves streams. Errors are inflateRaw's.
+ */
 export function inflateAll(data: Uint8Array, expectedSize?: number): Uint8Array {
-  const inf = inflateRaw();
-  inf.push(data);
   let out = new Uint8Array(expectedSize ?? Math.max(1024, data.length * 3));
   let n = 0;
-  for (;;) {
-    if (n === out.length) {
-      if (expectedSize !== undefined) {
-        inf.pull(out, n, 0); // lets the decoder reach end-of-stream; produced output would leave it unfinished
-        if (inf.finished) break;
-        throw new ZipError('inflate: output larger than expected');
-      }
-      const bigger = new Uint8Array(out.length * 2);
-      bigger.set(out);
-      out = bigger;
+  let pos = 0;
+  let bitbuf = 0;
+  let bitcnt = 0;
+  const truncated = (): ZipError => new ZipError('inflate: truncated input');
+  const tooBig = (): ZipError => new ZipError('inflate: output larger than expected');
+  /** Room for `k` more output bytes, growing the output when its size is not known. */
+  const room = (k: number): void => {
+    if (n + k <= out.length) return;
+    if (expectedSize !== undefined) throw tooBig();
+    let size = out.length * 2;
+    while (size < n + k) size *= 2;
+    const bigger = new Uint8Array(size);
+    bigger.set(out.subarray(0, n));
+    out = bigger;
+  };
+  const bits = (k: number): number => {
+    while (bitcnt < k) {
+      if (pos >= data.length) throw truncated();
+      bitbuf |= data[pos++]! << bitcnt;
+      bitcnt += 8;
     }
-    const k = inf.pull(out, n, out.length - n);
-    n += k;
-    if (inf.finished) break;
-    if (k === 0 && inf.needsInput) throw new ZipError('inflate: truncated input');
+    const v = bitbuf & ((1 << k) - 1);
+    bitbuf >>>= k;
+    bitcnt -= k;
+    return v;
+  };
+  const symbol = (h: Huffman): number => {
+    for (;;) {
+      while (bitcnt <= 24 && pos < data.length) {
+        bitbuf |= data[pos++]! << bitcnt;
+        bitcnt += 8;
+      }
+      const e = h.table[bitbuf & h.mask]!;
+      const l = e & 15;
+      if (e !== 0 && l <= bitcnt) {
+        bitbuf >>>= l;
+        bitcnt -= l;
+        return e >> 4;
+      }
+      if (bitcnt >= h.maxLen) throw new ZipError('inflate: invalid Huffman code');
+      throw truncated();
+    }
+  };
+  const dynamic = (): [Huffman, Huffman] => {
+    const hlit = bits(5) + 257;
+    const hdist = bits(5) + 1;
+    const hclen = bits(4) + 4;
+    if (hlit > 286 || hdist > 30) throw new ZipError('inflate: bad dynamic header');
+    const cl = new Uint8Array(19);
+    for (let i = 0; i < hclen; i++) cl[CL_ORDER[i]!] = bits(3);
+    const clHuff = buildHuffman(cl, 19, false);
+    const lengths = new Uint8Array(hlit + hdist);
+    for (let i = 0; i < hlit + hdist; ) {
+      const sym = symbol(clHuff);
+      if (sym < 16) {
+        lengths[i++] = sym;
+        continue;
+      }
+      let rep: number;
+      let val = 0;
+      if (sym === 16) {
+        if (i === 0) throw new ZipError('inflate: repeat with no previous length');
+        val = lengths[i - 1]!;
+        rep = 3 + bits(2);
+      } else if (sym === 17) rep = 3 + bits(3);
+      else rep = 11 + bits(7);
+      if (i + rep > hlit + hdist) throw new ZipError('inflate: too many code lengths');
+      lengths.fill(val, i, i + rep);
+      i += rep;
+    }
+    if (lengths[256] === 0) throw new ZipError('inflate: no end-of-block code');
+    return [buildHuffman(lengths, hlit, false), buildHuffman(lengths.subarray(hlit), hdist, true)];
+  };
+  for (let last = false; !last; ) {
+    last = bits(1) === 1;
+    const type = bits(2);
+    if (type === 0) {
+      bitbuf >>>= bitcnt & 7;
+      bitcnt -= bitcnt & 7;
+      const len = bits(16);
+      const nlen = bits(16);
+      if ((len ^ 0xffff) !== nlen) throw new ZipError('inflate: stored block length mismatch');
+      room(len);
+      let left = len;
+      while (left > 0 && bitcnt >= 8) {
+        out[n++] = bitbuf & 0xff;
+        bitbuf >>>= 8;
+        bitcnt -= 8;
+        left--;
+      }
+      if (pos + left > data.length) throw truncated();
+      out.set(data.subarray(pos, pos + left), n);
+      n += left;
+      pos += left;
+      continue;
+    }
+    if (type === 3) throw new ZipError('inflate: invalid block type');
+    const [lit, dist] = type === 2 ? dynamic() : [FIXED_LIT, FIXED_DIST];
+    const litTable = lit.table;
+    const litMask = lit.mask;
+    for (;;) {
+      while (bitcnt <= 24 && pos < data.length) {
+        bitbuf |= data[pos++]! << bitcnt;
+        bitcnt += 8;
+      }
+      const e = litTable[bitbuf & litMask]!;
+      const l = e & 15;
+      if (e === 0 || l > bitcnt) {
+        if (e === 0 && bitcnt >= lit.maxLen) throw new ZipError('inflate: invalid literal/length code');
+        throw truncated();
+      }
+      bitbuf >>>= l;
+      bitcnt -= l;
+      const sym = e >> 4;
+      if (sym < 256) {
+        if (n === out.length) room(1);
+        out[n++] = sym;
+        continue;
+      }
+      if (sym === 256) break;
+      if (sym > 285) throw new ZipError('inflate: invalid length symbol');
+      const li = sym - 257;
+      const lx = LEN_EXTRA[li]!;
+      const length = LEN_BASE[li]! + (lx > 0 ? bits(lx) : 0);
+      const ds = symbol(dist);
+      if (ds > 29) throw new ZipError('inflate: invalid distance symbol');
+      const dx = DIST_EXTRA[ds]!;
+      const d = DIST_BASE[ds]! + (dx > 0 ? bits(dx) : 0);
+      if (d > n) throw new ZipError('inflate: distance too far back');
+      room(length);
+      let from = n - d;
+      if (d >= length) {
+        out.copyWithin(n, from, from + length);
+        n += length;
+      } else {
+        for (let i = 0; i < length; i++) out[n++] = out[from++]!;
+      }
+    }
   }
   if (expectedSize !== undefined && n !== expectedSize) throw new ZipError('inflate: output smaller than expected');
   return n === out.length ? out : out.slice(0, n);

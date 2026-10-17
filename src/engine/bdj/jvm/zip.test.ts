@@ -126,6 +126,22 @@ describe('inflateAll', () => {
 });
 
 describe('inflateRaw', () => {
+  it('gives the same output fed in chunks of every size around a match (the fast and the waiting decode)', () => {
+    const src = new Uint8Array([...repeat(text('chunked matches, chunked matches '), 2000), ...randomBytes(3000)]);
+    const comp = new Uint8Array(deflateRawSync(src));
+    for (let size = 1; size <= 13; size++) {
+      const inf = inflateRaw();
+      const out = new Uint8Array(src.length);
+      let n = 0;
+      for (let i = 0; i < comp.length; i += size) {
+        inf.push(comp.subarray(i, i + size));
+        n += inf.pull(out, n, out.length - n);
+      }
+      n += inf.pull(out, n, out.length - n);
+      expect(inf.finished).toBe(true);
+      expect(out.subarray(0, n)).toEqual(src);
+    }
+  });
   it('gives the same output fed one byte at a time', () => {
     const src = new Uint8Array([...repeat(text('streaming data '), 3000), ...randomBytes(5000)]);
     const comp = new Uint8Array(deflateRawSync(src));
