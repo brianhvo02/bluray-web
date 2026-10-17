@@ -1,5 +1,6 @@
-// Chromium-only File System Access additions (Safari and Firefox use webkitdirectory and drops instead) not (yet) in lib.dom. If your TypeScript lib already declares one
-// of these members, delete that line here.
+// Chromium-only File System Access additions (Safari and Firefox use webkitdirectory and drops
+// instead) not (yet) in lib.dom. If your TypeScript lib already declares one of these members,
+// delete that line here.
 interface Window {
   showDirectoryPicker?(options?: { id?: string; mode?: 'read' | 'readwrite' }): Promise<FileSystemDirectoryHandle>;
 }
