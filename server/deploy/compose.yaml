@@ -11,6 +11,7 @@ services:
       TZ: America/Los_Angeles
       NIGHTLY_SCAN_AT: "04:00"
       PUBLIC_BASE: https://mediaserver.tailnet-8e55.ts.net/bluray/api/
+      TRUSTED_PROXY: caddy
     volumes:
       - /mnt/drv0/BDMVs:/library/drv0:ro
       - /mnt/drv2/BDMVs:/library/drv2:ro

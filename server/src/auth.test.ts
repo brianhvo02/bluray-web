@@ -1,5 +1,6 @@
 import type { webcrypto } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import { ownerCode } from './cli';
 import type { CodeRegistrar } from './codes';
 import { createServer } from './http';
 import { Library } from './library';
+import { FailureLimiter, trustedProxy } from './routes/pair';
 import { Store } from './store';
 
 type JsonWebKey = webcrypto.JsonWebKey;
@@ -197,6 +199,95 @@ describe('Auth', () => {
     clock += 10 * MINUTE;
     expect(auth.codes()).toEqual([]);
   });
+
+  it('keeps at most 5 challenges per device, dropping the oldest', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const { jwk, sign } = await deviceKey();
+    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
+    const other = auth.redeem(auth.createCode({ owner: false }).code, 'Phone', jwk)!;
+    const otherChallenge = auth.challenge(other.id)!;
+    const challenges = Array.from({ length: 6 }, () => auth.challenge(device.id)!);
+    expect(auth.startSession(device.id, challenges[0]!, await sign(challenges[0]!))).toBeNull();
+    for (const c of challenges.slice(1)) expect(auth.startSession(device.id, c, await sign(c))).not.toBeNull();
+    expect(auth.startSession(other.id, otherChallenge, await sign(otherChallenge))).not.toBeNull();
+  });
+
+  it('writes the secret whole, once, without leftovers', () => {
+    const first = new Store(tmp).secret();
+    expect(first).toHaveLength(32);
+    expect(new Store(tmp).secret().equals(first)).toBe(true);
+    expect(readdirSync(tmp).sort()).toEqual(['secret']);
+  });
+
+  it.each([
+    ['{', /auth\.json is corrupt: not valid JSON/],
+    ['[]', /auth\.json is corrupt: not a JSON object/],
+    ['{"devices":{},"codes":[]}', /auth\.json is corrupt: "devices" is not an array/],
+    ['{"devices":[],"codes":null}', /auth\.json is corrupt: "codes" is not an array/],
+    ['{"devices":[{"id":1}],"codes":[]}', /auth\.json is corrupt: devices\[0\]\.id is not a string/],
+    ['{"devices":[],"codes":[{"id":"a","hash":"h","owner":true,"expiresAt":"soon"}]}', /auth\.json is corrupt: codes\[0\]\.expiresAt is not a number/],
+  ])('names the file and the fault of a corrupt auth.json (%s)', (content, message) => {
+    writeFileSync(join(tmp, 'auth.json'), content);
+    const auth = new Auth(new Store(tmp), now);
+    expect(() => auth.devices()).toThrow(message);
+    expect(() => auth.verify('a.b')).not.toThrow();
+    expect(() => auth.createCode({ owner: true })).toThrow(message);
+  });
+});
+
+describe('FailureLimiter', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('holds a slot per attempt in flight', () => {
+    const limiter = new FailureLimiter(now, 2);
+    const a = limiter.admit('x')!;
+    const b = limiter.admit('x')!;
+    expect(limiter.admit('x')).toBeNull();
+    a.release();
+    a.fail();
+    const c = limiter.admit('x')!;
+    b.fail();
+    c.fail();
+    expect(limiter.recentFailures('x')).toBe(2);
+    expect(limiter.admit('x')).toBeNull();
+    expect(limiter.admit('y')).not.toBeNull();
+  });
+
+  it('forgets stale keys on a timer', () => {
+    vi.useFakeTimers();
+    const limiter = new FailureLimiter(now);
+    limiter.admit('x')!.fail();
+    expect(limiter.size).toBe(1);
+    clock += MINUTE;
+    vi.advanceTimersByTime(MINUTE);
+    expect(limiter.size).toBe(0);
+  });
+});
+
+describe('trustedProxy', () => {
+  it('trusts an IP as given, IPv4-mapped too', async () => {
+    const trust = await trustedProxy('172.18.0.2', async () => Promise.reject(new Error('no lookups for IPs')));
+    expect(trust('172.18.0.2')).toBe(true);
+    expect(trust('::ffff:172.18.0.2')).toBe(true);
+    expect(trust('172.18.0.3')).toBe(false);
+  });
+
+  it('resolves a hostname once', async () => {
+    const lookup = vi.fn(async () => [{ address: '172.18.0.5' }, { address: 'fd00::5' }]);
+    const trust = await trustedProxy('caddy', lookup);
+    expect(trust('172.18.0.5')).toBe(true);
+    expect(trust('fd00::5')).toBe(true);
+    expect(trust('172.18.0.6')).toBe(false);
+    expect(lookup).toHaveBeenCalledOnce();
+  });
+
+  it('trusts nobody when the hostname does not resolve', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const trust = await trustedProxy('caddy', async () => Promise.reject(new Error('ENOTFOUND')));
+    expect(trust('172.18.0.5')).toBe(false);
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
+  });
 });
 
 describe('HTTP', () => {
@@ -368,7 +459,7 @@ describe('HTTP', () => {
   });
 
   it('counts failures per forwarded client when the request comes through the proxy', async () => {
-    await start({ trustProxy: (address) => address === '127.0.0.1' || address === '::ffff:127.0.0.1' });
+    await start({ trustProxy: await trustedProxy('127.0.0.1') });
     const { jwk } = await deviceKey();
     const bad = { code: 'K7QM-4XP2-R9TD', deviceName: 'x', publicKeyJwk: jwk };
     for (let i = 0; i < 10; i++) expect((await post('/api/pair/redeem', bad, { 'X-Forwarded-For': '100.64.0.1, 172.18.0.2' })).status).toBe(401);
@@ -377,11 +468,62 @@ describe('HTTP', () => {
   });
 
   it('ignores X-Forwarded-For from an untrusted peer', async () => {
-    await start({ trustProxy: () => false });
+    await start({ trustProxy: await trustedProxy('10.9.9.9') });
     const { jwk } = await deviceKey();
     const bad = { code: 'K7QM-4XP2-R9TD', deviceName: 'x', publicKeyJwk: jwk };
     for (let i = 0; i < 10; i++) expect((await post('/api/pair/redeem', bad, { 'X-Forwarded-For': `100.64.0.${i}` })).status).toBe(401);
     expect((await post('/api/pair/redeem', bad, { 'X-Forwarded-For': '100.64.0.99' })).status).toBe(429);
+  });
+
+  it('admits at most 10 concurrent bad redeems from one client', async () => {
+    await start();
+    const { jwk } = await deviceKey();
+    const body = JSON.stringify({ code: 'K7QM-4XP2-R9TD', deviceName: 'x', publicKeyJwk: jwk });
+    // Every request is admitted before any body is complete, so none has failed yet when the others arrive.
+    const requests = Array.from({ length: 20 }, () => {
+      const req = request(`${base}/api/pair/redeem`, {
+        method: 'POST',
+        agent: false,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      });
+      const status = new Promise<number>((resolve, reject) => {
+        req.on('response', (res) => {
+          res.resume();
+          resolve(res.statusCode!);
+        });
+        req.on('error', reject);
+      });
+      req.write(body.slice(0, 5));
+      return { req, status };
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    for (const { req } of requests) req.end(body.slice(5));
+    const statuses = await Promise.all(requests.map((r) => r.status));
+    expect(statuses.filter((s) => s === 401).length).toBeLessThanOrEqual(10);
+    expect(statuses.filter((s) => s !== 401).every((s) => s === 429)).toBe(true);
+    expect((await post('/api/pair/redeem', JSON.parse(body))).status).toBe(429);
+  });
+
+  it('refuses to revoke the last owner device', async () => {
+    await start();
+    const headers = { Authorization: `Bearer ${await pairedToken(true)}` };
+    const [mac] = auth.devices();
+    const res = await fetch(`${base}/api/admin/devices/${mac!.id}`, { method: 'DELETE', headers });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'last-owner' });
+    await pairedToken(true);
+    expect((await fetch(`${base}/api/admin/devices/${mac!.id}`, { method: 'DELETE', headers })).status).toBe(204);
+  });
+
+  it('fails closed when auth.json is corrupt', async () => {
+    await start();
+    const token = await pairedToken(false);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    writeFileSync(join(tmp, 'data', 'auth.json'), '{"devices":"oops","codes":[]}');
+    const res = await fetch(`${base}/api/library?t=${encodeURIComponent(token)}`);
+    expect(res.status).toBe(500);
+    expect(errors).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/auth\.json is corrupt/) }));
+    errors.mockRestore();
   });
 });
 

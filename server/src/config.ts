@@ -13,11 +13,13 @@ export interface Config {
   scanPauseMs: number;
   /** This server's API as devices reach it, registered with each pairing code. */
   publicBase: string;
+  /** IP or hostname of the reverse proxy whose `X-Forwarded-For` is believed. */
+  trustedProxy: string;
 }
 
 const DEFAULT_PUBLIC_BASE = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
 
-/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS` and `PUBLIC_BASE`. */
+/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE` and `TRUSTED_PROXY`. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const roots = (env.LIBRARY_ROOTS ?? '')
     .split(',')
@@ -33,7 +35,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     if (seen.has(name)) throw new Error(`LIBRARY_ROOTS names "${name}" twice`);
     seen.add(name);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY) };
 }
 
 function parsePort(value: string | undefined): number {
@@ -65,5 +67,11 @@ function parseBase(value: string | undefined): string {
     url = undefined;
   }
   if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) throw new Error(`PUBLIC_BASE "${value}" is not an http(s) URL`);
+  return value;
+}
+
+function parseProxy(value: string | undefined): string {
+  if (value === undefined) return 'caddy';
+  if (!/^[A-Za-z0-9.:_-]+$/.test(value)) throw new Error(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   return value;
 }

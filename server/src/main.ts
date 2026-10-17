@@ -6,14 +6,16 @@ import { loadConfig } from './config';
 import type { Config } from './config';
 import { createServer } from './http';
 import { Library, nextNightly } from './library';
+import { trustedProxy } from './routes/pair';
 import { Store } from './store';
 
 const SHUTDOWN_GRACE_MS = 3_000;
 
-function serve(config: Config): void {
+async function serve(config: Config): Promise<void> {
+  const trustProxy = await trustedProxy(config.trustedProxy);
   const library = new Library(config.roots, join(config.dataDir, 'library.json'), { scanPauseMs: config.scanPauseMs });
   const auth = new Auth(new Store(config.dataDir), Date.now);
-  const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase }));
+  const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase, trustProxy }));
 
   const scheduleScans = (): void => {
     const run = (): void => {
@@ -46,7 +48,7 @@ function serve(config: Config): void {
 const config = loadConfig(process.env);
 const command = process.argv[2];
 if (command === undefined) {
-  serve(config);
+  await serve(config);
 } else if (command === 'owner-code') {
   ownerCode(config.dataDir);
 } else {

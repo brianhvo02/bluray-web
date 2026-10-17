@@ -1,5 +1,7 @@
 import type { webcrypto } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import type { IncomingMessage } from 'node:http';
+import { isIP } from 'node:net';
 import { p256PublicJwk } from '../auth';
 import type { Auth } from '../auth';
 import { HttpError, json, readJson } from '../http';
@@ -11,48 +13,88 @@ const MAX_FAILURES = 10;
 const FAILURE_WINDOW_MS = 60_000;
 const MAX_DEVICE_NAME = 100;
 
-/** Counts failures per key over a sliding window. */
+/** A slot taken from a {@link FailureLimiter}: `fail()` keeps it as a failure, `release()` gives it back. Settles once. */
+export interface Attempt {
+  fail(): void;
+  release(): void;
+}
+
+/**
+ * Counts failures per key over a sliding window. An attempt holds a slot from admission until it settles,
+ * so concurrent attempts can't all slip past the limit while their bodies are still being read.
+ */
 export class FailureLimiter {
   private readonly failures = new Map<string, number[]>();
+  private readonly pending = new Map<string, number>();
 
   constructor(
     private readonly now: () => number,
     private readonly limit = MAX_FAILURES,
     private readonly windowMs = FAILURE_WINDOW_MS,
-  ) {}
-
-  blocked(key: string): boolean {
-    return this.recent(key).length >= this.limit;
+  ) {
+    setInterval(() => this.prune(), windowMs).unref();
   }
 
-  fail(key: string): void {
-    const recent = this.recent(key);
-    recent.push(this.now());
-    this.failures.set(key, recent);
-    if (this.failures.size > 10_000) {
-      for (const k of [...this.failures.keys()]) if (this.recent(k).length === 0) this.failures.delete(k);
-    }
+  /** A slot for one attempt, or null when recent failures plus attempts in flight reach the limit. */
+  admit(key: string): Attempt | null {
+    if (this.recentFailures(key) + (this.pending.get(key) ?? 0) >= this.limit) return null;
+    this.pending.set(key, (this.pending.get(key) ?? 0) + 1);
+    let settled = false;
+    const settle = (failed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      const left = (this.pending.get(key) ?? 1) - 1;
+      if (left > 0) this.pending.set(key, left);
+      else this.pending.delete(key);
+      if (failed) this.failures.set(key, [...(this.failures.get(key) ?? []), this.now()]);
+    };
+    return { fail: () => settle(true), release: () => settle(false) };
   }
 
-  private recent(key: string): number[] {
+  /** Failures within the window, not counting attempts in flight. */
+  recentFailures(key: string): number {
     const since = this.now() - this.windowMs;
     const recent = (this.failures.get(key) ?? []).filter((t) => t > since);
     if (recent.length === 0) this.failures.delete(key);
     else this.failures.set(key, recent);
-    return recent;
+    return recent.length;
+  }
+
+  /** Forgets keys whose failures have all left the window. */
+  prune(): void {
+    for (const key of [...this.failures.keys()]) this.recentFailures(key);
+  }
+
+  /** Keys still remembered, for tests. */
+  get size(): number {
+    return this.failures.size;
   }
 }
 
-/** RFC 1918 and unique-local addresses: Docker networks such as Caddy's `caddy_default`. */
-export function isPrivateAddress(address: string): boolean {
-  const v4 = address.startsWith('::ffff:') ? address.slice(7) : address;
-  const m = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(v4);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+/**
+ * Whether a peer address is the reverse proxy: `proxy` is an IP or a hostname (Caddy's container name),
+ * resolved once here. A name that doesn't resolve trusts nobody.
+ */
+export async function trustedProxy(
+  proxy: string,
+  lookup: (host: string) => Promise<{ address: string }[]> = (host) => dnsLookup(host, { all: true }),
+): Promise<(address: string) => boolean> {
+  let addresses: string[];
+  if (isIP(proxy)) {
+    addresses = [proxy];
+  } else {
+    try {
+      addresses = (await lookup(proxy)).map((a) => a.address);
+    } catch (err) {
+      console.error(`TRUSTED_PROXY "${proxy}" does not resolve; ignoring X-Forwarded-For`, err);
+      addresses = [];
+    }
   }
-  return /^f[cd][0-9a-f]{2}:/i.test(address);
+  const trusted = new Set(addresses.map(unmapped));
+  return (address) => trusted.has(unmapped(address));
 }
+
+const unmapped = (address: string): string => (address.startsWith('::ffff:') ? address.slice(7) : address);
 
 /** The client's address: the first `X-Forwarded-For` entry when the peer is the trusted proxy, else the peer. */
 export function clientAddress(req: IncomingMessage, trustProxy: (address: string) => boolean): string {
@@ -84,19 +126,26 @@ export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (a
     switch (url.pathname) {
       case '/api/pair/redeem': {
         const client = clientAddress(req, opts.trustProxy);
-        if (limiter.blocked(client)) return json(429, { error: 'too many tries' }, { 'Retry-After': String(FAILURE_WINDOW_MS / 1000) });
-        const body = await readObject(req);
-        const code = str(body, 'code');
-        const deviceName = str(body, 'deviceName').trim();
-        if (deviceName === '' || deviceName.length > MAX_DEVICE_NAME || !p256PublicJwk(body.publicKeyJwk)) {
-          throw new HttpError(400, 'bad request');
+        const tooMany = () => json(429, { error: 'too many tries' }, { 'Retry-After': String(FAILURE_WINDOW_MS / 1000) });
+        const attempt = limiter.admit(client);
+        if (!attempt) return tooMany();
+        try {
+          const body = await readObject(req);
+          const code = str(body, 'code');
+          const deviceName = str(body, 'deviceName').trim();
+          if (deviceName === '' || deviceName.length > MAX_DEVICE_NAME || !p256PublicJwk(body.publicKeyJwk)) {
+            throw new HttpError(400, 'bad request');
+          }
+          if (limiter.recentFailures(client) >= MAX_FAILURES) return tooMany();
+          const device = auth.redeem(code, deviceName, body.publicKeyJwk as JsonWebKey);
+          if (!device) {
+            attempt.fail();
+            return json(401, { error: 'invalid code' });
+          }
+          return json(200, { deviceId: device.id, owner: device.owner });
+        } finally {
+          attempt.release();
         }
-        const device = auth.redeem(code, deviceName, body.publicKeyJwk as JsonWebKey);
-        if (!device) {
-          limiter.fail(client);
-          return json(401, { error: 'invalid code' });
-        }
-        return json(200, { deviceId: device.id, owner: device.owner });
       }
       case '/api/session/challenge': {
         const challenge = auth.challenge(str(await readObject(req), 'deviceId'));

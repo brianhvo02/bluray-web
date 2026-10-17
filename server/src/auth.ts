@@ -24,6 +24,7 @@ export interface PairingCode {
 
 const CODE_TTL_MS = 10 * 60_000;
 const CHALLENGE_TTL_MS = 60_000;
+const MAX_CHALLENGES_PER_DEVICE = 5;
 const SESSION_TTL_MS = 60 * 60_000;
 /** WebCrypto's ECDSA P-256 signature: r || s, 32 bytes each (IEEE P1363). */
 const SIGNATURE_BYTES = 64;
@@ -91,11 +92,14 @@ export class Auth {
     });
   }
 
-  /** A random challenge for the device to sign, valid 60 s; null for an unknown device. */
+  /** A random challenge for the device to sign, valid 60 s; null for an unknown device. A device holds at most 5, the oldest dropped. */
   challenge(deviceId: string): string | null {
     if (!this.device(deviceId)) return null;
     const now = this.now();
     for (const [c, entry] of this.challenges) if (entry.expiresAt <= now) this.challenges.delete(c);
+    // The map keeps insertion order, so the first ones found are the oldest.
+    const mine = [...this.challenges].filter(([, entry]) => entry.deviceId === deviceId);
+    for (const [c] of mine.slice(0, Math.max(0, mine.length - MAX_CHALLENGES_PER_DEVICE + 1))) this.challenges.delete(c);
     const challenge = randomBytes(32).toString('base64url');
     this.challenges.set(challenge, { deviceId, expiresAt: now + CHALLENGE_TTL_MS });
     return challenge;
