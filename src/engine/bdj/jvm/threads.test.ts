@@ -262,6 +262,48 @@ describe('suspension', () => {
     expect(seen[0]).toBe(b.uncaught);
     expect(jvm.threads.monitorEnter(spawn('burn'), guard)).toBe(true);
   });
+  it('an onThrow that throws ends as the thread\'s uncaught exception and run() resolves', async () => {
+    const { jvm, clock, spawn } = setup();
+    const t = jvm.loader.loadBoot('T')!;
+    const lock = jvm.mirror(t);
+    jvm.natives.register({
+      'T.inner()I': (ctx) =>
+        withMonitor(ctx.jvm, ctx.thread, lock, () => {
+          ctx.jvm.threads.monitorExit(ctx.thread, lock);
+          throw new JavaThrowable(ctx.jvm.throwNew('java/lang/RuntimeException', 'boom').exception);
+        }),
+      'T.outer()I': (ctx) =>
+        new Invoke(ctx.method.cls.methods.get('inner()I')!, [], (v) => v, () => {
+          throw new JavaThrowable(ctx.jvm.throwNew('java/lang/IllegalStateException', 'again').exception);
+        }),
+    });
+    spawn('holdAndScale');
+    const b = spawn('callOuter');
+    expect(await runWithClock(jvm, clock)).toBe('idle');
+    expect(b.uncaught?.cls.name).toBe('java/lang/IllegalStateException');
+  });
+  it('a success-path continuation that throws runs exactly once', async () => {
+    const { jvm, clock, spawn } = setup();
+    const t = jvm.loader.loadBoot('T')!;
+    const lock = jvm.mirror(t);
+    let runs = 0;
+    jvm.natives.register({
+      'T.inner()I': (ctx) => withMonitor(ctx.jvm, ctx.thread, lock, () => {
+        ctx.jvm.threads.monitorExit(ctx.thread, lock);
+        return 1;
+      }),
+      'T.outer()I': (ctx) =>
+        new Invoke(ctx.method.cls.methods.get('inner()I')!, [], () => {
+          runs++;
+          throw new JavaThrowable(ctx.jvm.throwNew('java/lang/RuntimeException', 'k').exception);
+        }),
+    });
+    spawn('holdAndScale');
+    const b = spawn('callOuter');
+    expect(await runWithClock(jvm, clock)).toBe('idle');
+    expect(runs).toBe(1);
+    expect(b.uncaught?.cls.name).toBe('java/lang/RuntimeException');
+  });
 });
 
 describe('wait and notify', () => {

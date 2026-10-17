@@ -440,12 +440,20 @@ export class Scheduler {
       this.conts.delete(t);
       this.inThread(t, () => {
         let r: NativeResult;
+        let v: NativeResult = undefined;
+        let thrown: ThrowResult | null = null;
         try {
-          const v = result();
-          r = !k ? v : v instanceof Invoke || v instanceof Suspend ? andThen(v, k, (e) => k(new ThrowResult(e))) : k(v);
+          v = result();
         } catch (e) {
           if (!(e instanceof JavaThrowable)) throw e;
-          r = k ? k(new ThrowResult(e.obj)) : new ThrowResult(e.obj);
+          thrown = new ThrowResult(e.obj);
+        }
+        try {
+          if (thrown) r = k ? k(thrown) : thrown;
+          else r = !k ? v : v instanceof Invoke || v instanceof Suspend ? andThen(v, k, (e) => k(new ThrowResult(e))) : k(v);
+        } catch (e) {
+          if (!(e instanceof JavaThrowable)) throw e;
+          r = new ThrowResult(e.obj);
         }
         complete(this.jvm, t, r);
       });
