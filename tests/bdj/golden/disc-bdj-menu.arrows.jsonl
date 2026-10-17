@@ -4,6 +4,7 @@
 {"call":"selectPlaylistN","args":[1,-1,-1,"-1"],"ret":1}
 {"call":"selectRateN","args":[1,1],"ret":1}
 {"call":"selectRateN","args":[0,2],"ret":1}
+{"call":"selectPlaylistN","args":[-1,-1,-1,"-1"],"ret":1}
 {"call":"selectPlaylistN","args":[0,-1,-1,"-1"],"ret":1}
 {"call":"selectRateN","args":[1,1],"ret":1}
 {"call":"selectRateN","args":[0,2],"ret":1}

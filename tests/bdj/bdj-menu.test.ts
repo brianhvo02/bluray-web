@@ -4,7 +4,7 @@ import type { ShownStill } from '../../src/engine/bdj/background';
 import { createGraphicsPlane, planeHash } from '../../src/engine/bdj/graphics-plane';
 import type { CompositorLike } from '../../src/engine/render/compositor';
 import { compareBdjTraces } from './compare';
-import { parseBdjTrace } from './format';
+import { CONTROL_CALLS, parseBdjTrace } from './format';
 import { parseKeyScript, type SettledStep } from './key-script';
 import { replayPlayerBdj } from './replay-player';
 
@@ -42,6 +42,9 @@ async function replayMenu(script: string, extra: Pick<Parameters<typeof replayPl
     ...extra,
   });
   compareBdjTraces(g.calls, run.trace);
+  // compareBdjTraces checks a prefix; the golden runs 5 s past the script, so it has every call, and ours none more
+  const control = (t: typeof run.trace): number => t.filter((e) => CONTROL_CALLS.has(e.call)).length;
+  expect(control(run.trace)).toBe(control(g.calls));
   expect(run.steps).toEqual(g.steps);
   expect(run.flushes.at(-1) ?? null).toBe(g.endHash);
   expect(run.events.some((e) => e.type === 'notice' && e.code === 'bdj-failed')).toBe(false);
@@ -66,7 +69,7 @@ describe('BD-J menu disc against libbluray (disc-bdj-menu)', () => {
     // three settled menus (Play, Chapters, Extras focused), each with the logo and text in the disc's CFF font and in
     // the fallback font; Enter then plays 00000 behind an emptied plane
     expect(new Set(g.steps.flatMap((s) => (s.hash ? [s.hash] : []))).size).toBe(3);
-    expect(run.trace.filter((e) => e.call === 'selectPlaylistN').map((e) => e.args[0])).toEqual([1, 0]);
+    expect(run.trace.filter((e) => e.call === 'selectPlaylistN').map((e) => e.args[0])).toEqual([1, -1, 0]); // Enter stops and closes 00001 first
     expect(g.endHash).toBe(planeHash(createGraphicsPlane()));
     console.log(`disc-bdj-menu arrows: ${run.flushes.length} flushes (${run.flushes.join(' ')}), ${run.untilMs.toFixed(0)} ms`);
   }, 180_000);

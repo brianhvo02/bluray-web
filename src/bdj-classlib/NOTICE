@@ -1,6 +1,15 @@
 rt-bdj.jar holds classes and files of the OpenJDK 8 runtime (GPLv2 with the Classpath Exception; see LICENSE and
 ASSEMBLY_EXCEPTION), unmodified, selected by src/bdj-classlib/classes.txt and tools/bdj-classlib/resources.txt.
 
+Third-party code among those classes:
+- com/sun/org/apache/xerces/internal/** (Apache Xerces Java, as bundled in OpenJDK's JAXP) and
+  com/sun/xml/internal/stream/Entity*: Apache License 2.0. The JDK's notice for its Apache components, with the
+  license text, is THIRD_PARTY_APACHE (from the JDK's THIRD_PARTY_README; it carries no separate Xerces NOTICE
+  file). The other JAXP classes (javax/xml/parsers, jdk/xml/internal, the rest of com/sun/xml/internal/stream) are
+  GPLv2 with the Classpath Exception.
+- org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain
+  notice (SAX_NOTICE).
+
 OpenJDK binary package: openjdk-8-jre-headless:amd64	8u504-ga-1ubuntu1~24.04.3
 Corresponding source:   Ubuntu source package openjdk-8 8u504-ga-1ubuntu1~24.04.3,
   https://snapshot.ubuntu.com/ubuntu/20261015T000000Z/pool/universe/o/openjdk-8/openjdk-8_8u504-ga-1ubuntu1~24.04.3.dsc

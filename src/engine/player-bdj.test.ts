@@ -354,9 +354,55 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(notices(h)).not.toContain('bdj-failed');
     clock.advance(1);
     expect(h.events.find((e) => e.type === 'notice' && e.code === 'bdj-failed')).toMatchObject({
-      message: "BD-J couldn't start this disc (timeout: no playlist was selected within 20 s). Choose a playlist to play.",
+      message: "BD-J couldn't start this disc (timeout: no playlist was selected and nothing was shown within 20 s). Choose a playlist to play.",
     });
     expect(h.events.filter((e) => e.type === 'bdjActive').at(-1)).toEqual({ type: 'bdjActive', active: false });
+    expect(w.terminated()).toBe(true);
+  });
+
+  /** A booted hand-driven title on a virtual timer clock, and its plane's writer. */
+  async function bootedOnClock(): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; clock: VirtualClock; writer: GraphicsPlaneWriter }> {
+    const clock = new VirtualClock();
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot') throw new Error('no boot');
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    return { h, w, clock, writer: new GraphicsPlaneWriter(boot.plane) };
+  }
+
+  it('a menu Java shows without selecting a playlist keeps BD-J alive past the 20 s timeout (ruling R7)', async () => {
+    const { h, w, clock, writer } = await bootedOnClock();
+    clock.advance(10_000);
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 100, 100, 299, 149);
+    await h.play(20); // the flush becomes visible at the next tick: bdjMenu visible
+    expect(h.events).toContainEqual({ type: 'bdjMenu', visible: true });
+    clock.advance(60_000);
+    expect(notices(h)).not.toContain('bdj-failed');
+    expect(w.terminated()).toBe(false);
+  });
+
+  it('a background still Java shows without selecting a playlist keeps BD-J alive past the 20 s timeout (ruling R7)', async () => {
+    const { h, w, clock } = await bootedOnClock();
+    w.emit({ type: 'background', image: new Uint8Array([1, 2, 3]), rect: { x: 0, y: 0, width: 1, height: 1 } });
+    clock.advance(60_000);
+    expect(notices(h)).not.toContain('bdj-failed');
+    expect(w.terminated()).toBe(false);
+  });
+
+  it('a title that draws nothing, shows no still and selects nothing still falls back at 20 s', async () => {
+    const { h, w, clock, writer } = await bootedOnClock();
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0); // an opened but empty plane is no menu
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 100, 299, 149);
+    w.emit({ type: 'background', image: null, rect: { x: 0, y: 0, width: 1, height: 1 } }); // a cleared still neither
+    await h.play(20);
+    clock.advance(19_999);
+    expect(notices(h)).not.toContain('bdj-failed');
+    clock.advance(1);
+    expect(notices(h)).toContain('bdj-failed');
     expect(w.terminated()).toBe(true);
   });
 

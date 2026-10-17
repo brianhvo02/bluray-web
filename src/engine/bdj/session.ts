@@ -40,10 +40,15 @@ export interface BdjSessionDeps {
   readonly onBackground?: (image: Uint8Array | null, rect: ScreenRect) => void;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
-  /** How long after boot (or the first start) Java has to select a playlist. */
+  /** How long after boot (or the first start) Java has to select a playlist, show a menu or show a background still. */
   readonly selectTimeoutMs?: number;
 }
 
+/**
+ * The start-up timeout: a BD-J title that has neither selected a playlist nor shown anything (a visible plane, a
+ * background still) this long after boot is taken as hung, and the player falls back to the picker. A menu that waits
+ * for input over a still or an empty video plane is alive (ruling R7).
+ */
 export const SELECT_PLAYLIST_TIMEOUT_MS = 20_000;
 
 export class BdjSession {
@@ -85,7 +90,7 @@ export class BdjSession {
     if (this.startedAt !== null) return;
     this.startedAt = this.deps.nowMs();
     const ms = this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
-    this.cancelTimeout = this.deps.setTimer(ms, () => this.fail('timeout', `no playlist was selected within ${ms / 1000} s`));
+    this.cancelTimeout = this.deps.setTimer(ms, () => this.fail('timeout', `no playlist was selected and nothing was shown within ${ms / 1000} s`));
   }
 
   event(ev: number, param: number, coalesce?: Coalesce): void {
@@ -130,6 +135,7 @@ export class BdjSession {
         break;
       case 'background':
         this.activityCount++;
+        if (m.image) this.alive('showed a background still');
         this.deps.onBackground?.(m.image, m.rect);
         break;
       case 'failed':
@@ -139,7 +145,7 @@ export class BdjSession {
   }
 
   private async answer(id: number, name: BdjCallName, args: readonly BdjWireValue[]): Promise<void> {
-    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.playlistSelected();
+    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.alive('selected its first playlist');
     let pending: Promise<number | string>;
     this.callInHand = id;
     try {
@@ -170,11 +176,17 @@ export class BdjSession {
     }
   }
 
-  private playlistSelected(): void {
+  /** The graphics plane turned visible: a menu on screen keeps the title alive without a playlist (ruling R7). */
+  menuShown(): void {
+    if (!this.stopped) this.alive('showed a menu');
+  }
+
+  /** Java showed it runs: the start-up timeout is cancelled, once. */
+  private alive(what: string): void {
     if (this.startedAt === null || this.cancelTimeout === null) return;
     this.cancelTimeout();
     this.cancelTimeout = null;
-    this.deps.onLog?.(`BD-J selected its first playlist ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot`, false);
+    this.deps.onLog?.(`BD-J ${what} ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot`, false);
   }
 
   private send(m: ToBdj): void {

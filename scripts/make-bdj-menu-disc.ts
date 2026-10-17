@@ -26,13 +26,15 @@ const BDJ_INTERACTIVE = 3;
 /** The menu draws in a full-HD graphics plane. */
 const HAVI_1920_1080 = 1;
 
-// Two playlists on one clip of real H.264 (as disc-bdj, so the disc plays in Chrome): 00001 plays behind the menu,
-// 00000 is what the menu's Play starts.
+// Two playlists on one 2 s clip of real H.264 (as disc-bdj, so the disc plays in Chrome): 00000 is what the menu's
+// Play starts; 00001, behind the menu, is the clip 30 times (60 s), so it does not end while a test uses the menu (the
+// end would be a call from Java, which counts as a reaction to a tap, and its place among the flushes varies).
+const BACKGROUND_REPEATS = 30;
 const files = buildSyntheticDisc({
   clips: [{ clipId: '00000', videoAus: encodeTestVideo(2 * 24), keyIndices: [0, 24], startPts: CLIP_START_PTS, audio: CodingType.LPCM }],
   playlists: [
     { id: '00000', clipIds: ['00000'] },
-    { id: '00001', clipIds: ['00000'] },
+    { id: '00001', clipIds: Array<string>(BACKGROUND_REPEATS).fill('00000') },
   ],
 });
 

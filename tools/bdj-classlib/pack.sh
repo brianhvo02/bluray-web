@@ -104,12 +104,38 @@ $MK $OUT/rt-bdj.jar "$T/stage" -
 cp /usr/share/common-licenses/GPL-2 $OUT/LICENSE
 sed -n '/^"CLASSPATH" EXCEPTION TO THE GPL$/,/^OpenJDK Trademark Notice/p' \
   /usr/share/doc/openjdk-8-jre-headless/copyright | sed '$d' | sed '$d' > $OUT/ASSEMBLY_EXCEPTION
+# the JDK's notice for its Apache-licensed components (Xerces among them): the section of THIRD_PARTY_README from its
+# "%%" line to the end of the Apache License 2.0 text
+awk '/^%% This notice is provided with respect to the following which may be/ { on = 1 }
+     on { print }
+     on && /^--- end of LICENSE ---$/ { exit }' "$JAVA_HOME/THIRD_PARTY_README" > $OUT/THIRD_PARTY_APACHE
+grep -q '^  Apache Xerces Java ' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache Xerces section" >&2; exit 1; }
+grep -q 'Apache License' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache License text" >&2; exit 1; }
+cat > $OUT/SAX_NOTICE <<'EOF'
+The org/xml/sax classes in rt-bdj.jar are OpenJDK's copies of SAX (http://www.saxproject.org), which carry Oracle's
+GPLv2 with the Classpath Exception header and, below it, the SAX project's own notice, for example in
+org/xml/sax/helpers/DefaultHandler.java:
+
+  // DefaultHandler.java - default implementation of the core handlers.
+  // http://www.saxproject.org
+  // Written by David Megginson
+  // NO WARRANTY!  This class is in the public domain.
+EOF
 SRC_PKG="$(dpkg-query -W -f='${source:Package}' openjdk-8-jre-headless)"
 SRC_VER="$(dpkg-query -W -f='${source:Version}' openjdk-8-jre-headless)"
 SNAPSHOT=20261015T000000Z
 {
   echo "rt-bdj.jar holds classes and files of the OpenJDK 8 runtime (GPLv2 with the Classpath Exception; see LICENSE and"
   echo "ASSEMBLY_EXCEPTION), unmodified, selected by src/bdj-classlib/classes.txt and tools/bdj-classlib/resources.txt."
+  echo
+  echo "Third-party code among those classes:"
+  echo "- com/sun/org/apache/xerces/internal/** (Apache Xerces Java, as bundled in OpenJDK's JAXP) and"
+  echo "  com/sun/xml/internal/stream/Entity*: Apache License 2.0. The JDK's notice for its Apache components, with the"
+  echo "  license text, is THIRD_PARTY_APACHE (from the JDK's THIRD_PARTY_README; it carries no separate Xerces NOTICE"
+  echo "  file). The other JAXP classes (javax/xml/parsers, jdk/xml/internal, the rest of com/sun/xml/internal/stream) are"
+  echo "  GPLv2 with the Classpath Exception."
+  echo "- org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain"
+  echo "  notice (SAX_NOTICE)."
   echo
   echo "OpenJDK binary package: $(dpkg-query -W openjdk-8-jre-headless)"
   echo "Corresponding source:   Ubuntu source package $SRC_PKG $SRC_VER,"

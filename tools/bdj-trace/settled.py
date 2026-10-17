@@ -1,7 +1,8 @@
 """Reduces a key-script run of bdj_trace (run.sh --keys) to what stays the same between runs, for a golden file.
 
 Reads the run on stdin and prints:
-  - the control calls, in order (CONTROL below), as the harness printed them;
+  - the control calls up to the script's end line, in order (CONTROL below), as the harness printed them (those after
+    it come from bd_close stopping the title);
   - then each script step as {"script":"step","n":i,"step":"<text>"}, and for a `wait still` step also "hash": the plane
     hash of the last flush before it (the settled plane, which every run reaches; null before the first flush);
   - then {"script":"end","hash":"<hash>"}: the last flushed plane at the end of the run's tail, settled too.
@@ -33,7 +34,8 @@ def main():
         except ValueError:
             continue
         if o.get('call') in CONTROL:
-            calls.append(line)
+            if end is None:  # after the end line come bd_close's (the title stopping), not the run's
+                calls.append(line)
         elif o.get('plane') == 'flush':
             last = o['hash']
         elif o.get('script') == 'step':

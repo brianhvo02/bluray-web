@@ -318,6 +318,8 @@ export class Player {
   /** The open disc's files as the user gave them (or where it is served), for the BD-J worker's own disc model. */
   private discRef: DiscSourceRef = { kind: 'files', entries: [] };
   private bdj: BdjTitle | null = null;
+  /** Taps on a BD-J menu that brought no reaction (telemetry). */
+  private bdjTapsIgnored = 0;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
   /** When the open command for this disc arrived (nowMs), and BD-J start-up times since then (telemetry `bdj`). */
@@ -791,6 +793,7 @@ export class Player {
       activity: () => plane.version() + session.activity,
       ignored: (notice) => {
         if (!live()) return;
+        this.bdjTapsIgnored++;
         this.deps.emit({ type: 'bdjTapIgnored' });
         if (notice) this.notice('bdj-tap-ignored', BDJ_TAP_IGNORED_MESSAGE);
       },
@@ -1021,7 +1024,10 @@ export class Player {
     const visible = entry.plane.visible();
     if (visible === entry.menuVisible) return;
     entry.menuVisible = visible;
-    if (visible) entry.taps.menuShown();
+    if (visible) {
+      entry.taps.menuShown();
+      entry.session.menuShown(); // a menu on screen is no hang, even with no playlist selected
+    }
     this.deps.emit({ type: 'bdjMenu', visible });
   }
 
@@ -2169,6 +2175,7 @@ export class Player {
         ass: this.assStats(),
         shader: this.shaderStage?.stats ?? null,
         bdj: this.bdjStartup ? { ...this.bdjStartup } : null,
+        bdjPlane: this.bdj ? { flushes: this.bdj.plane.flushCount(), tapsIgnored: this.bdjTapsIgnored } : null,
       },
     });
   }

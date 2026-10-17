@@ -215,6 +215,21 @@ describe('BdjSession rules', () => {
     expect(f.sent.at(-1)).toEqual({ type: 'reply', id: 1, value: 1 });
   });
 
+  it('a menu shown or a background still shown cancels the timeout; a cleared still does not (ruling R7)', () => {
+    for (const show of ['menu', 'still'] as const) {
+      const f = fakeWorker();
+      const h = session(f.worker);
+      h.session.start(FIRST_PLAY);
+      f.emit({ type: 'background', image: null, rect: { x: 0, y: 0, width: 1, height: 1 } });
+      h.clock.advance(10_000);
+      if (show === 'menu') h.session.menuShown();
+      else f.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1, height: 1 } });
+      h.clock.advance(60_000);
+      expect(h.failures).toEqual([]);
+      expect(h.logs).toContain(show === 'menu' ? 'BD-J showed a menu 10000 ms after boot' : 'BD-J showed a background still 10000 ms after boot');
+    }
+  });
+
   it('ignores messages after stop() and terminates the worker', async () => {
     const f = fakeWorker();
     const h = session(f.worker);

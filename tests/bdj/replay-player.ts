@@ -118,8 +118,8 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
  * after the `occurrence`-th reply to `until` (a trace name such as selectPlaylistN), or, with `untilPlane`, once it
  * returns true for the graphics plane (checked after every step). With `script` (tools/bdj-trace's key scripts), the
  * steps run as the harness runs them, in wall time (`wait still`) and on the player's events (`wait playlist`: a
- * `chapters` event), keys and clicks going in as the UI sends them (menuKey, pointer); the run then ends only once the
- * script has finished too. A thrown Error carries the trace recorded so far as `trace`.
+ * `chapters` event), keys and clicks going in as the UI sends them (menuKey, pointer), and the player's clock kept to
+ * wall time, as libbluray's reads are; the run then ends only once the script has finished too. A thrown Error carries the trace recorded so far as `trace`.
  */
 export async function replayPlayerBdj(
   discDir: URL | string,
@@ -202,6 +202,9 @@ export async function replayPlayerBdj(
   const runSteps = async (): Promise<void> => {
     while (stepIdx < script.length) {
       const s = script[stepIdx]!;
+      // where the next step's waits count from: a key or click is sent at once, so what it causes, even while it is
+      // being handed over, belongs to the next step (bdj_trace.c takes step_flushes before running a step's input)
+      const mark = { events: events.length, flushes: flushes.length, at: performance.now() };
       let held = true;
       switch (s.kind) {
         case 'waitFlush':
@@ -226,7 +229,7 @@ export async function replayPlayerBdj(
       }
       steps.push({ script: 'step', n: stepIdx, step: s.text, ...(s.kind === 'waitStill' ? { hash: flushes.at(-1) ?? null } : {}) });
       stepIdx++;
-      stepFrom = { events: events.length, flushes: flushes.length, at: performance.now() };
+      stepFrom = s.kind === 'key' || s.kind === 'pointer' ? mark : { events: events.length, flushes: flushes.length, at: performance.now() };
     }
   };
   const unhook = script.length
@@ -251,8 +254,11 @@ export async function replayPlayerBdj(
       const failed = events.find((e) => e.type === 'notice' && e.code === 'bdj-failed');
       if (failed?.type === 'notice') throw fail(`BD-J failed (${failed.message})`);
       if (events.some((e) => e.type === 'state' && e.state === 'error')) throw fail('the player failed');
-      clock.ms += STEP_MS;
-      for (let q = 0; q < 5; q++) renderQuantum(views, left, right);
+      // a script runs in wall time, as the harness reads in real time: the player's clock must not run ahead of it
+      if (!script.length || clock.ms - start <= performance.now() - t0) {
+        clock.ms += STEP_MS;
+        for (let q = 0; q < 5; q++) renderQuantum(views, left, right);
+      }
       player.tick();
       await new Promise((r) => setTimeout(r, 1));
       if (opts.untilPlane && plane && opts.untilPlane(plane)) done = true;

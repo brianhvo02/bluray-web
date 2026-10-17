@@ -70,32 +70,62 @@ async function clickPlane(page: Page, x: number, y: number): Promise<void> {
   await page.mouse.click(left + (x + 0.5) * scale, top + (y + 0.5) * scale);
 }
 
+/** The engine's BD-J plane telemetry (?telemetry=1): flushes so far, taps on the menu that brought no reaction, clock. */
+async function bdjPlane(page: Page): Promise<{ flushes: number; tapsIgnored: number; clockUs: number } | null> {
+  return page.evaluate(() => {
+    const t = (window as unknown as { __blurayTelemetry?: { clockUs: number; bdjPlane: { flushes: number; tapsIgnored: number } | null } | null }).__blurayTelemetry;
+    return t?.bdjPlane ? { ...t.bdjPlane, clockUs: t.clockUs } : null;
+  });
+}
+
+/** Waits until the plane has flushed more than `than` times; returns the new count. */
+async function flushedPast(page: Page, than: number): Promise<number> {
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(than);
+  return (await bdjPlane(page))!.flushes;
+}
+
 test('a BD-J menu answers clicks on its MouseListener button and keys; a click it ignores offers the remote', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
-  await expect(player).toHaveAttribute('data-playlist', '00001'); // the menu's background playlist
+  // the menu's background playlist: 60 s, so Java makes no call at its end while the test runs (a call would count as
+  // a reaction to a tap)
+  await expect(player).toHaveAttribute('data-playlist', '00001');
   await expect(page.getByTestId('playlist-picker')).toBeHidden();
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+  const shown = (await bdjPlane(page))!;
+  expect(shown.tapsIgnored).toBe(0);
 
-  // Play's MouseListener reacts (a flush within the tap window): no notice, no remote
+  // Play's MouseListener reacts with a flush; once the player's clock is well past the 0.2 s tap window, the tap was
+  // not counted as ignored: no notice, no remote
   await clickPlane(page, 300, 400);
-  await page.waitForTimeout(1000);
+  await flushedPast(page, shown.flushes);
+  const clicked = (await bdjPlane(page))!;
+  await expect.poll(async () => (await bdjPlane(page))!.clockUs, { timeout: 10_000 }).toBeGreaterThan(clicked.clockUs + 500_000);
+  expect((await bdjPlane(page))!.tapsIgnored).toBe(0);
   await expect(notice(page, /doesn't respond to taps/)).toHaveCount(0);
   await expect(page.getByTestId('remote-pad')).toBeHidden();
 
   // empty plane: the disc ignores the click, so the player says so and opens the remote
   await clickPlane(page, 1400, 540);
-  await expect(notice(page, /This disc's menu doesn't respond to taps here\. Use the remote\./)).toBeVisible({ timeout: 5_000 });
+  await expect.poll(async () => (await bdjPlane(page))!.tapsIgnored, { timeout: 5_000 }).toBe(1);
+  await expect(notice(page, /This disc's menu doesn't respond to taps here\. Use the remote\./)).toBeVisible();
   await expect(page.getByTestId('remote-pad')).toBeVisible();
 
-  // Down moves the focus to Chapters, where Enter does nothing; Up goes back to Play, where Enter plays 00000
+  // Down moves the focus to Chapters (a repaint), where Enter does nothing: a second of player time later 00001 still
+  // plays under the menu. Up goes back to Play (a repaint), where Enter plays 00000.
+  const beforeDown = (await bdjPlane(page))!.flushes;
   await page.keyboard.press('ArrowDown');
+  await flushedPast(page, beforeDown);
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(1000);
+  const entered = (await bdjPlane(page))!;
+  await expect.poll(async () => (await bdjPlane(page))!.clockUs, { timeout: 10_000 }).toBeGreaterThan(entered.clockUs + 1_000_000);
   await expect(player).toHaveAttribute('data-playlist', '00001');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true');
+  const beforeUp = (await bdjPlane(page))!.flushes;
   await page.keyboard.press('ArrowUp');
+  await flushedPast(page, beforeUp);
   await page.keyboard.press('Enter');
   await expect(player).toHaveAttribute('data-playlist', '00000', { timeout: 10_000 });
   await expect(player).toHaveAttribute('data-bdj-menu', 'false'); // the menu hid itself

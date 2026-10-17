@@ -54,6 +54,8 @@ export interface Telemetry {
    * has run since the disc opened.
    */
   readonly bdj: BdjStartup | null;
+  /** While a BD-J title runs: its graphics plane's flushes and the taps on its menu that brought no reaction. */
+  readonly bdjPlane: { readonly flushes: number; readonly tapsIgnored: number } | null;
 }
 
 export interface BdjStartup {

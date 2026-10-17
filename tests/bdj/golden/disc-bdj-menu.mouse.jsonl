@@ -3,7 +3,6 @@
 {"call":"writeRegN","args":[1,4,65535,-1],"ret":0}
 {"call":"selectPlaylistN","args":[1,-1,-1,"-1"],"ret":1}
 {"call":"selectRateN","args":[1,1],"ret":1}
-{"call":"selectRateN","args":[0,2],"ret":1}
 {"script":"step","n":0,"step":"wait playlist 1"}
 {"script":"step","n":1,"step":"wait still 1000","hash":"cf4977a0"}
 {"script":"step","n":2,"step":"click 300 400"}

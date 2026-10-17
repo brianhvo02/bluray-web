@@ -1,0 +1,8 @@
+The org/xml/sax classes in rt-bdj.jar are OpenJDK's copies of SAX (http://www.saxproject.org), which carry Oracle's
+GPLv2 with the Classpath Exception header and, below it, the SAX project's own notice, for example in
+org/xml/sax/helpers/DefaultHandler.java:
+
+  // DefaultHandler.java - default implementation of the core handlers.
+  // http://www.saxproject.org
+  // Written by David Megginson
+  // NO WARRANTY!  This class is in the public domain.
