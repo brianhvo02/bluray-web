@@ -208,12 +208,15 @@ fdlibm 5.3 (the C library behind the JDK's StrictMath)
   above) is original code. The engine's intrinsics for class-library methods
   are reimplementations of specified behaviour: SHA-1 compression
   (natives/intrinsics/crypto.ts), BigInteger.implMulAdd's word
-  multiply-accumulate (crypto.ts), PNGImageDecoder.update_crc (the PNG
-  specification's CRC-32, png.ts), the java.lang.String methods and the UTF-8
-  decoder's ASCII copy (strings.ts), Arrays.fill (arrays.ts) and
+  multiply-accumulate and destructiveMulAdd (crypto.ts), PNGImageDecoder.update_crc
+  (the PNG specification's CRC-32, png.ts), the java.lang.String methods,
+  StringBuilder.append(String), Integer.parseInt, Character.digit and the UTF-8
+  decoder's ASCII copy (strings.ts), Math.min/max, Arrays.copyOfRange and
+  new String(char[], int, int) (lang.ts), Arrays.fill (arrays.ts) and
   IndexColorModel.getRGB's palette lookup (color-model.ts). Intrinsics that
   derive from OpenJDK's code (DirectColorModel.getRGB, Rectangle.intersection,
-  PNGImageDecoder.produceImage's row loop) are not part of the engine: they
+  PNGImageDecoder.produceImage's row loop, the jar and manifest scanning of
+  jar-text.ts) are not part of the engine: they
   live with the class library in src/bdj-classlib/intrinsics/, under GPLv2
   with the Classpath Exception, and a JVM gets them only through
   JvmOptions.extraIntrinsics (the BD-J worker's entry passes them).

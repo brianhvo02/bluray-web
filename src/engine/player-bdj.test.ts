@@ -653,6 +653,19 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(h.events.some((e) => e.type === 'pointerTarget')).toBe(false); // HDMV's cursor feedback has no BD-J counterpart
   });
 
+  it('times a key and a click to the frame that shows their plane change (telemetry bdj.inputLatencyMs)', async () => {
+    const { h, writer } = await menuShown();
+    await h.player.handle({ type: 'menuKey', key: 'down' });
+    await h.play(STEP_MS * 3); // frames with the plane unchanged answer nothing
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    await h.play(STEP_MS);
+    await h.player.handle({ type: 'pointer', kind: 'move', x: 5, y: 5 }); // a move is not timed
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 200, y: 120 });
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-3), 100, 100, 299, 149);
+    await h.play(600); // a telemetry interval, with no playlist playing
+    expect(lastTelemetry(h)?.bdj?.inputLatencyMs).toEqual({ last: Math.round(STEP_MS), max: Math.round(STEP_MS * 4), count: 2 });
+  });
+
   it('reports the BD-J menu turning visible and empty, on changes only, and empty when BD-J stops', async () => {
     const { h, writer } = await menuShown();
     const menu = (): boolean[] => h.events.flatMap((e) => (e.type === 'bdjMenu' ? [e.visible] : []));
@@ -937,7 +950,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await until(h, () => lastState(h) === 'playing');
     await h.play(600);
     // a playlist the user chose is not Java's first playlist
-    expect(lastTelemetry(h)?.bdj).toEqual({ bootMs: null, firstPlaylistMs: null, firstFrameMs: null });
+    expect(lastTelemetry(h)?.bdj).toEqual({ bootMs: null, firstPlaylistMs: null, firstFrameMs: null, inputLatencyMs: null });
   }, 90_000);
 
   it('falls back to the picker with bdj-failed on an unreadable libbluray jar (the browser\'s ?bdjfail=1 hook)', async () => {

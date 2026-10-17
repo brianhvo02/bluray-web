@@ -53,7 +53,7 @@ export interface Telemetry {
    * the first frame of that playlist was presented. Each is null until it happens; the whole is null when no BD-J title
    * has run since the disc opened.
    */
-  readonly bdj: BdjStartup | null;
+  readonly bdj: BdjTelemetry | null;
   /** While a BD-J title runs: its graphics plane's flushes and the taps on its menu that brought no reaction. */
   readonly bdjPlane: { readonly flushes: number; readonly tapsIgnored: number } | null;
 }
@@ -62,6 +62,15 @@ export interface BdjStartup {
   readonly bootMs: number | null;
   readonly firstPlaylistMs: number | null;
   readonly firstFrameMs: number | null;
+}
+
+export interface BdjTelemetry extends BdjStartup {
+  /**
+   * Menu responsiveness (5d spec §4.2) since the disc opened: from a key press or a click/tap reaching the engine to
+   * the next presented frame containing a BD-J plane change published after it, in ms (last, largest, and how many
+   * inputs were answered); null before any. Pointer moves are not counted.
+   */
+  readonly inputLatencyMs: { readonly last: number; readonly max: number; readonly count: number } | null;
 }
 
 /** A set of mpv user shaders, in the order they run. */

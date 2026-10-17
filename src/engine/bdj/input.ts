@@ -5,8 +5,8 @@
  * (bd_user_input's BD-J branch, _get_key_uo_index, bd_mouse_select's BD-J branch) and src/libbluray/keys.h.
  * Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
  *
- * enqueueBdjEvent (the bounded event queue) and TapReactionWatch (the ignored-tap rule of the 5d spec, §4.2) are
- * original code for bluray-web: libbluray has neither.
+ * enqueueBdjEvent (the bounded event queue), TapReactionWatch (the ignored-tap rule of the 5d spec, §4.2) and
+ * InputLatency (the responsiveness measure of the same section) are original code for bluray-web: libbluray has none.
  *
  * Ported to TypeScript and modified for bluray-web, 2026.
  *
@@ -195,5 +195,61 @@ export class TapReactionWatch {
 
   get pending(): boolean {
     return this.cancelTimer !== null;
+  }
+}
+
+// ---- the responsiveness measure (original code) ----
+
+/** Input latency so far: the last and the largest, in ms, and how many inputs were answered. */
+export interface InputLatencyStats {
+  readonly last: number;
+  readonly max: number;
+  readonly count: number;
+}
+
+/** An input whose plane change has not been presented after this long changed nothing: it is dropped, uncounted. */
+export const INPUT_LATENCY_EXPIRY_MS = 5_000;
+const MAX_PENDING_INPUTS = 32;
+
+/**
+ * The 5d spec's responsiveness (§4.2): from a key press or a tap reaching the engine to the next presented frame that
+ * contains a plane change published after it. BD-J has no notion of which flush answers which input, so the first
+ * plane publication presented after an input answers it (and every input before it).
+ */
+export class InputLatency {
+  private readonly pending: Array<{ readonly atMs: number; readonly version: number }> = [];
+  private last = 0;
+  private max = 0;
+  private count = 0;
+
+  /** A key or tap went to Java at `atMs`, with the plane at `version` (GraphicsPlaneReader.version). */
+  input(atMs: number, version: number): void {
+    if (this.pending.length >= MAX_PENDING_INPUTS) this.pending.shift();
+    this.pending.push({ atMs, version });
+  }
+
+  /** A frame was presented at `atMs` with the plane as published at `version` or later. */
+  presented(atMs: number, version: number): void {
+    while (this.pending.length > 0) {
+      const p = this.pending[0]!;
+      if (atMs - p.atMs > INPUT_LATENCY_EXPIRY_MS) {
+        this.pending.shift();
+        continue;
+      }
+      if (version === p.version) break; // published before this input (the version only grows; === survives a wrap)
+      this.pending.shift();
+      this.last = atMs - p.atMs;
+      this.max = Math.max(this.max, this.last);
+      this.count++;
+    }
+  }
+
+  /** BD-J stopped: inputs still waiting are dropped. */
+  clearPending(): void {
+    this.pending.length = 0;
+  }
+
+  get stats(): InputLatencyStats | null {
+    return this.count > 0 ? { last: Math.round(this.last), max: Math.round(this.max), count: this.count } : null;
   }
 }

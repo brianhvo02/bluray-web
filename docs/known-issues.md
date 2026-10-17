@@ -117,6 +117,21 @@ what would change that decision.
   `Thread.sleep(3000)`; about 0.7 s is interpretation. On a slower machine the local 5 s check may fail. *Revisit in*
   5e: the JIT (spec 5c section 4.7, stage 2) is the lever if the margin is needed; stage 1 (intrinsics) replaced the
   5b figure of about 26 s in Node.
+- **5d responsiveness and start-up (Task 11; Chrome, production build, this machine).** Menu responsiveness is
+  telemetry `bdj.inputLatencyMs` (last, max, count): from a key press or click reaching the engine worker to the next
+  presented frame whose BD-J plane holds a publication made after it. The first publication presented after an input
+  answers it (and any earlier one still waiting): BD-J cannot say which flush answers which input, so on a menu that
+  animates by itself an input that changes nothing is answered by the next animation frame; one unanswered for 5 s is
+  dropped. The main thread to engine worker hop is not included. Arrows and Enter on A_NEW_ERA's main menu and on
+  RENTAL_FAMILY's picker and main menu show in 3-23 ms (bar 200 ms; `local-bdj-menus.spec.ts`). A_NEW_ERA's menu has no
+  mouse handling: a click is forwarded and the ignored-tap rule opens the remote. Its buttons lie along the bottom edge,
+  under the player's control bar while that shows, so a click there hits the bar. Pointer moves stay forwarded for the
+  whole BD-J title as spec §4.2 says: about 4.7k bytecodes (well under 0.1 ms) of Java per move, so not gated.
+  Start-up: A_NEW_ERA warm `firstFrameMs` went from median 4,966 ms (max 4,997, 5 runs) to median 4,790-4,828 ms (max
+  4,800-4,916, three sets of 7 runs) through intrinsics and loop hooks for the start-up path. Most of A_NEW_ERA's Java
+  time before its animation is the JDK opening its signed jar again and again: each `JarFile` parses the 32 KB
+  manifest and verifies the signature file (PKCS7 parse, RSA), about a third of the interpreted time. About 4.0 s of
+  the 4.8 s is the disc's own animation and `Thread.sleep(3000)`.
 - **Open on purpose in the JVM core.** Weak and soft references hold strongly, reference queues stay empty and
   finalizers never run. `long` is a `bigint`. A failed `invokedynamic` call site re-links on each execution (JDK 8
   behaviour, not JVMS §5.4.3). Deep method-handle nesting (about 60k) can overflow the JS stack. `rt-bdj.jar` has no

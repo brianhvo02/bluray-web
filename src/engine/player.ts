@@ -7,7 +7,7 @@ import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
 import { EarlyBdjWorker } from './bdj/early-worker';
 import { GraphicsPlaneReader, createGraphicsPlane } from './bdj/graphics-plane';
-import { BDJ_EVENT_MOUSE, TapReactionWatch, UoRestriction, bdjMouseParam, bdjUserInput } from './bdj/input';
+import { BDJ_EVENT_MOUSE, InputLatency, TapReactionWatch, UoRestriction, bdjMouseParam, bdjUserInput } from './bdj/input';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
 import { REGISTER_WORDS } from './bdj/shared-registers';
 import { StatusBlockWriter, createStatusBlock } from './bdj/status-block';
@@ -333,6 +333,8 @@ export class Player {
   /** When the open command for this disc arrived (nowMs), and BD-J start-up times since then (telemetry `bdj`). */
   private openedAtMs = 0;
   private bdjStartup: { bootMs: number | null; firstPlaylistMs: number | null; firstFrameMs: number | null } | null = null;
+  /** Keys and taps sent to BD-J menus, until their plane change is presented (telemetry `bdj.inputLatencyMs`). */
+  private bdjLatency = new InputLatency();
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -496,7 +498,10 @@ export class Player {
     const s = this.session;
     if (!s) {
       // a BD-J menu can show with no playlist playing
-      if (this.bdj) this.paint(null, this.clock.nowUs());
+      if (this.bdj) {
+        this.paint(null, this.clock.nowUs());
+        this.maybeEmitTelemetry(null);
+      }
       return;
     }
     this.updatePlayback(s);
@@ -568,7 +573,12 @@ export class Player {
       else ig.takeDirty();
     }
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
-    if (bdj && (bdjChanged || bdj.visible())) this.compositor?.drawBdj?.(bdj);
+    if (bdj && (bdjChanged || bdj.visible())) {
+      const version = bdj.version();
+      this.compositor?.drawBdj?.(bdj);
+      // drawn with everything published up to `version` unless the copy waits for the writer (still pending)
+      if (bdjChanged && !bdj.pending()) this.bdjLatency.presented(this.deps.nowMs(), version);
+    }
   }
 
   private setVideoShaders(set: ShaderSetData | null): void {
@@ -613,6 +623,7 @@ export class Player {
   private async open(ref: DiscSourceRef): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
+    this.bdjLatency = new InputLatency();
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
@@ -881,6 +892,7 @@ export class Player {
     entry.host.dispose();
     entry.end();
     entry.taps.cancel();
+    this.bdjLatency.clearPending();
     this.bdj = null;
     this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
@@ -1024,6 +1036,8 @@ export class Player {
    */
   private bdjUserInput(entry: BdjTitle, vk: number, repeat: boolean): void {
     const input = bdjUserInput(vk, { level: UoRestriction.RELAXED, popupShown: false, isUoMasked: (op) => entry.host.isUoMasked(op) });
+    // a held key's repeats are not new presses; the first answer times the press
+    if (input.kind !== 'none' && !repeat) this.bdjLatency.input(this.deps.nowMs(), entry.plane.version());
     if (input.kind === 'menuCall') this.bdjPlayTitle(entry, 0);
     else if (input.kind === 'event') entry.session.event(input.ev, input.param, repeat ? 'repeat' : undefined);
   }
@@ -2210,14 +2224,15 @@ export class Player {
     this.deps.emit({ type: 'time', timeUs: Math.round(timeUs) });
   }
 
-  private maybeEmitTelemetry(s: Session): void {
+  /** `s` is null for a BD-J menu shown with no playlist: the playback counters are then 0. */
+  private maybeEmitTelemetry(s: Session | null): void {
     const nowMs = this.deps.nowMs();
     if (nowMs - this.lastTelemetryMs < TELEMETRY_INTERVAL_MS) return;
     this.lastTelemetryMs = nowMs;
     const offsets = this.offsets;
     this.offsets = [];
     const ring = this.ring;
-    const stats = s.pipeline.stats;
+    const stats = s?.pipeline.stats ?? { corruptPackets: 0, continuityErrors: 0 };
     this.deps.emit({
       type: 'telemetry',
       telemetry: {
@@ -2235,8 +2250,8 @@ export class Player {
         audioDecodeErrors: this.audioDecodeErrors,
         continuityErrors: stats.continuityErrors,
         decoderErrors: this.decoderErrors,
-        openGopStarts: s.decoder.openGop.starts,
-        leadingPicturesSkipped: s.decoder.openGop.leadingSkipped,
+        openGopStarts: s?.decoder.openGop.starts ?? 0,
+        leadingPicturesSkipped: s?.decoder.openGop.leadingSkipped ?? 0,
         menu: this.menuActive && this.navRegs ? { page: this.navRegs.psrRead(PSR.MENU_PAGE_ID), selectedButton: this.navRegs.psrRead(PSR.SELECTED_BUTTON_ID), buttonsDrawn: this.igDraws } : null,
         igErrors: this.navigator?.igErrors ?? 0,
         soundsPlayed: this.soundsPlayed,
@@ -2246,7 +2261,7 @@ export class Player {
         textFile: this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.file ?? null : null,
         ass: this.assStats(),
         shader: this.shaderStage?.stats ?? null,
-        bdj: this.bdjStartup ? { ...this.bdjStartup } : null,
+        bdj: this.bdjStartup ? { ...this.bdjStartup, inputLatencyMs: this.bdjLatency.stats } : null,
         bdjPlane: this.bdj ? { flushes: this.bdj.plane.flushCount(), tapsIgnored: this.bdjTapsIgnored } : null,
       },
     });

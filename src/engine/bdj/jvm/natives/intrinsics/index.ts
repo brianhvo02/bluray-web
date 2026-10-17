@@ -18,6 +18,7 @@ import { engineColorModels } from './color-model';
 import { cryptoIntrinsics } from './crypto';
 import { graphicsIntrinsics } from './graphics';
 import { imageLoopHooks } from './image';
+import { langIntrinsics } from './lang';
 import { pngIntrinsics } from './png';
 import { stringIntrinsics } from './strings';
 
@@ -34,6 +35,7 @@ export function registerIntrinsics(table: NativeTable): void {
   table.intrinsify(arrayIntrinsics);
   table.intrinsify(cryptoIntrinsics);
   table.intrinsify(stringIntrinsics);
+  table.intrinsify(langIntrinsics);
   table.hookLoops(imageLoopHooks);
   for (const [name, convert] of engineColorModels) table.helpers.pixelConverters.set(name, convert);
 }

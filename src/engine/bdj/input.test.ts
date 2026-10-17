@@ -7,6 +7,8 @@ import {
   BD_VK_KEY_PRESSED,
   BD_VK_KEY_RELEASED,
   BD_VK_KEY_TYPED,
+  INPUT_LATENCY_EXPIRY_MS,
+  InputLatency,
   TapReactionWatch,
   UoRestriction,
   bdjKeyEvent,
@@ -192,5 +194,41 @@ describe('TapReactionWatch (the ignored-tap rule)', () => {
     r.watch.cancel();
     r.fire();
     expect(r.ignored).toEqual([]);
+  });
+});
+
+describe('InputLatency (the responsiveness measure, 5d spec §4.2)', () => {
+  it('times an input to the first presented frame with a plane published after it', () => {
+    const l = new InputLatency();
+    l.input(1000, 7);
+    l.presented(1050, 7); // the plane as it was before the input: no answer
+    expect(l.stats).toBeNull();
+    l.presented(1120, 8);
+    expect(l.stats).toEqual({ last: 120, max: 120, count: 1 });
+  });
+
+  it('answers every waiting input with one change, and keeps the largest', () => {
+    const l = new InputLatency();
+    l.input(0, 1);
+    l.input(30, 1);
+    l.presented(200, 2);
+    expect(l.stats).toEqual({ last: 170, max: 200, count: 2 });
+    l.input(300, 2);
+    l.input(320, 3); // after a flush: only a later publication answers it
+    l.presented(340, 3);
+    expect(l.stats).toEqual({ last: 40, max: 200, count: 3 });
+    l.presented(400, 4);
+    expect(l.stats).toEqual({ last: 80, max: 200, count: 4 });
+  });
+
+  it('drops an input that changed nothing within the expiry, and inputs still waiting when cleared', () => {
+    const l = new InputLatency();
+    l.input(0, 1);
+    l.presented(INPUT_LATENCY_EXPIRY_MS + 1, 2);
+    expect(l.stats).toBeNull();
+    l.input(10_000, 2);
+    l.clearPending();
+    l.presented(10_050, 3);
+    expect(l.stats).toBeNull();
   });
 });

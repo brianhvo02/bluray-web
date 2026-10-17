@@ -818,3 +818,397 @@ describe('PNG decoding into an image (PNGImageDecoder.produceImage row loop, BDI
     }
   });
 });
+
+// ---- the start-up intrinsics and loop hooks (5d Task 11) ----
+
+/** An Outcome with a returned String or array as its contents (objects of the two JVMs are never equal themselves). */
+function plain(s: Side, o: Outcome): { ret: unknown; thrown: string | null } {
+  const v = o.ret;
+  if (v === null || v === undefined || typeof v !== 'object') return { ret: v, thrown: o.thrown };
+  if ('data' in v) return { ret: [...(v as JArray).data] as unknown[], thrown: o.thrown };
+  const obj = v as JObject;
+  return { ret: obj.cls.name === 'java/lang/String' ? `"${s.jvm.heap.jsString(obj)}"` : `<${obj.cls.name}>`, thrown: o.thrown };
+}
+
+/** A random string: ASCII letters, digits and punctuation mostly, sometimes Latin-1 or beyond. */
+const textOf = (r: () => number, max = 16): string =>
+  Array.from({ length: int(r, 0, max) }, () =>
+    String.fromCharCode(pick(r, [int(r, 65, 90), int(r, 97, 122), int(r, 48, 57), pick(r, [45, 95, 47, 32, 58, 46]), int(r, 32, 126), int(r, 0x80, 0xff), int(r, 0x100, 0x7ff)])),
+  ).join('');
+
+/** Random bytes, mostly printable ASCII and line ends, with a share of negative (non-ASCII) ones. */
+const asciiBytes = (r: () => number, n: number, high = 0.05): number[] =>
+  Array.from({ length: n }, () => (r() < high ? int(r, -128, -1) : pick(r, [int(r, 32, 126), 10, 13, int(r, 0, 127)])));
+
+/** A string's chars as signed bytes (each char's low byte). */
+const bytesOf = (text: string): number[] => [...text].map((c) => ((c.charCodeAt(0) & 0xff) << 24) >> 24);
+
+describe('start-up intrinsics: java.lang and java.util', () => {
+  const S = 'java/lang/String';
+  const APPEND = 'java/lang/AbstractStringBuilder.append(Ljava/lang/String;)Ljava/lang/AbstractStringBuilder;';
+
+  it('String.getChars and StringBuilder/AbstractStringBuilder.append(String) copy as the Java code does', async () => {
+    let intrinsic = 0;
+    for (let i = 0; i < 200; i++) {
+      const r = rng(40000 + i);
+      const a = textOf(r);
+      const begin = r() < 0.8 ? int(r, 0, a.length) : int(r, -2, a.length + 2);
+      const end = r() < 0.8 ? int(r, begin, a.length) : int(r, -2, a.length + 2);
+      const dstLen = r() < 0.05 ? null : int(r, 0, 20);
+      const at = r() < 0.8 ? int(r, 0, Math.max(0, (dstLen ?? 0) - (end - begin))) : int(r, -2, 22);
+      const cap = int(r, 0, 24);
+      const append = r() < 0.05 ? null : textOf(r, 20);
+      const before = bytecodesIn(APPEND);
+      const res = await both(async (s) => {
+        const dst = dstLen === null ? null : s.jvm.heap.newArray(s.jvm.loader.arrayOf(s.jvm.loader.primitive('C')), dstLen);
+        const got = await s.call(S, 'getChars(II[CI)V', [s.jvm.heap.newString(a), begin, end, dst, at]);
+        const sb = await s.construct('java/lang/StringBuilder', '(I)V', [cap]);
+        const outs: unknown[] = [];
+        for (const [cls, key] of [
+          ['java/lang/StringBuilder', 'append(Ljava/lang/String;)Ljava/lang/StringBuilder;'],
+          ['java/lang/AbstractStringBuilder', 'append(Ljava/lang/String;)Ljava/lang/AbstractStringBuilder;'],
+        ] as const) {
+          const o = await s.call(cls, key, [sb, append === null ? null : s.jvm.heap.newString(append)]);
+          outs.push(o.thrown ?? (o.ret === sb ? 'this' : 'other'));
+        }
+        const str = (await s.call('java/lang/StringBuilder', 'toString()Ljava/lang/String;', [sb])).ret as JObject;
+        return { got, dst: dst ? [...(dst.data as Uint16Array)] : null, outs, text: s.jvm.heap.jsString(str), capacity: (s.field(sb, 'value', '[C') as JArray).data.length };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (bytecodesIn(APPEND) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(50);
+  });
+
+  it('Integer.parseInt and Character.digit give what the Java code gives, and throw where it throws', async () => {
+    const SPECIAL = ['2147483647', '2147483648', '-2147483648', '-2147483649', '+0', '-', '+', '', '007', '\u0661\u0662', '12\u00b2', 'zz', 'ZZ', '7fffffff', '-80000000', '80000000'];
+    const key = 'java/lang/Integer.parseInt(Ljava/lang/String;I)I';
+    let intrinsic = 0;
+    for (let i = 0; i < 300; i++) {
+      const r = rng(41000 + i);
+      const str = i < SPECIAL.length ? SPECIAL[i]! : r() < 0.05 ? null : pick(r, [String(int(r, -99999, 99999)), (r() < 0.5 ? '-' : '') + textOf(r, 8), int(r, 0, 2 ** 31).toString(36)]);
+      const radix = pick(r, [10, 10, 16, 36, int(r, -1, 40)]);
+      const c = pick(r, [int(r, 0, 127), int(r, 128, 0x7ff), -1, 0x10000 + int(r, 0, 99)]);
+      const before = bytecodesIn(key);
+      const res = await both(async (s) => {
+        const js = str === null ? null : s.jvm.heap.newString(str);
+        return [
+          await s.call('java/lang/Integer', 'parseInt(Ljava/lang/String;I)I', [js, radix]),
+          await s.call('java/lang/Integer', 'parseInt(Ljava/lang/String;)I', [js]),
+          await s.call('java/lang/Character', 'digit(II)I', [c, radix]),
+          await s.call('java/lang/Character', 'digit(CI)I', [c & 0xffff, radix]),
+        ];
+      });
+      expect(res.on, `case ${i}: ${JSON.stringify([str, radix, c])}`).toEqual(res.off);
+      if (bytecodesIn(key) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(30);
+  });
+
+  it('new String(bytes, offset, length, charsetName), new String(chars, offset, count) and Arrays.copyOfRange(char[]) build the same strings', async () => {
+    const key = 'java/lang/String.<init>([BIILjava/lang/String;)V';
+    let intrinsic = 0;
+    for (let i = 0; i < 200; i++) {
+      const r = rng(42000 + i);
+      const bytes = r() < 0.03 ? null : asciiBytes(r, int(r, 0, 24), 0.1);
+      const n = bytes?.length ?? 0;
+      const off = r() < 0.85 ? int(r, 0, n) : int(r, -2, n + 2);
+      const len = r() < 0.85 ? int(r, 0, Math.max(0, n - Math.max(off, 0))) : int(r, -2, n + 2);
+      const name = pick(r, ['UTF8', 'UTF-8', 'utf-8', 'Utf8', 'ISO-8859-1', 'US-ASCII', null] as const);
+      const chars = r() < 0.03 ? null : Array.from({ length: int(r, 0, 20) }, () => int(r, 0, 0xffff));
+      const from = int(r, -2, (chars?.length ?? 0) + 2);
+      const to = int(r, from - 2, (chars?.length ?? 0) + 6);
+      const before = bytecodesIn(key);
+      const res = await both(async (s) => {
+        const b = bytes === null ? null : s.byteArray(bytes);
+        const c = chars === null ? null : s.jvm.heap.newArray(s.jvm.loader.arrayOf(s.jvm.loader.primitive('C')), chars.length);
+        if (c && chars) (c.data as Uint16Array).set(chars);
+        const results: unknown[] = [];
+        const viaBytes = s.jvm.heap.newObject(s.cls(S));
+        const o1 = await s.call(S, '<init>([BIILjava/lang/String;)V', [viaBytes, b, off, len, name === null ? null : s.jvm.heap.newString(name)]);
+        results.push(o1.thrown ?? s.jvm.heap.jsString(viaBytes));
+        const viaChars = s.jvm.heap.newObject(s.cls(S));
+        const o2 = await s.call(S, '<init>([CII)V', [viaChars, c, from, to - from]);
+        results.push(o2.thrown ?? s.jvm.heap.jsString(viaChars));
+        results.push(plain(s, await s.call('java/util/Arrays', 'copyOfRange([CII)[C', [c, from, to])));
+        return results;
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (bytecodesIn(key) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(30);
+  });
+
+  it('String.toLowerCase(Locale) and toUpperCase(Locale) give the same strings (or the string itself), Turkish and Lithuanian too', async () => {
+    const key = 'java/lang/String.toLowerCase(Ljava/util/Locale;)Ljava/lang/String;';
+    let intrinsic = 0;
+    for (let i = 0; i < 200; i++) {
+      const r = rng(43000 + i);
+      const text = r() < 0.7 ? Array.from({ length: int(r, 0, 14) }, () => String.fromCharCode(int(r, 32, 126))).join('') : textOf(r);
+      const tag = pick(r, [['en'], [''], ['tr'], ['az'], ['lt'], ['fr', 'CA'], ['TR'], null] as const);
+      const before = bytecodesIn(key);
+      const res = await both(async (s) => {
+        const str = s.jvm.heap.newString(text);
+        const locale = tag === null ? null : await s.construct('java/util/Locale', '(Ljava/lang/String;Ljava/lang/String;)V', [s.jvm.heap.newString(tag[0]!), s.jvm.heap.newString(tag[1] ?? '')]);
+        const lower = await s.call(S, 'toLowerCase(Ljava/util/Locale;)Ljava/lang/String;', [str, locale]);
+        const upper = await s.call(S, 'toUpperCase(Ljava/util/Locale;)Ljava/lang/String;', [str, locale]);
+        return [plain(s, lower), lower.ret === str, plain(s, upper), upper.ret === str];
+      });
+      expect(res.on, `case ${i}: ${JSON.stringify([text, tag])}`).toEqual(res.off);
+      if (bytecodesIn(key) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(50);
+  });
+
+  it('Math.min, Math.max, HashMap.tableSizeFor and HashMap.hash return what the Java code returns', async () => {
+    for (let i = 0; i < 100; i++) {
+      const r = rng(44000 + i);
+      const a = pick(r, [anyInt(r), int(r, -5, 5), -2147483648, 2147483647, 1073741824, 1073741825]);
+      const b = anyInt(r);
+      const kind = pick(r, ['string', 'empty', 'null', 'integer'] as const);
+      const text = textOf(r);
+      const res = await both(async (s) => {
+        const k =
+          kind === 'string' ? s.jvm.heap.newString(text) : kind === 'empty' ? s.jvm.heap.newString('') : kind === 'null' ? null : (await s.call('java/lang/Integer', 'valueOf(I)Ljava/lang/Integer;', [b])).ret;
+        const out = [
+          await s.call('java/lang/Math', 'min(II)I', [a, b]),
+          await s.call('java/lang/Math', 'max(II)I', [a, b]),
+          await s.call('java/util/HashMap', 'tableSizeFor(I)I', [a]),
+          await s.call('java/util/HashMap', 'hash(Ljava/lang/Object;)I', [k ?? null]),
+        ];
+        return { out, cached: kind === 'string' ? s.field(k as JObject, 'hash', 'I') : null };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+  });
+
+  it('BigInteger.destructiveMulAdd, mulAdd and addOne leave the same words and carries', async () => {
+    const key = 'java/math/BigInteger.addOne([IIII)I';
+    let intrinsic = 0;
+    const word = (r: () => number): number => pick(r, [anyInt(r), anyInt(r), -1, 0, 1, -2147483648]);
+    for (let i = 0; i < 200; i++) {
+      const r = rng(45000 + i);
+      const x = Array.from({ length: i < 3 ? 0 : int(r, 1, 9) }, () => word(r));
+      const out = Array.from({ length: int(r, 1, 12) }, () => word(r));
+      const input = Array.from({ length: int(r, 0, 12) }, () => word(r));
+      const len = r() < 0.8 ? int(r, 0, Math.min(input.length, out.length)) : int(r, -1, 13);
+      const offset = r() < 0.8 ? int(r, 0, Math.max(0, out.length - Math.max(len, 0))) : int(r, -2, 13);
+      const mlen = r() < 0.8 ? int(r, 0, out.length - 1) : int(r, -1, 14);
+      const aOff = r() < 0.8 ? int(r, 0, Math.max(0, out.length - 1 - mlen)) : int(r, -2, 14);
+      const [y, z, k, carry] = [word(r), word(r), word(r), pick(r, [word(r), 1, 0])];
+      const before = bytecodesIn(key);
+      const res = await both(async (s) => {
+        const xa = s.intArray(x);
+        const o1 = await s.call('java/math/BigInteger', 'destructiveMulAdd([III)V', [xa, y, z]);
+        const oa = s.intArray(out);
+        const o2 = await s.call('java/math/BigInteger', 'mulAdd([I[IIII)I', [oa, s.intArray(input), offset, len, k]);
+        const aa = s.intArray(out);
+        const o3 = await s.call('java/math/BigInteger', 'addOne([IIII)I', [aa, aOff, mlen, carry]);
+        return [o1, [...(xa.data as Int32Array)], o2, [...(oa.data as Int32Array)], o3, [...(aa.data as Int32Array)]];
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+      if (bytecodesIn(key) === before) intrinsic++;
+    }
+    expect(intrinsic).toBeGreaterThan(100);
+  });
+});
+
+describe("start-up intrinsics and loop hooks: the class library's jar, manifest and data code", () => {
+  it('JarFile.match finds Class-Path in a manifest as the Java search does', async () => {
+    const key = 'java/util/jar/JarFile.match([C[B[I[I)Z';
+    const method = key.slice(key.indexOf('.') + 1);
+    const statics = (s: Side, name: string, desc: string): JValue => {
+      const c = s.cls('java/util/jar/JarFile');
+      return c.staticValues[c.findField(name, desc)!.slot]!;
+    };
+    // a first call initialises JarFile, whose static tables the search uses
+    for (const s of [sides.off, sides.on]) {
+      await s.call('java/util/jar/JarFile', method, [null, s.jvm.heap.newArray(s.jvm.loader.arrayOf(s.jvm.loader.primitive('C')), 1), s.byteArray([]), s.intArray(new Array(128).fill(0)), s.intArray([1])]);
+    }
+    const before = [bytecodesIn(key), bytecodesIn(key, 'off')];
+    for (let i = 0; i < 100; i++) {
+      const r = rng(46000 + i);
+      const parts = Array.from({ length: int(r, 0, 8) }, () =>
+        pick(r, ['Class-Path: a.jar\r\n', 'class-path', 'CLASS-PATH', 'Class-Pat', 'Manifest-Version: 1.0\n', String.fromCharCode(...asciiBytes(r, int(r, 0, 30)).map((b) => b & 0xff))]),
+      );
+      const bytes = bytesOf(parts.join(''));
+      const res = await both((s) =>
+        s.call('java/util/jar/JarFile', method, [null, statics(s, 'CLASSPATH_CHARS', '[C'), s.byteArray(bytes), statics(s, 'CLASSPATH_LASTOCC', '[I'), statics(s, 'CLASSPATH_OPTOSFT', '[I')]),
+      );
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+    expect(bytecodesIn(key) - before[0]!).toBeLessThan((bytecodesIn(key, 'off') - before[1]!) / 10);
+  });
+
+  it('UnixFileSystem.normalize, ASCIICaseInsensitiveComparator.lowerCaseHashCode and Attributes.Name.isValid return what the Java code returns', async () => {
+    for (let i = 0; i < 200; i++) {
+      const r = rng(47000 + i);
+      const path = r() < 0.05 ? null : pick(r, [textOf(r), `/${textOf(r, 6)}/${textOf(r, 6)}`, '//a//b/', '/', '', 'a/b/']);
+      const name = r() < 0.03 ? null : pick(r, [textOf(r, 80), 'Manifest-Version', 'Class_Path-2', 'a'.repeat(int(r, 69, 71))]);
+      const res = await both(async (s) => {
+        const p = path === null ? null : s.jvm.heap.newString(path);
+        const fs = s.object('java/io/UnixFileSystem');
+        const norm = await s.call('java/io/UnixFileSystem', 'normalize(Ljava/lang/String;)Ljava/lang/String;', [fs, p]);
+        const n = name === null ? null : s.jvm.heap.newString(name);
+        return [
+          plain(s, norm),
+          norm.ret === p,
+          await s.call('sun/misc/ASCIICaseInsensitiveComparator', 'lowerCaseHashCode(Ljava/lang/String;)I', [n]),
+          await s.call('java/util/jar/Attributes$Name', 'isValid(Ljava/lang/String;)Z', [n]),
+        ];
+      });
+      expect(res.on, `case ${i}: ${JSON.stringify([path, name])}`).toEqual(res.off);
+    }
+  });
+
+  it('ByteArrayAccess.b2iBig and Cache.EqualByteArray.hashCode read the same words and hashes', async () => {
+    for (let i = 0; i < 150; i++) {
+      const r = rng(48000 + i);
+      const bytes = r() < 0.03 ? null : Array.from({ length: int(r, 0, 72) }, () => int(r, -128, 127));
+      const n = bytes?.length ?? 0;
+      const inOfs = r() < 0.8 ? int(r, 0, n) : int(r, -2, n + 2);
+      const len = r() < 0.8 ? 4 * int(r, 0, Math.floor((n - Math.max(inOfs, 0)) / 4)) : int(r, -4, n + 4);
+      const outLen = int(r, 0, 20);
+      const outOfs = r() < 0.8 ? int(r, 0, Math.max(0, outLen - Math.floor(Math.max(len, 0) / 4))) : int(r, -2, 22);
+      const res = await both(async (s) => {
+        const out = s.intArray(new Array(outLen).fill(0));
+        const got = await s.call('sun/security/provider/ByteArrayAccess', 'b2iBig([BI[III)V', [bytes === null ? null : s.byteArray(bytes), inOfs, out, outOfs, len]);
+        const eq = bytes === null ? null : await s.construct('sun/security/util/Cache$EqualByteArray', '([B)V', [s.byteArray(bytes)]);
+        const hash = 'hashCode()I';
+        const hashes = eq ? [await s.call('sun/security/util/Cache$EqualByteArray', hash, [eq]), await s.call('sun/security/util/Cache$EqualByteArray', hash, [eq])] : null;
+        return { got, out: [...(out.data as Int32Array)], hashes };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+  });
+
+  it('DataInputStream over a ByteArrayInputStream: readInt, readUnsignedShort and readUTF read the same values, to the same EOF', async () => {
+    const read = 'java/io/ByteArrayInputStream.read()I';
+    const before = [bytecodesIn(read), bytecodesIn(read, 'off')];
+    for (let i = 0; i < 60; i++) {
+      const r = rng(49000 + i);
+      const asUtf = r() < 0.5;
+      const data = asUtf
+        ? Array.from({ length: int(r, 0, 6) }, () => {
+            // ASCII runs, with some two-byte sequences (C3 A9) and some broken ones
+            const body = asciiBytes(r, int(r, 0, 30), 0.08).map((b) => (b < 0 ? pick(r, [-61, -87]) : b));
+            return [(body.length >> 8) & 255, body.length & 255, ...body];
+          }).flat()
+        : Array.from({ length: int(r, 0, 40) }, () => int(r, -128, 127));
+      const res = await both(async (s) => {
+        const bais = await s.construct('java/io/ByteArrayInputStream', '([B)V', [s.byteArray(data)]);
+        const din = await s.construct('java/io/DataInputStream', '(Ljava/io/InputStream;)V', [bais]);
+        const steps = rng(49500 + i);
+        const reads: unknown[] = [];
+        for (let k = 0; k < 40; k++) {
+          const which = asUtf ? 'readUTF(Ljava/io/DataInput;)Ljava/lang/String;' : pick(steps, ['readInt()I', 'readUnsignedShort()I']);
+          const o = await s.call('java/io/DataInputStream', which, [din]);
+          reads.push(plain(s, o));
+          if (o.thrown) break;
+        }
+        return { reads, pos: s.field(bais, 'pos', 'I') };
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+    // readInt and readUnsignedShort took the bytes themselves: far fewer ByteArrayInputStream.read() calls ran
+    expect(bytecodesIn(read) - before[0]!).toBeLessThan((bytecodesIn(read, 'off') - before[1]!) / 4);
+  });
+
+  it('Manifest.FastInputStream.readLine returns the same lines, across buffer refills, as the Java loop does', async () => {
+    const key = 'java/util/jar/Manifest$FastInputStream.readLine([BII)I';
+    const before = [bytecodesIn(key), bytecodesIn(key, 'off')];
+    for (let i = 0; i < 60; i++) {
+      const r = rng(50000 + i);
+      const data = asciiBytes(r, int(r, 0, 300), 0.02).map((b) => (r() < 0.06 ? 10 : b));
+      const size = int(r, 1, 64);
+      const lineLen = int(r, 1, 90);
+      const res = await both(async (s) => {
+        const bais = await s.construct('java/io/ByteArrayInputStream', '([B)V', [s.byteArray(data)]);
+        const fin = await s.construct('java/util/jar/Manifest$FastInputStream', '(Ljava/io/InputStream;I)V', [bais, size]);
+        const lines: unknown[] = [];
+        for (let k = 0; k < 400; k++) {
+          const b = s.byteArray(new Array(lineLen + 4).fill(0));
+          const o = await s.call('java/util/jar/Manifest$FastInputStream', 'readLine([BII)I', [fin, b, k % 3, lineLen]);
+          lines.push(o, [...(b.data as Int8Array)]);
+          if (o.thrown || o.ret === -1) break;
+        }
+        return lines;
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+    expect(bytecodesIn(key) - before[0]!).toBeLessThan((bytecodesIn(key, 'off') - before[1]!) / 3);
+  });
+
+  it('Properties.load (LineReader.readLine) reads the same properties, comments, escapes and continued lines included', async () => {
+    const key = 'java/util/Properties$LineReader.readLine()I';
+    const before = [bytecodesIn(key), bytecodesIn(key, 'off')];
+    for (let i = 0; i < 40; i++) {
+      const r = rng(51000 + i);
+      const lines = Array.from({ length: int(r, 0, 12) }, () =>
+        pick(r, [`# ${textOf(r, 120)}`, '! comment', `${textOf(r, 10).replace(/[=: \\]/g, '')}=${textOf(r, 100)}`, 'key\\ with\\:escapes = value \\\n    continued', `  indented: ${textOf(r, 20)}`, '', 'trailing\\']),
+      );
+      const bytes = bytesOf(lines.join(pick(r, ['\n', '\r\n', '\r'])));
+      const res = await both(async (s) => {
+        const props = await s.construct('java/util/Properties', '()V', []);
+        const bais = await s.construct('java/io/ByteArrayInputStream', '([B)V', [s.byteArray(bytes)]);
+        const load = await s.call('java/util/Properties', 'load(Ljava/io/InputStream;)V', [props, bais]);
+        return [load, plain(s, await s.call('java/util/Hashtable', 'toString()Ljava/lang/String;', [props]))];
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+    expect(bytecodesIn(key) - before[0]!).toBeLessThan((bytecodesIn(key, 'off') - before[1]!) / 2);
+  });
+
+  it('ManifestDigester.findSection finds the same sections as the Java loop does', async () => {
+    const key = 'sun/security/util/ManifestDigester.findSection(ILsun/security/util/ManifestDigester$Position;)Z';
+    const method = key.slice(key.indexOf('.') + 1);
+    const before = [bytecodesIn(key), bytecodesIn(key, 'off')];
+    for (let i = 0; i < 60; i++) {
+      const r = rng(52000 + i);
+      const nl = pick(r, ['\n', '\r\n', '\r']);
+      const sections = Array.from({ length: int(r, 0, 6) }, () => [`Name: ${textOf(r, 30)}`, `SHA-256-Digest: ${textOf(r, 44)}`, ...(r() < 0.3 ? [' continued'] : [])].join(nl));
+      const bytes = bytesOf(sections.join(nl + nl) + (r() < 0.5 ? nl : ''));
+      const res = await both(async (s) => {
+        const md = s.object('sun/security/util/ManifestDigester', { rawBytes: ['[B', s.byteArray(bytes)] });
+        const pos = s.object('sun/security/util/ManifestDigester$Position');
+        const found: unknown[] = [];
+        let offset = 0;
+        for (let k = 0; k < 20; k++) {
+          const o = await s.call('sun/security/util/ManifestDigester', method, [md, offset, pos]);
+          const fields = ['endOfFirstLine', 'endOfSection', 'startOfNext'].map((f) => s.field(pos, f, 'I'));
+          found.push(o, fields);
+          if (o.thrown || o.ret !== 1) break;
+          offset = fields[2] as number;
+        }
+        return found;
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+    expect(bytecodesIn(key) - before[0]!).toBeLessThan((bytecodesIn(key, 'off') - before[1]!) / 2);
+  });
+
+  it('new String(ascii, hibyte, offset, count) and a UTF-8 CharsetDecoder (decodeArrayLoop) give the same chars', async () => {
+    const keys = ['java/lang/String.<init>([BIII)V', 'sun/nio/cs/UTF_8$Decoder.decodeArrayLoop(Ljava/nio/ByteBuffer;Ljava/nio/CharBuffer;)Ljava/nio/charset/CoderResult;'];
+    const before = keys.map((k) => [bytecodesIn(k), bytecodesIn(k, 'off')]);
+    for (let i = 0; i < 80; i++) {
+      const r = rng(53000 + i);
+      const bytes = asciiBytes(r, int(r, 0, 60), 0.05);
+      const n = bytes.length;
+      const off = r() < 0.85 ? int(r, 0, n) : int(r, -2, n + 2);
+      const count = r() < 0.85 ? int(r, 0, Math.max(0, n - Math.max(off, 0))) : int(r, -2, n + 2);
+      const hibyte = r() < 0.8 ? 0 : int(r, -300, 300);
+      const res = await both(async (s) => {
+        const str = s.jvm.heap.newObject(s.cls('java/lang/String'));
+        const made = await s.call('java/lang/String', '<init>([BIII)V', [str, s.byteArray(bytes), hibyte, off, count]);
+        const charset = (await s.call('java/nio/charset/Charset', 'forName(Ljava/lang/String;)Ljava/nio/charset/Charset;', [s.jvm.heap.newString('UTF-8')])).ret as JObject;
+        const decoder = (await s.call(charset.cls.name, 'newDecoder()Ljava/nio/charset/CharsetDecoder;', [charset])).ret as JObject;
+        const buf = (await s.call('java/nio/ByteBuffer', 'wrap([B)Ljava/nio/ByteBuffer;', [s.byteArray(bytes)])).ret as JObject;
+        const decoded = await s.call('java/nio/charset/CharsetDecoder', 'decode(Ljava/nio/ByteBuffer;)Ljava/nio/CharBuffer;', [decoder, buf]);
+        const text = decoded.thrown ?? plain(s, await s.call('java/nio/CharBuffer', 'toString()Ljava/lang/String;', [decoded.ret as JObject]));
+        return [made.thrown ?? s.jvm.heap.jsString(str), text];
+      });
+      expect(res.on, `case ${i}`).toEqual(res.off);
+    }
+    keys.forEach((k, j) => expect(bytecodesIn(k) - before[j]![0]!, k).toBeLessThan((bytecodesIn(k, 'off') - before[j]![1]!) / 2));
+  });
+});
