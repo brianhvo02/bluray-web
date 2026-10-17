@@ -3,7 +3,8 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: 'tests/e2e',
   timeout: 60_000,
-  use: { baseURL: 'http://localhost:4173' },
+  // The service worker's install and precache would run during the A/V sync tests; offline.spec.ts allows it.
+  use: { baseURL: 'http://localhost:4173', serviceWorkers: 'block' },
   projects: [
     {
       name: 'chromium',

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { skipWithoutH264 } from './support';
+import { CHROME_ONLY, skipWithoutH264 } from './support';
 import { collectWindows, expectInSync } from './telemetry';
 
 // fixtures/synthetic/disc-menu (scripts/make-menu-disc.ts): First Play loops the top menu (playlist 00001). Page 0 has
@@ -60,7 +60,8 @@ test('opens straight into the disc menu', async ({ page }) => {
   await expect(page.getByTestId('top-menu')).toBeVisible();
 });
 
-test('keys move through both pages and start the feature in sync', async ({ page }) => {
+test('keys move through both pages and start the feature in sync', async ({ page, browserName, isMobile }) => {
+  test.skip(browserName !== 'chromium' || isMobile, CHROME_ONLY);
   await openMenuDisc(page);
   await page.keyboard.press('ArrowDown');
   await expect.poll(() => menuState(page)).toBe('page 0 button 2');

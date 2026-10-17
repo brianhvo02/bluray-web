@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
 import { skipWithoutH264 } from './support';
 
+test.use({ serviceWorkers: 'allow' }); // blocked for every other spec in playwright.config.ts
+
 test('plays a disc offline after the first visit', async ({ page, context }) => {
   await page.goto('/');
   await page.evaluate(async () => {
