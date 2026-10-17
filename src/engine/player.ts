@@ -91,6 +91,7 @@ interface TextTrack {
 
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
 const MAX_DECODE_QUEUE = 8;
+const MENU_MEMORY_MESSAGE = "This disc's menus need more memory than this device allows.";
 /**
  * Read-ahead budget for compressed video waiting to enter the decoder. Discs may multiplex video
  * well ahead of its audio (≥ 0.5 s seen on real discs), so reading must be able to run this far
@@ -476,7 +477,10 @@ export class Player {
       port: this.navigationPort(),
       emit: (e) => this.onNavigatorEvent(e),
       nowScr: () => this.deps.nowMs() * SCR_PER_MS,
-      preloadSubPathIg: (clipId, signal) => this.preloadSubPathIg(clipId, signal),
+      preloadSubPathIg: (clipId, signal) => this.preloadSubPathIg(clipId, signal).catch((err: unknown) => {
+        if (err instanceof DiscError && err.message === MENU_MEMORY_MESSAGE) this.notice('menu-memory', MENU_MEMORY_MESSAGE);
+        throw err;
+      }),
     });
   }
 
@@ -487,7 +491,7 @@ export class Player {
     if (!source || !source.exists(path)) throw new DiscError('missing-file', `Missing sub-path clip ${path}`, [path]);
     if (source.size(path) > this.memory.igPreloadLimitBytes) {
       // desktop keeps libbluray's behaviour and message (PRELOAD_SIZE_LIMIT)
-      throw new DiscError('unreadable-stream', this.memoryName === 'constrained' ? "This disc's menus need more memory than this device allows." : `Sub-path clip ${path} is too large to preload`, [path]);
+      throw new DiscError('unreadable-stream', this.memoryName === 'constrained' ? MENU_MEMORY_MESSAGE : `Sub-path clip ${path} is too large to preload`, [path]);
     }
     const reader = new M2tsReader({ source, path, startSpn: 0, pids: new Set(Array.from({ length: 0x20 }, (_, k) => 0x1400 + k)) });
     const cancel = (): void => reader.cancel();
@@ -1119,6 +1123,7 @@ export class Player {
     const s = this.session;
     if (!s) return;
     this.session = null;
+    this.codedWidth = 0;
     this.deps.emit({ type: 'playlistCleared' });
     this.seekGeneration++;
     s.pipeline.stop();
@@ -1418,7 +1423,7 @@ export class Player {
   private feedDecoder(s: Session): void {
     if (s.videoState !== 'configured') return;
     let fed = 0;
-    while (fed < s.pendingVideo.length && this.presenter.size < this.memory.maxQueuedFrames(this.codedWidth || 0) && s.decoder.queueSize < MAX_DECODE_QUEUE) {
+    while (fed < s.pendingVideo.length && this.presenter.size < this.memory.maxQueuedFrames(this.codedWidth) && s.decoder.queueSize < MAX_DECODE_QUEUE) {
       s.decoder.decode(s.pendingVideo[fed]);
       fed++;
     }
