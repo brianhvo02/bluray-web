@@ -307,7 +307,14 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       onDrop={onDrop}
       onPointerDown={(e) => {
         setPressed(true);
-        if (!isVideoTouch(e)) wake(); // a touch on the video shows or hides the controls on its own, after the double-tap window
+        if (!isVideoTouch(e)) {
+          // A touch off the video cancels a pending single tap: it would otherwise hide the controls just woken.
+          if (tapTimer.current !== null) {
+            window.clearTimeout(tapTimer.current);
+            tapTimer.current = null;
+          }
+          wake();
+        } // a touch on the video shows or hides the controls on its own, after the double-tap window
       }}
     >
       <canvas
