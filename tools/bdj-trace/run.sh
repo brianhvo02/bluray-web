@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Prints libbluray's BD-J native-call trace (JSONL) for <disc> on stdout; libbluray's log goes to stderr.
-#   run.sh <disc> [--until <call>] [--seconds N] [--jvm-option OPT]...
+#   run.sh <disc> [--until <call>[#<n>]] [--seconds N] [--jvm-option OPT]...
 #   <disc>:        a folder name under fixtures/synthetic, or a path to a disc folder (the one holding BDMV/)
 #   --until CALL:  stop right after the first trace line for CALL (a JNI name without the Java_org_videolan_Libbluray_
-#                  prefix, e.g. selectPlaylistN)
+#                  prefix, e.g. selectPlaylistN); CALL#N stops after the N-th (selectPlaylistN#2)
 #   --seconds N:   stop after N seconds of wall time (default 60)
 #   --jvm-option:  passed to the JVM through JAVA_TOOL_OPTIONS (e.g. -verbose:class, -verbose:jni; their output
 #                  goes to stderr)
@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE=bluray-web-bdj-trace
 PLATFORM="${BDJ_TRACE_PLATFORM:-linux/amd64}"
 
-DISC="${1:?usage: run.sh <disc> [--until <call>] [--seconds N] [--jvm-option OPT]...}"
+DISC="${1:?usage: run.sh <disc> [--until <call>[#<n>]] [--seconds N] [--jvm-option OPT]...}"
 shift
 ENV_ARGS=()
 SECONDS_ARG=60

@@ -18,10 +18,13 @@ const CLASSES: ClassLibrarySource = {
   libbluray: file('../../bdj-classlib/libbluray-j2se.jar'),
   libblurayAwt: file('../../bdj-classlib/libbluray-awt-j2se.jar'),
 };
-const GOLDEN = new TextDecoder()
-  .decode(file('../../../tests/bdj/golden/disc-bdj.jsonl'))
-  .split('\n')
-  .filter((l) => l !== '');
+/** libbluray's control calls on disc-bdj through the first selectPlaylistN (the golden goes on to the second). */
+const GOLDEN = ((lines: string[]) => lines.slice(0, lines.findIndex((l) => l.includes('"call":"selectPlaylistN"')) + 1))(
+  new TextDecoder()
+    .decode(file('../../../tests/bdj/golden/disc-bdj.jsonl'))
+    .split('\n')
+    .filter((l) => l !== ''),
+);
 const GOLDEN_RETURNS: Partial<Record<BdjCallName, number>> = { writeReg: 0, selectPlaylist: 1 };
 const FIRST_PLAY = 0xffff;
 const DISC_FILES = discEntries(fixtureDiscFiles('disc-bdj'));

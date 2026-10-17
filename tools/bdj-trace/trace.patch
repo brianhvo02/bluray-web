@@ -1,13 +1,14 @@
 diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj/native/org_videolan_Libbluray.c
 --- a/src/libbluray/bdj/native/org_videolan_Libbluray.c
 +++ b/src/libbluray/bdj/native/org_videolan_Libbluray.c
-@@ -43,6 +43,48 @@
+@@ -43,6 +43,58 @@
  /* this automatically generated header is included to cross-check native function signatures */
  #include "org_videolan_Libbluray.h"
  
 +/* bdj-trace: one JSONL line per native call */
 +#include <stdio.h>
 +#include <unistd.h>
++#include <pthread.h>
 +
 +/* JSON string literal for a UTF-8 string, malloc'ed ("null" for NULL) */
 +char *bdj_json_str(const char *s)
@@ -35,22 +36,31 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
 +    return out;
 +}
 +
-+/* BDJ_TRACE_UNTIL=<call>: stop the process right after the first line for that call */
++/* BDJ_TRACE_UNTIL=<call>[#<n>]: stop the process right after the n-th line (default: the first) for that call */
 +void bdj_trace(const char *call, const char *args, const char *ret)
 +{
++    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++    static int seen;
 +    const char *until = getenv("BDJ_TRACE_UNTIL");
++    pthread_mutex_lock(&lock);
 +    printf("{\"call\":\"%s\",\"args\":[%s],\"ret\":%s}\n", call, args, ret);
 +    fflush(stdout);
-+    if (until && !strcmp(until, call)) {
-+        _exit(0);
++    if (until) {
++        const char *hash = strchr(until, '#');
++        size_t len = hash ? (size_t)(hash - until) : strlen(until);
++        int n = hash ? atoi(hash + 1) : 1;
++        if (strlen(call) == len && !strncmp(until, call, len) && ++seen >= n) {
++            _exit(0);
++        }
 +    }
++    pthread_mutex_unlock(&lock);
 +}
 +#define _trace bdj_trace
 +
  /* Disable some warnings */
  #if defined __GNUC__
  #pragma GCC diagnostic ignored "-Wunused-parameter"
-@@ -191,7 +233,11 @@
+@@ -191,7 +243,11 @@
  
      disc_info = bd_get_disc_info(bd);
  
@@ -63,7 +73,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT jobject JNICALL Java_org_videolan_Libbluray_getPlaylistInfoN
-@@ -199,17 +245,23 @@
+@@ -199,17 +255,23 @@
  {
      BLURAY *bd = (BLURAY*)(intptr_t)np;
      BLURAY_TITLE_INFO* ti;
@@ -88,7 +98,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      return titleInfo;
  }
  
-@@ -222,7 +274,10 @@
+@@ -222,7 +284,10 @@
  
      BD_DEBUG(DBG_JNI, "getAacsDataN(%d) -> %p\n", (int)type, (const void *)data);
  
@@ -99,7 +109,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
          return NULL;
      }
      if (type == 1/*BD_AACS_DISC_ID*/) {
-@@ -240,6 +295,8 @@
+@@ -240,6 +305,8 @@
  
      jbyteArray array = (*env)->NewByteArray(env, data_size);
      (*env)->SetByteArrayRegion(env, array, 0, data_size, (const jbyte *)data);
@@ -108,7 +118,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      return array;
  }
  
-@@ -248,7 +305,11 @@
+@@ -248,7 +315,11 @@
      BLURAY* bd = (BLURAY*)(intptr_t)np;
  
      BD_DEBUG(DBG_JNI, "getUOMaskN()\n");
@@ -121,7 +131,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT void JNICALL Java_org_videolan_Libbluray_setUOMaskN(JNIEnv * env,
-@@ -257,6 +318,9 @@
+@@ -257,6 +328,9 @@
  
      BD_DEBUG(DBG_JNI, "setUOMaskN(%d,%d)\n", (int)menuCallMask, (int)titleSearchMask);
      bdpriv_set_bdj_uo_mask(bd, ((!!menuCallMask) * BDJ_MENU_CALL_MASK) | ((!!titleSearchMask) * BDJ_TITLE_SEARCH_MASK));
@@ -131,7 +141,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT void JNICALL Java_org_videolan_Libbluray_setKeyInterestN(JNIEnv * env,
-@@ -265,6 +329,9 @@
+@@ -265,6 +339,9 @@
  
      BD_DEBUG(DBG_JNI, "setKeyInterestN(0x%x)\n", (int)mask);
      bdpriv_set_bdj_kit(bd, mask);
@@ -141,7 +151,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_setVirtualPackageN(JNIEnv * env,
-@@ -281,6 +348,14 @@
+@@ -281,6 +358,14 @@
  
      result = bdpriv_set_virtual_package(bd, path, (int)psr_init_backup);
  
@@ -156,7 +166,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      if (vpPath) {
          (*env)->ReleaseStringUTFChars(env, vpPath, path);
      }
-@@ -294,7 +369,12 @@
+@@ -294,7 +379,12 @@
  
      BD_DEBUG(DBG_JNI, "seekN(tick=%" PRId64 ", mark=%d, playitem=%d)\n", (int64_t)tick, (int)playmark, (int)playitem);
  
@@ -170,7 +180,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectPlaylistN(
-@@ -308,7 +388,12 @@
+@@ -308,7 +398,12 @@
      BD_DEBUG(DBG_JNI, "selectPlaylistN(pl=%d, pi=%d, pm=%d, time=%ld)\n",
               (int)playlist, (int)playitem, (int)playmark, (long)time);
  
@@ -184,7 +194,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectTitleN(JNIEnv * env,
-@@ -317,25 +402,44 @@
+@@ -317,25 +412,44 @@
  
      BD_DEBUG(DBG_JNI, "selectTitleN(%d)\n", (int)title);
  
@@ -233,7 +243,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
-@@ -345,6 +449,9 @@
+@@ -345,6 +459,9 @@
      BD_DEBUG(DBG_JNI, "selectRateN(%1.1f, %d)\n", (float)rate, (int)reason);
  
      bdpriv_select_rate(bd, (float)rate, reason);
@@ -243,7 +253,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      return 1;
  }
  
-@@ -355,6 +462,11 @@
+@@ -355,6 +472,11 @@
  
      BD_DEBUG(DBG_JNI, "readRegN(%s_%d) -> %d\n", is_psr ? "PSR" : "GPR", (int)num, (int)value);
  
@@ -255,7 +265,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      return value;
  }
  
-@@ -370,7 +482,12 @@
+@@ -370,7 +492,12 @@
                   is_psr ? "PSR" : "GPR", (int)num, (int)value, (int)mask);
      }
  
@@ -269,7 +279,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  }
  
  JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_cacheBdRomFileN(JNIEnv * env,
-@@ -392,6 +509,14 @@
+@@ -392,6 +519,14 @@
      result = disc_cache_bdrom_file(disc, rel_path, cache_path);
  
   out:
@@ -284,7 +294,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      if (rel_path) {
          (*env)->ReleaseStringUTFChars(env, jrel_path, rel_path);
      }
-@@ -415,6 +540,7 @@
+@@ -415,6 +550,7 @@
          return NULL;
      }
      BD_DEBUG(DBG_JNI, "listBdFilesN(%s)\n", path);
@@ -292,7 +302,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
  
      /* open directory stream */
      BD_DIR_H *dp;
-@@ -426,6 +552,12 @@
+@@ -426,6 +562,12 @@
      if (!dp) {
          BD_DEBUG(DBG_JNI, "failed opening directory %s\n", path);
          (*env)->ReleaseStringUTFChars(env, jpath, path);
@@ -305,7 +315,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
          return NULL;
      }
      (*env)->ReleaseStringUTFChars(env, jpath, path);
-@@ -466,6 +598,14 @@
+@@ -466,6 +608,14 @@
  
      X_FREE(files);
  
@@ -320,7 +330,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      return arr;
  }
  
-@@ -492,6 +632,12 @@
+@@ -492,6 +642,12 @@
          BD_DEBUG(DBG_JNI | DBG_CRIT, "getBdjoN(%s) failed\n", file);
      }
  
@@ -333,7 +343,7 @@ diff -ru a/src/libbluray/bdj/native/org_videolan_Libbluray.c b/src/libbluray/bdj
      (*env)->ReleaseStringUTFChars(env, jfile, file);
  
      return jbdjo;
-@@ -611,6 +757,11 @@
+@@ -611,6 +767,11 @@
      BLURAY* bd = (BLURAY*)(intptr_t)np;
  
      BD_DEBUG(DBG_JNI, "updateGraphicN(%ld,%ld-%ld,%ld)\n", (long)x0, (long)y0, (long)x1, (long)y1);

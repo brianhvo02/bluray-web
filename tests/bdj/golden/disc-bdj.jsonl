@@ -6,3 +6,6 @@
 {"call":"setKeyInterestN","args":[1],"ret":null}
 {"call":"writeRegN","args":[1,4,1,-1],"ret":0}
 {"call":"selectPlaylistN","args":[0,-1,-1,"-1"],"ret":1}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"call":"selectRateN","args":[0,2],"ret":1}
+{"call":"selectPlaylistN","args":[0,-1,-1,"-1"],"ret":1}

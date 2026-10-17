@@ -1,21 +1,43 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { compareBdjTraces } from './compare';
-import { parseBdjTrace } from './format';
-import type { BdjHost, RecordingHost } from '../../src/engine/bdj/host';
+import { parseBdjTrace, traceThrough } from './format';
+import type { BdjHost, RecordingHost, TraceEntry } from '../../src/engine/bdj/host';
 import { RegisterFile } from '../../src/engine/hdmv/registers';
 import { applyHarnessSettings, replayBdj } from './replay';
+import { replayPlayerBdj, traceEntryOf } from './replay-player';
+
+/** libbluray's control calls on disc-bdj through TitleXlet's second playlist selection. */
+const fullGolden = (): TraceEntry[] => parseBdjTrace(readFileSync(new URL('./golden/disc-bdj.jsonl', import.meta.url), 'utf8'));
+/** The part the RecordingHost replay reaches: through the first selection (it plays nothing, so no playlist ends). */
+const bootGolden = (): TraceEntry[] => traceThrough(fullGolden(), 'selectPlaylistN');
 
 describe('BD-J trace parity', () => {
-  it('disc-bdj makes the control calls libbluray makes', async () => {
-    const golden = parseBdjTrace(readFileSync(new URL('./golden/disc-bdj.jsonl', import.meta.url), 'utf8'));
+  it('disc-bdj makes the control calls libbluray makes, through the playlist selected when the first one ends', async () => {
+    const golden = fullGolden();
+    expect(golden.filter((e) => e.call === 'selectPlaylistN')).toHaveLength(2);
+    const { trace, firstPlaylistMs, untilMs, virtualMs } = await replayPlayerBdj('fixtures/synthetic/disc-bdj', { until: 'selectPlaylistN', occurrence: 2 });
+    console.log(`disc-bdj player replay: first playlist ${firstPlaylistMs.toFixed(0)} ms, until selectPlaylistN#2 ${untilMs.toFixed(0)} ms (virtual ${virtualMs.toFixed(0)} ms)`);
+    compareBdjTraces(golden, trace);
+  }, 120_000);
+
+  it("formats the engine's replies as trace.patch prints the natives", () => {
+    expect(traceEntryOf('selectRate', [0.3333333432674408, 1], 1)).toEqual({ call: 'selectRateN', args: [0.333333, 1], ret: 1 });
+    expect(traceEntryOf('writeReg', [0, 500, 0x88000000, -1], 0)).toEqual({ call: 'writeRegN', args: [0, 500, -2013265920, -1], ret: 0 });
+    expect(traceEntryOf('seek', [0, -1, '90000'], '90000')).toEqual({ call: 'seekN', args: [0, -1, '90000'], ret: '90000' });
+    expect(traceEntryOf('setUOMask', [true, false], 0)).toEqual({ call: 'setUOMaskN', args: [true, false], ret: null });
+    expect(traceEntryOf('selectPlaylist', [833, -1, -1, '-1'], 1)).toEqual({ call: 'selectPlaylistN', args: [833, -1, -1, '-1'], ret: 1 });
+  });
+
+  it('disc-bdj makes the control calls libbluray makes through the first selection, on the recording host', async () => {
+    const golden = bootGolden();
     const { trace, bootMs, untilMs } = await replayBdj('fixtures/synthetic/disc-bdj', { until: 'selectPlaylistN' });
     console.log(`disc-bdj replay: boot ${bootMs.toFixed(0)} ms, until selectPlaylistN ${untilMs.toFixed(0)} ms`);
     compareBdjTraces(golden, trace);
   }, 120_000);
 
   it('makes the same calls when the control calls answer through promises, as the BD-J worker host does', async () => {
-    const golden = parseBdjTrace(readFileSync(new URL('./golden/disc-bdj.jsonl', import.meta.url), 'utf8'));
+    const golden = bootGolden();
     const ASYNC = new Set(['selectTitle', 'selectPlaylist', 'seek', 'selectAngle', 'selectRate', 'writeReg', 'soundEffect', 'setVirtualPackage', 'setUOMask', 'setKeyInterest']);
     let parked = 0;
     const later = (host: RecordingHost): BdjHost =>

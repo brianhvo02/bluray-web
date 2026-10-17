@@ -23,3 +23,10 @@ export function parseBdjTrace(text: string): TraceEntry[] {
   }
   return out;
 }
+
+/** The entries of `trace` up to and including the `occurrence`-th `call` (all of them if it has fewer). */
+export function traceThrough(trace: readonly TraceEntry[], call: string, occurrence = 1): TraceEntry[] {
+  let seen = 0;
+  const i = trace.findIndex((e) => e.call === call && ++seen === occurrence);
+  return trace.slice(0, i < 0 ? trace.length : i + 1);
+}
