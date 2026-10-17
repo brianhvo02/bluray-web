@@ -84,6 +84,9 @@ while read -r r; do
   mkdir -p "$T/stage/$(dirname "$r")"
   cp -L "$JRE/$r" "$T/stage/$r"
 done < tools/bdj-classlib/resources.txt
+# cacerts is generated when the image is built and dates each entry with that moment: pin the dates (to the apt
+# snapshot, 2026-10-15T00:00:00Z) so every build of the image packs the same bytes
+python3 -I tools/bdj-classlib/normalize-jks.py "$T/stage/lib/security/cacerts" changeit 1792022400
 $MK $OUT/rt-bdj.jar "$T/stage" -
 
 # licenses
@@ -96,6 +99,9 @@ SNAPSHOT=20261015T000000Z
 {
   echo "rt-bdj.jar holds classes and files of the OpenJDK 8 runtime (GPLv2 with the Classpath Exception; see LICENSE and"
   echo "ASSEMBLY_EXCEPTION), unmodified, selected by src/bdj-classlib/classes.txt and tools/bdj-classlib/resources.txt."
+  echo "The one exception is lib/security/cacerts, the keystore ca-certificates-java $(dpkg-query -W -f='${Version}' ca-certificates-java)"
+  echo "generates from ca-certificates $(dpkg-query -W -f='${Version}' ca-certificates): its entries' creation dates are set to"
+  echo "2026-10-15T00:00:00Z (tools/bdj-classlib/normalize-jks.py) so the jar is reproducible."
   echo
   echo "OpenJDK binary package: $(dpkg-query -W openjdk-8-jre-headless)"
   echo "Corresponding source:   Ubuntu source package $SRC_PKG $SRC_VER,"
