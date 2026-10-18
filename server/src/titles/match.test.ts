@@ -694,6 +694,33 @@ describe('matchDiscs', () => {
         expect(twice.map((p) => state(r4, p))).toEqual([1, 2, 1, 2]);
       });
 
+      it('R1/R2: discs are numbered within their own volume or box family, and one slot takes one kind of number', async () => {
+        const quill = entry('anilist:996', { english: 'Quill Harbor' }, { year: 2015 });
+        const b = 'drv0/Anime/Quill Harbor';
+        const c = 'drv1/Downloads/Quill Harbor';
+        const states = async (paths: readonly string[]): Promise<unknown[]> => {
+          const ms = await run(paths, fake({ 'Quill Harbor': [quill] }), null);
+          return paths.map((p) => { const m = byDisc(ms, p); return m.status === 'filed' ? m.disc : m.status === 'unsorted' ? m.reason : m.status; });
+        };
+        const N = 'no-disc-number';
+        // N1: single-disc volume releases against a three-disc set's own disc numbers
+        expect(await states([`${b}/Volume 1`, `${b}/Volume 2`, `${b}/BD/Disc 1`, `${b}/BD/Disc 2`, `${b}/BD/Disc 3`])).toEqual([N, N, N, N, 3]);
+        // N2: a volume number against a disc number
+        expect(await states([`${b}/Volume 2`, `${b}/Season 1/Disc 2`])).toEqual([N, N]);
+        // N3: box 1's disc numbers against a volume number
+        expect(await states([`${b}/Box 1/Disc 1`, `${b}/Box 1/Disc 2`, `${b}/Volume 2`])).toEqual([1, N, N]);
+        // N4: volumes and a box set run separately: Volume 2/Disc 1 is disc 3, never 5
+        expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Volume 2/Disc 1`,
+          `${b}/BOX 1/Disc 1`, `${b}/BOX 1/Disc 2`, `${b}/BOX 1/Disc 3`, `${b}/BOX 1/Disc 4`])).toEqual([N, N, N, N, N, N, 4]);
+        // N5: two editions on two roots run separately; where they disagree, neither is placed
+        expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Volume 2/Disc 1`,
+          `${c}/Volume 1/Disc 1`, `${c}/Volume 1/Disc 2`, `${c}/Volume 1/Disc 3`])).toEqual([1, 2, N, 1, 2, N]);
+        // N6: one layout on two roots is copies
+        expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 2/Disc 1`, `${c}/Volume 1/Disc 1`, `${c}/Volume 2/Disc 1`])).toEqual([1, 2, 1, 2]);
+        // editions numbered by their own volume stay copies
+        expect(await states([`${b}/Quill Harbor Vol.1`, `${c}/[BDMV] Quill Harbor [ITA]/Quill Harbor Vol.1`])).toEqual([1, 1]);
+      });
+
       it('numbers Volume M/Disc K discs across the volumes, like boxes, so two volumes never share a slot', async () => {
         const anilist = fake({ 'Starfall Wanderer': [starfallEn] });
         const paths = ['drv0/Starfall Wanderer/Volume 1/Disc 1', 'drv0/Starfall Wanderer/Volume 1/Disc 2', 'drv0/Starfall Wanderer/Volume 2/Disc 1'];

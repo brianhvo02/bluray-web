@@ -169,6 +169,8 @@ interface Pending {
   readonly volumeBox: boolean;
   /** Placed like a movie: an AniList entry whose twin is a TMDB movie (ruling M4). */
   readonly filmLike: boolean;
+  /** Where the disc's own number (`disc`) came from: its own volume number or its own disc number. */
+  readonly numberFrom: 'volume' | 'disc' | null;
 }
 
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
@@ -509,6 +511,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   return {
     e, entry: best.entry, season, disc: numbers.size === 1 ? [...numbers][0]! : null, box: box ?? volume, bonus, via,
     volumeBox: volume !== null, filmLike: filmTwinned.has(best.entry.id),
+    numberFrom: numbers.size !== 1 ? null : own.some((p) => p.parse.volume !== null) ? 'volume' : 'disc',
   };
 }
 
@@ -528,7 +531,10 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
     let disc: number | null = p.disc;
     let placed = p.bonus;
     if (!placed && p.box !== null && p.box > 1) {
-      const running = familyMatched(p) ? boxRunning(pending.filter((q) => same(p, q) && q.box !== null)) : null;
+      // boxes run within one family and one kind (volumes or boxes), so another edition or a box set never shifts them (R1)
+      const family = boxFamily(p.e.path, p.volumeBox);
+      const boxed = pending.filter((q) => same(p, q) && q.box !== null && q.volumeBox === p.volumeBox && boxFamily(q.e.path, q.volumeBox) === family);
+      const running = familyMatched(p) ? boxRunning(boxed) : null;
       disc = running?.get(p) ?? null;
       placed = disc !== null;
     } else if (!placed && disc !== null) {
@@ -545,12 +551,14 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
       ? { discId: p.e.discId, status: 'filed', entryId: p.entry.id, season: p.season, disc, bonus: p.bonus, via: p.via }
       : unnumbered(p));
   }
-  // two discs of different group folders in one slot whose numbers come from different schemes (`Volume 1/Disc 2`
-  // numbered across volumes, a `Volume 2` disc folder by its own number) can't both be right, and the catalogue would
-  // merge them as copies: neither has a place (W3). Discs numbered the same way in one slot are copies or editions of
-  // one disc, as before, and so are discs with the same content.
+  // two discs of different group folders in one slot whose numbers come from different origins (`Volume 1/Disc 2`
+  // numbered across volumes, a `Volume 2` disc folder by its own volume, `BD/Disc 2` by its own disc number, `Box 1/
+  // Disc 2` within its box) can't both be right, and the catalogue would merge them as copies: neither has a place
+  // (W3, R2). Discs numbered the same way in one slot are copies or editions of one disc, as before, and so are discs
+  // with the same content.
   const byId = new Map(pending.map((p) => [p.e.discId, p]));
-  const scheme = (p: Pending): string => (p.volumeBox ? `v${p.box}:${p.disc}` : p.box !== null && p.box > 1 ? `b${p.box}:${p.disc}` : 'own');
+  const scheme = (p: Pending): string =>
+    p.volumeBox ? `v${p.box}:${p.disc}` : p.box !== null ? `b${p.box}:${p.disc}` : `own-${p.numberFrom === 'volume' ? 'vol' : 'disc'}`;
   return out.map((m, i) => {
     if (m.status !== 'filed' || m.disc === null || m.bonus) return m;
     const p = byId.get(m.discId)!;
