@@ -609,10 +609,11 @@ export class Player {
     }
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
     if (bdj && (bdjChanged || bdj.visible())) {
-      const version = bdj.version();
+      const copied = bdj.copiedVersion();
       this.compositor?.drawBdj?.(bdj);
-      // drawn with everything published up to `version` unless the copy waits for the writer (still pending)
-      if (bdjChanged && !bdj.pending()) this.bdjLatency.presented(this.deps.nowMs(), version);
+      // this frame shows what its copy took, which may be a flush that landed after bdjChanged was computed: Java
+      // flushes on the BD-J worker's thread (a copy that waited for the writer took nothing, and answers nothing)
+      if (bdj.copiedVersion() !== copied) this.bdjLatency.presented(this.deps.nowMs(), bdj.copiedVersion());
     }
   }
 

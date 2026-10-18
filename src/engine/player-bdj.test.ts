@@ -562,10 +562,13 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
   }
 
   /** A booted hand-driven BD-J title whose Java has drawn a menu into the plane, shown by a recording compositor. */
-  async function menuShown(opts: HarnessOptions = {}): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; rec: ReturnType<typeof recordingCompositor>; writer: GraphicsPlaneWriter }> {
+  async function menuShown(
+    opts: HarnessOptions = {},
+    wrap: (c: CompositorLike) => CompositorLike = (c) => c,
+  ): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; rec: ReturnType<typeof recordingCompositor>; writer: GraphicsPlaneWriter }> {
     const w = handWorker();
     const rec = recordingCompositor();
-    const h = await harness(bdjDisc(), { ...opts, worker: w.worker, compositor: rec.compositor });
+    const h = await harness(bdjDisc(), { ...opts, worker: w.worker, compositor: wrap(rec.compositor) });
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
     const boot = w.sent.find((m) => m.type === 'boot')!;
     if (boot.type !== 'boot') throw new Error('no boot');
@@ -732,6 +735,28 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-3), 100, 100, 299, 149);
     await h.play(600); // a telemetry interval, with no playlist playing
     expect(lastTelemetry(h)?.bdj?.inputLatencyMs).toEqual({ last: Math.round(STEP_MS), max: Math.round(STEP_MS * 4), count: 2 });
+  });
+
+  it("times an input whose flush lands in the middle of a frame's paint, which copies and shows it (Firefox gate)", async () => {
+    // Java flushes on the BD-J worker's thread: here after the frame has found nothing pending and before its copy
+    let midPaint: (() => void) | null = null;
+    const { h, w, writer } = await menuShown({ decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap }, (c) => ({
+      ...c,
+      drawVideo: (frame) => {
+        c.drawVideo(frame);
+        const flush = midPaint;
+        midPaint = null;
+        flush?.();
+      },
+    }));
+    await h.player.handle({ type: 'menuKey', key: 'down' });
+    await h.play(STEP_MS * 3);
+    midPaint = () => updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    // a background still makes the next frame repaint everything, the visible plane included
+    w.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1920, height: 1080 } });
+    await h.play(600);
+    expect(midPaint).toBeNull(); // the flush did land inside a paint
+    expect(lastTelemetry(h)?.bdj?.inputLatencyMs?.count).toBe(1);
   });
 
   it('telemetry carries the plane hash once the plane has settled for an interval, only when asked (test-only)', async () => {

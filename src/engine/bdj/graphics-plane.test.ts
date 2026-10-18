@@ -179,6 +179,27 @@ describe('GraphicsPlaneWriter / GraphicsPlaneReader', () => {
     expect(reader.copyDirtyInto(img)).toEqual({ x: 0, y: 0, width: PLANE_WIDTH, height: PLANE_HEIGHT });
   });
 
+  it('copiedVersion is the version a copy took: unchanged by a copy that waited for the writer or found nothing', () => {
+    const { writer, reader } = plane();
+    const img = image();
+    expect(reader.copiedVersion()).toBe(-1);
+    writer.init(1920, 1080);
+    writer.lock();
+    expect(reader.copyDirtyInto(img)).toBeNull();
+    expect(reader.copiedVersion()).toBe(-1);
+    writer.unlock();
+    reader.copyDirtyInto(img);
+    expect(reader.copiedVersion()).toBe(reader.version());
+    const first = reader.version();
+    updateGraphic(writer, 1920, 1080, backBuffer(1920, 1080, -1), 0, 0, 9, 9);
+    writer.flush(); // a flush with nothing drawn since publishes no area
+    expect(reader.version()).toBe(first + 2);
+    reader.copyDirtyInto(img);
+    expect(reader.copiedVersion()).toBe(first + 2);
+    expect(reader.copyDirtyInto(img)).toBeNull();
+    expect(reader.copiedVersion()).toBe(first + 2);
+  });
+
   it('with nothing pending, the reader returns without touching the lock, even while the writer holds it', () => {
     const { writer, reader } = plane();
     writer.init(1920, 1080);

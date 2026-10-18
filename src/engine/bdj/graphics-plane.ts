@@ -231,6 +231,17 @@ export function updateGraphic(
 
 /** The engine worker's side. */
 export class GraphicsPlaneReader extends PlaneViews {
+  private copied = -1;
+
+  /**
+   * The version (version()) of the plane the last copyDirtyInto that copied anything took, read under the lock, so
+   * exactly what the copy holds; -1 before the first. The writer flushes on its own thread, so a copy may take a flush
+   * that a pending() test made before it did not see.
+   */
+  copiedVersion(): number {
+    return this.copied;
+  }
+
   /** How many times the plane has been flushed. */
   flushCount(): number {
     return Atomics.load(this.header, FLUSHES);
@@ -280,6 +291,7 @@ export class GraphicsPlaneReader extends PlaneViews {
         y1 = PLANE_HEIGHT - 1;
       }
       if (x1 < x0 || y1 < y0) return null;
+      this.copied = Atomics.load(hd, VERSION);
       const out = image.data;
       const px = this.pixels;
       for (let y = y0; y <= y1; y++) {
