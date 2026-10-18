@@ -9,7 +9,8 @@ import { Poster } from './Poster';
 import { Preflight, type PreflightDisc } from './Preflight';
 import { SeasonScreen } from './SeasonScreen';
 import { SeriesScreen } from './SeriesScreen';
-import { displayName, recentlyAdded, searchTitles, seasonLabel, secondaryName, shelf } from './title-model';
+import type { OwnerFiling } from './FileDifferently';
+import { displayName, emptyLibraryText, recentlyAdded, searchTitles, seasonLabel, secondaryName, shelf } from './title-model';
 import { UnsortedScreen } from './UnsortedScreen';
 
 interface TitleLibraryProps {
@@ -66,6 +67,9 @@ const forgetTitles = (nas: NasClient): void => {
   c.titles = undefined;
   c.details.clear();
 };
+
+/** While the first matching run fills an empty library, owners see its progress refreshed this often (ruling F4). */
+const PROGRESS_POLL_MS = 10_000;
 
 /** Title routes answer 404 to a guest once the gate is closed (ruling T9c). */
 const isGateClosed = (err: unknown): boolean => err instanceof NasHttpError && err.status === 404;
@@ -128,6 +132,8 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
   const [unsorted, setUnsorted] = useState<number | null>(null);
   /** Whether the NAS has a TMDB key (owners' searches skip TMDB without one). */
   const [tmdb, setTmdb] = useState(false);
+  /** The matching run's progress, for an owner's empty library (ruling F4). */
+  const [progress, setProgress] = useState<{ running: boolean; groupsDone: number; groupsTotal: number; filed: number; music: number } | null>(null);
   /** The owner screens: Unsorted, and Hidden from it. */
   const [ownerScreen, setOwnerScreen] = useState<'unsorted' | 'hidden' | null>(null);
   /** Bumped after an owner change, so the titles and the Unsorted count are fetched again. */
@@ -171,6 +177,7 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
         if (!live) return;
         setUnsorted(s.unsorted);
         setTmdb(s.tmdb);
+        setProgress(s);
       },
       () => {},
     );
@@ -189,6 +196,23 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     forgetTitles(nas);
     setVersion((v) => v + 1);
   }, [nas]);
+
+  // An empty library while the first run matches: its progress is asked again every so often, and the titles once
+  // the run has published some (it does at each checkpoint)
+  const empty = titles !== null && titles.length === 0;
+  useEffect(() => {
+    if (!owner || !empty || !progress?.running) return;
+    const timer = setInterval(() => {
+      nas.admin.titleStatus().then(
+        (s) => {
+          if (s.filed + s.music > 0 || !s.running) changed();
+          else setProgress(s);
+        },
+        () => {},
+      );
+    }, PROGRESS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [nas, owner, empty, progress?.running, changed]);
   const loadDetail = useCallback((id: string) => loadTitle(nas, id), [nas]);
 
   const openId = stack.at(-1) ?? null;
@@ -203,15 +227,22 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
       },
       (err: unknown) => {
         if (!live) return;
-        // As for the list: the gate closed meanwhile, so the folder browser, with no raw error.
-        if (isGateClosed(err)) onFolders();
-        else setDetailError(message(err));
+        if (isGateClosed(err)) {
+          // An owner's title is gone, its last disc filed differently (ruling F3): back to where it was opened from.
+          if (owner) {
+            setSeasonId(null);
+            setStack((s) => s.slice(0, -1));
+          } else {
+            // As for the list: the gate closed meanwhile, so the folder browser, with no raw error.
+            onFolders();
+          }
+        } else setDetailError(message(err));
       },
     );
     return () => {
       live = false;
     };
-  }, [nas, openId, onFolders, version]);
+  }, [nas, openId, onFolders, version, owner]);
 
   /**
    * Focus follows the screens: an opened title or season focuses its heading, and going back focuses the item that
@@ -254,6 +285,7 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     setSeasonId(null);
   };
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
+  const filing: OwnerFiling | undefined = owner ? { nas, tmdb, onChanged: changed } : undefined;
 
   if (settings) return <AdminScreen nas={nas} thisDeviceId={deviceId} onClose={() => setSettings(false)} onTitlesChanged={changed} />;
 
@@ -303,9 +335,9 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     }
     const season = seasonId === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => s.id === seasonId);
     if (season) {
-      return <SeasonScreen seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} />;
+      return <SeasonScreen seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} owner={filing} />;
     }
-    return <SeriesScreen nas={nas} detail={detail} onBack={back} onSeason={openSeason} onExtras={() => openSeason('extras')} onTitle={openTitle} onOpen={openDisc} />;
+    return <SeriesScreen nas={nas} detail={detail} onBack={back} onSeason={openSeason} onExtras={() => openSeason('extras')} onTitle={openTitle} onOpen={openDisc} owner={filing} />;
   }
 
   const counts: Record<Shelf, number | null> = {
@@ -383,7 +415,7 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
       ) : picked === 'music' ? (
         <>
           <h3 className="title-section">Music</h3>
-          <MusicScreen nas={nas} titles={shelf(titles, 'music')} owner={owner} onOpen={openTitle} loadDetail={loadDetail} onChanged={changed} />
+          <MusicScreen nas={nas} titles={shelf(titles, 'music')} owner={owner} tmdb={tmdb} onOpen={openTitle} loadDetail={loadDetail} onChanged={changed} />
         </>
       ) : picked !== null ? (
         <>
@@ -399,7 +431,9 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
           )}
         </>
       ) : titles.length === 0 ? (
-        <p className="status">No titles yet. The NAS files discs under titles after each scan.</p>
+        <p className="status" data-testid="library-empty">
+          {emptyLibraryText(owner, progress)}
+        </p>
       ) : (
         <>
           <h3 className="title-section">Recently added</h3>

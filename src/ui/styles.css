@@ -169,6 +169,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .titles .disc-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 12px; text-align: left; background: var(--t-ground); }
 .disc-copy-drive { font-size: 0.85em; color: var(--t-accent); }
 .disc-copy-folder { font-size: 0.9em; color: var(--t-muted); overflow-wrap: anywhere; }
+.disc-copy-owned { display: flex; flex-direction: column; gap: 4px; }
+.owner-refile { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.owner-refile > div { align-self: stretch; }
+.titles .owner-refile > .title-link { align-self: flex-start; padding: 0 4px; }
 
 /* The owner screens (spec §9, mockups 4 and 5): Unsorted, Hidden and the Music shelf's renames. */
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }

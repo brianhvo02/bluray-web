@@ -535,6 +535,51 @@ test('Unsorted files a disc under a suggestion, then the other discs of its fold
   });
 });
 
+test('an owner files a disc differently from its season, into Music, and out of the library from the Music shelf', async ({ page, browserName }, testInfo) => {
+  const project = projectOf(testInfo.project.name);
+  const name = OWNER_SERIES[project];
+  const [first] = ownerDiscs(project).series.map(lastSegment) as [string, string];
+  await exclusivelyAsync('catalogue', async () => {
+    let id: string | null = null;
+    try {
+      // File the series' first disc from Unsorted: Season starts at the suggestion's season (ruling F2).
+      await openUnsorted(page, browserName);
+      const card = unsortedCard(page, first);
+      id = await card.getAttribute('data-disc-id');
+      await card.locator(`[data-testid="title-option"][data-name="${name}"]`).click();
+      await expect(card.getByTestId('unsorted-season')).toHaveValue('1');
+      await card.getByTestId('unsorted-disc').fill('1');
+      await card.getByTestId('unsorted-file').click();
+      await expect(page.getByTestId('unsorted-notice')).toContainText(`Filed under ${name}.`);
+      await page.getByRole('button', { name: 'Back to the library' }).click();
+
+      // From the season, "File differently…" moves it to Music; the series, now empty, is gone.
+      await page.locator(`[data-testid="title-card"][data-name="${name}"]`).click();
+      await page.getByTestId('season-row').first().click();
+      const discsTab = page.locator('[data-testid="season-tab"][data-tab="discs"]');
+      if ((await discsTab.count()) > 0) await discsTab.click();
+      const discCard = page.getByTestId('disc-card');
+      await expect(discCard).toHaveCount(1);
+      await discCard.getByTestId('disc-refile').click();
+      await discCard.getByTestId('unsorted-card').getByTestId('unsorted-music').click();
+      await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
+      await expect(page.locator(`[data-testid="title-card"][data-name="${name}"]`)).toHaveCount(0);
+
+      // On the Music shelf, "File differently…" and "Don't list" take it out of the library.
+      await shelfChip(page, 'music').click();
+      const row = page.locator(`[data-testid="music-row"][data-name="${first}"]`);
+      await expect(row).toBeVisible();
+      await row.getByTestId('music-refile-open').click();
+      await row.getByTestId('unsorted-card').getByTestId('unsorted-hide').click();
+      await expect(row).toHaveCount(0);
+      const hidden = (await (await ownerApi('admin/hidden')).json()) as { discs: { discId: string }[] };
+      expect(hidden.discs.map((d) => d.discId)).toContain(id);
+    } finally {
+      await clearChoices([id]);
+    }
+  });
+});
+
 test('"New title…" makes a Music title; "Don\'t list" hides a disc and Unhide brings it back', async ({ page, browserName }, testInfo) => {
   const project = projectOf(testInfo.project.name);
   const stray = ownerStray(project);

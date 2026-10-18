@@ -4,7 +4,7 @@ import { NasHttpError } from './nas-client';
 import {
   REASON_TEXT,
   applyNumber,
-  seasonGuessed,
+  seasonPrefill,
   blurayComSearchUrl,
   discPlace,
   lookupFailure,
@@ -107,6 +107,7 @@ describe('skippedText', () => {
   it('says why a disc kept its own choice', () => {
     expect(skippedText('direct')).toBe('filed separately');
     expect(skippedText('copy')).toBe('follows its copy');
+    expect(skippedText('no-number')).toBe('no disc number in its name');
   });
 });
 
@@ -119,12 +120,12 @@ describe('applyNumber', () => {
   });
 });
 
-describe('seasonGuessed', () => {
-  it('starts the season blank when the season is what the NAS was unsure of', () => {
-    expect(seasonGuessed('no-season')).toBe(false);
-    expect(seasonGuessed('episode-past-season')).toBe(false);
-    expect(seasonGuessed('no-disc-number')).toBe(true);
-    expect(seasonGuessed('several-fit')).toBe(true);
-    expect(seasonGuessed(null)).toBe(true);
+describe('seasonPrefill', () => {
+  it("starts Season at a suggestion's season hint, and blank without one (ruling F2)", () => {
+    expect(seasonPrefill({ ...summary({ id: 'anilist:2' }), seasonHint: 2 })).toBe('2');
+    expect(seasonPrefill({ ...summary({ id: 'anilist:2' }), seasonHint: null })).toBe('');
+    // a search result has no hint
+    expect(seasonPrefill(summary({ id: 'anilist:2' }))).toBe('');
+    expect(seasonPrefill({ ...summary({ id: 'tmdb-movie:2', kind: 'movie' }), seasonHint: 3 })).toBe('');
   });
 });

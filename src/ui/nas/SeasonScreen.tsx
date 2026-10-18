@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
 import type { DiscRef, DiscSlot, EpisodeRef, SeasonDetail } from '../../engine/disc/nas-api';
+import { FileDifferently, type OwnerFiling } from './FileDifferently';
 import type { PreflightDisc } from './Preflight';
 import { copiesLabel, discHeading, episodeMeta } from './title-model';
 
@@ -17,10 +18,15 @@ interface DiscListProps {
   readonly season: SeasonDetail;
   readonly discs: readonly DiscSlot[];
   readonly onOpen: OpenDisc;
+  /** For owners: "File differently…" on each copy (ruling F3). */
+  readonly owner?: OwnerFiling;
 }
 
-/** Disc cards: the disc and its episodes, how many copies, then one line per copy (drive and folder) that opens it. */
-export function DiscList({ season, discs, onOpen }: DiscListProps): ReactElement {
+/**
+ * Disc cards: the disc and its episodes, how many copies, then one line per copy (drive and folder) that opens it, and
+ * for owners a way to file that copy differently.
+ */
+export function DiscList({ season, discs, onOpen, owner }: DiscListProps): ReactElement {
   return (
     <ul className="title-list">
       {discs.map((d, i) => {
@@ -31,12 +37,21 @@ export function DiscList({ season, discs, onOpen }: DiscListProps): ReactElement
               <span className="title-row-name">{discHeading(season, d)}</span>
               {copies && <span className="title-muted">{copies}</span>}
             </div>
-            {d.copies.map((c) => (
-              <button key={c.discId} type="button" className="disc-copy" data-testid="disc-copy" onClick={() => onOpen(preflightDisc(c))}>
-                <span className="disc-copy-drive">{c.root}</span>
-                <span className="disc-copy-folder">{c.folder}</span>
-              </button>
-            ))}
+            {d.copies.map((c) => {
+              const copy = (
+                <button key={c.discId} type="button" className="disc-copy" data-testid="disc-copy" onClick={() => onOpen(preflightDisc(c))}>
+                  <span className="disc-copy-drive">{c.root}</span>
+                  <span className="disc-copy-folder">{c.folder}</span>
+                </button>
+              );
+              if (!owner) return copy;
+              return (
+                <div key={c.discId} className="disc-copy-owned">
+                  {copy}
+                  <FileDifferently owner={owner} disc={c} label={c.displayName ?? lastSegment(c.folder)} />
+                </div>
+              );
+            })}
           </li>
         );
       })}
@@ -51,13 +66,15 @@ interface SeasonScreenProps {
   readonly season: SeasonDetail;
   readonly onBack: () => void;
   readonly onOpen: OpenDisc;
+  /** For owners: "File differently…" on the discs (ruling F3). */
+  readonly owner?: OwnerFiling;
 }
 
 type Tab = 'episodes' | 'discs';
 const TABS: readonly Tab[] = ['episodes', 'discs'];
 
 /** A season: Episodes and Discs tabs, or the discs alone when its episodes aren't known. */
-export function SeasonScreen({ seriesName, heading, season, onBack, onOpen }: SeasonScreenProps): ReactElement {
+export function SeasonScreen({ seriesName, heading, season, onBack, onOpen, owner }: SeasonScreenProps): ReactElement {
   const episodes = season.episodes;
   const [tab, setTab] = useState<Tab>(episodes ? 'episodes' : 'discs');
   const ids = useId();
@@ -137,11 +154,11 @@ export function SeasonScreen({ seriesName, heading, season, onBack, onOpen }: Se
         </ul>
       )}
       <div {...(episodes ? { role: 'tabpanel', id: panelId('discs'), 'aria-labelledby': tabId('discs'), hidden: tab !== 'discs' } : {})}>
-        <DiscList season={season} discs={season.discs} onOpen={onOpen} />
+        <DiscList season={season} discs={season.discs} onOpen={onOpen} owner={owner} />
         {season.extras.length > 0 && (
           <>
             <h3 className="title-section">Extras</h3>
-            <DiscList season={{ ...season, episodes: null }} discs={season.extras} onOpen={onOpen} />
+            <DiscList season={{ ...season, episodes: null }} discs={season.extras} onOpen={onOpen} owner={owner} />
           </>
         )}
       </div>

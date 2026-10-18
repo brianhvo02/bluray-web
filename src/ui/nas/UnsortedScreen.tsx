@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactElement } from 'react';
-import type { OwnerChoice, TitleKind, TitleSummary, UnsortedItem, UnsortedReason } from '../../engine/disc/nas-api';
+import type { OwnerChoice, TitleKind, TitleSummary, UnsortedItem, UnsortedReason, UnsortedSuggestion } from '../../engine/disc/nas-api';
 import type { NasClient, SkippedDisc } from './nas-client';
 import { Poster } from './Poster';
 import { displayName } from './title-model';
-import { applyNumber, blurayComSearchUrl, discPlace, seasonGuessed, lookupFailure, mergeResults, parseNumber, reasonText, skippedText, suggestionLine, titleChoice } from './unsorted-model';
+import { applyNumber, blurayComSearchUrl, discPlace, lookupFailure, mergeResults, parseNumber, reasonText, seasonPrefill, skippedText, suggestionLine, titleChoice } from './unsorted-model';
 
 const PAGE = 50;
 const MAX_NAME = 200;
@@ -11,13 +11,16 @@ const MAX_NAME = 200;
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
-/** The disc a filing card is for: an Unsorted item, or a hidden disc being filed differently (no reason, no suggestions). */
+/**
+ * The disc a filing card is for: an Unsorted item, or a hidden, filed or music disc being filed differently (no reason,
+ * no suggestions).
+ */
 export interface FilingDisc {
   readonly discId: string;
   readonly path: string;
   readonly discTitles: UnsortedItem['discTitles'];
   readonly reason: UnsortedReason | null;
-  readonly suggestions: readonly TitleSummary[];
+  readonly suggestions: readonly UnsortedSuggestion[];
   readonly catalogueNumber: string | null;
   readonly groupSize: number;
 }
@@ -142,6 +145,8 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
   const id = useId();
   const [picked, setPicked] = useState<TitleSummary | null>(null);
   const [season, setSeason] = useState('');
+  /** Whether Season holds a suggestion's hint rather than the owner's typing. */
+  const [hinted, setHinted] = useState(false);
   const [discNo, setDiscNo] = useState('');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TitleSummary[] | null>(null);
@@ -154,10 +159,18 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
   const place = discPlace(disc.path);
   const ownTitle = disc.discTitles[0]?.name ?? null;
 
-  const pick = (t: TitleSummary): void => {
+  const pick = (t: TitleSummary | UnsortedSuggestion): void => {
     setPicked(t);
-    // season 1 is a fair start unless the season is what the NAS was unsure of (ruling T11i)
-    if (t.kind === 'series' && season === '' && seasonGuessed(disc.reason)) setSeason('1');
+    // Season starts at the suggestion's hint; without one it is blank and must be given (ruling F2), but what the
+    // owner typed stays
+    const prefill = seasonPrefill(t);
+    if (prefill !== '') {
+      setSeason(prefill);
+      setHinted(true);
+    } else if (hinted) {
+      setSeason('');
+      setHinted(false);
+    }
   };
 
   const choose = (choice: OwnerChoice, text: string): void => {
@@ -273,7 +286,10 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
       <div className="owner-numbers">
         <label className="owner-field">
           <span>Season</span>
-          <input type="text" inputMode="numeric" data-testid="unsorted-season" value={season} disabled={!seasonUsed} onChange={(e) => setSeason(e.target.value)} />
+          <input type="text" inputMode="numeric" data-testid="unsorted-season" value={season} disabled={!seasonUsed} onChange={(e) => {
+            setSeason(e.target.value);
+            setHinted(false);
+          }} />
         </label>
         <label className="owner-field">
           <span>Disc / volume</span>
@@ -484,7 +500,7 @@ export function UnsortedScreen({ nas, tmdb, onBack, onHidden, onChanged }: Unsor
           )}
           {notice.skipped && (
             <>
-              <p>These kept their own choice:</p>
+              <p>These were left as they were:</p>
               <ul className="owner-skipped" data-testid="unsorted-skipped">
                 {notice.skipped.map((s) => (
                   <li key={s.discId}>

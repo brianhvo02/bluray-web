@@ -123,7 +123,8 @@ const choicePath = (discId: string): string => `admin/discs/${encodeURIComponent
 /** Why "apply to the group" left a disc as it was: its own choice, or a copy following its source (rulings T9f, T9i). */
 export interface SkippedDisc {
   readonly discId: string;
-  readonly reason: 'direct' | 'copy';
+  /** `no-number`: other discs of the folder have a number in their names and this one hasn't (I3). */
+  readonly reason: 'direct' | 'copy' | 'no-number';
 }
 
 /** A stored record usable as a pairing: a missing or damaged key pair (say, after storage was tampered with) is not. */

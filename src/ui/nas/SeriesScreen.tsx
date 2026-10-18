@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import type { TitleDetail } from '../../engine/disc/nas-api';
 import type { NasClient } from './nas-client';
 import { Poster } from './Poster';
+import type { OwnerFiling } from './FileDifferently';
 import { DiscList, type OpenDisc } from './SeasonScreen';
 import { displayName, seasonCounts, seasonLabel, secondaryName, titleMeta } from './title-model';
 
@@ -15,10 +16,12 @@ interface SeriesScreenProps {
   /** A related title: a movie or side story of the series. */
   readonly onTitle: (titleId: string) => void;
   readonly onOpen: OpenDisc;
+  /** For owners: "File differently…" on a movie's or music title's discs (ruling F3). */
+  readonly owner?: OwnerFiling;
 }
 
 /** A title: banner, poster and names, then its seasons, related movies and extras; a movie or music title lists its discs. */
-export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle, onOpen }: SeriesScreenProps): ReactElement {
+export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle, onOpen, owner }: SeriesScreenProps): ReactElement {
   const { title } = detail;
   const name = displayName(title);
   const native = secondaryName(title);
@@ -64,7 +67,7 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
           })}
         </ul>
       ) : (
-        detail.seasons.map((s) => <DiscList key={s.id} season={s} discs={s.discs} onOpen={onOpen} />)
+        detail.seasons.map((s) => <DiscList key={s.id} season={s} discs={s.discs} onOpen={onOpen} owner={owner} />)
       )}
       {detail.related.length > 0 && (
         <ul className="title-list">

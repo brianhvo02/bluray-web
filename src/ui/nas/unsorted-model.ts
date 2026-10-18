@@ -1,5 +1,5 @@
-import type { OwnerChoice, TitleSummary, UnsortedReason } from '../../engine/disc/nas-api';
-import { NasHttpError } from './nas-client';
+import type { OwnerChoice, TitleSummary, UnsortedReason, UnsortedSuggestion } from '../../engine/disc/nas-api';
+import { NasHttpError, type SkippedDisc } from './nas-client';
 
 /** The owner screens' words and choices (spec §9): Unsorted, its search, and filing a disc. Original code. */
 
@@ -84,9 +84,9 @@ export function lookupFailure(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Why "Apply to the other discs" left a disc as it was (ruling T11c). */
-export function skippedText(reason: 'direct' | 'copy'): string {
-  return reason === 'direct' ? 'filed separately' : 'follows its copy';
+/** Why "Apply to the other discs" left a disc as it was (ruling T11c, I3). */
+export function skippedText(reason: SkippedDisc['reason']): string {
+  return reason === 'direct' ? 'filed separately' : reason === 'copy' ? 'follows its copy' : 'no disc number in its name';
 }
 
 /** The apply offer's disc number: a positive number, else null (Apply waits for one, ruling T11h). */
@@ -94,7 +94,11 @@ export function applyNumber(text: string): number | null {
   return parseNumber(text) ?? null;
 }
 
-/** Whether a picked series may start at season 1: not when the season is what the NAS was unsure of (ruling T11i). */
-export function seasonGuessed(reason: UnsortedReason | null): boolean {
-  return reason !== 'no-season' && reason !== 'episode-past-season';
+/**
+ * The Season field for a picked title (ruling F2): a series suggestion's season hint, else blank, so the owner must
+ * give one. Search results carry no hint.
+ */
+export function seasonPrefill(t: TitleSummary | UnsortedSuggestion): string {
+  const hint = 'seasonHint' in t ? t.seasonHint : null;
+  return t.kind === 'series' && hint !== null ? String(hint) : '';
 }

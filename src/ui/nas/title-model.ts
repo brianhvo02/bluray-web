@@ -117,3 +117,13 @@ export function discHeading(s: SeasonDetail, d: DiscSlot): string {
 export function copiesLabel(d: DiscSlot): string | null {
   return d.copies.length > 1 ? plural(d.copies.length, 'copy', 'copies') : null;
 }
+
+/**
+ * What an empty library says (ruling F4): to an owner, how far the matching run is, from `admin/metadata/status`; to a
+ * guest, who sees the library only once the gate is open, that it is being prepared.
+ */
+export function emptyLibraryText(owner: boolean, status: { readonly running: boolean; readonly groupsDone: number; readonly groupsTotal: number } | null): string {
+  if (!owner) return 'The library is being prepared';
+  if (status?.running && status.groupsTotal > 0) return `Matching your library… ${status.groupsDone} of ${status.groupsTotal} folders`;
+  return 'No titles yet. The NAS files discs under titles after each scan.';
+}

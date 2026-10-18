@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DiscSlot, SeasonDetail, TitleDetail, TitleKind, TitleNames, TitleSummary } from '../../engine/disc/nas-api';
-import { copiesLabel, discHeading, displayName, episodeMeta, initials, recentlyAdded, searchTitles, seasonCounts, seasonLabel, secondaryName, shelf, titleMeta } from './title-model';
+import { copiesLabel, discHeading, displayName, emptyLibraryText, episodeMeta, initials, recentlyAdded, searchTitles, seasonCounts, seasonLabel, secondaryName, shelf, titleMeta } from './title-model';
 
 // Every title here is made up (ruling R4).
 
@@ -125,5 +125,14 @@ describe('labels', () => {
     };
     expect(titleMeta(detail)).toBe('TV · 2016–2023 · 2 seasons, 1 movie');
     expect(titleMeta({ ...detail, title: { ...HARBOR, year: 2019 }, seasons: [], related: [] })).toBe('Movie · 2019');
+  });
+});
+
+describe('emptyLibraryText', () => {
+  it('tells owners how far matching is, and guests that the library is being prepared (ruling F4)', () => {
+    expect(emptyLibraryText(true, { running: true, groupsDone: 12, groupsTotal: 340 })).toBe('Matching your library… 12 of 340 folders');
+    expect(emptyLibraryText(true, { running: false, groupsDone: 0, groupsTotal: 0 })).toBe('No titles yet. The NAS files discs under titles after each scan.');
+    expect(emptyLibraryText(true, null)).toBe('No titles yet. The NAS files discs under titles after each scan.');
+    expect(emptyLibraryText(false, null)).toBe('The library is being prepared');
   });
 });

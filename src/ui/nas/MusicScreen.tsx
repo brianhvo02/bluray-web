@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
-import type { TitleDetail, TitleSummary } from '../../engine/disc/nas-api';
+import type { DiscRef, TitleDetail, TitleSummary } from '../../engine/disc/nas-api';
+import { filingDisc } from './FileDifferently';
 import type { NasClient } from './nas-client';
 import { displayName } from './title-model';
+import { DiscCard } from './UnsortedScreen';
 
 interface MusicScreenProps {
   readonly nas: NasClient;
   /** The Music shelf's titles, A–Z. */
   readonly titles: readonly TitleSummary[];
-  /** Owners can rename. */
+  /** Owners can rename, and file a title's discs differently. */
   readonly owner: boolean;
+  /** Whether the NAS has a TMDB key, for the filing card's search. */
+  readonly tmdb: boolean;
   readonly onOpen: (id: string) => void;
   /** A title's detail, from the library's session cache: where its first disc is. */
   readonly loadDetail: (id: string) => Promise<TitleDetail>;
@@ -130,9 +134,42 @@ function RenameForm({ nas, title, onDone, onCancel }: { nas: NasClient; title: T
   );
 }
 
+/**
+ * The owner's "File differently…" on a music title (ruling F3): a filing card for each of its discs, to file it under a
+ * title (out of Music) or leave it out with "Don't list".
+ */
+function MusicRefile({ nas, tmdb, title, loadDetail, onChanged }: { nas: NasClient; tmdb: boolean; title: TitleSummary; loadDetail: (id: string) => Promise<TitleDetail>; onChanged: () => void }): ReactElement {
+  const [discs, setDiscs] = useState<DiscRef[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadDetail(title.id).then(
+      (d) => {
+        if (live) setDiscs([...d.seasons.flatMap((s) => [...s.discs, ...s.extras]), ...d.extras].flatMap((slot) => slot.copies));
+      },
+      (err: unknown) => {
+        if (live) setError(message(err));
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [title.id, loadDetail]);
+  if (error) return <p className="owner-message" role="alert">{error}</p>;
+  if (discs === null) return <p className="status">Loading…</p>;
+  return (
+    <div className="owner-cards" data-testid="music-refile">
+      {discs.map((d) => (
+        <DiscCard key={d.discId} nas={nas} tmdb={tmdb} disc={filingDisc(d)} onFiled={onChanged} onCreated={onChanged} />
+      ))}
+    </div>
+  );
+}
+
 /** The Music shelf (spec §9, mockup 5): each title with where it is or what it was renamed from, and owners' renames. */
-export function MusicScreen({ nas, titles, owner, onOpen, loadDetail, onChanged }: MusicScreenProps): ReactElement {
+export function MusicScreen({ nas, titles, owner, tmdb, onOpen, loadDetail, onChanged }: MusicScreenProps): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
+  const [refiling, setRefiling] = useState<string | null>(null);
   /** After a rename is saved or cancelled, focus goes back to that row's pencil. */
   const focusPencil = useRef<string | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -174,7 +211,31 @@ export function MusicScreen({ nas, titles, owner, onOpen, loadDetail, onChanged 
                   <span aria-hidden="true">✎</span>
                 </button>
               )}
+              {owner && (
+                <button
+                  type="button"
+                  className="title-link"
+                  data-testid="music-refile-open"
+                  aria-label={`File ${name} differently`}
+                  aria-expanded={refiling === t.id}
+                  onClick={() => setRefiling((r) => (r === t.id ? null : t.id))}
+                >
+                  File differently…
+                </button>
+              )}
             </div>
+            {refiling === t.id && (
+              <MusicRefile
+                nas={nas}
+                tmdb={tmdb}
+                title={t}
+                loadDetail={loadDetail}
+                onChanged={() => {
+                  setRefiling(null);
+                  onChanged();
+                }}
+              />
+            )}
             {editing === t.id && (
               <RenameForm
                 nas={nas}
