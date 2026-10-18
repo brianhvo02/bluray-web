@@ -42,7 +42,7 @@ emcc -Oz -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1 -DFT2_BUILD_LIBRARY \
   '-DFT_CONFIG_OPTIONS_H=<bluray-ftoption.h>' '-DFT_CONFIG_MODULES_H=<bluray-ftmodule.h>' \
   -Iinclude -I/out/config \
   $SOURCES /out/shim.c \
-  -sSTANDALONE_WASM --no-entry -sALLOW_MEMORY_GROWTH=1 -sFILESYSTEM=0 -sSTACK_SIZE=1MB \
+  -sSTANDALONE_WASM --no-entry -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=2MB -sFILESYSTEM=0 -sSTACK_SIZE=1MB \
   -sEXPORTED_FUNCTIONS=_ft_init,_ft_last_error,_ft_new_face,_ft_done_face,_ft_family_name,_ft_style_name,_ft_set_char_size,_ft_size_metrics,_ft_load_char,_ft_glyph_info,_ft_glyph_bitmap,_ft_kerning,_malloc,_free \
   -o /build/freetype.wasm
 cp /build/freetype.wasm /out/freetype.wasm
