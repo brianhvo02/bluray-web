@@ -59,13 +59,24 @@ const health: Handler = async (req, url) => {
 /** Above Caddy's 2-minute upstream idle timeout, so Caddy never reuses a connection we have closed. */
 const KEEP_ALIVE_TIMEOUT_MS = 130_000;
 
+/** On every response: the bytes are user content on a shared origin, so never sniff them or run them as a page. */
+const SAFETY_HEADERS: Readonly<Record<string, string>> = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "sandbox; default-src 'none'",
+};
+
 function send(res: ServerResponse, origin: string | undefined, response: Response): void {
-  res.writeHead(response.status, { ...corsHeaders(origin), ...response.headers });
+  res.writeHead(response.status, { ...SAFETY_HEADERS, ...corsHeaders(origin), ...response.headers });
   const { body } = response;
   if (body instanceof Readable) {
+    const length = Number(response.headers?.['Content-Length'] ?? NaN);
+    let sent = 0;
+    body.on('data', (chunk: Buffer) => (sent += chunk.length));
     body.on('error', () => res.destroy());
+    // A file that shrank mid-read: end the connection, or the client waits for bytes that never come.
+    body.on('end', () => (Number.isFinite(length) && sent < length ? res.destroy() : res.end()));
     res.on('close', () => body.destroy());
-    body.pipe(res);
+    body.pipe(res, { end: false });
   } else {
     res.end(body);
   }

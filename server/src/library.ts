@@ -132,8 +132,8 @@ export class Library {
       const next: typeof queue = [];
       for (const dir of queue) {
         const entries = await this.readDir(dir.abs);
-        if (!entries) {
-          // An unreadable root keeps what it had rather than losing its discs.
+        if (!entries || (dir.depth === 0 && entries.length === 0)) {
+          // An unreadable or empty root (a drive that isn't mounted) keeps what it had rather than losing its discs.
           if (dir.depth === 0) for (const d of previous.values()) if (d.path === root.name || d.path.startsWith(`${root.name}/`)) out.push(d);
           continue;
         }

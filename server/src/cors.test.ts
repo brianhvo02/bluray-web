@@ -1,4 +1,5 @@
 import { connect } from 'node:net';
+import { Readable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { corsHeaders } from './cors';
@@ -119,5 +120,44 @@ describe('createServer', () => {
     expect(raw).toContain('{"error":"bad request"}');
     expect(error).not.toHaveBeenCalled();
     error.mockRestore();
+  });
+
+  it('sets nosniff and a sandboxing CSP on every response, beside the CORS and CORP headers', async () => {
+    const base = await start();
+    for (const res of [
+      await fetch(`${base}/api/health`, { headers: { Origin: 'https://bluray-web.pages.dev' } }),
+      await fetch(`${base}/nope`),
+      await fetch(`${base}/api/x`, { method: 'OPTIONS', headers: { Origin: 'http://localhost:4173', 'Access-Control-Request-Method': 'GET' } }),
+    ]) {
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('content-security-policy')).toBe("sandbox; default-src 'none'");
+      expect(res.headers.get('cross-origin-resource-policy')).toBe('cross-origin');
+    }
+  });
+
+  it('drops the connection when a body stream ends short of its Content-Length', async () => {
+    const short: Handler = async (_req, url) =>
+      url.pathname === '/short'
+        ? { status: 200, headers: { 'Content-Length': '10', 'Content-Type': 'application/octet-stream' }, body: Readable.from([Buffer.from('12345')]) }
+        : null;
+    const base = await start([short]);
+    const outcome = await Promise.race([
+      fetch(`${base}/short`).then((res) => res.arrayBuffer()).then(
+        () => 'complete',
+        () => 'aborted',
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 2_000)),
+    ]);
+    expect(outcome).toBe('aborted');
+  });
+
+  it('sends a body stream that matches its Content-Length whole', async () => {
+    const full: Handler = async (_req, url) =>
+      url.pathname === '/full'
+        ? { status: 200, headers: { 'Content-Length': '10' }, body: Readable.from([Buffer.from('12345'), Buffer.from('67890')]) }
+        : null;
+    const base = await start([full]);
+    const res = await fetch(`${base}/full`);
+    expect(await res.text()).toBe('1234567890');
   });
 });

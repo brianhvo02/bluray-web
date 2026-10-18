@@ -62,6 +62,23 @@ describe('buildManifest', () => {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('stops inlining at 8 MiB in all and lists the rest without bytes', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'manifest-'));
+    try {
+      cpSync(join(FIXTURES, 'disc1'), tmp, { recursive: true });
+      for (let i = 0; i < 10; i++) writeFileSync(join(tmp, `BDMV/PLAYLIST/0090${i}.mpls`), Buffer.alloc(1024 * 1024, i));
+      const manifest = await buildManifest(tmp, { id: 'x', name: 'x' });
+      const inlined = Object.values(manifest.inline).reduce((n, b64) => n + Buffer.from(b64, 'base64').length, 0);
+      expect(inlined).toBeLessThanOrEqual(8 * 1024 * 1024);
+      expect(inlined).toBeGreaterThan(7 * 1024 * 1024);
+      const big = manifest.files.filter((f) => /^BDMV\/PLAYLIST\/0090\d\.MPLS$/.test(f.path));
+      expect(big).toHaveLength(10);
+      expect(big.filter((f) => manifest.inline[f.path] === undefined).length).toBeGreaterThanOrEqual(2);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('disc routes', () => {

@@ -11,6 +11,34 @@ const DISC_FOLDERS = new Set(['BDMV', 'CERTIFICATE']);
 /** What the engine reads whole while opening a disc (`readWhole`). */
 const INLINED = /^(BDMV\/(INDEX\.BDMV|MOVIEOBJECT\.BDMV|PLAYLIST\/[^/]+\.MPLS|CLIPINF\/[^/]+\.CLPI|AUXDATA\/SOUND\.BDMV|BDJO\/[^/]+\.BDJO)|CERTIFICATE\/ID\.BDMV)$/;
 const MAX_INLINE_BYTES = 1024 * 1024;
+/** All a manifest inlines; files past it are listed without bytes, and the client reads them through the files route. */
+const INLINE_BUDGET_BYTES = 8 * 1024 * 1024;
+/** Stats and reads of a folder disc's manifest in flight at once. */
+const MANIFEST_CONCURRENCY = 8;
+
+/** `fn` over `items` with at most `limit` calls in flight, results in item order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/** The inline candidates among `files` (in order) that fit the manifest's inline budget together. */
+function inlineCandidates<T extends { path: string; size: number }>(files: readonly T[]): T[] {
+  let left = INLINE_BUDGET_BYTES;
+  return files.filter((f) => {
+    if (!INLINED.test(f.path) || f.size > MAX_INLINE_BYTES || f.size > left) return false;
+    left -= f.size;
+    return true;
+  });
+}
 
 async function entries(dir: string): Promise<Dirent[]> {
   try {
@@ -94,25 +122,23 @@ async function listFiles(dir: string): Promise<{ path: string; abs: string }[]> 
 
 /** The manifest of the folder disc at `dir`. */
 export async function buildManifest(dir: string, disc: { id: string; name: string }): Promise<DiscManifest> {
-  const files: { path: string; size: number }[] = [];
-  const inline: Record<string, string> = {};
-  for (const { path, abs } of await listFiles(dir)) {
-    let size: number;
+  const stated = await mapLimit(await listFiles(dir), MANIFEST_CONCURRENCY, async ({ path, abs }) => {
     try {
-      size = (await stat(abs)).size;
+      return { path, abs, size: (await stat(abs)).size };
     } catch {
-      continue; // Vanished meanwhile.
+      return null; // Vanished meanwhile.
     }
-    files.push({ path, size });
-    if (INLINED.test(path) && size <= MAX_INLINE_BYTES) {
-      try {
-        inline[path] = (await readFile(abs)).toString('base64');
-      } catch {
-        // Listed without its bytes: the client reads it through the files route.
-      }
+  });
+  const present = stated.filter((f): f is { path: string; abs: string; size: number } => f !== null);
+  const read = await mapLimit(inlineCandidates(present), MANIFEST_CONCURRENCY, async ({ path, abs }) => {
+    try {
+      return [path, (await readFile(abs)).toString('base64')] as const;
+    } catch {
+      return null; // Listed without its bytes: the client reads it through the files route.
     }
-  }
-  return { discId: disc.id, name: disc.name, files, inline };
+  });
+  const inline: Record<string, string> = Object.fromEntries(read.filter((e) => e !== null));
+  return { discId: disc.id, name: disc.name, files: present.map(({ path, size }) => ({ path, size })), inline };
 }
 
 /** The manifest of the ISO disc at `abs` whose UDF tree is `tree`: the same shape as a folder disc's. */
@@ -121,10 +147,7 @@ export async function buildIsoManifest(abs: string, tree: ReadonlyMap<string, Ud
   const listed = [...tree.values()]
     .filter((f) => resolveIsoFile(tree, f.path) === f && !f.path.split('/').some((s) => s.startsWith('.')))
     .sort((a, b) => (a.path < b.path ? -1 : 1));
-  const bytes = await readIsoFiles(
-    abs,
-    listed.filter((f) => INLINED.test(f.path) && f.size <= MAX_INLINE_BYTES),
-  );
+  const bytes = await readIsoFiles(abs, inlineCandidates(listed));
   const inline: Record<string, string> = {};
   for (const [path, buf] of bytes) inline[path] = buf.toString('base64');
   return { discId: disc.id, name: disc.name, files: listed.map(({ path, size }) => ({ path, size })), inline };

@@ -135,6 +135,18 @@ describe('Library scan behaviour', () => {
     expect(new Library(roots(), file, FAST).list('drvB')!.discs).toHaveLength(1);
   });
 
+  it('keeps a root previous entries when it lists zero entries (a drive that is not mounted)', async () => {
+    const file = join(tmp, 'library.json');
+    await new Library(roots(), file, FAST).scan();
+    const bDir = join(tmp, 'b');
+    rmSync(bDir, { recursive: true });
+    mkdirSync(bDir);
+    const lib = new Library(roots(), file, FAST);
+    await lib.scan();
+    expect(lib.list('drvB')!.discs.map((d) => d.name)).toEqual(['Other']);
+    expect(new Library(roots(), file, FAST).list('drvB')!.discs).toHaveLength(1);
+  });
+
   it('installs the tree after each root on a first scan', async () => {
     const bDir = join(tmp, 'b');
     let release!: () => void;
