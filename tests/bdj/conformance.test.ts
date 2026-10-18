@@ -79,6 +79,22 @@ describe('class-file bytes the classes keep', () => {
   });
 });
 
+describe('kept annotation bytes', () => {
+  it("are a runtime-visible annotation's bytes as HotSpot's reflection hands them out, after the class file is dropped", () => {
+    const jvm = new Jvm({ bootJars: BOOT_JARS, nowMs: () => 0, setTimer: () => () => {}, stdout: () => {}, stderr: () => {} });
+    const target = jvm.loader.loadBoot('conformance/Reflect$Target')!;
+    const add = target.file!.methods.find((m) => m.name === 'add')!;
+    const bytes = new Int8Array(add.annotations!.buffer, add.annotations!.byteOffset, add.annotations!.length);
+    let sum = 0;
+    for (const b of bytes) sum = (Math.imul(sum, 31) + b) | 0;
+    // @Tag("adder") on Reflect.Target.add: length and `sum = sum * 31 + b` over Method.annotations, as a Java program
+    // printed them on HotSpot 8 (the class library has no AnnotationParser, so Java cannot read them in our JVM)
+    expect([bytes.length, sum]).toEqual([11, -1974274957]);
+    expect(add.annotations!.buffer).toBe(add.code!.code.buffer);
+    expect(target.file!.methods.find((m) => m.name === 'secret')!.annotations).toBeNull();
+  });
+});
+
 describe('after JDK boot', () => {
   let out = '';
   let err = '';
@@ -526,11 +542,11 @@ describe('java.io paths and failures', () => {
     put('/tmp/a.jar', jar);
     expect(await call('zip', '/tmp/a.jar')).toBe('opened');
     expect(await call('zip', '/tmp/a.jar')).toBe('opened');
-    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 2, zipBytes: jar.length });
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 2, zipBytes: jar.length, vfsBytes: jar.length }); // the shared bytes count once
     // rewritten, it is a new file: the open archive keeps the old bytes, which are now its own
     put('/tmp/a.jar', jar);
     expect(await call('zip', '/tmp/a.jar')).toBe('opened');
-    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 3, zipBytes: 2 * jar.length });
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 3, zipBytes: 2 * jar.length, vfsBytes: jar.length, vfsUsedBytes: jar.length });
   }, 60_000);
 });
 

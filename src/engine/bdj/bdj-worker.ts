@@ -78,6 +78,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let driving: AbortController | null = null;
   /** The runtime's log repeats each line the host logs; the host's copy carries the error flag. */
   let hostLine: string | null = null;
+  /** FreeType once loaded (memory stats). */
+  let freeType: FreeType | null = null;
+  const loadFreeType = options.loadFreeType;
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -193,8 +196,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         },
         yieldTask: eventLoopTurn(),
         ...(options.extraIntrinsics ? { extraIntrinsics: options.extraIntrinsics } : {}),
-        ...(options.loadFreeType && options.loadDefaultFont
-          ? { fonts: { loadFreeType: options.loadFreeType, loadDefaultFont: options.loadDefaultFont } }
+        ...(loadFreeType && options.loadDefaultFont
+          ? { fonts: { loadFreeType: () => loadFreeType().then((ft) => (freeType = ft)), loadDefaultFont: options.loadDefaultFont } }
           : {}),
         log: (line) => {
           if (line === hostLine) hostLine = null;
@@ -212,7 +215,15 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     if (ended) return;
     booted = true;
     post({ type: 'booted', bootMs: performance.now() - t0 });
+    if (m.memoryStatsMs) reportMemory(m.memoryStatsMs);
     for (const w of waiting.splice(0)) deliver(w);
+  };
+
+  /** Posts the memory stats now and every `everyMs` until the session ends (Vfs.buffers walks the tree: keep it coarse). */
+  const reportMemory = (everyMs: number): void => {
+    if (ended || !rt || rt.jvm.threads.isHalted) return;
+    post({ type: 'memory', jvm: rt.jvm.memoryStats(), freeType: freeType?.memoryStats() ?? null });
+    setTimeout(() => reportMemory(everyMs), everyMs);
   };
 
   port.onmessage = ({ data: m }) => {

@@ -32,7 +32,8 @@ const scope = self as unknown as WorkerScope;
  *   seen in the browser;
  * - nonestedworkers (?nonestedworkers=1): the worker behaves as if it could not start workers, so the capability
  *   fallback (spec m5d §4.5) can be seen in a browser that has them;
- * - telemetry (?telemetry=1): telemetry carries the BD-J plane's settled hash (PlayerDeps.planeHashTelemetry).
+ * - telemetry (?telemetry=1): telemetry carries the BD-J plane's settled hash (PlayerDeps.planeHashTelemetry) and BD-J's
+ *   memory (PlayerDeps.memoryTelemetry).
  */
 const testFlags = new Set(((self as unknown as { name?: string }).name ?? '').split(':')[1]?.split(',') ?? []);
 const brokenClassLibrary = testFlags.has('bdjfail');
@@ -72,6 +73,7 @@ const player = new Player({
   createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) }))),
   bdjMissing: bdjMissingHere,
   planeHashTelemetry: testFlags.has('telemetry'),
+  memoryTelemetry: testFlags.has('telemetry'),
   createBdjWorker: () => new Worker(new URL('./bdj/bdj-worker-entry.ts', import.meta.url), { type: 'module' }),
   loadClassLibrary: async () => {
     const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);

@@ -46,7 +46,8 @@ import { AssRenderer } from './ass/renderer';
 import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
+import type { AudioTrack, BdjMemoryTelemetry, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
+import type { FromBdj } from './bdj/worker-protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
 import { UNAVAILABLE, type ShaderBackend } from './shaders/webgl-backend';
@@ -107,6 +108,8 @@ export interface PlayerDeps {
    * browser test can compare it with the libbluray golden's.
    */
   readonly planeHashTelemetry?: boolean;
+  /** Test-only (?telemetry=1): telemetry carries BD-J's memory (bdjMemory), which the BD-J worker reports every 5 s. */
+  readonly memoryTelemetry?: boolean;
   /** Decodes a BD-J background still (createImageBitmap); without it, background stills are not shown. */
   readonly decodeImage?: DecodeImage;
 }
@@ -139,6 +142,8 @@ interface TextTrack {
 
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
 const MAX_DECODE_QUEUE = 8;
+/** How often the BD-J worker reports its memory in telemetry runs (its stats walk the file tree: kept coarse). */
+const BDJ_MEMORY_STATS_MS = 5000;
 const MENU_MEMORY_MESSAGE = "This disc's menus need more memory than this device allows.";
 /**
  * Read-ahead budget for compressed video waiting to enter the decoder. Discs may multiplex video
@@ -233,6 +238,8 @@ interface BdjTitle {
   menuVisible: boolean;
   /** Taps forwarded to Java, waiting for a reaction (the ignored-tap rule). */
   readonly taps: TapReactionWatch;
+  /** The BD-J worker's last memory report (memoryTelemetry). */
+  memory: Extract<FromBdj, { type: 'memory' }> | null;
 }
 
 interface Session {
@@ -754,12 +761,26 @@ export class Player {
           discId: bdid?.discId ?? null,
           classLibrary,
           memory: this.bdjBudgets(),
+          ...(this.deps.memoryTelemetry ? { memoryStatsMs: BDJ_MEMORY_STATS_MS } : {}),
         });
       } catch {
         // a class library that does not load fails the session (bootBdj)
       }
     })();
     return early;
+  }
+
+  /** telemetry bdjMemory: the BD-J worker's last report and the engine's own BD-J buffers. */
+  private bdjMemory(): BdjMemoryTelemetry | null {
+    const entry = this.bdj;
+    if (!entry) return null;
+    return {
+      jvm: entry.memory?.jvm ?? null,
+      freeType: entry.memory?.freeType ?? null,
+      planeBytes: entry.plane.buffer.byteLength,
+      stillBytes: this.background.decodedBytes,
+      compositorBytes: this.compositor?.bdjBytes?.() ?? 0,
+    };
   }
 
   /** The memory profile's budgets the BD-J worker applies. */
@@ -835,6 +856,14 @@ export class Player {
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
       memory: this.bdjBudgets(),
+      ...(this.deps.memoryTelemetry
+        ? {
+            memoryStatsMs: BDJ_MEMORY_STATS_MS,
+            onMemory: (m: Extract<FromBdj, { type: 'memory' }>) => {
+              if (live() && entry) entry.memory = m;
+            },
+          }
+        : {}),
     });
     const taps = new TapReactionWatch({
       setTimer: this.deps.setTimer ?? defaultSetTimer,
@@ -847,7 +876,7 @@ export class Player {
         if (notice) this.notice('bdj-tap-ignored', BDJ_TAP_IGNORED_MESSAGE);
       },
     });
-    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, taps };
+    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, taps, memory: null };
     this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
@@ -2303,6 +2332,7 @@ export class Player {
         ass: this.assStats(),
         shader: this.shaderStage?.stats ?? null,
         bdj: this.bdjStartup ? { ...this.bdjStartup, inputLatencyMs: this.bdjLatency.stats } : null,
+        ...(this.deps.memoryTelemetry ? { bdjMemory: this.bdjMemory() } : {}),
         bdjPlane: this.bdj ? { flushes: this.bdj.plane.flushCount(), tapsIgnored: this.bdjTapsIgnored, ...(this.deps.planeHashTelemetry ? { hash: this.settledPlaneHash(this.bdj.plane) } : {}) } : null,
       },
     });

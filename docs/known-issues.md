@@ -194,6 +194,12 @@ what would change that decision.
   classes were missing from the class library; a still play item did not hold under BD-J (RENTAL_FAMILY's picker plays
   over an infinite still); a mark at the first play item's IN time never reached Java (`_find_next_playmark` works on
   packets, and the first item starts at packet 0, before that mark's EP map entry).
+- **BD-J file budget on phones and tablets (5d, ruling R16).** Under the constrained memory profile, the BD-J file
+  system's memory mounts (`/tmp/` with libbluray's copies of the disc's JARs and the files it extracts from them,
+  `/persistent/`, `/buda/`) hold at most `bdjVfsCacheBytes` (64 MB for now; Task 14 sets it from the devices). A write
+  beyond it fails as on a full disk (IOException "No space left on device", logged once with the path and the budget),
+  so a disc whose BD-J files exceed it fails to mount its app and falls back to the picker. libbluray has no such limit,
+  and desktop has none. The local discs use 4.4 MB (A_NEW_ERA) and 1.4 MB (RENTAL_FAMILY).
 
 ## Audio
 

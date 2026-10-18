@@ -35,6 +35,31 @@ describe('runBdjWorker', () => {
     expect(Math.abs(now - Date.now())).toBeLessThan(5_000);
   }, 90_000);
 
+  it('reports its memory after boot when asked (memoryStatsMs, telemetry runs), until the JVM halts', async () => {
+    const received: FromBdj[] = [];
+    const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+    const handle = runBdjWorker(port);
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        discFiles: discEntries(fixtureDiscFiles('disc-bdj')),
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+        memory: { classBytes: Infinity, vfsBytes: 64 * 1024 * 1024 },
+        memoryStatsMs: 5000,
+      },
+    });
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('memory'), { timeout: 60_000 });
+    const m = received.find((r) => r.type === 'memory');
+    expect(received.map((r) => r.type).indexOf('booted')).toBeLessThan(received.indexOf(m!));
+    expect(m).toMatchObject({ type: 'memory', freeType: null, jvm: { classes: expect.any(Number), classFileBytes: expect.any(Number) } });
+    expect(m!.type === 'memory' && m!.jvm.classes).toBeGreaterThan(500);
+    handle.runtime!.jvm.threads.halt(); // ends the reports
+  }, 90_000);
+
   it('opens a disc served over HTTP itself (discHttp), as the engine worker does', async () => {
     const root = fileURLToPath(new URL('../../../fixtures/synthetic/', import.meta.url));
     const paths: string[] = [];

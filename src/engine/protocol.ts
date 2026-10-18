@@ -1,4 +1,5 @@
 import type { MemoryProfileName } from './memory-profile';
+import type { JvmMemoryStats } from './bdj/jvm/jvm';
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
 import type { HttpDiscRef } from './disc/http-source';
@@ -60,6 +61,22 @@ export interface Telemetry {
    * PlayerDeps.planeHashTelemetry (test-only, ?telemetry=1), as it costs a pass over the whole plane.
    */
   readonly bdjPlane: { readonly flushes: number; readonly tapsIgnored: number; readonly hash?: string | null } | null;
+  /** While a BD-J title runs, what it holds in memory; only with PlayerDeps.memoryTelemetry (?telemetry=1). */
+  readonly bdjMemory?: BdjMemoryTelemetry | null;
+}
+
+/** BD-J's memory (5d spec §4.5), for the device measurements; sizes in bytes. */
+export interface BdjMemoryTelemetry {
+  /** The JVM's own accounting, as the BD-J worker last reported it (every BDJ_MEMORY_STATS_MS); null before. */
+  readonly jvm: JvmMemoryStats | null;
+  /** FreeType's WASM memory and open faces in the BD-J worker; null until FreeType is loaded. */
+  readonly freeType: { readonly wasmBytes: number; readonly faces: number } | null;
+  /** The graphics plane's shared buffer. */
+  readonly planeBytes: number;
+  /** Decoded background stills, shown and being decoded. */
+  readonly stillBytes: number;
+  /** The compositor's copy of the plane (canvas and ImageData); 0 while it has none. */
+  readonly compositorBytes: number;
 }
 
 export interface BdjStartup {

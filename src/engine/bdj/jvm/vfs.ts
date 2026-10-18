@@ -40,6 +40,8 @@ export interface VfsOptions {
    * full disk (the memory profile's bdjVfsCacheBytes). Default: none.
    */
   readonly memLimitBytes?: number;
+  /** A write or truncate of `path` was refused for the limit. */
+  readonly onFull?: (path: string, limitBytes: number) => void;
 }
 
 /** A file whose size is known up front and whose bytes are fetched when first read (reads of it return promises). */
@@ -162,6 +164,7 @@ export class Vfs {
   private readonly spelling = new Map<string, string>();
   private readonly jdkCache = new Map<string, Uint8Array>();
   private readonly memLimit: number;
+  private readonly onFull: ((path: string, limitBytes: number) => void) | undefined;
   /** The lengths of the files on the memory mounts. */
   private memUsed = 0;
 
@@ -169,6 +172,7 @@ export class Vfs {
     this.disc = opts.disc;
     this.nowMs = opts.nowMs;
     this.memLimit = opts.memLimitBytes ?? Infinity;
+    this.onFull = opts.onFull;
     if (opts.disc) {
       if (!opts.discPaths) throw new Error('Vfs: discPaths is required when a disc is given');
       for (const path of opts.discPaths) {
@@ -345,11 +349,13 @@ export class Vfs {
     return this.fitsLength(h, (handle.append ? (handle.node?.len ?? 0) : handle.position) + length);
   }
 
-  /** Whether `h`'s file can grow to `length` bytes within the memory mounts' limit. */
+  /** Whether `h`'s file can grow to `length` bytes within the memory mounts' limit; onFull hears of a refusal. */
   fitsLength(h: VfsHandle, length: number): boolean {
     const file = (h as Handle).node;
     if (!file?.linked) return true;
-    return length <= file.len || this.memUsed - file.len + length <= this.memLimit;
+    const fits = length <= file.len || this.memUsed - file.len + length <= this.memLimit;
+    if (!fits) this.onFull?.(h.path, this.memLimit);
+    return fits;
   }
 
   rename(from: string, to: string): boolean {

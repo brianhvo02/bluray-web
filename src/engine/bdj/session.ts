@@ -44,6 +44,9 @@ export interface BdjSessionDeps {
   readonly selectTimeoutMs?: number;
   /** The memory profile's BD-J budgets, for the boot message. */
   readonly memory?: BdjMemoryBudgets;
+  /** Asks the worker for its memory stats every this many ms (telemetry), which arrive here. */
+  readonly memoryStatsMs?: number;
+  readonly onMemory?: (stats: Extract<FromBdj, { type: 'memory' }>) => void;
 }
 
 /**
@@ -76,8 +79,18 @@ export class BdjSession {
       if (this.stopped) return resolve();
       this.armTimeout();
       this.bootDone = resolve;
-      const memory = this.deps.memory;
-      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, plane: this.deps.plane, ...bootDiscFields(disc), discId, classLibrary, ...(memory ? { memory } : {}) });
+      const { memory, memoryStatsMs } = this.deps;
+      this.post({
+        type: 'boot',
+        registers: this.deps.regs,
+        status: this.deps.status.buffer,
+        plane: this.deps.plane,
+        ...bootDiscFields(disc),
+        discId,
+        classLibrary,
+        ...(memory ? { memory } : {}),
+        ...(memoryStatsMs ? { memoryStatsMs } : {}),
+      });
     });
   }
 
@@ -143,6 +156,9 @@ export class BdjSession {
         break;
       case 'failed':
         this.fail(m.code, m.message);
+        break;
+      case 'memory':
+        this.deps.onMemory?.(m);
         break;
     }
   }

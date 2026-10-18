@@ -42,6 +42,8 @@ export interface CompositorLike {
   drawBdj?(plane: GraphicsPlaneReader): void;
   /** Forgets the BD-J plane (BD-J stopped): nothing of it is drawn again. */
   clearBdj?(): void;
+  /** Bytes the compositor's copy of the BD-J plane takes (canvas and ImageData); 0 while it has none. */
+  bdjBytes?(): number;
   /** Shades every video frame drawn from now on with the stage's set (null: draw frames as they are). */
   setShaderStage?(stage: ShaderStage | null): void;
 }
@@ -156,6 +158,10 @@ export class Compositor implements CompositorLike {
       const r = fitRect(PLANE_WIDTH, PLANE_HEIGHT, this.canvas.width, this.canvas.height);
       this.ctx.drawImage(b.canvas, 0, 0, width, height, r.x, r.y, r.width, r.height);
     }
+  }
+
+  bdjBytes(): number {
+    return this.bdj ? this.bdj.canvas.width * this.bdj.canvas.height * 4 + this.bdj.image.data.byteLength : 0;
   }
 
   /** Drops the plane's canvas and ImageData (about 16 MB); the next plane allocates them again. */

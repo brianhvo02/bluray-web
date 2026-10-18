@@ -11,6 +11,7 @@ import type { ScreenRect } from './background';
 import type { BdjErrorCode } from './errors';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
+import type { JvmMemoryStats } from './jvm/jvm';
 
 /** A call argument or reply value; a Java long crosses as a decimal string. */
 export type BdjWireValue = number | string | boolean | null;
@@ -30,6 +31,8 @@ export type ToBdj =
       readonly classLibrary: ClassLibrarySource;
       /** The memory profile's budgets (none: no limits). */
       readonly memory?: BdjMemoryBudgets;
+      /** Report the memory stats (a `memory` message) at once and every this many ms (telemetry runs only). */
+      readonly memoryStatsMs?: number;
     }
   | { readonly type: 'start'; readonly title: number }
   /** `coalesce`: a key repeat or pointer move, which may merge with the one before it in a full queue (input.ts). */
@@ -42,7 +45,8 @@ export type FromBdj =
   | { readonly type: 'log'; readonly line: string; readonly error: boolean }
   /** HStillImageBackgroundConfiguration.displayImage: the still's encoded bytes (null: none) and where it goes. */
   | { readonly type: 'background'; readonly image: Uint8Array | null; readonly rect: ScreenRect }
-  | { readonly type: 'failed'; readonly code: BdjFailureCode; readonly message: string };
+  | { readonly type: 'failed'; readonly code: BdjFailureCode; readonly message: string }
+  | { readonly type: 'memory'; readonly jvm: JvmMemoryStats; readonly freeType: { readonly wasmBytes: number; readonly faces: number } | null };
 
 export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';
 

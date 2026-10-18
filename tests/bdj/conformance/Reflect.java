@@ -11,6 +11,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Reflect {
+    /** On Target.add: its RuntimeVisibleAnnotations bytes are checked in conformance.test.ts. */
+    @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+    public @interface Tag {
+        String value();
+
+        int weight() default 3;
+    }
+
     public interface Greeter {
         String greet(String name);
 
@@ -28,6 +36,7 @@ public class Reflect {
             this.secret = secret;
         }
 
+        @Tag("adder")
         public int add(int a, int b) { return a + b; }
 
         public static String stat(String s) { return "static:" + s; }

@@ -84,6 +84,7 @@ interface HarnessOptions {
   readonly bdjMissing?: readonly string[];
   readonly planeHashTelemetry?: boolean;
   readonly memoryProfile?: MemoryProfileName;
+  readonly memoryTelemetry?: boolean;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -132,6 +133,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
     ...(opts.bdjMissing ? { bdjMissing: opts.bdjMissing } : {}),
     ...(opts.planeHashTelemetry ? { planeHashTelemetry: true } : {}),
+    ...(opts.memoryTelemetry ? { memoryTelemetry: true } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
@@ -724,6 +726,22 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     const plain = await menuShown();
     await plain.h.play(1200);
     expect(lastTelemetry(plain.h)?.bdjPlane).toEqual({ flushes: expect.any(Number), tapsIgnored: 0 });
+  });
+
+  it("telemetry carries BD-J's memory, from the worker's reports and the engine's buffers, only when asked (test-only)", async () => {
+    const { h, w } = await menuShown({ memoryTelemetry: true });
+    expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memoryStatsMs: 5000 });
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjMemory).toEqual({ jvm: null, freeType: null, planeBytes: (16 + 1920 * 1080) * 4, stillBytes: 0, compositorBytes: 0 });
+    const jvm = { bootJarBytes: 1, classes: 2, classFileBytes: 3, zipHandles: 4, zipBytes: 5, vfsFiles: 6, vfsBytes: 7, vfsUsedBytes: 8, jdkFileBytes: 9 };
+    w.emit({ type: 'memory', jvm, freeType: { wasmBytes: 2097152, faces: 1 } });
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjMemory).toMatchObject({ jvm, freeType: { wasmBytes: 2097152, faces: 1 } });
+
+    const plain = await menuShown();
+    expect(plain.w.sent.find((m) => m.type === 'boot')).not.toHaveProperty('memoryStatsMs');
+    await plain.h.play(600);
+    expect(lastTelemetry(plain.h)).not.toHaveProperty('bdjMemory');
   });
 
   it('reports the BD-J menu turning visible and empty, on changes only, and empty when BD-J stops', async () => {

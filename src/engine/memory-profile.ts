@@ -47,7 +47,8 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     maxQueuedFrames: () => 8,
     bdjTapWindowMs: 200,
     bdjClassCacheBytes: 32 * MB,
-    bdjVfsCacheBytes: 256 * MB,
+    // no limit: desktop BD-J writes as much as libbluray lets it
+    bdjVfsCacheBytes: Infinity,
     bdjDecodedImageBytes: 64 * MB,
   },
   constrained: {

@@ -301,7 +301,8 @@ describe('paths', () => {
   });
 
   it('a write or truncate beyond the memory mounts\' limit fails, as on a full disk', () => {
-    const { vfs } = make({ memLimitBytes: 10 });
+    const full: string[] = [];
+    const { vfs } = make({ memLimitBytes: 10, onFull: (path, limit) => full.push(`${path} ${limit}`) });
     writeFile(vfs, '/tmp/a', '123456');
     const h = vfs.open('/persistent/b', 'w')!;
     expect(vfs.fits(h, 4)).toBe(true);
@@ -310,6 +311,7 @@ describe('paths', () => {
     expect(vfs.stat('/persistent/b')?.size).toBe(0);
     expect(vfs.write(h, enc.encode('1234'), 0, 4)).toBe(true);
     expect(vfs.truncate(h, 5)).toBe(false);
+    expect(full).toEqual(['/persistent/b 10', '/persistent/b 10', '/persistent/b 10']);
     // overwriting in place and shrinking always fit
     h.position = 0;
     expect(vfs.write(h, enc.encode('abcd'), 0, 4)).toBe(true);

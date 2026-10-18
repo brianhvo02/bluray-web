@@ -146,6 +146,16 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(lines).toContain("Libbluray:0: INFO: Using Java 1.8 (5b) from '/jdk'");
   }, 60_000);
 
+  it('logs the first write the memory budget refuses, naming the path and the budget, and only that one', () => {
+    const { rt, lines } = runtime({ memory: { classBytes: Infinity, vfsBytes: 4 } });
+    const vfs = rt.jvm.opts.vfs!;
+    const h = vfs.open('/tmp/x', 'w')!;
+    expect(vfs.write(h, new Uint8Array(4), 0, 4)).toBe(true);
+    expect(vfs.write(h, new Uint8Array(1), 0, 1)).toBe(false);
+    expect(vfs.write(h, new Uint8Array(1), 0, 1)).toBe(false);
+    expect(lines.filter((l) => l.includes('No space'))).toEqual(['BD-J: no room to write /tmp/x: the BD-J files in memory are at the budget of 0.0 MB (No space left on device)']);
+  });
+
   it("passes the disc's id.bdmv disc ID to Libbluray.init, or 32 zeros without one, as _bdj_init does", async () => {
     const currentDisc = async (rt: BdjRuntime): Promise<string | null> => {
       const dm = (await rt.jvm.callStatic('org/bluray/ti/DiscManager', 'getDiscManager', '()Lorg/bluray/ti/DiscManager;')) as JObject;

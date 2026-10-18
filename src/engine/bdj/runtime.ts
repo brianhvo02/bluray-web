@@ -140,6 +140,7 @@ export class BdjRuntime {
   private eventThread: JThread | null = null;
   /** The drive in progress checks whether it is done. */
   private settle: (() => void) | null = null;
+  private vfsFullLogged = false;
 
   constructor(private readonly deps: BdjRuntimeDeps) {
     const inner = deps.host(
@@ -164,7 +165,7 @@ export class BdjRuntime {
         discPaths: deps.disc.paths(),
         jdkLib: ZipArchive.open(lib.rt),
         nowMs: deps.nowMs,
-        ...(deps.memory ? { memLimitBytes: deps.memory.vfsBytes } : {}),
+        ...(deps.memory ? { memLimitBytes: deps.memory.vfsBytes, onFull: (path, limit) => this.vfsFull(path, limit) } : {}),
         ...(fonts ? { jdkLazy: systemFontFiles(fonts.loadDefaultFont) } : {}),
       }),
       systemProperties: JVM_PROPERTIES,
@@ -176,6 +177,13 @@ export class BdjRuntime {
       fonts ? { loadFreeType: fonts.loadFreeType, fallbackFontPath: DEFAULT_FONT_PATH, log: deps.log } : { log: deps.log },
     );
     registerHaviNatives(this.jvm.natives, host);
+  }
+
+  /** The memory mounts' limit refused a write (ENOSPC for Java): logged the first time only. */
+  private vfsFull(path: string, limit: number): void {
+    if (this.vfsFullLogged) return;
+    this.vfsFullLogged = true;
+    this.deps.log(`BD-J: no room to write ${path}: the BD-J files in memory are at the budget of ${(limit / (1024 * 1024)).toFixed(1)} MB (No space left on device)`);
   }
 
   /** Runtime.halt's status, once Java has halted the JVM; nothing runs after that. */
