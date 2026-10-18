@@ -1,7 +1,6 @@
 # disc-bdj-menu: a click on Play (its MouseListener changes its text), a click on empty plane (nothing happens), then
 # a key, whose flush shows only the focus move.
-wait playlist 1
-wait still 1000   # the menu, Play focused
+wait still 1000   # the menu, Play focused (its first paint may come before playlist 00001's event, so no playlist wait)
 click 300 400     # inside Play: "Play (1)"
 wait still 1000
 click 1400 540    # outside every button: no flush

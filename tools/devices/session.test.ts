@@ -85,7 +85,7 @@ describe('DeviceSession failure classification', () => {
     server!.closeAllConnections();
     await new Promise<void>((r) => server!.close(() => r()));
     server = null;
-    await expect(s.until('x', 60_000, 10)).rejects.toThrow(/device disconnected or session lost: .*ECONN(REFUSED|RESET)/);
+    await expect(s.until('x', 60_000, 10)).rejects.toThrow(/device disconnected or session lost: .*(ECONN(REFUSED|RESET)|UND_ERR_SOCKET)/); // Linux's undici reports the dropped socket
   });
 
   it('a call with no answer times out as a lost device', async () => {

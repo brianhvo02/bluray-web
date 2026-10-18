@@ -3,11 +3,10 @@
 {"call":"writeRegN","args":[1,4,65535,-1],"ret":0}
 {"call":"selectPlaylistN","args":[1,-1,-1,"-1"],"ret":1}
 {"call":"selectRateN","args":[1,1],"ret":1}
-{"script":"step","n":0,"step":"wait playlist 1"}
-{"script":"step","n":1,"step":"wait still 1000","hash":"cf4977a0"}
-{"script":"step","n":2,"step":"click 300 400"}
-{"script":"step","n":3,"step":"wait still 1000","hash":"f9f4b7ce"}
-{"script":"step","n":4,"step":"click 1400 540"}
-{"script":"step","n":5,"step":"key down"}
-{"script":"step","n":6,"step":"wait still 1000","hash":"4fd2ce5e"}
+{"script":"step","n":0,"step":"wait still 1000","hash":"cf4977a0"}
+{"script":"step","n":1,"step":"click 300 400"}
+{"script":"step","n":2,"step":"wait still 1000","hash":"f9f4b7ce"}
+{"script":"step","n":3,"step":"click 1400 540"}
+{"script":"step","n":4,"step":"key down"}
+{"script":"step","n":5,"step":"wait still 1000","hash":"4fd2ce5e"}
 {"script":"end","hash":"4fd2ce5e"}
