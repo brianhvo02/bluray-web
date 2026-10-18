@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
 import { LibraryScreen } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
+import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import type { NasPairing } from './nas/nas-store';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
@@ -37,7 +38,26 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   /** undefined while loading; null when this device isn't paired. */
   const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
   const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
-  const [browsing, setBrowsing] = useState(false);
+  /**
+   * The NAS view: closed, asking `me` whether the title library is open to this device, the library (with whether this
+   * device is an owner), or the folder browser. A guest while the gate is closed gets the folders, with no notice.
+   */
+  const [nasView, setNasView] = useState<{ kind: 'closed' | 'checking' | 'folders' } | { kind: 'titles'; owner: boolean }>({ kind: 'closed' });
+  const browsing = nasView.kind !== 'closed';
+  const setBrowsing = (open: boolean): void => {
+    if (!open) {
+      setNasView({ kind: 'closed' });
+      return;
+    }
+    setNasView({ kind: 'checking' });
+    nas.me().then(
+      (me) => setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' })),
+      // an older NAS without `me`, or any failure: the folder browser shows what is wrong, if anything
+      () => setNasView((v) => (v.kind === 'checking' ? { kind: 'folders' } : v)),
+    );
+  };
+  const showFolders = useCallback(() => setNasView({ kind: 'folders' }), []);
+  const closeNas = useCallback(() => setNasView({ kind: 'closed' }), []);
   const loadPairing = (): void => {
     nas.pairing().then(setPairing, () => setPairing(null));
   };
@@ -237,7 +257,9 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
             </button>
           </p>
         ))}
-      {paired && browsing && <LibraryScreen nas={nas} controller={controller} onClose={() => setBrowsing(false)} />}
+      {paired && nasView.kind === 'checking' && <p className="status">Loading…</p>}
+      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onFolders={showFolders} onClose={closeNas} />}
+      {paired && nasView.kind === 'folders' && <LibraryScreen nas={nas} controller={controller} onClose={closeNas} />}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>

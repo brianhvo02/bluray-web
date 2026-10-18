@@ -3,6 +3,10 @@
  * The NAS side of nas.spec.ts, started by Playwright's webServer (`npx tsx tests/e2e/nas-server.ts`, after
  * `npm run server:build`): the built NAS server on NAS_PORT, serving a temporary copy of fixtures/synthetic as root
  * `syn`, and the rendezvous Worker's fetch handler, with in-memory storage, on RENDEZVOUS_PORT.
+ *
+ * The title library's AniList and TMDB are the recorded entries of tests/e2e/fixtures/nas-metadata.json
+ * (`METADATA_FIXTURE`, ruling R3), made-up titles that match the folders TITLE_DISCS puts synthetic discs in. Starfall
+ * Wanderer's runtime of 0.0667 minutes (4 s) makes disc1's 4-second playlist 00001 its one episode.
  */
 import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
@@ -24,6 +28,15 @@ export const NAS_ROOT = join(NAS_E2E_DIR, 'syn');
 export const CHANGED_FOLDER = 'changed';
 export const PROJECTS = ['chromium', 'firefox', 'webkit'] as const;
 export const SERVER = join(REPO, 'server/dist/server.mjs');
+/** The recorded metadata entries the server matches discs against. */
+export const METADATA_FIXTURE = join(REPO, 'tests/e2e/fixtures/nas-metadata.json');
+/** Copies of synthetic discs in the folders the metadata fixture's titles match: root-relative folder → fixture disc. */
+export const TITLE_DISCS: Readonly<Record<string, string>> = {
+  'Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.1': 'disc1',
+  'Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.2': 'disc-subs',
+  'Anime/Moonlit Harbor (月影の港)/Moonlit Harbor': 'disc2',
+  'Music/Lantern Parade Live 2024': 'disc3',
+};
 
 /** The server's environment, also what `server.mjs owner-code` needs to mint a code for it. */
 export const NAS_ENV: Readonly<Record<string, string>> = {
@@ -34,6 +47,7 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   RENDEZVOUS_URL,
   // Nothing proxies here; the default ('caddy') would only log that it does not resolve.
   TRUSTED_PROXY: '127.0.0.1',
+  METADATA_FIXTURE,
 };
 
 /** Puts `changed/<project>` (a copy of disc1, timestamps kept so its disc id never changes) back in the root. */
@@ -83,6 +97,7 @@ async function main(): Promise<void> {
   mkdirSync(NAS_E2E_DIR, { recursive: true });
   cpSync(join(REPO, 'fixtures/synthetic'), NAS_ROOT, { recursive: true, preserveTimestamps: true });
   for (const project of PROJECTS) for (const name of [project, `${project}-open`]) restoreChangedDisc(name);
+  for (const [folder, disc] of Object.entries(TITLE_DISCS)) cpSync(join(REPO, 'fixtures/synthetic', disc), join(NAS_ROOT, folder), { recursive: true, preserveTimestamps: true });
   await startRendezvous();
   const server = spawn(process.execPath, [SERVER], { env: { ...process.env, ...NAS_ENV }, stdio: 'inherit' });
   server.on('exit', (code) => process.exit(code ?? 1));

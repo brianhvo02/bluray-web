@@ -1,0 +1,36 @@
+{
+  "Starfall Wanderer": [
+    {
+      "source": "anilist",
+      "id": "anilist:900001",
+      "kind": "series",
+      "format": "TV",
+      "names": { "english": "Starfall Wanderer", "romaji": "Hoshifuri no Tabibito", "native": "星降りの旅人", "synonyms": [] },
+      "animation": true,
+      "year": 2016,
+      "episodes": 1,
+      "runtimeMin": 0.0667,
+      "seasons": [],
+      "relations": [],
+      "poster": null,
+      "banner": null
+    }
+  ],
+  "Moonlit Harbor": [
+    {
+      "source": "anilist",
+      "id": "anilist:900002",
+      "kind": "movie",
+      "format": "MOVIE",
+      "names": { "english": "Moonlit Harbor", "romaji": "Tsukikage no Minato", "native": "月影の港", "synonyms": [] },
+      "animation": true,
+      "year": 2019,
+      "episodes": 1,
+      "runtimeMin": 1,
+      "seasons": [],
+      "relations": [],
+      "poster": null,
+      "banner": null
+    }
+  ]
+}

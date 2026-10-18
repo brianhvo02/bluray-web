@@ -152,6 +152,38 @@ describe('NasClient', () => {
     expect(server.listed).toEqual(['drv5/[BD] 鋼の旅団 #1? 100% a+b']);
   });
 
+  it('asks the NAS who this device is, and reads titles, a title and art', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const asked: string[] = [];
+    const real = server.fetch;
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      if (route.startsWith('session')) {
+        // sessions from the real handlers
+        server.nas = undefined;
+        try {
+          return await real(url, init);
+        } finally {
+          server.nas = answer;
+        }
+      }
+      asked.push(`${route} ${new Headers(init?.headers).get('Authorization')?.slice(0, 7) ?? ''}`);
+      if (route === 'me') return Response.json({ owner: false, titleLibrary: true });
+      if (route === 'titles') return Response.json({ titles: [{ id: 'anilist:1' }] });
+      if (route === 'titles/anilist%3A1') return Response.json({ title: { id: 'anilist:1' } });
+      return Response.json({ error: 'not found' }, { status: 404 });
+    };
+    server.nas = answer;
+    expect(await nas.me()).toEqual({ owner: false, titleLibrary: true });
+    expect(await nas.titles()).toEqual([{ id: 'anilist:1' }]);
+    expect(await nas.title('anilist:1')).toEqual({ title: { id: 'anilist:1' } });
+    expect(asked).toEqual(['me Bearer ', 'titles Bearer ', 'titles/anilist%3A1 Bearer ']);
+    const { token } = await nas.session();
+    expect(await nas.artUrl('0123456789abcdef0123456789abcdef', 'large')).toBe(`${BASE}art/0123456789abcdef0123456789abcdef?size=large&t=${encodeURIComponent(token)}`);
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();

@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
-import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, SERVER, restoreChangedDisc } from './nas-server';
+import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, SERVER, restoreChangedDisc } from './nas-server';
 import { skipWithoutH264 } from './support';
 
 // The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
-// library's top level lists), and the rendezvous Worker that turns a code into the server's address.
+// library's top level lists), and the rendezvous Worker that turns a code into the server's address. Its title
+// library matches made-up titles from tests/e2e/fixtures/nas-metadata.json against copies of synthetic discs.
 
 const sleep = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -27,6 +28,68 @@ function exclusively<T>(fn: () => T): T {
   } finally {
     rmSync(lock, { recursive: true, force: true });
   }
+}
+
+/** Runs `fn` while no other worker does, holding the lock while `fn` awaits (the release gate is the server's, shared). */
+async function exclusivelyAsync<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const lock = join(NAS_E2E_DIR, `${name}.lock`);
+  for (let tries = 0; ; tries++) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || tries > 1200) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+/** Sets the release gate as the owner does, through the API with the owner device's session token. */
+async function setGate(token: string, gate: 'owners' | 'everyone'): Promise<void> {
+  const res = await fetch(`http://localhost:${NAS_PORT}/api/admin/settings/title-library`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ gate }),
+  });
+  expect(res.status).toBe(204);
+}
+
+/** The last session token `page` sent to the NAS, kept as it goes. */
+function watchToken(page: Page): () => string {
+  let token: string | null = null;
+  page.on('request', (r) => {
+    const auth = r.headers()['authorization'];
+    if (auth?.startsWith('Bearer ') && r.url().startsWith(`http://localhost:${NAS_PORT}/`)) token = auth.slice(7);
+  });
+  return () => {
+    expect(token).not.toBeNull();
+    return token!;
+  };
+}
+
+/**
+ * Waits for the server's first scan and title matching run (it matches after scanning) to have filed the fixture's
+ * discs: until then the folder listing is empty, and the app fetches the titles once per session.
+ */
+async function libraryReady(): Promise<void> {
+  await expect
+    .poll(
+      () => {
+        try {
+          const meta = JSON.parse(readFileSync(join(NAS_ENV.DATA_DIR!, 'metadata.json'), 'utf8')) as { matches: { status: string }[] };
+          return meta.matches.filter((m) => m.status === 'filed').length;
+        } catch {
+          return 0;
+        }
+      },
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThanOrEqual(3);
 }
 
 /**
@@ -56,11 +119,19 @@ async function pairByLink(page: Page): Promise<void> {
   await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
 }
 
-/** Pairs, then opens the library at its top. */
-async function openLibrary(page: Page, browserName: string): Promise<void> {
+/** Pairs, then opens the title library (an owner always has it). */
+async function openTitles(page: Page, browserName: string): Promise<void> {
+  await libraryReady();
   await allowLocalNetwork(page, browserName);
   await pairByLink(page);
   await page.getByTestId('nas-open').click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+}
+
+/** Pairs, then opens the folder browser at its top, from the title library. */
+async function openLibrary(page: Page, browserName: string): Promise<void> {
+  await openTitles(page, browserName);
+  await page.getByTestId('browse-folders').click();
   await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
 }
 
@@ -171,6 +242,7 @@ test('a disc deleted after its pre-flight fails to open, and Play works again', 
 });
 
 test('the owner mints a code, pairs a second browser as Mum, revokes it, and rescans', async ({ page, browser, browserName }) => {
+  const ownerToken = watchToken(page);
   await openLibrary(page, browserName);
   await page.getByTestId('nas-settings').click();
   await expect(page.getByTestId('nas-admin')).toBeVisible();
@@ -195,11 +267,33 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
     await mum.getByTestId('pair-button').click();
     const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
     await expect(mum.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
-    await mum.getByTestId('nas-open').click();
-    await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
-    // A guest: the listing is up, and there is no way into the settings.
-    await expect(mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
-    await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
+    // Review Focus 5. The gate is the server's, so the browsers take turns with it.
+    await exclusivelyAsync('gate', async () => {
+      try {
+        // A guest while the gate is closed: the folder browser, with no error notice.
+        await mum.getByTestId('nas-open').click();
+        await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await expect(mum.getByTestId('title-library')).toHaveCount(0);
+        await expect(mum.getByTestId('nas-error')).toHaveCount(0);
+        await expect(mum.getByTestId('error')).toHaveCount(0);
+        // A guest: the listing is up, and there is no way into the settings.
+        await expect(mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
+        await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
+
+        // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
+        await setGate(ownerToken(), 'everyone');
+        await mum.reload();
+        await mum.getByTestId('nas-open').click();
+        await expect(mum.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+        await expect(mum.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
+        await expect(mum.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
+        await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
+        await mum.getByTestId('browse-folders').click();
+        await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
+      } finally {
+        await setGate(ownerToken(), 'owners');
+      }
+    });
 
     // The owner sees both devices: this one and Mum (other tests' devices share the server).
     const mumRow = page.locator(`[data-testid="nas-device"][data-device-id="${deviceId}"]`);
@@ -244,4 +338,71 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
   await page.getByTestId('nas-new-code').click();
   await expect(codeText).toHaveText('K7QM-4XP2-R9TD');
   expect(minted).toEqual({ owner: true });
+});
+
+test('an owner browses the NAS by title: shelves, search, a series and its season', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  const shelf = (id: string) => page.locator(`[data-testid="title-shelf"][data-shelf="${id}"]`);
+  await expect(shelf('series')).toHaveText(/^Series\s*1$/);
+  await expect(shelf('movie')).toHaveText(/^Movies\s*1$/);
+  await expect(shelf('music')).toHaveText(/^Music\s*1$/);
+  await expect(shelf('unsorted')).toContainText('Unsorted');
+  const card = (name: string) => page.locator(`[data-testid="title-card"][data-name="${name}"]`);
+  await expect(card('Starfall Wanderer')).toContainText('星降りの旅人');
+  await expect(card('Moonlit Harbor')).toBeVisible();
+  await expect(card('Lantern Parade Live 2024')).toBeVisible();
+
+  // Search by English, romaji and Japanese names; a blank search shows the shelves again.
+  const search = page.getByTestId('title-search');
+  const results = page.getByTestId('title-row');
+  for (const [query, name] of [['starfall', 'Starfall Wanderer'], ['hoshifuri', 'Starfall Wanderer'], ['月影', 'Moonlit Harbor']]) {
+    await search.fill(query!);
+    await expect(results).toHaveCount(1);
+    await expect(results).toHaveAttribute('data-name', name!);
+  }
+  await search.fill('');
+  await expect(card('Moonlit Harbor')).toBeVisible();
+
+  // The Movies shelf alone.
+  await shelf('movie').click();
+  await expect(page.getByTestId('title-card')).toHaveCount(1);
+  await expect(card('Moonlit Harbor')).toBeVisible();
+  await shelf('movie').click();
+
+  // The series, its season, and the season's Episodes and Discs.
+  await card('Starfall Wanderer').click();
+  await expect(page.getByTestId('series-name')).toHaveText('Starfall Wanderer');
+  await expect(page.getByTestId('series-screen')).toContainText('Hoshifuri no Tabibito');
+  await expect(page.getByTestId('series-screen')).toContainText('TV · 2016 · 1 season');
+  const season = page.locator('[data-testid="season-row"][data-label="Season 1"]');
+  await expect(season).toContainText('1 episode · 2 discs');
+  await season.click();
+  await expect(page.getByTestId('season-screen')).toContainText('Starfall Wanderer');
+  await expect(page.getByTestId('season-tab')).toHaveText(['Episodes', 'Discs']);
+  await expect(page.getByTestId('episode-row')).toHaveCount(1);
+  await expect(page.getByTestId('episode-row')).toContainText('Episode 1');
+  await page.locator('[data-testid="season-tab"][data-tab="discs"]').click();
+  await expect(page.getByTestId('disc-card')).toHaveText([/^Disc 1 · Episode 1/, /^Disc 2/]);
+  await expect(page.getByTestId('disc-copy').first()).toContainText('Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.1');
+});
+
+test("tapping an episode plays the episode's playlist", async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await expect(page.getByTestId('nas-preflight')).toContainText('Episode 1 · Starfall Wanderer Vol.1');
+  await page.getByTestId('nas-play').click();
+  // The episode is disc1's 4-second playlist 00001, not the 00000 the disc's picker would offer first.
+  await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 15_000 });
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00001');
+});
+
+test('"Browse by folder instead" opens the folder browser', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await page.getByTestId('browse-folders').click();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+  await expect(page.getByTestId('title-library')).toHaveCount(0);
+  await expect(page.locator('[data-testid="nas-folder"][data-name="Anime"]')).toBeVisible();
 });

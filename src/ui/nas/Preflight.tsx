@@ -5,10 +5,15 @@ import type { PlayerController } from '../../player/player-controller';
 import { discBadges, discFacts, formatSize, openFailed, preflightLines, type DiscFacts } from './library-model';
 import { NasHttpError, type NasClient } from './nas-client';
 
+/** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
+export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
+
 interface PreflightProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
-  readonly disc: DiscEntry;
+  readonly disc: PreflightDisc;
+  /** An episode's playlist, started once the engine has read the disc (its 'titles' event). */
+  readonly playlistId?: string;
   /** Whether the disc is UHD, once its manifest has shown it (for the row's badge). */
   readonly onFacts: (discId: string, facts: DiscFacts) => void;
   readonly onCancel: () => void;
@@ -18,8 +23,23 @@ interface PreflightProps {
 const message = (err: unknown): string =>
   err instanceof NasHttpError && err.code === 'disc-changed' ? DISC_CHANGED_MESSAGE : err instanceof Error ? err.message : String(err);
 
+/**
+ * Starts `playlistId` once the engine has read the disc just opened. A plain subscription rather than an effect: the
+ * landing screen, and this pre-flight with it, unmounts as soon as the disc's playlists arrive.
+ */
+function playOnceOpen(controller: PlayerController, playlistId: string): void {
+  const unsubscribe = controller.subscribe(() => {
+    const snapshot = controller.getSnapshot();
+    if (openFailed(snapshot)) unsubscribe();
+    else if (snapshot.playlists.length > 0) {
+      unsubscribe();
+      controller.playPlaylist(playlistId);
+    }
+  });
+}
+
 /** Before a NAS disc plays: its manifest, this connection's throughput against the disc's peak rate, and Play. */
-export function Preflight({ nas, controller, disc, onFacts, onCancel }: PreflightProps): ReactElement {
+export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel }: PreflightProps): ReactElement {
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
   const [facts, setFacts] = useState<DiscFacts | null>(null);
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
@@ -72,6 +92,7 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
         controller.openRemote({ kind: 'remote', base, token, manifest }, () => nas.freshSession(token).then((s) => (token = s.token)));
+        if (playlistId !== undefined) playOnceOpen(controller, playlistId);
         setOpening('launched');
       },
     ).catch((err: unknown) => {
@@ -82,12 +103,13 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
 
   const lines = preflightLines(mbps ?? null, facts?.peakMbps ?? null);
   const badges = discBadges(disc, facts?.uhd);
+  const size = disc.sizeBytes ?? (manifest ? manifest.files.reduce((sum, f) => sum + f.size, 0) : null);
 
   return (
     <section className="preflight" data-testid="nas-preflight">
       <h3>{disc.name}</h3>
       <p className="library-meta">
-        {formatSize(disc.sizeBytes)}
+        {size !== null && formatSize(size)}
         {badges.map((b) => (
           <span key={b} className="badge">
             {b}

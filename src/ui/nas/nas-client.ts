@@ -1,4 +1,4 @@
-import type { CodeLookup, DiscEntry, DiscManifest, FolderEntry } from '../../engine/disc/nas-api';
+import type { CodeLookup, DiscEntry, DiscManifest, FolderEntry, TitleDetail, TitleSummary } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 
@@ -35,6 +35,24 @@ export interface NasDevice {
   readonly owner: boolean;
   readonly pairedAt: number;
   readonly lastSeen: number;
+}
+
+/** `GET me`: whether this device is an owner, and whether the title library is open to it. */
+export interface NasMe {
+  readonly owner: boolean;
+  readonly titleLibrary: boolean;
+}
+
+/** `GET admin/metadata/status`: the title matcher's progress and counts. */
+export interface NasTitleStatus {
+  readonly running: boolean;
+  readonly groupsDone: number;
+  readonly groupsTotal: number;
+  readonly filed: number;
+  readonly unsorted: number;
+  readonly music: number;
+  readonly lastRunAt: number | null;
+  readonly tmdb: boolean;
 }
 
 export interface NasCode {
@@ -124,6 +142,7 @@ export class NasClient {
     rescan: async (): Promise<void> => {
       await this.ok('admin/rescan', { method: 'POST' });
     },
+    titleStatus: async (): Promise<NasTitleStatus> => (await this.json('admin/metadata/status')) as NasTitleStatus,
   };
 
   constructor(private readonly deps: NasClientDeps) {}
@@ -221,6 +240,28 @@ export class NasClient {
 
   async library(path: string): Promise<{ folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean }> {
     return (await this.json(`library?path=${encodeURIComponent(path)}`)) as { folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean };
+  }
+
+  /** Whether this device is an owner, and whether it may browse by title (the release gate). */
+  async me(): Promise<NasMe> {
+    return (await this.json('me')) as NasMe;
+  }
+
+  /** Every title, with its names in all languages (searched locally). */
+  async titles(): Promise<TitleSummary[]> {
+    return ((await this.json('titles')) as { titles: TitleSummary[] }).titles;
+  }
+
+  /** A title's seasons, movies and extras. */
+  async title(id: string): Promise<TitleDetail> {
+    return (await this.json(`titles/${encodeURIComponent(id)}`)) as TitleDetail;
+  }
+
+  /** An `<img src>` for a poster or banner: the session token goes in `t=`, as images can't send headers. */
+  async artUrl(artId: string, size: 'small' | 'large'): Promise<string> {
+    const [session, pairing] = await Promise.all([this.session(), this.pairing()]);
+    if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
+    return `${pairing.base}art/${encodeURIComponent(artId)}?size=${size}&t=${encodeURIComponent(session.token)}`;
   }
 
   /** The disc's API base for the engine (`RemoteDiscSpec.base`): `<NAS base>discs/<id>/`. */
