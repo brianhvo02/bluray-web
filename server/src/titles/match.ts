@@ -165,8 +165,13 @@ interface Pending {
   readonly box: number | null;
   readonly bonus: boolean;
   readonly via: readonly Via[];
-  /** `box` is the volume of a `Volume M/Disc K` folder pair, numbered across the volumes like boxes (ruling M1). */
+  /**
+   * `box` is a volume, numbered across the volumes like boxes: of a `Volume M/Disc K` folder pair (ruling M1), or of a
+   * name carrying both (`Title Vol.1 Disc 2`, `第8巻 DISC2`, P1).
+   */
   readonly volumeBox: boolean;
+  /** The folder the disc's box family shares (see `boxFamily`); a volume in the disc's own name: its group folder. */
+  readonly family: string;
   /** Placed like a movie: an AniList entry whose twin is a TMDB movie (ruling M4). */
   readonly filmLike: boolean;
   /** Where the disc's own number (`disc`) came from: its own volume number or its own disc number. */
@@ -190,7 +195,7 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
   // a disc of box 2 and up is numbered only once every group of its box family is matched, so a checkpoint (or a run
   // that lost a group to an unreachable source) never files one that the whole family would leave Unsorted (ruling F7)
   const familyMatched = (p: Pending): boolean => {
-    const prefix = boxFamily(p.e.path, p.volumeBox);
+    const prefix = p.family;
     for (const g of groups.keys()) if ((prefix === '' || g === prefix || g.startsWith(`${prefix}/`)) && !matched.has(g)) return false;
     return true;
   };
@@ -500,18 +505,27 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   if (!bonus && episodes !== null && count !== null && episodes[1] > count) return unsorted('episode-past-season', [best.entry]);
 
   const own = named.filter((p) => p.own);
-  const numbers = new Set(own.map((p) => p.parse.volume ?? p.parse.disc).filter((n): n is number => n !== null));
   const box = named.find((p) => p.parse.box !== null)?.parse.box ?? null;
   const via = (['disc-title', 'folder', 'discdb'] as const).filter((k) => best.kinds.has(k));
+  const ownVolumes = new Set(own.map((p) => p.parse.volume).filter((n): n is number => n !== null));
+  const ownDiscs = new Set(own.map((p) => p.parse.disc).filter((n): n is number => n !== null));
+  const base = { e, entry: best.entry, season, bonus, via, filmLike: filmTwinned.has(best.entry.id) };
+  // a name carrying a volume and a disc number (`Title Vol.1 Disc 2`): the volume is a box, numbered across the
+  // volumes like `Volume M/Disc K` folders, within the group folder (P1)
+  if (box === null && own.some((p) => p.parse.volume !== null && p.parse.disc !== null)) {
+    const one = ownVolumes.size === 1 && ownDiscs.size === 1;
+    return { ...base, disc: one ? [...ownDiscs][0]! : null, box: one ? [...ownVolumes][0]! : null, volumeBox: one, family: groupKey(e), numberFrom: null };
+  }
+  const numbers = new Set(own.map((p) => p.parse.volume ?? p.parse.disc).filter((n): n is number => n !== null));
   // a `Volume M/Disc K` pair: the volume numbers the discs across the volumes, like a box (ruling M1), so Disc 1 of
   // Volume 2 never shares a slot with Disc 1 of Volume 1
-  const volume = box === null && own.every((p) => p.parse.volume === null) && own.some((p) => p.parse.disc !== null)
+  const volume = box === null && ownVolumes.size === 0 && ownDiscs.size > 0
     ? named.find((p) => !p.own && p.kind === 'folder' && p.parse.volume !== null)?.parse.volume ?? null
     : null;
   return {
-    e, entry: best.entry, season, disc: numbers.size === 1 ? [...numbers][0]! : null, box: box ?? volume, bonus, via,
-    volumeBox: volume !== null, filmLike: filmTwinned.has(best.entry.id),
-    numberFrom: numbers.size !== 1 ? null : own.some((p) => p.parse.volume !== null) ? 'volume' : 'disc',
+    ...base, disc: numbers.size === 1 ? [...numbers][0]! : null, box: box ?? volume,
+    volumeBox: volume !== null, family: boxFamily(e.path, volume !== null),
+    numberFrom: numbers.size !== 1 ? null : ownVolumes.size > 0 ? 'volume' : 'disc',
   };
 }
 
@@ -532,8 +546,7 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
     let placed = p.bonus;
     if (!placed && p.box !== null && p.box > 1) {
       // boxes run within one family and one kind (volumes or boxes), so another edition or a box set never shifts them (R1)
-      const family = boxFamily(p.e.path, p.volumeBox);
-      const boxed = pending.filter((q) => same(p, q) && q.box !== null && q.volumeBox === p.volumeBox && boxFamily(q.e.path, q.volumeBox) === family);
+      const boxed = pending.filter((q) => same(p, q) && q.box !== null && q.volumeBox === p.volumeBox && q.family === p.family);
       const running = familyMatched(p) ? boxRunning(boxed) : null;
       disc = running?.get(p) ?? null;
       placed = disc !== null;
@@ -551,23 +564,31 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
       ? { discId: p.e.discId, status: 'filed', entryId: p.entry.id, season: p.season, disc, bonus: p.bonus, via: p.via }
       : unnumbered(p));
   }
-  // two discs of different group folders in one slot whose numbers come from different origins (`Volume 1/Disc 2`
-  // numbered across volumes, a `Volume 2` disc folder by its own volume, `BD/Disc 2` by its own disc number, `Box 1/
-  // Disc 2` within its box) can't both be right, and the catalogue would merge them as copies: neither has a place
-  // (W3, R2). Discs numbered the same way in one slot are copies or editions of one disc, as before, and so are discs
-  // with the same content.
+  // two discs in one slot whose numbers come from different schemes (`Volume 1/Disc 2` numbered across volumes, a
+  // `Volume 2` disc folder by its own volume, `BD/Disc 2` by its own disc number, `Box 1/Disc 2` within its box), in
+  // one group folder or two, can't both be right, and the catalogue would merge them as copies (W3, R2, P2). Once two
+  // origins clash, no disc of the entry and season numbered by either keeps its number, so a title never mixes
+  // numbering schemes (ruling M5). Discs numbered the same way in one slot are copies or editions of one disc, as
+  // before, and so are discs with the same content.
   const byId = new Map(pending.map((p) => [p.e.discId, p]));
   const scheme = (p: Pending): string =>
     p.volumeBox ? `v${p.box}:${p.disc}` : p.box !== null ? `b${p.box}:${p.disc}` : `own-${p.numberFrom === 'volume' ? 'vol' : 'disc'}`;
-  return out.map((m, i) => {
+  /** A numbering's origin: its kind, and for volumes or boxes numbered across, its family. */
+  const origin = (p: Pending): string => (p.box !== null ? `${p.volumeBox ? 'v' : 'b'}@${p.family}` : scheme(p));
+  const slotKey = (p: Pending): string => `${p.entry.id}\u0000${p.season}`;
+  const numbered = out.flatMap((m) => (m.status === 'filed' && m.disc !== null && !m.bonus ? [{ m, p: byId.get(m.discId)! }] : []));
+  const clashing = new Set<string>();
+  for (const a of numbered) {
+    for (const b of numbered) {
+      if (a === b || a.m.entryId !== b.m.entryId || a.m.season !== b.m.season || a.m.disc !== b.m.disc || scheme(a.p) === scheme(b.p)) continue;
+      if (a.p.e.fingerprint !== null && a.p.e.fingerprint === b.p.e.fingerprint) continue;
+      clashing.add(`${slotKey(a.p)}\u0000${origin(a.p)}`);
+    }
+  }
+  return out.map((m) => {
     if (m.status !== 'filed' || m.disc === null || m.bonus) return m;
     const p = byId.get(m.discId)!;
-    const clash = out.some((o, j) => {
-      if (j === i || o.status !== 'filed' || o.bonus || o.entryId !== m.entryId || o.season !== m.season || o.disc !== m.disc) return false;
-      const q = byId.get(o.discId)!;
-      return q.group !== p.group && scheme(q) !== scheme(p) && (p.e.fingerprint === null || q.e.fingerprint !== p.e.fingerprint);
-    });
-    return clash ? unnumbered(p) : m;
+    return clashing.has(`${slotKey(p)}\u0000${origin(p)}`) ? unnumbered(p) : m;
   });
 }
 

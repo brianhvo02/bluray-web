@@ -674,16 +674,16 @@ describe('matchDiscs', () => {
         }
       });
 
-      it('W3: discs of two group folders numbered differently into one slot both go to no-disc-number; copies stay', async () => {
+      it('W3/M5: discs numbered differently into one slot, and every disc of either numbering, go to no-disc-number; copies stay', async () => {
         const quill = entry('anilist:995', { english: 'Quill Harbor' }, { year: 2015 });
         const b = 'drv0/Anime/Quill Harbor';
         const state = (ms: readonly DiscMatch[], p: string): unknown => { const m = byDisc(ms, p); return m.status === 'filed' ? m.disc : m.status === 'unsorted' ? m.reason : m.status; };
         const mixed = [`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Volume 2`];
         const r1 = await run(mixed, fake({ 'Quill Harbor': [quill] }), null);
-        expect(mixed.map((p) => state(r1, p))).toEqual([1, 'no-disc-number', 'no-disc-number']);
+        expect(mixed.map((p) => state(r1, p))).toEqual(['no-disc-number', 'no-disc-number', 'no-disc-number']);
         const three = [`${b}/Volume 1/Disc 1`, `${b}/Volume 2/Disc 1`, `${b}/Volume 2/Disc 2`, `${b}/Volume 3`];
         const r2 = await run(three, fake({ 'Quill Harbor': [quill] }), null);
-        expect(three.map((p) => state(r2, p))).toEqual([1, 2, 'no-disc-number', 'no-disc-number']);
+        expect(three.map((p) => state(r2, p))).toEqual(['no-disc-number', 'no-disc-number', 'no-disc-number', 'no-disc-number']);
         // the same disc in two places (equal content) is two copies of one disc, as before
         const copies = ['drv0/Anime/Quill Harbor/Volume 1', 'drv1/Backup/Quill Harbor/Volume 1'];
         const r3 = await matchDiscs(copies.map((p) => ({ ...rooted(p), fingerprint: 'FPQ1' })), ctx(fake({ 'Quill Harbor': [quill] }), null));
@@ -692,6 +692,14 @@ describe('matchDiscs', () => {
         const twice = ['drv0', 'drv1'].flatMap((root) => [1, 2].map((d) => `${root}/Anime/Quill Harbor/Volume 1/Disc ${d}`));
         const r4 = await run(twice, fake({ 'Quill Harbor': [quill] }), null);
         expect(twice.map((p) => state(r4, p))).toEqual([1, 2, 1, 2]);
+      });
+
+      it('P1: `第N巻 DISCk` names are numbered across the volumes', async () => {
+        const anilist = fake({ 星降りの旅人: [starfallEn] });
+        const g = 'drv0/Anime/星降りの旅人';
+        const paths = [`${g}/[BDMV] 星降りの旅人 第1巻 DISC1`, `${g}/[BDMV] 星降りの旅人 第1巻 DISC2`, `${g}/[BDMV] 星降りの旅人 第2巻 DISC1`];
+        const ms = await run(paths, anilist, null);
+        expect(paths.map((p) => { const m = byDisc(ms, p); return m.status === 'filed' ? m.disc : m.status; })).toEqual([1, 2, 3]);
       });
 
       it('R1/R2: discs are numbered within their own volume or box family, and one slot takes one kind of number', async () => {
@@ -703,18 +711,28 @@ describe('matchDiscs', () => {
           return paths.map((p) => { const m = byDisc(ms, p); return m.status === 'filed' ? m.disc : m.status === 'unsorted' ? m.reason : m.status; });
         };
         const N = 'no-disc-number';
-        // N1: single-disc volume releases against a three-disc set's own disc numbers
-        expect(await states([`${b}/Volume 1`, `${b}/Volume 2`, `${b}/BD/Disc 1`, `${b}/BD/Disc 2`, `${b}/BD/Disc 3`])).toEqual([N, N, N, N, 3]);
+        // N1: single-disc volume releases against a three-disc set's own disc numbers (and, M5, the set's other disc)
+        expect(await states([`${b}/Volume 1`, `${b}/Volume 2`, `${b}/BD/Disc 1`, `${b}/BD/Disc 2`, `${b}/BD/Disc 3`])).toEqual([N, N, N, N, N]);
         // N2: a volume number against a disc number
         expect(await states([`${b}/Volume 2`, `${b}/Season 1/Disc 2`])).toEqual([N, N]);
         // N3: box 1's disc numbers against a volume number
-        expect(await states([`${b}/Box 1/Disc 1`, `${b}/Box 1/Disc 2`, `${b}/Volume 2`])).toEqual([1, N, N]);
+        expect(await states([`${b}/Box 1/Disc 1`, `${b}/Box 1/Disc 2`, `${b}/Volume 2`])).toEqual([N, N, N]);
         // N4: volumes and a box set run separately: Volume 2/Disc 1 is disc 3, never 5
         expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Volume 2/Disc 1`,
-          `${b}/BOX 1/Disc 1`, `${b}/BOX 1/Disc 2`, `${b}/BOX 1/Disc 3`, `${b}/BOX 1/Disc 4`])).toEqual([N, N, N, N, N, N, 4]);
+          `${b}/BOX 1/Disc 1`, `${b}/BOX 1/Disc 2`, `${b}/BOX 1/Disc 3`, `${b}/BOX 1/Disc 4`])).toEqual([N, N, N, N, N, N, N]);
         // N5: two editions on two roots run separately; where they disagree, neither is placed
         expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Volume 2/Disc 1`,
-          `${c}/Volume 1/Disc 1`, `${c}/Volume 1/Disc 2`, `${c}/Volume 1/Disc 3`])).toEqual([1, 2, N, 1, 2, N]);
+          `${c}/Volume 1/Disc 1`, `${c}/Volume 1/Disc 2`, `${c}/Volume 1/Disc 3`])).toEqual([N, N, N, N, N, N]);
+        // M5: once two numberings clash in a slot, no disc of either keeps a number (L7)
+        expect(await states([`${b}/Box 1/Disc 1`, `${b}/Box 1/Disc 2`, `${b}/Volume 1`])).toEqual([N, N, N]);
+        // P2: the clash counts within one group folder too (L18)
+        expect(await states([`${b}/Volume 2`, `${b}/Disc 2`])).toEqual([N, N]);
+        // P1: a name with a volume and a disc number runs across the volumes like Volume M/Disc K folders (L13b, L13)
+        expect(await states([`${b}/Quill Harbor Vol.1 Disc 1`, `${b}/Quill Harbor Vol.1 Disc 2`, `${b}/Quill Harbor Vol.2 Disc 1`])).toEqual([1, 2, 3]);
+        expect(await states([`${b}/Quill Harbor Vol.1 Disc 2`, `${b}/Quill Harbor Vol.2 Disc 1`])).toEqual([2, N]);
+        expect(await states([`${b}/Quill Harbor Vol.2 Disc 1`])).toEqual([N]);
+        // and agrees with the folder layout, so the two are copies
+        expect(await states([`${b}/Quill Harbor Vol.1 Disc 2`, `${c}/Volume 1/Disc 2`])).toEqual([2, 2]);
         // N6: one layout on two roots is copies
         expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 2/Disc 1`, `${c}/Volume 1/Disc 1`, `${c}/Volume 2/Disc 1`])).toEqual([1, 2, 1, 2]);
         // editions numbered by their own volume stay copies
