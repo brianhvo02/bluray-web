@@ -103,7 +103,7 @@ what would change that decision.
 - **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
   (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
 
-## BD-J (milestones 5b-5c)
+## BD-J (milestones 5b-5d)
 
 - **5c timings (Chrome, production build, this machine).** Time from opening the disc to the first frame of the
   title's playlist, as `bdj.firstFrameMs`:
@@ -180,7 +180,11 @@ what would change that decision.
   remote opens by itself once per menu, with the notice; one the user closes stays closed until the next menu.
 - **Touch over a disc menu, HDMV or BD-J (5d, rulings R12-R15).** A tap on the picture goes to the disc; a tap off
   it (any letterbox or pillarbox band), an HDMV tap that hits no button, a BD-J tap Java ignores (remote too), or a
-  long press (500 ms, at most 10 px of movement; never sent to the disc) brings up the controls.
+  long press (500 ms, at most 10 px of movement; never sent to the disc) brings up the controls. In a menu, empty
+  control-bar space passes clicks through, a pointer move wakes the bar only near the bottom edge, and keys that go to
+  the disc don't wake it (R9, R11). The long press is tested only through CDP touch in Chrome and in the gate's unit
+  tests, not on real iPhone or iPad hardware: the device gate never needed it (its fallback taps a letterbox band
+  instead).
 - **Local BD-J discs against libbluray (5d).** `tests/local/bdj-menus.test.ts` drives A_NEW_ERA (main menu to PLAY,
   and to CHAPTERS, chapter 2) and RENTAL_FAMILY (language picker, English, main menu, PLAY) to the feature and compares
   the control calls and the plane at every settled point with libbluray's committed runs (`tests/bdj/golden/local/`).
@@ -196,10 +200,65 @@ what would change that decision.
   packets, and the first item starts at packet 0, before that mark's EP map entry).
 - **BD-J file budget on phones and tablets (5d, ruling R16).** Under the constrained memory profile, the BD-J file
   system's memory mounts (`/tmp/` with libbluray's copies of the disc's JARs and the files it extracts from them,
-  `/persistent/`, `/buda/`) hold at most `bdjVfsCacheBytes` (64 MB for now; Task 14 sets it from the devices). A write
-  beyond it fails as on a full disk (IOException "No space left on device", logged once with the path and the budget),
+  `/persistent/`, `/buda/`) hold at most `bdjVfsCacheBytes` (64 MB; the device gate measured 4.6 MB on the iPhone,
+  so it stayed). A write beyond it fails as on a full disk (IOException "No space left on device", logged once with the path and the budget),
   so a disc whose BD-J files exceed it fails to mount its app and falls back to the picker. libbluray has no such limit,
   and desktop has none. The local discs use 4.4 MB (A_NEW_ERA) and 1.4 MB (RENTAL_FAMILY).
+- **5d start-up and the device gate (2026-10-18).** `bdj.firstFrameMs` for A_NEW_ERA (RENTAL_FAMILY is under
+  1 s on desktop and about 4.6-5.3 s on the iPhone and iPad):
+
+  | Where | Warm | Cold | Bar |
+  |---|---|---|---|
+  | Desktop Chrome (local files and disc server) | about 4.8-4.96 s (medians 4.8-4.92 s) | 4,976-5,034 ms | 5 s warm |
+  | Mac Safari 26.6.2 (disc server) | 4,888-4,964 ms | 5,039 ms | 5 s warm |
+  | iPhone 17 Pro, iOS 27.2 (disc server, solo) | 8.3-9.0 s | 10.8 s | 10 s target, 15 s blocker |
+  | iPad Pro 12.9" 5th gen, iPadOS 27.0.1 (disc server) | 9.5 s | 11.6 s | 10 s target, 15 s blocker |
+
+  Desktop passes with a thin margin (tens of ms; a loaded machine goes over, 5,441 ms seen). The iPhone meets the
+  10 s target warm and misses it cold by 0.8 s, well under the blocker; the iPad misses it by up to 1.6 s cold. Most
+  of A_NEW_ERA's time is its own animation and `Thread.sleep(3000)`; about a third of the interpreted part is the JDK
+  re-verifying the signed `00000.jar`, as HotSpot does (R10). With the iPhone and iPad gate run concurrently on one
+  disc server the iPhone took 12.7-20.3 s; that was the shared connection, not the player. *Revisit in* 5e: a JIT
+  (5c spec section 4.7, stage 2) is the lever, and whether to build it is the user's decision. Menu responsiveness: at
+  most 68 ms on every device (bars 0.2 s computer, 0.5 s iPhone). Ten minutes in the menus (200 inputs) brought no
+  reload on the iPhone, the iPad, the iPad Simulator or Mac Safari; desktop Chrome and Firefox stayed 120 s.
+  Measured device memory stayed well under the constrained budgets (class bytes 1.33 of 4 MB, VFS 4.6 of 64 MB,
+  stills 0 of 16 MB), so none was changed. The Java heap (about 38 MB of `int[]` on A_NEW_ERA) and the JVM's
+  own JS structures (about 95 MB, mostly parsed constant pools) are not budgeted; a compact constant-pool form is the
+  next lever if a phone needs it. Firefox ran RENTAL_FAMILY only (no HEVC, spec 4.5).
+- **Buffering behind a BD-J menu over the disc server (Task 14c).** On the iPhone the menu playlist (A_NEW_ERA's
+  `00149`) sat in `buffering` at 0:00 for several seconds after the menu was drawn, while `RemoteSource`'s read-ahead
+  filled, with the spinner over a still menu. Taps now pass through the spinner, so the menu works, but the wait
+  itself is a start-up and read-ahead question for the remote route that 5d did not address.
+- **BD-J text (5d).** FreeType 2.13.2 is built to WASM from Ubuntu's patched source, the version libbluray links in the
+  harness, and `freetype-golden.json` / `text-golden.json` (`tests/bdj/fonts/`) hold its glyphs and what libbluray's
+  compiled font and text natives return and draw. Those two goldens cover TrueType fonts only; CFF outlines are
+  covered by the synthetic menu disc, whose disc font is Source Sans 3 (OpenType CFF, OFL) and whose plane hashes are
+  in the bdj-trace golden. No CI job regenerates `freetype-golden.json` or `text-golden.json`
+  (`npm run bdj-trace:freetype-golden` / `bdj-trace:text-golden` by hand): CI rebuilds `freetype.wasm` and checks it
+  against them through Vitest only.
+- **HAVi background stills (5d).** libbluray never draws `HStillImageBackgroundConfiguration.displayImage`; we draw
+  the still under the video, decoded by the browser. Gaps, as in libbluray: no `HPermissionDeniedException`,
+  `HConfigurationException` or `IOException` is raised, the background colour is not drawn, and the scaling flag is
+  ignored. A failed decode clears the still, but a missing file keeps the previous one, and a still survives a title
+  change inside one BD-J entry. `HBackgroundImage(byte[])` and `HBackgroundImage(URL)` throw `NoClassDefFoundError`
+  because `sun.awt.image.ByteArrayImageSource` and `URLImageSource` are not in the class library (ruling R4): neither
+  local disc uses them. *Revisit if* a disc does: add the two classes and a branch in `natives/havi.ts`.
+- **JPEG decoded in Java is unsupported (5d).** The class library has no `JPEGImageDecoder` and there is no libjpeg
+  in WASM, so a JPEG image Java loads (an AWT image, or a JPEG `HBackgroundImage` on `load()`) fails to load where
+  HotSpot decodes it, even though `displayImage` itself would let the browser decode the same bytes. Neither local disc
+  loads a JPEG (both use PNG). *Revisit if* a disc needs it: build libjpeg through the FreeType WASM pipeline, matching
+  the JRE's libjpeg.
+- **Annotation reflection is unsupported in the class library.** `rt-bdj.jar` has no
+  `sun.reflect.annotation.AnnotationParser` (nor `MethodRepository`), so `getAnnotation` and friends throw
+  `NoClassDefFoundError`. BD-J targets Java 1.3/1.4, which has no annotations; the JVM itself keeps the attributes,
+  and a TypeScript test checks their bytes.
+- **The class library is collected from traced runs (5d, Task 14b).** `bdj-classlib:collect` lists the classes
+  HotSpot loads while running the synthetic and local discs, plus a constant-pool scan. A class reached only on a
+  path those runs never took is missing: `ThreadLocalRandom`, reached only when a `ConcurrentHashMap` CAS race was
+  lost, stalled about one boot in 60 until it was added, and Xerces error and validation paths may still miss
+  classes. The scan follows constant-pool references only, not reflection. A missing class fails loudly
+  (`NoClassDefFoundError` in the log), and a boot that stalls on one dumps every Java thread at the 20 s timeout.
 - **Ignored taps on the iPhone gate (Task 14c, 2026-10-18).** On the iPhone, A_NEW_ERA's tap on the menu centre was
   never counted as ignored. The cause was not the reaction window: idling in A_NEW_ERA's main menu for about 45 s through the
   real Player (local replay, playlist 00149 behind it) brings no control call, no register write and no plane change
@@ -224,7 +283,8 @@ what would change that decision.
 
 ## Browsers and devices
 
-- **BD-J on real discs is verified in desktop Chromium only.** Cross-browser support (step 1 of `docs/superpowers/specs/2026-10-16-cross-browser-and-remote-design.md`) was built in parallel with milestone 5 (BD-J). With 5c merged, BD-J titles play in desktop Chromium, on real discs too. The synthetic BD-J disc's E2E tests (`bdj.spec.ts`) also pass in Playwright's Firefox and WebKit, but real BD-J discs in Safari and Firefox, and BD-J on phones and tablets, are unverified and is part of milestone 5's remaining work: the requirements are in that spec's §3.9 (time to first frame on iPhone within M5's target, touch navigation, the BD-J worker in Safari and Firefox, JVM caches in the constrained memory profile). A failed BD-J boot still falls back to the playlist picker.
+- **BD-J on real discs is verified on every supported device class (5d gate, 2026-10-18).** Both local BD-J discs went from their first menu to the feature, by keys and by touch, matching libbluray's planes, on desktop Chrome, Mac Safari, Firefox (RENTAL_FAMILY only: no HEVC), iPhone 17 Pro and iPad Pro 12.9" 5th gen; the cross-browser spec's §3.9 is covered. Numbers are in the BD-J section. Chrome Android was not part of the gate (only Chrome's mobile emulation). A failed BD-J boot still falls back to the playlist picker.
+- **No USB route for iOS in the 5d gate (ruling R18).** Folder picks on iOS copy every file first (below), so the iPhone and iPad gate ran over HTTP (the disc server, the NAS route's client path); Blob slicing beyond 4 GiB from a picked folder stays untested on iOS.
 - **iPhone has no element fullscreen.** Use the installed app (Add to Home Screen); WebKit bug 206854.
 - **No background audio on iOS.** Playback pauses when the platform suspends audio.
 - **If WebKit reports the AudioContext `suspended` only after the page is visible again,** no pause happens and audio stays suspended while the engine plays, until the user acts.
@@ -246,8 +306,8 @@ Fill in from `probe.html` on each device.
 
 | Device | Browser/OS | blob-slice-over-4gib | audio-sample-rate | audio-session | worker-raf | hevc | webgl2-float | canvas-filter | letter-spacing | fullscreen | webkitdirectory | relative-path |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| iPad (2026-10-17) | Safari 27.0.1 (iPadOS, desktop UA) | untested (no clip over 4 GiB handed over) | 48000 | present | rAF, p95 18.9 ms | untested | float and half-float | **missing** | works | yes | yes | paths kept |
-| iPhone |  |  |  |  |  |  |  |  |  |  |  |  |
+| iPad (2026-10-17) | Safari 27.0.1 (iPadOS, desktop UA) | untested (no clip over 4 GiB handed over) | 48000 | present | rAF, p95 18.9 ms | Main and Main 10 (5d gate, 2026-10-18) | float and half-float | **missing** | works | yes | yes | paths kept |
+| iPhone 17 Pro (2026-10-18, 5d gate, not the probe page) | Safari 27.2 (iOS 27.2) | untested (disc server route) | untested | untested | untested | Main and Main 10 | untested | untested | untested | untested (no element fullscreen, above) | untested | untested |
 
 ## Resolved (for reference)
 

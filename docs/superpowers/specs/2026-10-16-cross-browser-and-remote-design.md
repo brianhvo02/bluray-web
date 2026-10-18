@@ -136,6 +136,8 @@ All goals in §2 for step 1 pass the real-device gate (Android on the emulator, 
 
 ### 3.9 BD-J on phones (handed to milestone 5)
 
+**Covered by milestone 5d's device gate (2026-10-18; `2026-10-17-m5d-bdj-menus-design.md`, status line and §9).** Both local BD-J discs open, reach their menus and play the feature by touch on iPhone 17 Pro (iOS 27.2) and iPad Pro 12.9" 5th gen (iPadOS 27.0.1), and by keys in Safari macOS and Firefox (Firefox on the H.264 disc only, no HEVC). The BD-J worker runs in Safari and Firefox (nested workers work; a browser without them gets a named message and the picker). The constrained profile has BD-J budgets, measured on the devices well within them, with no memory kill in ten minutes of menu use. iPhone time to first frame for the slower disc: 8.3–9.0 s warm, 10.8 s cold, against 5d's 10 s target and 15 s blocker; not a blocker, open items in `docs/known-issues.md`.
+
 The user wants BD-J discs to work on iPhone and iPad like HDMV discs. Step 1 is built before milestone 5 finishes, so these requirements belong to milestone 5's remaining work and its device gate, and are recorded in `docs/known-issues.md` until then:
 
 - BD-J discs open and reach their menus on iPhone and iPad (iOS/iPadOS 26) and Safari macOS, within milestone 5's own time-to-first-frame target, navigated by touch (taps map to the same pointer and key events as HDMV menus, §3.3).

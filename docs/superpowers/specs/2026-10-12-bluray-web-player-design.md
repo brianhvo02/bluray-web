@@ -38,7 +38,7 @@ A user on Chromium desktop can:
 | AACS / BD+ decryption (as a `ByteSource` decrypt stage with a user-supplied key DB and no bundled keys; legal review required before shipping) | Later |
 | JASSUB/libass fallback for ASS | Only if golden-image tests show the native renderer is unacceptable |
 | Safari / Firefox support | After Chromium v1 |
-| BD-J | Milestone 5 series: 5b JVM core and 5c playback done; 5d (graphics, keys, fonts) and 5e (storage, network, speed) planned. |
+| BD-J | Milestone 5 series: 5b JVM core, 5c playback and 5d menus (graphics plane, keys, mouse and touch, FreeType text, on desktop browsers, iPhone and iPad; `2026-10-17-m5d-bdj-menus-design.md`) done; 5e (storage, network, speed) planned. |
 | HDR tone mapping, 3D/MVC, multi-angle, PiP secondary video, mobile | Not planned for v1 |
 
 ## 2. Architecture
@@ -244,6 +244,8 @@ v1 is delivered as four sequential plans. Each one ends in a working, testable a
 2. **Audio coverage:** the WASM AC-3/E-AC-3 and DTS core decoder (a reproducible build, with `audio.wasm` committed), TrueHD AC-3 core extraction, and audio track switching.
 3. **Menus:** RegisterFile, HDMV VM, the libbluray VM trace harness, IG decoder, GraphicsController, UO masks, menu input routing, and the remote pad. Done (2026-10-15); details in `2026-10-14-m3-hdmv-menus-design.md`.
 4. **Subtitles:** PGS (including forced subtitles), SRT, the native ASS renderer, subtitle controls, and the ASS golden-image tests. Split in two: 4a (PGS, SRT and the subtitle controls) is done (2026-10-15), details in `2026-10-15-m4a-pgs-srt-design.md`; 4b (the native ASS renderer, episode subtitle sets and the libass golden-image tests) is done (2026-10-15), details in `2026-10-15-m4b-ass-renderer-design.md`.
+
+After v1, BD-J came as the milestone 5 series: 5b (the JVM core, `2026-10-15-m5b-bdj-jvm-core-design.md`), 5c (BD-J titles drive playback, `2026-10-16-m5c-bdj-playback-design.md`) and 5d (BD-J menus on every device, `2026-10-17-m5d-bdj-menus-design.md`) are done; 5e (storage, network, speed) is next.
 
 ## 12. Decisions log
 
