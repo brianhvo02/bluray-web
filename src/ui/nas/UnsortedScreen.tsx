@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useId, useState, type FormEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import type { OwnerChoice, TitleKind, TitleSummary, UnsortedItem, UnsortedReason } from '../../engine/disc/nas-api';
 import type { NasClient, SkippedDisc } from './nas-client';
 import { Poster } from './Poster';
 import { displayName } from './title-model';
-import { blurayComSearchUrl, discPlace, lookupFailure, mergeResults, parseNumber, reasonText, skippedText, suggestionLine, titleChoice } from './unsorted-model';
+import { applyNumber, blurayComSearchUrl, discPlace, seasonGuessed, lookupFailure, mergeResults, parseNumber, reasonText, skippedText, suggestionLine, titleChoice } from './unsorted-model';
 
 const PAGE = 50;
 const MAX_NAME = 200;
@@ -156,7 +156,8 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
 
   const pick = (t: TitleSummary): void => {
     setPicked(t);
-    if (t.kind === 'series' && season === '') setSeason('1');
+    // season 1 is a fair start unless the season is what the NAS was unsure of (ruling T11i)
+    if (t.kind === 'series' && season === '' && seasonGuessed(disc.reason)) setSeason('1');
   };
 
   const choose = (choice: OwnerChoice, text: string): void => {
@@ -208,6 +209,8 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
       }
       const found = mergeResults(lists);
       setResults(found);
+      // a picked title that is no longer on screen isn't filed by mistake
+      setPicked((p) => (p !== null && (found.some((t) => t.id === p.id) || disc.suggestions.slice(0, 3).some((t) => t.id === p.id)) ? p : null));
       setSearchNote(note ?? (found.length === 0 ? `Nothing found for “${q}”.` : null));
       setSearching(false);
     })();
@@ -361,6 +364,13 @@ export function UnsortedScreen({ nas, tmdb, onBack, onHidden, onChanged }: Unsor
   const [skipped, setSkipped] = useState<ReadonlySet<string>>(new Set());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [applying, setApplying] = useState(false);
+  /** The Disc / volume field of the apply offer: the server numbers the other discs from it (ruling T11h). */
+  const [applyDisc, setApplyDisc] = useState('');
+  const noticeRef = useRef<HTMLDivElement>(null);
+  // a decision unmounts its card and the focused control with it: focus goes to the notice saying what happened
+  useEffect(() => {
+    if (notice) noticeRef.current?.focus();
+  }, [notice]);
 
   /** Loads the first `count` items again (after a change, the list shifts). */
   const load = useCallback(
@@ -399,13 +409,15 @@ export function UnsortedScreen({ nas, tmdb, onBack, onHidden, onChanged }: Unsor
   const onFiled = ({ disc, choice, text }: Filed): void => {
     const others = disc.groupSize - 1;
     setNotice(choice.kind === 'title' && others > 0 ? { text, apply: { disc, choice, others } } : { text });
+    setApplyDisc(choice.kind === 'title' && choice.disc !== null ? String(choice.disc) : '');
     onChanged();
     void load(items?.length ?? PAGE);
   };
 
-  const applyToGroup = (apply: NonNullable<Notice['apply']>): void => {
+  const applyToGroup = (apply: NonNullable<Notice['apply']>, disc: number): void => {
     setApplying(true);
-    nas.admin.setChoice(apply.disc.discId, apply.choice, true).then(
+    const choice = apply.choice.kind === 'title' ? { ...apply.choice, disc } : apply.choice;
+    nas.admin.setChoice(apply.disc.discId, choice, true).then(
       (left) => {
         setApplying(false);
         const filed = apply.others - left.length;
@@ -438,17 +450,37 @@ export function UnsortedScreen({ nas, tmdb, onBack, onHidden, onChanged }: Unsor
         </div>
       </header>
       {notice && (
-        <div className="owner-notice" role="status" data-testid="unsorted-notice">
+        <div className="owner-notice" role="status" data-testid="unsorted-notice" ref={noticeRef} tabIndex={-1}>
           <p>{notice.text}</p>
           {notice.apply && (
-            <div className="owner-buttons">
-              <button type="button" className="owner-primary" data-testid="unsorted-apply" disabled={applying} onClick={() => applyToGroup(notice.apply!)}>
-                Apply to the other {plural(notice.apply.others, 'disc')} in this folder
-              </button>
-              <button type="button" onClick={() => setNotice(null)}>
-                No thanks
-              </button>
-            </div>
+            <>
+              <label className="owner-field owner-number">
+                <span>Disc / volume of {discPlace(notice.apply.disc.path).name}</span>
+                <input type="text" inputMode="numeric" data-testid="unsorted-apply-disc" value={applyDisc} onChange={(e) => setApplyDisc(e.target.value)} />
+              </label>
+              {applyNumber(applyDisc) === null && (
+                <p className="owner-message" data-testid="unsorted-apply-hint">
+                  Enter this disc's number first
+                </p>
+              )}
+              <div className="owner-buttons">
+                <button
+                  type="button"
+                  className="owner-primary"
+                  data-testid="unsorted-apply"
+                  disabled={applying || applyNumber(applyDisc) === null}
+                  onClick={() => {
+                    const n = applyNumber(applyDisc);
+                    if (n !== null) applyToGroup(notice.apply!, n);
+                  }}
+                >
+                  Apply to the other {plural(notice.apply.others, 'disc')} in this folder
+                </button>
+                <button type="button" onClick={() => setNotice(null)}>
+                  No thanks
+                </button>
+              </div>
+            </>
           )}
           {notice.skipped && (
             <>

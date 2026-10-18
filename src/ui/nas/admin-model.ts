@@ -1,3 +1,5 @@
+import type { TitleSummary } from '../../engine/disc/nas-api';
+import { displayName } from './title-model';
 import { NasHttpError, type NasClient, type NasDevice, type NasTitleStatus } from './nas-client';
 
 export const ADMIN_MESSAGES = {
@@ -88,4 +90,21 @@ export function matchingStatus(s: NasTitleStatus, now: number): { progress: stri
     counts: `${discs(s.filed)} filed · ${s.unsorted} unsorted · ${s.music} music`,
     tmdb: s.tmdb ? null : 'No TMDB key: discs that aren’t anime go to Unsorted.',
   };
+}
+
+/** The owner's own titles (spec §9), A–Z, for NAS settings' "Own titles" list. */
+export function ownTitles(titles: readonly TitleSummary[]): TitleSummary[] {
+  return titles.filter((t) => t.own).sort((a, b) => displayName(a).localeCompare(displayName(b), undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+/** An own title's kind: `Series · N seasons`, `Movie` or `Music`. */
+export function ownTitleKind(t: TitleSummary): string {
+  if (t.kind === 'movie') return 'Movie';
+  if (t.kind === 'music') return 'Music';
+  return `Series · ${t.seasons} ${t.seasons === 1 ? 'season' : 'seasons'}`;
+}
+
+/** The confirm step before deleting an own title. */
+export function deleteTitleQuestion(name: string): string {
+  return `Delete ${name}? Its discs go back to Unsorted.`;
 }

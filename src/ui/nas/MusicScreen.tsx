@@ -79,7 +79,7 @@ function RenameForm({ nas, title, onDone, onCancel }: { nas: NasClient; title: T
     setBusy(true);
     setError(null);
     // an own title's name is the title's; any other music title's is a display name over its folder name
-    const done = title.own ? nas.admin.renameTitle(title.id, value!) : nas.admin.setName(title.id, value);
+    const done = title.own ? nas.admin.updateTitle(title.id, { name: value! }) : nas.admin.setName(title.id, value);
     done.then(
       () => {
         setBusy(false);
@@ -133,9 +133,23 @@ function RenameForm({ nas, title, onDone, onCancel }: { nas: NasClient; title: T
 /** The Music shelf (spec §9, mockup 5): each title with where it is or what it was renamed from, and owners' renames. */
 export function MusicScreen({ nas, titles, owner, onOpen, loadDetail, onChanged }: MusicScreenProps): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
+  /** After a rename is saved or cancelled, focus goes back to that row's pencil. */
+  const focusPencil = useRef<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  useEffect(() => {
+    if (focusPencil.current === null) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-rename-id="${CSS.escape(focusPencil.current)}"]`);
+    if (!el) return;
+    focusPencil.current = null;
+    el.focus();
+  });
+  const closeEditor = (id: string): void => {
+    focusPencil.current = id;
+    setEditing(null);
+  };
   if (titles.length === 0) return <p className="status">Nothing here yet.</p>;
   return (
-    <ul className="title-list" data-testid="music-list">
+    <ul className="title-list" data-testid="music-list" ref={listRef}>
       {titles.map((t) => {
         const name = displayName(t);
         return (
@@ -152,6 +166,7 @@ export function MusicScreen({ nas, titles, owner, onOpen, loadDetail, onChanged 
                   type="button"
                   className="title-icon-button"
                   data-testid="music-rename"
+                  data-rename-id={t.id}
                   aria-label={`Rename ${name}`}
                   aria-expanded={editing === t.id}
                   onClick={() => setEditing((e) => (e === t.id ? null : t.id))}
@@ -164,9 +179,9 @@ export function MusicScreen({ nas, titles, owner, onOpen, loadDetail, onChanged 
               <RenameForm
                 nas={nas}
                 title={t}
-                onCancel={() => setEditing(null)}
+                onCancel={() => closeEditor(t.id)}
                 onDone={() => {
-                  setEditing(null);
+                  closeEditor(t.id);
                   onChanged();
                 }}
               />

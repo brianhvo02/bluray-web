@@ -255,7 +255,7 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
   };
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
 
-  if (settings) return <AdminScreen nas={nas} thisDeviceId={deviceId} onClose={() => setSettings(false)} />;
+  if (settings) return <AdminScreen nas={nas} thisDeviceId={deviceId} onClose={() => setSettings(false)} onTitlesChanged={changed} />;
 
   if (ownerScreen === 'hidden') {
     const toUnsorted = (): void => {

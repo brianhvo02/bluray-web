@@ -188,8 +188,9 @@ export class NasClient {
     },
     createTitle: async (kind: TitleKind, name: string, seasons: number | null): Promise<OwnTitle> =>
       (await this.json('admin/titles', jsonBody('POST', kind === 'series' ? { kind, name, seasons } : { kind, name }))) as OwnTitle,
-    renameTitle: async (id: string, name: string): Promise<OwnTitle> =>
-      (await this.json(`admin/titles/${encodeURIComponent(id)}`, jsonBody('PATCH', { name }))) as OwnTitle,
+    /** Renames an own title, or changes an own series' number of seasons. */
+    updateTitle: async (id: string, change: { readonly name?: string; readonly seasons?: number }): Promise<OwnTitle> =>
+      (await this.json(`admin/titles/${encodeURIComponent(id)}`, jsonBody('PATCH', change))) as OwnTitle,
     deleteTitle: async (id: string): Promise<void> => {
       await this.ok(`admin/titles/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },

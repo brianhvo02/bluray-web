@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { DiscRef } from '../../engine/disc/nas-api';
 import { NasHttpError, type NasClient } from './nas-client';
 import { DiscCard } from './UnsortedScreen';
@@ -28,6 +28,17 @@ export function HiddenScreen({ nas, tmdb, onBack, onChanged }: HiddenScreenProps
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
   const [follows, setFollows] = useState<FollowsCopy | null>(null);
+  /** After Unhide, focus goes to the row now at the unhidden one's place, else the heading. */
+  const focusAt = useRef<number | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (focusAt.current === null || discs === null) return;
+    const at = focusAt.current;
+    focusAt.current = null;
+    const buttons = listRef.current?.querySelectorAll<HTMLButtonElement>('[data-testid="hidden-unhide"]') ?? [];
+    (buttons[Math.min(at, buttons.length - 1)] ?? headingRef.current)?.focus();
+  }, [discs]);
 
   const load = useCallback(
     (): Promise<void> =>
@@ -64,6 +75,7 @@ export function HiddenScreen({ nas, tmdb, onBack, onChanged }: HiddenScreenProps
     nas.admin.clearChoice(disc.discId).then(
       () => {
         working(disc.discId, false);
+        focusAt.current = discs?.findIndex((d) => d.discId === disc.discId) ?? 0;
         changed();
       },
       (err: unknown) => {
@@ -81,6 +93,7 @@ export function HiddenScreen({ nas, tmdb, onBack, onChanged }: HiddenScreenProps
   /** "Don't list this copy": a hidden choice of its own, so it no longer follows its source. */
   const hideOwn = (discId: string): void => {
     working(discId, true);
+    setError(null);
     nas.admin.setChoice(discId, { kind: 'hidden' }).then(
       () => {
         working(discId, false);
@@ -100,7 +113,7 @@ export function HiddenScreen({ nas, tmdb, onBack, onChanged }: HiddenScreenProps
           <span aria-hidden="true">‹</span>
         </button>
         <div className="season-head-text">
-          <h2 tabIndex={-1} data-focus-heading>
+          <h2 tabIndex={-1} data-focus-heading ref={headingRef}>
             Hidden
           </h2>
           <span className="title-muted">Left out of the title library for everyone. They stay in the folder view.</span>
@@ -116,7 +129,7 @@ export function HiddenScreen({ nas, tmdb, onBack, onChanged }: HiddenScreenProps
       ) : discs.length === 0 ? (
         <p className="status">No hidden discs.</p>
       ) : (
-        <ul className="title-list">
+        <ul className="title-list" ref={listRef}>
           {discs.map((d) => {
             const name = d.displayName ?? lastSegment(d.folder);
             const followsHere = follows?.discId === d.discId ? follows : null;

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
-import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, OWNER_SERIES, OWNER_STRAY, PROJECTS, SERVER, ownerDiscs, restoreChangedDisc } from './nas-server';
+import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, OWNER_SERIES, PROJECTS, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
 
@@ -512,6 +512,8 @@ test('Unsorted files a disc under a suggestion, then the other discs of its fold
       await card.getByTestId('unsorted-file').click();
       const notice = page.getByTestId('unsorted-notice');
       await expect(notice).toContainText(`Filed under ${name}.`);
+      await expect(notice).toBeFocused();
+      await expect(page.getByTestId('unsorted-apply-disc')).toHaveValue('1');
       await expect(unsortedCard(page, first)).toHaveCount(0);
       await page.getByTestId('unsorted-apply').filter({ hasText: 'Apply to the other 1 disc in this folder' }).click();
       await expect(notice).toContainText('Filed 1 more disc from this folder.');
@@ -535,12 +537,13 @@ test('Unsorted files a disc under a suggestion, then the other discs of its fold
 
 test('"New title…" makes a Music title; "Don\'t list" hides a disc and Unhide brings it back', async ({ page, browserName }, testInfo) => {
   const project = projectOf(testInfo.project.name);
+  const stray = ownerStray(project);
   await exclusivelyAsync('catalogue', async () => {
-    let stray: string | null = null;
+    let strayId: string | null = null;
     try {
       await openUnsorted(page, browserName);
-      const card = unsortedCard(page, OWNER_STRAY);
-      stray = await card.getAttribute('data-disc-id');
+      const card = unsortedCard(page, stray);
+      strayId = await card.getAttribute('data-disc-id');
       await expect(card.getByTestId('unsorted-reason')).toHaveText('Why unsure: No title found');
       await card.getByRole('button', { name: 'New title…' }).click();
       const form = card.getByTestId('new-title-form');
@@ -558,18 +561,20 @@ test('"New title…" makes a Music title; "Don\'t list" hides a disc and Unhide 
 
       // Don't list, then Hidden and Unhide.
       await shelfChip(page, 'unsorted').click();
-      await unsortedCard(page, OWNER_STRAY).getByTestId('unsorted-hide').click();
+      await unsortedCard(page, stray).getByTestId('unsorted-hide').click();
       await expect(page.getByTestId('unsorted-notice')).toContainText('Not listed.');
-      await expect(unsortedCard(page, OWNER_STRAY)).toHaveCount(0);
+      await expect(unsortedCard(page, stray)).toHaveCount(0);
       await page.getByTestId('open-hidden').click();
-      const row = page.locator(`[data-testid="hidden-row"][data-folder="${OWNER_STRAY}"]`).filter({ hasText: `Owner/${project}/` });
+      const row = page.locator(`[data-testid="hidden-row"][data-folder="${stray}"]`);
       await expect(row).toBeVisible();
       await row.getByTestId('hidden-unhide').click();
       await expect(row).toHaveCount(0);
+      // focus goes to the next row or the heading, not back to the top of the page
+      await expect.poll(() => page.evaluate(() => document.activeElement?.closest('[data-testid="hidden-screen"]') !== null)).toBe(true);
       await page.getByRole('button', { name: 'Back to Unsorted' }).click();
-      await expect(unsortedCard(page, OWNER_STRAY).filter({ hasText: `Owner/${project}` })).toBeVisible();
+      await expect(unsortedCard(page, stray)).toBeVisible();
     } finally {
-      await clearChoices([stray]);
+      await clearChoices([strayId]);
       const own = (await (await ownerApi(`admin/lookup?q=${encodeURIComponent('Live 2024')}&source=own`)).json()) as { titles: { id: string }[] };
       for (const t of own.titles) await ownerApi(`admin/titles/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
     }
@@ -578,26 +583,28 @@ test('"New title…" makes a Music title; "Don\'t list" hides a disc and Unhide 
 
 test('renaming a music title shows the new name on the Music shelf and in search', async ({ page, browserName }, testInfo) => {
   const project = projectOf(testInfo.project.name);
+  const stray = ownerStray(project);
   await exclusivelyAsync('catalogue', async () => {
-    let stray: string | null = null;
+    let strayId: string | null = null;
     let musicId: string | null = null;
     try {
       await openUnsorted(page, browserName);
-      const card = unsortedCard(page, OWNER_STRAY);
-      stray = await card.getAttribute('data-disc-id');
+      const card = unsortedCard(page, stray);
+      strayId = await card.getAttribute('data-disc-id');
       await card.getByTestId('unsorted-music').click();
       await expect(page.getByTestId('unsorted-notice')).toContainText('Marked as Music.');
       await page.getByRole('button', { name: 'Back to the library' }).click();
       await shelfChip(page, 'music').click();
 
-      const row = page.locator(`[data-testid="music-row"][data-name="${OWNER_STRAY}"]`);
-      await expect(row).toContainText(`syn · Owner/${project}/${OWNER_STRAY}`);
+      const row = page.locator(`[data-testid="music-row"][data-name="${stray}"]`);
+      await expect(row).toContainText(`syn · Owner/${project}/${stray}`);
       musicId = await row.locator('button[data-title-id]').getAttribute('data-title-id');
-      await row.getByRole('button', { name: `Rename ${OWNER_STRAY}` }).click();
+      await row.getByRole('button', { name: `Rename ${stray}` }).click();
       await row.getByLabel('Display name').fill('Reel Session');
       await row.getByTestId('music-save').click();
       const renamed = page.locator('[data-testid="music-row"][data-name="Reel Session"]');
-      await expect(renamed).toContainText(`Renamed · was ${OWNER_STRAY}`);
+      await expect(renamed).toContainText(`Renamed · was ${stray}`);
+      await expect(renamed.getByTestId('music-rename')).toBeFocused();
 
       await page.getByTestId('title-search').fill('reel session');
       await expect(page.getByTestId('title-row')).toHaveCount(1);
@@ -610,7 +617,7 @@ test('renaming a music title shows the new name on the Music shelf and in search
       await expect(row).toBeVisible();
     } finally {
       if (musicId !== null) await ownerApi(`admin/names/${encodeURIComponent(musicId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: null }) });
-      await clearChoices([stray]);
+      await clearChoices([strayId]);
     }
   });
 });
@@ -648,6 +655,11 @@ async function gateSettings(page: Page, browserName: string): Promise<void> {
   await page.getByTestId('nas-gate-confirm').click();
   await expect(gate).toBeChecked();
   expect(sent).toEqual([{ gate: 'everyone' }]);
+  // Turning it off is the safe direction: no confirm (ruling T11j).
+  await gate.click();
+  await expect(gate).not.toBeChecked();
+  await expect(page.getByTestId('nas-gate-confirm')).toHaveCount(0);
+  expect(sent).toEqual([{ gate: 'everyone' }, { gate: 'owners' }]);
 }
 
 test('a hidden copy explains what it follows, and "apply to the folder" lists the discs it left', async ({ page, browserName }, testInfo) => {
@@ -655,12 +667,14 @@ test('a hidden copy explains what it follows, and "apply to the folder" lists th
   const name = OWNER_SERIES[project];
   const [first, second] = ownerDiscs(project).series.map(lastSegment) as [string, string];
   let secondId: string | null = null;
+  const applied: unknown[] = [];
   const cors = (): Record<string, string> => ({ 'Access-Control-Allow-Origin': new URL(page.url()).origin });
   // Stubbed answers: the NAS's own refusals (copies need two discs with one fingerprint) and nothing changed for real.
   await page.route('**/api/admin/discs/*/choice', async (route) => {
     const req = route.request();
     if (req.method() === 'DELETE') return route.fulfill({ status: 409, headers: cors(), json: { error: 'copy-follows-source', source: 'src-disc' } });
-    const body = req.postDataJSON() as { applyToGroup?: boolean };
+    const body = req.postDataJSON() as { choice: unknown; applyToGroup?: boolean };
+    if (body.applyToGroup) applied.push(body.choice);
     if (!body.applyToGroup) return route.fulfill({ status: 204, headers: cors() });
     return route.fulfill({ status: 200, headers: cors(), json: { skipped: [{ discId: secondId, reason: 'direct' }] } });
   });
@@ -680,9 +694,18 @@ test('a hidden copy explains what it follows, and "apply to the folder" lists th
   secondId = await unsortedCard(page, second).getAttribute('data-disc-id');
   const card = unsortedCard(page, first);
   await card.locator(`[data-testid="title-option"][data-name="${name}"]`).click();
+  // Filed with no disc number: Apply waits for one (ruling T11h), and numbers the others from it.
   await card.getByTestId('unsorted-file').click();
-  await page.getByTestId('unsorted-apply').click();
+  const apply = page.getByTestId('unsorted-apply');
+  await expect(apply).toBeDisabled();
+  await expect(page.getByTestId('unsorted-apply-hint')).toHaveText("Enter this disc's number first");
+  await page.getByTestId('unsorted-apply-disc').fill('0');
+  await expect(apply).toBeDisabled();
+  await page.getByTestId('unsorted-apply-disc').fill('3');
+  await expect(page.getByTestId('unsorted-apply-hint')).toHaveCount(0);
+  await apply.click();
   await expect(page.getByTestId('unsorted-notice')).toContainText('No other disc in this folder was filed.');
+  expect(applied).toEqual([{ kind: 'title', titleId: `anilist:${900111 + PROJECTS.indexOf(project)}`, season: 1, disc: 3 }]);
   await expect(page.getByTestId('unsorted-skipped')).toHaveText(`${second} (filed separately)`);
 
   await page.getByTestId('open-hidden').click();
@@ -692,4 +715,44 @@ test('a hidden copy explains what it follows, and "apply to the folder" lists th
   await expect(copy.getByTestId('hidden-own')).toHaveText("Don't list this copy");
   await copy.getByTestId('hidden-file').click();
   await expect(copy.getByTestId('unsorted-card')).toBeVisible();
+});
+
+test('NAS settings list own titles, to rename, change seasons and delete after a confirm', async ({ page, browserName }, testInfo) => {
+  const project = projectOf(testInfo.project.name);
+  const name = `Harbor Tales ${project}`;
+  await exclusivelyAsync('catalogue', async () => {
+    const created = (await (await ownerApi('admin/titles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'series', name, seasons: 2 }) })).json()) as { id: string };
+    try {
+      await openTitles(page, browserName);
+      await page.getByTestId('nas-settings').click();
+      const row = page.locator(`[data-testid="nas-own-title"][data-name="${name}"]`);
+      await expect(row).toContainText('Series · 2 seasons');
+
+      await row.getByRole('button', { name: `Rename ${name}` }).click();
+      await row.getByRole('textbox', { name: 'Name' }).fill(`${name} Redux`);
+      await row.getByTestId('nas-own-save').click();
+      const renamed = page.locator(`[data-testid="nas-own-title"][data-name="${name} Redux"]`);
+      await expect(renamed).toBeVisible();
+
+      await renamed.getByRole('button', { name: `Seasons of ${name} Redux` }).click();
+      await renamed.getByRole('textbox', { name: 'Seasons' }).fill('3');
+      await renamed.getByTestId('nas-own-save').click();
+      await expect(renamed).toContainText('Series · 3 seasons');
+
+      await renamed.getByRole('button', { name: `Delete ${name} Redux` }).click();
+      await expect(renamed).toContainText(`Delete ${name} Redux? Its discs go back to Unsorted.`);
+      await renamed.getByRole('button', { name: 'Cancel' }).click();
+      await expect(renamed).toBeVisible();
+      await renamed.getByRole('button', { name: `Delete ${name} Redux` }).click();
+      await renamed.getByTestId('nas-own-delete-confirm').click();
+      await expect(renamed).toHaveCount(0);
+
+      // the library fetches its titles again: the deleted title is gone from search
+      await page.getByRole('button', { name: 'Back', exact: true }).click();
+      await page.getByTestId('title-search').fill(name);
+      await expect(page.getByTestId('title-row')).toHaveCount(0);
+    } finally {
+      await ownerApi(`admin/titles/${encodeURIComponent(created.id)}`, { method: 'DELETE' });
+    }
+  });
 });

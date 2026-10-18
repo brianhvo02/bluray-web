@@ -216,6 +216,16 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .admin-switch input { width: 24px; height: 24px; }
 .admin-confirm-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .admin-tmdb { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 0.85em; opacity: 0.85; }
+.admin-own { display: flex; flex-direction: column; gap: 8px; }
+.admin-own h4 { margin: 8px 0 0; }
+.admin-own-row { display: flex; flex-direction: column; gap: 8px; }
+.admin-own-main { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.admin-own-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-own-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.admin-own-form input { min-height: 44px; box-sizing: border-box; font: inherit; }
+/* Confirm and cancel buttons in NAS settings are 44 px on every screen, not only on phones. */
+.admin-confirm button, .admin-confirm-box button, .admin-own-actions button, .admin-titles button { min-height: 44px; min-width: 44px; }
+.admin-confirm-box .admin-confirm { flex-wrap: wrap; }
 
 /* Phones and tablets: 44 px hit targets, wrapping controls, safe areas, menus as bottom sheets. */
 @media (max-width: 600px), (pointer: coarse) {

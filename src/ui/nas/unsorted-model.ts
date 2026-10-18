@@ -88,3 +88,13 @@ export function lookupFailure(err: unknown): string {
 export function skippedText(reason: 'direct' | 'copy'): string {
   return reason === 'direct' ? 'filed separately' : 'follows its copy';
 }
+
+/** The apply offer's disc number: a positive number, else null (Apply waits for one, ruling T11h). */
+export function applyNumber(text: string): number | null {
+  return parseNumber(text) ?? null;
+}
+
+/** Whether a picked series may start at season 1: not when the season is what the NAS was unsure of (ruling T11i). */
+export function seasonGuessed(reason: UnsortedReason | null): boolean {
+  return reason !== 'no-season' && reason !== 'episode-past-season';
+}

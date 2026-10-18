@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ADMIN_MESSAGES, TMDB_ATTRIBUTION, countdown, deviceRow, gateSwitchOn, lastSeen, matchingStatus, newCode, revoke, withGate, type AdminApi } from './admin-model';
+import { ADMIN_MESSAGES, TMDB_ATTRIBUTION, countdown, deviceRow, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, revoke, withGate, type AdminApi } from './admin-model';
+import type { TitleSummary } from '../../engine/disc/nas-api';
 import { NasHttpError, type NasDevice } from './nas-client';
 
 const MINUTE = 60_000;
@@ -134,5 +135,25 @@ describe('the gate switch', () => {
     expect(gateSwitchOn(withGate(status, 'everyone'), false)).toBe(true);
     expect(gateSwitchOn(withGate({ ...status, gate: 'everyone' }, 'owners'), false)).toBe(false);
     expect(withGate(null, 'everyone')).toBeNull();
+  });
+});
+
+describe('own titles in NAS settings', () => {
+  const title = (id: string, kind: TitleSummary['kind'], display: string, own: boolean, seasons = 0): TitleSummary => ({
+    id, kind, names: { english: own ? null : display, romaji: null, native: null, synonyms: [], display: own ? display : null },
+    poster: null, year: null, seasons, discs: 0, addedAt: 0, own,
+  });
+  it('lists only own titles, A–Z', () => {
+    const list = [title('own:b', 'music', 'live 2024', true), title('anilist:1', 'series', 'Aardvark', false), title('own:a', 'series', 'Harbor Tales', true, 2)];
+    expect(ownTitles(list).map((t) => t.id)).toEqual(['own:a', 'own:b']);
+  });
+  it('names the kind, with a series’ seasons', () => {
+    expect(ownTitleKind(title('own:a', 'series', 'Harbor Tales', true, 2))).toBe('Series · 2 seasons');
+    expect(ownTitleKind(title('own:a', 'series', 'Harbor Tales', true, 1))).toBe('Series · 1 season');
+    expect(ownTitleKind(title('own:b', 'movie', 'Night Film', true))).toBe('Movie');
+    expect(ownTitleKind(title('own:c', 'music', 'Live 2024', true))).toBe('Music');
+  });
+  it('asks before deleting', () => {
+    expect(deleteTitleQuestion('Live 2024')).toBe('Delete Live 2024? Its discs go back to Unsorted.');
   });
 });

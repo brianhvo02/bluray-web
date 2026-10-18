@@ -243,7 +243,8 @@ describe('NasClient', () => {
     await nas.admin.setName('music:ab', null);
     await nas.admin.createTitle('music', 'Live 2024', null);
     await nas.admin.createTitle('series', 'Ember Tide', 2);
-    await nas.admin.renameTitle('own:x', 'Live 2025');
+    await nas.admin.updateTitle('own:x', { name: 'Live 2025' });
+    await nas.admin.updateTitle('own:x', { seasons: 3 });
     await nas.admin.deleteTitle('own:x');
     await nas.admin.setTitleLibrary('everyone');
     expect(sent).toEqual([
@@ -259,6 +260,7 @@ describe('NasClient', () => {
       'POST admin/titles {"kind":"music","name":"Live 2024"}',
       'POST admin/titles {"kind":"series","name":"Ember Tide","seasons":2}',
       'PATCH admin/titles/own%3Ax {"name":"Live 2025"}',
+      'PATCH admin/titles/own%3Ax {"seasons":3}',
       'DELETE admin/titles/own%3Ax',
       'PUT admin/settings/title-library {"gate":"everyone"}',
     ]);

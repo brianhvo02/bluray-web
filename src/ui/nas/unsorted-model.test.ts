@@ -3,6 +3,8 @@ import type { TitleSummary, UnsortedReason } from '../../engine/disc/nas-api';
 import { NasHttpError } from './nas-client';
 import {
   REASON_TEXT,
+  applyNumber,
+  seasonGuessed,
   blurayComSearchUrl,
   discPlace,
   lookupFailure,
@@ -105,5 +107,24 @@ describe('skippedText', () => {
   it('says why a disc kept its own choice', () => {
     expect(skippedText('direct')).toBe('filed separately');
     expect(skippedText('copy')).toBe('follows its copy');
+  });
+});
+
+describe('applyNumber', () => {
+  it('needs a positive disc number before the other discs are filed', () => {
+    expect(applyNumber('')).toBeNull();
+    expect(applyNumber('0')).toBeNull();
+    expect(applyNumber('x')).toBeNull();
+    expect(applyNumber('2')).toBe(2);
+  });
+});
+
+describe('seasonGuessed', () => {
+  it('starts the season blank when the season is what the NAS was unsure of', () => {
+    expect(seasonGuessed('no-season')).toBe(false);
+    expect(seasonGuessed('episode-past-season')).toBe(false);
+    expect(seasonGuessed('no-disc-number')).toBe(true);
+    expect(seasonGuessed('several-fit')).toBe(true);
+    expect(seasonGuessed(null)).toBe(true);
   });
 });
