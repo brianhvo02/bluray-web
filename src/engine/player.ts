@@ -2253,7 +2253,11 @@ export class Player {
     this.deps.emit({ type: 'time', timeUs: Math.round(timeUs) });
   }
 
-  /** `s` is null for a BD-J menu shown with no playlist: the playback counters are then 0. */
+  /**
+   * `s` is null for a BD-J menu shown with no playlist: the playback counters are then 0. The BD-J plane hash
+   * (settledPlaneHash) runs on this frame path only in telemetry runs (planeHashTelemetry), once per settled plane
+   * version, and may cause a one-frame hitch there.
+   */
   private maybeEmitTelemetry(s: Session | null): void {
     const nowMs = this.deps.nowMs();
     if (nowMs - this.lastTelemetryMs < TELEMETRY_INTERVAL_MS) return;

@@ -38,12 +38,21 @@ test('a BD-J menu draws as libbluray draws it, and arrows and Enter drive it', a
     return shown.r + shown.g + shown.b;
   }, { timeout: SCREEN_TIMEOUT_MS }).toBeGreaterThan(150);
 
-  for (const [key, want] of [['ArrowDown', settled[1]], ['ArrowDown', settled[2]], ['ArrowUp', settled[3]], ['ArrowUp', settled[4]]] as const) {
+  const player = page.getByTestId('player');
+  await page.keyboard.press('ArrowDown');
+  await settlesOn(page, settled[1]!);
+  // Enter on Chapters does nothing: a second of player time later 00001 still plays under the same menu
+  await page.keyboard.press('Enter');
+  const entered = (await bdjPlane(page))!;
+  await expect.poll(async () => (await bdjPlane(page))!.clockUs, { timeout: 10_000 }).toBeGreaterThan(entered.clockUs + 1_000_000);
+  await expect(player).toHaveAttribute('data-playlist', '00001');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true');
+  await settlesOn(page, settled[1]!);
+  for (const [key, want] of [['ArrowDown', settled[2]], ['ArrowUp', settled[3]], ['ArrowUp', settled[4]]] as const) {
     await page.keyboard.press(key);
     await settlesOn(page, want!);
   }
   await page.keyboard.press('Enter'); // Play: the menu hides and 00000 plays
-  const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-playlist', '00000', { timeout: 10_000 });
   await expect(player).toHaveAttribute('data-bdj-menu', 'false');
   // without the menu the same region is the video alone
@@ -90,9 +99,13 @@ test("a BD-J background still reaches the screen beside the video it plays under
     const c = await regionColour(page, region);
     return Math.max(Math.abs(c.r - 0x20), Math.abs(c.g - 0x60), Math.abs(c.b - 0xc0));
   }, { timeout: SCREEN_TIMEOUT_MS }).toBeLessThan(24);
-  // the picture itself is not the still's colour: the video is drawn over it
-  const picture = await regionColour(page, await planeRegion(page, 600, 300, 900, 700));
-  expect(Math.abs(picture.r - 0x20) + Math.abs(picture.g - 0x60) + Math.abs(picture.b - 0xc0)).toBeGreaterThan(30);
+  // the picture itself is the video drawn over the still: not black, and not the still's colour
+  const pictureRegion = await planeRegion(page, 600, 300, 900, 700);
+  await expect.poll(async () => {
+    const c = await regionColour(page, pictureRegion);
+    const fromStill = Math.abs(c.r - 0x20) + Math.abs(c.g - 0x60) + Math.abs(c.b - 0xc0);
+    return c.r + c.g + c.b > 150 && fromStill > 30;
+  }, { timeout: SCREEN_TIMEOUT_MS }).toBe(true);
 });
 
 test('a browser that cannot start workers from workers (?nonestedworkers=1) names it and opens the picker', async ({ page }) => {

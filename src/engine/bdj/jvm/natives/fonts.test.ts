@@ -357,10 +357,8 @@ describe('BD-J fonts when FreeType cannot be loaded', () => {
     expect((await run('java/awt/BDFontMetrics', metrics, [await font(24)])).thrown).toBe('java/awt/AWTError');
     expect({ loads, waits }).toEqual({ loads: 1, waits: 1 });
     const later = [await font(30), await font(36)];
-    const started = Date.now();
     for (const f of later) expect((await run('java/awt/BDFontMetrics', metrics, [f])).thrown).toBe('java/awt/AWTError');
-    expect(Date.now() - started).toBeLessThan(200); // no second wait
-    expect({ loads, waits }).toEqual({ loads: 1, waits: 1 });
+    expect({ loads, waits }).toEqual({ loads: 1, waits: 1 }); // no second load, so no second wait
     expect(logged.filter((l) => /FreeType could not be loaded/.test(l))).toEqual(['BD-J: FreeType could not be loaded: freetype.wasm: The operation timed out.']);
   }, 60_000);
 });
