@@ -60,8 +60,13 @@ describe('OwnerStore', () => {
 
   it('gives a present copy its present twin\'s choice, and never overwrites a disc\'s own choice', () => {
     const s = new OwnerStore(dir);
+    // distinct times: two choices in the same millisecond would tie for "most recent"
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(1000);
     s.setChoice('A', 'F', title('t1'));
+    now.mockReturnValue(2000);
     s.setChoice('B', 'F', { kind: 'hidden' });
+    now.mockRestore();
     s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }, { id: 'C', fingerprint: 'F' }]);
     const { choices } = s.snapshot();
     expect(choices.get('A')).toEqual(title('t1'));
