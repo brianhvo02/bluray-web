@@ -137,10 +137,10 @@ const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3
 const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 /** Genres besides anime that can share a bracket with the anime tag (W4). */
 const OTHER_GENRES = /^(?:ドラマ|drama|実写|live|特撮|action)$/i;
-/** What sets a word off in a Japanese name: a space, punctuation or a symbol (`・ ： 『』 【】 〜 -`), or the long-vowel dash. */
-const BOUNDARY = /[\s\p{P}\p{S}ー〜]/u;
-/** Affixes that make a Japanese name the same work's (R1): `劇場版`, `映画`, `特別編`, `総集編`, `完全版`, `OVA`, seasons and chapters. */
-const AFFIX = /^(?:劇場版|映画|特別編|総集編|完全版|ova|season\s*\d+|\d+(?:st|nd|rd|th)\s*season|第\s*[0-9一二三四五六七八九十]+\s*(?:期|章|クール|シリーズ))$/i;
+/** Affixes before a Japanese name that keep it the same work's (M7d): `劇場版`, `映画`. */
+const PREFIX_AFFIX = /^(?:劇場版|映画)$/;
+/** Affixes after it: `特別編`, `総集編`, `完全版`, `OVA`, `Season N`, `第N期`, `第N章`, `第Nクール`, `第Nシリーズ` (M7d). */
+const SUFFIX_AFFIX = /^(?:特別編|総集編|完全版|ova|season\s*\d+|\d+(?:st|nd|rd|th)\s*season|第\s*[0-9一二三四五六七八九十]+\s*(?:期|章|クール|シリーズ))$/i;
 
 /** The discs under a folder, in its subfolders too, leaving out those in or named as a bonus folder (R2). */
 function discsUnder(folder: string, evidence: readonly DiscEvidence[]): number {
@@ -463,16 +463,23 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const japaneseTitles = candidates.filter((c) => JAPANESE.test(c));
   const japaneseNames = (en: Entry): string[] => [en.names.native, ...en.names.synonyms].filter((n): n is string => n !== null && JAPANESE.test(n));
   const namedStrictly = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n)));
-  const namedAtAll = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
+  // for keeping competitors in, a name holding the other at all (`劇場版 X`, `X2`, `新X`, `X冬の章`) is the same title
+  // too (W1, ruling M7c): leniency here only leaves the disc several-fit
+  const namedLoosely = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
     const base = parseName(n).candidates[0] ?? n;
-    // one name holding the other (`劇場版 X`, `X 冬の章` against `X`) isn't another title either (W1)
-    return heldAtBoundary(c, n) || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
+    const sc = normalizeStrict(c);
+    const sn = normalizeStrict(n);
+    const holds = sc !== '' && sn !== '' && (sc.includes(sn) || sn.includes(sc));
+    return holds || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
   }));
+  // for filing a lone fit, only the same name or one differing by a known affix agrees (ruling M7d): leniency there
+  // would file the disc
+  const namedStrictlyOrAffixed = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n) || affixed(c, n)));
   const fitsOf = (en: Entry): string[] => candidates.filter((c) => quality(en, c, fitSeason) > 0);
   if (japaneseTitles.length > 0) {
     const named = scored.filter((s) => !dropped.has(s.entry.id) && namedStrictly(s.entry)).map((s) => new Set(fitsOf(s.entry)));
     for (const en of all.values()) {
-      if (japaneseNames(en).length === 0 || namedAtAll(en)) continue;
+      if (japaneseNames(en).length === 0 || namedLoosely(en)) continue;
       const own = fitsOf(en);
       if (named.some((fits) => own.every((c) => fits.has(c)))) dropped.add(en.id);
     }
@@ -554,7 +561,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   if (!best.exact) return unsorted(names(best.entry).some((n) => parseName(n).season !== null) ? 'no-season' : 'no-title', ranked);
   // the evidence's Japanese titles name something else than the entry's Japanese names: the disc may be another work
   // of the same name, so it isn't filed (ruling M7b)
-  if (japaneseTitles.length > 0 && japaneseNames(best.entry).length > 0 && !namedAtAll(best.entry)) return unsorted('sources-disagree', [best.entry]);
+  if (japaneseTitles.length > 0 && japaneseNames(best.entry).length > 0 && !namedStrictlyOrAffixed(best.entry)) return unsorted('sources-disagree', [best.entry]);
 
   const bonus = named.some((p) => p.parse.bonus);
   // rule 3: the season or movie is resolved; a bonus disc without a season goes to the title's extras
@@ -820,22 +827,20 @@ function animeTagged(segment: string): boolean {
 }
 
 /**
- * Whether one Japanese name holds the other as a word (W1, R1): the rest of the longer one is set off by a space or a
- * mark (`X 冬の章`, `X・夏`, `『X』`), or is a known affix (`劇場版X`, `X第2期`). `海` in `海の家` or `星` in `星降りの旅人`
- * is not.
+ * Whether two Japanese names differ only by a known affix, with or without a space (ruling M7d): `劇場版 X`, `映画X`
+ * before, `X 完全版`, `X第2期`, `X OVA` after. A space or a mark alone (`X 殺人事件`, `青い X`, `X・空`) or an affix on
+ * the other side (`X映画`, `OVA X`) is another title.
  */
-function heldAtBoundary(a: string, b: string): boolean {
+function affixed(a: string, b: string): boolean {
   const x = a.normalize('NFKC').toLowerCase().trim();
   const y = b.normalize('NFKC').toLowerCase().trim();
   if (x === '' || y === '' || x === y) return false;
   const [short, long] = x.length <= y.length ? [x, y] : [y, x];
   const at = long.indexOf(short);
   if (at < 0) return false;
-  const before = long.slice(0, at);
-  const after = long.slice(at + short.length);
-  const ok = (rest: string, edge: string | undefined): boolean =>
-    rest === '' || (edge !== undefined && BOUNDARY.test(edge)) || AFFIX.test(rest.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim());
-  return ok(before, before.at(-1)) && ok(after, after[0]);
+  const before = long.slice(0, at).trim();
+  const after = long.slice(at + short.length).trim();
+  return (before === '' || PREFIX_AFFIX.test(before)) && (after === '' || SUFFIX_AFFIX.test(after)) && (before !== '' || after !== '');
 }
 
 /** Whether two AniList entries are tied by a story link, in either direction. */

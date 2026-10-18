@@ -1064,10 +1064,11 @@ describe('matchDiscs', () => {
         expect(await one(p, fake({}), fake({ 'Glass Orchard': [film] }), { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree', suggestions: ['tmdb-movie:1600'] });
       });
 
-      it('files as before with no Japanese name, a kana or season variant of it, or no Japanese evidence', async () => {
+      it('files as before with no Japanese name, a season variant of it, or no Japanese evidence', async () => {
         const runWith = (native: string | null, titles: Record<string, string>) => one(p, fake({}), fake({ 'Glass Orchard': [{ ...film, names: { ...film.names, native } }] }), titles);
         expect(await runWith(null, { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
-        expect(await runWith('がらすの果樹園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
+        // a kana variant is not strictly the same name (M7d)
+        expect(await runWith('がらすの果樹園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
         expect(await runWith('ガラスの果樹園 第2期', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
         expect(await runWith('硝子の果樹園', {})).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
       });
@@ -1141,15 +1142,30 @@ describe('matchDiscs', () => {
         expect(await lone('海の家', '海')).toBe('sources-disagree');
         expect(await lone('海', '海の家')).toBe('sources-disagree');
         expect(await lone('星降りの旅人', '星')).toBe('sources-disagree');
-        // set off by a space or a mark, or a known affix, it is the same work
-        for (const [native, jpn] of [['劇場版 海の家', '海の家'], ['劇場版海の家', '海の家'], ['海の家 冬の章', '海の家'], ['海の家・夏', '海の家'], ['海の家第2期', '海の家'],
-          ['映画 海の家', '海の家'], ['海の家 総集編', '海の家'], ['『海の家』', '海の家'], ['海の家 OVA', '海の家'], ['海の家', '劇場版 海の家']]) {
+        // M7d: only a known affix makes it the same work, with or without a space (劇場版, 映画 before; the rest after)
+        for (const [native, jpn] of [['劇場版 海の家', '海の家'], ['劇場版海の家', '海の家'], ['海の家第2期', '海の家'], ['映画 海の家', '海の家'], ['海の家 総集編', '海の家'],
+          ['『海の家』', '海の家'], ['海の家 OVA', '海の家'], ['海の家', '劇場版 海の家'], ['海の家 完全版', '海の家'], ['海の家 Season 2', '海の家'], ['海の家 第3章', '海の家']]) {
           expect(await lone(native!, jpn!), `${native} / ${jpn}`).toBe('tmdb-movie:2200#null');
         }
-        // drop side: a live film named 海の家 is no competitor to an anime film named 海 when the disc says 海
+        // a space or a mark alone is not enough, nor an affix on the wrong side, nor a long-vowel dash
+        for (const [native, jpn] of [['海 殺人事件', '海'], ['青い 海', '海'], ['海・空', '海'], ['『海』の作り方', '海'], ['ヒカリ映画', 'ヒカリ'], ['OVA海', '海'],
+          ['海の家 冬の章', '海の家'], ['海の家・夏', '海の家'], ['カラーズ', 'カラ'], ['海ー', '海']]) {
+          expect(await lone(native!, jpn!), `${native} / ${jpn}`).toBe('sources-disagree');
+        }
+        // drop side (M7c): a live film whose Japanese name holds the disc's at all still competes
         const anime = entry('anilist:2201', { english: 'Ocean', native: '海' }, { year: 2010, format: 'MOVIE', kind: 'movie' });
         const live = entry('tmdb-movie:2202', { english: 'Ocean', native: '海の家' }, { year: 2010, animation: false });
-        expect(await states([['drv0/Movies/Ocean/BDROM', { jpn: '海' }]], fake({ Ocean: [anime], 海: [anime] }), fake({ Ocean: [live] }))).toEqual(['anilist:2201#null']);
+        expect(await states([['drv0/Movies/Ocean/BDROM', { jpn: '海' }]], fake({ Ocean: [anime], 海: [anime] }), fake({ Ocean: [live] }))).toEqual(['several-fit']);
+      });
+
+      it('M7c: an anime whose Japanese name holds the disc title, glued or not, is never dropped for a live-action entry', async () => {
+        const live = entry('tmdb-movie:2401', { english: 'Lantern Coast', native: 'ランタン海岸' }, { year: 2022, animation: false });
+        for (const native of ['ランタン海岸2', 'ランタン海岸S', 'ランタン海岸R', 'ランタン海岸II', 'ランタン海岸Ⅱ', 'ランタン海岸SEED', 'ランタン海岸2199',
+          'ランタン海岸夜明け編', '新ランタン海岸', '真ランタン海岸', '続ランタン海岸']) {
+          const film = entry('anilist:2400', { english: 'Lantern Coast', native }, { year: 2021, format: 'MOVIE', kind: 'movie' });
+          const r = await states([['drv0/Movies/Lantern Coast/BDROM', { jpn: 'ランタン海岸' }]], fake({ 'Lantern Coast': [film] }), fake({ 'Lantern Coast': [live], ランタン海岸: [live] }));
+          expect(r, native).toEqual(['several-fit']);
+        }
       });
 
       it('R2: every disc under an M10 release folder counts, whatever its match', async () => {
