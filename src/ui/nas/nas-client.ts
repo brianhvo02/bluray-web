@@ -210,6 +210,15 @@ export class NasClient {
     return this.pending;
   }
 
+  /**
+   * A session for the engine after the NAS refused `staleToken`: never that token again, even while it looks fresh to
+   * a device clock running slow against the NAS's.
+   */
+  freshSession(staleToken: string): Promise<NasSession> {
+    if (this.cached?.token === staleToken) this.cached = null;
+    return this.session();
+  }
+
   async library(path: string): Promise<{ folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean }> {
     return (await this.json(`library?path=${encodeURIComponent(path)}`)) as { folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean };
   }

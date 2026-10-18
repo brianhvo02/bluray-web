@@ -289,6 +289,21 @@ describe('NasClient', () => {
     expect(server.hits.session).toBe(2);
   });
 
+  it('gives the engine a new token for the one it reports rejected, even while that one looks fresh (a slow clock)', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const first = await nas.session();
+    clock += MINUTE; // tokens are made from the expiry time, so a later session gets another one
+    expect((await nas.session()).token).toBe(first.token);
+    const fresh = await nas.freshSession(first.token);
+    expect(fresh.token).not.toBe(first.token);
+    expect(server.hits.session).toBe(2);
+    // A rejection of a token already replaced keeps the newer one.
+    expect((await nas.freshSession(first.token)).token).toBe(fresh.token);
+    expect(server.hits.session).toBe(2);
+  });
+
   it('pairs with a code typed in lower case with spaces', async () => {
     expect(normalizeCode('k7qm 4xp2 r9td')).toBe('K7QM4XP2R9TD');
     const server = fakeServer();

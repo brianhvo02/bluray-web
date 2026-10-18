@@ -109,6 +109,21 @@ describe('RemoteSource', () => {
     await expect(s.read('BDMV/STREAM/00000.M2TS', 0, 1)).rejects.toMatchObject({ code: 'missing-file' });
   });
 
+  it('reads a listed file the manifest did not inline (past its inline budget) through the transport', async () => {
+    const index = new Uint8Array([1, 2, 3]);
+    const playlist = pattern(1000);
+    const files = new Map<string, Uint8Array>([
+      ['BDMV/INDEX.BDMV', index],
+      ['BDMV/PLAYLIST/00900.MPLS', playlist],
+    ]);
+    const transport = new FakeTransport(files, true);
+    const s = new RemoteSource(manifest(files, { 'BDMV/INDEX.BDMV': Buffer.from(index).toString('base64') }), transport, { readAheadBytes: 8 * MiB, chunkBytes: CHUNK, inFlight: 4 });
+    expect(s.size('BDMV/PLAYLIST/00900.MPLS')).toBe(1000);
+    expectBytes(await s.read('BDMV/PLAYLIST/00900.MPLS', 0, 1000), playlist);
+    expect(transport.calls.every((c) => c.path === 'BDMV/PLAYLIST/00900.MPLS')).toBe(true);
+    expect(transport.calls.length).toBeGreaterThan(0);
+  });
+
   it('reads ahead of sequential reads, at most 4 requests at once and never more than the budget', async () => {
     const clip = pattern(40 * MiB);
     const files = new Map([['BDMV/STREAM/00001.M2TS', clip]]);

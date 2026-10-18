@@ -1,9 +1,18 @@
 /*
+ * Ported from libudfread src/udfread.c and src/ecma167.c
+ * Copyright (C) 2014-2015 VLC authors and VideoLAN
+ * Authors: Petri Hintukainen <phintuka@users.sourceforge.net>
+ *
+ * Ported to TypeScript and modified for bluray-web, 2026.
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
+/*
  * A read-only UDF reader for Blu-ray images: the volume structure, the partitions (type 1 and the UDF 2.50/2.60
- * metadata partition), file entries and directories. Ported from libudfread (src/udfread.c and src/ecma167.c), see
- * NOTICE. It lists files with their extents as byte offsets in the image, and reads nothing but descriptors,
- * directories and file entries. Byte offsets are plain Numbers, exact far beyond 4 GiB; no bitwise operator ever
- * touches one.
+ * metadata partition), file entries and directories (see NOTICE). It lists files with their extents as byte offsets
+ * in the image, and reads nothing but descriptors, directories and file entries. Byte offsets are plain Numbers,
+ * exact far beyond 4 GiB; no bitwise operator ever touches one.
  */
 
 /** A piece of a file in the image. `offset` is -1 for a piece that reads as zeros (unrecorded or unallocated). */
