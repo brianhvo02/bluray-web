@@ -1,7 +1,7 @@
 # NAS Disc Server and the HTTPS Route (Step 2) — Design Spec
 
 Date: 2026-10-17
-Status: Draft
+Status: Done; deployed 2026-10-17. Device results: the iPhone paired through the rendezvous with an owner link and played a disc with menus over the NAS. The iPad and Mac device runs over the NAS are pending.
 Parent spec: `2026-10-16-cross-browser-and-remote-design.md` §4 (step 2), with the pairing of §5.3. This document makes §4 concrete for the user's NAS; where it and the parent disagree, this one wins for step 2.
 
 ## 1. Intent
