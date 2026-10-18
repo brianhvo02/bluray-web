@@ -133,6 +133,8 @@ const STORY_LINKS = new Set(['SEQUEL', 'PREQUEL', 'PARENT', 'SIDE_STORY', 'SUMMA
 const FILM_FORMATS = new Set(['MOVIE', 'SPECIAL', 'OVA']);
 /** A disc folder's label that names only a disc (`BD`, `BDROM`, `BD_VIDEO`, `DISC_2`); `Blu-ray`, `DVD` and such are categories. */
 const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3})?$/i;
+/** A disc folder's generic label with no number, which takes its release folder's volume (ruling M10). */
+const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 
 /** The parent folder path of the disc folder or ISO. */
 export function groupKey(e: DiscEvidence): string {
@@ -532,6 +534,9 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const competitor = fitting.length > 1;
   if (competitor && (!best.exact || best.kinds.size < 2)) return unsorted('several-fit', ranked);
   if (!best.exact) return unsorted(names(best.entry).some((n) => parseName(n).season !== null) ? 'no-season' : 'no-title', ranked);
+  // the evidence's Japanese titles name something else than the entry's Japanese names: the disc may be another work
+  // of the same name, so it isn't filed (ruling M7b)
+  if (japaneseTitles.length > 0 && japaneseNames(best.entry).length > 0 && !namedAtAll(best.entry)) return unsorted('sources-disagree', [best.entry]);
 
   const bonus = named.some((p) => p.parse.bonus);
   // rule 3: the season or movie is resolved; a bonus disc without a season goes to the title's extras
@@ -542,7 +547,13 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const count = episodeCount(best.entry, season);
   if (!bonus && episodes !== null && count !== null && episodes[1] > count) return unsorted('episode-past-season', [best.entry]);
 
-  const own = named.filter((p) => p.own);
+  // a generic disc folder (`BDROM`) in a single disc's release folder (`[BDMV][Title][Vol.2][JPN]`) takes that folder's
+  // volume as its own (ruling M10); a range (`Vol.1-6`) parses as no volume
+  const parent = named.find((p) => !p.own && p.kind === 'folder');
+  const generic = GENERIC_DISC.test(lastSegment(e.path).normalize('NFKC').trim()) && parent !== undefined && parent.parse.volume !== null;
+  const own = generic
+    ? [...named.filter((p) => p.own), { ...parent, own: true, parse: { ...parent.parse, disc: null } }]
+    : named.filter((p) => p.own);
   const box = named.find((p) => p.parse.box !== null)?.parse.box ?? null;
   const via = (['disc-title', 'folder', 'discdb'] as const).filter((k) => best.kinds.has(k));
   const ownVolumes = new Set(own.map((p) => p.parse.volume).filter((n): n is number => n !== null));

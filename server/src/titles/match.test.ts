@@ -1022,7 +1022,7 @@ describe('matchDiscs', () => {
         const vol = 'drv0/Anime/[BDMV][Harbor Line][Vol.2][JPN]';
         expect(await one(vol, fake({ 'Harbor Line': [s1, s2] }), null)).toMatchObject({ status: 'filed', entryId: 'anilist:1300', season: 1, disc: 2 });
         const bdrom = 'drv0/Anime/[BDMV][Harbor Line][Vol.2][JPN]/BDROM';
-        expect(await one(bdrom, fake({ 'Harbor Line': [s1, s2] }), null)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number', suggestions: ['anilist:1300'] });
+        expect(await one(bdrom, fake({ 'Harbor Line': [s1, s2] }), null)).toMatchObject({ status: 'filed', entryId: 'anilist:1300', season: 1, disc: 2 });
       });
 
       it('still competes with an unrelated entry, and may be the only fit', async () => {
@@ -1031,6 +1031,45 @@ describe('matchDiscs', () => {
         expect(await one(vol, fake({ 'Harbor Line': [{ ...s1, relations: [] }, other] }), null)).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
         const s2only = 'drv0/Anime/[BDMV][Harbor Line Season 2][Vol.1]';
         expect(await one(s2only, fake({ 'Harbor Line': [s2] }, [], [s1]), null)).toMatchObject({ status: 'filed', entryId: 'anilist:1301', season: 2, disc: 1 });
+      });
+    });
+
+    describe("M10: a generic disc folder takes its release folder's volume", () => {
+      const brasswick = entry('anilist:1500', { english: 'Brasswick' }, { year: 2016 });
+      const states = async (paths: readonly string[]): Promise<unknown[]> => {
+        const { matches } = await matchDiscs(paths.map((p) => rooted(p)), ctx(fake({ Brasswick: [brasswick] }), null));
+        return paths.map((p) => { const m = byDisc(matches, p); return m.status === 'filed' ? m.disc : m.status === 'unsorted' ? m.reason : m.status; });
+      };
+
+      it('numbers sibling release folders by their volumes', async () => {
+        expect(await states([1, 2, 3].map((v) => `drv0/Anime/[BDMV][Brasswick][Vol.${v}][JPN]/BDROM`))).toEqual([1, 2, 3]);
+        for (const label of ['BD', 'BD_ROM', 'BD_VIDEO', 'BDMV', 'DISC', 'VIDEO']) {
+          expect(await states([`drv0/Anime/[BDMV][Brasswick][Vol.4][JPN]/${label}`]), label).toEqual([4]);
+        }
+      });
+
+      it('not a range, nor a numbered label, nor a folder further up', async () => {
+        expect(await states(['drv0/Anime/[BDMV][Brasswick][Vol.1-6 Fin]/BDROM'])).toEqual(['no-disc-number']);
+        // a numbered label keeps its own number
+        expect(await states(['drv0/Anime/[BDMV][Brasswick][Vol.2]/BD_2'])).toEqual(['no-disc-number']);
+        expect(await states(['drv0/Anime/[BDMV][Brasswick][Vol.2]/Season 1/BDROM'])).toEqual(['no-disc-number']);
+      });
+    });
+
+    describe('M7b: a lone fit the Japanese title contradicts', () => {
+      const film = entry('tmdb-movie:1600', { english: 'Glass Orchard', native: '硝子の果樹園' }, { year: 1933 });
+      const p = 'drv0/Movies/Glass Orchard/BDROM';
+
+      it('goes to Unsorted as sources-disagree', async () => {
+        expect(await one(p, fake({}), fake({ 'Glass Orchard': [film] }), { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree', suggestions: ['tmdb-movie:1600'] });
+      });
+
+      it('files as before with no Japanese name, a kana or season variant of it, or no Japanese evidence', async () => {
+        const runWith = (native: string | null, titles: Record<string, string>) => one(p, fake({}), fake({ 'Glass Orchard': [{ ...film, names: { ...film.names, native } }] }), titles);
+        expect(await runWith(null, { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
+        expect(await runWith('がらすの果樹園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
+        expect(await runWith('ガラスの果樹園 第2期', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
+        expect(await runWith('硝子の果樹園', {})).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
       });
     });
 
