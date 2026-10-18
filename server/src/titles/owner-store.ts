@@ -12,7 +12,7 @@ export interface OwnerSnapshot {
 }
 
 interface OwnerData {
-  choices: Record<string, { choice: OwnerChoice; fingerprint: string | null }>;
+  choices: Record<string, { choice: OwnerChoice; fingerprint: string | null; setAt: number }>;
   ownTitles: OwnTitle[];
   displayNames: Record<string, string>;
   gate: 'owners' | 'everyone' | null;
@@ -47,7 +47,7 @@ export class OwnerStore {
 
   setChoice(discId: string, fingerprint: string | null, choice: OwnerChoice): void {
     this.update((d) => {
-      d.choices[discId] = { choice, fingerprint };
+      d.choices[discId] = { choice, fingerprint, setAt: Date.now() };
     });
   }
 
@@ -104,18 +104,32 @@ export class OwnerStore {
   }
 
   /**
-   * Follows moved discs: a choice whose disc id is absent moves to every present disc with the same non-null
-   * fingerprint. A choice without a fingerprint stays under its id. An existing choice on a present disc wins.
+   * Applies choices to discs by content fingerprint (copies and moved discs are the same disc), after each scan:
+   * - A present disc whose fingerprint is known or changed gets it stored.
+   * - Every present disc with a non-null fingerprint and no choice of its own takes the choice stored under that
+   *   fingerprint. A present disc's own choice always wins.
+   * - When several stored choices share a fingerprint (copies filed differently), the most recently set one
+   *   propagates; ties keep the first in file order.
+   * - No entry is ever deleted, even one whose disc is absent: a disc that is only offline (a mount down during
+   *   the scan) keeps its choice for when it returns. A choice with a null fingerprint stays under its id.
+   * The file is written only when something changed.
    */
   reattach(discs: readonly { id: string; fingerprint: string | null }[]): void {
-    const present = new Set(discs.map((d) => d.id));
     this.update((d) => {
-      for (const [oldId, entry] of Object.entries(d.choices)) {
-        if (present.has(oldId) || entry.fingerprint === null) continue;
-        const targets = discs.filter((x) => x.fingerprint === entry.fingerprint && d.choices[x.id] === undefined);
-        if (targets.length === 0) continue;
-        for (const t of targets) d.choices[t.id] = { choice: entry.choice, fingerprint: entry.fingerprint };
-        delete d.choices[oldId];
+      for (const disc of discs) {
+        const entry = d.choices[disc.id];
+        if (entry && disc.fingerprint !== null && entry.fingerprint !== disc.fingerprint) entry.fingerprint = disc.fingerprint;
+      }
+      const source = new Map<string, { choice: OwnerChoice; setAt: number }>();
+      for (const entry of Object.values(d.choices)) {
+        if (entry.fingerprint === null) continue;
+        const best = source.get(entry.fingerprint);
+        if (!best || entry.setAt > best.setAt) source.set(entry.fingerprint, { choice: entry.choice, setAt: entry.setAt });
+      }
+      for (const disc of discs) {
+        if (disc.fingerprint === null || d.choices[disc.id] !== undefined) continue;
+        const from = source.get(disc.fingerprint);
+        if (from) d.choices[disc.id] = { choice: from.choice, fingerprint: disc.fingerprint, setAt: from.setAt };
       }
     });
   }
@@ -124,8 +138,10 @@ export class OwnerStore {
     const release = lockFile(this.file);
     try {
       const data = this.load();
+      const before = JSON.stringify(data);
       const result = change(data);
-      replaceAtomically(this.file, JSON.stringify(data));
+      const after = JSON.stringify(data);
+      if (after !== before) replaceAtomically(this.file, after);
       return result;
     } finally {
       release();
@@ -153,6 +169,27 @@ export class OwnerStore {
     if (!Array.isArray(ownTitles)) fail(this.file, '"ownTitles" is not an array');
     if (!isObj(displayNames)) fail(this.file, '"displayNames" is not an object');
     if (gate !== null && gate !== 'owners' && gate !== 'everyone') fail(this.file, '"gate" is not owners, everyone or null');
+    const bad = (where: string): never => fail(this.file, `${where} is malformed`);
+    const str = (v: unknown): boolean => typeof v === 'string';
+    const num = (v: unknown): boolean => v === null || typeof v === 'number';
+    const kinds = ['series', 'movie', 'music'];
+    for (const [id, e] of Object.entries(choices as Record<string, unknown>)) {
+      const entry = e as Record<string, unknown> | null;
+      if (!isObj(entry) || !(entry!.fingerprint === null || str(entry!.fingerprint)) || typeof entry!.setAt !== 'number') bad(`choices.${id}`);
+      const c = entry!.choice as Record<string, unknown> | null;
+      const ok =
+        isObj(c) &&
+        ((c!.kind === 'title' && str(c!.titleId) && num(c!.season) && num(c!.disc)) ||
+          (c!.kind === 'music' && (c!.name === null || str(c!.name))) ||
+          (c!.kind === 'extras' && str(c!.titleId) && num(c!.season)) ||
+          c!.kind === 'hidden');
+      if (!ok) bad(`choices.${id}.choice`);
+    }
+    (ownTitles as unknown[]).forEach((t, i) => {
+      const o = t as Record<string, unknown> | null;
+      if (!isObj(o) || !str(o!.id) || !kinds.includes(o!.kind as string) || !str(o!.name) || !num(o!.seasons)) bad(`ownTitles[${i}]`);
+    });
+    for (const [id, v] of Object.entries(displayNames as Record<string, unknown>)) if (!str(v)) bad(`displayNames.${id}`);
     return parsed as OwnerData;
   }
 }

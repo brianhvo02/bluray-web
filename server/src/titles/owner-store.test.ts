@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OwnerChoice } from '../../../src/engine/disc/nas-api';
 import { OwnerStore } from './owner-store';
 
@@ -19,27 +19,72 @@ describe('OwnerStore', () => {
     expect(new OwnerStore(dir).snapshot().choices.get('A')).toEqual(title('anilist:1'));
   });
 
-  it('moves a choice to every present disc with the same fingerprint', () => {
+  it('gives a choice to every present disc with the fingerprint and no choice, keeping the original', () => {
     const s = new OwnerStore(dir);
     s.setChoice('A', 'F', title('anilist:1'));
     s.reattach([{ id: 'B', fingerprint: 'F' }, { id: 'C', fingerprint: 'F' }, { id: 'D', fingerprint: 'G' }]);
     const { choices } = s.snapshot();
-    expect(choices.has('A')).toBe(false);
+    expect(choices.get('A')).toEqual(title('anilist:1'));
     expect(choices.get('B')).toEqual(title('anilist:1'));
     expect(choices.get('C')).toEqual(title('anilist:1'));
     expect(choices.has('D')).toBe(false);
   });
 
-  it('keeps a choice while its disc is present, and one with no fingerprint while its disc is absent', () => {
+  it('gives a present copy its present twin\'s choice, and never overwrites a disc\'s own choice', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('t1'));
+    s.setChoice('B', 'F', { kind: 'hidden' });
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }, { id: 'C', fingerprint: 'F' }]);
+    const { choices } = s.snapshot();
+    expect(choices.get('A')).toEqual(title('t1'));
+    expect(choices.get('B')).toEqual({ kind: 'hidden' });
+    expect(choices.get('C')).toEqual({ kind: 'hidden' });
+  });
+
+  it('propagates the most recently set choice when absent copies disagree', () => {
+    const s = new OwnerStore(dir);
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(1000);
+    s.setChoice('A', 'F', title('old'));
+    now.mockReturnValue(2000);
+    s.setChoice('B', 'F', title('new'));
+    now.mockRestore();
+    s.reattach([{ id: 'C', fingerprint: 'F' }]);
+    expect(s.snapshot().choices.get('C')).toEqual(title('new'));
+    expect(s.snapshot().choices.get('A')).toEqual(title('old'));
+  });
+
+  it('stores a fingerprint that became known or changed on a present disc', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', null, title('t'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }]);
+    s.reattach([{ id: 'B', fingerprint: 'F' }]);
+    expect(s.snapshot().choices.get('B')).toEqual(title('t'));
+    s.reattach([{ id: 'A', fingerprint: 'G' }]);
+    s.reattach([{ id: 'E', fingerprint: 'G' }]);
+    expect(s.snapshot().choices.get('E')).toEqual(title('t'));
+  });
+
+  it('writes owner.json only when reattach changed something', () => {
     const s = new OwnerStore(dir);
     s.setChoice('A', 'F', title('t'));
-    s.setChoice('N', null, { kind: 'hidden' });
-    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }, { id: 'M', fingerprint: null }]);
-    const { choices } = s.snapshot();
-    expect(choices.has('A')).toBe(true);
-    expect(choices.has('B')).toBe(false);
-    expect(choices.get('N')).toEqual({ kind: 'hidden' });
-    expect(choices.has('M')).toBe(false);
+    const file = join(dir, 'owner.json');
+    const old = new Date(2000, 0, 1);
+    utimesSync(file, old, old);
+    s.reattach([{ id: 'A', fingerprint: 'F' }]);
+    expect(statSync(file).mtimeMs).toBe(old.getTime());
+    s.reattach([{ id: 'B', fingerprint: 'F' }]);
+    expect(statSync(file).mtimeMs).not.toBe(old.getTime());
+  });
+
+  it('loses no update when two stores on one dir change it in turn', () => {
+    const a = new OwnerStore(dir);
+    const b = new OwnerStore(dir);
+    for (let i = 0; i < 20; i++) {
+      a.setChoice(`a${i}`, null, { kind: 'hidden' });
+      b.setChoice(`b${i}`, null, { kind: 'hidden' });
+    }
+    expect(a.snapshot().choices.size).toBe(40);
   });
 
   it('keeps a choice when no present disc carries its fingerprint', () => {
@@ -87,7 +132,15 @@ describe('OwnerStore', () => {
   it('throws an error naming owner.json when it is corrupt', () => {
     writeFileSync(join(dir, 'owner.json'), '{nope');
     expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);
-    writeFileSync(join(dir, 'owner.json'), '{"choices":[],"ownTitles":[],"displayNames":{},"gate":null}');
-    expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);
+    for (const body of [
+      '{"choices":[],"ownTitles":[],"displayNames":{},"gate":null}',
+      '{"choices":{"A":5},"ownTitles":[],"displayNames":{},"gate":null}',
+      '{"choices":{"A":{"choice":{"kind":"title"},"fingerprint":null,"setAt":1}},"ownTitles":[],"displayNames":{},"gate":null}',
+      '{"choices":{},"ownTitles":[{"id":"own:1","kind":"show","name":"x","seasons":null}],"displayNames":{},"gate":null}',
+      '{"choices":{},"ownTitles":[],"displayNames":{"A":3},"gate":null}',
+    ]) {
+      writeFileSync(join(dir, 'owner.json'), body);
+      expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);
+    }
   });
 });
