@@ -200,6 +200,7 @@ what would change that decision.
   beyond it fails as on a full disk (IOException "No space left on device", logged once with the path and the budget),
   so a disc whose BD-J files exceed it fails to mount its app and falls back to the picker. libbluray has no such limit,
   and desktop has none. The local discs use 4.4 MB (A_NEW_ERA) and 1.4 MB (RENTAL_FAMILY).
+- **BD-J worker slow-read log (Task 14b).** The BD-J worker logs a slow disc read only at RemoteSource's waiting threshold (`WAITING_AFTER_MS`, 3 s), with how long it waited; reads from picked files (FileSource) are not timed.
 
 ## Audio
 

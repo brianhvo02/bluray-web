@@ -9,13 +9,35 @@ import type { DiscManifest } from '../disc/nas-api';
 import { fakeNas } from '../../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries } from '../../../tests/helpers/synthetic-disc';
-import { runBdjWorker, type BdjPort } from './bdj-worker';
+import { StartupWatch, runBdjWorker, type BdjPort } from './bdj-worker';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { createStatusBlock } from './status-block';
 import type { FromBdj, ToBdj } from './worker-protocol';
 
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../bdj-classlib/${name}`, import.meta.url))));
+
+describe('StartupWatch (the start-up deadlock dump)', () => {
+  it('dumps the first deadlock only while Java has shown nothing: no playlist, visible plane or still (ruling R7)', () => {
+    const idle = new StartupWatch();
+    idle.call('selectPlaylist', [-1, -1, -1, '-1']); // a close selects nothing
+    idle.still(null); // nor does a cleared still
+    idle.plane(false);
+    expect(idle.deadlock()).toBe(true);
+    expect(idle.deadlock()).toBe(false); // once
+
+    for (const show of [
+      (w: StartupWatch) => w.call('selectPlaylist', [5, -1, -1, '-1']),
+      (w: StartupWatch) => w.plane(true), // a still menu waiting for keys
+      (w: StartupWatch) => w.still(new Uint8Array([1])),
+    ]) {
+      const w = new StartupWatch();
+      show(w);
+      w.plane(false); // a menu taken down later still showed Java runs
+      expect(w.deadlock()).toBe(false);
+    }
+  });
+});
 
 describe('runBdjWorker', () => {
   it("gives Java the wall clock: System.currentTimeMillis is the epoch time, as libbluray's JVM has it", async () => {

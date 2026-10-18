@@ -216,6 +216,24 @@ describe('BdjSession rules', () => {
     await booted; // settles at the stop
   });
 
+  it('once the timeout has fired, Java is no longer answered while its dump comes: the fallback starts nothing', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    h.clock.advance(20_000);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [5, -1, -1, '-1'] });
+    f.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1, height: 1 } });
+    f.emit({ type: 'dumped' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(h.calls).toEqual([]);
+    expect(f.sent.some((m) => m.type === 'reply')).toBe(false);
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+    expect(h.logs.some((l) => l.includes('selected its first playlist'))).toBe(false);
+  });
+
   it('a selected playlist cancels the timeout', async () => {
     const f = fakeWorker();
     const h = session(f.worker);

@@ -174,6 +174,9 @@ export class BdjSession {
 
   private receive(m: FromBdj): void {
     if (this.stopped) return;
+    // after the start-up timeout only the dump is waited for: Java is refused as after stop() (nothing it sends is
+    // acted on), so a playlist it selects now does not play behind the fallback
+    if (this.timedOut && m.type !== 'log' && m.type !== 'dumped') return;
     switch (m.type) {
       case 'booted':
         this.deps.onLog?.(`BD-J booted in ${Math.round(m.bootMs)} ms`, false);

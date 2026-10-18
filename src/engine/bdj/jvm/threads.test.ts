@@ -352,6 +352,7 @@ describe('wait and notify', () => {
     expect(await runWithClock(jvm, clock)).toBe('idle');
     expect([w.state, s.state, w.uncaught, s.uncaught]).toEqual(['terminated', 'terminated', null, null]);
     expect(get('done')).toBe(1);
+    expect(w.blocker).toBeNull(); // it waited on the monitor, then took it back
   });
 
   it('wait(100) returns once the clock has advanced 100 ms', async () => {

@@ -527,6 +527,7 @@ export class Scheduler {
   private makeRunnable(t: JThread): void {
     if (this.halted) return;
     t.state = 'runnable';
+    t.blocker = null; // woken, or given its monitor back
     this.enqueue(t);
     this.wake?.();
   }

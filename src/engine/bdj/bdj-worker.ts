@@ -15,7 +15,7 @@ import { RemoteSource } from '../disc/remote-source';
 import { BdjError } from './errors';
 import type { FreeType } from './fonts/freetype';
 import type { NativeTable } from './jvm/natives/index';
-import { GraphicsPlaneWriter } from './graphics-plane';
+import { GraphicsPlaneReader, GraphicsPlaneWriter } from './graphics-plane';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
@@ -25,6 +25,35 @@ import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from '
 export interface BdjPort {
   postMessage(message: FromBdj): void;
   onmessage: ((event: { readonly data: ToBdj }) => void) | null;
+}
+
+/**
+ * Whether Java has shown it runs, as the session's start-up timeout counts it (BdjSession.alive, ruling R7): a
+ * selected playlist, a visible plane or a shown background still. Only a deadlock before that is a boot stall.
+ */
+export class StartupWatch {
+  private shown = false;
+  private dumped = false;
+
+  call(name: BdjCallName, args: readonly BdjWireValue[]): void {
+    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.shown = true;
+  }
+
+  /** A background still was shown (null: one was cleared, which shows nothing). */
+  still(image: Uint8Array | null): void {
+    if (image) this.shown = true;
+  }
+
+  plane(visible: boolean): void {
+    if (visible) this.shown = true;
+  }
+
+  /** A deadlock outcome: true for the first one while Java has shown nothing, which the worker dumps. */
+  deadlock(): boolean {
+    if (this.shown || this.dumped) return false;
+    this.dumped = true;
+    return true;
+  }
 }
 
 export interface BdjWorkerHandle {
@@ -94,8 +123,10 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let latestToken: string | null = null;
   let remote: RemoteSource | null = null;
   let waitingSince = 0;
-  /** Java has selected a playlist (the deadlock dump is for start-up only). */
-  let selected = false;
+  /** Whether Java has shown it runs (the deadlock dump is for start-up only). */
+  const startup = new StartupWatch();
+  /** The plane Java draws into, read for its visibility. */
+  let planeView: GraphicsPlaneReader | null = null;
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -119,7 +150,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
 
   const call = (name: BdjCallName, args: readonly BdjWireValue[]): Promise<number | string> => {
     const id = nextId++;
-    if (name === 'selectPlaylist' && Number(args[0]) >= 0) selected = true;
+    startup.call(name, args);
     return new Promise((resolve) => {
       replies.set(id, { name, resolve });
       post({ type: 'call', id, name, args });
@@ -141,6 +172,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
           dirty = false;
           driving = new AbortController();
           const outcome = await rt!.run({ signal: driving.signal });
+          startup.plane(planeView?.visible() ?? false);
           if (rt!.exitStatus !== null) fail(null);
           else if (outcome === 'deadlock') deadlocked();
         }
@@ -199,6 +231,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (!model) throw new Error('the disc model is not loaded yet');
         return model;
       };
+      planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
         disc,
         discId: m.discId,
@@ -209,7 +242,10 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
             regs: new SharedRegisterView(m.registers),
             status: new StatusBlockReader(m.status),
             plane: new GraphicsPlaneWriter(m.plane),
-            background: (image, rect) => post({ type: 'background', image, rect }),
+            background: (image, rect) => {
+              startup.still(image);
+              post({ type: 'background', image, rect });
+            },
             call,
             get disc() {
               return loaded().disc;
@@ -255,16 +291,13 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
 
   /**
    * Every live Java thread is blocked with no timer or read to wake it: only an event or a title start can. A menu
-   * waiting for keys is in this state; before Java's first playlist it is how a boot stall looks, so the first one
+   * waiting for keys is in this state; before Java has shown it runs it is how a boot stall looks, so the first one
    * then is dumped (the others are counted in the next dump).
    */
   let deadlocks = 0;
-  let dumped = false;
   const deadlocked = (): void => {
     deadlocks++;
-    if (selected || dumped) return;
-    dumped = true;
-    dump('every Java thread is blocked before the first playlist');
+    if (startup.deadlock()) dump('every Java thread is blocked before it selected a playlist or showed anything');
   };
 
   /** Logs the worker's state and a thread dump (the engine asks at its start-up timeout; the first deadlock). */
