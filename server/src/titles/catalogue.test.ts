@@ -595,30 +595,34 @@ describe('buildCatalogue', () => {
       expect(series.names.synonyms).not.toContain('Ember Blade');
     });
 
-    it('M9: builds a catalogue of thousands of chained TV entries quickly', () => {
+    it('M9: works out chain places with a precomputed prequel map, not a scan of every entry per link', () => {
+      // counted, not timed: reads of an entry's relations. A scan per chain link reads every TV entry's relations at each
+      // step (about entries × chain length × entries / 2, millions here); the precomputed map reads each a few times.
+      const chains = 50;
+      const length = 20;
       const entries: Entry[] = [];
       const evidence: DiscEvidence[] = [];
       const matches: DiscMatch[] = [];
-      for (let c = 0; c < 300; c++) {
-        for (let k = 0; k < 20; k++) {
+      let reads = 0;
+      for (let c = 0; c < chains; c++) {
+        for (let k = 0; k < length; k++) {
           const n = 10_000 + c * 100 + k;
-          entries.push(entry(`anilist:${n}`, { english: `Saga ${c} Part ${k + 1}` }, {
-            year: 2000 + k,
-            relations: [
-              ...(k > 0 ? [{ type: 'PREQUEL', id: `anilist:${n - 1}`, format: 'TV', startDate: null }] : []),
-              ...(k < 19 ? [{ type: 'SEQUEL', id: `anilist:${n + 1}`, format: 'TV', startDate: null }] : []),
-            ],
-          }));
+          const en = entry(`anilist:${n}`, { english: `Saga ${c} Part ${k + 1}` }, { year: 2000 + k });
+          const relations: Entry['relations'] = [
+            ...(k > 0 ? [{ type: 'PREQUEL', id: `anilist:${n - 1}`, format: 'TV', startDate: null }] : []),
+            ...(k < length - 1 ? [{ type: 'SEQUEL', id: `anilist:${n + 1}`, format: 'TV', startDate: null }] : []),
+          ];
+          Object.defineProperty(en, 'relations', { enumerable: true, get: () => (reads++, relations) });
+          entries.push(en);
           const path = `drv1/Saga ${c}/P${k + 1}`;
           evidence.push(ev(path));
           matches.push(filed(path, `anilist:${n}`, k + 1, 1));
         }
       }
-      const started = performance.now();
       const cat = build({ entries, evidence, matches });
-      expect(performance.now() - started).toBeLessThan(1500);
-      expect(cat.titles).toHaveLength(300);
-      expect(cat.detail('anilist:10000')!.seasons).toHaveLength(20);
+      expect(cat.titles).toHaveLength(chains);
+      expect(cat.detail('anilist:10000')!.seasons).toHaveLength(length);
+      expect(reads).toBeLessThan(20 * entries.length);
     });
 
     it('M11: TheDiscDB episodes past the season\'s episode count are not used under it', () => {
