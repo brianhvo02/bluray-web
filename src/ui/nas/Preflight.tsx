@@ -69,7 +69,9 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
     setError(null);
     Promise.all([nas.discBase(disc.id), nas.session()]).then(
       ([base, session]) => {
-        controller.openRemote({ kind: 'remote', base, token: session.token, manifest }, () => nas.session().then((s) => s.token));
+        // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
+        let token = session.token;
+        controller.openRemote({ kind: 'remote', base, token, manifest }, () => nas.freshSession(token).then((s) => (token = s.token)));
         setOpening('launched');
       },
     ).catch((err: unknown) => {

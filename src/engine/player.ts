@@ -587,6 +587,7 @@ export class Player {
       disc = await openDisc(source);
     } catch (err) {
       this.dropEarlyBdj();
+      this.dropRemote(); // its read-ahead would otherwise go on fetching
       throw err;
     }
     this.source = source;
