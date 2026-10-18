@@ -3,9 +3,13 @@
  * The NAS side of nas.spec.ts, started by Playwright's webServer (`npx tsx tests/e2e/nas-server.ts`, after
  * `npm run server:build`): the built NAS server on NAS_PORT, serving a temporary copy of fixtures/synthetic as root
  * `syn`, and the rendezvous Worker's fetch handler, with in-memory storage, on RENDEZVOUS_PORT.
+ *
+ * The title library's AniList and TMDB are the recorded entries of tests/e2e/fixtures/nas-metadata.json
+ * (`METADATA_FIXTURE`, ruling R3), made-up titles that match the folders TITLE_DISCS puts synthetic discs in. Starfall
+ * Wanderer's runtime of 0.0667 minutes (4 s) makes disc1's 4-second playlist 00001 its one episode.
  */
 import { spawn } from 'node:child_process';
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,6 +28,30 @@ export const NAS_ROOT = join(NAS_E2E_DIR, 'syn');
 export const CHANGED_FOLDER = 'changed';
 export const PROJECTS = ['chromium', 'firefox', 'webkit'] as const;
 export const SERVER = join(REPO, 'server/dist/server.mjs');
+/** The recorded metadata entries the server matches discs against. */
+export const METADATA_FIXTURE = join(REPO, 'tests/e2e/fixtures/nas-metadata.json');
+/** Copies of synthetic discs in the folders the metadata fixture's titles match: root-relative folder → fixture disc. */
+export const TITLE_DISCS: Readonly<Record<string, string>> = {
+  'Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.1': 'disc1',
+  'Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.2': 'disc-subs',
+  'Anime/Moonlit Harbor (月影の港)/Moonlit Harbor': 'disc2',
+  'Music/Lantern Parade Live 2024': 'disc3',
+};
+
+/**
+ * Each browser's own Unsorted discs (the owner screens' tests change their choices, and the projects run side by side):
+ * two discs of a made-up series with no disc number (`no-disc-number`, the series suggested, each with a catalogue
+ * number), and one disc nothing names (`no-title`). Named in the metadata fixture as anilist:90011x.
+ */
+export const OWNER_SERIES: Readonly<Record<(typeof PROJECTS)[number], string>> = { chromium: 'Ember Tide', firefox: 'Paper Comet', webkit: 'Glass Orchard' };
+/** The project's disc nothing names, its folder name unique so each browser finds only its own card. */
+export const ownerStray = (project: (typeof PROJECTS)[number]): string => `Stray Reel ${project}`;
+/** Root-relative folders of a project's owner discs: the series' two, then the stray one. */
+export function ownerDiscs(project: (typeof PROJECTS)[number]): { series: [string, string]; stray: string } {
+  const name = OWNER_SERIES[project];
+  const at = `Owner/${project}`;
+  return { series: [`${at}/${name}/${name} [ZMXA-1101]`, `${at}/${name}/${name} [ZMXA-1102]`], stray: `${at}/${ownerStray(project)}` };
+}
 
 /** The server's environment, also what `server.mjs owner-code` needs to mint a code for it. */
 export const NAS_ENV: Readonly<Record<string, string>> = {
@@ -34,6 +62,7 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   RENDEZVOUS_URL,
   // Nothing proxies here; the default ('caddy') would only log that it does not resolve.
   TRUSTED_PROXY: '127.0.0.1',
+  METADATA_FIXTURE,
 };
 
 /** Puts `changed/<project>` (a copy of disc1, timestamps kept so its disc id never changes) back in the root. */
@@ -83,6 +112,22 @@ async function main(): Promise<void> {
   mkdirSync(NAS_E2E_DIR, { recursive: true });
   cpSync(join(REPO, 'fixtures/synthetic'), NAS_ROOT, { recursive: true, preserveTimestamps: true });
   for (const project of PROJECTS) for (const name of [project, `${project}-open`]) restoreChangedDisc(name);
+  for (const [folder, disc] of Object.entries(TITLE_DISCS)) cpSync(join(REPO, 'fixtures/synthetic', disc), join(NAS_ROOT, folder), { recursive: true, preserveTimestamps: true });
+  // Minimal discs: index.bdmv and one clip whose size is unique, so no two share a content fingerprint (copies would
+  // share owner choices). Their times are set in the past: the scan leaves out discs written moments ago (a download
+  // still in progress).
+  const past = new Date('2024-01-01T00:00:00Z');
+  let size = 0;
+  for (const project of PROJECTS) {
+    const { series, stray } = ownerDiscs(project);
+    for (const folder of [...series, stray]) {
+      const bdmv = join(NAS_ROOT, folder, 'BDMV');
+      mkdirSync(join(bdmv, 'STREAM'), { recursive: true });
+      cpSync(join(REPO, 'fixtures/synthetic/disc1/BDMV/index.bdmv'), join(bdmv, 'index.bdmv'));
+      writeFileSync(join(bdmv, 'STREAM/00001.m2ts'), Buffer.alloc(192 * (1000 + size++)));
+      for (const path of ['STREAM/00001.m2ts', 'index.bdmv', 'STREAM', '']) utimesSync(join(bdmv, path), past, past);
+    }
+  }
   await startRendezvous();
   const server = spawn(process.execPath, [SERVER], { env: { ...process.env, ...NAS_ENV }, stdio: 'inherit' });
   server.on('exit', (code) => process.exit(code ?? 1));

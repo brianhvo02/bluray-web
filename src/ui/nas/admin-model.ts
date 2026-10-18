@@ -1,4 +1,6 @@
-import { NasHttpError, type NasClient, type NasDevice } from './nas-client';
+import type { TitleSummary } from '../../engine/disc/nas-api';
+import { displayName } from './title-model';
+import { NasHttpError, type NasClient, type NasDevice, type NasTitleStatus } from './nas-client';
 
 export const ADMIN_MESSAGES = {
   lastOwner: "You can't remove the last owner.",
@@ -59,4 +61,50 @@ export async function revoke(api: AdminApi, id: string): Promise<string | null> 
     if (err instanceof NasHttpError && err.status === 409 && err.code === 'last-owner') return ADMIN_MESSAGES.lastOwner;
     return err instanceof Error ? err.message : String(err);
   }
+}
+
+/** Whether the gate switch shows on: the NAS's gate is `everyone`, or turning it on is waiting for confirmation. */
+export function gateSwitchOn(status: NasTitleStatus | null, confirming: boolean): boolean {
+  return confirming || status?.gate === 'everyone';
+}
+
+/** The status after the owner's PUT of the gate succeeded, so the switch shows what the NAS now has. */
+export function withGate(status: NasTitleStatus | null, gate: NasTitleStatus['gate']): NasTitleStatus | null {
+  return status === null ? null : { ...status, gate };
+}
+
+/** TMDB's required notice (global constraints), shown with its logo in NAS settings. */
+export const TMDB_ATTRIBUTION = 'This product uses the TMDB API but is not endorsed or certified by TMDB';
+
+const discs = (n: number): string => `${n} ${n === 1 ? 'disc' : 'discs'}`;
+
+/** The title library's matching status in NAS settings: the run's progress, the counts, and a note without TMDB. */
+export function matchingStatus(s: NasTitleStatus, now: number): { progress: string; counts: string; tmdb: string | null } {
+  const progress = s.running
+    ? `Matching… ${s.groupsDone} of ${s.groupsTotal} folders`
+    : s.lastRunAt === null
+      ? 'Not matched yet'
+      : `Last matched ${lastSeen(s.lastRunAt, now)}`;
+  return {
+    progress,
+    counts: `${discs(s.filed)} filed · ${s.unsorted} unsorted · ${s.music} music`,
+    tmdb: s.tmdb ? null : 'No TMDB key: discs that aren’t anime go to Unsorted.',
+  };
+}
+
+/** The owner's own titles (spec §9), A–Z, for NAS settings' "Own titles" list. */
+export function ownTitles(titles: readonly TitleSummary[]): TitleSummary[] {
+  return titles.filter((t) => t.own).sort((a, b) => displayName(a).localeCompare(displayName(b), undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+/** An own title's kind: `Series · N seasons`, `Movie` or `Music`. */
+export function ownTitleKind(t: TitleSummary): string {
+  if (t.kind === 'movie') return 'Movie';
+  if (t.kind === 'music') return 'Music';
+  return `Series · ${t.seasons} ${t.seasons === 1 ? 'season' : 'seasons'}`;
+}
+
+/** The confirm step before deleting an own title. */
+export function deleteTitleQuestion(name: string): string {
+  return `Delete ${name}? Its discs go back to Unsorted.`;
 }

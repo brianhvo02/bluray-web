@@ -211,6 +211,7 @@ export class PlayerController {
   private backgroundPaused = false;
   /** The open NAS disc's token source, asked when the engine's reads get a 401. */
   private refreshToken: (() => Promise<string>) | null = null;
+  private opens = 0;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -313,7 +314,18 @@ export class PlayerController {
     );
   }
 
+  /** How many times a disc was opened or closed: what was waiting on one open can tell that another came since. */
+  get discOpens(): number {
+    return this.opens;
+  }
+
+  /** A notice from the UI itself (the engine's arrive as events), replacing any with the same code. */
+  showNotice(code: string, message: string): void {
+    this.update(withNotice(this.snapshot, { code, message }));
+  }
+
   open(entries: ReadonlyArray<readonly [string, File]>): void {
+    this.opens++;
     this.refreshToken = null;
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
@@ -325,6 +337,7 @@ export class PlayerController {
    * refreshed on schedule goes to the engine through setRemoteToken.
    */
   openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>): void {
+    this.opens++;
     this.refreshToken = refreshToken ?? null;
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
@@ -602,6 +615,7 @@ export class PlayerController {
   }
 
   closeDisc(): void {
+    this.opens++;
     this.refreshToken = null;
     this.post({ type: 'close' });
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });

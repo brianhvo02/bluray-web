@@ -1,14 +1,20 @@
-import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { discBadges, discFacts, formatSize, openFailed, preflightLines, type DiscFacts } from './library-model';
 import { NasHttpError, type NasClient } from './nas-client';
+import { playOnceOpen } from './play-once-open';
+
+/** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
+export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
 
 interface PreflightProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
-  readonly disc: DiscEntry;
+  readonly disc: PreflightDisc;
+  /** An episode's playlist, started once the engine has read the disc (its 'titles' event). */
+  readonly playlistId?: string;
   /** Whether the disc is UHD, once its manifest has shown it (for the row's badge). */
   readonly onFacts: (discId: string, facts: DiscFacts) => void;
   readonly onCancel: () => void;
@@ -19,7 +25,7 @@ const message = (err: unknown): string =>
   err instanceof NasHttpError && err.code === 'disc-changed' ? DISC_CHANGED_MESSAGE : err instanceof Error ? err.message : String(err);
 
 /** Before a NAS disc plays: its manifest, this connection's throughput against the disc's peak rate, and Play. */
-export function Preflight({ nas, controller, disc, onFacts, onCancel }: PreflightProps): ReactElement {
+export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel }: PreflightProps): ReactElement {
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
   const [facts, setFacts] = useState<DiscFacts | null>(null);
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
@@ -29,6 +35,9 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
   const [opening, setOpening] = useState<'idle' | 'starting' | 'launched'>('idle');
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const engineFailed = openFailed(snapshot);
+  /** Releases the wait for this open's playlists (playOnceOpen); this pre-flight going away ends it too. */
+  const releaseWait = useRef<(() => void) | null>(null);
+  useEffect(() => () => releaseWait.current?.(), []);
   useEffect(() => {
     if (opening === 'launched' && engineFailed) setOpening('idle');
   }, [opening, engineFailed]);
@@ -72,6 +81,8 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
         controller.openRemote({ kind: 'remote', base, token, manifest }, () => nas.freshSession(token).then((s) => (token = s.token)));
+        releaseWait.current?.();
+        releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
         setOpening('launched');
       },
     ).catch((err: unknown) => {
@@ -82,12 +93,13 @@ export function Preflight({ nas, controller, disc, onFacts, onCancel }: Prefligh
 
   const lines = preflightLines(mbps ?? null, facts?.peakMbps ?? null);
   const badges = discBadges(disc, facts?.uhd);
+  const size = disc.sizeBytes ?? (manifest ? manifest.files.reduce((sum, f) => sum + f.size, 0) : null);
 
   return (
     <section className="preflight" data-testid="nas-preflight">
       <h3>{disc.name}</h3>
       <p className="library-meta">
-        {formatSize(disc.sizeBytes)}
+        {size !== null && formatSize(size)}
         {badges.map((b) => (
           <span key={b} className="badge">
             {b}

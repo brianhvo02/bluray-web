@@ -1,0 +1,53 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "adult": false,
+      "backdrop_path": null,
+      "id": 990201,
+      "title": "Lanternfall",
+      "original_language": "en",
+      "original_title": "Lanternfall",
+      "overview": "A made-up film used in tests.",
+      "poster_path": "/pLanternfall.jpg",
+      "media_type": "movie",
+      "genre_ids": [18],
+      "popularity": 4.2,
+      "release_date": "2019-11-01",
+      "video": false,
+      "vote_average": 6.5,
+      "vote_count": 33
+    },
+    {
+      "adult": false,
+      "backdrop_path": "/bLanternfallTv.jpg",
+      "id": 990202,
+      "name": "Lanternfall",
+      "original_language": "en",
+      "original_name": "Lanternfall",
+      "overview": "A made-up series used in tests.",
+      "poster_path": null,
+      "media_type": "tv",
+      "genre_ids": [18],
+      "popularity": 3.1,
+      "first_air_date": "",
+      "vote_average": 0,
+      "vote_count": 0,
+      "origin_country": ["GB"]
+    },
+    {
+      "adult": false,
+      "id": 990203,
+      "name": "Ada Lanternfall",
+      "original_name": "Ada Lanternfall",
+      "media_type": "person",
+      "popularity": 1.0,
+      "gender": 1,
+      "known_for_department": "Acting",
+      "profile_path": null,
+      "known_for": []
+    }
+  ],
+  "total_pages": 1,
+  "total_results": 3
+}

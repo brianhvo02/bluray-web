@@ -24,6 +24,7 @@
     "ass-trace:build": "tools/ass-trace/build.sh",
     "ass-trace:golden": "tools/ass-trace/golden.sh",
     "ass-trace": "tsx tests/ass-trace/run.ts",
+    "discdb:index": "tsx scripts/build-discdb-index.ts",
     "server:build": "node server/build.mjs",
     "server:dev": "npm run server:build && LIBRARY_ROOTS=syn=fixtures/synthetic DATA_DIR=.cache/server-data PORT=4192 node server/dist/server.mjs",
     "server:deploy": "bash server/deploy/deploy.sh",

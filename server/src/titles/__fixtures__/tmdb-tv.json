@@ -1,0 +1,25 @@
+{
+  "adult": false,
+  "backdrop_path": "/qXbAckdropStarfall.jpg",
+  "episode_run_time": [24],
+  "first_air_date": "2023-04-07",
+  "genres": [{ "id": 16, "name": "Animation" }],
+  "id": 990101,
+  "in_production": true,
+  "languages": ["ja"],
+  "name": "Starfall Wanderer",
+  "number_of_episodes": 37,
+  "number_of_seasons": 2,
+  "origin_country": ["JP"],
+  "original_language": "ja",
+  "original_name": "星降りの旅人",
+  "overview": "A made-up series used in tests.",
+  "poster_path": "/pStarfallPoster.jpg",
+  "seasons": [
+    { "air_date": "2023-03-01", "episode_count": 2, "id": 991000, "name": "Specials", "overview": "", "poster_path": null, "season_number": 0, "vote_average": 0 },
+    { "air_date": "2023-04-07", "episode_count": 24, "id": 991001, "name": "Season 1", "overview": "", "poster_path": "/s1.jpg", "season_number": 1, "vote_average": 8.2 },
+    { "air_date": "2025-01-10", "episode_count": 13, "id": 991002, "name": "Season 2", "overview": "", "poster_path": "/s2.jpg", "season_number": 2, "vote_average": 8.4 }
+  ],
+  "status": "Returning Series",
+  "type": "Scripted"
+}
