@@ -1,7 +1,7 @@
 # NAS Library by Title (Step 2, part 2) — Design Spec
 
 Date: 2026-10-17
-Status: Deployed 2026-10-18 with the gate at owners; matching on the real library in progress (2,349 discs, after adding the Downloads and Rips folders); spot-check pending.
+Status: Done, 2026-10-18. On the real library (2,349 discs, after adding the Downloads and Rips folders) matching files 1,079 discs, puts 67 on the Music shelf and leaves 1,202 in Unsorted (more than one title fits 481, no title 281, no disc number 243, no season 101, sources disagree 93, episode past the season 3), after three tuning rounds on the real run, each checked by an adversarial review. The owner's spot-check of 50 random filed discs found none wrong, so the gate is open to everyone.
 Parent spec: `2026-10-17-nas-server-design.md` (step 2). This document adds a title library on top of step 2's server and folder browser. Where the two disagree, this one wins for the library.
 
 ## 1. Intent

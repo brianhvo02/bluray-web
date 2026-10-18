@@ -17,7 +17,7 @@ services:
       RENDEZVOUS_URL: https://bluray-rendezvous.brianhvo02.workers.dev
       # TheMovieDB key for title matching, read from .env next to this file. Empty: no TMDB lookups.
       TMDB_API_KEY: ${TMDB_API_KEY:-}
-      TITLE_LIBRARY: owners
+      TITLE_LIBRARY: everyone
     env_file:
       - path: .env
         required: false
