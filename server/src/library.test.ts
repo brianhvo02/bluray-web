@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -145,6 +145,32 @@ describe('Library scan behaviour', () => {
     await lib.scan();
     expect(lib.list('drvB')!.discs.map((d) => d.name)).toEqual(['Other']);
     expect(new Library(roots(), file, FAST).list('drvB')!.discs).toHaveLength(1);
+  });
+
+  it("keeps a root previous entries when its BDMVs folder doesn't exist (a drive whose mount point is empty)", async () => {
+    const file = join(tmp, 'library.json');
+    const mounted = [{ name: 'drvB', dir: join(tmp, 'mnt/drvB/BDMVs') }];
+    cpSync(join(tmp, 'b'), mounted[0]!.dir, { recursive: true, preserveTimestamps: true });
+    await new Library(mounted, file, FAST).scan();
+    rmSync(join(tmp, 'mnt/drvB/BDMVs'), { recursive: true });
+    const lib = new Library(mounted, file, FAST);
+    await lib.scan();
+    expect(lib.list('drvB')!.discs.map((d) => d.name)).toEqual(['Other']);
+    expect(new Library(mounted, file, FAST).list('drvB')!.discs).toHaveLength(1);
+  });
+
+  it("keeps disc ids and library paths when a root's directory moves (/library/drvN to /library-mnt/drvN/BDMVs)", async () => {
+    const before = new Library(roots(), join(tmp, 'before.json'), FAST);
+    await before.scan();
+    const moved = roots().map((r) => ({ name: r.name, dir: join(tmp, 'library-mnt', r.name, 'BDMVs') }));
+    for (const [i, r] of moved.entries()) cpSync(roots()[i]!.dir, r.dir, { recursive: true, preserveTimestamps: true });
+    const after = new Library(moved, join(tmp, 'after.json'), FAST);
+    await after.scan();
+    const discs = (lib: Library) => [...lib.list('drvA')!.discs, ...lib.list('drvB')!.discs, ...lib.list('drvA/Series (シリーズ)')!.discs].map(({ id, path }) => ({ id, path }));
+    expect(discs(after)).toEqual(discs(before));
+    expect(discs(before).length).toBeGreaterThan(2);
+    const disc = after.list('drvB')!.discs[0]!;
+    expect(after.locate(disc)).toBe(join(tmp, 'library-mnt/drvB/BDMVs/Other'));
   });
 
   it('installs the tree after each root on a first scan', async () => {
