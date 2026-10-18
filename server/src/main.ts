@@ -78,6 +78,7 @@ async function serve(config: Config): Promise<void> {
 
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => {
+      titles.close();
       server.close(() => process.exit(0));
       // Long disc streams would otherwise hold shutdown until Docker's SIGKILL.
       setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS).unref();

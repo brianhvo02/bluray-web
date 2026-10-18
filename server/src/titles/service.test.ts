@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -348,6 +348,108 @@ describe('TitleService', () => {
     clock += DAY;
     await s.runNow();
     expect(anilist.calls).toEqual([]);
+  });
+
+  it('matches a box family together, so an added Box 2 is numbered after an unchanged Box 1 (T8b)', async () => {
+    const tmdb = fake({ Brasswick: [entry('tmdb-tv:7', { english: 'Brasswick' }, { seasons: [{ number: 1, episodes: 12, runtimeMin: 24 }] })] });
+    const box1 = [ev('drv1/TV/Brasswick/Brasswick BOX 1/DISC1'), ev('drv1/TV/Brasswick/Brasswick BOX 1/DISC2')];
+    const box2 = ev('drv1/TV/Brasswick/Brasswick BOX 2/DISC1');
+    let evidence = [...box1];
+    const s = service({ evidence: () => evidence, anilist: fake({}), tmdb });
+    await s.runNow();
+    expect(discsOf(s, 'tmdb-tv:7')).toBe(2);
+    evidence = [...box1, box2];
+    clock += 60_000;
+    await s.runNow();
+    expect(s.catalogue().unsorted).toEqual([]);
+    const slots = s.catalogue().detail('tmdb-tv:7')!.seasons[0]!.discs;
+    expect(slots.map((d) => [d.number, d.copies[0]!.discId])).toEqual([[1, box1[0]!.discId], [2, box1[1]!.discId], [3, box2.discId]]);
+  });
+
+  it('caches an entry lookup that found nothing, and asks again only on the weekly retry (T8c)', async () => {
+    const s1 = entry('anilist:300', { english: 'Ember Blade' }, { year: 2019, episodes: 12, relations: [{ type: 'SEQUEL', id: 'anilist:999', format: 'TV', startDate: 20210407 }] });
+    const disc = ev('drv1/Anime/[BDMV] Ember Blade Vol.1', { eng: 'Ember Blade' });
+    const anilist = fake({ 'Ember Blade': [s1] });
+    const s = service({ evidence: () => [disc], anilist });
+    await s.runNow();
+    expect(anilist.calls).toContain('entry:anilist:999');
+    anilist.calls.length = 0;
+    clock += DAY;
+    await s.runNow();
+    expect(anilist.calls).toEqual([]);
+    expect(service({ evidence: () => [disc], anilist }).catalogue().titles.map((t) => t.id)).toEqual(['anilist:300']);
+    clock += 7 * DAY;
+    await s.runNow();
+    expect(anilist.calls).toEqual(['entry:anilist:999']);
+  });
+
+  it('keeps a filed disc whose evidence changed during an outage filed until a re-match succeeds (T8d)', async () => {
+    const anilist = fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER] });
+    let evidence: DiscEvidence[] = [A];
+    const s = service({ evidence: () => evidence, anilist });
+    await s.runNow();
+    const changed = { ...A, discTitles: [...A.discTitles, { lang: 'eng', name: 'Hinokiri no Ken' }] };
+    evidence = [changed];
+    anilist.down = true;
+    clock += 60_000;
+    await s.runNow();
+    expect(discsOf(s, 'anilist:100')).toBe(1);
+    expect(s.catalogue().unsorted).toEqual([]);
+    anilist.down = false;
+    anilist.calls.length = 0;
+    clock += 60_000;
+    await s.runNow();
+    expect(anilist.calls).toContain(`search:${normalizeTitle('Hinokiri no Ken')}`);
+    expect(discsOf(s, 'anilist:100')).toBe(1);
+    anilist.calls.length = 0;
+    clock += 60_000;
+    await s.runNow();
+    expect(anilist.calls).toEqual([]);
+  });
+
+  it('logs a failed run and still makes the run queued during it', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const inner = fake({ 火斬りの剣: [EMBER] });
+    let first = true;
+    const anilist: MetadataSource = {
+      search: async (q, o) => {
+        if (first) {
+          first = false;
+          await gate;
+          throw new Error('boom');
+        }
+        return inner.search(q, o);
+      },
+      entry: (id) => inner.entry(id),
+    };
+    const s = service({ evidence: () => [A], anilist });
+    const run = s.runNow();
+    void s.runNow(); // a scan finishing during the run
+    release();
+    await run;
+    expect(error).toHaveBeenCalledWith('title matching failed', expect.any(Error));
+    expect(discsOf(s, 'anilist:100')).toBe(1);
+    error.mockRestore();
+  });
+
+  it.each([
+    ['not JSON', '{'],
+    ['the wrong shape', JSON.stringify({ version: 1, matches: 'x' })],
+    ['a bad entry', JSON.stringify({ version: 1, matches: [], entries: { a: { at: 1 } }, cache: {}, discs: {}, firstSeen: {}, lastRunAt: null, lastRetryAt: null, lastRefreshAt: null })],
+  ])('sets a metadata.json that is %s aside and starts afresh (T8e)', async (_, text) => {
+    writeFileSync(join(dir, 'metadata.json'), text);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const anilist = fake({ 火斬りの剣: [EMBER] });
+    const s = service({ evidence: () => [A], anilist });
+    expect(error).toHaveBeenCalledTimes(1);
+    error.mockRestore();
+    expect(s.catalogue().titles).toEqual([]);
+    expect(readdirSync(dir)).toContain(`metadata.json.corrupt-${clock}`);
+    expect(existsSync(join(dir, 'metadata.json'))).toBe(false);
+    await s.runNow();
+    expect(discsOf(s, 'anilist:100')).toBe(1);
   });
 
   it('takes the gate from the owner, else the config', () => {

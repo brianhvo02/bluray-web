@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -46,7 +46,7 @@ describe('ArtCache', () => {
 
   it('deletes the least recently used files past its budget', async () => {
     let t = 0;
-    const art = new ArtCache(dir, fetcher(10), 25, () => ++t);
+    const art = new ArtCache(dir, fetcher(10), 25, { now: () => ++t });
     await art.get(ID1, 'small', 'https://img.example/1');
     await art.get(ID2, 'small', 'https://img.example/2');
     await art.get(ID1, 'small', 'https://img.example/1'); // ID1 is now the more recently used
@@ -66,5 +66,68 @@ describe('ArtCache', () => {
     const notImage = vi.fn(async () => new Response('<html>', { headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
     expect(await new ArtCache(dir, notImage).get(ID1, 'small', 'https://img.example/1')).toBeNull();
     expect(existsSync(join(dir, `${ID1}-small`))).toBe(false);
+  });
+
+  it('stores only jpeg, png, webp and gif, and only the two sizes (T8f)', async () => {
+    const typed = (type: string) => vi.fn(async () => new Response('x', { headers: { 'content-type': type } })) as unknown as typeof globalThis.fetch;
+    expect(await new ArtCache(dir, typed('image/svg+xml')).get(ID1, 'small', 'https://img.example/1')).toBeNull();
+    expect(await new ArtCache(dir, typed('image/avif')).get(ID1, 'small', 'https://img.example/1')).toBeNull();
+    for (const type of ['image/jpeg', 'image/png', 'image/webp', 'image/gif']) {
+      expect(await new ArtCache(dir, typed(type)).get(ID2, 'large', `https://img.example/${type}`)).toMatchObject({ type });
+      rmSync(dir, { recursive: true });
+    }
+    const fetch = fetcher();
+    expect(await new ArtCache(dir, fetch).get(ID1, 'huge' as 'small', 'https://img.example/1')).toBeNull();
+    expect(fetch.urls).toEqual([]);
+  });
+
+  it('gives up on a body past its cap, streaming, and on a fetch that takes too long (T8f)', async () => {
+    let pulled = 0;
+    const endless = vi.fn(async () => new Response(new ReadableStream({
+      pull(c) {
+        pulled++;
+        c.enqueue(new Uint8Array(4));
+      },
+    }), { headers: { 'content-type': 'image/png' } })) as unknown as typeof globalThis.fetch;
+    expect(await new ArtCache(dir, endless, undefined, { maxBytes: 10 }).get(ID1, 'small', 'https://img.example/1')).toBeNull();
+    expect(pulled).toBeLessThan(10);
+    expect(existsSync(join(dir, `${ID1}-small`))).toBe(false);
+
+    const hanging = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+    })) as unknown as typeof globalThis.fetch;
+    expect(await new ArtCache(dir, hanging, undefined, { timeoutMs: 20 }).get(ID1, 'small', 'https://img.example/1')).toBeNull();
+  });
+
+  it('caps the body at 5 MB and times out after 15 s by default', async () => {
+    const big = vi.fn(async () => new Response(new Uint8Array(5 * 1024 * 1024 + 1), { headers: { 'content-type': 'image/png' } })) as unknown as typeof globalThis.fetch;
+    expect(await new ArtCache(dir, big).get(ID1, 'small', 'https://img.example/1')).toBeNull();
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    await new ArtCache(dir, fetcher()).get(ID2, 'small', 'https://img.example/2');
+    expect(timeout).toHaveBeenCalledWith(15_000);
+    timeout.mockRestore();
+  });
+
+  it('saves hit times soon after a hit, so a restarted cache evicts by them (T8f)', async () => {
+    let t = 0;
+    const now = (): number => ++t;
+    const art = new ArtCache(dir, fetcher(10), 25, { now, saveDelayMs: 5 });
+    await art.get(ID1, 'small', 'https://img.example/1');
+    await art.get(ID2, 'small', 'https://img.example/2');
+    await art.get(ID1, 'small', 'https://img.example/1');
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'index.json'), 'utf8'))[`${ID1}-small`].usedAt).toBe(3));
+    const restarted = new ArtCache(dir, fetcher(10), 25, { now });
+    await restarted.get(ID3, 'small', 'https://img.example/3');
+    expect(existsSync(join(dir, `${ID1}-small`))).toBe(true);
+    expect(existsSync(join(dir, `${ID2}-small`))).toBe(false);
+  });
+
+  it('counts files missing from its index against the budget at startup (T8f)', async () => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ID2}-small`), new Uint8Array(20));
+    const art = new ArtCache(dir, fetcher(10), 25);
+    await art.get(ID1, 'small', 'https://img.example/1');
+    expect(existsSync(join(dir, `${ID2}-small`))).toBe(false);
+    expect(existsSync(join(dir, `${ID1}-small`))).toBe(true);
   });
 });

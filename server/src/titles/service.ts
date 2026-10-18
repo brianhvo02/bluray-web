@@ -4,7 +4,7 @@
  * is retried weekly, entries older than 30 days are fetched again monthly. Original code.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { normalizeTitle } from '../../../src/engine/disc/title-text';
 import { isCode, replaceAtomically } from '../atomic-json';
@@ -19,6 +19,7 @@ import type { DiscEvidence } from './evidence';
 import { groupKey, matchDiscs } from './match';
 import type { DiscMatch } from './match';
 import type { OwnerStore } from './owner-store';
+import { parseName } from './parse-name';
 import { SourceUnavailable } from './sources';
 import type { Entry, MetadataSource } from './sources';
 
@@ -75,6 +76,10 @@ interface MetadataFile {
 }
 
 const evidenceKey = (e: DiscEvidence): string => createHash('sha256').update(JSON.stringify(e)).digest('hex').slice(0, 32);
+const parentOf = (path: string): string => path.slice(0, Math.max(0, path.lastIndexOf('/')));
+const lastSegment = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
+/** A box folder's box family, the folder its box folders share (T8b), or null when the group isn't a box folder. */
+const boxFamily = (group: string): string | null => (parseName(lastSegment(group)).box !== null ? parentOf(group) : null);
 const sourceOf = (id: string): 'anilist' | 'tmdb' | null => (id.startsWith('anilist:') ? 'anilist' : id.startsWith('tmdb-') ? 'tmdb' : null);
 
 function defaultTimer(fn: () => void, ms: number): () => void {
@@ -177,10 +182,12 @@ export class TitleService {
       try {
         do {
           this.again = false;
-          await this.run();
+          try {
+            await this.run();
+          } catch (err) {
+            console.error('title matching failed', err);
+          }
         } while (this.again);
-      } catch (err) {
-        console.error('title matching failed', err);
       } finally {
         this.running = null;
       }
@@ -234,12 +241,16 @@ export class TitleService {
       if (!before || before.key !== d.key || !m || (m.status === 'unsorted' && (m.reason === 'source-unreachable' || retryDue))) dirty.add(d.group);
     }
     for (const [id, d] of this.discs) if (!discs.has(id)) dirty.add(d.group);
+    // a box family is matched whole, so rule 4 numbers its discs across all its boxes (T8b)
+    const families = new Set([...dirty].map(boxFamily).filter((f): f is string => f !== null));
+    if (families.size > 0) for (const d of discs.values()) if (families.has(boxFamily(d.group) ?? '\0')) dirty.add(d.group);
     const toMatch = evidence.filter((e) => dirty.has(groupKey(e)));
 
-    // the matcher's cache; on retry day, search results older than a week are looked up again
+    // the matcher's cache; on retry day, search results and entry lookups that found nothing, older than a week, are
+    // looked up again (T8c)
     const cache = new Map<string, Entry[]>();
     for (const [k, d] of this.cache) {
-      if (retryDue && !ENTRY_KEY.test(k) && now - d.at >= RETRY_UNSORTED_MS) continue;
+      if (retryDue && (!ENTRY_KEY.test(k) || d.value.length === 0) && now - d.at >= RETRY_UNSORTED_MS) continue;
       cache.set(k, d.value);
     }
     this.groupsDone = 0;
@@ -258,8 +269,12 @@ export class TitleService {
       const before = this.matches.get(m.discId);
       if (m.status === 'unsorted' && m.reason === 'source-unreachable') {
         failed = true;
-        // a disc filed before, whose evidence is unchanged, stays filed (Review Focus 2)
-        if (before && before.status !== 'unsorted' && this.discs.get(m.discId)?.key === discs.get(m.discId)!.key) continue;
+        // a disc filed before stays filed (Review Focus 2); a changed one keeps its old key, so it is matched again (T8d)
+        if (before && before.status !== 'unsorted') {
+          const old = this.discs.get(m.discId);
+          if (old) discs.set(m.discId, old);
+          continue;
+        }
       }
       matches.set(m.discId, m);
     }
@@ -351,9 +366,9 @@ export class TitleService {
     }
     for (const [k, d] of this.cache) if (!nextCache.has(k)) nextCache.set(k, d);
     for (const [k, d] of nextCache) {
-      // search results older than 30 days go; entry lookups stay while their entry does
+      // search results and lookups that found nothing go after 30 days; other entry lookups stay while their entry does
       const id = ENTRY_KEY.exec(k)?.[1];
-      if (id === undefined ? now - d.at >= SEARCH_CACHE_MS : !failed && !entries.has(id)) nextCache.delete(k);
+      if (id === undefined || d.value.length === 0 ? now - d.at >= SEARCH_CACHE_MS : !failed && !entries.has(id)) nextCache.delete(k);
     }
 
     this.matches = matches;
@@ -367,15 +382,25 @@ export class TitleService {
     this.save();
   }
 
+  /** Reads metadata.json; a malformed one is set aside as `metadata.json.corrupt-<time>` and matching starts afresh (T8e). */
   private load(): void {
-    let data: MetadataFile;
+    let data: unknown;
     try {
-      data = JSON.parse(readFileSync(this.file, 'utf8')) as MetadataFile;
+      data = JSON.parse(readFileSync(this.file, 'utf8'));
     } catch (err) {
-      if (!isCode(err, 'ENOENT')) console.error(`${this.file} is unreadable; matching starts afresh`, err);
+      if (isCode(err, 'ENOENT')) return;
+      data = undefined;
+    }
+    if (!validMetadata(data)) {
+      const aside = `${this.file}.corrupt-${this.now()}`;
+      try {
+        renameSync(this.file, aside);
+        console.error(`${this.file} is malformed; moved to ${aside}, matching starts afresh`);
+      } catch (err) {
+        console.error(`${this.file} is malformed and could not be moved; matching starts afresh`, err);
+      }
       return;
     }
-    if (data?.version !== 1) return;
     this.matches = new Map(data.matches.map((m) => [m.discId, m]));
     this.entries = new Map(Object.entries(data.entries));
     this.cache = new Map(Object.entries(data.cache));
@@ -400,4 +425,29 @@ export class TitleService {
     };
     replaceAtomically(this.file, JSON.stringify(data));
   }
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isString = (v: unknown): v is string => typeof v === 'string';
+const isTime = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+const isEntry = (v: unknown): boolean =>
+  isObject(v) && isString(v.id) && (v.source === 'anilist' || v.source === 'tmdb') && isObject(v.names) && Array.isArray(v.relations) && Array.isArray(v.seasons);
+const isDated = (v: unknown, value: (x: unknown) => boolean): boolean => isObject(v) && isTime(v.at) && value(v.value);
+const isMatch = (v: unknown): boolean => {
+  if (!isObject(v) || !isString(v.discId)) return false;
+  if (v.status === 'filed') return isString(v.entryId) && Array.isArray(v.via);
+  if (v.status === 'music') return isString(v.group) && isString(v.name);
+  return v.status === 'unsorted' && isString(v.reason) && Array.isArray(v.suggestions) && v.suggestions.every(isString);
+};
+const values = (v: unknown, each: (x: unknown) => boolean): boolean => isObject(v) && Object.values(v).every(each);
+
+/** Whether a parsed metadata.json has the shape `MetadataFile` describes, down to its elements. */
+function validMetadata(data: unknown): data is MetadataFile {
+  return isObject(data) && data.version === 1 &&
+    Array.isArray(data.matches) && data.matches.every(isMatch) &&
+    values(data.entries, (d) => isDated(d, isEntry)) &&
+    values(data.cache, (d) => isDated(d, (x) => Array.isArray(x) && x.every(isEntry))) &&
+    values(data.discs, (d) => isObject(d) && isString(d.key) && isString(d.group)) &&
+    values(data.firstSeen, isTime) &&
+    [data.lastRunAt, data.lastRetryAt, data.lastRefreshAt].every((t) => t === null || isTime(t));
 }
