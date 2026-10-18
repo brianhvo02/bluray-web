@@ -70,3 +70,6 @@ export interface DiscManifest {
   /** Path → base64 of the whole file. */
   readonly inline: Readonly<Record<string, string>>;
 }
+
+/** Why the NAS's title matcher left a disc in Unsorted (spec §7), shown to the owner. */
+export type UnsortedReason = 'no-title' | 'several-fit' | 'no-season' | 'episode-past-season' | 'no-disc-number' | 'sources-disagree' | 'source-unreachable';
