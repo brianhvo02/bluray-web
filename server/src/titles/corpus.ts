@@ -121,11 +121,11 @@ export const NAME_CORPUS: readonly { readonly text: string; readonly expected: P
   { text: 'ISO [BDMV]', expected: { candidates: [] } },
   { text: 'DVD (Foo)', expected: { candidates: ['Foo'] } },
   { text: 'Foo Live 2019 [BDMV]', expected: { candidates: ['Foo Live'], year: 2019, bonus: false } },
-  { text: 'BD Foo Vol.2', expected: { candidates: ['Foo'], volume: 2 } },
+  { text: 'BD Foo Vol.2', expected: { candidates: ['BD Foo', 'Foo'], volume: 2 } },
   { text: 'Foo - 2019', expected: { candidates: ['Foo'], year: 2019, episodes: null } },
   { text: 'Foo Bar - 2020 [1080p]', expected: { candidates: ['Foo Bar'], year: 2020, episodes: null } },
   { text: 'Foo - 05', expected: { candidates: ['Foo'], episodes: [5, 5] } },
-  { text: 'Foo - 7', expected: { candidates: ['Foo'], episodes: [7, 7] } },
+  { text: 'Foo - 7', expected: { candidates: ['Foo - 7'], episodes: null } },
   { text: '[BDMV][Live Event][Foo]', expected: { candidates: ['Foo'], bonus: true } },
   { text: '[BDMV][Event][Foo]', expected: { candidates: ['Foo'], bonus: true } },
   { text: '[BDMV][Foo][Live]', expected: { candidates: ['Foo'], bonus: true } },
@@ -133,4 +133,22 @@ export const NAME_CORPUS: readonly { readonly text: string; readonly expected: P
   { text: '[BDMV][特典][Foo]', expected: { candidates: ['Foo'], bonus: true } },
   { text: 'Foo S01E05-E08', expected: { candidates: ['Foo'], season: 1, episodes: [5, 8] } },
   { text: 'Foo S2E05-E06', expected: { candidates: ['Foo'], season: 2, episodes: [5, 6] } },
+
+  // Re-review 2: a leading format word is a tag only when the name has another tag (T3e); disc names have no ` - NN`
+  // episode, and a single digit is never one (T3f); a reversed range is null
+  { text: 'ISO Station 7', expected: { candidates: ['ISO Station 7'] } },
+  { text: 'DVD Club', expected: { candidates: ['DVD Club'] } },
+  { text: 'BD Wars', expected: { candidates: ['BD Wars'] } },
+  { text: '4K Dreams', expected: { candidates: ['4K Dreams'] } },
+  { text: 'DVD Club [BDMV]', expected: { candidates: ['DVD Club', 'Club'] } },
+  { text: 'BD Wars Vol.2', expected: { candidates: ['BD Wars', 'Wars'], volume: 2 } },
+  { text: '4K.Dreams.2160p.UHD.Blu-ray.HEVC-GRP', expected: { candidates: ['4K Dreams', 'Dreams'] } },
+  { text: 'Foo - 1 [BDMV]', expected: { episodes: null } },
+  { text: 'Foo - 05 [BDMV]', expected: { candidates: ['Foo'], episodes: null } },
+  { text: 'Foo Vol.2 Bar - 05', expected: { candidates: ['Foo'], volume: 2, episodes: null } },
+  { text: 'Foo Vol.2 - 05', expected: { volume: null, episodes: null } }, // could be the range Vol.2-5
+  { text: 'Foo - 05 [1080p]', expected: { candidates: ['Foo'], episodes: [5, 5] } },
+  { text: 'Foo S01E08-E05', expected: { candidates: ['Foo'], season: 1, episodes: null } },
+  { text: 'Foo 第8話-第5話', expected: { candidates: ['Foo'], episodes: null } },
+  { text: 'Foo (316-266)', expected: { candidates: ['Foo'], episodes: null } },
 ];

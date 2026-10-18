@@ -25,6 +25,13 @@ class Found {
   readonly numbers = new Map<NumberField, number | 'conflict'>();
   episodes: readonly [number, number] | null = null;
   bonus = false;
+  /** The name carries a BDMV, BD, disc or volume tag, so ` - NN` is not a fansub episode number (ruling T3f). */
+  discName = false;
+
+  /** Records an episode range once; a reversed range is unclear and records nothing. */
+  setEpisodes(first: number, last: number): void {
+    if (this.episodes === null && last >= first) this.episodes = [first, last];
+  }
 
   set(field: NumberField, n: number): void {
     if (!Number.isFinite(n)) return;
@@ -67,13 +74,13 @@ const STRUCTURE: readonly { readonly re: RegExp; readonly read: (f: Found, m: st
   { re: /\bDis[ck][ ._]*\d{1,2}\s*[-~]\s*(?:Dis[ck][ ._]*)?\d{1,2}\b/gi, read: () => {} },
   { re: /\bD\d{1,2}\s*[-~]\s*D?\d{1,2}\b/g, read: () => {} },
   { re: /上巻\s*[・,、&＆~-]?\s*下巻/g, read: (f) => { f.set('volume', 1); f.set('volume', 2); } },
-  { re: /第(\d{1,4})話?\s*[-~]\s*第?(\d{1,4})話/g, read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[2])]; } },
-  { re: /第(\d{1,4})話/g, read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
+  { re: /第(\d{1,4})話?\s*[-~]\s*第?(\d{1,4})話/g, read: (f, m) => f.setEpisodes(Number(m[1]), Number(m[2])) },
+  { re: /第(\d{1,4})話/g, read: (f, m) => f.setEpisodes(Number(m[1]), Number(m[1])) },
   {
     re: /\bS(\d{1,2})(?:E(\d{1,3})(?:-E?(\d{1,3}))?)?\b/gi,
     read: (f, m) => {
       f.set('season', toNumber(m[1]));
-      if (m[2] !== undefined) f.episodes ??= [Number(m[2]), Number(m[3] ?? m[2])];
+      if (m[2] !== undefined) f.setEpisodes(Number(m[2]), Number(m[3] ?? m[2]));
     },
   },
   { re: /\b(\d{1,2})(?:st|nd|rd|th)[ ._]*Season\b/gi, read: (f, m) => f.set('season', toNumber(m[1])) },
@@ -88,8 +95,12 @@ const STRUCTURE: readonly { readonly re: RegExp; readonly read: (f: Found, m: st
   { re: /\bD(\d{1,2})\b/g, read: (f, m) => f.set('disc', toNumber(m[1])) },
   { re: /\bBOX[ ._]*(\d{1,2})\b/gi, read: (f, m) => f.set('box', toNumber(m[1])) },
   // a fansub-style episode number: `Foo - 05` before tags or at the end
-  // (a year here was taken by markYear first, so a four-digit number left is not a year)
-  { re: new RegExp(`\\s-\\s(\\d{1,4})(?:v\\d)?(?=\\s*(?:${MARK}|$))`, 'g'), read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
+  // (a year here was taken by markYear first, so a four-digit number left is not a year); never a single digit, and
+  // never in a disc name, where it is more likely a volume (ruling T3f)
+  {
+    re: new RegExp(`\\s-\\s(\\d{2,4})(?:v\\d)?(?=\\s*(?:${MARK}|$))`, 'g'),
+    read: (f, m) => { if (!f.discName) f.setEpisodes(Number(m[1]), Number(m[1])); },
+  },
 ];
 
 /** Bonus markers that are never part of a title, so they cut it. */
@@ -130,8 +141,14 @@ const CJK_END = /^(.*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\s+(
 
 const clean = (piece: string): string => piece.replace(/\s+/g, ' ').replace(TRIM, '');
 const WHOLE_WEAK = new RegExp(`^(?:${WEAK_TAG.source})$`, 'i');
-/** A format word that leads a name (`BD Foo Vol.2`) is a tag; only upper case, so `Iso Tribe` keeps its title. */
-const LEADING_FORMAT = /^(?:BD|DVD|ISO|4K)\s+/;
+/**
+ * An upper-case format word leading a title (`BD Foo Vol.2`) may be a tag, but only when the name carries another tag
+ * (ruling T3e); `Iso Tribe` and `DVD Club` keep their titles.
+ */
+const LEADING_FORMAT = /^(?:BD|DVD|ISO|4K)\s+(?=\S)/;
+const ANY_STRONG_TAG = new RegExp(STRONG_TAG.source, 'i');
+/** BDMV, BD, disc or volume words: the name is a disc's, not a fansub file's. */
+const DISC_WORD = /\b(?:BDMV|BD|DIS[CK]|VOL(?:UME)?)(?![a-z])/i;
 /** A title that is nothing but tag-words (`DVD`, `ISO`) is no title. */
 const onlyTags = (title: string): boolean => title.split(' ').every((w) => WHOLE_WEAK.test(w));
 const hasLetter = (text: string): boolean => /\p{L}/u.test(text);
@@ -240,7 +257,7 @@ function scanGroup(group: Group, f: Found): string {
   }
   const range = group.bracket ? null : /^(\d{1,4})\s*[-~]\s*(\d{1,4})$/.exec(c);
   if (range) {
-    f.episodes ??= [Number(range[1]), Number(range[2])];
+    f.setEpisodes(Number(range[1]), Number(range[2]));
     return '';
   }
   return scan(c, f, { scene: false, bracket: group.bracket });
@@ -249,6 +266,7 @@ function scanGroup(group: Group, f: Found): string {
 export function parseName(text: string): ParsedName {
   const f = new Found();
   const nfkc = text.normalize('NFKC').trim();
+  f.discName = DISC_WORD.test(nfkc);
   const music = /\[CD\]/i.test(nfkc) || (/\bFLAC\b/i.test(nfkc) && /\bBDMV\b/i.test(nfkc));
   if (BONUS_PHRASE.test(nfkc)) f.bonus = true;
 
@@ -261,7 +279,7 @@ export function parseName(text: string): ParsedName {
     // scene names and disc labels separate words with dots or underscores and have no spaces
     const scene = !/\s/.test(raw) && /[._]/.test(raw);
     const capsLabel = scene && /^[A-Z0-9_]+$/.test(raw.replace(new RegExp(MARK, 'g'), '')) && raw.includes('_');
-    const outside = scene ? raw.replace(/[._]/g, ' ') : raw.replace(LEADING_FORMAT, TAG);
+    const outside = scene ? raw.replace(/[._]/g, ' ') : raw;
     let title = scan(outside, f, { scene, bracket: false });
     if (capsLabel) title = clean(title.split(' ').filter((w) => !/^\d+$/.test(w)).join(' ')); // `ABC_TITLE_3_1`
     const brackets = groups.filter((g) => g.bracket).map((g) => ({ g, title: scanGroup(g, f) }));
@@ -271,7 +289,11 @@ export function parseName(text: string): ParsedName {
     const bracketTitles = title !== '' ? [] : brackets.filter(({ g, title: t }, i) =>
       t !== '' && !(g.start === 0 && !/\s/.test(t) && brackets.slice(i + 1).some((b) => b.title !== '')));
     const loneTag = groups.length === 1 && groups[0]?.bracket === true && clean(raw.replace(new RegExp(MARK, 'g'), '')) === '' && !/\s/.test(groups[0].content.trim());
-    candidates = [title, ...(loneTag ? [] : bracketTitles.map((b) => b.title)), ...parens].filter(hasLetter);
+    // a leading format word is dropped only when another tag backs it, and the full title stays first (ruling T3e)
+    const tagged = groups.some((g) => isTagGroup(g.bracket, g.content)) || ANY_STRONG_TAG.test(nfkc) ||
+      (['season', 'volume', 'disc'] as const).some((k) => f.numbers.has(k));
+    const stripped = tagged && LEADING_FORMAT.test(title) ? title.replace(LEADING_FORMAT, '') : '';
+    candidates = [title, stripped, ...(loneTag ? [] : bracketTitles.map((b) => b.title)), ...parens].filter(hasLetter);
   }
   candidates = [...new Set(candidates)];
 
