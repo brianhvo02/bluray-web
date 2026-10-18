@@ -27,6 +27,10 @@ class Found {
   bonus = false;
   /** The name carries a BDMV, BD, disc or volume tag, so ` - NN` is not a fansub episode number (ruling T3f). */
   discName = false;
+  /** A scene name's year at its very end (`Night_2012`), cut by markYear but maybe part of the title (Y4). */
+  sceneEndYear: number | null = null;
+  /** Titles with that year kept (`Night 2012`): later candidates, so an entry named so still competes. */
+  readonly alternates: string[] = [];
 
   /** Records an episode range once; a reversed range is unclear and records nothing. */
   setEpisodes(first: number, last: number): void {
@@ -137,7 +141,7 @@ const GENERIC_LABEL = /^(?:(?:BDROM|BD[ _-]?ROM|BD[ _-]?VIDEO|BD|BLU-?RAY|VIDEO_
 const PART = /^\s*(?:Part[ ._]*\d{1,2}|\d{1,2}(?:st|nd|rd|th)[ ._]*Cour|Cour[ ._]*\d{1,2})\b/i;
 const YEAR = /\b((?:19|20)\d{2})\b/g;
 /** A Japanese year, `2013年` or `2013年製作` (made in 2013), not run into a title (`1999年の夏` keeps its title, M6). */
-const KANJI_YEAR = /((?:19|20)\d{2})年(?:製作|制作)?(?![\p{L}\p{N}])/gu;
+const KANJI_YEAR = /(?<![\p{L}\p{N}])((?:19|20)\d{2})年(?:製作|制作)?(?![\p{L}\p{N}])/gu;
 /** Region and language tags, upper case only so that words aren't taken for them: tags inside brackets or parens (M6). */
 const REGION_TAG = /^(?:US|USA|JP|JPN|UK|EU|ITA|ENG|FRA|GER|KOR|CHN|HK|TW)$/;
 const TRIM = /^[\s\-–—:~_.,・/|+&]+|[\s\-–—:~_.,・/|+&]+$/g;
@@ -186,15 +190,18 @@ function markYear(t: string, f: Found, scene: boolean): string {
   const year = Number(last[1]);
   if (year < 1900 || year > new Date().getFullYear() + 1) return t;
   f.set('year', year);
+  if (scene && /^\s*$/.test(t.slice(last.index + last[0].length))) f.sceneEndYear = year;
   return t.slice(0, last.index) + CUT + t.slice(last.index + last[0].length);
 }
 
 /** Strips structure and tags from free text, recording what it finds, and returns the title piece left (or ''). */
 function scan(text: string, f: Found, opts: { readonly scene: boolean; readonly bracket: boolean }): string {
   let t = markTags(text.replace(DATE, CUT).replace(CATALOGUE, CUT), opts.bracket);
-  t = t.replace(KANJI_YEAR, (_, y: string) => {
+  // a year run into a title (`星の海2020年`) is part of it, and one out of range is left alone (W5)
+  t = t.replace(KANJI_YEAR, (whole: string, y: string) => {
     const year = Number(y);
-    if (year >= 1900 && year <= new Date().getFullYear() + 1) f.set('year', year);
+    if (year < 1900 || year > new Date().getFullYear() + 1) return whole;
+    f.set('year', year);
     return CUT;
   });
   t = markYear(t, f, opts.scene);
@@ -202,9 +209,13 @@ function scan(text: string, f: Found, opts: { readonly scene: boolean; readonly 
   t = t.replace(BONUS_CUT, () => ((f.bonus = true), CUT));
   const pieces = t.split(new RegExp(MARK));
   const at = pieces.findIndex((p) => hasLetter(clean(p)) && !onlyTags(clean(p)));
+  const endYear = f.sceneEndYear;
+  f.sceneEndYear = null;
   if (at < 0) return '';
   const part = PART.exec(pieces[at + 1] ?? '');
-  return clean(`${pieces[at] ?? ''} ${part ? part[0].trim() : ''}`);
+  const title = clean(`${pieces[at] ?? ''} ${part ? part[0].trim() : ''}`);
+  if (endYear !== null) f.alternates.push(`${title} ${endYear}`);
+  return title;
 }
 
 interface Group {
@@ -219,6 +230,12 @@ function isTagGroup(bracket: boolean, content: string): boolean {
   if (!bracket) return false;
   if (/^\d{6}$|^\d{8}$/.test(c) || new RegExp(`^(?:${DATE.source}|${CATALOGUE.source})$`).test(c)) return true;
   return c.split(/[+\s,/&]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TAG.test(tag) || REGION_TAG.test(tag));
+}
+
+/** Whether a word is a release, format, region or bracket-only tag (`BDMV`, `アニメ`, `US`), as `isTagGroup` reads one. */
+export function isTagWord(word: string): boolean {
+  const w = word.normalize('NFKC').trim();
+  return BRACKET_TAG.test(w) || WHOLE_TAG.test(w) || REGION_TAG.test(w);
 }
 
 /** A group of region and language tags only (`(HK)`, `[US]`), in brackets or parens (M6). */
@@ -312,7 +329,7 @@ export function parseName(text: string): ParsedName {
     const stripped = tagged && LEADING_FORMAT.test(title) ? title.replace(LEADING_FORMAT, '') : '';
     candidates = [title, stripped, ...(loneTag ? [] : bracketTitles.map((b) => b.title)), ...parens].filter(hasLetter);
   }
-  candidates = [...new Set(candidates)];
+  candidates = [...new Set([...candidates, ...(candidates.length > 0 ? f.alternates : [])])];
 
   // a disc title like `星降りの旅人 2` ends in its volume; the whole name stays as a candidate for a sequel named so
   const first = candidates[0];

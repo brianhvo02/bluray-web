@@ -7,7 +7,7 @@ import type { UnsortedReason } from '../../../src/engine/disc/nas-api';
 import { normalizeStrict, normalizeTitle } from '../../../src/engine/disc/title-text';
 import type { DiscDbHit } from './discdb';
 import type { DiscEvidence } from './evidence';
-import { parseName } from './parse-name';
+import { isTagWord, parseName } from './parse-name';
 import type { ParsedName } from './parse-name';
 import { SourceUnavailable } from './sources';
 import type { Entry, MetadataSource } from './sources';
@@ -134,6 +134,8 @@ const FILM_FORMATS = new Set(['MOVIE', 'SPECIAL', 'OVA']);
 /** A disc folder's label that names only a disc (`BD`, `BDROM`, `BD_VIDEO`, `DISC_2`); `Blu-ray`, `DVD` and such are categories. */
 const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3})?$/i;
 /** A disc folder's generic label with no number, which takes its release folder's volume (ruling M10). */
+/** Genres besides anime that can share a bracket with the anime tag (W4). */
+const OTHER_GENRES = /^(?:ドラマ|drama|実写|live|特撮|action)$/i;
 const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 
 /** The parent folder path of the disc folder or ISO. */
@@ -185,6 +187,8 @@ interface Pending {
   readonly numberFrom: 'volume' | 'disc' | null;
   /** The disc's numbers can't be read into a place (a volume-and-disc name inside a box, F2): it has none. */
   readonly unplaceable: boolean;
+  /** Numbered by its release folder's volume, as a generic disc folder (ruling M10). */
+  readonly fromParent: boolean;
 }
 
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
@@ -448,7 +452,11 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const namedStrictly = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n)));
   const namedAtAll = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
     const base = parseName(n).candidates[0] ?? n;
-    return sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
+    // one name holding the other (`劇場版 X`, `X 冬の章` against `X`) isn't another title either (W1)
+    const sc = normalizeStrict(c);
+    const sn = normalizeStrict(n);
+    const holds = sc !== '' && sn !== '' && (sc.includes(sn) || sn.includes(sc));
+    return holds || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
   }));
   const fitsOf = (en: Entry): string[] => candidates.filter((c) => quality(en, c, fitSeason) > 0);
   if (japaneseTitles.length > 0) {
@@ -550,7 +558,8 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   // a generic disc folder (`BDROM`) in a single disc's release folder (`[BDMV][Title][Vol.2][JPN]`) takes that folder's
   // volume as its own (ruling M10); a range (`Vol.1-6`) parses as no volume
   const parent = named.find((p) => !p.own && p.kind === 'folder');
-  const generic = GENERIC_DISC.test(lastSegment(e.path).normalize('NFKC').trim()) && parent !== undefined && parent.parse.volume !== null;
+  const generic = GENERIC_DISC.test(lastSegment(e.path).normalize('NFKC').trim()) && parent !== undefined && parent.parse.volume !== null &&
+    parent.parse.disc === null && parent.parse.box === null; // a parent naming a disc or box too is no single-disc release (W2)
   const own = generic
     ? [...named.filter((p) => p.own), { ...parent, own: true, parse: { ...parent.parse, disc: null } }]
     : named.filter((p) => p.own);
@@ -558,7 +567,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const via = (['disc-title', 'folder', 'discdb'] as const).filter((k) => best.kinds.has(k));
   const ownVolumes = new Set(own.map((p) => p.parse.volume).filter((n): n is number => n !== null));
   const ownDiscs = new Set(own.map((p) => p.parse.disc).filter((n): n is number => n !== null));
-  const base = { e, entry: best.entry, season, bonus, via, filmLike: filmTwinned.has(best.entry.id), unplaceable: false };
+  const base = { e, entry: best.entry, season, bonus, via, filmLike: filmTwinned.has(best.entry.id), unplaceable: false, fromParent: false };
   // inside a box, a name with a volume and a disc number has three numbers and no rule to place it by (F2)
   if (box !== null && own.some((p) => p.parse.volume !== null && p.parse.disc !== null)) {
     return { ...base, disc: null, box, volumeBox: false, family: boxFamily(e.path, false), numberFrom: null, unplaceable: true };
@@ -577,7 +586,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     : null;
   return {
     ...base, disc: numbers.size === 1 ? [...numbers][0]! : null, box: box ?? volume,
-    volumeBox: volume !== null, family: boxFamily(e.path, volume !== null),
+    volumeBox: volume !== null, family: boxFamily(e.path, volume !== null), fromParent: generic && numbers.size === 1,
     numberFrom: numbers.size !== 1 ? null : ownVolumes.size > 0 ? 'volume' : 'disc',
   };
 }
@@ -646,10 +655,17 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
   // be right, since `Disc 1` says Volume 1 has more discs (ruling M5b)
   const kinds = new Map<string, Set<string>>();
   for (const { p } of numbered) kinds.set(slotKey(p), (kinds.get(slotKey(p)) ?? new Set()).add(kind(p)));
+  // a generic disc folder takes its release folder's volume only as that release's single disc: once any of those
+  // folders holds another disc of the entry, no disc numbered so keeps its number (W3)
+  const shared = new Set<string>();
+  for (const p of pending) {
+    if (p.fromParent && pending.some((q) => q !== p && !q.bonus && q.entry.id === p.entry.id && q.group === p.group)) shared.add(slotKey(p));
+  }
   return out.map((m) => {
     if (m.status !== 'filed' || m.disc === null || m.bonus) return m;
     const p = byId.get(m.discId)!;
-    return clashing.has(`${slotKey(p)}\u0000${origin(p)}`) || kinds.get(slotKey(p))!.size > 1 ? unnumbered(p) : m;
+    const mixed = clashing.has(`${slotKey(p)}\u0000${origin(p)}`) || kinds.get(slotKey(p))!.size > 1;
+    return mixed || (p.fromParent && shared.has(slotKey(p))) ? unnumbered(p) : m;
   });
 }
 
@@ -786,12 +802,13 @@ function halves(candidates: readonly string[]): [string, string][] {
   return candidates.flatMap((c, i): [string, string][] => (japaneseHalf(candidates, i) ? [[candidates[0]!, c], [c, candidates[0]!]] : []));
 }
 
-/** Whether a folder name carries the anime tag, `[アニメ]` or `[Anime]`, alone or among other tags in its brackets (M8). */
+/** Whether a folder name carries the anime tag, `[アニメ]` or `[Anime]`, alone or among other tags in its brackets (M8, W4). */
 function animeTagged(segment: string): boolean {
-  for (const m of segment.normalize('NFKC').matchAll(/[[【]([^\]】]*)[\]】]/g)) {
-    if ((m[1] ?? '').split(/[+\s,/&]+/).some((t) => t === 'アニメ' || t.toLowerCase() === 'anime')) return true;
-  }
-  return false;
+  // a bracket of tags only (`[Not Anime]` doesn't count), with no other genre beside it in any of the folder's
+  // brackets (`[Anime+Drama]`, `[アニメ][特撮]` don't count, W4)
+  const brackets = [...segment.normalize('NFKC').matchAll(/[[【]([^\]】]*)[\]】]/g)].map((m) => (m[1] ?? '').split(/[+\s,/&]+/).filter((t) => t !== ''));
+  if (brackets.some((tokens) => tokens.some((t) => OTHER_GENRES.test(t)))) return false;
+  return brackets.some((tokens) => tokens.some((t) => t === 'アニメ' || t.toLowerCase() === 'anime') && tokens.every(isTagWord));
 }
 
 /** Whether two AniList entries are tied by a story link, in either direction. */
