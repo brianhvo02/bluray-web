@@ -60,6 +60,7 @@ function toEntry(m: Media): Entry {
     kind: m.format === 'MOVIE' ? 'movie' : 'series',
     format: m.format ?? null,
     names: { english: m.title?.english ?? null, romaji: m.title?.romaji ?? null, native: m.title?.native ?? null, synonyms: m.synonyms ?? [] },
+    animation: true,
     year: m.startDate?.year ?? null,
     episodes: m.episodes ?? null,
     runtimeMin: m.duration ?? null,

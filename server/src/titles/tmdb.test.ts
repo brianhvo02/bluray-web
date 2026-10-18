@@ -37,6 +37,7 @@ describe('createTmdb', () => {
         kind: 'series',
         format: null,
         names: { english: 'Starfall Wanderer', romaji: null, native: '星降りの旅人', synonyms: [] },
+        animation: true,
         year: 2023,
         episodes: null,
         runtimeMin: null,
@@ -52,7 +53,7 @@ describe('createTmdb', () => {
     const { fetch, urls } = fakeTmdb({ '/3/search/movie': () => json(fixture('tmdb-search-movie.json')) });
     const entries = await createTmdb(fetch, pacer(), KEY).search('Lanternfall', { kind: 'movie', year: 2019 });
     expect(urls[0]!.searchParams.get('year')).toBe('2019');
-    expect(entries).toMatchObject([{ id: 'tmdb-movie:990201', kind: 'movie', year: 2019, names: { english: 'Lanternfall', native: 'Lanternfall' } }]);
+    expect(entries).toMatchObject([{ id: 'tmdb-movie:990201', kind: 'movie', year: 2019, names: { english: 'Lanternfall', native: 'Lanternfall' }, animation: false }]);
   });
 
   it('searches both kinds through search/multi and leaves out people', async () => {
@@ -82,6 +83,13 @@ describe('createTmdb', () => {
     });
   });
 
+  it('marks animation from genre 16 in genre_ids or genres', async () => {
+    const { fetch } = fakeTmdb({ '/3/tv/990101': () => json(fixture('tmdb-tv.json')) });
+    expect((await createTmdb(fetch, pacer(), KEY).entry('tmdb-tv:990101'))?.animation).toBe(true);
+    const drama = fakeTmdb({ '/3/tv/1': () => json({ id: 1, name: 'Glass Orchard', genres: [{ id: 18, name: 'Drama' }] }) });
+    expect((await createTmdb(drama.fetch, pacer(), KEY).entry('tmdb-tv:1'))?.animation).toBe(false);
+  });
+
   it("falls back to the last aired episode's runtime, then to null", async () => {
     const tv = fixture('tmdb-tv.json') as Record<string, unknown>;
     const { fetch } = fakeTmdb({
@@ -106,7 +114,8 @@ describe('createTmdb', () => {
   it('reads a movie entry with its runtime', async () => {
     const { fetch } = fakeTmdb({ '/3/movie/990201': () => json(fixture('tmdb-movie.json')) });
     const entry = await createTmdb(fetch, pacer(), KEY).entry('tmdb-movie:990201');
-    expect(entry).toMatchObject({ id: 'tmdb-movie:990201', kind: 'movie', year: 2019, runtimeMin: 118, episodes: null, seasons: [] });
+    // the fixture has no genres: unknown, not live action
+    expect(entry).toMatchObject({ id: 'tmdb-movie:990201', kind: 'movie', year: 2019, runtimeMin: 118, episodes: null, seasons: [], animation: null });
   });
 
   it('answers null for an unknown id and for an id of another source', async () => {

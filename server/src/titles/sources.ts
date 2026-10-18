@@ -15,6 +15,8 @@ export interface Entry {
   readonly kind: 'series' | 'movie';
   readonly format: string | null; // AniList TV/TV_SHORT/MOVIE/OVA/ONA/SPECIAL
   readonly names: EntryNames;
+  /** Animated: TMDB's Animation genre (16), null when TMDB gave no genres; always true on AniList. */
+  readonly animation: boolean | null;
   readonly year: number | null;
   readonly episodes: number | null;
   readonly runtimeMin: number | null;

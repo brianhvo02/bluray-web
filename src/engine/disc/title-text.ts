@@ -26,11 +26,13 @@ export function normalizeTitle(text: string): string {
 }
 
 /**
- * NFKC, lower case, and punctuation, symbols and spaces removed, with no vowel or kana folding: the matcher's test for an
- * exact fit, since `normalizeTitle`'s folding merges some different titles (`Good`/`God`, `Soul`/`Sol`).
+ * NFKC and lower case, with only spaces, separators (`. , : ; _ · ・ /`, dashes) and brackets removed, and no vowel or
+ * kana folding: the matcher's test for an exact fit, since `normalizeTitle`'s folding merges some different titles
+ * (`Good`/`God`, `Soul`/`Sol`). Marks that tell titles apart (`' ’ ′ ° ! ? ☆ ★ ♪ +`) are kept, so `Glimmer'` is not
+ * `Glimmer`.
  */
 export function normalizeStrict(text: string): string {
-  return text.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\p{Z}\s]+/gu, '');
+  return text.normalize('NFKC').toLowerCase().replace(/[\s\p{Z}.,:;_·・/\p{Pd}\p{Ps}\p{Pe}]+/gu, '');
 }
 
 /**

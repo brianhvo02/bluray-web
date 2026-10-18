@@ -48,7 +48,15 @@ describe('titleMatches', () => {
 
 describe('normalizeStrict', () => {
   it('applies NFKC, lower-cases and removes spaces and punctuation', () => {
-    expect(normalizeStrict("Ｓｔａｒｆａｌｌ: Wanderer's End!")).toBe('starfallwanderersend');
+    expect(normalizeStrict('Ｓｔａｒｆａｌｌ: Wanderer · End')).toBe('starfallwandererend');
+    expect(normalizeStrict('[Star-fall] (Wan/der_er); 1.2, 3')).toBe('starfallwanderer123');
+  });
+
+  it("keeps title-significant marks: ' ’ ′ ° ! ? ☆ ★ ♪ ＋ +", () => {
+    expect(normalizeStrict("Glimmer'")).not.toBe(normalizeStrict('Glimmer'));
+    expect(normalizeStrict("Wanderer's End!")).toBe("wanderer'send!");
+    for (const mark of ['’', '′', '°', '!', '?', '☆', '★', '♪', '+']) expect(normalizeStrict(`Spark${mark}`)).toBe(`spark${mark}`);
+    expect(normalizeStrict('Spark＋')).toBe('spark+');
   });
 
   it('does not fold long vowels', () => {

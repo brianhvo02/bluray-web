@@ -56,26 +56,46 @@ const YEAR_SLACK = 1;
 const MAX_SUGGESTIONS = 3;
 /** Folder evidence goes at most this many folders above the disc folder (ruling T5f). */
 const MAX_ANCESTORS = 2;
+/**
+ * Folders this many levels above the disc folder or more (above its parent) may support a match but are never its only
+ * evidence (ruling T5n).
+ */
+const FAR_ANCESTOR = 2;
 /** Folders at this depth or above (the root's top-level folders) are category-like and never evidence. */
 const TOP_LEVEL_DEPTH = 0;
 /** Prequel links followed to find an AniList entry's place in its chain. */
 const MAX_CHAIN = 20;
 
-/** Category folder names that are never candidates (ruling T5f). */
-const CATEGORY_FOLDERS = new Set([
-  'Movies', 'Films', 'TV', 'TV Shows', 'Series', 'Anime', 'Documentaries', 'Docs', 'Music', 'Concerts', 'Live', 'Downloads',
-  'BDMVs', 'Blu-ray', 'BluRay', 'UHD', '4K', 'Kids', 'Family', '映画', 'アニメ', 'ドラマ', '音楽',
+/** Category names that are never candidates, in folder names or disc titles (rulings T5f, T5n). */
+const CATEGORIES = new Set([
+  'Film', 'Films', 'Movie', 'Movies', 'TV', 'TV Shows', 'Show', 'Shows', 'Series', 'Drama', 'Dramas', 'Anime', 'Animation', 'Animated',
+  'Documentaries', 'Docs', 'Music', 'Concerts', 'Live', 'Video', 'Videos', 'Media', 'Collection', 'Collections', 'Library', 'Misc',
+  'Other', 'Others', 'New', 'Old', 'Archive', 'Backup', 'Rips', 'Remux', 'Downloads', 'Discs', 'BDMVs', 'Blu-ray', 'Blu-rays',
+  'BluRay', 'BD', 'DVD', 'UHD', '4K', 'Kids', 'Family', '映画', 'アニメ', 'ドラマ', '音楽', '特撮',
 ].map(normalizeStrict));
 
 /** `Vol.1-6`, `Disc 1~4`-like folder notes: the release's disc count. */
 const RELEASE_COUNT = /(?:\bvol(?:ume)?|\bdis[ck]|\bbd)\.?\s*0*1\s*[-~〜]\s*0*(\d{1,2})\b/i;
-const JAPANESE_TEXT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
-const JAPANESE_RELEASE = /\[BDMV\]|\bJPN\b/i;
 const MACRON = /[āīūēō]/;
 const MACRONS: Readonly<Record<string, string>> = { ā: 'a', ī: 'i', ū: 'u', ē: 'e', ō: 'o' };
 const ASCII = /^[\x00-\x7f]*$/;
-/** Sequel markers in an AniList name: `Part 2`, `II`, `2nd Season`, `Season 2`, `第2期` (the last three via parseName). */
-const SEQUEL_MARK = /\bpart\s*0*(?:[2-9]|\d{2,})\b|\b(?:II|III|IV)\b/;
+/**
+ * Sequel markers in an AniList name, besides the seasons parseName reads (`2nd Season`, `Season 2`, `第2期`): `Part N`,
+ * `Final Season`, `Second Season`, `Cour N`, `Nth Cour`, `第Nクール` (N > 1), `Zoku`, `続`, `完結編` (rulings T5i, N8).
+ */
+const SEQUEL_MARK = new RegExp([
+  '\\bpart\\s*0*(?:[2-9]|\\d{2,})\\b',
+  '\\bfinal\\s+season\\b',
+  '\\b(?:second|third|fourth|fifth)\\s+(?:season|cour)\\b',
+  '\\bcour\\s*0*(?:[2-9]|\\d{2,})\\b',
+  '\\b(?:[2-9]|\\d{2,})(?:nd|rd|th)\\s+cour\\b',
+  '第\\s*0*(?:[2-9]|\\d{2,})\\s*クール',
+  '\\bzoku\\b',
+  '(?:^|[\\s・:])続(?=[\\s・:]|$)',
+  '完結編',
+].join('|'), 'i');
+/** Roman sequel numerals, upper case only so that words aren't taken for them. */
+const SEQUEL_ROMAN = /\b(?:II|III|IV)\b/;
 const TV_FORMATS = new Set(['TV', 'TV_SHORT']);
 
 /** The parent folder path of the disc folder or ISO. */
@@ -88,6 +108,7 @@ export function groupKey(e: DiscEvidence): string {
 interface Piece {
   readonly kind: Via;
   readonly own: boolean; // the disc's own title or folder, not an ancestor's
+  readonly far: boolean; // a folder FAR_ANCESTOR or more levels above the disc folder
   readonly parse: ParsedName;
   readonly found: Entry[];
   readonly hit?: DiscDbHit;
@@ -164,19 +185,13 @@ function musicRelease(e: DiscEvidence): string | null {
   return segs.slice(0, parentIsShelf ? segs.length : segs.length - 1).join('/');
 }
 
-/** A folder name's parse, without candidates that are category folder names. */
-function folderParse(segment: string): ParsedName {
-  const parse = parseName(segment);
-  return { ...parse, candidates: parse.candidates.filter((c) => !CATEGORY_FOLDERS.has(normalizeStrict(c))) };
+/** A folder name's or disc title's parse, without candidates that are category names. */
+function nameParse(text: string): ParsedName {
+  const parse = parseName(text);
+  return { ...parse, candidates: parse.candidates.filter((c) => !CATEGORIES.has(normalizeStrict(c))) };
 }
 
 async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: MatchContext, entries: Map<string, Entry>): Promise<{ done: DiscMatch[]; pending: Pending[] }> {
-  // AniList is asked for every candidate; TMDB too, unless the evidence looks Japanese (Japanese text, a Japanese
-  // release pattern or label) and AniList has an exact fit (ruling T5g)
-  const japanese = discs.some((e) =>
-    e.segments.some((s) => JAPANESE_TEXT.test(s) || JAPANESE_RELEASE.test(s)) ||
-    e.discTitles.some((t) => t.lang.toLowerCase() === 'jpn' || JAPANESE_TEXT.test(t.name)));
-
   const search = async (source: string, src: MetadataSource, query: string, year: number | null): Promise<Entry[]> => {
     const key = `${source}:${normalizeTitle(query)}${year === null ? '' : `:${year}`}`;
     let hit = ctx.cache.get(key);
@@ -186,15 +201,13 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
     }
     return hit;
   };
+  /** Every candidate on AniList, and on TMDB too when there is a key, so a same-titled live-action entry is seen (T5m). */
   const lookUp = async (parse: ParsedName): Promise<Entry[]> => {
     const found: Entry[] = [];
-    const years = parse.year === null ? [] : [parse.year];
     for (const cand of parse.candidates) {
       if (normalizeTitle(cand) === '') continue;
-      const a = await search('anilist', ctx.anilist, cand, parse.year);
-      found.push(...a);
-      const anilistExact = a.some((en) => yearFits(en, years) && quality(en, cand, parse.season) === EXACT);
-      if (ctx.tmdb && (!japanese || !anilistExact)) found.push(...(await search('tmdb', ctx.tmdb, cand, parse.year)));
+      found.push(...(await search('anilist', ctx.anilist, cand, parse.year)));
+      if (ctx.tmdb) found.push(...(await search('tmdb', ctx.tmdb, cand, parse.year)));
     }
     return found;
   };
@@ -205,9 +218,9 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
   const ancestors: Piece[] = [];
   const ancestorText: string[] = [];
   for (let i = segs.length - 2; i > TOP_LEVEL_DEPTH && i >= segs.length - 1 - MAX_ANCESTORS; i--) {
-    const parse = folderParse(segs[i]!);
+    const parse = nameParse(segs[i]!);
     const found = await lookUp(parse);
-    ancestors.push({ kind: 'folder', own: false, parse, found });
+    ancestors.push({ kind: 'folder', own: false, far: segs.length - 1 - i >= FAR_ANCESTOR, parse, found });
     ancestorText.push(segs[i]!.normalize('NFKC'));
     if (found.some((en) => parse.candidates.some((c) => quality(en, c, parse.season) > 0))) break;
   }
@@ -219,11 +232,11 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
   for (const e of discs) {
     const own: Piece[] = [];
     for (const t of e.discTitles) {
-      const parse = parseName(t.name);
-      own.push({ kind: 'disc-title', own: true, parse, found: await lookUp(parse) });
+      const parse = nameParse(t.name);
+      own.push({ kind: 'disc-title', own: true, far: false, parse, found: await lookUp(parse) });
     }
-    const segParse = folderParse(e.segments[e.segments.length - 1] ?? '');
-    own.push({ kind: 'folder', own: true, parse: segParse, found: await lookUp(segParse) });
+    const segParse = nameParse(e.segments[e.segments.length - 1] ?? '');
+    own.push({ kind: 'folder', own: true, far: false, parse: segParse, found: await lookUp(segParse) });
     const named = [...own, ...ancestors];
 
     const hit = e.fingerprint ? ctx.discdb.lookup(e.fingerprint) : null;
@@ -232,7 +245,7 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
       // TheDiscDB's title is looked up only when nothing else names an entry: it confirms, or stands unopposed
       const parse = parseName(hit.title);
       const nothingElse = !named.some((p) => p.found.some((en) => fit(p, en, null) > 0));
-      pieces.push({ kind: 'discdb', own: true, parse, hit, found: nothingElse ? await lookUp(parse) : [] });
+      pieces.push({ kind: 'discdb', own: true, far: false, parse, hit, found: nothingElse ? await lookUp(parse) : [] });
     }
 
     const result = await decide(e, pieces, hit, ctx, entries);
@@ -260,10 +273,12 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const years = named.map((p) => p.parse.year).filter((y): y is number => y !== null);
   if (hit?.year != null) years.push(hit.year);
 
-  const candidates = new Map<string, Entry>();
-  for (const p of pieces) for (const en of p.found) if (yearFits(en, years)) candidates.set(en.id, en);
+  // everything the lookups found, before the year, season and format filters
+  const all = new Map<string, Entry>();
+  for (const p of pieces) for (const en of p.found) all.set(en.id, en);
   let scored: Scored[] = [];
-  for (const en of candidates.values()) {
+  for (const en of all.values()) {
+    if (!yearFits(en, years)) continue;
     let score = 0;
     let exact = false;
     const kinds = new Set<Via>();
@@ -276,9 +291,19 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     }
     if (score > 0) scored.push({ entry: en, score, exact, kinds });
   }
-  // a TMDB entry that is the twin of an exactly fitting AniList entry is the same title: AniList's id wins (ruling T5g)
-  const anilistExact = scored.filter((s) => s.entry.source === 'anilist' && s.exact);
-  scored = scored.filter((s) => !(s.entry.source === 'tmdb' && anilistExact.some((a) => twins(a.entry, s.entry))));
+  // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year, is
+  // its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
+  // evidence may be that one (rulings T5g, T5m)
+  const anilistExact = scored.filter((s) => s.entry.source === 'anilist' && s.exact).map((s) => s.entry);
+  let twinIds = new Set<string>();
+  let notTwins: Entry[] = [];
+  if (anilistExact.length > 0) {
+    const titles = named.flatMap((p) => p.parse.candidates);
+    const sameTitled = [...all.values()].filter((en) => en.source === 'tmdb' && names(en).some((n) => titles.some((c) => sameTitle(c, n))));
+    notTwins = sameTitled.filter((t) => !anilistExact.some((a) => twins(a, t)));
+    if (notTwins.length === 0) twinIds = new Set(sameTitled.map((t) => t.id));
+  }
+  scored = scored.filter((s) => !twinIds.has(s.entry.id));
   if (scored.length === 0) return unsorted('no-title', []);
 
   const compat = new Map<string, Compat>();
@@ -289,14 +314,18 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const best = fitting[0]!;
   const ranked = fitting.map((s) => s.entry);
 
-  // two pieces of evidence naming different entries is a disagreement, never a pick (rulings T5b, T5d): counted over
-  // every entry that fits, whatever its season, so a season filter can't hide it; a TheDiscDB hit that names none of
-  // the entries found counts too
+  // two pieces of evidence naming different entries is a disagreement, never a pick (rulings T5b, T5d, T5l): counted
+  // over everything the lookups found, before the year, season and format filters, so no filter can hide it (twins
+  // dropped above are the best entry's own title); a TheDiscDB hit that names none of the entries found counts too
+  const universe = [...all.values()].filter((en) => !twinIds.has(en.id));
   const disagree = pieces.some((p) => {
-    const fits = scored.filter((s) => fit(p, s.entry, fitSeason) > 0).map((s) => s.entry);
+    const fits = universe.filter((en) => fit(p, en, fitSeason) > 0);
     return fits.length > 0 ? !fits.includes(best.entry) : p.kind === 'discdb';
   });
-  if (disagree) return unsorted('sources-disagree', [...ranked, ...scored.map((s) => s.entry)]);
+  if (disagree) return unsorted('sources-disagree', [...ranked, ...universe.filter((en) => pieces.some((p) => fit(p, en, fitSeason) > 0))]);
+  // a folder above the disc folder's parent may support a match but is never its only evidence (ruling T5n)
+  if (!pieces.some((p) => !p.far && fit(p, best.entry, fitSeason) > 0)) return unsorted('no-title', [best.entry]);
+  if (notTwins.length > 0) return unsorted('several-fit', [...ranked, ...notTwins]);
   // rule 1: exactly one entry fits, and no other comes close; AniList and TMDB each fitting exactly, without being
   // twins, fit different things
   const close = fitting.slice(1).some((s) => s.score >= best.score * COMES_CLOSE_RATIO || (s.exact && s.entry.source !== best.entry.source));
@@ -426,9 +455,12 @@ function yearFits(en: Entry, years: readonly number[]): boolean {
   return en.year === null || years.length === 0 || years.some((y) => Math.abs(y - en.year!) <= YEAR_SLACK);
 }
 
-/** An AniList entry and a TMDB entry for the same title: a strictly equal name, the same kind, years within YEAR_SLACK. */
+/**
+ * An AniList entry and a TMDB entry for the same title: TMDB marks it animated, a strictly equal name, the same kind,
+ * years within YEAR_SLACK.
+ */
 function twins(a: Entry, t: Entry): boolean {
-  if (a.kind !== t.kind || a.year === null || t.year === null || Math.abs(a.year - t.year) > YEAR_SLACK) return false;
+  if (t.animation !== true || a.kind !== t.kind || a.year === null || t.year === null || Math.abs(a.year - t.year) > YEAR_SLACK) return false;
   return names(a).some((x) => names(t).some((y) => sameTitle(x, y)));
 }
 
@@ -453,7 +485,8 @@ async function anilistPlace(en: Entry, ctx: MatchContext): Promise<{ place: numb
   const named = seen.size === 1 ? [...seen][0]! : null;
   const tvPrequels = (x: Entry) => x.relations.filter((r) => r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? ''));
   if (tvPrequels(en).length === 0) {
-    const sequel = seen.size > 1 || (named !== null && named > 1) || names(en).some((n) => SEQUEL_MARK.test(n));
+    const sequel = seen.size > 1 || (named !== null && named > 1) ||
+      names(en).some((n) => SEQUEL_MARK.test(n.normalize('NFKC')) || SEQUEL_ROMAN.test(n.normalize('NFKC')));
     return { place: sequel ? null : 1, named };
   }
   let cur = en;

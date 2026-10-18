@@ -26,7 +26,12 @@ interface Show {
   readonly runtime?: number | null;
   readonly last_episode_to_air?: { readonly runtime?: number | null } | null;
   readonly seasons?: readonly { readonly season_number: number; readonly episode_count: number }[] | null;
+  readonly genre_ids?: readonly number[] | null; // search results
+  readonly genres?: readonly { readonly id: number }[] | null; // entries
 }
+
+/** TMDB's Animation genre. */
+const ANIMATION = 16;
 
 const yearOf = (date: string | null | undefined): number | null => {
   const m = /^(\d{4})-/.exec(date ?? '');
@@ -43,6 +48,7 @@ function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
     kind,
     format: null,
     names: { english: (tv ? s.name : s.title) ?? null, romaji: null, native: (tv ? s.original_name : s.original_title) ?? null, synonyms: [] },
+    animation: s.genre_ids ? s.genre_ids.includes(ANIMATION) : s.genres ? s.genres.some((g) => g.id === ANIMATION) : null,
     year: yearOf(tv ? s.first_air_date : s.release_date),
     episodes: tv ? (s.number_of_episodes ?? null) : null,
     runtimeMin: runtimeMin || null,
