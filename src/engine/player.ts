@@ -807,7 +807,7 @@ export class Player {
           status: early.status.buffer,
           plane: early.plane.buffer,
           disc: this.discSpec,
-          readAheadBytes: this.memory.remoteReadAheadBytes,
+          readAheadBytes: this.memory.bdjRemoteReadAheadBytes,
           discId: bdid?.discId ?? null,
           classLibrary,
           memory: this.bdjBudgets(),
@@ -948,7 +948,7 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
-    await entry.session.boot(this.discSpec, this.memory.remoteReadAheadBytes, this.bdjDiscId, classes);
+    await entry.session.boot(this.discSpec, this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
     if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();

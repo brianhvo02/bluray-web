@@ -25,7 +25,7 @@ export type ToBdj =
       readonly plane: SharedArrayBuffer;
       /** Picked files, or a disc on the NAS (or the dev disc server), which the BD-J worker reads with its own RemoteSource. */
       readonly disc: DiscSpec;
-      /** A NAS disc's read-ahead budget (the engine's memory profile). */
+      /** The BD-J worker's read-ahead budget for a NAS disc (the memory profile's bdjRemoteReadAheadBytes). */
       readonly readAheadBytes: number;
       readonly discId: string | null;
       readonly classLibrary: ClassLibrarySource;

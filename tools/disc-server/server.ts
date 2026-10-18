@@ -7,7 +7,7 @@
  *
  *   npm run disc-server -- --root <dir> [--root <dir>…] [--port 8443] [--cert cert.pem --key key.pem] [--dist dist]
  *
- * Node built-ins only. See README.md.
+ * Node built-ins and the NAS server's own modules. See README.md.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -227,6 +227,26 @@ function discEntry(disc: Disc): DiscEntry {
   return { id: disc.id, name: disc.name, path: disc.path, kind: 'folder', sizeBytes: discBytes(disc.dir) };
 }
 
+/** The Vite dev server's port (`npm run dev`), whose pages may read the API across origins. */
+export const VITE_DEV_PORT = '5173';
+
+/**
+ * Whether a page at `origin` may read the API: the server's own origin (`own`, from the request's Host), or the Vite dev
+ * server on loopback or this home network (`http(s)://localhost|<private address>:5173`).
+ */
+export function corsAllowed(origin: string, own: string | null): boolean {
+  if (own !== null && origin === own) return true;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.origin !== origin || (url.protocol !== 'http:' && url.protocol !== 'https:') || url.port !== VITE_DEV_PORT) return false;
+  const host = url.hostname.replace(/^\[(.*)\]$/, '$1');
+  return host === 'localhost' || isLocalAddress(host);
+}
+
 /** First 4 MiB of the largest clip, as the NAS's probe route sends it (the pre-flight throughput check). */
 const PROBE_BYTES = 4_194_304;
 
@@ -329,11 +349,15 @@ export function createDiscHandler(options: DiscHandlerOptions): RequestListener 
       return serveApp(req, res, distDir, segments);
     }
 
-    // CORS, so a player served elsewhere on the LAN (the Vite dev server) can open discs too; the token still gates every read
+    // CORS, so the Vite dev server on this Mac or the LAN can open discs too (the token still gates every read); any other
+    // origin gets no Access-Control-Allow-Origin, so a page elsewhere cannot read the API even with a token
     const origin = req.headers.origin;
-    const cors: Record<string, string> = origin
-      ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin', 'Access-Control-Expose-Headers': 'Content-Range, Content-Length, Accept-Ranges' }
-      : {};
+    const own = req.headers.host ? `${(req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http'}://${req.headers.host}` : null;
+    const cors: Record<string, string> = { Vary: 'Origin' };
+    if (origin && corsAllowed(origin, own)) {
+      cors['Access-Control-Allow-Origin'] = origin;
+      cors['Access-Control-Expose-Headers'] = 'Content-Range, Content-Length, Accept-Ranges';
+    }
     for (const [name, value] of Object.entries(cors)) res.setHeader(name, value);
     if (req.method === 'OPTIONS') {
       res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, HEAD', 'Access-Control-Allow-Headers': 'Authorization, Range', 'Access-Control-Max-Age': '600' });

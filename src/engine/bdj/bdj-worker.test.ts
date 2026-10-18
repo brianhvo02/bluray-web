@@ -4,7 +4,9 @@ import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { createDiscHandler, discApiBase, findDiscs } from '../../../tools/disc-server/server';
+import { BDJ_REMOTE_CHUNK_BYTES, BDJ_REMOTE_IN_FLIGHT } from '../disc/disc-spec';
 import type { DiscManifest } from '../disc/nas-api';
+import { fakeNas } from '../../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries } from '../../../tests/helpers/synthetic-disc';
 import { runBdjWorker, type BdjPort } from './bdj-worker';
@@ -111,5 +113,51 @@ describe('runBdjWorker', () => {
       server.closeAllConnections();
       server.close();
     }
+  }, 90_000);
+
+  it("reads a NAS disc with the BD-J worker's own read-ahead: 512 KiB requests, at most 2 at once (ruling R20)", async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc-bdj'));
+    const ranges: number[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const m = /^bytes=(\d+)-(\d+)$/.exec(new Headers(init?.headers).get('Range') ?? '');
+      if (m) ranges.push(Number(m[2]) - Number(m[1]) + 1);
+      maxInFlight = Math.max(maxInFlight, ++inFlight);
+      try {
+        return await nas.fetch(input, init);
+      } finally {
+        inFlight--;
+      }
+    }) as typeof globalThis.fetch;
+    const received: FromBdj[] = [];
+    const port: BdjPort = {
+      onmessage: null,
+      postMessage: (m) => {
+        received.push(m);
+        if (m.type === 'call') setTimeout(() => port.onmessage!({ data: { type: 'reply', id: m.id, value: 0 } }), 0);
+      },
+    };
+    runBdjWorker(port, { fetch });
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        disc: nas.spec,
+        readAheadBytes: 1024 * 1024,
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+      },
+    });
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+    port.onmessage!({ data: { type: 'start', title: 0xffff } });
+    await vi.waitFor(() => expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(true), { timeout: 60_000 });
+    expect(received.some((m) => m.type === 'failed')).toBe(false);
+    expect(nas.requested).toContain('BDMV/JAR/00000.JAR');
+    expect(ranges.length).toBeGreaterThan(0);
+    expect(Math.max(...ranges)).toBeLessThanOrEqual(BDJ_REMOTE_CHUNK_BYTES);
+    expect(maxInFlight).toBeLessThanOrEqual(BDJ_REMOTE_IN_FLIGHT);
   }, 90_000);
 });

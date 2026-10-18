@@ -37,6 +37,11 @@ export interface MemoryProfile {
   readonly bdjDecodedImageBytes: number;
   /** A NAS disc's read-ahead: bytes fetched ahead of playback and kept. */
   readonly remoteReadAheadBytes: number;
+  /**
+   * The BD-J worker's own read-ahead of a NAS disc (ruling R20): it reads JARs and metadata files, not streams, so it
+   * holds far less than the engine's playback read-ahead.
+   */
+  readonly bdjRemoteReadAheadBytes: number;
 }
 
 export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>> = {
@@ -53,6 +58,7 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     bdjVfsCacheBytes: Infinity,
     bdjDecodedImageBytes: 64 * MB,
     remoteReadAheadBytes: 128 * MB,
+    bdjRemoteReadAheadBytes: 16 * MB,
   },
   constrained: {
     igPreloadLimitBytes: 64 * MB,
@@ -67,5 +73,6 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     // two 1920x1080 stills (7.9 MB each) while one replaces the other
     bdjDecodedImageBytes: 16 * MB,
     remoteReadAheadBytes: 48 * MB,
+    bdjRemoteReadAheadBytes: 8 * MB,
   },
 };

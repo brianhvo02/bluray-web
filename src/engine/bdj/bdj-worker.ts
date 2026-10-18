@@ -7,7 +7,7 @@
  */
 
 import type { Clpi } from '../bdmv/clpi-parser';
-import { createByteSource } from '../disc/disc-spec';
+import { BDJ_REMOTE_CHUNK_BYTES, BDJ_REMOTE_IN_FLIGHT, createByteSource } from '../disc/disc-spec';
 import { TokenRelay } from '../disc/http-transport';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
@@ -163,7 +163,15 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     const t0 = performance.now();
     try {
       const fetchFn = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
-      const disc = createByteSource(m.disc, { fetch: fetchFn, readAheadBytes: m.readAheadBytes, onWaiting: () => undefined, refreshToken: () => tokens.request() });
+      // the BD-J read-ahead budget (memory profile bdjRemoteReadAheadBytes), in BD-J-sized requests (ruling R20)
+      const disc = createByteSource(m.disc, {
+        fetch: fetchFn,
+        readAheadBytes: m.readAheadBytes,
+        chunkBytes: BDJ_REMOTE_CHUNK_BYTES,
+        inFlight: BDJ_REMOTE_IN_FLIGHT,
+        onWaiting: () => undefined,
+        refreshToken: () => tokens.request(),
+      });
       if (disc instanceof RemoteSource) {
         remote = disc;
         if (latestToken !== null) disc.setToken(latestToken);

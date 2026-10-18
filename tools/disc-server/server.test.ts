@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createByteSource } from '../../src/engine/disc/disc-spec';
 import type { DiscManifest, LibraryListing } from '../../src/engine/disc/nas-api';
 import { openDisc } from '../../src/engine/disc/open-disc';
-import { createDiscHandler, discApiBase, findDiscs, isLocalAddress, parseRange } from './server';
+import { corsAllowed, createDiscHandler, discApiBase, findDiscs, isLocalAddress, parseRange } from './server';
 
 const TOKEN = 'test-token-0123456789';
 const GIB = 1024 ** 3;
@@ -290,6 +290,29 @@ describe('disc server (the NAS disc API)', () => {
     expect(g.headers['access-control-allow-origin']).toBe('http://localhost:5173');
     expect(g.headers['access-control-expose-headers']).toMatch(/content-range/i);
     expect((await get('/', { origin: 'http://localhost:5173' }, 'OPTIONS')).status).toBe(405);
+  });
+
+  it('lets only its own origin and the Vite dev server read the API across origins', async () => {
+    const base = await bigDisc();
+    for (const origin of ['https://192.168.1.5:5173', 'http://127.0.0.1:5173', `http://127.0.0.1:${port}`]) {
+      const r = await get(`${base}manifest`, { ...auth, origin });
+      expect(r.headers['access-control-allow-origin'], origin).toBe(origin);
+    }
+    for (const origin of ['https://evil.example', 'https://evil.example:5173', 'http://8.8.8.8:5173', 'http://localhost:4173', 'null']) {
+      const r = await get(`${base}manifest`, { ...auth, origin });
+      expect(r.headers['access-control-allow-origin'], origin).toBeUndefined();
+      const p = await get(`${base}manifest`, { origin, 'access-control-request-method': 'GET' }, 'OPTIONS');
+      expect(p.headers['access-control-allow-origin'], origin).toBeUndefined();
+    }
+  });
+
+  it('corsAllowed: own origin, or port 5173 on loopback or a private address', () => {
+    expect(corsAllowed('https://10.0.0.2:8443', 'https://10.0.0.2:8443')).toBe(true);
+    expect(corsAllowed('http://[::1]:5173', null)).toBe(true);
+    expect(corsAllowed('http://localhost:5173', null)).toBe(true);
+    expect(corsAllowed('https://10.0.0.2:8443', 'https://10.0.0.3:8443')).toBe(false);
+    expect(corsAllowed('http://100.64.0.1:5173', null)).toBe(false);
+    expect(corsAllowed('not a url', null)).toBe(false);
   });
 });
 

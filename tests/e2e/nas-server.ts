@@ -6,7 +6,7 @@
  */
 import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, request, type IncomingHttpHeaders, type OutgoingHttpHeaders } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -24,6 +24,53 @@ export const NAS_ROOT = join(NAS_E2E_DIR, 'syn');
 export const CHANGED_FOLDER = 'changed';
 export const PROJECTS = ['chromium', 'firefox', 'webkit'] as const;
 export const SERVER = join(REPO, 'server/dist/server.mjs');
+
+/**
+ * The production CORS policy (src/engine/disc/cors-policy.ts) allows the preview on localhost:4173 only. When the
+ * preview runs on another port (E2E_PORT, a second checkout), the stand-ins below present the page's origin to the NAS
+ * server and the rendezvous Worker as 4173's, and the allowed origin they answer back as the page's: a test-only
+ * translation, so the deployed policy stays as it is. With E2E_PORT unset or 4173 nothing is rewritten.
+ */
+const POLICY_ORIGIN = 'http://localhost:4173';
+const PAGE_ORIGIN = `http://localhost:${process.env.E2E_PORT ?? 4173}`;
+const TRANSLATE = PAGE_ORIGIN !== POLICY_ORIGIN;
+/** Where the NAS server listens behind its stand-in when origins are translated. */
+const NAS_INNER_PORT = 4194;
+
+/** The page's origin as the policy knows it, for a request on its way in. */
+export function inboundOrigin(origin: string | undefined, page = PAGE_ORIGIN): string | undefined {
+  return origin === page ? POLICY_ORIGIN : origin;
+}
+
+/** The allowed origin of a response on its way out, back to the page's. */
+export function outboundAllowOrigin(allowed: string | undefined, page = PAGE_ORIGIN): string | undefined {
+  return allowed === POLICY_ORIGIN ? page : allowed;
+}
+
+function translatedRequestHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
+  const out: OutgoingHttpHeaders = { ...headers };
+  if (typeof headers.origin === 'string') out.origin = inboundOrigin(headers.origin);
+  return out;
+}
+
+/** NAS_PORT → the NAS server on NAS_INNER_PORT, streaming both ways, with the origins translated. */
+function startNasProxy(): void {
+  createServer((req, res) => {
+    const upstream = request(
+      { host: '127.0.0.1', port: NAS_INNER_PORT, method: req.method, path: req.url, headers: translatedRequestHeaders(req.headers) },
+      (answer) => {
+        const headers = { ...answer.headers };
+        const allowed = headers['access-control-allow-origin'];
+        if (typeof allowed === 'string') headers['access-control-allow-origin'] = outboundAllowOrigin(allowed);
+        res.writeHead(answer.statusCode ?? 502, headers);
+        answer.pipe(res);
+      },
+    );
+    upstream.on('error', () => (res.headersSent ? res.destroy() : res.writeHead(502).end()));
+    res.on('close', () => upstream.destroy());
+    req.pipe(upstream);
+  }).listen(NAS_PORT);
+}
 
 /** The server's environment, also what `server.mjs owner-code` needs to mint a code for it. */
 export const NAS_ENV: Readonly<Record<string, string>> = {
@@ -58,6 +105,8 @@ async function startRendezvous(): Promise<void> {
     req.on('end', () => {
       const headers = new Headers();
       for (const [name, value] of Object.entries(req.headers)) if (typeof value === 'string') headers.set(name, value);
+      const origin = inboundOrigin(req.headers.origin);
+      if (origin !== undefined) headers.set('Origin', origin);
       // Every request counts as a new client: a run pairs a browser for each test, far more than the 10 lookups a
       // minute one address gets (that limit is unit-tested in rendezvous/).
       client = (client + 1) % 65_536;
@@ -66,7 +115,10 @@ async function startRendezvous(): Promise<void> {
       const request = new Request(`${RENDEZVOUS_URL}${req.url ?? '/'}`, { method: req.method, headers, body });
       worker.fetch(request, env).then(
         async (response) => {
-          res.writeHead(response.status, Object.fromEntries(response.headers));
+          const out = Object.fromEntries(response.headers);
+          const allowed = outboundAllowOrigin(out['access-control-allow-origin']);
+          if (allowed !== undefined) out['access-control-allow-origin'] = allowed;
+          res.writeHead(response.status, out);
           res.end(Buffer.from(await response.arrayBuffer()));
         },
         (err: unknown) => {
@@ -84,7 +136,9 @@ async function main(): Promise<void> {
   cpSync(join(REPO, 'fixtures/synthetic'), NAS_ROOT, { recursive: true, preserveTimestamps: true });
   for (const project of PROJECTS) for (const name of [project, `${project}-open`]) restoreChangedDisc(name);
   await startRendezvous();
-  const server = spawn(process.execPath, [SERVER], { env: { ...process.env, ...NAS_ENV }, stdio: 'inherit' });
+  const env = { ...process.env, ...NAS_ENV, ...(TRANSLATE ? { PORT: String(NAS_INNER_PORT) } : {}) };
+  const server = spawn(process.execPath, [SERVER], { env, stdio: 'inherit' });
+  if (TRANSLATE) startNasProxy();
   server.on('exit', (code) => process.exit(code ?? 1));
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.kill(signal));
 }

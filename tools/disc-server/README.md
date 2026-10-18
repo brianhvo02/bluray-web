@@ -2,7 +2,7 @@
 
 Serves disc folders on this Mac to devices on the home network (iPhone, iPad, the iOS Simulator, other browsers), so a disc opens by URL instead of a folder pick. It also serves the built player from the same origin, so a device loads the app and the disc from one LAN URL in a secure, cross-origin-isolated context (SharedArrayBuffer needs both). Spec: `docs/superpowers/specs/2026-10-17-m5d-bdj-menus-design.md` §4.5. It speaks the NAS server's disc API (`docs/superpowers/specs/2026-10-17-nas-server-design.md`; ruling R19 of the 5d plan): the same library listing, manifest (with the metadata files inlined) and files route, so the player opens its discs through the same `RemoteSource` and `HttpTransport` as a NAS disc. Manifests, file resolution and range parsing are the NAS server's own code (`server/src/manifest.ts`, `server/src/ranges.ts`). Pairing, sessions, folders and ISO images are NAS-only: the dev server has one token per run and lists folder discs flat.
 
-Node built-ins only (run through `tsx`, already a devDependency).
+Node built-ins and the NAS server's own modules (`server/src/manifest.ts`, `server/src/ranges.ts`), run through `tsx` (already a devDependency).
 
 ## Run it
 
@@ -58,7 +58,7 @@ The token goes in `Authorization: Bearer <token>` (what the player sends for the
 - Paths with an empty, `.` or `..` segment, or with `/`, `\` or NUL once decoded, are refused (400). A file is only served if its real path (after links) is inside the disc folder.
 - Read-only: only `GET`, `HEAD` and the CORS preflight `OPTIONS` are answered.
 
-CORS: disc requests from another origin (the Vite dev server on this Mac, for example) get `Access-Control-Allow-Origin` for that origin, so `npm run dev` can open `?disc=https://<lan-ip>:8443/api/discs/<id>/&token=…` too. The token still gates every read.
+CORS: API requests from the Vite dev server (port 5173 on loopback or a private LAN address) get `Access-Control-Allow-Origin` for that origin, as do the server's own origin; any other origin gets none, so `npm run dev` can open `?disc=https://<lan-ip>:8443/api/discs/<id>/&token=…` too. The token still gates every read.
 
 ## Tests
 

@@ -221,7 +221,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await until(h, () => lastState(h) === 'playing' && playlistsPlayed(h).length > 0);
     expect(playlistsPlayed(h)).toEqual(['00000']);
     const boot = h.sent.find((m) => m.type === 'boot');
-    expect(boot).toMatchObject({ disc: { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/' }, readAheadBytes: 128 * 1024 * 1024 });
+    expect(boot).toMatchObject({ disc: { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/' }, readAheadBytes: 16 * 1024 * 1024 }); // the BD-J worker's own budget (R20)
     expect(h.requested).toContain('BDMV/JAR/00000.JAR'); // only the BD-J worker reads the jar
     expect(h.requested).toContain('BDMV/STREAM/00000.M2TS');
   }, 90_000);
