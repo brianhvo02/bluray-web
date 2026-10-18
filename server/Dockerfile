@@ -7,6 +7,8 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 COPY dist/server.mjs ./server.mjs
+# TheDiscDB index (MIT, see NOTICE), read from env DISCDB_INDEX, default /app/data/discdb-index.json.
+COPY data/discdb-index.json ./data/discdb-index.json
 # Created here so the named volume mounted on /data starts out owned by `node`.
 RUN mkdir -p /data && chown node:node /data
 

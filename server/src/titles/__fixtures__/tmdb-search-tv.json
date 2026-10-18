@@ -1,0 +1,23 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "adult": false,
+      "backdrop_path": "/qXbAckdropStarfall.jpg",
+      "genre_ids": [16, 10765],
+      "id": 990101,
+      "origin_country": ["JP"],
+      "original_language": "ja",
+      "original_name": "星降りの旅人",
+      "overview": "A made-up series used in tests.",
+      "popularity": 12.5,
+      "poster_path": "/pStarfallPoster.jpg",
+      "first_air_date": "2023-04-07",
+      "name": "Starfall Wanderer",
+      "vote_average": 8.1,
+      "vote_count": 120
+    }
+  ],
+  "total_pages": 1,
+  "total_results": 1
+}
