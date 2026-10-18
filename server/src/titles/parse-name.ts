@@ -70,10 +70,10 @@ const STRUCTURE: readonly { readonly re: RegExp; readonly read: (f: Found, m: st
   { re: /第(\d{1,4})話?\s*[-~]\s*第?(\d{1,4})話/g, read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[2])]; } },
   { re: /第(\d{1,4})話/g, read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
   {
-    re: /\bS(\d{1,2})(?:E(\d{1,3}))?\b/gi,
+    re: /\bS(\d{1,2})(?:E(\d{1,3})(?:-E?(\d{1,3}))?)?\b/gi,
     read: (f, m) => {
       f.set('season', toNumber(m[1]));
-      if (m[2] !== undefined) f.episodes ??= [Number(m[2]), Number(m[2])];
+      if (m[2] !== undefined) f.episodes ??= [Number(m[2]), Number(m[3] ?? m[2])];
     },
   },
   { re: /\b(\d{1,2})(?:st|nd|rd|th)[ ._]*Season\b/gi, read: (f, m) => f.set('season', toNumber(m[1])) },
@@ -88,14 +88,16 @@ const STRUCTURE: readonly { readonly re: RegExp; readonly read: (f: Found, m: st
   { re: /\bD(\d{1,2})\b/g, read: (f, m) => f.set('disc', toNumber(m[1])) },
   { re: /\bBOX[ ._]*(\d{1,2})\b/gi, read: (f, m) => f.set('box', toNumber(m[1])) },
   // a fansub-style episode number: `Foo - 05` before tags or at the end
-  { re: new RegExp(`\\s-\\s(\\d{2,4})(?:v\\d)?(?=\\s*(?:${MARK}|$))`, 'g'), read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
+  // (a year here was taken by markYear first, so a four-digit number left is not a year)
+  { re: new RegExp(`\\s-\\s(\\d{1,4})(?:v\\d)?(?=\\s*(?:${MARK}|$))`, 'g'), read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
 ];
 
 /** Bonus markers that are never part of a title, so they cut it. */
 const BONUS_CUT = /映像特典|特典(?:DISC|ディスク)?|\bBonus\b/gi;
 /** `Live`/`Event` mark a bonus disc only as `Live Event` or next to Bonus/特典 (inside brackets, on their own too). */
 const BONUS_PHRASE = /\bLive\s*Event\b|(?:\bBonus|特典)\s*(?:Live|Event)\b|\b(?:Live|Event)\s*(?:Bonus\b|特典)/i;
-const BONUS_WORD = /\b(?:Live|Event)\b/i;
+/** Inside brackets, any of these words marks a bonus disc. */
+const BONUS_WORD = /\b(?:Live|Event|Bonus)\b|特典/i;
 
 const word = (tokens: readonly string[]): string => tokens.map((t) => `\\b${t}\\b`).join('|');
 /** Release, format, codec and region tokens that are never title words: they end a title wherever they appear. */
@@ -112,7 +114,7 @@ const WEAK_TAG = new RegExp(word(['4K', 'BD', 'DVD', 'ISO', 'ITA', 'ENG', 'BOX(?
 const WEAK_BEFORE_TAG = new RegExp(`(?:${WEAK_TAG.source})(?=[\\s.+\\-]*${TAG})`, 'gi');
 const WEAK_AFTER_TAG = new RegExp(`(?<=${TAG}[\\s.+\\-]*)(?:${WEAK_TAG.source})`, 'gi');
 /** Group contents that are tags only inside brackets. */
-const BRACKET_TAG = /^(?:CD|CUE|LOG|BK|SCANS?|WAV|MP3|アニメ|映画|ドラマ|Anime|Movie)$/i;
+const BRACKET_TAG = /^(?:CD|CUE|LOG|BK|SCANS?|WAV|MP3|アニメ|映画|ドラマ|Anime|Movie|Live|Event|Bonus|映像特典|特典)$/i;
 const WHOLE_TAG = new RegExp(`^(?:${STRONG_TAG.source}|${WEAK_TAG.source})$`, 'i');
 /** `ABCD-12345`, `XXCL-1234~5`. */
 const CATALOGUE = /\b[A-Z]{2,5}-\d{3,5}(?:~\d{1,2})?\b/g;
@@ -127,6 +129,11 @@ const TRIM = /^[\s\-–—:~_.,・/|+&]+|[\s\-–—:~_.,・/|+&]+$/g;
 const CJK_END = /^(.*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\s+(\d{1,2})$/u;
 
 const clean = (piece: string): string => piece.replace(/\s+/g, ' ').replace(TRIM, '');
+const WHOLE_WEAK = new RegExp(`^(?:${WEAK_TAG.source})$`, 'i');
+/** A format word that leads a name (`BD Foo Vol.2`) is a tag; only upper case, so `Iso Tribe` keeps its title. */
+const LEADING_FORMAT = /^(?:BD|DVD|ISO|4K)\s+/;
+/** A title that is nothing but tag-words (`DVD`, `ISO`) is no title. */
+const onlyTags = (title: string): boolean => title.split(' ').every((w) => WHOLE_WEAK.test(w));
 const hasLetter = (text: string): boolean => /\p{L}/u.test(text);
 
 /** Marks release tags: strong ones anywhere, ambiguous ones inside brackets or next to another tag. */
@@ -142,12 +149,18 @@ function markTags(text: string, bracket: boolean): string {
 
 /**
  * Takes a year from the last year-like token directly before the release tags (or at the end of a scene name), after
- * some title text, and only from 1900 to next year: `Glass.Orchard.2049.2017.1080p` is 2017, `….2049.1080p` none.
+ * some title text, or after ` - ` at the end (`Foo - 2019`), and only from 1900 to next year:
+ * `Glass.Orchard.2049.2017.1080p` is 2017, `….2049.1080p` none.
  */
 function markYear(t: string, f: Found, scene: boolean): string {
   const end = new RegExp(`^\\s*(?:${TAG}${scene ? '|$' : ''})`);
+  const endAfterDash = new RegExp(`^\\s*(?:${TAG}|$)`);
   let last: RegExpExecArray | null = null;
-  for (const m of t.matchAll(YEAR)) if (end.test(t.slice(m.index + m[0].length)) && hasLetter(t.slice(0, m.index))) last = m;
+  for (const m of t.matchAll(YEAR)) {
+    const before = t.slice(0, m.index);
+    const after = t.slice(m.index + m[0].length);
+    if (hasLetter(before) && (end.test(after) || (/\s-\s$/.test(before) && endAfterDash.test(after)))) last = m;
+  }
   if (last === null) return t;
   const year = Number(last[1]);
   if (year < 1900 || year > new Date().getFullYear() + 1) return t;
@@ -162,7 +175,7 @@ function scan(text: string, f: Found, opts: { readonly scene: boolean; readonly 
   for (const { re, read } of STRUCTURE) t = t.replace(re, (...m: string[]) => (read(f, m), CUT));
   t = t.replace(BONUS_CUT, () => ((f.bonus = true), CUT));
   const pieces = t.split(new RegExp(MARK));
-  const at = pieces.findIndex((p) => hasLetter(clean(p)));
+  const at = pieces.findIndex((p) => hasLetter(clean(p)) && !onlyTags(clean(p)));
   if (at < 0) return '';
   const part = PART.exec(pieces[at + 1] ?? '');
   return clean(`${pieces[at] ?? ''} ${part ? part[0].trim() : ''}`);
@@ -174,7 +187,18 @@ interface Group {
   readonly start: number;
 }
 
-/** Top-level bracket and paren groups, nesting-aware; the text outside them keeps a cut where each group was. */
+/** A bracket group that holds only tags (`[BDMV]`, `[220629]`, `[FLAC+CUE]`, `[XXCL-1234~5]`, `[Live Event]`). */
+function isTagGroup(bracket: boolean, content: string): boolean {
+  const c = content.trim();
+  if (!bracket) return false;
+  if (/^\d{6}$|^\d{8}$/.test(c) || new RegExp(`^(?:${DATE.source}|${CATALOGUE.source})$`).test(c)) return true;
+  return c.split(/[+\s,/&]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TAG.test(tag));
+}
+
+/**
+ * Top-level bracket and paren groups, nesting-aware. The text outside them keeps a mark where each group was: a tag mark
+ * for a group of tags (so a tag-word next to it is a tag too), a cut for any other.
+ */
 function splitGroups(text: string): { outside: string; groups: Group[] } {
   const groups: Group[] = [];
   let outside = '';
@@ -192,8 +216,9 @@ function splitGroups(text: string): { outside: string; groups: Group[] } {
     } else if (depth > 0 && ']】)'.includes(c)) {
       depth--;
       if (depth === 0) {
-        groups.push({ bracket: open !== '(', content: text.slice(start + 1, i), start });
-        outside += CUT;
+        const group = { bracket: open !== '(', content: text.slice(start + 1, i), start };
+        groups.push(group);
+        outside += isTagGroup(group.bracket, splitGroups(group.content).outside) ? TAG : CUT;
       }
     } else if (depth === 0) {
       outside += c;
@@ -207,7 +232,7 @@ function splitGroups(text: string): { outside: string; groups: Group[] } {
 function scanGroup(group: Group, f: Found): string {
   const c = splitGroups(group.content).outside.trim();
   if (group.bracket && BONUS_WORD.test(c)) f.bonus = true;
-  if (/^\d{6}$|^\d{8}$/.test(c)) return '';
+  if (isTagGroup(group.bracket, c)) return '';
   const year = /^((?:19|20)\d{2})$/.exec(c);
   if (year) {
     f.set('year', Number(year[1]));
@@ -218,7 +243,6 @@ function scanGroup(group: Group, f: Found): string {
     f.episodes ??= [Number(range[1]), Number(range[2])];
     return '';
   }
-  if (group.bracket && c.split(/[+\s,/]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TAG.test(tag))) return '';
   return scan(c, f, { scene: false, bracket: group.bracket });
 }
 
@@ -236,9 +260,9 @@ export function parseName(text: string): ParsedName {
     const { outside: raw, groups } = splitGroups(nfkc);
     // scene names and disc labels separate words with dots or underscores and have no spaces
     const scene = !/\s/.test(raw) && /[._]/.test(raw);
-    const capsLabel = scene && /^[A-Z0-9_]+$/.test(raw.replaceAll(CUT, '')) && raw.includes('_');
-    const outside = scene ? raw.replace(/[._]/g, ' ') : raw;
-    let title = outside.split(CUT).map((piece) => scan(piece, f, { scene, bracket: false })).find((c) => c !== '') ?? '';
+    const capsLabel = scene && /^[A-Z0-9_]+$/.test(raw.replace(new RegExp(MARK, 'g'), '')) && raw.includes('_');
+    const outside = scene ? raw.replace(/[._]/g, ' ') : raw.replace(LEADING_FORMAT, TAG);
+    let title = scan(outside, f, { scene, bracket: false });
     if (capsLabel) title = clean(title.split(' ').filter((w) => !/^\d+$/.test(w)).join(' ')); // `ABC_TITLE_3_1`
     const brackets = groups.filter((g) => g.bracket).map((g) => ({ g, title: scanGroup(g, f) }));
     const parens = groups.filter((g) => !g.bracket).map((g) => scanGroup(g, f));
@@ -246,7 +270,7 @@ export function parseName(text: string): ParsedName {
     // the first group, with a title after it, is a release group
     const bracketTitles = title !== '' ? [] : brackets.filter(({ g, title: t }, i) =>
       t !== '' && !(g.start === 0 && !/\s/.test(t) && brackets.slice(i + 1).some((b) => b.title !== '')));
-    const loneTag = groups.length === 1 && groups[0]?.bracket === true && clean(raw.replaceAll(CUT, '')) === '' && !/\s/.test(groups[0].content.trim());
+    const loneTag = groups.length === 1 && groups[0]?.bracket === true && clean(raw.replace(new RegExp(MARK, 'g'), '')) === '' && !/\s/.test(groups[0].content.trim());
     candidates = [title, ...(loneTag ? [] : bracketTitles.map((b) => b.title)), ...parens].filter(hasLetter);
   }
   candidates = [...new Set(candidates)];
