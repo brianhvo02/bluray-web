@@ -149,13 +149,52 @@ describe('TitleService', () => {
   });
 
   describe('matching rules version', () => {
-    const sources = () => fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER], 'Starfall Traveler': [STARFALL] });
+    // entries as the sources give them now, with a start date field (null: unknown), so a rules bump has nothing to refresh
+    const dated = { ...EMBER, startDate: null };
+    const sources = () => fake({ 火斬りの剣: [dated], 'Hinokiri no Ken': [dated], 'Starfall Traveler': [{ ...STARFALL, startDate: null }] });
     const rewrite = (change: (data: Record<string, unknown>) => void): void => {
       const data = JSON.parse(readFileSync(join(dir, 'metadata.json'), 'utf8')) as Record<string, unknown>;
       change(data);
       writeFileSync(join(dir, 'metadata.json'), JSON.stringify(data));
     };
     const evidence = () => [A, A2, B];
+
+    it('on a rules bump, re-fetches once each cached entry a disc names that lacks a start date, before matching', async () => {
+      // the first run's entries come from before start dates: EMBER has no field; STARFALL has one
+      const old = fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER], 'Starfall Traveler': [{ ...STARFALL, startDate: 20190405 }] });
+      await service({ evidence, anilist: old }).runNow();
+      rewrite((d) => { d.rulesVersion = MATCH_RULES_VERSION - 1; });
+      const fresh = { ...EMBER, startDate: 20220110 };
+      const anilist = fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER], 'Starfall Traveler': [STARFALL] }, [fresh]);
+      anilist.byId.set('anilist:100', fresh);
+      const s = service({ evidence, anilist });
+      clock += DAY;
+      await s.runNow();
+      expect(anilist.calls.filter((c) => c === 'entry:anilist:100')).toHaveLength(1);
+      expect(anilist.calls.filter((c) => c === 'entry:anilist:400')).toHaveLength(0);
+      expect(anilist.calls.filter((c) => c.startsWith('search:'))).toEqual([]);
+      expect(metadata().pool['anilist:100']!.startDate).toBe(20220110);
+      // the search results the matcher reads carry the refreshed entry too
+      expect(Object.values(metadata().cache).some((d) => d.value.includes('anilist:100'))).toBe(true);
+      // the next run refreshes nothing
+      anilist.calls.length = 0;
+      clock += DAY;
+      await s.runNow();
+      expect(anilist.calls).toEqual([]);
+    });
+
+    it('keeps an entry whose re-fetch fails, and still matches', async () => {
+      await service({ evidence, anilist: fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER], 'Starfall Traveler': [STARFALL] }) }).runNow();
+      rewrite((d) => { d.rulesVersion = MATCH_RULES_VERSION - 1; });
+      const anilist = fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER], 'Starfall Traveler': [STARFALL] });
+      anilist.failIds.add('anilist:100');
+      const s = service({ evidence, anilist });
+      clock += DAY;
+      await s.runNow();
+      expect(anilist.calls.filter((c) => c === 'entry:anilist:100').length).toBeGreaterThan(0);
+      expect(metadata().pool['anilist:100']).toBeDefined();
+      expect(s.catalogue().titles.map((t) => t.id).sort()).toEqual(['anilist:100', 'anilist:400']);
+    });
 
     it('stores the rules version, and an unchanged one re-matches nothing', async () => {
       expect(Number.isSafeInteger(MATCH_RULES_VERSION)).toBe(true);

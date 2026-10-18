@@ -324,6 +324,10 @@ export class TitleService {
     if (families.size > 0) for (const d of keys.values()) if (families.has(boxFamily(d.group) ?? '\0')) dirty.add(d.group);
     const toMatch = evidence.filter((e) => dirty.has(groupKey(e)));
 
+    // new rules may read entries' start dates (M11), which entries cached before them lack: those the discs name are
+    // fetched again first, so the re-match from the cache sees them
+    if (rulesChanged) await this.refreshStartDates(now);
+
     // the matcher's cache; on retry day, search results and entry lookups that found nothing, older than a week, are
     // looked up again (T8c)
     const cache = new Map<string, Entry[]>();
@@ -531,6 +535,52 @@ export class TitleService {
       return { keep, failed: true };
     }
     return { keep, failed: false };
+  }
+
+  /**
+   * Fetches again, by id and paced like any lookup, each cached entry that a disc's match names (filed or suggested)
+   * and that has no `startDate` field, from before entries carried one (M11). The fresh entry replaces every cached
+   * copy. One that fails is kept as it is, and CIRCUIT_BREAKER failures in a row end the batch; progress is saved
+   * every CHECKPOINT_GROUPS entries or CHECKPOINT_MS, as a matching run is.
+   */
+  private async refreshStartDates(now: number): Promise<void> {
+    const named = new Set<string>();
+    for (const m of this.matches.values()) {
+      if (m.status === 'filed') named.add(m.entryId);
+      else if (m.status === 'unsorted') for (const id of m.suggestions) named.add(id);
+    }
+    const lacking = new Set<string>();
+    const consider = (en: Entry): void => { if (named.has(en.id) && !('startDate' in en)) lacking.add(en.id); };
+    for (const d of this.entries.values()) consider(d.value);
+    for (const d of this.cache.values()) for (const en of d.value) consider(en);
+    let failures = 0;
+    let since = 0;
+    let checkpointAt = this.now();
+    for (const id of [...lacking].sort()) {
+      const src = this.sourceFor(id);
+      if (!src) continue;
+      let en: Entry | null;
+      try {
+        en = await src.entry(id);
+        failures = 0;
+      } catch (err) {
+        if (!(err instanceof SourceUnavailable)) throw err;
+        if (++failures >= CIRCUIT_BREAKER) break;
+        continue;
+      }
+      if (!en) continue;
+      const fresh = en;
+      const entry = this.entries.get(id);
+      if (entry) this.entries.set(id, { at: now, value: fresh });
+      for (const [k, d] of this.cache) if (d.value.some((x) => x.id === id)) this.cache.set(k, { at: d.at, value: d.value.map((x) => (x.id === id ? fresh : x)) });
+      this.cache.set(`${sourceOf(id)}-entry:${id}`, { at: now, value: [fresh] });
+      if (++since >= CHECKPOINT_GROUPS || this.now() - checkpointAt >= CHECKPOINT_MS) {
+        since = 0;
+        checkpointAt = this.now();
+        this.save();
+      }
+    }
+    this.save();
   }
 
   private sourceFor(id: string): MetadataSource | null {
