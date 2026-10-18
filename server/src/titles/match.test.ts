@@ -478,8 +478,9 @@ describe('matchDiscs', () => {
       const series = entry('tmdb-tv:810', { english: 'Harbor Line' }, { year: 2019, seasons: seasons(3), animation: true });
       expect(await run(series)).toMatchObject({ status: 'filed', entryId: 'anilist:803', season: 3, disc: 1 });
       expect(await run({ ...series, animation: false })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
-      // before the chain root's year minus one: not the same series
-      expect(await run({ ...series, year: 2016 })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      // more than three years before the chain root's year: not the same series (TMDB may date it by an early special, M12)
+      expect(await run({ ...series, year: 2016 })).toMatchObject({ status: 'filed', entryId: 'anilist:803' });
+      expect(await run({ ...series, year: 2015 })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
     });
 
     it('T5r: a live-action TMDB entry named like the AniList entry, but not like the evidence, is several-fit (G4)', async () => {
@@ -1231,6 +1232,19 @@ describe('matchDiscs', () => {
         const sameMonth = fake({ Brasswick: [s1, { ...s2, startDate: 20170400 }] });
         expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', sameMonth, null)).toBe('several-fit');
       });
+    });
+
+    it('M12: a TMDB series dated up to three years before the AniList chain root is its twin', async () => {
+      const anime = entry('anilist:3100', { english: 'Quill Harbor', native: '羽根の港' }, { year: 2026 });
+      const tv = (year: number) => fake({ 'Quill Harbor': [entry('tmdb-tv:3101', { english: 'Quill Harbor', native: '羽根の港' }, { year, seasons: seasons(1), animation: true })] });
+      const p = 'drv0/Anime/Quill Harbor/Volume 1';
+      expect(await state(p, fake({ 'Quill Harbor': [anime] }), tv(2024))).toBe('anilist:3100#1');
+      expect(await state(p, fake({ 'Quill Harbor': [anime] }), tv(2023))).toBe('anilist:3100#1');
+      expect(await state(p, fake({ 'Quill Harbor': [anime] }), tv(2022))).toBe('several-fit');
+      // a TMDB movie keeps one year either way
+      const film = fake({ 'Quill Harbor': [entry('tmdb-movie:3102', { english: 'Quill Harbor', native: '羽根の港' }, { year: 2024, animation: true })] });
+      const anilistFilm = fake({ 'Quill Harbor': [{ ...anime, format: 'MOVIE', kind: 'movie' }] });
+      expect(await state('drv0/Movies/Quill Harbor/BDROM', anilistFilm, film)).toBe('several-fit');
     });
   });
 });

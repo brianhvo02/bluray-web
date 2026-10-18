@@ -69,6 +69,8 @@ const LATER_CANDIDATE_MAX = BASE;
 const COMES_CLOSE_RATIO = 0.5;
 /** Years further apart than this mean a different entry (ruling T5j), and two sources' entries aren't twins. */
 const YEAR_SLACK = 1;
+/** A TMDB series may be dated by an early special: its first-air year may be this far before an AniList chain root's (M12). */
+const TMDB_TV_EARLY = 3;
 /** Suggestions offered with an Unsorted disc. */
 const MAX_SUGGESTIONS = 3;
 /** Folder evidence goes at most this many folders above the disc folder (ruling T5f). */
@@ -810,12 +812,13 @@ function yearFits(en: Entry, years: readonly number[]): boolean {
 /**
  * Whether a TMDB entry's year fits an AniList entry's (ruling T5q). A TMDB series is dated by its first season, so for a
  * series the window runs from the AniList chain root's year (the first TV season; this entry's own year when the chain
- * is unknown) to this entry's year, each widened by YEAR_SLACK; a movie keeps YEAR_SLACK on both sides. A missing year
+ * is unknown) to this entry's year, each widened by YEAR_SLACK (the start by `early` when given, TMDB_TV_EARLY for a
+ * twin series, M12); a movie keeps YEAR_SLACK on both sides. A missing year
  * fits when `unknownFits`.
  */
-function inYearWindow(a: Entry, rootYear: number | null, t: Entry, unknownFits: boolean): boolean {
+function inYearWindow(a: Entry, rootYear: number | null, t: Entry, unknownFits: boolean, early = YEAR_SLACK): boolean {
   if (a.year === null || t.year === null) return unknownFits;
-  const from = (a.kind === 'series' ? (rootYear ?? a.year) : a.year) - YEAR_SLACK;
+  const from = (a.kind === 'series' ? (rootYear ?? a.year) : a.year) - early;
   return t.year >= from && t.year <= a.year + YEAR_SLACK;
 }
 
@@ -835,7 +838,9 @@ interface TwinInfo {
  */
 function twinMatch(a: Entry, rootYear: number | null, t: Entry, named: readonly Piece[], season: number | null): 'name' | 'base' | 'segment' | null {
   const film = a.kind !== t.kind && t.kind === 'movie' && FILM_FORMATS.has(a.format ?? '');
-  if (t.animation !== true || (a.kind !== t.kind && !film) || !inYearWindow(a, rootYear, t, false)) return null;
+  // a TMDB series' first-air year may be up to TMDB_TV_EARLY years before the AniList chain root's (ruling M12)
+  const early = a.kind === 'series' && t.kind === 'series' ? TMDB_TV_EARLY : YEAR_SLACK;
+  if (t.animation !== true || (a.kind !== t.kind && !film) || !inYearWindow(a, rootYear, t, false, early)) return null;
   if (names(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'name';
   if (film) return null;
   if (seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'base';
