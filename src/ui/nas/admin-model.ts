@@ -61,6 +61,16 @@ export async function revoke(api: AdminApi, id: string): Promise<string | null> 
   }
 }
 
+/** Whether the gate switch shows on: the NAS's gate is `everyone`, or turning it on is waiting for confirmation. */
+export function gateSwitchOn(status: NasTitleStatus | null, confirming: boolean): boolean {
+  return confirming || status?.gate === 'everyone';
+}
+
+/** The status after the owner's PUT of the gate succeeded, so the switch shows what the NAS now has. */
+export function withGate(status: NasTitleStatus | null, gate: NasTitleStatus['gate']): NasTitleStatus | null {
+  return status === null ? null : { ...status, gate };
+}
+
 /** TMDB's required notice (global constraints), shown with its logo in NAS settings. */
 export const TMDB_ATTRIBUTION = 'This product uses the TMDB API but is not endorsed or certified by TMDB';
 

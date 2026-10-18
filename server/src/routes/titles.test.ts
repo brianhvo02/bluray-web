@@ -157,6 +157,14 @@ describe('title routes', () => {
     expect((await get('/api/titles/anilist%3A999', guest)).status).toBe(404);
   });
 
+  it("reports the effective gate in the matching status, and the owner's change to it", async () => {
+    await start();
+    const own = await token(true);
+    expect(await (await get('/api/admin/metadata/status', own)).json()).toMatchObject({ gate: 'owners' });
+    expect((await send('PUT', '/api/admin/settings/title-library', own, { gate: 'everyone' })).status).toBe(204);
+    expect(await (await get('/api/admin/metadata/status', own)).json()).toMatchObject({ gate: 'everyone' });
+  });
+
   it('serves a guest with the env gate at everyone', async () => {
     await start({ gate: 'everyone' });
     expect((await get('/api/titles', await token(false))).status).toBe(200);

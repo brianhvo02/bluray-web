@@ -38,6 +38,10 @@ MIT License:
 
 TMDB (server/src/titles/tmdb.ts):
 This product uses the TMDB API but is not endorsed or certified by TMDB.
+The app shows this notice in its NAS settings with TMDB's logo, public/tmdb-logo.svg:
+TMDB's "Primary short (blue)" logo, unmodified, from
+https://www.themoviedb.org/about/logos-attribution, used for attribution only,
+as that page provides it for applications that use TMDB's data.
 
 AniList (server/src/titles/anilist.ts): the AniList API is free for
 non-commercial use under its terms (https://docs.anilist.co/guide/terms-of-use),

@@ -55,6 +55,8 @@ export interface NasTitleStatus {
   readonly music: number;
   readonly lastRunAt: number | null;
   readonly tmdb: boolean;
+  /** The release gate in effect: the owner's setting, else the server's `TITLE_LIBRARY`. */
+  readonly gate: 'owners' | 'everyone';
 }
 
 export interface NasCode {

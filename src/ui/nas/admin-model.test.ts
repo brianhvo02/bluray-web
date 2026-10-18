@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ADMIN_MESSAGES, TMDB_ATTRIBUTION, countdown, deviceRow, lastSeen, matchingStatus, newCode, revoke, type AdminApi } from './admin-model';
+import { ADMIN_MESSAGES, TMDB_ATTRIBUTION, countdown, deviceRow, gateSwitchOn, lastSeen, matchingStatus, newCode, revoke, withGate, type AdminApi } from './admin-model';
 import { NasHttpError, type NasDevice } from './nas-client';
 
 const MINUTE = 60_000;
@@ -103,7 +103,7 @@ describe('revoke', () => {
 });
 
 describe('matchingStatus', () => {
-  const status = { running: false, groupsDone: 0, groupsTotal: 0, filed: 12, unsorted: 3, music: 1, lastRunAt: null, tmdb: true } as const;
+  const status = { running: false, groupsDone: 0, groupsTotal: 0, filed: 12, unsorted: 3, music: 1, lastRunAt: null, tmdb: true, gate: 'owners' } as const;
   it('says how far a run is, or when the last one ended, with the counts', () => {
     expect(matchingStatus({ ...status, running: true, groupsDone: 40, groupsTotal: 120 }, NOW)).toEqual({ progress: 'Matching… 40 of 120 folders', counts: '12 discs filed · 3 unsorted · 1 music', tmdb: null });
     expect(matchingStatus(status, NOW).progress).toBe('Not matched yet');
@@ -117,5 +117,22 @@ describe('matchingStatus', () => {
 describe('TMDB_ATTRIBUTION', () => {
   it('is TMDB’s notice, verbatim', () => {
     expect(TMDB_ATTRIBUTION).toBe('This product uses the TMDB API but is not endorsed or certified by TMDB');
+  });
+});
+
+describe('the gate switch', () => {
+  const status = { running: false, groupsDone: 0, groupsTotal: 0, filed: 0, unsorted: 0, music: 0, lastRunAt: null, tmdb: true, gate: 'owners' } as const;
+  it("shows the NAS's gate: on for everyone, off for owners or before the status loads", () => {
+    expect(gateSwitchOn({ ...status, gate: 'everyone' }, false)).toBe(true);
+    expect(gateSwitchOn(status, false)).toBe(false);
+    expect(gateSwitchOn(null, false)).toBe(false);
+  });
+  it('shows on while turning it on waits for confirmation', () => {
+    expect(gateSwitchOn(status, true)).toBe(true);
+  });
+  it('follows a successful PUT', () => {
+    expect(gateSwitchOn(withGate(status, 'everyone'), false)).toBe(true);
+    expect(gateSwitchOn(withGate({ ...status, gate: 'everyone' }, 'owners'), false)).toBe(false);
+    expect(withGate(null, 'everyone')).toBeNull();
   });
 });

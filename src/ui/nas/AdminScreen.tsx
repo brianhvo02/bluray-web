@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
-import { TMDB_ATTRIBUTION, countdown, deviceRow, matchingStatus, newCode, revoke } from './admin-model';
+import { TMDB_ATTRIBUTION, countdown, deviceRow, gateSwitchOn, matchingStatus, newCode, revoke, withGate } from './admin-model';
 import type { NasClient, NasDevice, NasTitleStatus } from './nas-client';
 import { qrSvg } from './qr';
 
@@ -27,13 +27,12 @@ interface ShownCode {
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
- * The title library's part of NAS settings: the matching status, the release gate (off by default; turning it on asks
- * first) and TMDB's attribution. Absent when the NAS has no title library (its status route answers 404).
+ * The title library's part of NAS settings: the matching status, the release gate (as the NAS reports it; turning it on
+ * asks first) and TMDB's attribution. Absent when the NAS has no title library (its status route answers 404).
  */
 function TitleLibrarySettings({ nas, now }: { nas: NasClient; now: () => number }): ReactElement {
   const [status, setStatus] = useState<NasTitleStatus | null>(null);
   const [missing, setMissing] = useState(false);
-  const [everyone, setEveryone] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +66,7 @@ function TitleLibrarySettings({ nas, now }: { nas: NasClient; now: () => number 
       () => {
         setBusy(false);
         setConfirming(false);
-        setEveryone(open);
+        setStatus((s) => withGate(s, open ? 'everyone' : 'owners'));
       },
       (err: unknown) => {
         setBusy(false);
@@ -94,7 +93,7 @@ function TitleLibrarySettings({ nas, now }: { nas: NasClient; now: () => number 
               type="checkbox"
               role="switch"
               data-testid="nas-gate"
-              checked={everyone || confirming}
+              checked={gateSwitchOn(status, confirming)}
               disabled={busy}
               onChange={(e) => (e.target.checked ? setConfirming(true) : confirming ? setConfirming(false) : setGate(false))}
             />{' '}

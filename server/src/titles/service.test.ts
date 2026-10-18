@@ -180,13 +180,13 @@ describe('TitleService', () => {
       entry: (id) => inner.entry(id),
     };
     const s = service({ evidence: () => [A, B], anilist });
-    expect(s.status()).toEqual({ running: false, groupsDone: 0, groupsTotal: 0, filed: 0, unsorted: 0, music: 0, lastRunAt: null, tmdb: false });
+    expect(s.status()).toEqual({ running: false, groupsDone: 0, groupsTotal: 0, filed: 0, unsorted: 0, music: 0, lastRunAt: null, tmdb: false, gate: 'owners' });
     const run = s.runNow();
     await Promise.resolve();
     expect(s.status()).toMatchObject({ running: true, groupsDone: 0, groupsTotal: 2 });
     release();
     await run;
-    expect(s.status()).toEqual({ running: false, groupsDone: 2, groupsTotal: 2, filed: 2, unsorted: 0, music: 0, lastRunAt: clock, tmdb: false });
+    expect(s.status()).toEqual({ running: false, groupsDone: 2, groupsTotal: 2, filed: 2, unsorted: 0, music: 0, lastRunAt: clock, tmdb: false, gate: 'owners' });
   });
 
   it("dates a disc's addedAt at its first sighting, unchanged by later runs", async () => {

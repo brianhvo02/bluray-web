@@ -39,7 +39,7 @@ const ENTRY_KEY = /^(?:anilist|tmdb)-entry:(.+)$/;
 /** Posters of lookup results kept for `GET art/<id>`, at most (ruling T9e). */
 const MAX_LOOKUP_ART = 500;
 
-export interface TitleStatus { readonly running: boolean; readonly groupsDone: number; readonly groupsTotal: number; readonly filed: number; readonly unsorted: number; readonly music: number; readonly lastRunAt: number | null; readonly tmdb: boolean }
+export interface TitleStatus { readonly running: boolean; readonly groupsDone: number; readonly groupsTotal: number; readonly filed: number; readonly unsorted: number; readonly music: number; readonly lastRunAt: number | null; readonly tmdb: boolean; readonly gate: 'owners' | 'everyone' }
 
 export interface TitleServiceOptions {
   readonly library: Pick<Library, 'evidence'>;
@@ -165,7 +165,7 @@ export class TitleService {
     }
     return {
       running: this.running !== null, groupsDone: this.groupsDone, groupsTotal: this.groupsTotal, filed, unsorted: this.built.unsorted.length, music,
-      lastRunAt: this.lastRunAt, tmdb: this.opts.tmdb !== null,
+      lastRunAt: this.lastRunAt, tmdb: this.opts.tmdb !== null, gate: this.gate(),
     };
   }
 

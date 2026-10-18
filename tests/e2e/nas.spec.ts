@@ -616,6 +616,11 @@ test('renaming a music title shows the new name on the Music shelf and in search
 });
 
 test('NAS settings show the matching status, the TMDB attribution, and the gate switch asks first', async ({ page, browserName }) => {
+  // The switch shows the server's gate, which the guest test opens for a while: the browsers take turns with it.
+  await exclusivelyAsync('gate', () => gateSettings(page, browserName));
+});
+
+async function gateSettings(page: Page, browserName: string): Promise<void> {
   await openTitles(page, browserName);
   await page.getByTestId('nas-settings').click();
   await expect(page.getByTestId('nas-matching')).toContainText(/Last matched|Matching…/);
@@ -643,7 +648,7 @@ test('NAS settings show the matching status, the TMDB attribution, and the gate 
   await page.getByTestId('nas-gate-confirm').click();
   await expect(gate).toBeChecked();
   expect(sent).toEqual([{ gate: 'everyone' }]);
-});
+}
 
 test('a hidden copy explains what it follows, and "apply to the folder" lists the discs it left', async ({ page, browserName }, testInfo) => {
   const project = projectOf(testInfo.project.name);
