@@ -73,34 +73,42 @@ export class Library {
 
   list(path: string): { folders: FolderEntry[]; discs: DiscEntry[] } | null {
     const key = path.replace(/\/+$/, '');
-    // A group's folders are listed under the group's name, and merge those of its roots.
+    // A group's folders are listed under the group's name, and merge those of its roots, plus a real top-level folder
+    // of the same name in an ungrouped root.
     const slash = key.indexOf('/');
     const head = slash < 0 ? key : key.slice(0, slash);
-    const members = key === '' ? [] : this.roots.filter((r) => r.group === head);
-    if (members.length > 0) {
+    if (key !== '' && this.roots.some((r) => r.group === head)) {
       const rest = slash < 0 ? '' : key.slice(slash);
-      const nodes = members.map((r) => ({ root: r, node: this.tree.get(`${r.name}${rest}`) })).filter((m): m is { root: LibraryRoot; node: Node } => m.node !== undefined);
-      if (nodes.length === 0) return null;
-      return { folders: mergeFolders(nodes.flatMap((m) => this.grouped([...m.node.folders.values()], m.root))), discs: nodes.flatMap((m) => m.node.discs).sort(byName) };
+      const members = this.groupBases(head).flatMap((base) => {
+        const node = this.tree.get(`${base}${rest}`);
+        return node ? [{ base, node }] : [];
+      });
+      if (members.length === 0) return null;
+      return {
+        folders: mergeFolders(members.flatMap((m) => [...m.node.folders.values()].map((f) => ({ ...f, path: `${head}${f.path.slice(m.base.length)}` })))),
+        discs: members.flatMap((m) => m.node.discs).sort(byName),
+      };
     }
     // The top level shows the children of every ungrouped root, merged, and one folder per group.
     const nodes = key === '' ? this.roots.filter((r) => r.group === undefined).map((r) => this.tree.get(r.name)) : [this.tree.get(key)];
     if (key !== '' && !nodes[0]) return null;
     const present = nodes.filter((n): n is Node => n !== undefined);
-    const folders = present.flatMap((n) => [...n.folders.values()]);
+    let folders = present.flatMap((n) => [...n.folders.values()]);
     if (key === '') {
       for (const group of new Set(this.roots.flatMap((r) => (r.group === undefined ? [] : [r.group])))) {
-        const inGroup = this.roots.filter((r) => r.group === group).map((r) => this.tree.get(r.name)).filter((n): n is Node => n !== undefined);
+        const inGroup = this.groupBases(group).map((base) => this.tree.get(base)).filter((n): n is Node => n !== undefined);
         const discs = inGroup.reduce((sum, n) => sum + n.discs.length + [...n.folders.values()].reduce((s, f) => s + f.discs, 0), 0);
+        // A real folder with the group's name is part of the group folder, not a second one.
+        folders = folders.filter((f) => f.name !== group);
         if (discs > 0) folders.push({ name: group, path: group, discs });
       }
     }
     return { folders: folders.sort(byName), discs: present.flatMap((n) => n.discs).sort(byName) };
   }
 
-  /** Folder entries of a grouped root, with their paths moved under the group's name. */
-  private grouped(folders: FolderEntry[], root: LibraryRoot): FolderEntry[] {
-    return folders.map((f) => ({ ...f, path: `${root.group}${f.path.slice(root.name.length)}` }));
+  /** Tree keys whose children make up a group's folder: its roots, and a same-named top-level folder of an ungrouped root. */
+  private groupBases(group: string): string[] {
+    return this.roots.map((r) => (r.group === group ? r.name : r.group === undefined ? `${r.name}/${group}` : null)).filter((b): b is string => b !== null);
   }
 
   disc(id: string): DiscEntry | null {
@@ -171,7 +179,7 @@ export class Library {
         }
         const bdmv = entries.find((e) => e.isDir && e.name.toLowerCase() === 'bdmv');
         if (bdmv) {
-          const disc = await this.folderDisc(dir.rel, join(dir.abs, bdmv.name), previous, root.group !== undefined);
+          const disc = await this.folderDisc(dir.rel, join(dir.abs, bdmv.name), previous);
           if (disc) {
             out.push(disc);
             continue;
@@ -183,7 +191,7 @@ export class Library {
           if (e.isDir) {
             if (dir.depth < MAX_DEPTH) next.push({ rel, abs: join(dir.abs, e.name), depth: dir.depth + 1 });
           } else if (e.isFile && e.name.toLowerCase().endsWith('.iso')) {
-            const disc = await this.isoDisc(rel, join(dir.abs, e.name), e.name, previous, root.group !== undefined);
+            const disc = await this.isoDisc(rel, join(dir.abs, e.name), e.name, previous);
             if (disc) out.push(disc);
           }
         }
@@ -213,8 +221,7 @@ export class Library {
    * An ISO disc if the image's UDF tree has BDMV/INDEX.BDMV. Its id is made from the path, image size and mtime; an
    * image whose id is already known either way (a disc in `previous`, or not a disc) isn't read again.
    */
-  private async isoDisc(rel: string, abs: string, name: string, previous: Map<string, DiscEntry>, settle: boolean): Promise<DiscEntry | null> {
-    if (settle && !(await this.isSettled(abs, this.now()))) return this.keepPrevious(rel, previous);
+  private async isoDisc(rel: string, abs: string, name: string, previous: Map<string, DiscEntry>): Promise<DiscEntry | null> {
     let st;
     try {
       st = await stat(abs);
@@ -224,6 +231,7 @@ export class Library {
     const id = discId(rel, st.size, st.mtimeMs);
     const disc: DiscEntry = { id, name, path: rel, kind: 'iso', sizeBytes: st.size };
     if (previous.get(id)?.kind === 'iso') return disc;
+    if (!(await this.isSettled(abs, this.now()))) return this.keepPrevious(rel, previous);
     if (this.notDiscs.has(id)) return null;
     try {
       if (await isoIsDisc(abs)) return disc;
@@ -269,15 +277,21 @@ export class Library {
     return nowMs - newest >= SETTLE_MS;
   }
 
+  private previousPaths: { source: Map<string, DiscEntry>; byPath: Map<string, DiscEntry> } | null = null;
+
+  /** The previous scan's discs by path, built once per scan. */
+  private previousByPath(previous: Map<string, DiscEntry>): Map<string, DiscEntry> {
+    if (this.previousPaths?.source !== previous) this.previousPaths = { source: previous, byPath: new Map([...previous.values()].map((d) => [d.path, d])) };
+    return this.previousPaths.byPath;
+  }
+
   /** An unsettled disc keeps its entry from the previous scan, if it had one. */
   private keepPrevious(rel: string, previous: Map<string, DiscEntry>): DiscEntry | null {
-    for (const d of previous.values()) if (d.path === rel) return d;
-    return null;
+    return this.previousByPath(previous).get(rel) ?? null;
   }
 
   /** A folder disc if `bdmvDir` holds index.bdmv; its size is that of the clips in STREAM, carried over from `previous` when the id is unchanged. */
-  private async folderDisc(rel: string, bdmvDir: string, previous: Map<string, DiscEntry>, settle: boolean): Promise<DiscEntry | null> {
-    if (settle && !(await this.isSettled(bdmvDir, this.now()))) return this.keepPrevious(rel, previous);
+  private async folderDisc(rel: string, bdmvDir: string, previous: Map<string, DiscEntry>): Promise<DiscEntry | null> {
     const entries = await this.readDir(bdmvDir);
     const index = entries?.find((e) => e.isFile && e.name.toLowerCase() === 'index.bdmv');
     if (!entries || !index) return null;
@@ -292,6 +306,7 @@ export class Library {
     const known = previous.get(id);
     // Same path, index size and mtime: the disc is unchanged, so skip reading STREAM again.
     if (known && known.kind === 'folder') return { id, name, path: rel, kind: 'folder', sizeBytes: known.sizeBytes };
+    if (!(await this.isSettled(bdmvDir, this.now()))) return this.keepPrevious(rel, previous);
     let sizeBytes = 0;
     const stream = entries.find((e) => e.isDir && e.name.toLowerCase() === 'stream');
     const streamDir = stream ? join(bdmvDir, stream.name) : null;

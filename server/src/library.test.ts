@@ -11,7 +11,8 @@ import { Library, SETTLE_MS, nextNightly } from './library';
 import { libraryRoute } from './routes/library';
 
 let tmp: string;
-const FAST = { scanPauseMs: 0 };
+/** Fixtures are created just now, so the clock is set past the settle time. */
+const FAST = { scanPauseMs: 0, now: () => Date.now() + SETTLE_MS + 1 };
 const touch = (path: string, content = 'x'): void => {
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, content);
@@ -294,7 +295,7 @@ describe('Downloads group', () => {
   });
 
   it('shows the group as one folder and merges its roots', async () => {
-    const lib = new Library(dl(), join(tmp, 'library.json'), { ...FAST, now: () => Date.now() + 2 * SETTLE_MS });
+    const lib = new Library(dl(), join(tmp, 'library.json'), FAST);
     await lib.scan();
     const top = lib.list('')!;
     expect(top.folders).toContainEqual({ name: 'Downloads', path: 'Downloads', discs: 3 });
@@ -308,10 +309,9 @@ describe('Downloads group', () => {
   });
 
   it('keeps root-based disc paths and ids', async () => {
-    const later = { now: () => Date.now() + 2 * SETTLE_MS };
-    const plain = new Library([{ name: 'drvA-dl', dir: join(tmp, 'dl1') }], join(tmp, 'p.json'), { ...FAST, ...later });
+    const plain = new Library([{ name: 'drvA-dl', dir: join(tmp, 'dl1') }], join(tmp, 'p.json'), FAST);
     await plain.scan();
-    const grouped = new Library(dl(), join(tmp, 'g.json'), { ...FAST, ...later });
+    const grouped = new Library(dl(), join(tmp, 'g.json'), FAST);
     await grouped.scan();
     const id = plain.list('drvA-dl')!.discs[0]!.id;
     expect(grouped.disc(id)?.path).toBe('drvA-dl/Loose');
@@ -348,5 +348,47 @@ describe('Downloads group', () => {
     const settled = new Library(dl(), join(tmp, 'library2.json'), { ...FAST, now: () => t0 + 51 * MIN });
     await settled.scan();
     expect(settled.list('Downloads')!.discs.map((d) => d.name)).toContain('new.iso');
+  });
+});
+
+describe('settle time on every root', () => {
+  it('skips an unsettled disc in an ungrouped root, and keeps its earlier entry', async () => {
+    let now = Date.now();
+    const lib = new Library(roots(), join(tmp, 'library.json'), { ...FAST, now: () => now });
+    await lib.scan();
+    expect(lib.list('')).toMatchObject({ discs: [], folders: [] });
+    now += SETTLE_MS + 1;
+    await lib.scan();
+    expect(lib.list('drvB')!.discs).toHaveLength(1);
+    now = Date.now(); // index.bdmv rewritten: unsettled again, previous entry stays.
+    touch(join(tmp, 'b/Other/BDMV/index.bdmv'), 'changed');
+    await lib.scan();
+    expect(lib.list('drvB')!.discs).toHaveLength(1);
+  });
+});
+
+describe('Downloads group, more', () => {
+  const dl = (): { name: string; dir: string; group?: string }[] => [
+    { name: 'drvA', dir: join(tmp, 'a') },
+    { name: 'drvA-dl', dir: join(tmp, 'dl1'), group: 'Downloads' },
+  ];
+
+  it('locates and finds a Downloads disc', async () => {
+    touch(join(tmp, 'dl1/Show/Vol 1/BDMV/index.bdmv'));
+    const lib = new Library(dl(), join(tmp, 'library.json'), FAST);
+    await lib.scan();
+    const disc = lib.list('Downloads/Show')!.discs[0]!;
+    expect(lib.disc(disc.id)).toEqual(disc);
+    expect(lib.locate(disc)).toBe(join(tmp, 'dl1/Show/Vol 1'));
+  });
+
+  it('merges a real top-level folder named like the group into the group folder', async () => {
+    touch(join(tmp, 'dl1/Show/BDMV/index.bdmv'));
+    touch(join(tmp, 'a/Downloads/Old/BDMV/index.bdmv'));
+    const lib = new Library(dl(), join(tmp, 'library.json'), FAST);
+    await lib.scan();
+    expect(lib.list('')!.folders.filter((f) => f.name === 'Downloads')).toEqual([{ name: 'Downloads', path: 'Downloads', discs: 2 }]);
+    const group = lib.list('Downloads')!;
+    expect(group.discs.map((d) => d.path).sort()).toEqual(['drvA-dl/Show', 'drvA/Downloads/Old']);
   });
 });

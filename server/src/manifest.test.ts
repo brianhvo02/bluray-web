@@ -108,7 +108,7 @@ describe('disc routes', () => {
     const fd = openSync(join(root, 'multi.iso'), 'w');
     for (const [lba, block] of multi.image.blocks) writeSync(fd, block, 0, block.length, lba * 2048);
     closeSync(fd);
-    library = new Library([{ name: 'drvA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0 });
+    library = new Library([{ name: 'drvA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
     await library.scan();
     for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
     server = createServer([discRoutes(library)]);
