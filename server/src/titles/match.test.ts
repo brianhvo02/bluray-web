@@ -1246,5 +1246,27 @@ describe('matchDiscs', () => {
       const anilistFilm = fake({ 'Quill Harbor': [{ ...anime, format: 'MOVIE', kind: 'movie' }] });
       expect(await state('drv0/Movies/Quill Harbor/BDROM', anilistFilm, film)).toBe('several-fit');
     });
+
+    describe('M13: disc-label candidates are weak', () => {
+      const film = entry('anilist:3200', { romaji: 'Hyakumeter no Kiseki', native: '百メートルの奇跡' }, { format: 'MOVIE', kind: 'movie', year: 2022 });
+      const others = [entry('tmdb-movie:3201', { english: '100M Feature' }, { year: 2001 }), entry('tmdb-movie:3202', { english: '100M Feature' }, { year: 2014 })];
+
+      it('a label fits nothing once a folder name or a disc title fits an entry', async () => {
+        const p = 'drv0/Movies/Hyakumeter no Kiseki/100M_FEATURE';
+        expect(await state(p, fake({ 'Hyakumeter no Kiseki': [film] }), fake({ '100M FEATURE': others }))).toBe('anilist:3200#null');
+        // a disc title fitting counts as well
+        const q = 'drv0/Movies/100M_FEATURE';
+        const r = byDisc((await matchDiscs([rooted(q, { jpn: '百メートルの奇跡' })], ctx(fake({ 百メートルの奇跡: [film] }), fake({ '100M FEATURE': others })))).matches, q);
+        expect(r).toMatchObject({ status: 'filed', entryId: 'anilist:3200' });
+      });
+
+      it('with no other evidence a label works as before, and its disc number still counts', async () => {
+        const glass = entry('tmdb-movie:3203', { english: 'Glass Orchard' }, { year: 2019 });
+        expect(await state('drv0/Movies/GLASS_ORCHARD', fake({}), fake({ 'GLASS ORCHARD': [glass] }))).toBe('tmdb-movie:3203#null');
+        expect(await state('drv0/Movies/100M_FEATURE', fake({}), fake({ '100M FEATURE': others }))).toBe('several-fit');
+        const tv = entry('anilist:3204', { english: 'Quill Harbor' }, { year: 2015 });
+        expect(await state('drv0/Anime/Quill Harbor/QUILL_HARBOR_D2', fake({ 'Quill Harbor': [tv] }), null)).toBe('anilist:3204#2');
+      });
+    });
   });
 });

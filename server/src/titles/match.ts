@@ -135,6 +135,8 @@ const STORY_LINKS = new Set(['SEQUEL', 'PREQUEL', 'PARENT', 'SIDE_STORY', 'SUMMA
 const FILM_FORMATS = new Set(['MOVIE', 'SPECIAL', 'OVA']);
 /** A disc folder's label that names only a disc (`BD`, `BDROM`, `BD_VIDEO`, `DISC_2`); `Blu-ray`, `DVD` and such are categories. */
 const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3})?$/i;
+/** A disc folder's label: capitals, digits and underscores (`100M_FEATURE`, `TO_BE_HERO_X_V4_D2`), with a letter (M13). */
+const DISC_LABEL = /^(?=.*[A-Z])(?=.*_)[A-Z0-9_]+$/;
 /** A disc folder's generic label with no number, which takes its release folder's volume (ruling M10). */
 const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 /** Genres besides anime that can share a bracket with the anime tag (W4). */
@@ -200,6 +202,7 @@ interface Piece {
   readonly kind: Via;
   readonly own: boolean; // the disc's own title or folder, not an ancestor's
   readonly far: boolean; // a folder FAR_ANCESTOR or more levels above the disc folder
+  readonly label?: boolean; // the disc folder's label (`GLASS_ORCHARD_D1`): a weak candidate (M13)
   readonly parse: ParsedName;
   readonly found: Entry[];
   readonly hit?: DiscDbHit;
@@ -402,7 +405,8 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
       own.push({ kind: 'disc-title', own: true, far: false, parse, found: await lookUp(parse) });
     }
     const segParse = nameParse(e.segments[e.segments.length - 1] ?? '');
-    own.push({ kind: 'folder', own: true, far: false, parse: segParse, found: await lookUp(segParse) });
+    const segment = e.segments[e.segments.length - 1] ?? '';
+    own.push({ kind: 'folder', own: true, far: false, label: DISC_LABEL.test(segment), parse: segParse, found: await lookUp(segParse) });
     const named = [...own, ...ancestors];
 
     const hit = e.fingerprint ? ctx.discdb.lookup(e.fingerprint) : null;
@@ -425,8 +429,12 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
  * Rules 1-3 for one disc: an Unsorted match, or the entry and season waiting for rule 4. `siblings`: the discs in the
  * disc's group, itself included.
  */
-async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit | null, siblings: number, ctx: MatchContext, entries: Map<string, Entry>):
+async function decide(e: DiscEvidence, given: readonly Piece[], hit: DiscDbHit | null, siblings: number, ctx: MatchContext, entries: Map<string, Entry>):
   Promise<DiscMatch | Omit<Pending, 'group' | 'releaseCount' | 'folderDiscs'>> {
+  // a disc folder's label names something only when no disc title or other folder name fits any entry; its disc
+  // number still counts (ruling M13)
+  const othersFit = given.some((p) => !p.label && p.found.some((en) => fit(p, en, null) > 0));
+  const pieces = othersFit ? given.map((p) => (p.label ? { ...p, parse: { ...p.parse, candidates: [] }, found: [] } : p)) : given;
   const compat = new Map<string, Compat>();
   const unsorted = (reason: UnsortedReason, suggest: readonly Entry[]): DiscMatch => {
     const ids = [...new Set(suggest.map((en) => en.id))].slice(0, MAX_SUGGESTIONS);
