@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ADMIN_MESSAGES, countdown, deviceRow, lastSeen, newCode, revoke, type AdminApi } from './admin-model';
+import { ADMIN_MESSAGES, TMDB_ATTRIBUTION, countdown, deviceRow, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, revoke, withGate, type AdminApi } from './admin-model';
+import type { TitleSummary } from '../../engine/disc/nas-api';
 import { NasHttpError, type NasDevice } from './nas-client';
 
 const MINUTE = 60_000;
@@ -99,5 +100,60 @@ describe('revoke', () => {
   it("passes other failures' messages on", async () => {
     const api = fakeApi({ revokeDevice: vi.fn(async () => Promise.reject(new NasHttpError(404, 'unknown device'))) });
     expect(await revoke(api, 'gone')).toBe('The NAS answered 404 (unknown device).');
+  });
+});
+
+describe('matchingStatus', () => {
+  const status = { running: false, groupsDone: 0, groupsTotal: 0, filed: 12, unsorted: 3, music: 1, lastRunAt: null, tmdb: true, gate: 'owners' } as const;
+  it('says how far a run is, or when the last one ended, with the counts', () => {
+    expect(matchingStatus({ ...status, running: true, groupsDone: 40, groupsTotal: 120 }, NOW)).toEqual({ progress: 'Matching… 40 of 120 folders', counts: '12 discs filed · 3 unsorted · 1 music', tmdb: null });
+    expect(matchingStatus(status, NOW).progress).toBe('Not matched yet');
+    expect(matchingStatus({ ...status, lastRunAt: NOW - 3 * MINUTE, filed: 1, unsorted: 0, music: 0 }, NOW)).toEqual({ progress: 'Last matched 3 minutes ago', counts: '1 disc filed · 0 unsorted · 0 music', tmdb: null });
+  });
+  it('says what matching does without a TMDB key', () => {
+    expect(matchingStatus({ ...status, tmdb: false }, NOW).tmdb).toBe('No TMDB key: discs that aren’t anime go to Unsorted.');
+  });
+});
+
+describe('TMDB_ATTRIBUTION', () => {
+  it('is TMDB’s notice, verbatim', () => {
+    expect(TMDB_ATTRIBUTION).toBe('This product uses the TMDB API but is not endorsed or certified by TMDB');
+  });
+});
+
+describe('the gate switch', () => {
+  const status = { running: false, groupsDone: 0, groupsTotal: 0, filed: 0, unsorted: 0, music: 0, lastRunAt: null, tmdb: true, gate: 'owners' } as const;
+  it("shows the NAS's gate: on for everyone, off for owners or before the status loads", () => {
+    expect(gateSwitchOn({ ...status, gate: 'everyone' }, false)).toBe(true);
+    expect(gateSwitchOn(status, false)).toBe(false);
+    expect(gateSwitchOn(null, false)).toBe(false);
+  });
+  it('shows on while turning it on waits for confirmation', () => {
+    expect(gateSwitchOn(status, true)).toBe(true);
+  });
+  it('follows a successful PUT', () => {
+    expect(gateSwitchOn(withGate(status, 'everyone'), false)).toBe(true);
+    expect(gateSwitchOn(withGate({ ...status, gate: 'everyone' }, 'owners'), false)).toBe(false);
+    expect(withGate(null, 'everyone')).toBeNull();
+  });
+});
+
+describe('own titles in NAS settings', () => {
+  const title = (id: string, kind: TitleSummary['kind'], display: string, own: boolean, seasons = 0): TitleSummary => ({
+    id, kind, names: { english: own ? null : display, romaji: null, native: null, synonyms: [], display: own ? display : null },
+    poster: null, year: null, seasons, discs: 0, addedAt: 0, own,
+  });
+  it('lists only own titles, A–Z', () => {
+    const list = [title('own:b', 'music', 'live 2024', true), title('anilist:1', 'series', 'Aardvark', false), title('own:a', 'series', 'Harbor Tales', true, 2)];
+    expect(ownTitles(list).map((t) => t.id)).toEqual(['own:a', 'own:b']);
+  });
+  it('names the kind, with a series’ seasons', () => {
+    expect(ownTitleKind(title('own:a', 'series', 'Harbor Tales', true, 2))).toBe('Series · 2 seasons');
+    expect(ownTitleKind(title('own:a', 'series', 'Harbor Tales', true, 1))).toBe('Series · 1 season');
+    expect(ownTitleKind(title('own:b', 'movie', 'Night Film', true))).toBe('Movie');
+    expect(ownTitleKind(title('own:c', 'music', 'Live 2024', true))).toBe('Music');
+  });
+  it('asks before deleting', () => {
+    expect(deleteTitleQuestion('Live 2024')).toBe('Delete Live 2024? Its discs go back to Unsorted.');
   });
 });

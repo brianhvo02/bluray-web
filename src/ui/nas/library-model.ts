@@ -32,7 +32,7 @@ export function sortRows(listing: { readonly folders: readonly FolderEntry[]; re
 }
 
 /** `ISO` for disc images; `UHD` once the disc's manifest has shown an HEVC 2160p main title (undefined: not known yet). */
-export function discBadges(disc: DiscEntry, uhd: boolean | undefined): string[] {
+export function discBadges(disc: Pick<DiscEntry, 'kind'>, uhd: boolean | undefined): string[] {
   const badges: string[] = [];
   if (disc.kind === 'iso') badges.push('ISO');
   if (uhd) badges.push('UHD');

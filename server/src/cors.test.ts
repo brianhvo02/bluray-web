@@ -62,7 +62,7 @@ describe('createServer', () => {
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:4173');
     expect(res.headers.get('access-control-max-age')).toBe('600');
-    expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, DELETE');
+    expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, PUT, PATCH, DELETE');
   });
 
   it('answers 404 JSON when no handler matches', async () => {

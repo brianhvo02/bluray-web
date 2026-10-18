@@ -254,12 +254,12 @@
 
 - [ ] **Step 1: Write failing tests.** Use fake `MetadataSource`s that return fixed entries per query. Each test names its rule:
   - One AniList entry fits, and both the disc title and the folder agree → `filed`, with season from the entry and disc from the volume.
-  - Two entries fit equally (`Citadel` → `Citadel Season 2` (AniList) and `Citadel (2019)` (TMDB movie)) → `unsorted`, `several-fit`, with both ids in the suggestions.
+  - Two entries fit equally (`Brasswick` → `Brasswick Season 2` (AniList) and `Brasswick (2019)` (TMDB movie)) → `unsorted`, `several-fit`, with both ids in the suggestions.
   - A TMDB TV match with 3 seasons and no season number in the evidence → `no-season`. The same with a single-season series → `filed`.
   - Episode range `[第13話]` on a season with 12 episodes → `episode-past-season`.
   - A group of 6 sibling discs with no volume numbers, matching an entry, where the release disc count is unknown → `no-disc-number`. The same group, with the parent folder saying `Vol.1-6 Fin` → `filed`, numbered in folder order.
   - A TheDiscDB hit that names a different title from the folder's only candidate → `sources-disagree`.
-  - `CITADEL S02/CITADEL S02 VOL.2` and a sibling disc with no title inherit the group's entry.
+  - `BRASSWICK S02/BRASSWICK S02 VOL.2` and a sibling disc with no title inherit the group's entry.
   - **Review Focus 1:** a disc with only an `ita` bdmt `Ember Blade: Hinokiri no Ken` and folder `[BDMV] Hinokiri no Ken [Dist][ITA]` files under the same AniList entry as the Japanese release, or goes to Unsorted. It never files under an unrelated entry. Assert it isn't any id other than the expected one.
   - Under `.../Music/...` or with `parseName(...).music` → `music`, grouped by release folder and named after it.
   - A bonus marker with a resolved title → `filed` with `bonus: true`.

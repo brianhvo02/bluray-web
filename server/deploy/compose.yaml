@@ -5,7 +5,7 @@ services:
     container_name: bluray-server
     restart: unless-stopped
     environment:
-      LIBRARY_ROOTS: drv0=/library-mnt/drv0/BDMVs,drv2=/library-mnt/drv2/BDMVs,drv3=/library-mnt/drv3/BDMVs,drv5=/library-mnt/drv5/BDMVs,drv6=/library-mnt/drv6/BDMVs,drv7=/library-mnt/drv7/BDMVs,drv8=/library-mnt/drv8/BDMVs
+      LIBRARY_ROOTS: drv0=/library-mnt/drv0/BDMVs,drv2=/library-mnt/drv2/BDMVs,drv3=/library-mnt/drv3/BDMVs,drv5=/library-mnt/drv5/BDMVs,drv6=/library-mnt/drv6/BDMVs,drv7=/library-mnt/drv7/BDMVs,drv8=/library-mnt/drv8/BDMVs,drv0-dl=/library-mnt/drv0/Downloads@Downloads,drv1-dl=/library-mnt/drv1/Downloads@Downloads,drv2-dl=/library-mnt/drv2/Downloads@Downloads,drv3-dl=/library-mnt/drv3/Downloads@Downloads,drv4-dl=/library-mnt/drv4/Downloads@Downloads,drv2-rips=/library-mnt/drv2/Rips@Rips
       DATA_DIR: /data
       PORT: "8080"
       TZ: America/Los_Angeles
@@ -15,6 +15,12 @@ services:
       # The rendezvous Worker (rendezvous/), where owner codes are registered for lookup by code or QR. Empty: codes are
       # not registered, and only devices that already know the NAS address can pair.
       RENDEZVOUS_URL: https://bluray-rendezvous.brianhvo02.workers.dev
+      # TheMovieDB key for title matching, read from .env next to this file. Empty: no TMDB lookups.
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TITLE_LIBRARY: owners
+    env_file:
+      - path: .env
+        required: false
     # Each drive's mount point, not its BDMVs folder: the mount point always exists on the root filesystem, so the
     # container starts with a drive missing, and create_host_path: false means Docker never makes anything under /mnt.
     # rslave lets a drive mounted after the container started (a late nofail mount) appear inside it. A root whose
@@ -26,6 +32,11 @@ services:
         read_only: true
         bind: { create_host_path: false, propagation: rslave }
       - type: bind
+        source: /mnt/drv1
+        target: /library-mnt/drv1
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
         source: /mnt/drv2
         target: /library-mnt/drv2
         read_only: true
@@ -33,6 +44,11 @@ services:
       - type: bind
         source: /mnt/drv3
         target: /library-mnt/drv3
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv4
+        target: /library-mnt/drv4
         read_only: true
         bind: { create_host_path: false, propagation: rslave }
       - type: bind

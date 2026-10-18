@@ -14,6 +14,8 @@ describe('loadConfig', () => {
       scanPauseMs: 10,
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
       trustedProxy: 'caddy',
+      tmdbApiKey: null,
+      titleLibrary: 'owners',
     });
   });
 
@@ -26,6 +28,8 @@ describe('loadConfig', () => {
       scanPauseMs: 10,
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
       trustedProxy: 'caddy',
+      tmdbApiKey: null,
+      titleLibrary: 'owners',
     });
   });
 
@@ -35,6 +39,12 @@ describe('loadConfig', () => {
 
   it('rejects duplicate root names', () => {
     expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv0=/b' })).toThrow('LIBRARY_ROOTS names "drv0" twice');
+  });
+
+  it('reads TMDB_API_KEY and TITLE_LIBRARY', () => {
+    expect(loadConfig({ TMDB_API_KEY: 'k123', TITLE_LIBRARY: 'everyone' })).toMatchObject({ tmdbApiKey: 'k123', titleLibrary: 'everyone' });
+    expect(loadConfig({ TMDB_API_KEY: '', TITLE_LIBRARY: 'owners' })).toMatchObject({ tmdbApiKey: null, titleLibrary: 'owners' });
+    expect(() => loadConfig({ TITLE_LIBRARY: 'all' })).toThrow('TITLE_LIBRARY "all" is not owners or everyone');
   });
 
   it('reads NIGHTLY_SCAN_AT and SCAN_PAUSE_MS', () => {
@@ -81,5 +91,14 @@ describe('loadConfig', () => {
 
   it.each(['rendezvous', 'ftp://r.example/'])('rejects RENDEZVOUS_URL=%j', (value) => {
     expect(() => loadConfig({ RENDEZVOUS_URL: value })).toThrow(`RENDEZVOUS_URL "${value}" is not an http(s) URL`);
+  });
+
+  it('parses a root group written name=dir@group', () => {
+    const { roots } = loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv0-dl=/b@Downloads' });
+    expect(roots).toEqual([{ name: 'drv0', dir: '/a' }, { name: 'drv0-dl', dir: '/b', group: 'Downloads' }]);
+  });
+
+  it('rejects a group named like a root', () => {
+    expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv1=/b@drv0' })).toThrow('group "drv0" is also a root name');
   });
 });

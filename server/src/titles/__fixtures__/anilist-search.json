@@ -1,0 +1,41 @@
+{
+  "data": {
+    "Page": {
+      "media": [
+        {
+          "id": 990001,
+          "title": { "romaji": "Hoshifuri no Tabibito", "english": "Starfall Wanderer", "native": "星降りの旅人" },
+          "synonyms": ["Hoshitabi", "The Starfall Wanderer"],
+          "format": "TV",
+          "episodes": 24,
+          "duration": 24,
+          "startDate": { "year": 2023, "month": 4, "day": 7 },
+          "coverImage": {
+            "medium": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/small/bx990001-AbCdEf.jpg",
+            "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx990001-AbCdEf.jpg"
+          },
+          "bannerImage": "https://s4.anilist.co/file/anilistcdn/media/anime/banner/990001-GhIjKl.jpg",
+          "relations": {
+            "edges": [
+              { "relationType": "SEQUEL", "node": { "id": 990002, "format": "TV", "startDate": { "year": 2025, "month": 1, "day": 10 } } },
+              { "relationType": "PREQUEL", "node": { "id": 990000, "format": "MOVIE", "startDate": { "year": 2022, "month": null, "day": null } } },
+              { "relationType": "ADAPTATION", "node": { "id": 880001, "format": "MANGA", "startDate": { "year": null, "month": null, "day": null } } }
+            ]
+          }
+        },
+        {
+          "id": 990002,
+          "title": { "romaji": "Hoshifuri no Tabibito 2nd Season", "english": null, "native": "星降りの旅人 第2期" },
+          "synonyms": [],
+          "format": "TV",
+          "episodes": null,
+          "duration": null,
+          "startDate": { "year": 2025, "month": 1, "day": 10 },
+          "coverImage": { "medium": null, "large": null },
+          "bannerImage": null,
+          "relations": { "edges": [] }
+        }
+      ]
+    }
+  }
+}

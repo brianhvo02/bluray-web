@@ -4,9 +4,13 @@ import type { Dir } from 'node:fs';
 import { join } from 'node:path';
 import type { DiscEntry, FolderEntry } from '../../src/engine/disc/nas-api';
 import { discId } from './disc-id';
-import { isoIsDisc } from './iso';
+import { isoDiscTree, readIsoTree } from './iso';
+import { readFolderEvidence, readIsoEvidence } from './titles/evidence';
+import type { DiscEvidence } from './titles/evidence';
 
 const MAX_DEPTH = 6;
+/** A disc whose files changed within this long is still downloading and is left out of the library. */
+export const SETTLE_MS = 3_600_000;
 const SKIPPED = new Set(['bk', 'lost+found']);
 
 export interface LibraryOptions {
@@ -14,11 +18,19 @@ export interface LibraryOptions {
   opendir?: (path: string) => Promise<Dir>;
   /** Pause between directory reads, which keeps a scan gentle on disks that ignore ionice. Default 10. */
   scanPauseMs?: number;
+  /** Injected for tests: the current time in ms. Default `Date.now`. */
+  now?: () => number;
 }
 
 interface Node {
   folders: Map<string, FolderEntry>;
   discs: DiscEntry[];
+}
+
+interface LibraryRoot {
+  name: string;
+  dir: string;
+  group?: string;
 }
 
 const byName = (a: { name: string }, b: { name: string }): number => a.name.localeCompare(b.name, 'ja');
@@ -33,23 +45,42 @@ export function nextNightly(now: Date, at: { hour: number; minute: number } = { 
 export class Library {
   private tree = buildTree([]);
   private byId = new Map<string, DiscEntry>();
+  /** Evidence of the installed discs, by id. */
+  private evidenceById = new Map<string, DiscEvidence>();
+  /** During a scan: the evidence it started with, and what it has gathered so far. */
+  private previousEvidence = new Map<string, DiscEvidence>();
+  private nextEvidence = new Map<string, DiscEvidence>();
+  private readonly scannedListeners: (() => void)[] = [];
   private running: Promise<void> | null = null;
   private readonly open: (path: string) => Promise<Dir>;
   private readonly pauseMs: number;
+  private readonly now: () => number;
   private reads = 0;
   /** Ids of `.iso` files whose UDF tree has no BDMV/INDEX.BDMV (or that aren't UDF), so a rescan doesn't read them again. */
   private readonly notDiscs = new Set<string>();
 
   constructor(
-    private readonly roots: readonly { name: string; dir: string }[],
+    private readonly roots: readonly { name: string; dir: string; group?: string }[],
     private readonly cacheFile: string,
     options: LibraryOptions = {},
   ) {
     this.open = options.opendir ?? opendir;
     this.pauseMs = options.scanPauseMs ?? 10;
+    this.now = options.now ?? Date.now;
     try {
       const cached: unknown = JSON.parse(readFileSync(cacheFile, 'utf8'));
-      if (Array.isArray(cached)) this.install(cached.filter((e) => this.valid(e)));
+      if (Array.isArray(cached)) {
+        const discs: DiscEntry[] = [];
+        const evidence = new Map<string, DiscEvidence>();
+        for (const e of cached) {
+          if (!this.valid(e)) continue;
+          // Each cached disc carries its evidence; an older cache has none, and the next scan reads it.
+          const { evidence: ev, ...disc } = e as DiscEntry & { evidence?: unknown };
+          discs.push(disc);
+          if (validEvidence(ev, disc)) evidence.set(disc.id, ev);
+        }
+        this.install(discs, evidence);
+      }
     } catch {
       // No usable cache: the first scan fills it.
     }
@@ -61,14 +92,52 @@ export class Library {
 
   list(path: string): { folders: FolderEntry[]; discs: DiscEntry[] } | null {
     const key = path.replace(/\/+$/, '');
-    // The top level shows the children of every root, merged.
-    const nodes = key === '' ? this.roots.map((r) => this.tree.get(r.name)) : [this.tree.get(key)];
+    // A group's folders are listed under the group's name, and merge those of its roots, plus a real top-level folder
+    // of the same name in an ungrouped root.
+    const slash = key.indexOf('/');
+    const head = slash < 0 ? key : key.slice(0, slash);
+    if (key !== '' && this.roots.some((r) => r.group === head)) {
+      const rest = slash < 0 ? '' : key.slice(slash);
+      const members = this.groupBases(head).flatMap((base) => {
+        const node = this.tree.get(`${base}${rest}`);
+        return node ? [{ base, node }] : [];
+      });
+      if (members.length === 0) return null;
+      return {
+        folders: mergeFolders(members.flatMap((m) => [...m.node.folders.values()].map((f) => ({ ...f, path: `${head}${f.path.slice(m.base.length)}` })))),
+        discs: members.flatMap((m) => m.node.discs).sort(byName),
+      };
+    }
+    // The top level shows the children of every ungrouped root, merged, and one folder per group.
+    const nodes = key === '' ? this.roots.filter((r) => r.group === undefined).map((r) => this.tree.get(r.name)) : [this.tree.get(key)];
     if (key !== '' && !nodes[0]) return null;
     const present = nodes.filter((n): n is Node => n !== undefined);
-    return {
-      folders: present.flatMap((n) => [...n.folders.values()]).sort(byName),
-      discs: present.flatMap((n) => n.discs).sort(byName),
-    };
+    let folders = present.flatMap((n) => [...n.folders.values()]);
+    if (key === '') {
+      for (const group of new Set(this.roots.flatMap((r) => (r.group === undefined ? [] : [r.group])))) {
+        const inGroup = this.groupBases(group).map((base) => this.tree.get(base)).filter((n): n is Node => n !== undefined);
+        const discs = inGroup.reduce((sum, n) => sum + n.discs.length + [...n.folders.values()].reduce((s, f) => s + f.discs, 0), 0);
+        // A real folder with the group's name is part of the group folder, not a second one.
+        folders = folders.filter((f) => f.name !== group);
+        if (discs > 0) folders.push({ name: group, path: group, discs });
+      }
+    }
+    return { folders: folders.sort(byName), discs: present.flatMap((n) => n.discs).sort(byName) };
+  }
+
+  /** Tree keys whose children make up a group's folder: its roots, and a same-named top-level folder of an ungrouped root. */
+  private groupBases(group: string): string[] {
+    return this.roots.map((r) => (r.group === group ? r.name : r.group === undefined ? `${r.name}/${group}` : null)).filter((b): b is string => b !== null);
+  }
+
+  /** The evidence of every listed disc whose evidence has been read. */
+  evidence(): readonly DiscEvidence[] {
+    return [...this.evidenceById.values()];
+  }
+
+  /** Calls `listener` after every completed scan. */
+  onScanned(listener: () => void): void {
+    this.scannedListeners.push(listener);
   }
 
   disc(id: string): DiscEntry | null {
@@ -102,9 +171,10 @@ export class Library {
     );
   }
 
-  private install(discs: DiscEntry[]): void {
+  private install(discs: DiscEntry[], evidence: ReadonlyMap<string, DiscEvidence>): void {
     this.tree = buildTree(discs);
     this.byId = new Map(discs.map((d) => [d.id, d]));
+    this.evidenceById = new Map(discs.flatMap((d) => (evidence.has(d.id) ? [[d.id, evidence.get(d.id)!] as const] : [])));
   }
 
   private async doScan(): Promise<void> {
@@ -112,21 +182,47 @@ export class Library {
     const previous = this.byId;
     const progressive = previous.size === 0;
     this.reads = 0;
+    this.previousEvidence = this.evidenceById;
+    this.nextEvidence = new Map();
     for (const root of this.roots) {
       await this.scanRoot(root, found, previous);
-      if (progressive) this.install([...found]);
+      if (progressive) this.install([...found], this.nextEvidence);
     }
-    this.install(found);
+    this.install(found, this.nextEvidence);
     try {
       const tmp = `${this.cacheFile}.tmp`;
-      await writeFile(tmp, JSON.stringify(found));
+      await writeFile(tmp, JSON.stringify(found.map((d) => ({ ...d, evidence: this.nextEvidence.get(d.id) }))));
       await rename(tmp, this.cacheFile);
     } catch (err) {
       console.error('could not write the library cache', err);
     }
+    for (const listener of this.scannedListeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error('a scan listener failed', err);
+      }
+    }
   }
 
-  private async scanRoot(root: { name: string; dir: string }, out: DiscEntry[], previous: Map<string, DiscEntry>): Promise<void> {
+  /** Carries a disc's evidence over from the previous scan, if it had any; true if it did. */
+  private carryEvidence(id: string): boolean {
+    const ev = this.previousEvidence.get(id);
+    if (ev) this.nextEvidence.set(id, ev);
+    return ev !== undefined;
+  }
+
+  /** Reads a disc's evidence, at the scan's pace; a failed read leaves it out, to be read again by the next scan. */
+  private async readEvidence(disc: DiscEntry, read: () => Promise<DiscEvidence>): Promise<void> {
+    await this.pace();
+    try {
+      this.nextEvidence.set(disc.id, await read());
+    } catch (err) {
+      console.error(`could not read the evidence of ${disc.path}`, err);
+    }
+  }
+
+  private async scanRoot(root: LibraryRoot, out: DiscEntry[], previous: Map<string, DiscEntry>): Promise<void> {
     let queue: { rel: string; abs: string; depth: number }[] = [{ rel: root.name, abs: root.dir, depth: 0 }];
     while (queue.length > 0) {
       const next: typeof queue = [];
@@ -134,7 +230,13 @@ export class Library {
         const entries = await this.readDir(dir.abs);
         if (!entries || (dir.depth === 0 && entries.length === 0)) {
           // An unreadable or empty root (a drive that isn't mounted) keeps what it had rather than losing its discs.
-          if (dir.depth === 0) for (const d of previous.values()) if (d.path === root.name || d.path.startsWith(`${root.name}/`)) out.push(d);
+          if (dir.depth === 0) {
+            for (const d of previous.values()) {
+              if (d.path !== root.name && !d.path.startsWith(`${root.name}/`)) continue;
+              out.push(d);
+              this.carryEvidence(d.id);
+            }
+          }
           continue;
         }
         const bdmv = entries.find((e) => e.isDir && e.name.toLowerCase() === 'bdmv');
@@ -160,8 +262,13 @@ export class Library {
     }
   }
 
-  private async readDir(abs: string): Promise<{ name: string; isDir: boolean; isFile: boolean }[] | null> {
+  /** Waits `scanPauseMs` before every read of a scan but the first. */
+  private async pace(): Promise<void> {
     if (this.reads++ > 0 && this.pauseMs > 0) await new Promise((r) => setTimeout(r, this.pauseMs));
+  }
+
+  private async readDir(abs: string): Promise<{ name: string; isDir: boolean; isFile: boolean }[] | null> {
+    await this.pace();
     let dir: Dir;
     try {
       dir = await this.open(abs);
@@ -190,16 +297,76 @@ export class Library {
     }
     const id = discId(rel, st.size, st.mtimeMs);
     const disc: DiscEntry = { id, name, path: rel, kind: 'iso', sizeBytes: st.size };
-    if (previous.get(id)?.kind === 'iso') return disc;
+    if (previous.get(id)?.kind === 'iso') {
+      if (!this.carryEvidence(id) && (await this.isSettled(abs, this.now()))) {
+        await this.readEvidence(disc, async () => readIsoEvidence(disc, abs, await readIsoTree(abs)));
+      }
+      return disc;
+    }
+    if (!(await this.isSettled(abs, this.now()))) return this.keepPrevious(rel, previous);
     if (this.notDiscs.has(id)) return null;
     try {
-      if (await isoIsDisc(abs)) return disc;
+      // A disc's tree is parsed once, for both the probe and the evidence.
+      const tree = await isoDiscTree(abs);
+      if (tree) {
+        await this.readEvidence(disc, () => readIsoEvidence(disc, abs, tree));
+        return disc;
+      }
       this.notDiscs.add(id);
     } catch (err) {
       // A read error: left out of this scan, and tried again on the next.
       console.error(`could not read ${abs}`, err);
     }
     return null;
+  }
+
+  /**
+   * Whether nothing of a disc changed in the last `SETTLE_MS`. `abs` is an ISO file or a BDMV directory; for the
+   * directory the newest mtime of index.bdmv and the files of PLAYLIST, CLIPINF and STREAM counts.
+   */
+  async isSettled(abs: string, nowMs: number): Promise<boolean> {
+    let newest = 0;
+    try {
+      const st = await stat(abs);
+      newest = st.mtimeMs;
+      if (st.isDirectory()) {
+        const entries = (await this.readDir(abs)) ?? [];
+        const files: string[] = [];
+        for (const e of entries) {
+          const lower = e.name.toLowerCase();
+          if (e.isFile && lower === 'index.bdmv') files.push(join(abs, e.name));
+          else if (e.isDir && (lower === 'playlist' || lower === 'clipinf' || lower === 'stream')) {
+            for (const f of (await this.readDir(join(abs, e.name))) ?? []) if (f.isFile) files.push(join(abs, e.name, f.name));
+          }
+        }
+        newest = 0;
+        for (const f of files) {
+          try {
+            newest = Math.max(newest, (await stat(f)).mtimeMs);
+          } catch {
+            // Vanished mid-scan.
+          }
+        }
+      }
+    } catch {
+      return false;
+    }
+    return nowMs - newest >= SETTLE_MS;
+  }
+
+  private previousPaths: { source: Map<string, DiscEntry>; byPath: Map<string, DiscEntry> } | null = null;
+
+  /** The previous scan's discs by path, built once per scan. */
+  private previousByPath(previous: Map<string, DiscEntry>): Map<string, DiscEntry> {
+    if (this.previousPaths?.source !== previous) this.previousPaths = { source: previous, byPath: new Map([...previous.values()].map((d) => [d.path, d])) };
+    return this.previousPaths.byPath;
+  }
+
+  /** An unsettled disc keeps its entry from the previous scan, if it had one. */
+  private keepPrevious(rel: string, previous: Map<string, DiscEntry>): DiscEntry | null {
+    const kept = this.previousByPath(previous).get(rel) ?? null;
+    if (kept) this.carryEvidence(kept.id);
+    return kept;
   }
 
   /** A folder disc if `bdmvDir` holds index.bdmv; its size is that of the clips in STREAM, carried over from `previous` when the id is unchanged. */
@@ -217,7 +384,13 @@ export class Library {
     const name = rel.slice(rel.lastIndexOf('/') + 1);
     const known = previous.get(id);
     // Same path, index size and mtime: the disc is unchanged, so skip reading STREAM again.
-    if (known && known.kind === 'folder') return { id, name, path: rel, kind: 'folder', sizeBytes: known.sizeBytes };
+    const discDir = join(bdmvDir, '..');
+    if (known && known.kind === 'folder') {
+      const disc: DiscEntry = { id, name, path: rel, kind: 'folder', sizeBytes: known.sizeBytes };
+      if (!this.carryEvidence(id) && (await this.isSettled(bdmvDir, this.now()))) await this.readEvidence(disc, () => readFolderEvidence(disc, discDir, (dir) => this.readDir(dir)));
+      return disc;
+    }
+    if (!(await this.isSettled(bdmvDir, this.now()))) return this.keepPrevious(rel, previous);
     let sizeBytes = 0;
     const stream = entries.find((e) => e.isDir && e.name.toLowerCase() === 'stream');
     const streamDir = stream ? join(bdmvDir, stream.name) : null;
@@ -229,8 +402,40 @@ export class Library {
         // Vanished mid-scan.
       }
     }
-    return { id, name, path: rel, kind: 'folder', sizeBytes };
+    const disc: DiscEntry = { id, name, path: rel, kind: 'folder', sizeBytes };
+    await this.readEvidence(disc, () => readFolderEvidence(disc, discDir, (dir) => this.readDir(dir)));
+    return disc;
   }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string');
+
+/** Whether a cached `evidence` field has the shape of a disc's evidence (for that disc), down to its elements. */
+function validEvidence(ev: unknown, disc: DiscEntry): ev is DiscEvidence {
+  if (!isRecord(ev)) return false;
+  return (
+    ev.discId === disc.id &&
+    ev.path === disc.path &&
+    (ev.fingerprint === null || typeof ev.fingerprint === 'string') &&
+    Array.isArray(ev.discTitles) &&
+    ev.discTitles.every((t) => isRecord(t) && typeof t.lang === 'string' && typeof t.name === 'string') &&
+    isStrings(ev.segments) &&
+    isStrings(ev.catalogueNumbers) &&
+    Array.isArray(ev.playlists) &&
+    ev.playlists.every(
+      (p) => isRecord(p) && typeof p.id === 'string' && Number.isFinite(p.durationS) && Number.isInteger(p.chapters) && isStrings(p.clips),
+    )
+  );
+}
+
+function mergeFolders(folders: FolderEntry[]): FolderEntry[] {
+  const merged = new Map<string, FolderEntry>();
+  for (const f of folders) {
+    const prev = merged.get(f.path);
+    merged.set(f.path, prev ? { ...prev, discs: prev.discs + f.discs } : f);
+  }
+  return [...merged.values()].sort(byName);
 }
 
 function buildTree(discs: readonly DiscEntry[]): Map<string, Node> {
