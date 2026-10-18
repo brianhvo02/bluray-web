@@ -184,6 +184,21 @@ describe('NasClient', () => {
     expect(await nas.artUrl('0123456789abcdef0123456789abcdef', 'large')).toBe(`${BASE}art/0123456789abcdef0123456789abcdef?size=large&t=${encodeURIComponent(token)}`);
   });
 
+  it('gives a failed art URL a fresh token, never the one it carried', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const artId = '0123456789abcdef0123456789abcdef';
+    const first = await nas.artUrl(artId, 'small');
+    const stale = new URL(first).searchParams.get('t');
+    clock += 1_000; // a token is made from the device and its expiry
+    const retry = await nas.freshArtUrl(artId, 'small', first);
+    const fresh = new URL(retry).searchParams.get('t');
+    expect(fresh).not.toBe(stale);
+    expect(retry).toBe(`${BASE}art/${artId}?size=small&t=${encodeURIComponent(fresh!)}`);
+    expect(server.auth.verify(fresh!)).not.toBeNull();
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();

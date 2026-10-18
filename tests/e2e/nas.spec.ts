@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, SERVER, restoreChangedDisc } from './nas-server';
+import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
 
 // The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
@@ -49,43 +50,57 @@ async function exclusivelyAsync<T>(name: string, fn: () => Promise<T>): Promise<
   }
 }
 
-/** Sets the release gate as the owner does, through the API with the owner device's session token. */
-async function setGate(token: string, gate: 'owners' | 'everyone'): Promise<void> {
-  const res = await fetch(`http://localhost:${NAS_PORT}/api/admin/settings/title-library`, {
-    method: 'PUT',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ gate }),
-  });
+const NAS_API = `http://localhost:${NAS_PORT}/api/`;
+
+const post = async (path: string, body: unknown): Promise<unknown> => {
+  const res = await fetch(`${NAS_API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  expect(res.status, `POST ${path}`).toBe(200);
+  return res.json();
+};
+
+let apiSession: Promise<string> | null = null;
+/**
+ * A session token of an owner device this test worker pairs for itself (`E2E API`), as the app does: redeem an owner
+ * code with a new P-256 key, then sign the NAS's challenge. Kept for the worker's run (sessions last an hour).
+ */
+function apiToken(): Promise<string> {
+  apiSession ??= (async () => {
+    const code = normalizeCode(ownerCode())!;
+    const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', key.publicKey);
+    const { deviceId } = (await post('pair/redeem', { code, deviceName: 'E2E API', publicKeyJwk: { kty, crv, x, y } })) as { deviceId: string };
+    const { challenge } = (await post('session/challenge', { deviceId })) as { challenge: string };
+    const signature = Buffer.from(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key.privateKey, new TextEncoder().encode(challenge))).toString('base64url');
+    const { token } = (await post('session', { deviceId, challenge, signature })) as { token: string };
+    return token;
+  })();
+  return apiSession;
+}
+
+/** An owner route of the NAS API, as the owner device. */
+async function ownerApi(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${await apiToken()}`);
+  return fetch(`${NAS_API}${path}`, { ...init, headers });
+}
+
+/** Sets the release gate as the owner does, through the API. */
+async function setGate(gate: 'owners' | 'everyone'): Promise<void> {
+  const res = await ownerApi('admin/settings/title-library', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gate }) });
   expect(res.status).toBe(204);
 }
 
-/** The last session token `page` sent to the NAS, kept as it goes. */
-function watchToken(page: Page): () => string {
-  let token: string | null = null;
-  page.on('request', (r) => {
-    const auth = r.headers()['authorization'];
-    if (auth?.startsWith('Bearer ') && r.url().startsWith(`http://localhost:${NAS_PORT}/`)) token = auth.slice(7);
-  });
-  return () => {
-    expect(token).not.toBeNull();
-    return token!;
-  };
-}
-
 /**
- * Waits for the server's first scan and title matching run (it matches after scanning) to have filed the fixture's
- * discs: until then the folder listing is empty, and the app fetches the titles once per session.
+ * Waits, through `GET admin/metadata/status`, for the server's first scan and title matching run (it matches after
+ * scanning) to have filed the fixture's discs: until then the folder listing is empty, and the app fetches the titles
+ * once per session.
  */
 async function libraryReady(): Promise<void> {
   await expect
     .poll(
-      () => {
-        try {
-          const meta = JSON.parse(readFileSync(join(NAS_ENV.DATA_DIR!, 'metadata.json'), 'utf8')) as { matches: { status: string }[] };
-          return meta.matches.filter((m) => m.status === 'filed').length;
-        } catch {
-          return 0;
-        }
+      async () => {
+        const status = (await (await ownerApi('admin/metadata/status')).json()) as { running: boolean; lastRunAt: number | null; filed: number };
+        return !status.running && status.lastRunAt !== null ? status.filed : 0;
       },
       { timeout: 30_000 },
     )
@@ -242,7 +257,6 @@ test('a disc deleted after its pre-flight fails to open, and Play works again', 
 });
 
 test('the owner mints a code, pairs a second browser as Mum, revokes it, and rescans', async ({ page, browser, browserName }) => {
-  const ownerToken = watchToken(page);
   await openLibrary(page, browserName);
   await page.getByTestId('nas-settings').click();
   await expect(page.getByTestId('nas-admin')).toBeVisible();
@@ -281,7 +295,7 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
         await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
 
         // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
-        await setGate(ownerToken(), 'everyone');
+        await setGate('everyone');
         await mum.reload();
         await mum.getByTestId('nas-open').click();
         await expect(mum.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
@@ -291,7 +305,7 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
         await mum.getByTestId('browse-folders').click();
         await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
       } finally {
-        await setGate(ownerToken(), 'owners');
+        await setGate('owners');
       }
     });
 
@@ -405,4 +419,46 @@ test('"Browse by folder instead" opens the folder browser', async ({ page, brows
   await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
   await expect(page.getByTestId('title-library')).toHaveCount(0);
   await expect(page.locator('[data-testid="nas-folder"][data-name="Anime"]')).toBeVisible();
+});
+
+test("an episode whose playlist isn't on its disc opens the disc normally, with a notice", async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  // As if the catalogue named a playlist the disc doesn't have.
+  await page.route('**/api/titles/anilist%3A900001', async (route) => {
+    const res = await route.fetch();
+    const detail = (await res.json()) as { seasons: { episodes: { playlistId: string }[] | null }[] };
+    for (const s of detail.seasons) for (const e of s.episodes ?? []) e.playlistId = '00009';
+    await route.fulfill({ response: res, json: detail });
+  });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  // disc1 has no menu: opened normally, it offers its playlists.
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("This episode isn't on this disc; it opened normally.")).toBeVisible();
+  await expect(page.getByTestId('error')).toHaveCount(0);
+});
+
+test('the title screens move focus to the new heading, and back to the opener', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
+  await card.click();
+  await expect(page.getByTestId('series-name')).toBeFocused();
+  const season = page.locator('[data-testid="season-row"][data-label="Season 1"]');
+  await season.click();
+  await expect(page.getByTestId('season-screen').locator('h2')).toBeFocused();
+  // The tabs: arrow keys move between them, selecting as they go.
+  const tabs = page.getByTestId('season-tab');
+  await expect(page.getByRole('tablist', { name: 'Season view' })).toBeVisible();
+  await tabs.first().focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.nth(1)).toBeFocused();
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', (await tabs.nth(1).getAttribute('id'))!);
+  await page.getByRole('button', { name: 'Back to Starfall Wanderer' }).click();
+  await expect(season).toBeFocused();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(card).toBeFocused();
 });

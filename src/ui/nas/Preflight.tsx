@@ -1,9 +1,10 @@
-import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { discBadges, discFacts, formatSize, openFailed, preflightLines, type DiscFacts } from './library-model';
 import { NasHttpError, type NasClient } from './nas-client';
+import { playOnceOpen } from './play-once-open';
 
 /** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
 export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
@@ -23,21 +24,6 @@ interface PreflightProps {
 const message = (err: unknown): string =>
   err instanceof NasHttpError && err.code === 'disc-changed' ? DISC_CHANGED_MESSAGE : err instanceof Error ? err.message : String(err);
 
-/**
- * Starts `playlistId` once the engine has read the disc just opened. A plain subscription rather than an effect: the
- * landing screen, and this pre-flight with it, unmounts as soon as the disc's playlists arrive.
- */
-function playOnceOpen(controller: PlayerController, playlistId: string): void {
-  const unsubscribe = controller.subscribe(() => {
-    const snapshot = controller.getSnapshot();
-    if (openFailed(snapshot)) unsubscribe();
-    else if (snapshot.playlists.length > 0) {
-      unsubscribe();
-      controller.playPlaylist(playlistId);
-    }
-  });
-}
-
 /** Before a NAS disc plays: its manifest, this connection's throughput against the disc's peak rate, and Play. */
 export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel }: PreflightProps): ReactElement {
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
@@ -49,6 +35,9 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
   const [opening, setOpening] = useState<'idle' | 'starting' | 'launched'>('idle');
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const engineFailed = openFailed(snapshot);
+  /** Releases the wait for this open's playlists (playOnceOpen); this pre-flight going away ends it too. */
+  const releaseWait = useRef<(() => void) | null>(null);
+  useEffect(() => () => releaseWait.current?.(), []);
   useEffect(() => {
     if (opening === 'launched' && engineFailed) setOpening('idle');
   }, [opening, engineFailed]);
@@ -92,7 +81,8 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
         controller.openRemote({ kind: 'remote', base, token, manifest }, () => nas.freshSession(token).then((s) => (token = s.token)));
-        if (playlistId !== undefined) playOnceOpen(controller, playlistId);
+        releaseWait.current?.();
+        releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
         setOpening('launched');
       },
     ).catch((err: unknown) => {

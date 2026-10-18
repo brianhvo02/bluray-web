@@ -36,7 +36,9 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
       <div className="series-head">
         <Poster nas={nas} artId={title.poster} name={name} size="large" className="series-poster" />
         <div className="series-names">
-          <h2 data-testid="series-name">{name}</h2>
+          <h2 data-testid="series-name" tabIndex={-1} data-focus-heading="">
+            {name}
+          </h2>
           {romaji && <span className="title-muted">{romaji}</span>}
           {native && native !== romaji && <span className="title-muted" lang="ja">{native}</span>}
           <span className="series-meta">{titleMeta(detail)}</span>
@@ -48,7 +50,7 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
             const label = seasonLabel(s);
             return (
               <li key={s.id}>
-                <button type="button" className="title-row" data-testid="season-row" data-label={label} onClick={() => onSeason(s.id)}>
+                <button type="button" className="title-row" data-testid="season-row" data-label={label} data-season-id={s.id} onClick={() => onSeason(s.id)}>
                   <Poster nas={nas} artId={title.poster} name={name} size="small" className="title-thumb" />
                   <span className="title-row-text">
                     <span className="title-row-name">{label}</span>
@@ -68,7 +70,7 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
         <ul className="title-list">
           {detail.related.map((r) => (
             <li key={r.id}>
-              <button type="button" className="title-row" data-testid="related-row" onClick={() => onTitle(r.id)}>
+              <button type="button" className="title-row" data-testid="related-row" data-title-id={r.id} onClick={() => onTitle(r.id)}>
                 <Poster nas={nas} artId={r.poster} name={displayName(r)} size="small" className="title-thumb" />
                 <span className="title-row-text">
                   <span className="title-row-name">{displayName(r)}</span>

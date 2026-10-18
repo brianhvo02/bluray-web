@@ -87,6 +87,22 @@ describe('playlist lifecycle', () => {
     expect(worker.posted).toEqual([{ type: 'close' }]);
     expect(c.getSnapshot().playlists).toEqual([]);
   });
+
+  it('counts every open and close, so a wait begun for one open can tell another from it', () => {
+    const c = new PlayerController(new FakeWorker(), new FakeAudio());
+    expect(c.discOpens).toBe(0);
+    c.open([]);
+    c.openRemote({ kind: 'remote', base: 'https://nas.example/discs/a/', token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } });
+    c.closeDisc();
+    expect(c.discOpens).toBe(3);
+  });
+
+  it('shows a notice of its own, replacing one with the same code', () => {
+    const c = new PlayerController(new FakeWorker(), new FakeAudio());
+    c.showNotice('episode-missing', 'a');
+    c.showNotice('episode-missing', 'b');
+    expect(c.getSnapshot().notices).toEqual([{ code: 'episode-missing', message: 'b' }]);
+  });
 });
 
 describe('notices across playlists', () => {

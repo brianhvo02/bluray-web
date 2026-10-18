@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
@@ -58,6 +58,8 @@ const loadTitle = (nas: NasClient, id: string): Promise<TitleDetail> => {
   return cached(() => details.get(id), (p) => (p ? details.set(id, p) : details.delete(id)), () => nas.title(id));
 };
 
+/** Title routes answer 404 to a guest once the gate is closed (ruling T9c). */
+const isGateClosed = (err: unknown): boolean => err instanceof NasHttpError && err.status === 404;
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Pseudo-season holding a title's own extras, shown like a season without episodes. */
@@ -74,7 +76,7 @@ function TitleCard({ nas, title, onOpen }: TitleCardProps): ReactElement {
   const native = secondaryName(title);
   return (
     <li>
-      <button type="button" className="title-card" data-testid="title-card" data-name={name} onClick={() => onOpen(title.id)}>
+      <button type="button" className="title-card" data-testid="title-card" data-name={name} data-title-id={title.id} onClick={() => onOpen(title.id)}>
         <Poster nas={nas} artId={title.poster} name={name} size="small" className="title-poster" />
         <span className="title-card-name">{name}</span>
         {native && (
@@ -92,7 +94,7 @@ function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
   const native = secondaryName(title);
   return (
     <li>
-      <button type="button" className="title-row" data-testid="title-row" data-name={name} onClick={() => onOpen(title.id)}>
+      <button type="button" className="title-row" data-testid="title-row" data-name={name} data-title-id={title.id} onClick={() => onOpen(title.id)}>
         <Poster nas={nas} artId={title.poster} name={name} size="small" className="title-thumb" />
         <span className="title-row-text">
           <span className="title-row-name">{name}</span>
@@ -134,7 +136,7 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
       (err: unknown) => {
         if (!live) return;
         // The gate closed since `me` answered: the folder browser, as for any guest.
-        if (err instanceof NasHttpError && err.status === 404) onFolders();
+        if (isGateClosed(err)) onFolders();
         else setError(message(err));
       },
     );
@@ -174,21 +176,56 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
         if (live) setDetail(d);
       },
       (err: unknown) => {
-        if (live) setDetailError(message(err));
+        if (!live) return;
+        // As for the list: the gate closed meanwhile, so the folder browser, with no raw error.
+        if (isGateClosed(err)) onFolders();
+        else setDetailError(message(err));
       },
     );
     return () => {
       live = false;
     };
-  }, [nas, openId]);
+  }, [nas, openId, onFolders]);
+
+  /**
+   * Focus follows the screens: an opened title or season focuses its heading, and going back focuses the item that
+   * opened it (the button that had focus is gone with its screen). `focusNext` is applied once its element renders.
+   */
+  const focusNext = useRef<string | null>(null);
+  const returnFocus = useRef<string[]>([]);
+  useEffect(() => {
+    if (focusNext.current === null) return;
+    const el = document.querySelector<HTMLElement>(focusNext.current);
+    if (!el) return; // not rendered yet (a title still loading)
+    focusNext.current = null;
+    el.focus();
+  });
+  const forward = (opener: string): void => {
+    returnFocus.current.push(opener);
+    focusNext.current = '[data-focus-heading]';
+  };
+  const backward = (): void => {
+    focusNext.current = returnFocus.current.pop() ?? null;
+  };
+  const byAttr = (name: string, value: string): string => `[${name}="${CSS.escape(value)}"]`;
 
   const openTitle = useCallback((id: string) => {
+    forward(byAttr('data-title-id', id));
     setSeasonId(null);
     setStack((s) => [...s, id]);
   }, []);
   const back = (): void => {
+    backward();
     setSeasonId(null);
     setStack((s) => s.slice(0, -1));
+  };
+  const openSeason = (id: string): void => {
+    forward(id === 'extras' ? '[data-testid="extras-row"]' : byAttr('data-season-id', id));
+    setSeasonId(id);
+  };
+  const closeSeason = (): void => {
+    backward();
+    setSeasonId(null);
   };
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
 
@@ -221,9 +258,9 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     }
     const season = seasonId === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => s.id === seasonId);
     if (season) {
-      return <SeasonScreen seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={() => setSeasonId(null)} onOpen={openDisc} />;
+      return <SeasonScreen seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} />;
     }
-    return <SeriesScreen nas={nas} detail={detail} onBack={back} onSeason={setSeasonId} onExtras={() => setSeasonId('extras')} onTitle={openTitle} onOpen={openDisc} />;
+    return <SeriesScreen nas={nas} detail={detail} onBack={back} onSeason={openSeason} onExtras={() => openSeason('extras')} onTitle={openTitle} onOpen={openDisc} />;
   }
 
   const counts: Record<Shelf, number | null> = {

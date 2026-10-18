@@ -264,6 +264,13 @@ export class NasClient {
     return `${pairing.base}art/${encodeURIComponent(artId)}?size=${size}&t=${encodeURIComponent(session.token)}`;
   }
 
+  /** `failedUrl` (an artUrl) again with a fresh token: the one it carried may have lapsed since it was made. */
+  async freshArtUrl(artId: string, size: 'small' | 'large', failedUrl: string): Promise<string> {
+    const stale = new URL(failedUrl).searchParams.get('t');
+    if (stale !== null) await this.freshSession(stale);
+    return this.artUrl(artId, size);
+  }
+
   /** The disc's API base for the engine (`RemoteDiscSpec.base`): `<NAS base>discs/<id>/`. */
   async discBase(discId: string): Promise<string> {
     const pairing = await this.pairing();

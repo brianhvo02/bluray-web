@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react';
+import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
 import type { DiscRef, DiscSlot, EpisodeRef, SeasonDetail } from '../../engine/disc/nas-api';
 import type { PreflightDisc } from './Preflight';
 import { copiesLabel, discHeading, episodeMeta } from './title-model';
@@ -53,10 +53,26 @@ interface SeasonScreenProps {
   readonly onOpen: OpenDisc;
 }
 
+type Tab = 'episodes' | 'discs';
+const TABS: readonly Tab[] = ['episodes', 'discs'];
+
 /** A season: Episodes and Discs tabs, or the discs alone when its episodes aren't known. */
 export function SeasonScreen({ seriesName, heading, season, onBack, onOpen }: SeasonScreenProps): ReactElement {
   const episodes = season.episodes;
-  const [tab, setTab] = useState<'episodes' | 'discs'>(episodes ? 'episodes' : 'discs');
+  const [tab, setTab] = useState<Tab>(episodes ? 'episodes' : 'discs');
+  const ids = useId();
+  const tabId = (t: Tab): string => `${ids}-tab-${t}`;
+  const panelId = (t: Tab): string => `${ids}-panel-${t}`;
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
+  /** Arrow keys, Home and End move between the tabs, selecting as they go (roving tabIndex). */
+  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>): void => {
+    const at = TABS.indexOf(tab);
+    const next = e.key === 'ArrowRight' ? (at + 1) % TABS.length : e.key === 'ArrowLeft' ? (at + TABS.length - 1) % TABS.length : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    setTab(TABS[next]!);
+    tabRefs.current[TABS[next]!]?.focus();
+  };
 
   const playEpisode = (e: EpisodeRef): void => {
     const copy = season.discs.flatMap((d) => d.copies).find((c) => c.discId === e.discId);
@@ -72,20 +88,38 @@ export function SeasonScreen({ seriesName, heading, season, onBack, onOpen }: Se
         </button>
         <div className="season-head-text">
           <span className="title-muted">{seriesName}</span>
-          <h2>{heading}</h2>
+          <h2 tabIndex={-1} data-focus-heading="">
+            {heading}
+          </h2>
         </div>
       </header>
       {episodes && (
-        <div className="segmented" role="tablist" aria-label="Show">
-          {(['episodes', 'discs'] as const).map((t) => (
-            <button key={t} type="button" role="tab" aria-selected={tab === t} className={tab === t ? 'selected' : ''} data-testid="season-tab" data-tab={t} onClick={() => setTab(t)}>
+        <div className="segmented" role="tablist" aria-label="Season view">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              ref={(el) => {
+                tabRefs.current[t] = el;
+              }}
+              type="button"
+              role="tab"
+              id={tabId(t)}
+              aria-controls={panelId(t)}
+              aria-selected={tab === t}
+              tabIndex={tab === t ? 0 : -1}
+              className={tab === t ? 'selected' : ''}
+              data-testid="season-tab"
+              data-tab={t}
+              onClick={() => setTab(t)}
+              onKeyDown={onTabKey}
+            >
               {t === 'episodes' ? 'Episodes' : 'Discs'}
             </button>
           ))}
         </div>
       )}
-      {episodes && tab === 'episodes' ? (
-        <ul className="title-list" role="tabpanel">
+      {episodes && (
+        <ul className="title-list" role="tabpanel" id={panelId('episodes')} aria-labelledby={tabId('episodes')} hidden={tab !== 'episodes'}>
           {episodes.map((e) => (
             <li key={`${e.discId}:${e.playlistId}`}>
               <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} onClick={() => playEpisode(e)}>
@@ -101,17 +135,16 @@ export function SeasonScreen({ seriesName, heading, season, onBack, onOpen }: Se
             </li>
           ))}
         </ul>
-      ) : (
-        <div role={episodes ? 'tabpanel' : undefined}>
-          <DiscList season={season} discs={season.discs} onOpen={onOpen} />
-          {season.extras.length > 0 && (
-            <>
-              <h3 className="title-section">Extras</h3>
-              <DiscList season={{ ...season, episodes: null }} discs={season.extras} onOpen={onOpen} />
-            </>
-          )}
-        </div>
       )}
+      <div {...(episodes ? { role: 'tabpanel', id: panelId('discs'), 'aria-labelledby': tabId('discs'), hidden: tab !== 'discs' } : {})}>
+        <DiscList season={season} discs={season.discs} onOpen={onOpen} />
+        {season.extras.length > 0 && (
+          <>
+            <h3 className="title-section">Extras</h3>
+            <DiscList season={{ ...season, episodes: null }} discs={season.extras} onOpen={onOpen} />
+          </>
+        )}
+      </div>
     </section>
   );
 }
