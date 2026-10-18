@@ -101,6 +101,7 @@ const RELEASE_COUNT = /(?:\bvol(?:ume)?|\bdis[ck]|\bbd)\.?\s*0*1\s*[-~〜]\s*0*(
 const MACRON = /[āīūēō]/;
 const MACRONS: Readonly<Record<string, string>> = { ā: 'a', ī: 'i', ū: 'u', ē: 'e', ō: 'o' };
 const ASCII = /^[\x00-\x7f]*$/;
+const JAPANESE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 /**
  * Sequel markers in an AniList name, besides the seasons parseName reads (`2nd Season`, `Season 2`, `第2期`): `Part N`,
  * `Final Season`, `Second Season`, `Cour N`, `Nth Cour`, `第Nクール` (N > 1), `Zoku`, `続`, `完結編` (rulings T5i, N8).
@@ -119,6 +120,14 @@ const SEQUEL_MARK = new RegExp([
 /** Roman sequel numerals, upper case only so that words aren't taken for them. */
 const SEQUEL_ROMAN = /\b(?:II|III|IV)\b/;
 const TV_FORMATS = new Set(['TV', 'TV_SHORT']);
+/** AniList entries that a related TV entry beats when the evidence is series-shaped (ruling M3). */
+const SIDE_FORMATS = new Set(['OVA', 'ONA', 'SPECIAL', 'TV_SHORT']);
+/** Relations that tie an AniList entry to a series' story; CHARACTER, ALTERNATIVE, OTHER and the like don't (as in the catalogue). */
+const STORY_LINKS = new Set(['SEQUEL', 'PREQUEL', 'PARENT', 'SIDE_STORY', 'SUMMARY']);
+/** AniList formats whose entry can be the twin of a TMDB movie (ruling M4). */
+const FILM_FORMATS = new Set(['MOVIE', 'SPECIAL', 'OVA']);
+/** A disc folder's label that names only a disc (`BD`, `BDROM`, `BD_VIDEO`, `DISC_2`); `Blu-ray`, `DVD` and such are categories. */
+const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3})?$/i;
 
 /** The parent folder path of the disc folder or ISO. */
 export function groupKey(e: DiscEvidence): string {
@@ -156,6 +165,10 @@ interface Pending {
   readonly box: number | null;
   readonly bonus: boolean;
   readonly via: readonly Via[];
+  /** `box` is the volume of a `Volume M/Disc K` folder pair, numbered across the volumes like boxes (ruling M1). */
+  readonly volumeBox: boolean;
+  /** Placed like a movie: an AniList entry whose twin is a TMDB movie (ruling M4). */
+  readonly filmLike: boolean;
 }
 
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
@@ -175,7 +188,7 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
   // a disc of box 2 and up is numbered only once every group of its box family is matched, so a checkpoint (or a run
   // that lost a group to an unreachable source) never files one that the whole family would leave Unsorted (ruling F7)
   const familyMatched = (p: Pending): boolean => {
-    const prefix = boxFamily(p.e.path);
+    const prefix = boxFamily(p.e.path, p.volumeBox);
     for (const g of groups.keys()) if ((prefix === '' || g === prefix || g.startsWith(`${prefix}/`)) && !matched.has(g)) return false;
     return true;
   };
@@ -222,12 +235,26 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
 
 /**
  * The folder a disc's box family shares: the parent of the deepest folder on its path that names a box (`Brasswick BOX
- * 2`), or '' (the whole run) when no folder does.
+ * 2`), or for a volume numbered like a box, of the deepest folder above the disc folder that names a volume; or ''
+ * (the whole run) when no folder does.
  */
-function boxFamily(path: string): string {
+function boxFamily(path: string, volumeBox: boolean): string {
   const parts = path.split('/');
-  for (let j = parts.length - 1; j > 0; j--) if (parseName(parts[j]!).box !== null) return parts.slice(0, j).join('/');
+  for (let j = parts.length - (volumeBox ? 2 : 1); j > 0; j--) {
+    const parse = parseName(parts[j]!);
+    if ((volumeBox ? parse.volume : parse.box) !== null) return parts.slice(0, j).join('/');
+  }
   return '';
+}
+
+/**
+ * A folder that names only structure, a season, volume, disc or box (`Season 1`, `Volume 2`, `Vol.4`, `Box 1`,
+ * `DISC_2`, `BD`), and no title: it isn't a level when deciding how far up a folder is (ruling M1).
+ */
+function structureOnly(text: string): boolean {
+  const p = parseName(text);
+  if (p.candidates.length > 0 || p.bonus || p.music || p.year !== null || p.episodes !== null) return false;
+  return p.season !== null || p.volume !== null || p.disc !== null || p.box !== null || STRUCTURE_LABEL.test(text.normalize('NFKC').trim());
 }
 
 /**
@@ -275,16 +302,19 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
   };
 
   // folders above the discs, from the group folder up to the first one that names something, at most MAX_ANCESTORS
-  // up; a root's top-level folder counts (category names are dropped by nameParse), and is far like any other (F6)
+  // levels up; a root's top-level folder counts (category names are dropped by nameParse), and is far like any other
+  // (F6); a folder naming only structure (`Season 1`, `Volume 2`) isn't a level for the folders above it (M1)
   const segs = discs[0]!.segments;
   const ancestors: Piece[] = [];
   const ancestorText: string[] = [];
-  for (let i = segs.length - 2; i >= TOP_LEVEL_DEPTH && i >= segs.length - 1 - MAX_ANCESTORS; i--) {
+  let level = 0;
+  for (let i = segs.length - 2; i >= TOP_LEVEL_DEPTH && ++level <= MAX_ANCESTORS; i--) {
     const parse = nameParse(segs[i]!);
     const found = await lookUp(parse);
-    ancestors.push({ kind: 'folder', own: false, far: segs.length - 1 - i >= FAR_ANCESTOR, parse, found });
+    ancestors.push({ kind: 'folder', own: false, far: level >= FAR_ANCESTOR, parse, found });
     ancestorText.push(segs[i]!.normalize('NFKC'));
     if (found.some((en) => parse.candidates.some((c) => quality(en, c, parse.season) > 0))) break;
+    if (structureOnly(segs[i]!)) level--;
   }
   const count = ancestorText.map((t) => RELEASE_COUNT.exec(t)?.[1]).find((n) => n !== undefined);
   const releaseCount = count === undefined ? null : Number(count);
@@ -310,15 +340,18 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
       pieces.push({ kind: 'discdb', own: true, far: false, parse, hit, found: nothingElse ? await lookUp(parse) : [] });
     }
 
-    const result = await decide(e, pieces, hit, ctx, entries);
+    const result = await decide(e, pieces, hit, discs.length, ctx, entries);
     if ('status' in result) done.push(result);
     else pending.push({ ...result, group, releaseCount });
   }
   return { done, pending };
 }
 
-/** Rules 1-3 for one disc: an Unsorted match, or the entry and season waiting for rule 4. */
-async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit | null, ctx: MatchContext, entries: Map<string, Entry>):
+/**
+ * Rules 1-3 for one disc: an Unsorted match, or the entry and season waiting for rule 4. `siblings`: the discs in the
+ * disc's group, itself included.
+ */
+async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit | null, siblings: number, ctx: MatchContext, entries: Map<string, Entry>):
   Promise<DiscMatch | Omit<Pending, 'group' | 'releaseCount'>> {
   const compat = new Map<string, Compat>();
   const unsorted = (reason: UnsortedReason, suggest: readonly Entry[]): DiscMatch => {
@@ -367,6 +400,22 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     all.set(full.id, full);
     scored[i] = { ...s, entry: full };
   }
+  // series-shaped evidence (a season number, an episode range, or a volume or disc number among two or more sibling
+  // discs) is no film's: TMDB and AniList movies aren't competitors there once a series fits, and an exactly fitting
+  // AniList TV entry beats the OVA, ONA, SPECIAL and TV_SHORT entries tied to it by a story link (ruling M3)
+  const seriesShaped = evSeason !== null || named.some((p) => p.parse.episodes !== null) ||
+    (siblings >= 2 && named.some((p) => p.parse.volume !== null || p.parse.disc !== null));
+  const filmsOut = seriesShaped && scored.some((s) => s.entry.kind !== 'movie');
+  const dropped = new Set<string>();
+  if (seriesShaped) {
+    if (filmsOut) for (const s of scored) if (s.entry.kind === 'movie') dropped.add(s.entry.id);
+    const tv = scored.filter((s) => s.exact && s.entry.source === 'anilist' && TV_FORMATS.has(s.entry.format ?? '') && !dropped.has(s.entry.id));
+    for (const s of scored) {
+      const side = s.entry.source === 'anilist' && SIDE_FORMATS.has(s.entry.format ?? '');
+      if (side && tv.some((t) => t.entry.id !== s.entry.id && (t.entry.format === 'TV' || s.entry.format !== 'TV_SHORT') && storyLinked(t.entry, s.entry))) dropped.add(s.entry.id);
+    }
+    scored = scored.filter((s) => !dropped.has(s.entry.id));
+  }
   // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year, is
   // its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
   // evidence may be that one (rulings T5g, T5m); and a twin is exactly one TMDB entry, so two twins of one AniList
@@ -375,6 +424,8 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   let twinIds = new Set<string>();
   let notTwins: Entry[] = [];
   let severalTwins: Entry[] = [];
+  /** AniList entries whose twin is a TMDB movie. */
+  const filmTwinned = new Set<string>();
   if (anilistExact.length > 0) {
     const info = new Map<string, TwinInfo>();
     for (const a of anilistExact) {
@@ -382,7 +433,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
       const place = tv ? await anilistPlace(a, ctx) : null;
       info.set(a.id, { tv, rootYear: place?.root?.year ?? null, place: place?.place ?? null });
     }
-    const tmdb = [...all.values()].filter((en) => en.source === 'tmdb');
+    const tmdb = [...all.values()].filter((en) => en.source === 'tmdb' && !dropped.has(en.id) && !(filmsOut && en.kind === 'movie'));
     const titles = named.flatMap((p) => p.parse.candidates);
     const evidenceTitled = tmdb.filter((t) => names(t).some((n) => titles.some((c) => sameTitle(c, n))));
     // TMDB entries named like an AniList entry in any of its languages, even when not like the evidence (ruling T5r):
@@ -392,7 +443,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     const twinsOf = new Map<string, Entry[]>();
     for (const a of anilistExact) {
       const found: Entry[] = [];
-      for (const t of new Set([...evidenceTitled, ...anilistTitled])) if (await isTwin(a, info.get(a.id)!, t, ctx)) found.push(t);
+      for (const t of new Set([...evidenceTitled, ...anilistTitled])) if (await isTwin(a, info.get(a.id)!, t, named, fitSeason, ctx)) found.push(t);
       twinsOf.set(a.id, found);
     }
     const allTwins = new Set([...twinsOf.values()].flat());
@@ -400,6 +451,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     const several = anilistExact.find((a) => twinsOf.get(a.id)!.length > 1);
     if (several) severalTwins = [several, ...twinsOf.get(several.id)!];
     else if (notTwins.length === 0) twinIds = new Set([...allTwins].map((t) => t.id));
+    for (const [id, ts] of twinsOf) if (twinIds.size > 0 && ts.some((t) => t.kind === 'movie')) filmTwinned.add(id);
   }
   scored = scored.filter((s) => !twinIds.has(s.entry.id));
   if (scored.length === 0) return unsorted('no-title', []);
@@ -446,15 +498,24 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const numbers = new Set(own.map((p) => p.parse.volume ?? p.parse.disc).filter((n): n is number => n !== null));
   const box = named.find((p) => p.parse.box !== null)?.parse.box ?? null;
   const via = (['disc-title', 'folder', 'discdb'] as const).filter((k) => best.kinds.has(k));
-  return { e, entry: best.entry, season, disc: numbers.size === 1 ? [...numbers][0]! : null, box, bonus, via };
+  // a `Volume M/Disc K` pair: the volume numbers the discs across the volumes, like a box (ruling M1), so Disc 1 of
+  // Volume 2 never shares a slot with Disc 1 of Volume 1
+  const volume = box === null && own.every((p) => p.parse.volume === null) && own.some((p) => p.parse.disc !== null)
+    ? named.find((p) => !p.own && p.kind === 'folder' && p.parse.volume !== null)?.parse.volume ?? null
+    : null;
+  return {
+    e, entry: best.entry, season, disc: numbers.size === 1 ? [...numbers][0]! : null, box: box ?? volume, bonus, via,
+    volumeBox: volume !== null, filmLike: filmTwinned.has(best.entry.id),
+  };
 }
 
 /**
  * Rule 4: each disc's place. Its own number counts. In a box set, discs are numbered across the boxes in (box, disc)
  * order, only when every box from 1 up is present and each box's disc numbers run from 1 with no gap (ruling T5h);
- * otherwise discs of box 2 and up have no place. Unnumbered discs are numbered in folder order when their group folder
- * gives the release's disc count and they are exactly that many. A bonus disc needs no number,
- * nor does a movie that is the only disc of its entry in its group. A disc of box 2 and up waits for `familyMatched`.
+ * otherwise discs of box 2 and up have no place. Volumes holding numbered discs count as boxes (ruling M1). Unnumbered
+ * discs are numbered in folder order when their group folder gives the release's disc count and they are exactly that
+ * many. A bonus disc needs no number, nor does a movie (or an AniList entry whose twin is a TMDB movie) that is the
+ * only disc of its entry in its group. A disc of box 2 and up waits for `familyMatched`.
  */
 function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, familyMatched: (p: Pending) => boolean): DiscMatch[] {
   const out: DiscMatch[] = [];
@@ -471,7 +532,7 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
       placed = true;
     } else if (!placed) {
       const siblings = pending.filter((q) => same(p, q) && q.group === p.group && (q.box ?? 1) === 1).sort((a, b) => naturalOrder(a.e.path, b.e.path));
-      if (p.entry.kind === 'movie' && siblings.length === 1) placed = true;
+      if ((p.entry.kind === 'movie' || p.filmLike) && siblings.length === 1) placed = true;
       else if (p.releaseCount !== null && p.releaseCount === siblings.length && siblings.every((q) => q.disc === null)) {
         disc = siblings.indexOf(p) + 1;
         placed = true;
@@ -501,13 +562,17 @@ function boxRunning(boxed: readonly Pending[]): Map<Pending, number> | null {
   return running;
 }
 
-/** The best fit of any of a piece's candidates; a TheDiscDB hit also fits the TMDB entry it names. */
+/**
+ * The best fit of any of a piece's candidates; a TheDiscDB hit also fits the TMDB entry it names. The Japanese half of
+ * a folder's `English (日本語)` name is the same title as the first, so it fits as fully (ruling M2).
+ */
 function fit(p: Piece, en: Entry, season: number | null): number {
   if (p.hit?.tmdbId && en.id === `tmdb-${p.hit.kind === 'series' ? 'tv' : 'movie'}:${p.hit.tmdbId}`) return EXACT;
   let best = 0;
-  p.parse.candidates.forEach((cand, i) => {
+  const cands = p.parse.candidates;
+  cands.forEach((cand, i) => {
     const q = quality(en, cand, season);
-    best = Math.max(best, i === 0 ? q : Math.min(q, LATER_CANDIDATE_MAX));
+    best = Math.max(best, i === 0 || (p.kind === 'folder' && japaneseHalf(cands, i)) ? q : Math.min(q, LATER_CANDIDATE_MAX));
   });
   return best;
 }
@@ -574,22 +639,47 @@ interface TwinInfo {
 
 /**
  * How an AniList entry and a TMDB entry name the same title, or null when they aren't twins: TMDB marks it animated, the
- * same kind, a year in the window (ruling T5q), and a name strictly equal to one of the AniList names (`name`) or only
- * to one with its season stripped (`base`: TMDB names the series, AniList the season, `Harbor Line Season 3`).
+ * same kind, a year in the window (ruling T5q), and a name strictly equal to one of the AniList names (`name`), or only
+ * to one with its season stripped (`base`: TMDB names the series, AniList the season, `Harbor Line Season 3`), or the
+ * two fit the two halves of one folder's `English (日本語)` name (`segment`, ruling M2). An AniList MOVIE, SPECIAL or
+ * OVA and a TMDB movie are twins too, by a strictly equal name only (ruling M4).
  */
-function twinMatch(a: Entry, rootYear: number | null, t: Entry): 'name' | 'base' | null {
-  if (t.animation !== true || a.kind !== t.kind || !inYearWindow(a, rootYear, t, false)) return null;
+function twinMatch(a: Entry, rootYear: number | null, t: Entry, named: readonly Piece[], season: number | null): 'name' | 'base' | 'segment' | null {
+  const film = a.kind !== t.kind && t.kind === 'movie' && FILM_FORMATS.has(a.format ?? '');
+  if (t.animation !== true || (a.kind !== t.kind && !film) || !inYearWindow(a, rootYear, t, false)) return null;
   if (names(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'name';
-  return seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y))) ? 'base' : null;
+  if (film) return null;
+  if (seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'base';
+  return named.some((p) => p.kind === 'folder' && halves(p.parse.candidates).some(([x, y]) =>
+    quality(a, x, season) === EXACT && names(t).some((n) => sameTitle(y, n)))) ? 'segment' : null;
+}
+
+/**
+ * Whether a parse's candidate `i` is the Japanese half of the tidy layout's `English (日本語)`: a later candidate in
+ * Japanese script after a first one with none. A stripped variant (`BD Foo` → `Foo`), a volume split (`星降りの旅人 2`)
+ * or a note in parens (`(Director's Cut)`) isn't one.
+ */
+function japaneseHalf(candidates: readonly string[], i: number): boolean {
+  return i > 0 && JAPANESE.test(candidates[i] ?? '') && !JAPANESE.test(candidates[0] ?? '');
+}
+
+/** Both orders of each `English (日本語)` pair among a parse's candidates. */
+function halves(candidates: readonly string[]): [string, string][] {
+  return candidates.flatMap((c, i): [string, string][] => (japaneseHalf(candidates, i) ? [[candidates[0]!, c], [c, candidates[0]!]] : []));
+}
+
+/** Whether two AniList entries are tied by a story link, in either direction. */
+function storyLinked(a: Entry, b: Entry): boolean {
+  return a.relations.some((r) => r.id === b.id && STORY_LINKS.has(r.type)) || b.relations.some((r) => r.id === a.id && STORY_LINKS.has(r.type));
 }
 
 /**
  * Whether a TMDB entry is an AniList entry's twin. A TMDB TV series must also have at least as many seasons as the
  * AniList TV entry's place in its chain; when that can't be told (the season count or the place is unknown), only a
- * full-name match counts (ruling T5t).
+ * full-name match counts (ruling T5t), never a `base` or `segment` one.
  */
-async function isTwin(a: Entry, info: TwinInfo, t: Entry, ctx: MatchContext): Promise<boolean> {
-  const how = twinMatch(a, info.rootYear, t);
+async function isTwin(a: Entry, info: TwinInfo, t: Entry, named: readonly Piece[], season: number | null, ctx: MatchContext): Promise<boolean> {
+  const how = twinMatch(a, info.rootYear, t, named, season);
   if (how === null) return false;
   if (!info.tv || t.kind !== 'series') return true;
   if (how === 'name' && (info.place === null || info.place <= 1)) return true;

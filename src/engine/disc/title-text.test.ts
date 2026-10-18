@@ -55,8 +55,20 @@ describe('normalizeStrict', () => {
   it("keeps title-significant marks: ' ’ ′ ° ! ? ☆ ★ ♪ ＋ +", () => {
     expect(normalizeStrict("Glimmer'")).not.toBe(normalizeStrict('Glimmer'));
     expect(normalizeStrict("Wanderer's End!")).toBe("wanderer'send!");
-    for (const mark of ['’', '′', '°', '!', '?', '☆', '★', '♪', '+']) expect(normalizeStrict(`Spark${mark}`)).toBe(`spark${mark}`);
+    for (const mark of ['°', '!', '?', '☆', '★', '♪', '+']) expect(normalizeStrict(`Spark${mark}`)).toBe(`spark${mark}`);
     expect(normalizeStrict('Spark＋')).toBe('spark+');
+    for (const mark of ['’', '‘', '′', '`']) expect(normalizeStrict(`Spark${mark}`)).not.toBe(normalizeStrict('Spark'));
+  });
+
+  it('folds typographic variants of a mark to one form (M2)', () => {
+    for (const mark of ['’', '‘', '′', '`', '＇']) expect(normalizeStrict(`Wanderer${mark}s End`)).toBe("wanderer'send");
+    expect(normalizeStrict('“Harbor” Line')).toBe(normalizeStrict('"Harbor" Line'));
+    expect(normalizeStrict('Fin & Feather')).toBe(normalizeStrict('Fin and Feather'));
+    expect(normalizeStrict('Fin ＆ Feather')).toBe('finandfeather');
+    expect(normalizeStrict('Ｇｌａｓｓ Ｏｒｃｈａｒｄ')).toBe(normalizeStrict('Glass Orchard'));
+    // other marks stay distinct (T5p)
+    expect(normalizeStrict('Spark!')).not.toBe(normalizeStrict('Spark?'));
+    expect(normalizeStrict('Spark☆')).not.toBe(normalizeStrict('Spark♪'));
   });
 
   it('does not fold long vowels', () => {
