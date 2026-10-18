@@ -103,17 +103,25 @@ export async function resolveDiscFile(dir: string, path: string): Promise<string
   return current;
 }
 
-/** Every regular file under the disc folder's BDMV and CERTIFICATE, upper-cased; on a case clash the first name wins. */
-export async function listFiles(dir: string): Promise<{ path: string; abs: string }[]> {
+/** A directory's entries: real directories and files only count (symlinks are neither). */
+export type ListDir = (abs: string) => Promise<readonly { name: string; isDir: boolean; isFile: boolean }[] | null>;
+
+const listDir: ListDir = async (abs) => (await entries(abs)).map((e) => ({ name: e.name, isDir: e.isDirectory(), isFile: e.isFile() }));
+
+/**
+ * Every regular file under the disc folder's BDMV and CERTIFICATE, upper-cased; on a case clash the first name wins.
+ * `list` reads each directory (a caller can pace the reads through it).
+ */
+export async function listFiles(dir: string, list: ListDir = listDir): Promise<{ path: string; abs: string }[]> {
   const out = new Map<string, string>();
   const walk = async (abs: string, rel: string): Promise<void> => {
-    const sorted = (await entries(abs)).sort((a, b) => (a.name < b.name ? -1 : 1));
+    const sorted = [...((await list(abs)) ?? [])].sort((a, b) => (a.name < b.name ? -1 : 1));
     for (const e of sorted) {
       if (e.name.startsWith('.')) continue;
       const path = rel === '' ? e.name.toUpperCase() : `${rel}/${e.name.toUpperCase()}`;
       if (rel === '' && !DISC_FOLDERS.has(path)) continue;
-      if (e.isDirectory()) await walk(join(abs, e.name), path);
-      else if (e.isFile() && rel !== '' && !out.has(path)) out.set(path, join(abs, e.name));
+      if (e.isDir) await walk(join(abs, e.name), path);
+      else if (e.isFile && rel !== '' && !out.has(path)) out.set(path, join(abs, e.name));
     }
   };
   await walk(dir, '');

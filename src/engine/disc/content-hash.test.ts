@@ -36,6 +36,11 @@ describe('contentHash', () => {
     expect(a).toBe('052D14F335879C7C054068C6229E0FD5');
   });
 
+  it('throws for a size that is not a safe non-negative integer', () => {
+    for (const size of [-1, 1.5, 2 ** 53, Number.NaN, Infinity]) expect(() => contentHash([{ name: '00001.m2ts', size }]), String(size)).toThrow(RangeError);
+    expect(contentHash([{ name: '00001.m2ts', size: 2 ** 53 - 1 }])).toMatch(/^[0-9A-F]{32}$/);
+  });
+
   it('is null without .m2ts files', () => {
     expect(contentHash([])).toBeNull();
     expect(contentHash([{ name: 'index.bdmv', size: 10 }])).toBeNull();

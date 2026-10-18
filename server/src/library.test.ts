@@ -252,7 +252,8 @@ describe('Library evidence', () => {
     await new Library(roots(), file, FAST).scan();
     writeFileSync(join(single(), 'META/DL/bdmt_eng.xml'), bdmt.replace('Single One', 'Changed'));
     rmSync(join(tmp, 'a/junk.iso')); // A new Library would probe this non-disc again.
-    const lib = new Library(roots(), file, FAST);
+    const opened: string[] = [];
+    const lib = new Library(roots(), file, { ...FAST, opendir: async (p) => (opened.push(p), opendir(p)) });
     const title = (): string | undefined => lib.evidence().find((e) => e.path === 'drvA/[BDMV] Single #1 100%')?.discTitles[0]?.name;
     expect(title()).toBe('Single One');
     const reads = vi.spyOn(udf.UdfImage, 'open');
@@ -260,6 +261,41 @@ describe('Library evidence', () => {
     expect(reads).not.toHaveBeenCalled();
     reads.mockRestore();
     expect(title()).toBe('Single One');
+    // Only the disc's BDMV folder is listed (for index.bdmv), none of its subfolders.
+    expect(opened.filter((p) => p.startsWith(single()) && p !== single())).toEqual([]);
+  });
+
+  it('reads folder evidence through the paced directory reader', async () => {
+    const opened: string[] = [];
+    const lib = new Library(roots(), join(tmp, 'library.json'), { ...FAST, opendir: async (p) => (opened.push(p), opendir(p)) });
+    await lib.scan();
+    expect(opened).toContain(join(single(), 'META/DL'));
+  });
+
+  it('parses a new ISO image once', async () => {
+    const only = [{ name: 'drvA', dir: join(tmp, 'iso') }];
+    mkdirSync(only[0]!.dir);
+    copyFileSync(join(tmp, 'a/disc.iso'), join(only[0]!.dir, 'disc.iso'));
+    const reads = vi.spyOn(udf.UdfImage, 'open');
+    const lib = new Library(only, join(tmp, 'library.json'), FAST);
+    await lib.scan();
+    expect(reads).toHaveBeenCalledTimes(1);
+    reads.mockRestore();
+    expect(lib.evidence()[0]!.playlists.length).toBeGreaterThan(0);
+  });
+
+  it('drops malformed cached evidence, keeps the disc, and reads the evidence again', async () => {
+    const file = join(tmp, 'library.json');
+    await new Library(roots(), file, FAST).scan();
+    const cached = JSON.parse(readFileSync(file, 'utf8')) as { path: string; evidence: Record<string, unknown> }[];
+    const entry = cached.find((d) => d.path === 'drvA/[BDMV] Single #1 100%')!;
+    entry.evidence = { ...entry.evidence, playlists: [{ id: 1 }], discTitles: ['x'] };
+    writeFileSync(file, JSON.stringify(cached));
+    const lib = new Library(roots(), file, FAST);
+    expect(lib.list('drvA')!.discs.some((d) => d.path === entry.path)).toBe(true);
+    expect(lib.evidence().some((e) => e.path === entry.path)).toBe(false);
+    await lib.scan();
+    expect(lib.evidence().find((e) => e.path === entry.path)?.discTitles).toEqual([{ lang: 'eng', name: 'Single One' }]);
   });
 
   it('reads evidence on the next scan for a cache written without it', async () => {

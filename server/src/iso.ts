@@ -53,12 +53,30 @@ export async function isoUnchanged(entry: DiscEntry, abs: string): Promise<boole
   }
 }
 
-/** The UDF tree of the image at `abs` (path → file). A file whose extents go past the end of the image is left out: it could not be served whole. */
+/** `files` by path, without those whose extents go past the end of the image: they could not be served whole. */
+function treeOf(files: readonly UdfFile[], size: number): ReadonlyMap<string, UdfFile> {
+  return new Map(files.filter((f) => f.extents.every((e) => e.offset < 0 || e.offset + e.length <= size)).map((f) => [f.path, f]));
+}
+
+/** The UDF tree of the image at `abs` (path → file). */
 export function readIsoTree(abs: string): Promise<ReadonlyMap<string, UdfFile>> {
-  return withImage(abs, async (read, size) => {
-    const files = await readUdf(read);
-    return new Map(files.filter((f) => f.extents.every((e) => e.offset < 0 || e.offset + e.length <= size)).map((f) => [f.path, f]));
-  });
+  return withImage(abs, async (read, size) => treeOf(await readUdf(read), size));
+}
+
+/**
+ * The UDF tree of the image at `abs` if it is a Blu-ray disc (as `isoIsDisc`), parsed once; null otherwise. An image
+ * that isn't a disc costs only the probe. Read errors propagate.
+ */
+export async function isoDiscTree(abs: string): Promise<ReadonlyMap<string, UdfFile> | null> {
+  try {
+    return await withImage(abs, async (read, size) => {
+      const image = await UdfImage.open(read);
+      return (await image.find('BDMV/INDEX.BDMV')) ? treeOf(await image.files(), size) : null;
+    });
+  } catch (err) {
+    if (err instanceof UdfError) return null;
+    throw err;
+  }
 }
 
 /** The parsed UDF trees of the last `max` ISO discs used, by disc id (path → file), so range reads don't re-parse. */
@@ -114,17 +132,23 @@ export function isoFileStream(abs: string, file: UdfFile, start: number, end: nu
   return piecesStream(abs, udfPieces(file, start, end + 1));
 }
 
-/** The whole of each of `files` in the image at `abs`, read through one open handle. */
-export async function readIsoFiles(abs: string, files: readonly UdfFile[]): Promise<Map<string, Buffer>> {
+/**
+ * The whole of each of `files` in the image at `abs`, read through one open handle. A short read throws, or with
+ * `skipShort` leaves just that file out.
+ */
+export async function readIsoFiles(abs: string, files: readonly UdfFile[], skipShort = false): Promise<Map<string, Buffer>> {
   return withImage(abs, async (read) => {
     const out = new Map<string, Buffer>();
-    for (const file of files) {
+    files: for (const file of files) {
       const buf = Buffer.alloc(file.size);
       let at = 0;
       for (const piece of udfPieces(file, 0, file.size)) {
         if (piece.offset >= 0) {
           const bytes = await read(piece.offset, piece.length);
-          if (bytes.length < piece.length) throw new Error(`short read in ${abs} at ${piece.offset}`);
+          if (bytes.length < piece.length) {
+            if (skipShort) continue files;
+            throw new Error(`short read in ${abs} at ${piece.offset}`);
+          }
           buf.set(bytes, at);
         }
         at += piece.length;

@@ -4,7 +4,7 @@ import type { Dir } from 'node:fs';
 import { join } from 'node:path';
 import type { DiscEntry, FolderEntry } from '../../src/engine/disc/nas-api';
 import { discId } from './disc-id';
-import { isoIsDisc, readIsoTree } from './iso';
+import { isoDiscTree, readIsoTree } from './iso';
 import { readFolderEvidence, readIsoEvidence } from './titles/evidence';
 import type { DiscEvidence } from './titles/evidence';
 
@@ -297,16 +297,19 @@ export class Library {
     }
     const id = discId(rel, st.size, st.mtimeMs);
     const disc: DiscEntry = { id, name, path: rel, kind: 'iso', sizeBytes: st.size };
-    const evidence = (): Promise<DiscEvidence> => readIsoTree(abs).then((tree) => readIsoEvidence(disc, abs, tree));
     if (previous.get(id)?.kind === 'iso') {
-      if (!this.carryEvidence(id) && (await this.isSettled(abs, this.now()))) await this.readEvidence(disc, evidence);
+      if (!this.carryEvidence(id) && (await this.isSettled(abs, this.now()))) {
+        await this.readEvidence(disc, async () => readIsoEvidence(disc, abs, await readIsoTree(abs)));
+      }
       return disc;
     }
     if (!(await this.isSettled(abs, this.now()))) return this.keepPrevious(rel, previous);
     if (this.notDiscs.has(id)) return null;
     try {
-      if (await isoIsDisc(abs)) {
-        await this.readEvidence(disc, evidence);
+      // A disc's tree is parsed once, for both the probe and the evidence.
+      const tree = await isoDiscTree(abs);
+      if (tree) {
+        await this.readEvidence(disc, () => readIsoEvidence(disc, abs, tree));
         return disc;
       }
       this.notDiscs.add(id);
@@ -384,7 +387,7 @@ export class Library {
     const discDir = join(bdmvDir, '..');
     if (known && known.kind === 'folder') {
       const disc: DiscEntry = { id, name, path: rel, kind: 'folder', sizeBytes: known.sizeBytes };
-      if (!this.carryEvidence(id) && (await this.isSettled(bdmvDir, this.now()))) await this.readEvidence(disc, () => readFolderEvidence(disc, discDir));
+      if (!this.carryEvidence(id) && (await this.isSettled(bdmvDir, this.now()))) await this.readEvidence(disc, () => readFolderEvidence(disc, discDir, (dir) => this.readDir(dir)));
       return disc;
     }
     if (!(await this.isSettled(bdmvDir, this.now()))) return this.keepPrevious(rel, previous);
@@ -400,23 +403,29 @@ export class Library {
       }
     }
     const disc: DiscEntry = { id, name, path: rel, kind: 'folder', sizeBytes };
-    await this.readEvidence(disc, () => readFolderEvidence(disc, discDir));
+    await this.readEvidence(disc, () => readFolderEvidence(disc, discDir, (dir) => this.readDir(dir)));
     return disc;
   }
 }
 
-/** Whether a cached `evidence` field has the shape of a disc's evidence (for that disc). */
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string');
+
+/** Whether a cached `evidence` field has the shape of a disc's evidence (for that disc), down to its elements. */
 function validEvidence(ev: unknown, disc: DiscEntry): ev is DiscEvidence {
-  if (typeof ev !== 'object' || ev === null) return false;
-  const e = ev as Record<string, unknown>;
+  if (!isRecord(ev)) return false;
   return (
-    e.discId === disc.id &&
-    e.path === disc.path &&
-    (e.fingerprint === null || typeof e.fingerprint === 'string') &&
-    Array.isArray(e.discTitles) &&
-    Array.isArray(e.segments) &&
-    Array.isArray(e.catalogueNumbers) &&
-    Array.isArray(e.playlists)
+    ev.discId === disc.id &&
+    ev.path === disc.path &&
+    (ev.fingerprint === null || typeof ev.fingerprint === 'string') &&
+    Array.isArray(ev.discTitles) &&
+    ev.discTitles.every((t) => isRecord(t) && typeof t.lang === 'string' && typeof t.name === 'string') &&
+    isStrings(ev.segments) &&
+    isStrings(ev.catalogueNumbers) &&
+    Array.isArray(ev.playlists) &&
+    ev.playlists.every(
+      (p) => isRecord(p) && typeof p.id === 'string' && Number.isFinite(p.durationS) && Number.isInteger(p.chapters) && isStrings(p.clips),
+    )
   );
 }
 

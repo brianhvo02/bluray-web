@@ -5,6 +5,7 @@ import type { DiscEntry } from '../../../src/engine/disc/nas-api';
 import type { UdfFile } from '../../../src/engine/disc/udf';
 import { readIsoFiles } from '../iso';
 import { listFiles } from '../manifest';
+import type { ListDir } from '../manifest';
 
 /** What a disc's files and path say about it, read once per new or changed disc for the title matcher. */
 export interface DiscEvidence {
@@ -23,14 +24,25 @@ const BDMT = /^BDMV\/META\/DL\/BDMT_([A-Z]{3})\.XML$/;
 /** Larger metadata or playlist files than this are not read. */
 const MAX_READ_BYTES = 1024 * 1024;
 
-/** Letter groups that look like a catalogue number's prefix but name a format or a volume. */
-const NOT_CATALOGUE = new Set(['AAC', 'AC', 'AVC', 'BD', 'BDMV', 'BDRIP', 'CD', 'DISC', 'DTS', 'DVD', 'EP', 'FHD', 'FLAC', 'HD', 'HDR', 'HEVC', 'ISO', 'LPCM', 'MKV', 'OVA', 'PCM', 'SDR', 'SP', 'TV', 'UHD', 'VOL']);
+/** Letter groups that look like a catalogue number's prefix but name a format, a language, a volume or a word of a title. */
+const NOT_CATALOGUE = new Set([
+  'AAC', 'AC', 'AVC', 'BD', 'BDMV', 'BDRIP', 'BOX', 'CD', 'CHN', 'CRY', 'DISC', 'DTS', 'DV', 'DVD', 'ENG', 'EP', 'FHD', 'FIN', 'FLAC', 'FRA',
+  'GER', 'HD', 'HDR', 'HEVC', 'ISO', 'ITA', 'JPN', 'KOR', 'LIVE', 'LPCM', 'MKV', 'MOVIE', 'OST', 'OVA', 'PART', 'PCM', 'REMUX', 'SDR', 'SP',
+  'SPA', 'TV', 'UHD', 'UK', 'US', 'USA', 'VOL', 'WEB', 'YEAR',
+]);
+/** Numbers that are a video resolution, not a catalogue number. */
+const RESOLUTIONS = new Set(['480', '576', '720', '1080', '2160']);
 const CATALOGUE = /(?<![A-Za-z0-9])([A-Z]{2,5})[- ](\d{3,5})(?![0-9A-Za-z])/g;
 
 /** The catalogue numbers in `text`, normalized to `PREFIX-NUMBER` ('MNOP 1357' → 'MNOP-1357', 'XXCL-1234~5' → 'XXCL-1234'). */
 export function catalogueNumbers(text: string): string[] {
   const found = new Set<string>();
-  for (const m of text.normalize('NFKC').matchAll(CATALOGUE)) if (!NOT_CATALOGUE.has(m[1]!)) found.add(`${m[1]}-${m[2]}`);
+  for (const m of text.normalize('NFKC').matchAll(CATALOGUE)) {
+    const [, prefix, number] = m as unknown as [string, string, string];
+    // A resolution or a year (1900–2099) after a word is more likely than a catalogue number.
+    if (NOT_CATALOGUE.has(prefix) || RESOLUTIONS.has(number) || /^(19|20)\d\d$/.test(number)) continue;
+    found.add(`${prefix}-${number}`);
+  }
   return [...found];
 }
 
@@ -43,9 +55,10 @@ function bdmtName(xml: string): string | null {
   const name = m[1]!
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
     .replace(/&(#x[0-9a-fA-F]+|#\d+|[a-z]+);/g, (whole, e: string) => {
-      if (e.startsWith('#x')) return String.fromCodePoint(parseInt(e.slice(2), 16));
-      if (e.startsWith('#')) return String.fromCodePoint(parseInt(e.slice(1), 10));
-      return ENTITIES[e] ?? whole;
+      if (!e.startsWith('#')) return ENTITIES[e] ?? whole;
+      const cp = e.startsWith('#x') ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      // A code point that doesn't exist is skipped.
+      return cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
     })
     .replace(/\s+/g, ' ')
     .trim();
@@ -105,20 +118,20 @@ async function evidenceOf<F extends { path: string; size: number }>(
   return { discId: entry.id, path: entry.path, fingerprint: contentHash(streams), discTitles, segments, catalogueNumbers: [...catalogue], playlists };
 }
 
-/** The evidence of the folder disc `entry` at `dir`. */
-export async function readFolderEvidence(entry: DiscEntry, dir: string): Promise<DiscEvidence> {
-  const listed = await listFiles(dir);
-  const sized = await Promise.all(
-    listed.map(async (f) => {
-      if (!STREAM.test(f.path) && !PLAYLIST.test(f.path) && !BDMT.test(f.path)) return null;
-      try {
-        return { ...f, size: (await stat(f.abs)).size };
-      } catch {
-        return null; // Vanished meanwhile.
-      }
-    }),
-  );
-  const files = sized.filter((f): f is { path: string; abs: string; size: number } => f !== null);
+/**
+ * The evidence of the folder disc `entry` at `dir`. Directories are read through `list` (the library passes its own
+ * paced reader), and files are stated one at a time.
+ */
+export async function readFolderEvidence(entry: DiscEntry, dir: string, list?: ListDir): Promise<DiscEvidence> {
+  const files: { path: string; abs: string; size: number }[] = [];
+  for (const f of await listFiles(dir, list)) {
+    if (!STREAM.test(f.path) && !PLAYLIST.test(f.path) && !BDMT.test(f.path)) continue;
+    try {
+      files.push({ ...f, size: (await stat(f.abs)).size });
+    } catch {
+      // Vanished meanwhile.
+    }
+  }
   return evidenceOf(entry, files, async (wanted) => {
     const out = new Map<string, Uint8Array>();
     for (const f of wanted) {
@@ -132,7 +145,7 @@ export async function readFolderEvidence(entry: DiscEntry, dir: string): Promise
   });
 }
 
-/** The evidence of the ISO disc `entry` at `abs`, whose UDF tree is `tree`. */
+/** The evidence of the ISO disc `entry` at `abs`, whose UDF tree is `tree`. A file the image is too short for is left out. */
 export async function readIsoEvidence(entry: DiscEntry, abs: string, tree: ReadonlyMap<string, UdfFile>): Promise<DiscEvidence> {
-  return evidenceOf(entry, [...tree.values()], (wanted) => readIsoFiles(abs, wanted));
+  return evidenceOf(entry, [...tree.values()], (wanted) => readIsoFiles(abs, wanted, true));
 }

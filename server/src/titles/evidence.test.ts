@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -74,6 +74,22 @@ describe('readFolderEvidence', () => {
     expect(ev.catalogueNumbers).toEqual(['EFGH-1234']);
   });
 
+  it('skips a numeric entity that is not a code point', async () => {
+    put(join(tmp, 'BD/BDMV/META/DL/bdmt_eng.xml'), bdmt('eng', 'Foo&#x110000; &#99999999; Bar&#33;'));
+    const ev = await readFolderEvidence(entry, join(tmp, 'BD'));
+    expect(ev.discTitles.find((t) => t.lang === 'eng')?.name).toBe('Foo Bar!');
+  });
+
+  it('reads directories through the given lister', async () => {
+    const listed: string[] = [];
+    const ev = await readFolderEvidence(entry, join(tmp, 'BD'), async (abs) => {
+      listed.push(abs);
+      return readdirSync(abs, { withFileTypes: true }).map((e) => ({ name: e.name, isDir: e.isDirectory(), isFile: e.isFile() }));
+    });
+    expect(ev.playlists).toHaveLength(2);
+    expect(listed).toContain(join(tmp, 'BD/BDMV/META/DL'));
+  });
+
   it('copes with a disc that has no playlists, streams or metadata', async () => {
     put(join(tmp, 'Bare/BDMV/index.bdmv'), 'x');
     const ev = await readFolderEvidence({ ...entry, path: 'drv0/Bare' }, join(tmp, 'Bare'));
@@ -92,6 +108,16 @@ describe('readIsoEvidence', () => {
     expect(iso.playlists.length).toBeGreaterThan(0);
     expect(iso).toEqual(folder);
   });
+
+  it('leaves out just a file the image is too short for', async () => {
+    const abs = join(FIXTURES, 'disc1.iso');
+    const entry: DiscEntry = { id: 'iso-1', name: 'disc1.iso', path: 'drv0/disc1.iso', kind: 'iso', sizeBytes: 0 };
+    const tree = new Map(await new IsoTrees().get('iso-1', abs));
+    const whole = await readIsoEvidence(entry, abs, tree);
+    const past = statSync(abs).size + 2048;
+    tree.set('BDMV/PLAYLIST/09999.MPLS', { path: 'BDMV/PLAYLIST/09999.MPLS', size: 100, extents: [{ offset: past, length: 100 }] });
+    expect(await readIsoEvidence(entry, abs, tree)).toEqual(whole);
+  });
 });
 
 describe('catalogueNumbers', () => {
@@ -106,5 +132,12 @@ describe('catalogueNumbers', () => {
   it('ignores dates, volumes and technical tags', () => {
     expect(catalogueNumbers('[BDMV][Foo][Vol.1-6 Fin] Disc 2 1080p')).toEqual([]);
     expect(catalogueNumbers('[BDMV 2024] HEVC 2160 FLAC 2496 BD-1080 S01E02')).toEqual([]);
+  });
+
+  it('ignores a word followed by a year or a resolution', () => {
+    for (const text of ['GIRLS BAND CRY 2024', 'MOVIE 2024', 'PART 2024', 'OST 2024', 'WEB 1080', 'REMUX 1080', 'DV 2160', 'JPN 1080', 'ITA 720', 'ENG 480', 'USA 576', 'ABCD 1999', 'ABCD 2099']) {
+      expect(catalogueNumbers(text), text).toEqual([]);
+    }
+    expect(catalogueNumbers('ABCD-1899 ABCD-2100')).toEqual(['ABCD-1899', 'ABCD-2100']);
   });
 });
