@@ -185,6 +185,29 @@ test('portrait, BD-J menu: a tap in the bottom letterbox brings back the control
   await expect.poll(async () => (await bdjPlane(page))!.flushes, { timeout: 5_000 }).toBeGreaterThan(before);
 });
 
+test('portrait, BD-J menu while buffering: a tap on the middle of the picture, under the spinner, still reaches the disc (task 14c)', async ({ page }) => {
+  await page.goto('/?telemetry=1&memory=constrained');
+  await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
+  const player = page.getByTestId('player');
+  await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
+  await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
+  const bar = page.getByTestId('control-bar');
+  await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
+  // The buffering spinner sits at the centre of the player, which is the centre of the picture. On the iPhone a disc
+  // opened from the disc server buffers behind its menu, and the spinner took the tap. The synthetic disc never stays
+  // buffering long enough to be tapped, so the test adds the player's own spinner element (same class, same styles).
+  await page.evaluate(() => {
+    const s = document.createElement('div');
+    s.className = 'spinner';
+    s.setAttribute('aria-label', 'Buffering');
+    document.querySelector('[data-testid=player]')!.appendChild(s);
+  });
+  const centre = await menuPoint(page, 960, 540); // empty picture: the disc's MouseListener is on Play only
+  await page.touchscreen.tap(centre.x, centre.y);
+  await expect.poll(async () => (await bdjPlane(page))!.tapsIgnored, { timeout: 5_000 }).toBe(1);
+  await expect(page.getByTestId('remote-pad')).toBeVisible();
+});
+
 test('a double tap on the right third seeks forward', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
