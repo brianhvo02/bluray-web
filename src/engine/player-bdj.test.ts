@@ -11,7 +11,7 @@ import { createRing, renderQuantum, ringViews } from './audio/ring';
 import { runBdjWorker } from './bdj/bdj-worker';
 import { ZipArchive } from './bdj/jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './bdj/runtime';
-import type { WorkerLike } from './bdj/session';
+import { DUMP_WAIT_MS, type WorkerLike } from './bdj/session';
 import type { FromBdj, ToBdj } from './bdj/worker-protocol';
 import type { DecodeImage } from './bdj/background';
 import { SharedRegisterView } from './bdj/shared-registers';
@@ -457,6 +457,10 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     clock.advance(19_999);
     expect(notices(h)).not.toContain('bdj-failed');
     clock.advance(1);
+    // the worker is asked for its thread dump first; one that does not answer is stopped DUMP_WAIT_MS later
+    expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    expect(notices(h)).not.toContain('bdj-failed');
+    clock.advance(DUMP_WAIT_MS);
     expect(h.events.find((e) => e.type === 'notice' && e.code === 'bdj-failed')).toMatchObject({
       message: "BD-J couldn't start this disc (timeout: no playlist was selected and nothing was shown within 20 s). Choose a playlist to play.",
     });
@@ -506,6 +510,8 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     clock.advance(19_999);
     expect(notices(h)).not.toContain('bdj-failed');
     clock.advance(1);
+    expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    w.emit({ type: 'dumped' });
     expect(notices(h)).toContain('bdj-failed');
     expect(w.terminated()).toBe(true);
   });

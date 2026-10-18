@@ -8,7 +8,7 @@ import type { DiscSpec } from '../disc/disc-spec';
 import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
-import { BdjSession, type BdjFailureCode, type WorkerLike } from './session';
+import { BdjSession, DUMP_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
@@ -189,7 +189,12 @@ describe('BdjSession rules', () => {
     h.clock.advance(19_999);
     expect(h.failures).toEqual([]);
     h.clock.advance(1);
-    expect(h.failures.map(([c]) => c)).toEqual(['timeout']);
+    // the engine's side goes to the log and the worker is asked for a thread dump; its answer ends the session
+    expect(h.logs.at(-1)).toBe('BD-J start-up timeout: booted, the engine is answering selectPlaylist#1, 0 messages held');
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    expect(h.failures).toEqual([]);
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
     expect(f.terminated()).toBe(true);
   });
 
@@ -200,6 +205,12 @@ describe('BdjSession rules', () => {
     h.clock.advance(19_999);
     expect(h.failures).toEqual([]);
     h.clock.advance(1);
+    expect(h.logs.at(-1)).toBe('BD-J start-up timeout: not booted, no call in the engine, 0 messages held');
+    // a worker whose event loop is blocked never answers: the session fails DUMP_WAIT_MS later all the same
+    h.clock.advance(DUMP_WAIT_MS - 1);
+    expect(h.failures).toEqual([]);
+    h.clock.advance(1);
+    expect(h.logs.at(-1)).toBe(`BD-J worker sent no thread dump within ${DUMP_WAIT_MS} ms (its event loop is blocked)`);
     expect(h.failures.map(([c]) => c)).toEqual(['timeout']);
     expect(f.terminated()).toBe(true);
     await booted; // settles at the stop

@@ -73,7 +73,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let booted = false;
   let ended = false;
   const waiting: TitleMessage[] = [];
-  const replies = new Map<number, (value: number | string) => void>();
+  const replies = new Map<number, { readonly name: BdjCallName; readonly resolve: (value: number | string) => void }>();
   let nextId = 1;
   let looping = false;
   let dirty = false;
@@ -93,6 +93,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   );
   let latestToken: string | null = null;
   let remote: RemoteSource | null = null;
+  let waitingSince = 0;
+  /** Java has selected a playlist (the deadlock dump is for start-up only). */
+  let selected = false;
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -116,8 +119,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
 
   const call = (name: BdjCallName, args: readonly BdjWireValue[]): Promise<number | string> => {
     const id = nextId++;
+    if (name === 'selectPlaylist' && Number(args[0]) >= 0) selected = true;
     return new Promise((resolve) => {
-      replies.set(id, resolve);
+      replies.set(id, { name, resolve });
       post({ type: 'call', id, name, args });
     });
   };
@@ -136,8 +140,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         while (dirty && !ended) {
           dirty = false;
           driving = new AbortController();
-          await rt!.run({ signal: driving.signal });
+          const outcome = await rt!.run({ signal: driving.signal });
           if (rt!.exitStatus !== null) fail(null);
+          else if (outcome === 'deadlock') deadlocked();
         }
       } catch (e) {
         fail(e);
@@ -169,7 +174,11 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         readAheadBytes: m.readAheadBytes,
         chunkBytes: BDJ_REMOTE_CHUNK_BYTES,
         inFlight: BDJ_REMOTE_IN_FLIGHT,
-        onWaiting: () => undefined,
+        // a read that has waited WAITING_AFTER_MS on the NAS, and how long it took in the end
+        onWaiting: (on) => {
+          if (on) waitingSince = performance.now();
+          post({ type: 'log', line: on ? 'BD-J worker: disc reads are waiting for the network' : `BD-J worker: disc reads waited ${Math.round(performance.now() - waitingSince)} ms`, error: false });
+        },
         refreshToken: () => tokens.request(),
       });
       if (disc instanceof RemoteSource) {
@@ -244,6 +253,32 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     for (const w of waiting.splice(0)) deliver(w);
   };
 
+  /**
+   * Every live Java thread is blocked with no timer or read to wake it: only an event or a title start can. A menu
+   * waiting for keys is in this state; before Java's first playlist it is how a boot stall looks, so the first one
+   * then is dumped (the others are counted in the next dump).
+   */
+  let deadlocks = 0;
+  let dumped = false;
+  const deadlocked = (): void => {
+    deadlocks++;
+    if (selected || dumped) return;
+    dumped = true;
+    dump('every Java thread is blocked before the first playlist');
+  };
+
+  /** Logs the worker's state and a thread dump (the engine asks at its start-up timeout; the first deadlock). */
+  const dump = (reason: string): void => {
+    const calls = [...replies].map(([id, c]) => `${c.name}#${id}`);
+    const lines = [
+      `BD-J thread dump (${reason}): ${booted ? 'booted' : rt ? 'booting' : 'not booting'}, ${looping ? 'driving' : 'idle'}, ` +
+        `${waiting.length} messages waiting for the boot, ${calls.length ? `waiting for the engine's reply to ${calls.join(', ')}` : 'no call waiting for the engine'}, ` +
+        `${deadlocks} deadlock outcomes`,
+      ...(rt ? rt.threadDump() : []),
+    ];
+    post({ type: 'log', line: lines.join('\n'), error: false });
+  };
+
   /** Posts the memory stats now and every `everyMs` until the session ends (Vfs.buffers walks the tree: keep it coarse). */
   const reportMemory = (everyMs: number): void => {
     if (ended || !rt || rt.jvm.threads.isHalted) return;
@@ -267,10 +302,14 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (booted) deliver(m);
         else waiting.push(m);
         break;
+      case 'dump':
+        dump(m.reason);
+        post({ type: 'dumped' });
+        break;
       case 'reply': {
-        const resolve = replies.get(m.id);
+        const c = replies.get(m.id);
         replies.delete(m.id);
-        resolve?.(m.value);
+        c?.resolve(m.value);
         if (!looping) kick();
         break;
       }

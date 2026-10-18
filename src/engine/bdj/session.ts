@@ -58,6 +58,9 @@ export interface BdjSessionDeps {
  */
 export const SELECT_PLAYLIST_TIMEOUT_MS = 20_000;
 
+/** At the start-up timeout, how long the worker has to log its thread dump before it is stopped. */
+export const DUMP_WAIT_MS = 1_000;
+
 export class BdjSession {
   private stopped = false;
   private bootDone: (() => void) | null = null;
@@ -69,6 +72,10 @@ export class BdjSession {
   private holdFor: number | null = null;
   private readonly held: ToBdj[] = [];
   private activityCount = 0;
+  /** Calls the engine is answering (diagnostics). */
+  private readonly answering = new Map<number, BdjCallName>();
+  /** The start-up timeout has fired: the session fails once the worker's thread dump is in (or DUMP_WAIT_MS on). */
+  private timedOut: (() => void) | null = null;
 
   constructor(private readonly deps: BdjSessionDeps) {
     deps.worker.onmessage = (e) => this.receive(e.data);
@@ -114,7 +121,30 @@ export class BdjSession {
     if (this.startedAt !== null) return;
     this.startedAt = this.deps.nowMs();
     const ms = this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
-    this.cancelTimeout = this.deps.setTimer(ms, () => this.fail('timeout', `no playlist was selected and nothing was shown within ${ms / 1000} s`));
+    this.cancelTimeout = this.deps.setTimer(ms, () => this.timeout(`no playlist was selected and nothing was shown within ${ms / 1000} s`));
+  }
+
+  /** The start-up timeout: the engine's side and the worker's thread dump go to the log, then the session fails. */
+  private timeout(message: string): void {
+    if (this.stopped) return;
+    this.cancelTimeout = null;
+    const calls = [...this.answering].map(([id, name]) => `${name}#${id}`);
+    this.deps.onLog?.(
+      `BD-J start-up timeout: ${this.bootDone ? 'not booted' : 'booted'}, ${calls.length ? `the engine is answering ${calls.join(', ')}` : 'no call in the engine'}, ` +
+        `${this.held.length} messages held${this.holdFor !== null ? ` for the reply to #${this.holdFor}` : ''}`,
+      true,
+    );
+    const cancel = this.deps.setTimer(DUMP_WAIT_MS, () => {
+      if (this.stopped) return;
+      this.deps.onLog?.(`BD-J worker sent no thread dump within ${DUMP_WAIT_MS} ms (its event loop is blocked)`, true);
+      this.timedOut?.();
+    });
+    this.timedOut = () => {
+      cancel();
+      this.timedOut = null;
+      this.fail('timeout', message);
+    };
+    this.post({ type: 'dump', reason: 'start-up timeout' });
   }
 
   event(ev: number, param: number, coalesce?: Coalesce): void {
@@ -171,12 +201,16 @@ export class BdjSession {
       case 'remoteTokenNeeded':
         this.deps.onTokenNeeded?.();
         break;
+      case 'dumped':
+        this.timedOut?.();
+        break;
     }
   }
 
   private async answer(id: number, name: BdjCallName, args: readonly BdjWireValue[]): Promise<void> {
     if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.alive('selected its first playlist');
     let pending: Promise<number | string>;
+    this.answering.set(id, name);
     this.callInHand = id;
     try {
       pending = this.deps.host.handle(name, args);
@@ -192,6 +226,8 @@ export class BdjSession {
     } catch (e) {
       this.fail('internal', `${name} failed in the player: ${e instanceof Error ? e.message : String(e)}`);
       return;
+    } finally {
+      this.answering.delete(id);
     }
     if (stoppedByThisCall) {
       this.post({ type: 'reply', id, value });

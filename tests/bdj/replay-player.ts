@@ -216,7 +216,13 @@ export async function replayPlayerBdj(
     playerSettings: HARNESS_SETTINGS,
   });
   const fail = (why: string): Error =>
-    Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), { trace: [...trace], steps: [...steps], flushes: [...flushes], events: [...events] });
+    Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), {
+      trace: [...trace],
+      steps: [...steps],
+      flushes: [...flushes],
+      events: [...events],
+      threadDump: (lastWorker as BdjWorkerHandle | null)?.runtime?.threadDump() ?? [],
+    });
   /** Runs the script's steps from the current one while their waits hold (bdj_trace.c's step loop). */
   const runSteps = async (): Promise<void> => {
     while (stepIdx < script.length) {

@@ -332,6 +332,13 @@ export class BdjRuntime {
     });
   }
 
+  /** A thread dump of the Java threads (diagnostics: the boot timeout, a deadlock), with the events still queued. */
+  threadDump(): string[] {
+    const lines = this.jvm.threads.dump(frameText);
+    lines.push(`events: ${this.events.length} queued${this.eventThread ? `, #${this.eventThread.id} running one` : ''}`);
+    return lines;
+  }
+
   private onTrace(e: TraceEntry): void {
     if (!this.until || this.matched || !this.until(e)) return;
     this.matched = true;

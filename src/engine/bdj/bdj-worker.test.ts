@@ -39,6 +39,35 @@ describe('runBdjWorker', () => {
     expect(Math.abs(now - Date.now())).toBeLessThan(5_000);
   }, 90_000);
 
+  it('logs a thread dump when the engine asks (its start-up timeout), then answers dumped', async () => {
+    const received: FromBdj[] = [];
+    const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+    const handle = runBdjWorker(port);
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        disc: { kind: 'files', entries: discEntries(fixtureDiscFiles('disc-bdj')) },
+        readAheadBytes: 0,
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+      },
+    });
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+    port.onmessage!({ data: { type: 'dump', reason: 'start-up timeout' } });
+    const [log, done] = received.slice(-2);
+    expect(done).toEqual({ type: 'dumped' });
+    const lines = log?.type === 'log' ? log.line.split('\n') : [];
+    expect(lines[0]).toBe("BD-J thread dump (start-up timeout): booted, idle, 0 messages waiting for the boot, no call waiting for the engine, 0 deadlock outcomes");
+    expect(lines[1]).toMatch(/^threads: \d+ live, /);
+    expect(lines).toContainEqual(expect.stringMatching(/^#\d+ "Reference Handler" waiting on java\.lang\.ref\.Reference\$Lock@[0-9a-f]+$/));
+    expect(lines).toContain('    at java.lang.ref.Reference.tryHandlePending(Reference.java:191)');
+    expect(lines.at(-1)).toBe('events: 0 queued');
+    handle.runtime!.jvm.threads.halt();
+  }, 90_000);
+
   it('reports its memory after boot when asked (memoryStatsMs, telemetry runs), until the JVM halts', async () => {
     const received: FromBdj[] = [];
     const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };

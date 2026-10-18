@@ -39,7 +39,9 @@ export type ToBdj =
   | { readonly type: 'start'; readonly title: number }
   /** `coalesce`: a key repeat or pointer move, which may merge with the one before it in a full queue (input.ts). */
   | { readonly type: 'event'; readonly ev: number; readonly param: number; readonly coalesce?: Coalesce }
-  | { readonly type: 'reply'; readonly id: number; readonly value: number | string };
+  | { readonly type: 'reply'; readonly id: number; readonly value: number | string }
+  /** Log a thread dump (diagnostics), then answer `dumped`. */
+  | { readonly type: 'dump'; readonly reason: string };
 
 export type FromBdj =
   | { readonly type: 'booted'; readonly bootMs: number }
@@ -50,7 +52,9 @@ export type FromBdj =
   | { readonly type: 'failed'; readonly code: BdjFailureCode; readonly message: string }
   | { readonly type: 'memory'; readonly jvm: JvmMemoryStats; readonly freeType: { readonly wasmBytes: number; readonly faces: number } | null }
   /** The NAS answered 401: the engine asks the controller for a fresh token and sends it as remoteToken. */
-  | { readonly type: 'remoteTokenNeeded' };
+  | { readonly type: 'remoteTokenNeeded' }
+  /** The thread dump asked for has been logged. */
+  | { readonly type: 'dumped' };
 
 export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';
 
