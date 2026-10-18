@@ -38,7 +38,7 @@ These words are used in the UI and in this document (the user asked for terms th
   | Japanese release | ~1,220 | `[BDMV][220629][Kumo no Ue no Tenshi][Vol.4]`, `[BDMV][アニメ][青い硝子の庭][Vol.1-Vol.12 Fin]/…Vol.3` |
   | The user's tidy layout | ~370 | `Starfall Wanderer (星降りの旅人)/Volume 2`, `Kazeguruma (風車)/Season 3/Disc 7` |
   | Scene | ~300 | `Ink.and.Iron.S05.1080p.JPN.Blu-ray.AVC.LPCM.2.0-GRP/BDROM_22`, `Lantern.Road.2025.2160p…` |
-  | Loose | ~420, 190 of them without a disc title | `CITADEL S02/CITADEL S02 VOL.2`, `夏の終わりの灯台/BD`, `Harbor Line 7/HARBOR_L7_02` |
+  | Loose | ~420, 190 of them without a disc title | `BRASSWICK S02/BRASSWICK S02 VOL.2`, `夏の終わりの灯台/BD`, `Harbor Line 7/HARBOR_L7_02` |
 
   Seasons, volumes and box sets nest up to six levels.
 - **Music.** 72 music Blu-rays (concerts, live shows, CD bonus discs), all in `drv1/Downloads/Music`.
@@ -137,7 +137,7 @@ For every disc the scan records **evidence**, all cheap reads:
 
 The parser is original code with a test corpus (§12).
 
-**Grouping before lookup.** Discs under the same parent folder, and the same box or series folder, form a group that is matched once. Each disc then inherits the group's title, unless its own evidence names a different one. This makes "loose" discs like `CITADEL S02/CITADEL S02 VOL.2` and `Harbor Line 7/HARBOR_L7_02` identifiable from their parents, and keeps lookups down to roughly one per group rather than one per disc.
+**Grouping before lookup.** Discs under the same parent folder, and the same box or series folder, form a group that is matched once. Each disc then inherits the group's title, unless its own evidence names a different one. This makes "loose" discs like `BRASSWICK S02/BRASSWICK S02 VOL.2` and `Harbor Line 7/HARBOR_L7_02` identifiable from their parents, and keeps lookups down to roughly one per group rather than one per disc.
 
 **Lookup.**
 - Anime candidates go to AniList (GraphQL, no key; search matches English, romaji and native titles).
