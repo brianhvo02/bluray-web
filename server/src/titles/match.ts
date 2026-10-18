@@ -32,6 +32,8 @@ export interface MatchContext {
   readonly discdb: { lookup(fp: string): DiscDbHit | null };
   /** Search results by source and normalised query (and AniList entries by id), so lookups happen once per run. */
   readonly cache: Map<string, Entry[]>;
+  /** Called as each group (a parent folder) is done, for progress. */
+  readonly onGroupDone?: () => void;
 }
 
 /**
@@ -155,7 +157,10 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
       if (music) byDisc.set(e.discId, { discId: e.discId, status: 'music', group: music, name: lastSegment(music) });
       else lookup.push(e);
     }
-    if (lookup.length === 0) continue;
+    if (lookup.length === 0) {
+      ctx.onGroupDone?.();
+      continue;
+    }
     try {
       const r = await matchGroup(key, lookup, ctx, entries);
       for (const m of r.done) byDisc.set(m.discId, m);
@@ -164,6 +169,7 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
       if (!(err instanceof SourceUnavailable)) throw err;
       for (const e of lookup) byDisc.set(e.discId, { discId: e.discId, status: 'unsorted', reason: 'source-unreachable', suggestions: [] });
     }
+    ctx.onGroupDone?.();
   }
   for (const m of placeDiscs(pending, entries)) byDisc.set(m.discId, m);
   return { matches: evidence.map((e) => byDisc.get(e.discId)!), entries };

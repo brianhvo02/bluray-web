@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appHandlers } from './app';
 import { Auth } from './auth';
@@ -10,8 +11,28 @@ import { Library, nextNightly } from './library';
 import { RendezvousClient } from './rendezvous-client';
 import { trustedProxy } from './routes/pair';
 import { Store } from './store';
+import { createAniList } from './titles/anilist';
+import { ArtCache } from './titles/art';
+import { OwnerStore } from './titles/owner-store';
+import { Pacer } from './titles/pacer';
+import { downloadRootNames, fixtureSources, loadDiscDbOrNone, TitleService } from './titles/service';
+import type { Entry, MetadataSource } from './titles/sources';
+import { createTmdb } from './titles/tmdb';
 
 const SHUTDOWN_GRACE_MS = 3_000;
+const DEFAULT_DISCDB_INDEX = '/app/data/discdb-index.json';
+
+/** AniList and TMDB, or the recorded entries of `METADATA_FIXTURE` in E2E tests (ruling R3). */
+function metadataSources(config: Config): { anilist: MetadataSource; tmdb: MetadataSource | null } {
+  const fixture = process.env.METADATA_FIXTURE;
+  if (fixture) return fixtureSources(JSON.parse(readFileSync(fixture, 'utf8')) as Record<string, Entry[]>);
+  const anilist = createAniList(fetch, new Pacer(30, 60_000));
+  if (config.tmdbApiKey === null) {
+    console.log('TMDB key not set: non-anime discs go to Unsorted');
+    return { anilist, tmdb: null };
+  }
+  return { anilist, tmdb: createTmdb(fetch, new Pacer(20, 1_000), config.tmdbApiKey) };
+}
 
 /** The rendezvous client when `RENDEZVOUS_URL` is set; its key lives next to the auth data. */
 function rendezvousRegistrar(config: Config): CodeRegistrar | undefined {
@@ -23,6 +44,17 @@ async function serve(config: Config): Promise<void> {
   const trustProxy = await trustedProxy(config.trustedProxy);
   const library = new Library(config.roots, join(config.dataDir, 'library.json'), { scanPauseMs: config.scanPauseMs });
   const auth = new Auth(new Store(config.dataDir), Date.now);
+  const titles = new TitleService({
+    library,
+    owner: new OwnerStore(config.dataDir),
+    dataDir: config.dataDir,
+    ...metadataSources(config),
+    discdb: loadDiscDbOrNone(process.env.DISCDB_INDEX || DEFAULT_DISCDB_INDEX),
+    art: new ArtCache(join(config.dataDir, 'art'), fetch),
+    downloadRoots: downloadRootNames(config.roots),
+    titleLibrary: config.titleLibrary,
+  });
+  library.onScanned(() => void titles.runNow());
   const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy }));
 
   const scheduleScans = (): void => {
