@@ -1,6 +1,6 @@
 /** AniList GraphQL client (https://docs.anilist.co). Pace it with `new Pacer(30, 60_000)`. */
 import { RateLimited } from './pacer';
-import type { Pacer } from './pacer';
+import type { PacedOptions, Pacer } from './pacer';
 import { retryAfterMs, SourceUnavailable } from './sources';
 import type { Entry, MetadataSource } from './sources';
 
@@ -75,7 +75,7 @@ function toEntry(m: Media): Entry {
 
 export function createAniList(fetch: typeof globalThis.fetch, pacer: Pacer): MetadataSource {
   /** Runs one query; null on 404 (an unknown id). */
-  const query = (q: string, variables: Record<string, unknown>): Promise<unknown> =>
+  const query = (q: string, variables: Record<string, unknown>, paced: PacedOptions = {}): Promise<unknown> =>
     pacer.run(async () => {
       let res: Response;
       try {
@@ -83,6 +83,7 @@ export function createAniList(fetch: typeof globalThis.fetch, pacer: Pacer): Met
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify({ query: q, variables }),
+          signal: paced.signal,
         });
       } catch {
         throw new SourceUnavailable('anilist: network error');
@@ -102,7 +103,7 @@ export function createAniList(fetch: typeof globalThis.fetch, pacer: Pacer): Met
       // A GraphQL error with no data is a failed query, not an empty answer.
       if ((body.data === null || body.data === undefined) && body.errors !== undefined) throw new SourceUnavailable('anilist: query failed');
       return body.data ?? null;
-    });
+    }, paced);
 
   return {
     async search(search, opts = {}) {
@@ -112,7 +113,7 @@ export function createAniList(fetch: typeof globalThis.fetch, pacer: Pacer): Met
         variables.startDate_greater = opts.year * 10_000 - 1; // exclusive: YYYY0000 (year only) is in
         variables.startDate_lesser = (opts.year + 1) * 10_000;
       }
-      const data = (await query(SEARCH, variables)) as { Page?: { media?: readonly Media[] | null } | null } | null;
+      const data = (await query(SEARCH, variables, { urgent: opts.urgent, signal: opts.signal })) as { Page?: { media?: readonly Media[] | null } | null } | null;
       return (data?.Page?.media ?? []).map(toEntry);
     },
     async entry(id) {

@@ -65,7 +65,8 @@ export function titleRoutes(auth: Auth, library: TitleLibrary): Handler {
     const artId = segments[0]!;
     const size = url.searchParams.get('size') ?? 'small';
     if (!ART_ID.test(artId) || (size !== 'small' && size !== 'large')) return notFound();
-    const urls = catalogue.art(artId);
+    // lookup results' posters only for owners, who alone can look up (ruling T9e)
+    const urls = catalogue.art(artId) ?? (device.owner ? service.lookupArtUrls(artId) : null);
     if (!urls) return notFound();
     const cached = await service.art.get(artId, size, urls[size]);
     if (!cached) return notFound();

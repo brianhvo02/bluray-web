@@ -36,6 +36,8 @@ const MAX_CHAIN_ENTRIES = 30;
 const TV_FORMATS = new Set(['TV', 'TV_SHORT']);
 /** The matcher's cache keys for entries looked up by id (`anilist-entry:anilist:1`, `tmdb-entry:tmdb-tv:2`). */
 const ENTRY_KEY = /^(?:anilist|tmdb)-entry:(.+)$/;
+/** Posters of lookup results kept for `GET art/<id>`, at most (ruling T9e). */
+const MAX_LOOKUP_ART = 500;
 
 export interface TitleStatus { readonly running: boolean; readonly groupsDone: number; readonly groupsTotal: number; readonly filed: number; readonly unsorted: number; readonly music: number; readonly lastRunAt: number | null; readonly tmdb: boolean }
 
@@ -136,6 +138,8 @@ export class TitleService {
   private groupsDone = 0;
   private groupsTotal = 0;
   private cancelTimer: () => void = () => {};
+  /** Lookup results' poster URLs by art id, least recently used first. */
+  private readonly lookupArt = new Map<string, { small: string; large: string }>();
 
   constructor(private readonly opts: TitleServiceOptions) {
     this.now = opts.now ?? Date.now;
@@ -197,14 +201,16 @@ export class TitleService {
   }
 
   /**
-   * The owner's search (spec §9): AniList or TMDB through their paced sources, or the own titles by name. A title the
-   * catalogue lists comes back as listed; a poster is kept only when the catalogue serves that art (ruling T9d). No
-   * TMDB key: no results. A source that is down throws `SourceUnavailable`.
+   * The owner's search (spec §9): AniList or TMDB through their paced sources, ahead of background matching, or the
+   * own titles by name. A title the catalogue lists comes back as listed. Other results' posters are registered for
+   * `lookupArtUrls` (ruling T9e). No TMDB key: no results. A source that is down throws `SourceUnavailable`; aborting
+   * `signal` rejects with its reason.
    */
-  async lookup(query: string, source: 'anilist' | 'tmdb' | 'own'): Promise<TitleSummary[]> {
+  async lookup(query: string, source: 'anilist' | 'tmdb' | 'own', signal?: AbortSignal): Promise<TitleSummary[]> {
     const listed = new Map(this.built.titles.map((t) => [t.id, t]));
     if (source === 'own') {
       const q = normalizeTitle(query);
+      if (q === '') return [];
       return this.opts.owner.snapshot().ownTitles
         .filter((t) => normalizeTitle(t.name).includes(q))
         .map((t) => listed.get(t.id) ?? {
@@ -214,16 +220,38 @@ export class TitleService {
     }
     const src = source === 'anilist' ? this.opts.anilist : this.opts.tmdb;
     if (!src) return [];
-    const found = await src.search(query);
+    const found = await src.search(query, { urgent: true, signal });
     return found.map((en) => {
       const known = listed.get(en.id);
       if (known) return known;
-      const art = en.poster === null ? null : artIdOf(en.poster);
       return {
-        id: en.id, kind: en.kind, names: { ...en.names, display: null }, poster: art !== null && this.built.art(art) !== null ? art : null,
+        id: en.id, kind: en.kind, names: { ...en.names, display: null }, poster: en.poster === null ? null : this.registerArt(en.poster),
         year: en.year, seasons: en.seasons.length, discs: 0, addedAt: 0, own: false,
       };
     });
+  }
+
+  /** The source URLs of a lookup result's poster, by art id, or null; a hit counts as a use. */
+  lookupArtUrls(artId: string): { small: string; large: string } | null {
+    const urls = this.lookupArt.get(artId);
+    if (!urls) return null;
+    this.lookupArt.delete(artId);
+    this.lookupArt.set(artId, urls);
+    return urls;
+  }
+
+  /**
+   * Registers a poster from a source's answer under its art id, dropping the least recently used beyond 500. An id the
+   * catalogue holds for other URLs isn't taken over, and the result gets no poster.
+   */
+  private registerArt(poster: { readonly small: string; readonly large: string }): string | null {
+    const id = artIdOf(poster);
+    const held = this.built.art(id);
+    if (held) return held.small === poster.small && held.large === poster.large ? id : null;
+    this.lookupArt.delete(id);
+    this.lookupArt.set(id, { small: poster.small, large: poster.large });
+    while (this.lookupArt.size > MAX_LOOKUP_ART) this.lookupArt.delete(this.lookupArt.keys().next().value!);
+    return id;
   }
 
   /** Builds the catalogue again from what is known, with no network access: after an owner change. */

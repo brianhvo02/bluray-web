@@ -29,7 +29,8 @@ export interface Entry {
 }
 
 export interface MetadataSource {
-  search(query: string, opts?: { year?: number; kind?: 'series' | 'movie' }): Promise<Entry[]>;
+  /** `urgent` and `signal` are for the owner's lookups: see `PacedOptions`. */
+  search(query: string, opts?: { year?: number; kind?: 'series' | 'movie'; urgent?: boolean; signal?: AbortSignal }): Promise<Entry[]>;
   entry(id: string): Promise<Entry | null>;
 }
 

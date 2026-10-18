@@ -23,9 +23,28 @@ describe('OwnerStore', () => {
     const s = new OwnerStore(dir);
     s.setChoice('A', 'F', title('anilist:1'));
     s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
-    expect(s.choiceOrigin('A')).toEqual({ direct: true });
-    expect(s.choiceOrigin('B')).toEqual({ direct: false, source: 'A' });
+    expect(s.choiceOrigin('A')).toEqual({ kind: 'direct' });
+    expect(s.choiceOrigin('B')).toEqual({ kind: 'copy', source: 'A' });
     expect(s.choiceOrigin('C')).toBeNull();
+  });
+
+  it('marks a choice applied to a group, which copies follow like a direct one (ruling T9f)', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('anilist:1'), 'group');
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    expect(s.choiceOrigin('A')).toEqual({ kind: 'group' });
+    expect(s.choiceOrigin('B')).toEqual({ kind: 'copy', source: 'A' });
+    expect(new OwnerStore(dir).snapshot().choices.get('B')).toEqual(title('anilist:1'));
+    s.setChoice('A', 'F', title('anilist:2'));
+    expect(s.choiceOrigin('A')).toEqual({ kind: 'direct' });
+  });
+
+  it('names no source for a copy whose source is gone', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('anilist:1'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    s.clearChoice('A');
+    expect(s.choiceOrigin('B')).toEqual({ kind: 'copy', source: null });
   });
 
   it('gives a choice to every present disc with the fingerprint and no choice, keeping the original', () => {
@@ -176,6 +195,8 @@ describe('OwnerStore', () => {
       '{"choices":{},"ownTitles":[{"id":"own:1","kind":"show","name":"x","seasons":null}],"displayNames":{},"gate":null}',
       '{"choices":{},"ownTitles":[],"displayNames":{"A":3},"gate":null}',
       '{"choices":{"A":{"choice":{"kind":"hidden"},"fingerprint":null,"setAt":1}},"ownTitles":[],"displayNames":{},"gate":null}',
+      '{"choices":{"A":{"choice":{"kind":"hidden"},"fingerprint":null,"setAt":1,"propagated":false}},"ownTitles":[],"displayNames":{},"gate":null}',
+      '{"choices":{"A":{"choice":{"kind":"hidden"},"fingerprint":null,"setAt":1,"propagated":false,"origin":"owner"}},"ownTitles":[],"displayNames":{},"gate":null}',
     ]) {
       writeFileSync(join(dir, 'owner.json'), body);
       expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);

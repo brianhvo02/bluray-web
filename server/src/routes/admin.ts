@@ -21,6 +21,9 @@ export interface AdminOptions {
   registrarDeadlineMs?: number;
   /** The title library; its owner routes answer 404 without it. */
   titles?: TitleLibrary;
+  now?: () => number;
+  /** How long an owner's lookup may take before it answers 503. Default 10 s. */
+  lookupTimeoutMs?: number;
 }
 
 const REGISTRAR_DEADLINE_MS = 5_000;
@@ -48,6 +51,7 @@ export function bearerToken(header: string | undefined): string | null {
 
 /** `/api/admin/*`, for owner devices only; the token must come as `Authorization: Bearer`. */
 export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
+  const lookups = new LookupLimiter(opts.now ?? Date.now);
   return async (req, url) => {
     const path = url.pathname;
     if (path !== '/api/admin' && !path.startsWith('/api/admin/')) return null;
@@ -64,6 +68,7 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
     }
     const route = `${req.method} ${collection ?? ''}${id === undefined ? '' : '/:id'}`;
     if (opts.titles) {
+      if (route === 'GET lookup') return lookupRoute(url, device.id, opts.titles, lookups, opts.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS);
       const answer = await titleAdminRoute(route, id === undefined ? undefined : decode(id), req, url, opts.library, opts.titles);
       if (answer) return answer;
     }
@@ -135,6 +140,61 @@ const MAX_PAGE = 200;
 /** Ids a choice may file a disc under: a source entry or an own title. */
 const TITLE_ID = /^(?:anilist:\d+|tmdb-(?:tv|movie):\d+|own:[0-9a-f-]{36})$/;
 const KINDS: readonly TitleKind[] = ['series', 'movie', 'music'];
+const LOOKUP_TIMEOUT_MS = 10_000;
+const LOOKUPS_PER_MINUTE = 20;
+const MINUTE_MS = 60_000;
+
+/** Per device: one lookup in flight and 20 started in any minute (ruling T9h). */
+class LookupLimiter {
+  private readonly busy = new Set<string>();
+  private readonly starts = new Map<string, number[]>();
+
+  constructor(private readonly now: () => number) {}
+
+  /** Starts a lookup for `device`, or the 429 that refuses it. Call `done` once it ends. */
+  start(device: string): Response | null {
+    if (this.busy.has(device)) return json(429, { error: 'lookup-busy' });
+    const t = this.now();
+    for (const [d, ts] of this.starts) {
+      const live = ts.filter((s) => s > t - MINUTE_MS);
+      if (live.length === 0) this.starts.delete(d);
+      else this.starts.set(d, live);
+    }
+    const mine = this.starts.get(device) ?? [];
+    if (mine.length >= LOOKUPS_PER_MINUTE) {
+      const wait = Math.max(1, Math.ceil((mine[0]! + MINUTE_MS - t) / 1000));
+      return json(429, { error: 'too-many-lookups' }, { 'Retry-After': String(wait) });
+    }
+    this.starts.set(device, [...mine, t]);
+    this.busy.add(device);
+    return null;
+  }
+
+  done(device: string): void {
+    this.busy.delete(device);
+  }
+}
+
+/** `GET admin/lookup?q&source`: paced ahead of matching, limited per device, given up after `timeoutMs` (ruling T9h). */
+async function lookupRoute(url: URL, device: string, titles: TitleLibrary, limiter: LookupLimiter, timeoutMs: number): Promise<Response> {
+  const q = url.searchParams.get('q')?.trim() ?? '';
+  const source = url.searchParams.get('source');
+  if (q.length < 1 || q.length > MAX_QUERY || (source !== 'anilist' && source !== 'tmdb' && source !== 'own')) throw new HttpError(400, 'bad query');
+  const refused = limiter.start(device);
+  if (refused) return refused;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(new SourceUnavailable(`lookup took over ${timeoutMs} ms`)), timeoutMs);
+  try {
+    const timedOut = new Promise<never>((_, reject) => abort.signal.addEventListener('abort', () => reject(abort.signal.reason as Error), { once: true }));
+    return json(200, { titles: await Promise.race([titles.service.lookup(q, source, abort.signal), timedOut]) });
+  } catch (err) {
+    if (err instanceof SourceUnavailable) return json(503, { error: 'source-unreachable' });
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    limiter.done(device);
+  }
+}
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 /** Exactly these keys, the optional ones may be absent. */
@@ -188,7 +248,9 @@ const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefi
  * After an owner change: the catalogue is built again at once (ruling T9a); a choice naming an entry that isn't loaded
  * (its disc stays Unsorted as `no-title`) also starts a run in the background to load it.
  */
-function rebuildAfter(titles: TitleLibrary, discId?: string, choice?: OwnerChoice): void {
+function rebuildAfter(titles: TitleLibrary, library: Library, discId?: string, choice?: OwnerChoice): void {
+  // copies follow at once (ruling T9g)
+  titles.owner.reattach(library.evidence().map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
   titles.service.rebuild();
   if (discId === undefined || choice === undefined || (choice.kind !== 'title' && choice.kind !== 'extras') || choice.titleId.startsWith('own:')) return;
   if (titles.service.catalogue().unsorted.some((u) => u.discId === discId && u.reason === 'no-title')) {
@@ -201,10 +263,10 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
   const { owner } = titles;
   if (method === 'DELETE') {
     const origin = owner.choiceOrigin(discId);
-    // a copy's choice follows its source, so clearing it would not last (ruling T9b)
-    if (origin && !origin.direct) return json(409, { error: 'copy-follows-source', source: origin.source });
+    // a copy's choice follows its source, so clearing it would not last (ruling T9b); with no source left, it can go
+    if (origin?.kind === 'copy' && origin.source !== null) return json(409, { error: 'copy-follows-source', source: origin.source });
     owner.clearChoice(discId);
-    rebuildAfter(titles);
+    rebuildAfter(titles, library);
     return { status: 204 };
   }
   if (method !== 'PUT') return null;
@@ -220,7 +282,8 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
   }
   owner.setChoice(discId, disc.fingerprint, choice);
   if (applyToGroup) {
-    // the group's discs in parsed order (number, then folder); the others are numbered from this one's place
+    // the group's discs in parsed order (number, then folder); the others are numbered from this one's place, and a
+    // disc the owner chose for itself keeps its choice, while one filed with a group takes the new one (ruling T9f)
     const group = groupKey(disc);
     const order = evidence
       .filter((e) => groupKey(e) === group)
@@ -228,16 +291,16 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
     const at = order.indexOf(disc);
     const base = choice.kind === 'title' ? (choice.disc ?? at + 1) : null;
     for (const [i, e] of order.entries()) {
-      if (e === disc || owner.choiceOrigin(e.discId)?.direct) continue;
+      if (e === disc || owner.choiceOrigin(e.discId)?.kind === 'direct') continue;
       let c: OwnerChoice = choice;
       if (choice.kind === 'title' && base !== null) {
         const n = base + i - at;
         c = { ...choice, disc: n >= 1 ? n : null };
       }
-      owner.setChoice(e.discId, e.fingerprint, c);
+      owner.setChoice(e.discId, e.fingerprint, c, 'group');
     }
   }
-  rebuildAfter(titles, discId, choice);
+  rebuildAfter(titles, library, discId, choice);
   return { status: 204 };
 }
 
@@ -260,17 +323,6 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
     }
     case 'GET hidden':
       return json(200, { discs: service.catalogue().hidden });
-    case 'GET lookup': {
-      const q = url.searchParams.get('q')?.trim() ?? '';
-      const source = url.searchParams.get('source');
-      if (q.length < 1 || q.length > MAX_QUERY || (source !== 'anilist' && source !== 'tmdb' && source !== 'own')) throw new HttpError(400, 'bad query');
-      try {
-        return json(200, { titles: await service.lookup(q, source) });
-      } catch (err) {
-        if (err instanceof SourceUnavailable) return json(503, { error: 'source-unreachable' });
-        throw err;
-      }
-    }
     case 'PUT names/:id': {
       const body = await readJson(req);
       const value = isObject(body) && hasKeys(body, ['name']) ? (body.name === null ? null : name(body.name)) : undefined;
@@ -278,7 +330,7 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       const known = library.evidence().some((e) => e.discId === id) || service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own);
       if (!known) return json(404, { error: 'unknown id' });
       owner.setDisplayName(id!, value);
-      rebuildAfter(titles);
+      rebuildAfter(titles, library);
       return { status: 204 };
     }
     case 'POST titles': {
@@ -289,7 +341,7 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       const seasons = body.seasons ?? null;
       if (kind === undefined || n === undefined || !isCount(seasons) || (kind !== 'series' && seasons !== null)) throw new HttpError(400, 'bad title');
       const title = owner.createTitle(kind, n, seasons);
-      rebuildAfter(titles);
+      rebuildAfter(titles, library);
       return json(200, title);
     }
     case 'PATCH titles/:id': {
@@ -302,13 +354,13 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       if (!existing) return json(404, { error: 'unknown title' });
       if (existing.kind !== 'series' && body.seasons !== undefined && body.seasons !== null) throw new HttpError(400, 'bad title');
       const title = owner.updateTitle(existing.id, { ...(n !== undefined ? { name: n } : {}), ...(body.seasons !== undefined ? { seasons: body.seasons as number | null } : {}) });
-      rebuildAfter(titles);
+      rebuildAfter(titles, library);
       return json(200, title);
     }
     case 'DELETE titles/:id': {
       if (!owner.snapshot().ownTitles.some((t) => t.id === id)) return json(404, { error: 'unknown title' });
       owner.deleteTitle(id!);
-      rebuildAfter(titles);
+      rebuildAfter(titles, library);
       return { status: 204 };
     }
     case 'PUT settings/:id': {

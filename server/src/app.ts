@@ -21,6 +21,8 @@ export interface AppOptions {
   trustProxy?: (address: string) => boolean;
   /** The title library: without it, its routes answer 404. */
   titles?: TitleLibrary;
+  /** How long an owner's lookup may take. Default 10 s. */
+  lookupTimeoutMs?: number;
 }
 
 /** Answers 401 to any request without a valid token (`t=` query or `Authorization: Bearer`); lets the rest through. */
@@ -37,7 +39,10 @@ export function appHandlers(opts: AppOptions): Handler[] {
   return [
     pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false) }),
     requireToken(auth),
-    adminRoutes(auth, { library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs, titles: opts.titles }),
+    adminRoutes(auth, {
+      library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
+      titles: opts.titles, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
+    }),
     libraryRoute(opts.library),
     ...(opts.titles ? [titleRoutes(auth, opts.titles)] : []),
     discRoutes(opts.library),

@@ -11,8 +11,11 @@ export interface OwnerSnapshot {
   readonly gate: 'owners' | 'everyone' | null;
 }
 
+/** `direct`: the owner chose for this disc; `group`: filed with "apply to the group" from another disc (ruling T9f). */
+export type ChoiceOrigin = 'direct' | 'group';
+
 interface OwnerData {
-  choices: Record<string, { choice: OwnerChoice; fingerprint: string | null; setAt: number; propagated: boolean }>;
+  choices: Record<string, { choice: OwnerChoice; fingerprint: string | null; setAt: number; propagated: boolean; origin: ChoiceOrigin }>;
   ownTitles: OwnTitle[];
   displayNames: Record<string, string>;
   gate: 'owners' | 'everyone' | null;
@@ -45,21 +48,22 @@ export class OwnerStore {
     };
   }
 
-  setChoice(discId: string, fingerprint: string | null, choice: OwnerChoice): void {
+  setChoice(discId: string, fingerprint: string | null, choice: OwnerChoice, origin: ChoiceOrigin = 'direct'): void {
     this.update((d) => {
-      d.choices[discId] = { choice, fingerprint, setAt: Date.now(), propagated: false };
+      d.choices[discId] = { choice, fingerprint, setAt: Date.now(), propagated: false, origin };
     });
   }
 
   /**
-   * Where a disc's choice comes from: null when it has none, `direct` when it was set with `setChoice`, otherwise the
-   * disc whose direct choice it follows (the newest for its fingerprint, as `reattach` picks it), or null if none is.
+   * Where a disc's choice comes from: null when it has none, `direct` or `group` when it was set with `setChoice`,
+   * otherwise `copy` with the disc whose choice it follows (the newest for its fingerprint, as `reattach` picks it), or
+   * null when none is left.
    */
-  choiceOrigin(discId: string): { readonly direct: true } | { readonly direct: false; readonly source: string | null } | null {
+  choiceOrigin(discId: string): { readonly kind: ChoiceOrigin } | { readonly kind: 'copy'; readonly source: string | null } | null {
     const data = this.load();
     const entry = data.choices[discId];
     if (!entry) return null;
-    if (!entry.propagated) return { direct: true };
+    if (!entry.propagated) return { kind: entry.origin };
     let source: string | null = null;
     let setAt = -Infinity;
     for (const [id, e] of Object.entries(data.choices)) {
@@ -69,7 +73,7 @@ export class OwnerStore {
         setAt = e.setAt;
       }
     }
-    return { direct: false, source };
+    return { kind: 'copy', source };
   }
 
   clearChoice(discId: string): void {
@@ -162,7 +166,7 @@ export class OwnerStore {
       for (const disc of discs) {
         if (disc.fingerprint === null || d.choices[disc.id] !== undefined) continue;
         const from = source.get(disc.fingerprint);
-        if (from) d.choices[disc.id] = { choice: from.choice, fingerprint: disc.fingerprint, setAt: from.setAt, propagated: true };
+        if (from) d.choices[disc.id] = { choice: from.choice, fingerprint: disc.fingerprint, setAt: from.setAt, propagated: true, origin: 'direct' }; // origin is unused while propagated
       }
     });
   }
@@ -208,7 +212,7 @@ export class OwnerStore {
     const kinds = ['series', 'movie', 'music'];
     for (const [id, e] of Object.entries(choices as Record<string, unknown>)) {
       const entry = e as Record<string, unknown> | null;
-      if (!isObj(entry) || !(entry!.fingerprint === null || str(entry!.fingerprint)) || typeof entry!.setAt !== 'number' || typeof entry!.propagated !== 'boolean') bad(`choices.${id}`);
+      if (!isObj(entry) || !(entry!.fingerprint === null || str(entry!.fingerprint)) || typeof entry!.setAt !== 'number' || typeof entry!.propagated !== 'boolean' || (entry!.origin !== 'direct' && entry!.origin !== 'group')) bad(`choices.${id}`);
       const c = entry!.choice as Record<string, unknown> | null;
       const ok =
         isObj(c) &&

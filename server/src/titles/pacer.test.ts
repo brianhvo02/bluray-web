@@ -68,6 +68,48 @@ describe('Pacer', () => {
     expect(t).toBe(60_000); // no Retry-After: one window
   });
 
+  it('starts an urgent call ahead of calls already waiting (ruling T9h)', async () => {
+    let t = 0;
+    const sleeps: { ms: number; wake: () => void }[] = [];
+    const sleep = (ms: number): Promise<void> => new Promise((wake) => sleeps.push({ ms, wake }));
+    const pacer = new Pacer(1, 1_000, () => t, sleep);
+    const order: string[] = [];
+    const runs = [
+      pacer.run(async () => order.push('first')),
+      pacer.run(async () => order.push('background')),
+    ];
+    await flush();
+    runs.push(pacer.run(async () => order.push('lookup'), { urgent: true }));
+    await flush();
+    t = 1_000;
+    sleeps[0]!.wake();
+    await flush();
+    t = 2_000;
+    sleeps[1]!.wake();
+    await Promise.all(runs);
+    expect(order).toEqual(['first', 'lookup', 'background']);
+  });
+
+  it('drops a waiting call whose signal aborts, without spending a start on it', async () => {
+    let t = 0;
+    const sleeps: { ms: number; wake: () => void }[] = [];
+    const sleep = (ms: number): Promise<void> => new Promise((wake) => sleeps.push({ ms, wake }));
+    const pacer = new Pacer(1, 1_000, () => t, sleep);
+    const ran: string[] = [];
+    const first = pacer.run(async () => ran.push('first'));
+    const abort = new AbortController();
+    const dropped = pacer.run(async () => ran.push('dropped'), { signal: abort.signal });
+    const last = pacer.run(async () => ran.push('last'));
+    await flush();
+    abort.abort(new Error('timed out'));
+    await expect(dropped).rejects.toThrow('timed out');
+    t = 1_000;
+    sleeps[0]!.wake();
+    await Promise.all([first, last]);
+    expect(ran).toEqual(['first', 'last']);
+    await expect(pacer.run(async () => null, { signal: abort.signal })).rejects.toThrow('timed out');
+  });
+
   it('passes other errors through', async () => {
     const pacer = new Pacer(1, 1_000);
     await expect(pacer.run(async () => Promise.reject(new SourceUnavailable('down')))).rejects.toThrow('down');

@@ -44,14 +44,21 @@ const A = ev('drv1/Anime/火斬りの剣/[BDMV][220629][火斬りの剣][Vol.1]'
 const BOX = ['drv1/Misc/Quiet Harbor/Quiet Harbor Disc 3', 'drv1/Misc/Quiet Harbor/Quiet Harbor Disc 1', 'drv1/Misc/Quiet Harbor/Quiet Harbor Disc 2'].map((p, i) => ev(p, {}, `FB${i}`));
 const COPY = ev('drv2/Downloads/Quiet.Harbor.D1', {}, 'FB1');
 
-function fakeSource(results: Record<string, Entry[]>): MetadataSource & { down: boolean } {
+type SearchOpts = Parameters<MetadataSource['search']>[1];
+
+function fakeSource(results: Record<string, Entry[]>): MetadataSource & { down: boolean; hold: Promise<void> | null; searches: { query: string; opts: SearchOpts }[]; extra: Entry[] } {
   const byKey = new Map(Object.entries(results).map(([q, es]) => [normalizeTitle(q), es]));
   const byId = new Map(Object.values(results).flat().map((en) => [en.id, en]));
   const src = {
     down: false,
-    async search(query: string): Promise<Entry[]> {
+    hold: null as Promise<void> | null,
+    searches: [] as { query: string; opts: SearchOpts }[],
+    extra: [] as Entry[],
+    async search(query: string, opts?: SearchOpts): Promise<Entry[]> {
+      src.searches.push({ query, opts });
+      if (src.hold) await src.hold;
       if (src.down) throw new SourceUnavailable('down');
-      return byKey.get(normalizeTitle(query)) ?? [];
+      return [...(byKey.get(normalizeTitle(query)) ?? []), ...(normalizeTitle(query) === 'many' ? src.extra : [])];
     },
     async entry(id: string): Promise<Entry | null> {
       if (src.down) throw new SourceUnavailable('down');
@@ -82,7 +89,7 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-async function start(opts: { gate?: 'owners' | 'everyone' } = {}): Promise<void> {
+async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number } = {}): Promise<void> {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
@@ -97,7 +104,7 @@ async function start(opts: { gate?: 'owners' | 'everyone' } = {}): Promise<void>
     now: () => clock, setTimer: () => () => {},
   });
   await service.runNow();
-  const server = createServer(appHandlers({ auth, library, now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner } }));
+  const server = createServer(appHandlers({ auth, library, now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, lookupTimeoutMs: opts.lookupTimeoutMs }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -329,5 +336,145 @@ describe('owner title routes', () => {
 
     const status = await (await get('/api/admin/metadata/status', t)).json();
     expect(status).toMatchObject({ running: false, filed: 1, unsorted: 4, tmdb: false });
+  });
+});
+
+describe('task 9 review', () => {
+  const ADMIN_ROUTES: [string, string, unknown?][] = [
+    ['GET', '/api/admin/unsorted'],
+    ['GET', '/api/admin/hidden'],
+    ['GET', '/api/admin/lookup?q=x&source=own'],
+    ['PUT', `/api/admin/discs/${encodeURIComponent(A.discId)}/choice`, { choice: { kind: 'hidden' } }],
+    ['DELETE', `/api/admin/discs/${encodeURIComponent(A.discId)}/choice`],
+    ['PUT', `/api/admin/names/${encodeURIComponent(A.discId)}`, { name: 'x' }],
+    ['POST', '/api/admin/titles', { kind: 'movie', name: 'x' }],
+    ['PATCH', '/api/admin/titles/own:x', { name: 'x' }],
+    ['DELETE', '/api/admin/titles/own:x'],
+    ['PUT', '/api/admin/settings/title-library', { gate: 'everyone' }],
+    ['GET', '/api/admin/metadata/status'],
+  ];
+
+  it('answers 401 on every new admin route with no token, and with an owner token sent as ?t=', async () => {
+    await start();
+    const t = await token(true);
+    for (const [method, path, body] of ADMIN_ROUTES) {
+      const init = { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) };
+      expect((await fetch(`${base}${path}`, init)).status, `${method} ${path}`).toBe(401);
+      const sep = path.includes('?') ? '&' : '?';
+      expect((await fetch(`${base}${path}${sep}t=${encodeURIComponent(t)}`, init)).status, `${method} ${path} ?t=`).toBe(401);
+    }
+    expect(owner.snapshot().gate).toBeNull();
+  });
+
+  it('serves the art of lookup results to an owner, from a registry of at most 500 (ruling T9e)', async () => {
+    await start({ gate: 'everyone' });
+    const t = await token(true);
+    const guest = await token(false);
+    anilist.extra = Array.from({ length: 501 }, (_, i) =>
+      entry(`anilist:${5000 + i}`, { english: `Lantern ${i}` }, { poster: { small: `https://img.example/l${i}-s.jpg`, large: `https://img.example/l${i}-l.jpg` } }));
+    const { titles } = (await (await get('/api/admin/lookup?q=many&source=anilist', t)).json()) as { titles: TitleSummary[] };
+    expect(titles).toHaveLength(501);
+    const first = titles[0]!.poster!;
+    const last = titles[500]!.poster!;
+    expect(last).toBe(artIdOf(anilist.extra[500]!.poster!));
+    const res = await get(`/api/art/${last}?size=large`, t);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('private, max-age=2592000, immutable');
+    expect(artFetch).toHaveBeenLastCalledWith('https://img.example/l500-l.jpg', expect.anything());
+    expect((await get(`/api/art/${last}`, guest)).status).toBe(404);
+    expect((await get(`/api/art/${first}`, t)).status).toBe(404);
+    // the catalogue's own art still serves everyone
+    expect((await get(`/api/art/${artId}`, guest)).status).toBe(200);
+  });
+
+  it('lets a later applyToGroup correct group-filed discs, but not discs filed one by one (ruling T9f)', async () => {
+    await start();
+    const t = await token(true);
+    const mk = async (n: string): Promise<OwnTitle> => (await (await send('POST', '/api/admin/titles', t, { kind: 'series', name: n, seasons: 1 })).json()) as OwnTitle;
+    const wrong = await mk('Wrong Harbor');
+    const right = await mk('Quiet Harbor');
+    const [d3, d1, d2] = BOX as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const choice = (id: string, disc: number): unknown => ({ choice: { kind: 'title', titleId: id, season: 1, disc }, applyToGroup: true });
+    const filed = (id: string, disc: number): unknown => ({ kind: 'title', titleId: id, season: 1, disc });
+    const at = (d: DiscEvidence): unknown => owner.snapshot().choices.get(d.discId);
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(d1.discId)}/choice`, t, choice(wrong.id, 1));
+    // applied again, from the same disc: the group-filed siblings follow
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(d1.discId)}/choice`, t, choice(right.id, 1));
+    expect([d1, d2, d3].map(at)).toEqual([filed(right.id, 1), filed(right.id, 2), filed(right.id, 3)]);
+    // a disc the owner filed one by one keeps its choice
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(d3.discId)}/choice`, t, { choice: { kind: 'hidden' } });
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(d1.discId)}/choice`, t, choice(wrong.id, 1));
+    expect([d1, d2, d3].map(at)).toEqual([filed(wrong.id, 1), filed(wrong.id, 2), { kind: 'hidden' }]);
+    // a disc the owner acted on with applyToGroup is direct too
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(d2.discId)}/choice`, t, choice(right.id, 2));
+    expect(at(d1)).toEqual(filed(wrong.id, 1));
+  });
+
+  it('applies a choice to the copies at once (ruling T9g)', async () => {
+    await start();
+    const t = await token(true);
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(BOX[1]!.discId)}/choice`, t, { choice: { kind: 'hidden' } });
+    const hidden = (await (await get('/api/admin/hidden', t)).json()) as { discs: { discId: string }[] };
+    expect(hidden.discs.map((d) => d.discId).sort()).toEqual([BOX[1]!.discId, COPY.discId].sort());
+  });
+
+  it('clears a copy whose source is gone, with no 409', async () => {
+    await start();
+    const t = await token(true);
+    const d1 = BOX[1]!;
+    owner.setChoice(d1.discId, d1.fingerprint, { kind: 'hidden' });
+    owner.reattach(evidence.map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
+    owner.clearChoice(d1.discId);
+    expect((await send('DELETE', `/api/admin/discs/${encodeURIComponent(COPY.discId)}/choice`, t)).status).toBe(204);
+    expect(owner.snapshot().choices.has(COPY.discId)).toBe(false);
+  });
+
+  it('finds no own titles for a query that normalises to nothing', async () => {
+    await start();
+    const t = await token(true);
+    owner.createTitle('movie', 'Paper Lanterns', null);
+    expect(await (await get('/api/admin/lookup?q=!!!&source=own', t)).json()).toEqual({ titles: [] });
+  });
+
+  it('looks up ahead of background matching, one at a time and 20 a minute per device (ruling T9h)', async () => {
+    await start();
+    const t = await token(true);
+    const other = await token(true);
+    anilist.searches.length = 0; // the start's matching run
+    let release!: () => void;
+    anilist.hold = new Promise((r) => (release = r));
+    const busy = get('/api/admin/lookup?q=Ember%20Blade&source=anilist', t);
+    await vi.waitFor(() => expect(anilist.searches).toHaveLength(1));
+    expect(anilist.searches[0]!.opts).toMatchObject({ urgent: true });
+    expect(anilist.searches[0]!.opts?.signal).toBeInstanceOf(AbortSignal);
+    const second = await get('/api/admin/lookup?q=Ember%20Blade&source=anilist', t);
+    expect(second.status).toBe(429);
+    expect(await second.json()).toEqual({ error: 'lookup-busy' });
+    release();
+    expect((await busy).status).toBe(200);
+    anilist.hold = null;
+    for (let i = 1; i < 20; i++) expect((await get('/api/admin/lookup?q=Ember&source=anilist', t)).status, `lookup ${i}`).toBe(200);
+    clock += 30_000;
+    const over = await get('/api/admin/lookup?q=Ember&source=anilist', t);
+    expect(over.status).toBe(429);
+    expect(over.headers.get('retry-after')).toBe('30');
+    expect(await over.json()).toEqual({ error: 'too-many-lookups' });
+    expect((await get('/api/admin/lookup?q=Ember&source=anilist', other)).status).toBe(200);
+    clock += 30_000;
+    expect((await get('/api/admin/lookup?q=Ember&source=anilist', t)).status).toBe(200);
+  });
+
+  it('gives up on a lookup after its timeout with 503 source-unreachable', async () => {
+    await start({ lookupTimeoutMs: 50 });
+    const t = await token(true);
+    anilist.searches.length = 0; // the start's matching run
+    anilist.hold = new Promise(() => {});
+    const res = await get('/api/admin/lookup?q=Ember&source=anilist', t);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'source-unreachable' });
+    expect(anilist.searches[0]!.opts?.signal?.aborted).toBe(true);
+    // the device may look up again
+    anilist.hold = null;
+    expect((await get('/api/admin/lookup?q=Ember&source=anilist', t)).status).toBe(200);
   });
 });

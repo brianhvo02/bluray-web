@@ -3,7 +3,7 @@
  * The key goes in the `api_key` parameter and nowhere else: errors never carry the URL, the response or a cause.
  */
 import { RateLimited } from './pacer';
-import type { Pacer } from './pacer';
+import type { PacedOptions, Pacer } from './pacer';
 import { retryAfterMs, SourceUnavailable } from './sources';
 import type { Entry, MetadataSource } from './sources';
 
@@ -61,14 +61,14 @@ function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
 
 export function createTmdb(fetch: typeof globalThis.fetch, pacer: Pacer, apiKey: string): MetadataSource {
   /** GETs one path (logged as the path only); null on 404. */
-  const get = (path: string, params: Record<string, string> = {}): Promise<unknown> =>
+  const get = (path: string, params: Record<string, string> = {}, paced: PacedOptions = {}): Promise<unknown> =>
     pacer.run(async () => {
       const url = new URL(`${API}${path}`);
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
       url.searchParams.set('api_key', apiKey);
       let res: Response;
       try {
-        res = await fetch(url, { headers: { Accept: 'application/json' } });
+        res = await fetch(url, { headers: { Accept: 'application/json' }, signal: paced.signal });
       } catch {
         throw new SourceUnavailable(`tmdb: network error on ${path}`);
       }
@@ -83,23 +83,24 @@ export function createTmdb(fetch: typeof globalThis.fetch, pacer: Pacer, apiKey:
       } catch {
         throw new SourceUnavailable(`tmdb: unreadable response on ${path}`);
       }
-    });
+    }, paced);
 
   return {
     async search(query, opts = {}) {
       const params: Record<string, string> = { query, include_adult: 'false' };
+      const paced: PacedOptions = { urgent: opts.urgent, signal: opts.signal };
       if (opts.kind === 'series') {
         if (opts.year !== undefined) params.first_air_date_year = String(opts.year);
-        const data = (await get('/search/tv', params)) as { results?: readonly Show[] } | null;
+        const data = (await get('/search/tv', params, paced)) as { results?: readonly Show[] } | null;
         return (data?.results ?? []).map((s) => toEntry(s, 'series'));
       }
       if (opts.kind === 'movie') {
         if (opts.year !== undefined) params.year = String(opts.year);
-        const data = (await get('/search/movie', params)) as { results?: readonly Show[] } | null;
+        const data = (await get('/search/movie', params, paced)) as { results?: readonly Show[] } | null;
         return (data?.results ?? []).map((s) => toEntry(s, 'movie'));
       }
       // search/multi takes no year; the matcher weighs `year` itself.
-      const data = (await get('/search/multi', params)) as { results?: readonly Show[] } | null;
+      const data = (await get('/search/multi', params, paced)) as { results?: readonly Show[] } | null;
       return (data?.results ?? []).flatMap((s) => (s.media_type === 'tv' ? [toEntry(s, 'series')] : s.media_type === 'movie' ? [toEntry(s, 'movie')] : []));
     },
     async entry(id) {
