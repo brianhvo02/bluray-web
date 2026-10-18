@@ -136,6 +136,10 @@ const GENERIC_LABEL = /^(?:(?:BDROM|BD[ _-]?ROM|BD[ _-]?VIDEO|BD|BLU-?RAY|VIDEO_
 /** `Part 2`, `2nd Cour`, `Cour 2`: kept on the title, since AniList titles carry them. */
 const PART = /^\s*(?:Part[ ._]*\d{1,2}|\d{1,2}(?:st|nd|rd|th)[ ._]*Cour|Cour[ ._]*\d{1,2})\b/i;
 const YEAR = /\b((?:19|20)\d{2})\b/g;
+/** A Japanese year, `2013年` or `2013年製作` (made in 2013), not run into a title (`1999年の夏` keeps its title, M6). */
+const KANJI_YEAR = /((?:19|20)\d{2})年(?:製作|制作)?(?![\p{L}\p{N}])/gu;
+/** Region and language tags, upper case only so that words aren't taken for them: tags inside brackets or parens (M6). */
+const REGION_TAG = /^(?:US|USA|JP|JPN|UK|EU|ITA|ENG|FRA|GER|KOR|CHN|HK|TW)$/;
 const TRIM = /^[\s\-–—:~_.,・/|+&]+|[\s\-–—:~_.,・/|+&]+$/g;
 const CJK_END = /^(.*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\s+(\d{1,2})$/u;
 
@@ -188,6 +192,11 @@ function markYear(t: string, f: Found, scene: boolean): string {
 /** Strips structure and tags from free text, recording what it finds, and returns the title piece left (or ''). */
 function scan(text: string, f: Found, opts: { readonly scene: boolean; readonly bracket: boolean }): string {
   let t = markTags(text.replace(DATE, CUT).replace(CATALOGUE, CUT), opts.bracket);
+  t = t.replace(KANJI_YEAR, (_, y: string) => {
+    const year = Number(y);
+    if (year >= 1900 && year <= new Date().getFullYear() + 1) f.set('year', year);
+    return CUT;
+  });
   t = markYear(t, f, opts.scene);
   for (const { re, read } of STRUCTURE) t = t.replace(re, (...m: string[]) => (read(f, m), CUT));
   t = t.replace(BONUS_CUT, () => ((f.bonus = true), CUT));
@@ -209,8 +218,14 @@ function isTagGroup(bracket: boolean, content: string): boolean {
   const c = content.trim();
   if (!bracket) return false;
   if (/^\d{6}$|^\d{8}$/.test(c) || new RegExp(`^(?:${DATE.source}|${CATALOGUE.source})$`).test(c)) return true;
-  return c.split(/[+\s,/&]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TAG.test(tag));
+  return c.split(/[+\s,/&]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TAG.test(tag) || REGION_TAG.test(tag));
 }
+
+/** A group of region and language tags only (`(HK)`, `[US]`), in brackets or parens (M6). */
+const regionGroup = (content: string): boolean => {
+  const tags = content.trim().split(/[+\s,/&]+/).filter((t) => t !== '');
+  return tags.length > 0 && tags.every((t) => REGION_TAG.test(t));
+};
 
 /**
  * Top-level bracket and paren groups, nesting-aware. The text outside them keeps a mark where each group was: a tag mark
@@ -249,7 +264,7 @@ function splitGroups(text: string): { outside: string; groups: Group[] } {
 function scanGroup(group: Group, f: Found): string {
   const c = splitGroups(group.content).outside.trim();
   if (group.bracket && BONUS_WORD.test(c)) f.bonus = true;
-  if (isTagGroup(group.bracket, c)) return '';
+  if (isTagGroup(group.bracket, c) || regionGroup(c)) return '';
   const year = /^((?:19|20)\d{2})$/.exec(c);
   if (year) {
     f.set('year', Number(year[1]));
@@ -260,7 +275,9 @@ function scanGroup(group: Group, f: Found): string {
     f.setEpisodes(Number(range[1]), Number(range[2]));
     return '';
   }
-  return scan(c, f, { scene: false, bracket: group.bracket });
+  // a scene-style name in a group (`[Brasswick_2006]`) separates words with dots or underscores, as outside (M6)
+  const scene = !/\s/.test(c) && /[._]/.test(c);
+  return scan(scene ? c.replace(/[._]/g, ' ') : c, f, { scene, bracket: group.bracket });
 }
 
 export function parseName(text: string): ParsedName {

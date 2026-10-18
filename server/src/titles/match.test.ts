@@ -955,4 +955,90 @@ describe('matchDiscs', () => {
       });
     });
   });
+
+  describe('tuning round 2', () => {
+    const rooted = (path: string, titles: Record<string, string> = {}): DiscEvidence => ({ ...ev(path, titles), segments: path.split('/').slice(1) });
+    const related = (type: string, id: string, format: string | null = 'TV'): Entry['relations'][number] => ({ type, id, format, startDate: null });
+    const one = async (path: string, anilist: MetadataSource, tmdb: MetadataSource | null, titles: Record<string, string> = {}): Promise<DiscMatch> =>
+      byDisc((await matchDiscs([rooted(path, titles)], ctx(anilist, tmdb))).matches, path);
+
+    describe('M6 + M8: a Japanese release year and the anime tag', () => {
+      const film = entry('anilist:1100', { romaji: 'Hoshifuri no Tabibito', native: '星降りの旅人' }, { format: 'MOVIE', kind: 'movie', year: 2013 });
+      const twin = entry('tmdb-movie:1101', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { year: 2013, animation: true });
+      const drama = entry('tmdb-movie:1102', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { year: 1976, animation: false });
+      const sources = () => [fake({ 星降りの旅人: [film] }), fake({ 星降りの旅人: [twin, drama] })] as const;
+
+      it('a [アニメ] release folder with a 2013年製作 film files under the anime film, not the 1976 live-action one', async () => {
+        const p = 'drv0/[BDISO+BDMV][アニメ][240703][Lantern Collection]/[2013年製作][BDISO]『星降りの旅人』/HOSHIFURI.iso';
+        expect(await one(p, ...sources())).toMatchObject({ status: 'filed', entryId: 'anilist:1100', season: null, disc: null });
+        // [Anime] too
+        const q = 'drv0/[BDMV][Anime][Lantern Collection]/[2013年製作]『星降りの旅人』/HOSHIFURI.iso';
+        expect(await one(q, ...sources())).toMatchObject({ status: 'filed', entryId: 'anilist:1100' });
+      });
+
+      it('without the anime tag the live-action film still competes', async () => {
+        const p = 'drv0/Lantern Collection/[2013年製作][BDISO]『星降りの旅人』/HOSHIFURI.iso';
+        expect(await one(p, ...sources())).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      });
+
+      it('under the anime tag a live-action entry is no fit at all, and an unknown genre still competes', async () => {
+        const p = 'drv0/[BDMV][アニメ][Lantern Collection]/『星降りの旅人』/HOSHIFURI.iso';
+        expect(await one(p, fake({}), fake({ 星降りの旅人: [drama] }))).toMatchObject({ status: 'unsorted', reason: 'no-title' });
+        const unknown = { ...drama, animation: null };
+        expect(await one(p, fake({ 星降りの旅人: [film] }), fake({ 星降りの旅人: [twin, unknown] }))).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      });
+    });
+
+    describe('M7: the Japanese evidence decides between same-named entries', () => {
+      const anime = entry('anilist:1200', { english: 'Glass Orchard', native: 'ガラスの果樹園' }, { year: 2019 });
+      const twin = entry('tmdb-tv:1201', { english: 'Glass Orchard', native: 'ガラスの果樹園' }, { year: 2019, seasons: seasons(1), animation: true });
+      const old = entry('tmdb-movie:1202', { english: 'Glass Orchard', native: '硝子の果樹園' }, { year: 1933, animation: false });
+      const p = 'drv0/Anime/[BDMV] Glass Orchard/GLASS_ORCHARD_D1';
+      const sources = (film: Entry = old) => [fake({ 'Glass Orchard': [anime], ガラスの果樹園: [anime] }), fake({ 'Glass Orchard': [twin, film], ガラスの果樹園: [twin] })] as const;
+
+      it("a film whose Japanese name isn't the disc's Japanese title is no competitor", async () => {
+        expect(await one(p, ...sources(), { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'anilist:1200', season: 1, disc: 1 });
+      });
+
+      it('not without Japanese evidence, nor for an entry without a Japanese name, nor when no entry has the Japanese name', async () => {
+        expect(await one(p, ...sources())).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        expect(await one(p, ...sources({ ...old, names: { ...old.names, native: null } }), { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        // a Japanese name differing only in kana, or by a season, is not another title: it still competes
+        for (const native of ['がらすの果樹園', 'ガラスの果樹園 第2期']) {
+          expect(await one(p, ...sources({ ...old, names: { ...old.names, native } }), { jpn: 'ガラスの果樹園' }), native).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        }
+        // the Japanese title names neither: nothing is dropped
+        const tmdb = fake({ 'Glass Orchard': [entry('tmdb-movie:1203', { english: 'Glass Orchard', native: '硝子の果樹園' }, { year: 1933 })] });
+        const m = await one(p, fake({ 'Glass Orchard': [{ ...anime, names: { ...anime.names, native: 'ガラスの果樹園 新章' } }] }), tmdb, { jpn: 'ガラスの果樹園' });
+        expect(m).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      });
+    });
+
+    describe('M9: an unaired AniList entry', () => {
+      const s1 = entry('anilist:1300', { english: 'Harbor Line' }, { year: 2019, relations: [related('SEQUEL', 'anilist:1301')] });
+      const s2 = entry('anilist:1301', { english: 'Harbor Line Season 2' }, { year: null, relations: [related('PREQUEL', 'anilist:1300')] });
+
+      it('is no competitor when a fitting entry of its franchise has a year', async () => {
+        const vol = 'drv0/Anime/[BDMV][Harbor Line][Vol.2][JPN]';
+        expect(await one(vol, fake({ 'Harbor Line': [s1, s2] }), null)).toMatchObject({ status: 'filed', entryId: 'anilist:1300', season: 1, disc: 2 });
+        const bdrom = 'drv0/Anime/[BDMV][Harbor Line][Vol.2][JPN]/BDROM';
+        expect(await one(bdrom, fake({ 'Harbor Line': [s1, s2] }), null)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number', suggestions: ['anilist:1300'] });
+      });
+
+      it('still competes with an unrelated entry, and may be the only fit', async () => {
+        const vol = 'drv0/Anime/[BDMV][Harbor Line][Vol.2][JPN]';
+        const other = { ...s2, relations: [] };
+        expect(await one(vol, fake({ 'Harbor Line': [{ ...s1, relations: [] }, other] }), null)).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        const s2only = 'drv0/Anime/[BDMV][Harbor Line Season 2][Vol.1]';
+        expect(await one(s2only, fake({ 'Harbor Line': [s2] }, [], [s1]), null)).toMatchObject({ status: 'filed', entryId: 'anilist:1301', season: 2, disc: 1 });
+      });
+    });
+
+    it('M6: a [Title_2006][US] folder searches for the title, never the region', async () => {
+      const tmdb = fake({ Brasswick: [entry('tmdb-tv:1400', { english: 'Brasswick' }, { year: 2006, seasons: seasons(1) })], US: [entry('tmdb-movie:1401', { english: 'US' })] });
+      const p = 'drv0/TV/[BDMV][Brasswick_2006][US]/BRASSWICK_D2';
+      expect(await one(p, fake({}), tmdb)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:1400', season: 1, disc: 2 });
+      expect((tmdb as unknown as { calls: string[] }).calls).not.toContain(normalizeTitle('US'));
+    });
+  });
 });

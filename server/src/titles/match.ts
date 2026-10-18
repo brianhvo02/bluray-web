@@ -87,7 +87,7 @@ const TOP_LEVEL_DEPTH = 0;
  * The matching rules' version. Bump it whenever the matching rules change (what files, where, or as what): the title
  * service then re-matches every disc on its next run, from its lookup cache, so the library follows the new rules.
  */
-export const MATCH_RULES_VERSION = 2;
+export const MATCH_RULES_VERSION = 3;
 /** Groups failing in a row (SourceUnavailable) before a run stops, leaving the rest for the next run (M3). */
 export const CIRCUIT_BREAKER = 5;
 /** Prequel links followed to find an AniList entry's place in its chain. */
@@ -433,6 +433,37 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     }
     scored = scored.filter((s) => !dropped.has(s.entry.id));
   }
+  // the anime tag (`[アニメ]`, `[Anime]` on any folder): a live-action entry is no fit (ruling M8)
+  if (e.segments.some(animeTagged)) for (const en of all.values()) if (en.animation === false) dropped.add(en.id);
+  // Japanese evidence decides (ruling M7): an entry whose Japanese names are all other titles than the evidence's
+  // Japanese ones (not even with a season stripped, or under kana folding) is no competitor to a fitting entry whose
+  // Japanese name the evidence names strictly, provided that entry fits every candidate the dropped one fits, so a
+  // folder's mismatched `English (日本語)` halves stay several-fit (M2b). Entries with no Japanese name are left alone,
+  // and with no entry named so, nothing is dropped.
+  const candidates = [...new Set(named.flatMap((p) => p.parse.candidates))];
+  const japaneseTitles = candidates.filter((c) => JAPANESE.test(c));
+  const japaneseNames = (en: Entry): string[] => [en.names.native, ...en.names.synonyms].filter((n): n is string => n !== null && JAPANESE.test(n));
+  const namedStrictly = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n)));
+  const namedAtAll = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
+    const base = parseName(n).candidates[0] ?? n;
+    return sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
+  }));
+  const fitsOf = (en: Entry): string[] => candidates.filter((c) => quality(en, c, fitSeason) > 0);
+  if (japaneseTitles.length > 0) {
+    const named = scored.filter((s) => !dropped.has(s.entry.id) && namedStrictly(s.entry)).map((s) => new Set(fitsOf(s.entry)));
+    for (const en of all.values()) {
+      if (japaneseNames(en).length === 0 || namedAtAll(en)) continue;
+      const own = fitsOf(en);
+      if (named.some((fits) => own.every((c) => fits.has(c)))) dropped.add(en.id);
+    }
+  }
+  // an AniList series with no start year (not aired yet) is no competitor to a dated entry of its franchise (ruling M9)
+  for (const s of scored) {
+    const en = s.entry;
+    if (en.source !== 'anilist' || en.kind !== 'series' || en.year !== null) continue;
+    if (scored.some((o) => o !== s && !dropped.has(o.entry.id) && o.entry.year !== null && o.entry.source === 'anilist' && storyLinked(o.entry, en))) dropped.add(en.id);
+  }
+  scored = scored.filter((s) => !dropped.has(s.entry.id));
   // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year, is
   // its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
   // evidence may be that one (rulings T5g, T5m); and a twin is exactly one TMDB entry, so two twins of one AniList
@@ -742,6 +773,14 @@ function japaneseHalf(candidates: readonly string[], i: number): boolean {
 /** Both orders of each `English (日本語)` pair among a parse's candidates. */
 function halves(candidates: readonly string[]): [string, string][] {
   return candidates.flatMap((c, i): [string, string][] => (japaneseHalf(candidates, i) ? [[candidates[0]!, c], [c, candidates[0]!]] : []));
+}
+
+/** Whether a folder name carries the anime tag, `[アニメ]` or `[Anime]`, alone or among other tags in its brackets (M8). */
+function animeTagged(segment: string): boolean {
+  for (const m of segment.normalize('NFKC').matchAll(/[[【]([^\]】]*)[\]】]/g)) {
+    if ((m[1] ?? '').split(/[+\s,/&]+/).some((t) => t === 'アニメ' || t.toLowerCase() === 'anime')) return true;
+  }
+  return false;
 }
 
 /** Whether two AniList entries are tied by a story link, in either direction. */

@@ -151,4 +151,21 @@ export const NAME_CORPUS: readonly { readonly text: string; readonly expected: P
   { text: 'Foo S01E08-E05', expected: { candidates: ['Foo'], season: 1, episodes: null } },
   { text: 'Foo 第8話-第5話', expected: { candidates: ['Foo'], episodes: null } },
   { text: 'Foo (316-266)', expected: { candidates: ['Foo'], episodes: null } },
+
+  // Tuning round 2 (ruling M6): Japanese years, region and language tags, scene years in brackets
+  { text: '[2013年製作][BDISO]『星降りの旅人』', expected: { candidates: ['『星降りの旅人』'], year: 2013 } },
+  { text: '[2013年] 星降りの旅人', expected: { candidates: ['星降りの旅人'], year: 2013 } },
+  { text: '星降りの旅人 (2013年)', expected: { candidates: ['星降りの旅人'], year: 2013 } },
+  { text: '星降りの旅人 2013年', expected: { candidates: ['星降りの旅人'], year: 2013 } },
+  { text: '1999年の夏休み', expected: { candidates: ['1999年の夏休み'], year: null } },
+  { text: '星降りの旅人 (1850年)', expected: { year: null } },
+  { text: '[BDMV][Brasswick_2006][US]', expected: { candidates: ['Brasswick'], year: 2006 } },
+  { text: '[BDMV][Brasswick.2006][JP]', expected: { candidates: ['Brasswick'], year: 2006 } },
+  { text: 'Brasswick_2006', expected: { candidates: ['Brasswick'], year: 2006 } },
+  { text: 'Brasswick.2006', expected: { candidates: ['Brasswick'], year: 2006 } },
+  { text: '[BDMV][Harbor Line][Vol.2][JPN]', expected: { candidates: ['Harbor Line'], volume: 2 } },
+  { text: 'Glass Orchard [UK]', expected: { candidates: ['Glass Orchard'] } },
+  { text: 'Glass Orchard (HK)', expected: { candidates: ['Glass Orchard'] } },
+  { text: 'Glass Orchard [EU] [TW]', expected: { candidates: ['Glass Orchard'] } },
+  { text: '[KOR+ENG] Glass Orchard', expected: { candidates: ['Glass Orchard'] } },
 ];
