@@ -977,9 +977,12 @@ describe('matchDiscs', () => {
         expect(await one(q, ...sources())).toMatchObject({ status: 'filed', entryId: 'anilist:1100' });
       });
 
-      it('without the anime tag the live-action film still competes', async () => {
-        const p = 'drv0/Lantern Collection/[2013年製作][BDISO]『星降りの旅人』/HOSHIFURI.iso';
+      it('without the anime tag the live-action film still competes, unless the year rules it out', async () => {
+        const p = 'drv0/Lantern Collection/[BDISO]『星降りの旅人』/HOSHIFURI.iso';
         expect(await one(p, ...sources())).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        // 2013年製作 is more than a year from the 1976 film's, so that film is no fit (T5j)
+        const q = 'drv0/Lantern Collection/[2013年製作][BDISO]『星降りの旅人』/HOSHIFURI.iso';
+        expect(await one(q, ...sources())).toMatchObject({ status: 'filed', entryId: 'anilist:1100' });
       });
 
       it('under the anime tag a live-action entry is no fit at all, and an unknown genre still competes', async () => {
@@ -1267,6 +1270,18 @@ describe('matchDiscs', () => {
         const tv = entry('anilist:3204', { english: 'Quill Harbor' }, { year: 2015 });
         expect(await state('drv0/Anime/Quill Harbor/QUILL_HARBOR_D2', fake({ 'Quill Harbor': [tv] }), null)).toBe('anilist:3204#2');
       });
+    });
+
+    it("a same-named TMDB entry outside the evidence's year is no competitor to an AniList entry and its twin", async () => {
+      const anime = entry('anilist:3300', { english: 'Brasswick', native: 'ブラスウィック' }, { year: 2006 });
+      const twin = entry('tmdb-tv:3301', { english: 'Brasswick', native: 'ブラスウィック' }, { year: 2006, seasons: seasons(1), animation: true });
+      const live = entry('tmdb-tv:3302', { english: 'Brasswick', native: 'ブラスウィック' }, { year: 2011, seasons: seasons(1), animation: false });
+      const sources = () => [fake({ Brasswick: [anime] }), fake({ Brasswick: [twin, live] })] as const;
+      expect(await state('drv0/Anime/[BDMV][Brasswick_2006][US]/BRASSWICK_D2', ...sources())).toBe('anilist:3300#2');
+      // without a year in the evidence it still competes
+      expect(await state('drv0/Anime/[BDMV][Brasswick][US]/BRASSWICK_D2', ...sources())).toBe('several-fit');
+      // and a live-action entry within a year of the evidence still does
+      expect(await state('drv0/Anime/[BDMV][Brasswick_2006][US]/BRASSWICK_D2', fake({ Brasswick: [anime] }), fake({ Brasswick: [twin, { ...live, year: 2007 }] }))).toBe('several-fit');
     });
   });
 });

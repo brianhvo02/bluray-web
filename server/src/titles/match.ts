@@ -547,8 +547,8 @@ async function decide(e: DiscEvidence, given: readonly Piece[], hit: DiscDbHit |
     if (scored.some((o) => o !== s && !dropped.has(o.entry.id) && o.entry.year !== null && o.entry.source === 'anilist' && storyLinked(o.entry, en))) dropped.add(en.id);
   }
   scored = scored.filter((s) => !dropped.has(s.entry.id));
-  // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year, is
-  // its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
+  // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year
+  // the evidence's year allows (any when it has none), is its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
   // evidence may be that one (rulings T5g, T5m); and a twin is exactly one TMDB entry, so two twins of one AniList
   // entry mean one of them is another show (ruling T5s)
   const anilistExact = scored.filter((s) => s.entry.source === 'anilist' && s.exact).map((s) => s.entry);
@@ -566,7 +566,9 @@ async function decide(e: DiscEvidence, given: readonly Piece[], hit: DiscDbHit |
     }
     const tmdb = [...all.values()].filter((en) => en.source === 'tmdb' && !dropped.has(en.id) && !(filmsOut && filmOut(en)));
     const titles = named.flatMap((p) => p.parse.candidates);
-    const evidenceTitled = tmdb.filter((t) => names(t).some((n) => titles.some((c) => sameTitle(c, n))));
+    // of any year when the evidence has none; with a year, one more than YEAR_SLACK off isn't a fit (T5j), so it no
+    // longer blocks the AniList entry and its twin
+    const evidenceTitled = tmdb.filter((t) => yearFits(t, years) && names(t).some((n) => titles.some((c) => sameTitle(c, n))));
     // TMDB entries named like an AniList entry in any of its languages, even when not like the evidence (ruling T5r):
     // a live-action one in the year window may be what the disc holds
     const anilistTitled = tmdb.filter((t) => anilistExact.some((a) => seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))));
