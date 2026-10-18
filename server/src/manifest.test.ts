@@ -256,7 +256,7 @@ describe('disc routes', () => {
     } finally {
       await new Promise((r) => app.close(r));
     }
-  });
+  }, 30_000); // starts a server and pairs a device: more than vitest's 5 s default on a loaded runner
 
   it('serves the manifest of an ISO disc like that of the same folder disc', async () => {
     const res = await fetch(`${base}/${ids['disc.iso']}/manifest`);

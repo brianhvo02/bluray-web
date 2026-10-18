@@ -1977,7 +1977,7 @@ describe('Player with a disc on the NAS', () => {
     expect(h.ringPlaying()).toBe(false);
     gate.raise('00002', Infinity);
     await untilPlaying(h);
-  });
+  }, 30_000); // its waits allow 10 s; vitest's 5 s default would cut the test off first on a loaded runner
 
   it('shows "Waiting for the NAS drive…" while a read takes over 3 s, and clears it when the read lands', async () => {
     const nas = fakeNas(fixtureDiscFiles('disc1'));
