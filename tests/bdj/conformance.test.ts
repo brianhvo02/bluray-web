@@ -315,6 +315,30 @@ describe('I/O and zip on the JDK class path alone', () => {
   );
 });
 
+// Green threads switch only between bytecodes, but they do switch inside java.util.concurrent's read-then-CAS loops,
+// so a CAS can lose to another thread as on HotSpot. A one-bytecode slice runs the putters in lockstep, which makes
+// ConcurrentHashMap.addCount lose its baseCount CAS every time and take the counter-cell path (fullAddCount), which
+// seeds the thread's probe from ThreadLocalRandom. A disc's class loader hit it at random and its xlet failed to load.
+describe('java.util.concurrent when threads race', () => {
+  it('Concurrent prints what HotSpot prints, after its putters lost a CAS to each other', async () => {
+    const io = { out: '', err: '' };
+    const jvm = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT, file('./conformance.jar')]);
+    await jvm.boot();
+    const slice = jvm.threads.slice;
+    jvm.threads.slice = 1;
+    try {
+      await runCapturing(jvm, io, 'conformance/Concurrent');
+    } finally {
+      jvm.threads.slice = slice;
+    }
+    expect(io.err).toBe('');
+    expect(io.out).toBe(new TextDecoder().decode(file('./conformance/Concurrent.out')));
+    const cls = jvm.loader.loadBoot('conformance/Concurrent')!;
+    const map = cls.staticValues[cls.findField('map', 'Ljava/util/concurrent/ConcurrentHashMap;')!.slot] as JObject;
+    expect(jvm.getField(map, 'counterCells', '[Ljava/util/concurrent/ConcurrentHashMap$CounterCell;')).not.toBeNull();
+  }, 60_000);
+});
+
 describe('URLClassLoader', () => {
   const io = { out: '', err: '' };
   let jvm: Jvm;
