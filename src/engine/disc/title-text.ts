@@ -26,6 +26,14 @@ export function normalizeTitle(text: string): string {
 }
 
 /**
+ * NFKC, lower case, and punctuation, symbols and spaces removed, with no vowel or kana folding: the matcher's test for an
+ * exact fit, since `normalizeTitle`'s folding merges some different titles (`Good`/`God`, `Soul`/`Sol`).
+ */
+export function normalizeStrict(text: string): string {
+  return text.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\p{Z}\s]+/gu, '');
+}
+
+/**
  * True when the normalised query is a substring of a normalised name. A query that normalises to nothing matches no
  * name; the search UI shows the full list for a blank query itself.
  */

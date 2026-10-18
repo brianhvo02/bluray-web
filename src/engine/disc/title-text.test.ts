@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeTitle, titleMatches } from './title-text';
+import { normalizeStrict, normalizeTitle, titleMatches } from './title-text';
 
 describe('normalizeTitle', () => {
   it('does not transliterate romaji', () => {
@@ -43,5 +43,21 @@ describe('titleMatches', () => {
   it('is false for a query that normalises to nothing', () => {
     expect(titleMatches('', ['Starfall Wanderer'])).toBe(false);
     expect(titleMatches(' !! ', ['Starfall Wanderer'])).toBe(false);
+  });
+});
+
+describe('normalizeStrict', () => {
+  it('applies NFKC, lower-cases and removes spaces and punctuation', () => {
+    expect(normalizeStrict("Ｓｔａｒｆａｌｌ: Wanderer's End!")).toBe('starfallwanderersend');
+  });
+
+  it('does not fold long vowels', () => {
+    expect(normalizeStrict('Good Hunter')).not.toBe(normalizeStrict('God Hunter'));
+    expect(normalizeStrict('Sōsō')).toBe('sōsō');
+    expect(normalizeStrict('Toukyou')).toBe('toukyou');
+  });
+
+  it('does not fold katakana to hiragana', () => {
+    expect(normalizeStrict('ヴェルミナ')).not.toBe(normalizeStrict('ゔぇるみな'));
   });
 });
