@@ -51,6 +51,27 @@ export class OwnerStore {
     });
   }
 
+  /**
+   * Where a disc's choice comes from: null when it has none, `direct` when it was set with `setChoice`, otherwise the
+   * disc whose direct choice it follows (the newest for its fingerprint, as `reattach` picks it), or null if none is.
+   */
+  choiceOrigin(discId: string): { readonly direct: true } | { readonly direct: false; readonly source: string | null } | null {
+    const data = this.load();
+    const entry = data.choices[discId];
+    if (!entry) return null;
+    if (!entry.propagated) return { direct: true };
+    let source: string | null = null;
+    let setAt = -Infinity;
+    for (const [id, e] of Object.entries(data.choices)) {
+      if (e.propagated || e.fingerprint === null || e.fingerprint !== entry.fingerprint) continue;
+      if (e.setAt > setAt) {
+        source = id;
+        setAt = e.setAt;
+      }
+    }
+    return { direct: false, source };
+  }
+
   clearChoice(discId: string): void {
     this.update((d) => {
       delete d.choices[discId];

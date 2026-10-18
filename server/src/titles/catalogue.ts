@@ -209,7 +209,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   const artById = new Map<string, { small: string; large: string }>();
   const artId = (art: { small: string; large: string } | null): string | null => {
     if (art === null) return null;
-    const id = hash(`${art.small}\n${art.large}`, 32);
+    const id = artIdOf(art);
     artById.set(id, art);
     return id;
   };
@@ -506,6 +506,11 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     art: (id) => artById.get(id) ?? null,
     provisional: [...new Set([...seriesOf.values()].filter((x) => x.provisional && builds.has(x.id)).map((x) => x.id))],
   };
+}
+
+/** The art id of a poster or banner's source URLs: 32 lower-case hex digits. */
+export function artIdOf(art: { readonly small: string; readonly large: string }): string {
+  return hash(`${art.small}\n${art.large}`, 32);
 }
 
 /** A banner has one size. */

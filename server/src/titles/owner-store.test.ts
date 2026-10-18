@@ -19,6 +19,15 @@ describe('OwnerStore', () => {
     expect(new OwnerStore(dir).snapshot().choices.get('A')).toEqual(title('anilist:1'));
   });
 
+  it('tells a direct choice from a copy that follows its source', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('anilist:1'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    expect(s.choiceOrigin('A')).toEqual({ direct: true });
+    expect(s.choiceOrigin('B')).toEqual({ direct: false, source: 'A' });
+    expect(s.choiceOrigin('C')).toBeNull();
+  });
+
   it('gives a choice to every present disc with the fingerprint and no choice, keeping the original', () => {
     const s = new OwnerStore(dir);
     s.setChoice('A', 'F', title('anilist:1'));

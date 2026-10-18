@@ -1,9 +1,15 @@
+import type { OwnerChoice, TitleKind } from '../../../src/engine/disc/nas-api';
 import type { Auth } from '../auth';
 import { formatCode, pairingLink } from '../codes';
 import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
-import type { Handler } from '../http';
+import type { Handler, Response } from '../http';
 import type { Library } from '../library';
+import type { DiscEvidence } from '../titles/evidence';
+import { groupKey } from '../titles/match';
+import { parseName } from '../titles/parse-name';
+import { SourceUnavailable } from '../titles/sources';
+import type { TitleLibrary } from './titles';
 
 export interface AdminOptions {
   library: Library;
@@ -13,6 +19,8 @@ export interface AdminOptions {
   registrar?: CodeRegistrar;
   /** How long a code waits for its rendezvous registration before it is returned with `rendezvous: false`. */
   registrarDeadlineMs?: number;
+  /** The title library; its owner routes answer 404 without it. */
+  titles?: TitleLibrary;
 }
 
 const REGISTRAR_DEADLINE_MS = 5_000;
@@ -49,8 +57,16 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
     if (!device.owner) return json(403, { error: 'forbidden' });
 
     const [, , , collection, id, ...rest] = path.split('/');
-    if (rest.length > 0) return null;
+    if (rest.length > 0) {
+      // the one three-segment route
+      if (opts.titles && collection === 'discs' && rest.length === 1 && rest[0] === 'choice') return choiceRoute(req.method, decode(id!), req, opts.library, opts.titles);
+      return null;
+    }
     const route = `${req.method} ${collection ?? ''}${id === undefined ? '' : '/:id'}`;
+    if (opts.titles) {
+      const answer = await titleAdminRoute(route, id === undefined ? undefined : decode(id), req, url, opts.library, opts.titles);
+      if (answer) return answer;
+    }
     switch (route) {
       case 'GET devices':
         return json(200, {
@@ -108,5 +124,204 @@ function decode(segment: string): string {
     return decodeURIComponent(segment);
   } catch {
     throw new HttpError(400, 'bad request');
+  }
+}
+
+const MAX_NAME = 200;
+const MAX_QUERY = 200;
+const MAX_NUMBER = 1000;
+const DEFAULT_PAGE = 50;
+const MAX_PAGE = 200;
+/** Ids a choice may file a disc under: a source entry or an own title. */
+const TITLE_ID = /^(?:anilist:\d+|tmdb-(?:tv|movie):\d+|own:[0-9a-f-]{36})$/;
+const KINDS: readonly TitleKind[] = ['series', 'movie', 'music'];
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+/** Exactly these keys, the optional ones may be absent. */
+const hasKeys = (o: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean =>
+  required.every((k) => k in o) && Object.keys(o).every((k) => required.includes(k) || optional.includes(k));
+const isCount = (v: unknown): v is number | null => v === null || (Number.isSafeInteger(v) && (v as number) >= 1 && (v as number) <= MAX_NUMBER);
+/** A trimmed name of 1 to 200 characters, or undefined. */
+function name(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t.length >= 1 && t.length <= MAX_NAME ? t : undefined;
+}
+
+function parseChoice(v: unknown): OwnerChoice | null {
+  if (!isObject(v)) return null;
+  switch (v.kind) {
+    case 'title':
+      return hasKeys(v, ['kind', 'titleId', 'season', 'disc']) && typeof v.titleId === 'string' && TITLE_ID.test(v.titleId) && isCount(v.season) && isCount(v.disc)
+        ? { kind: 'title', titleId: v.titleId, season: v.season, disc: v.disc }
+        : null;
+    case 'extras':
+      return hasKeys(v, ['kind', 'titleId', 'season']) && typeof v.titleId === 'string' && TITLE_ID.test(v.titleId) && isCount(v.season)
+        ? { kind: 'extras', titleId: v.titleId, season: v.season }
+        : null;
+    case 'music': {
+      if (!hasKeys(v, ['kind', 'name'])) return null;
+      if (v.name === null) return { kind: 'music', name: null };
+      const n = name(v.name);
+      return n === undefined ? null : { kind: 'music', name: n };
+    }
+    case 'hidden':
+      return hasKeys(v, ['kind']) ? { kind: 'hidden' } : null;
+    default:
+      return null;
+  }
+}
+
+/** The disc or volume number a disc's own folder or titles carry, for "parsed order" (spec §8). */
+function parsedNumber(e: DiscEvidence): number | null {
+  for (const text of [e.path.slice(e.path.lastIndexOf('/') + 1), ...e.discTitles.map((t) => t.name)]) {
+    const p = parseName(text);
+    const n = p.volume ?? p.disc;
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
+
+/**
+ * After an owner change: the catalogue is built again at once (ruling T9a); a choice naming an entry that isn't loaded
+ * (its disc stays Unsorted as `no-title`) also starts a run in the background to load it.
+ */
+function rebuildAfter(titles: TitleLibrary, discId?: string, choice?: OwnerChoice): void {
+  titles.service.rebuild();
+  if (discId === undefined || choice === undefined || (choice.kind !== 'title' && choice.kind !== 'extras') || choice.titleId.startsWith('own:')) return;
+  if (titles.service.catalogue().unsorted.some((u) => u.discId === discId && u.reason === 'no-title')) {
+    titles.service.runNow().catch((err: unknown) => console.error('title matching failed', err));
+  }
+}
+
+/** `PUT` and `DELETE admin/discs/<id>/choice`. */
+async function choiceRoute(method: string | undefined, discId: string, req: Parameters<Handler>[0], library: Library, titles: TitleLibrary): Promise<Response | null> {
+  const { owner } = titles;
+  if (method === 'DELETE') {
+    const origin = owner.choiceOrigin(discId);
+    // a copy's choice follows its source, so clearing it would not last (ruling T9b)
+    if (origin && !origin.direct) return json(409, { error: 'copy-follows-source', source: origin.source });
+    owner.clearChoice(discId);
+    rebuildAfter(titles);
+    return { status: 204 };
+  }
+  if (method !== 'PUT') return null;
+  const body = await readJson(req);
+  const choice = isObject(body) && hasKeys(body, ['choice'], ['applyToGroup']) ? parseChoice(body.choice) : null;
+  const applyToGroup = isObject(body) ? (body.applyToGroup ?? false) : false;
+  if (choice === null || typeof applyToGroup !== 'boolean') throw new HttpError(400, 'bad choice');
+  const evidence = library.evidence();
+  const disc = evidence.find((e) => e.discId === discId);
+  if (!disc) return json(404, { error: 'unknown disc' });
+  if (choice.kind === 'title' || choice.kind === 'extras') {
+    if (choice.titleId.startsWith('own:') && !owner.snapshot().ownTitles.some((t) => t.id === choice.titleId)) throw new HttpError(400, 'unknown title');
+  }
+  owner.setChoice(discId, disc.fingerprint, choice);
+  if (applyToGroup) {
+    // the group's discs in parsed order (number, then folder); the others are numbered from this one's place
+    const group = groupKey(disc);
+    const order = evidence
+      .filter((e) => groupKey(e) === group)
+      .sort((a, b) => (parsedNumber(a) ?? Infinity) - (parsedNumber(b) ?? Infinity) || naturalOrder(a.path, b.path));
+    const at = order.indexOf(disc);
+    const base = choice.kind === 'title' ? (choice.disc ?? at + 1) : null;
+    for (const [i, e] of order.entries()) {
+      if (e === disc || owner.choiceOrigin(e.discId)?.direct) continue;
+      let c: OwnerChoice = choice;
+      if (choice.kind === 'title' && base !== null) {
+        const n = base + i - at;
+        c = { ...choice, disc: n >= 1 ? n : null };
+      }
+      owner.setChoice(e.discId, e.fingerprint, c);
+    }
+  }
+  rebuildAfter(titles, discId, choice);
+  return { status: 204 };
+}
+
+/** The owner's title routes (spec §9, §11), or null for another route. `id` is decoded. */
+async function titleAdminRoute(route: string, id: string | undefined, req: Parameters<Handler>[0], url: URL, library: Library, titles: TitleLibrary): Promise<Response | null> {
+  const { service, owner } = titles;
+  switch (route) {
+    case 'GET unsorted': {
+      const page = (key: string, fallback: number, max: number): number => {
+        const raw = url.searchParams.get(key);
+        if (raw === null) return fallback;
+        const n = /^\d{1,9}$/.test(raw) ? Number(raw) : NaN;
+        if (!Number.isSafeInteger(n) || n > max) throw new HttpError(400, 'bad paging');
+        return n;
+      };
+      const offset = page('offset', 0, Number.MAX_SAFE_INTEGER);
+      const limit = page('limit', DEFAULT_PAGE, MAX_PAGE);
+      const all = service.catalogue().unsorted;
+      return json(200, { items: all.slice(offset, offset + limit), total: all.length });
+    }
+    case 'GET hidden':
+      return json(200, { discs: service.catalogue().hidden });
+    case 'GET lookup': {
+      const q = url.searchParams.get('q')?.trim() ?? '';
+      const source = url.searchParams.get('source');
+      if (q.length < 1 || q.length > MAX_QUERY || (source !== 'anilist' && source !== 'tmdb' && source !== 'own')) throw new HttpError(400, 'bad query');
+      try {
+        return json(200, { titles: await service.lookup(q, source) });
+      } catch (err) {
+        if (err instanceof SourceUnavailable) return json(503, { error: 'source-unreachable' });
+        throw err;
+      }
+    }
+    case 'PUT names/:id': {
+      const body = await readJson(req);
+      const value = isObject(body) && hasKeys(body, ['name']) ? (body.name === null ? null : name(body.name)) : undefined;
+      if (value === undefined) throw new HttpError(400, 'bad name');
+      const known = library.evidence().some((e) => e.discId === id) || service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own);
+      if (!known) return json(404, { error: 'unknown id' });
+      owner.setDisplayName(id!, value);
+      rebuildAfter(titles);
+      return { status: 204 };
+    }
+    case 'POST titles': {
+      const body = await readJson(req);
+      if (!isObject(body) || !hasKeys(body, ['kind', 'name'], ['seasons'])) throw new HttpError(400, 'bad title');
+      const kind = KINDS.find((k) => k === body.kind);
+      const n = name(body.name);
+      const seasons = body.seasons ?? null;
+      if (kind === undefined || n === undefined || !isCount(seasons) || (kind !== 'series' && seasons !== null)) throw new HttpError(400, 'bad title');
+      const title = owner.createTitle(kind, n, seasons);
+      rebuildAfter(titles);
+      return json(200, title);
+    }
+    case 'PATCH titles/:id': {
+      const body = await readJson(req);
+      if (!isObject(body) || !hasKeys(body, [], ['name', 'seasons']) || Object.keys(body).length === 0) throw new HttpError(400, 'bad title');
+      const n = body.name === undefined ? undefined : name(body.name);
+      if (body.name !== undefined && n === undefined) throw new HttpError(400, 'bad title');
+      if (body.seasons !== undefined && !isCount(body.seasons)) throw new HttpError(400, 'bad title');
+      const existing = owner.snapshot().ownTitles.find((t) => t.id === id);
+      if (!existing) return json(404, { error: 'unknown title' });
+      if (existing.kind !== 'series' && body.seasons !== undefined && body.seasons !== null) throw new HttpError(400, 'bad title');
+      const title = owner.updateTitle(existing.id, { ...(n !== undefined ? { name: n } : {}), ...(body.seasons !== undefined ? { seasons: body.seasons as number | null } : {}) });
+      rebuildAfter(titles);
+      return json(200, title);
+    }
+    case 'DELETE titles/:id': {
+      if (!owner.snapshot().ownTitles.some((t) => t.id === id)) return json(404, { error: 'unknown title' });
+      owner.deleteTitle(id!);
+      rebuildAfter(titles);
+      return { status: 204 };
+    }
+    case 'PUT settings/:id': {
+      if (id !== 'title-library') return null;
+      const body = await readJson(req);
+      const gate = isObject(body) && hasKeys(body, ['gate']) ? body.gate : undefined;
+      if (gate !== 'owners' && gate !== 'everyone') throw new HttpError(400, 'bad gate');
+      owner.setGate(gate);
+      return { status: 204 };
+    }
+    case 'GET metadata/:id':
+      return id === 'status' ? json(200, service.status()) : null;
+    default:
+      return null;
   }
 }

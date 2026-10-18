@@ -6,12 +6,13 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
+import type { TitleSummary } from '../../../src/engine/disc/nas-api';
 import { normalizeTitle } from '../../../src/engine/disc/title-text';
 import { isCode, replaceAtomically } from '../atomic-json';
 import type { LibraryRoot } from '../config';
 import type { Library } from '../library';
 import type { ArtCache } from './art';
-import { buildCatalogue } from './catalogue';
+import { artIdOf, buildCatalogue } from './catalogue';
 import type { Catalogue } from './catalogue';
 import { loadDiscDb } from './discdb';
 import type { DiscDbHit } from './discdb';
@@ -193,6 +194,36 @@ export class TitleService {
       }
     })();
     return this.running;
+  }
+
+  /**
+   * The owner's search (spec §9): AniList or TMDB through their paced sources, or the own titles by name. A title the
+   * catalogue lists comes back as listed; a poster is kept only when the catalogue serves that art (ruling T9d). No
+   * TMDB key: no results. A source that is down throws `SourceUnavailable`.
+   */
+  async lookup(query: string, source: 'anilist' | 'tmdb' | 'own'): Promise<TitleSummary[]> {
+    const listed = new Map(this.built.titles.map((t) => [t.id, t]));
+    if (source === 'own') {
+      const q = normalizeTitle(query);
+      return this.opts.owner.snapshot().ownTitles
+        .filter((t) => normalizeTitle(t.name).includes(q))
+        .map((t) => listed.get(t.id) ?? {
+          id: t.id, kind: t.kind, names: { english: null, romaji: null, native: null, synonyms: [], display: t.name }, poster: null, year: null,
+          seasons: t.kind === 'series' ? (t.seasons ?? 0) : 0, discs: 0, addedAt: 0, own: true,
+        });
+    }
+    const src = source === 'anilist' ? this.opts.anilist : this.opts.tmdb;
+    if (!src) return [];
+    const found = await src.search(query);
+    return found.map((en) => {
+      const known = listed.get(en.id);
+      if (known) return known;
+      const art = en.poster === null ? null : artIdOf(en.poster);
+      return {
+        id: en.id, kind: en.kind, names: { ...en.names, display: null }, poster: art !== null && this.built.art(art) !== null ? art : null,
+        year: en.year, seasons: en.seasons.length, discs: 0, addedAt: 0, own: false,
+      };
+    });
   }
 
   /** Builds the catalogue again from what is known, with no network access: after an owner change. */

@@ -44,9 +44,10 @@ async function serve(config: Config): Promise<void> {
   const trustProxy = await trustedProxy(config.trustedProxy);
   const library = new Library(config.roots, join(config.dataDir, 'library.json'), { scanPauseMs: config.scanPauseMs });
   const auth = new Auth(new Store(config.dataDir), Date.now);
+  const owner = new OwnerStore(config.dataDir);
   const titles = new TitleService({
     library,
-    owner: new OwnerStore(config.dataDir),
+    owner,
     dataDir: config.dataDir,
     ...metadataSources(config),
     discdb: loadDiscDbOrNone(process.env.DISCDB_INDEX || DEFAULT_DISCDB_INDEX),
@@ -55,7 +56,7 @@ async function serve(config: Config): Promise<void> {
     titleLibrary: config.titleLibrary,
   });
   library.onScanned(() => void titles.runNow());
-  const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy }));
+  const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy, titles: { service: titles, owner } }));
 
   const scheduleScans = (): void => {
     const run = (): void => {
