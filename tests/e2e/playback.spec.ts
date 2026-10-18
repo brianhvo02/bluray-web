@@ -1,11 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
-import { CHROME_ONLY, skipWithoutH264 } from './support';
+import { CHROME_ONLY, setFolder, skipWithoutH264 } from './support';
 import { collectWindows, expectInSync, pausedClockUs, recordTelemetrySamples, telemetry, telemetrySamples, type TelemetrySample } from './telemetry';
 
 const DISC = 'fixtures/synthetic/disc1';
 async function openDisc(page: Page, folder = DISC): Promise<void> {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(folder);
+  await setFolder(page.getByTestId('folder-input'), folder);
   await expect(page.getByTestId('playlist-00000')).toBeVisible();
 }
 
@@ -76,7 +76,7 @@ test('opens another disc after closing the current one', async ({ page }) => {
   await expect(page.getByTestId('landing')).toBeVisible();
   await page.waitForTimeout(500);
   await expect(page.getByTestId('landing')).toBeVisible(); // late events from the old disc must not bring the player back
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await startPlaylist(page, '00000');
   await expect.poll(async () => (await page.evaluate(() => (window as unknown as { __blurayTelemetry?: { clockUs: number } | null }).__blurayTelemetry?.clockUs)) ?? 0).toBeGreaterThan(1_000_000);
 });
@@ -159,7 +159,7 @@ test('stays in sync for ten minutes (nightly)', async ({ page, browserName, isMo
   test.skip(!process.env.NIGHTLY, 'Set NIGHTLY=1 after generating fixtures/local/long-disc (see the README "Nightly sync test" section).');
   test.setTimeout(13 * 60_000);
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles('fixtures/local/long-disc');
+  await setFolder(page.getByTestId('folder-input'), 'fixtures/local/long-disc');
   await startPlaylist(page, '00000');
   const windows = await collectWindows(page, 590_000_000, 12 * 60_000);
   expectInSync(windows);

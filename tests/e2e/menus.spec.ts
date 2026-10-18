@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { CHROME_ONLY, skipWithoutH264 } from './support';
+import { CHROME_ONLY, setFolder, skipWithoutH264 } from './support';
 import { collectWindows, expectInSync, pausedClockUs, recordTelemetrySamples, telemetrySamples } from './telemetry';
 
 // fixtures/synthetic/disc-menu (scripts/make-menu-disc.ts): First Play loops the top menu (playlist 00001). Page 0 has
@@ -30,7 +30,7 @@ const expectMenu = (page: Page, shown: boolean) => expect(page.getByTestId('play
 async function openMenuDisc(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await expectMenu(page, true);
   await expect.poll(() => menuState(page), { timeout: 10_000 }).toBe('page 0 button 1');
 }

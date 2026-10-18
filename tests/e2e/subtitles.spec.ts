@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { skipWithoutH264 } from './support';
+import { setFolder, skipWithoutH264 } from './support';
 
 // fixtures/synthetic/disc-subs (scripts/make-subs-disc.ts): a 12 s feature with PG stream 1 (eng: 1–3 s, a forced caption
 // 4–6 s, 8–10 s) and stream 2 (jpn: 2–5 s, 7–9 s). First Play turns English on and plays 00000; title 2 plays 00001,
@@ -87,7 +87,7 @@ async function sampleBetween(page: Page, start: number, fromUs: number, toUs: nu
 async function openSubsDisc(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 }
 
