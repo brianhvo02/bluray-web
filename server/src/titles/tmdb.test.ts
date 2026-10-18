@@ -39,6 +39,7 @@ describe('createTmdb', () => {
         names: { english: 'Starfall Wanderer', romaji: null, native: '星降りの旅人', synonyms: [] },
         animation: true,
         year: 2023,
+        startDate: 20230407,
         episodes: null,
         runtimeMin: null,
         seasons: [],

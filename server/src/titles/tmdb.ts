@@ -38,6 +38,12 @@ const yearOf = (date: string | null | undefined): number | null => {
   return m ? Number(m[1]) : null;
 };
 
+/** A `YYYY-MM-DD` date as YYYYMMDD, or null. */
+const dateOf = (date: string | null | undefined): number | null => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(date ?? '');
+  return m ? Number(`${m[1]}${m[2]}${m[3]}`) : null;
+};
+
 function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
   const tv = kind === 'series';
   // TV: `episode_run_time` is empty for many newer series; the last aired episode's runtime stands in.
@@ -50,6 +56,7 @@ function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
     names: { english: (tv ? s.name : s.title) ?? null, romaji: null, native: (tv ? s.original_name : s.original_title) ?? null, synonyms: [] },
     animation: s.genre_ids ? s.genre_ids.includes(ANIMATION) : s.genres ? s.genres.some((g) => g.id === ANIMATION) : null,
     year: yearOf(tv ? s.first_air_date : s.release_date),
+    startDate: dateOf(tv ? s.first_air_date : s.release_date),
     episodes: tv ? (s.number_of_episodes ?? null) : null,
     runtimeMin: runtimeMin || null,
     seasons: (s.seasons ?? []).filter((season) => season.season_number > 0).map((season) => ({ number: season.season_number, episodes: season.episode_count, runtimeMin: runtimeMin || null })),

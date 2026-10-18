@@ -1198,4 +1198,39 @@ describe('matchDiscs', () => {
       expect((tmdb as unknown as { calls: string[] }).calls).not.toContain(normalizeTitle('US'));
     });
   });
+
+  describe('round 3', () => {
+    const rooted = (path: string, titles: Record<string, string> = {}): DiscEvidence => ({ ...ev(path, titles), segments: path.split('/').slice(1) });
+    const related = (type: string, id: string): Entry['relations'][number] => ({ type, id, format: 'TV', startDate: null });
+    const state = async (path: string, anilist: MetadataSource, tmdb: MetadataSource | null): Promise<string> => {
+      const m = byDisc((await matchDiscs([rooted(path)], ctx(anilist, tmdb))).matches, path);
+      return m.status === 'filed' ? `${m.entryId}#${m.disc}` : m.status === 'unsorted' ? m.reason : m.status;
+    };
+
+    describe('M11: the release date', () => {
+      const s1 = entry('anilist:3000', { english: 'Brasswick' }, { year: 2016, startDate: 20161005, relations: [related('SEQUEL', 'anilist:3001')] });
+      const s2 = entry('anilist:3001', { english: 'Brasswick 2nd Season', synonyms: ['Brasswick'] }, { year: 2017, startDate: 20171004, relations: [related('PREQUEL', 'anilist:3000')] });
+      const anilist = () => fake({ Brasswick: [s1, s2] });
+
+      it('an entry that started after the release date is no fit', async () => {
+        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', anilist(), null)).toBe('anilist:3000#2');
+        expect(await state('drv0/Anime/[BDMV][20170426][Brasswick][Vol.02]', anilist(), null)).toBe('anilist:3000#2');
+        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]/BDROM', anilist(), null)).toBe('anilist:3000#2');
+        expect(await state('drv0/Anime/[BDMV][180124][Brasswick][Vol.02]', anilist(), null)).toBe('several-fit');
+        // a TMDB entry by its first-air date, and an entry with only a year
+        const tmdbLater = fake({ Brasswick: [entry('tmdb-tv:3002', { english: 'Brasswick' }, { year: 2017, startDate: 20171101, seasons: seasons(1), animation: false })] });
+        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', fake({ Brasswick: [s1] }), tmdbLater)).toBe('anilist:3000#2');
+        const yearOnly = fake({ Brasswick: [s1, { ...s2, startDate: undefined, year: 2018 }] });
+        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', yearOnly, null)).toBe('anilist:3000#2');
+      });
+
+      it('not an invalid or future date, nor a same-month entry with no day', async () => {
+        for (const date of ['171345', '170231', '991231', '20990101']) {
+          expect(await state(`drv0/Anime/[BDMV][${date}][Brasswick][Vol.02]`, anilist(), null), date).toBe('several-fit');
+        }
+        const sameMonth = fake({ Brasswick: [s1, { ...s2, startDate: 20170400 }] });
+        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', sameMonth, null)).toBe('several-fit');
+      });
+    });
+  });
 });

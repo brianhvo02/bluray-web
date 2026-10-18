@@ -49,6 +49,7 @@ describe('createAniList', () => {
       names: { english: 'Starfall Wanderer', romaji: 'Hoshifuri no Tabibito', native: '星降りの旅人', synonyms: ['Hoshitabi', 'The Starfall Wanderer'] },
       animation: true,
       year: 2023,
+      startDate: 20230407,
       episodes: 24,
       runtimeMin: 24,
       seasons: [],

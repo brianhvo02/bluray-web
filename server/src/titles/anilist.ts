@@ -62,6 +62,7 @@ function toEntry(m: Media): Entry {
     names: { english: m.title?.english ?? null, romaji: m.title?.romaji ?? null, native: m.title?.native ?? null, synonyms: m.synonyms ?? [] },
     animation: true,
     year: m.startDate?.year ?? null,
+    startDate: fuzzyDateInt(m.startDate),
     episodes: m.episodes ?? null,
     runtimeMin: m.duration ?? null,
     seasons: [],

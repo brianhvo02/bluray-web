@@ -18,6 +18,11 @@ export interface Entry {
   /** Animated: TMDB's Animation genre (16), null when TMDB gave no genres; always true on AniList. */
   readonly animation: boolean | null;
   readonly year: number | null;
+  /**
+   * When it started: AniList's startDate, TMDB's first-air or release date, as YYYYMMDD with 00 for an unknown month
+   * or day. Optional: entries saved before it have none (M11).
+   */
+  readonly startDate?: number | null;
   readonly episodes: number | null;
   readonly runtimeMin: number | null;
   /** TMDB TV only, numbered from 1: season 0 (TMDB's "Specials") is left out. */

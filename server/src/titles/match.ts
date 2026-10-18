@@ -146,6 +146,41 @@ const KANJI_VARIANTS: Readonly<Record<string, string>> = {
 };
 const KANJI_VARIANT = new RegExp(`[${Object.keys(KANJI_VARIANTS).join('')}]`, 'gu');
 
+/**
+ * The disc's release date as YYYYMMDD, from a bracketed `[YYMMDD]` (20YY) or `[YYYYMMDD]` on the disc folder or the
+ * two folders above it, nearest first; only a valid date that isn't in the future (ruling M11).
+ */
+function releaseDate(segments: readonly string[]): number | null {
+  const today = new Date();
+  const now = today.getFullYear() * 10_000 + (today.getMonth() + 1) * 100 + today.getDate();
+  for (const seg of segments.slice(-3).reverse()) {
+    for (const m of seg.normalize('NFKC').matchAll(/[[【](\d{6}|\d{8})[\]】]/g)) {
+      const d = m[1]!;
+      const [y, mo, da] = d.length === 6 ? [2000 + Number(d.slice(0, 2)), Number(d.slice(2, 4)), Number(d.slice(4, 6))] : [Number(d.slice(0, 4)), Number(d.slice(4, 6)), Number(d.slice(6, 8))];
+      const date = new Date(Date.UTC(y, mo - 1, da));
+      const valid = y >= 1900 && date.getUTCFullYear() === y && date.getUTCMonth() === mo - 1 && date.getUTCDate() === da;
+      const value = y * 10_000 + mo * 100 + da;
+      if (valid && value <= now) return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether an entry started after a release date: by its start date (an unknown month or day, `00`, counts as the
+ * earliest it could be), else by its year alone.
+ */
+function startedAfter(en: Entry, released: number): boolean {
+  const start = en.startDate ?? (en.year !== null ? en.year * 10_000 : null);
+  if (start === null) return false;
+  const month = Math.floor(start / 100) % 100;
+  const day = start % 100;
+  // compare at the precision the start date has
+  if (month === 0) return Math.floor(start / 10_000) > Math.floor(released / 10_000);
+  if (day === 0) return Math.floor(start / 100) > Math.floor(released / 100);
+  return start > released;
+}
+
 /** The discs under a folder, in its subfolders too, leaving out those in or named as a bonus folder (R2). */
 function discsUnder(folder: string, evidence: readonly DiscEvidence[]): number {
   const depth = folder === '' ? 0 : folder.split('/').length;
@@ -411,9 +446,11 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const years = named.map((p) => p.parse.year).filter((y): y is number => y !== null);
   if (hit?.year != null) years.push(hit.year);
 
-  // everything the lookups found, before the year, season and format filters
+  // everything the lookups found, before the year, season and format filters; an entry that started after the disc's
+  // release date (`[170426]` on its release folder) can't be on it, and is no fit at all (ruling M11)
+  const released = releaseDate(e.segments);
   const all = new Map<string, Entry>();
-  for (const p of pieces) for (const en of p.found) all.set(en.id, en);
+  for (const p of pieces) for (const en of p.found) if (released === null || !startedAfter(en, released)) all.set(en.id, en);
   let scored: Scored[] = [];
   for (const en of all.values()) {
     if (!yearFits(en, years)) continue;
