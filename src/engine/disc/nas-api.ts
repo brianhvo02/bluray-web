@@ -92,4 +92,10 @@ export type OwnerChoice =
   | { readonly kind: 'extras'; readonly titleId: string; readonly season: number | null }
   | { readonly kind: 'hidden' };
 export interface OwnTitle { readonly id: string; readonly kind: TitleKind; readonly name: string; readonly seasons: number | null }
-export interface UnsortedItem { readonly discId: string; readonly path: string; readonly discTitles: readonly { readonly lang: string; readonly name: string }[]; readonly reason: UnsortedReason; readonly suggestions: readonly TitleSummary[]; readonly catalogueNumber: string | null; readonly group: string; readonly groupSize: number }
+/**
+ * A title suggested for an Unsorted disc, with the season the owner's Season field starts at (ruling F2): the matcher's
+ * season for it, else the season the disc's names give, else the entry's place in its chain; null when none is known
+ * or the title has no seasons.
+ */
+export interface UnsortedSuggestion extends TitleSummary { readonly seasonHint: number | null }
+export interface UnsortedItem { readonly discId: string; readonly path: string; readonly discTitles: readonly { readonly lang: string; readonly name: string }[]; readonly reason: UnsortedReason; readonly suggestions: readonly UnsortedSuggestion[]; readonly catalogueNumber: string | null; readonly group: string; readonly groupSize: number }

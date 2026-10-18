@@ -5,7 +5,7 @@
  */
 import { createHash } from 'node:crypto';
 import type {
-  DiscRef, DiscSlot, EpisodeRef, OwnTitle, SeasonDetail, TitleDetail, TitleKind, TitleNames, TitleSummary, UnsortedItem, UnsortedReason,
+  DiscRef, DiscSlot, EpisodeRef, OwnTitle, SeasonDetail, TitleDetail, TitleKind, TitleNames, TitleSummary, UnsortedItem, UnsortedReason, UnsortedSuggestion,
 } from '../../../src/engine/disc/nas-api';
 import type { DiscDbHit } from './discdb';
 import { guessEpisodes } from './episodes';
@@ -13,6 +13,7 @@ import type { DiscEvidence } from './evidence';
 import { groupKey, musicRelease } from './match';
 import type { DiscMatch } from './match';
 import type { OwnerSnapshot } from './owner-store';
+import { parseName } from './parse-name';
 import type { Entry } from './sources';
 
 export interface Catalogue {
@@ -103,6 +104,7 @@ type Target = { readonly title: TitleBuild; readonly season: SeasonBuild | null 
  * loaded the series is provisional. Seasons that aren't loaded are absent, never invented.
  */
 function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series> {
+  const prequels = tvPrequels(entries);
   const isTvNode = (id: string): boolean => {
     const en = entries.get(id);
     return en === undefined || isAnilistTv(en);
@@ -162,7 +164,7 @@ function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series>
       .map((id) => entries.get(id)!);
     const number = new Map<string, number>();
     for (const en of members) {
-      const place = chainPlace(en, entries);
+      const place = chainPlace(en, entries, prequels);
       if (place !== null) number.set(en.id, place);
     }
     const series: Series = { id: roots[0]!, provisional: number.get(roots[0]!) !== 1, members, number };
@@ -172,21 +174,37 @@ function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series>
 }
 
 /**
+ * Each loaded AniList TV entry's TV prequels, worked out once per build (M9): those its own PREQUEL relations name, and
+ * the loaded TV entries whose SEQUEL relation names it.
+ */
+function tvPrequels(entries: ReadonlyMap<string, Entry>): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  const add = (id: string, prequel: string): void => {
+    let set = out.get(id);
+    if (!set) out.set(id, (set = new Set()));
+    set.add(prequel);
+  };
+  for (const en of entries.values()) {
+    if (!isAnilistTv(en)) continue;
+    for (const r of en.relations) {
+      if (r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? '')) add(en.id, r.id);
+      else if (r.type === 'SEQUEL') add(r.id, en.id);
+    }
+  }
+  return out;
+}
+
+/**
  * An AniList TV entry's place in its chain, counted along single TV prequel links back to a loaded root (a loaded TV
  * entry with no TV prequel), or null when a link leads to an entry that isn't loaded, or branches. A prequel is named
- * by the entry's own PREQUEL relation or by a loaded TV entry's SEQUEL relation to it.
+ * by the entry's own PREQUEL relation or by a loaded TV entry's SEQUEL relation to it (`prequels`, from `tvPrequels`).
  */
-function chainPlace(en: Entry, entries: ReadonlyMap<string, Entry>): number | null {
-  const tv = [...entries.values()].filter(isAnilistTv);
+function chainPlace(en: Entry, entries: ReadonlyMap<string, Entry>, prequels: ReadonlyMap<string, ReadonlySet<string>>): number | null {
   let cur = en;
   for (let place = 1; place <= entries.size; place++) {
-    const id = cur.id;
-    const prequels = new Set([
-      ...cur.relations.filter((r) => r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? '')).map((r) => r.id),
-      ...tv.filter((x) => x.relations.some((r) => r.type === 'SEQUEL' && r.id === id)).map((x) => x.id),
-    ]);
-    if (prequels.size === 0) return place;
-    const next = prequels.size === 1 ? entries.get([...prequels][0]!) : undefined;
+    const before = prequels.get(cur.id);
+    if (!before || before.size === 0) return place;
+    const next = before.size === 1 ? entries.get([...before][0]!) : undefined;
     if (!next || !isAnilistTv(next)) return null;
     cur = next;
   }
@@ -232,8 +250,14 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
 
   const seriesTitle = (series: Series): TitleBuild => {
     const head = series.members[0]!;
-    return builds.get(series.id) ?? newTitle({
-      id: series.id, kind: 'series', names: entryNames(head), year: head.year, own: false, single: false, series,
+    const known = builds.get(series.id);
+    if (known) return known;
+    // the other seasons' names are synonyms, so the series is found by any of them (M7)
+    const headNames = new Set([head.names.english, head.names.romaji, head.names.native, ...head.names.synonyms].filter((n): n is string => n !== null));
+    const synonyms = [...new Set([...head.names.synonyms, ...series.members.slice(1).flatMap((m) =>
+      [m.names.english, m.names.romaji, m.names.native, ...m.names.synonyms].filter((n): n is string => n !== null && n.trim() !== '' && !headNames.has(n)))])];
+    return newTitle({
+      id: series.id, kind: 'series', names: { ...entryNames(head), synonyms }, year: head.year, own: false, single: false, series,
       poster: artId(series.members.find((en) => en.poster !== null)?.poster ?? null),
       banner: artId(bannerArt(series.members.find((en) => en.banner !== null)?.banner ?? null)),
     });
@@ -348,7 +372,8 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   };
 
   const hidden: DiscRef[] = [];
-  const unsortedDiscs: { e: DiscEvidence; reason: UnsortedReason; suggestions: readonly string[] }[] = [];
+  /** `seasons`: the matcher's season for a suggestion, by entry id, where it worked one out. */
+  const unsortedDiscs: { e: DiscEvidence; reason: UnsortedReason; suggestions: readonly string[]; seasons: Readonly<Record<string, number>> }[] = [];
   for (const e of input.evidence) {
     const choice = owner.choices.get(e.discId);
     const match = matchById.get(e.discId);
@@ -371,7 +396,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       target = resolve(choice.titleId, choice.season, extras, true);
       if (typeof target === 'string') {
         const suggestions = match?.status === 'unsorted' ? match.suggestions : match?.status === 'filed' && entries.has(match.entryId) ? [match.entryId] : [];
-        unsortedDiscs.push({ e, reason: target, suggestions });
+        unsortedDiscs.push({ e, reason: target, suggestions, seasons: matchSeasons(match) });
         continue;
       }
     } else if (!match) {
@@ -380,14 +405,14 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       music(e, match.group, match.name, null);
       continue;
     } else if (match.status === 'unsorted') {
-      unsortedDiscs.push({ e, reason: match.reason, suggestions: match.suggestions });
+      unsortedDiscs.push({ e, reason: match.reason, suggestions: match.suggestions, seasons: matchSeasons(match) });
       continue;
     } else {
       extras = match.bonus;
       disc = match.disc;
       target = resolve(match.entryId, match.season, extras, false);
       if (typeof target === 'string') {
-        unsortedDiscs.push({ e, reason: target, suggestions: entries.has(match.entryId) ? [match.entryId] : [] });
+        unsortedDiscs.push({ e, reason: target, suggestions: entries.has(match.entryId) ? [match.entryId] : [], seasons: matchSeasons(match) });
         continue;
       }
     }
@@ -436,8 +461,11 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     const firsts = copies.map((cs) => cs[0]!);
     const hits = firsts.map((e) => (e.fingerprint !== null ? input.discdb.lookup(e.fingerprint) : null));
     if (hits.every((h) => h !== null && h.episodes.length > 0)) {
-      const out = copies.flatMap((cs, i) => hits[i]!.episodes
-        .filter((ep) => s.discDbSeason === null || ep.season === s.discDbSeason)
+      const kept = hits.map((h) => h!.episodes.filter((ep) => s.discDbSeason === null || ep.season === s.discDbSeason));
+      // TheDiscDB numbers by TMDB's seasons: numbers past this season's episode count belong to another numbering (M11)
+      const count = s.info.episodes;
+      const fits = count === null || kept.every((eps) => eps.every((ep) => ep.episode >= 1 && ep.episode <= count));
+      const out = !fits ? [] : copies.flatMap((cs, i) => kept[i]!
         .flatMap((ep): EpisodeRef[] => {
           for (const e of cs) {
             const playlist = e.playlists.find((p) => p.id === ep.playlist);
@@ -464,7 +492,8 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     const placed = [...[...b.seasons.values()].flatMap((s) => [...s.discs, ...s.extras]), ...b.extras];
     const summary: TitleSummary = {
       id: b.id, kind: b.kind, poster: b.poster, year: b.year,
-      names: b.kind === 'music' && !b.own ? { ...b.names, display: owner.displayNames.get(b.id) ?? musicChoiceNames.get(b.id) ?? null } : b.names,
+      // a name in a disc's music choice follows the disc when its folder moves (M8), so it comes first
+      names: b.kind === 'music' && !b.own ? { ...b.names, display: musicChoiceNames.get(b.id) ?? owner.displayNames.get(b.id) ?? null } : b.names,
       seasons: b.single ? 0 : seasons.length,
       discs: seasons.reduce((n, s) => n + s.discs.length + s.extras.length, extras.length),
       addedAt: placed.reduce((max, p) => Math.max(max, input.addedAt.get(p.e.discId) ?? 0), 0),
@@ -481,12 +510,26 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     if (!en) return null;
     return { id, kind: en.kind, names: entryNames(en), poster: artId(en.poster), year: en.year, seasons: en.seasons.length, discs: 0, addedAt: 0, own: false };
   };
-  const unsorted: UnsortedItem[] = unsortedDiscs.map(({ e, reason, suggestions }) => ({
+  /** Whether a suggestion has seasons: an own or listed series, a TMDB series or an AniList TV entry. */
+  const hasSeasons = (t: TitleSummary): boolean => {
+    const en = entries.get(t.id);
+    return en ? (en.source === 'tmdb' ? en.kind === 'series' : isAnilistTv(en)) : t.kind === 'series';
+  };
+  /** The season the owner's Season field starts at for a suggestion (ruling F2), see `UnsortedSuggestion`. */
+  const seasonHint = (t: TitleSummary, e: DiscEvidence, seasons: Readonly<Record<string, number>>): number | null => {
+    if (!hasSeasons(t)) return null;
+    const series = seriesOf.get(t.id);
+    return seasons[t.id] ?? evidenceSeason(e) ?? (series ? seasonOf(series, t.id) : null);
+  };
+  const unsorted: UnsortedItem[] = unsortedDiscs.map(({ e, reason, suggestions, seasons }) => ({
     discId: e.discId,
     path: e.path,
     discTitles: e.discTitles,
     reason,
-    suggestions: suggestions.map(entrySummary).filter((s): s is TitleSummary => s !== null),
+    suggestions: suggestions
+      .map(entrySummary)
+      .filter((s): s is TitleSummary => s !== null)
+      .map((s): UnsortedSuggestion => ({ ...s, seasonHint: seasonHint(s, e, seasons) })),
     catalogueNumber: e.catalogueNumbers[0] ?? null,
     group: groupKey(e),
     groupSize: groupSizes.get(groupKey(e)) ?? 1,
@@ -506,6 +549,19 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     art: (id) => artById.get(id) ?? null,
     provisional: [...new Set([...seriesOf.values()].filter((x) => x.provisional && builds.has(x.id)).map((x) => x.id))],
   };
+}
+
+/** The matcher's seasons for an Unsorted match's suggestions, or for a filed match's entry. */
+function matchSeasons(m: DiscMatch | undefined): Readonly<Record<string, number>> {
+  if (m?.status === 'unsorted') return m.seasons ?? {};
+  if (m?.status === 'filed' && m.season !== null) return { [m.entryId]: m.season };
+  return {};
+}
+
+/** The one season a disc's titles, own folder and the two folders above it name, or null for none or several. */
+function evidenceSeason(e: DiscEvidence): number | null {
+  const seen = new Set([...e.discTitles.map((t) => t.name), ...e.segments.slice(-3)].map((t) => parseName(t).season).filter((n): n is number => n !== null));
+  return seen.size === 1 ? [...seen][0]! : null;
 }
 
 /** The art id of a poster or banner's source URLs: 32 lower-case hex digits. */

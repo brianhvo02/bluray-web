@@ -316,7 +316,7 @@ export class TitleService {
     this.groupsTotal = new Set(toMatch.map(groupKey)).size;
     const result = toMatch.length === 0
       ? { matches: [], entries: new Map<string, Entry>() }
-      : await matchDiscs(toMatch, { anilist, tmdb, discdb: this.opts.discdb, cache, onGroupDone: () => this.groupsDone++ });
+      : await matchDiscs(toMatch, { anilist, tmdb, discdb: this.opts.discdb, cache, onGroupDone: () => { this.groupsDone++; } });
 
     let failed = false;
     const matches = new Map<string, DiscMatch>();

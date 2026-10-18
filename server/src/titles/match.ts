@@ -24,7 +24,12 @@ type Via = 'disc-title' | 'folder' | 'discdb';
 export type DiscMatch =
   | { readonly discId: string; readonly status: 'filed'; readonly entryId: string; readonly season: number | null; readonly disc: number | null; readonly bonus: boolean; readonly via: readonly Via[] }
   | { readonly discId: string; readonly status: 'music'; readonly group: string; readonly name: string }
-  | { readonly discId: string; readonly status: 'unsorted'; readonly reason: UnsortedReason; readonly suggestions: readonly string[] }; // suggestions: entry ids, up to 3
+  | {
+    readonly discId: string; readonly status: 'unsorted'; readonly reason: UnsortedReason;
+    readonly suggestions: readonly string[]; // entry ids, up to 3
+    /** The season the matcher worked out for a suggestion (see `season` above), by entry id, when it did (ruling F2). */
+    readonly seasons?: Readonly<Record<string, number>>;
+  };
 
 export interface MatchContext {
   readonly anilist: MetadataSource;
@@ -32,8 +37,18 @@ export interface MatchContext {
   readonly discdb: { lookup(fp: string): DiscDbHit | null };
   /** Search results by source and normalised query (and AniList entries by id), so lookups happen once per run. */
   readonly cache: Map<string, Entry[]>;
-  /** Called as each group (a parent folder) is done, for progress. */
-  readonly onGroupDone?: () => void;
+  /**
+   * Called as each group (a parent folder) is done, for progress, with that group's discs' matches so far (rule 4 is
+   * applied to the groups done) and the entries they name, so a long run can save its progress (ruling F4).
+   */
+  readonly onGroupDone?: (progress: () => { matches: DiscMatch[]; entries: Map<string, Entry> }) => void | Promise<void>;
+}
+
+/** The result of a run. `aborted`: the sources failed for CIRCUIT_BREAKER groups in a row, so the run stopped (M3). */
+export interface MatchResult {
+  readonly matches: DiscMatch[];
+  readonly entries: Map<string, Entry>;
+  readonly aborted: boolean;
 }
 
 /**
@@ -63,8 +78,10 @@ const MAX_ANCESTORS = 2;
  * evidence (ruling T5n).
  */
 const FAR_ANCESTOR = 2;
-/** Folders at this depth or above (the root's top-level folders) are category-like and never evidence. */
+/** The root's top-level folders: evidence like any folder, and never too far up to be the only evidence (ruling F5). */
 const TOP_LEVEL_DEPTH = 0;
+/** Groups failing in a row (SourceUnavailable) before a run stops, leaving the rest for the next run (M3). */
+export const CIRCUIT_BREAKER = 5;
 /** Prequel links followed to find an AniList entry's place in its chain. */
 const MAX_CHAIN = 20;
 
@@ -141,7 +158,7 @@ interface Pending {
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
 const lastSegment = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
-export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchContext): Promise<{ matches: DiscMatch[]; entries: Map<string, Entry> }> {
+export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchContext): Promise<MatchResult> {
   const groups = new Map<string, DiscEvidence[]>();
   for (const e of evidence) {
     const key = groupKey(e);
@@ -150,29 +167,42 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
   const byDisc = new Map<string, DiscMatch>();
   const entries = new Map<string, Entry>();
   const pending: Pending[] = [];
+  const unreachable = (e: DiscEvidence): DiscMatch => ({ discId: e.discId, status: 'unsorted', reason: 'source-unreachable', suggestions: [] });
+  const progress = (): { matches: DiscMatch[]; entries: Map<string, Entry> } => {
+    const placed = new Map(entries);
+    const out = new Map(byDisc);
+    for (const m of placeDiscs(pending, placed)) out.set(m.discId, m);
+    return { matches: [...out.values()], entries: placed };
+  };
+  let failures = 0;
+  let aborted = false;
   for (const [key, discs] of groups) {
+    if (aborted) {
+      for (const e of discs) byDisc.set(e.discId, unreachable(e));
+      continue;
+    }
     const lookup: DiscEvidence[] = [];
     for (const e of discs) {
       const music = musicRelease(e);
       if (music) byDisc.set(e.discId, { discId: e.discId, status: 'music', group: music, name: lastSegment(music) });
       else lookup.push(e);
     }
-    if (lookup.length === 0) {
-      ctx.onGroupDone?.();
-      continue;
+    if (lookup.length > 0) {
+      try {
+        const r = await matchGroup(key, lookup, ctx, entries);
+        for (const m of r.done) byDisc.set(m.discId, m);
+        pending.push(...r.pending);
+        failures = 0;
+      } catch (err) {
+        if (!(err instanceof SourceUnavailable)) throw err;
+        for (const e of lookup) byDisc.set(e.discId, unreachable(e));
+        aborted = ++failures >= CIRCUIT_BREAKER;
+      }
     }
-    try {
-      const r = await matchGroup(key, lookup, ctx, entries);
-      for (const m of r.done) byDisc.set(m.discId, m);
-      pending.push(...r.pending);
-    } catch (err) {
-      if (!(err instanceof SourceUnavailable)) throw err;
-      for (const e of lookup) byDisc.set(e.discId, { discId: e.discId, status: 'unsorted', reason: 'source-unreachable', suggestions: [] });
-    }
-    ctx.onGroupDone?.();
+    await ctx.onGroupDone?.(progress);
   }
   for (const m of placeDiscs(pending, entries)) byDisc.set(m.discId, m);
-  return { matches: evidence.map((e) => byDisc.get(e.discId)!), entries };
+  return { matches: evidence.map((e) => byDisc.get(e.discId)!), entries, aborted };
 }
 
 /**
@@ -199,7 +229,8 @@ function nameParse(text: string): ParsedName {
 
 async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: MatchContext, entries: Map<string, Entry>): Promise<{ done: DiscMatch[]; pending: Pending[] }> {
   const search = async (source: string, src: MetadataSource, query: string, year: number | null): Promise<Entry[]> => {
-    const key = `${source}:${normalizeTitle(query)}${year === null ? '' : `:${year}`}`;
+    // keyed strictly, so `God X` doesn't reuse what `Good X` found (M2)
+    const key = `${source}:${normalizeStrict(query)}${year === null ? '' : `:${year}`}`;
     let hit = ctx.cache.get(key);
     if (!hit) {
       hit = await src.search(query, year === null ? undefined : { year });
@@ -219,14 +250,14 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
   };
 
   // folders above the discs, from the group folder up to the first one that names something, at most MAX_ANCESTORS
-  // up and never a top-level folder
+  // up; a root's top-level folder counts (category names are dropped by nameParse) and may be the only evidence
   const segs = discs[0]!.segments;
   const ancestors: Piece[] = [];
   const ancestorText: string[] = [];
-  for (let i = segs.length - 2; i > TOP_LEVEL_DEPTH && i >= segs.length - 1 - MAX_ANCESTORS; i--) {
+  for (let i = segs.length - 2; i >= TOP_LEVEL_DEPTH && i >= segs.length - 1 - MAX_ANCESTORS; i--) {
     const parse = nameParse(segs[i]!);
     const found = await lookUp(parse);
-    ancestors.push({ kind: 'folder', own: false, far: segs.length - 1 - i >= FAR_ANCESTOR, parse, found });
+    ancestors.push({ kind: 'folder', own: false, far: i > TOP_LEVEL_DEPTH && segs.length - 1 - i >= FAR_ANCESTOR, parse, found });
     ancestorText.push(segs[i]!.normalize('NFKC'));
     if (found.some((en) => parse.candidates.some((c) => quality(en, c, parse.season) > 0))) break;
   }
@@ -264,10 +295,16 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
 /** Rules 1-3 for one disc: an Unsorted match, or the entry and season waiting for rule 4. */
 async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit | null, ctx: MatchContext, entries: Map<string, Entry>):
   Promise<DiscMatch | Omit<Pending, 'group' | 'releaseCount'>> {
+  const compat = new Map<string, Compat>();
   const unsorted = (reason: UnsortedReason, suggest: readonly Entry[]): DiscMatch => {
     const ids = [...new Set(suggest.map((en) => en.id))].slice(0, MAX_SUGGESTIONS);
     for (const en of suggest) if (ids.includes(en.id)) entries.set(en.id, en);
-    return { discId: e.discId, status: 'unsorted', reason, suggestions: ids };
+    const seasons: Record<string, number> = {};
+    for (const id of ids) {
+      const c = compat.get(id);
+      if (c?.ok && c.season !== null) seasons[id] = c.season;
+    }
+    return { discId: e.discId, status: 'unsorted', reason, suggestions: ids, ...(Object.keys(seasons).length > 0 ? { seasons } : {}) };
   };
   const named = pieces.filter((p) => p.kind !== 'discdb');
 
@@ -296,6 +333,14 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
       kinds.add(p.kind);
     }
     if (score > 0) scored.push({ entry: en, score, exact, kinds });
+  }
+  // TMDB's search answers have no seasons: each fitting TMDB series is fetched by id, and the full entry is used from
+  // here on, so the season checks and the catalogue see its seasons (I1)
+  for (const [i, s] of scored.entries()) {
+    if (s.entry.source !== 'tmdb' || s.entry.kind !== 'series') continue;
+    const full = await tmdbEntry(s.entry, ctx);
+    all.set(full.id, full);
+    scored[i] = { ...s, entry: full };
   }
   // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year, is
   // its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
@@ -334,7 +379,6 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   scored = scored.filter((s) => !twinIds.has(s.entry.id));
   if (scored.length === 0) return unsorted('no-title', []);
 
-  const compat = new Map<string, Compat>();
   for (const s of scored) compat.set(s.entry.id, await compatible(s.entry, evSeason, ctx));
   const fitting = scored.filter((s) => { const c = compat.get(s.entry.id)!; return c.ok || c.unresolved; }).sort((a, b) => b.score - a.score);
   // titles fit, but every one contradicts the evidence's season
@@ -410,7 +454,7 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>): D
     }
     out.push(placed
       ? { discId: p.e.discId, status: 'filed', entryId: p.entry.id, season: p.season, disc, bonus: p.bonus, via: p.via }
-      : { discId: p.e.discId, status: 'unsorted', reason: 'no-disc-number', suggestions: [p.entry.id] });
+      : { discId: p.e.discId, status: 'unsorted', reason: 'no-disc-number', suggestions: [p.entry.id], ...(p.season !== null ? { seasons: { [p.entry.id]: p.season } } : {}) });
   }
   return out;
 }
@@ -531,7 +575,13 @@ async function isTwin(a: Entry, info: TwinInfo, t: Entry, ctx: MatchContext): Pr
 
 /** A TMDB series' season count, fetched by id through the cache when the search result has none; 0 when unknown. */
 async function tmdbSeasonCount(t: Entry, ctx: MatchContext): Promise<number> {
-  if (t.seasons.length > 0 || !ctx.tmdb) return t.seasons.length;
+  if (t.seasons.length > 0) return t.seasons.length;
+  return (await tmdbEntry(t, ctx)).seasons.length;
+}
+
+/** A TMDB entry by id, through the cache (`tmdb-entry:<id>`), with its seasons; the search result when there is none. */
+async function tmdbEntry(t: Entry, ctx: MatchContext): Promise<Entry> {
+  if (!ctx.tmdb) return t;
   const key = `tmdb-entry:${t.id}`;
   let hit = ctx.cache.get(key);
   if (!hit) {
@@ -539,7 +589,7 @@ async function tmdbSeasonCount(t: Entry, ctx: MatchContext): Promise<number> {
     hit = en ? [en] : [];
     ctx.cache.set(key, hit);
   }
-  return hit[0]?.seasons.length ?? 0;
+  return hit[0] ?? t;
 }
 
 /** An AniList entry's names, each also with its season stripped. */

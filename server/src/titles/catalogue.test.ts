@@ -556,7 +556,7 @@ describe('buildCatalogue', () => {
     expect(cat.titles.map((t) => [t.names.english, t.discs]).sort()).toEqual([['Concert A', 1], ['Concert B', 1], [release, 2]]);
   });
 
-  it('takes a music title\'s name from a choice on any of its discs, the title\'s display name first', () => {
+  it('takes a music title\'s name from a choice on any of its discs first, which follows the disc (M8), else the title\'s display name', () => {
     const group = 'Music/Other Group - Spring';
     const bd1 = ev(`drv1-dl/${group}/BD1`);
     const bd2 = ev(`drv1-dl/${group}/BD2`);
@@ -565,6 +565,75 @@ describe('buildCatalogue', () => {
     const cat = build({ evidence: [bd1, bd2], matches, owner: owner(choices) });
     expect(cat.titles.map((t) => [t.names.display, t.discs])).toEqual([['Renamed', 2]]);
     const named = build({ evidence: [bd1, bd2], matches, owner: owner(choices, [], { [cat.titles[0]!.id]: 'Spring Live' }) });
-    expect(named.titles[0]!.names.display).toBe('Spring Live');
+    expect(named.titles[0]!.names.display).toBe('Renamed');
+    const titleOnly = build({ evidence: [bd1, bd2], matches, owner: owner({}, [], { [cat.titles[0]!.id]: 'Spring Live' }) });
+    expect(titleOnly.titles[0]!.names.display).toBe('Spring Live');
+  });
+
+  describe('final review', () => {
+    it("I2: each suggestion carries a season hint: the matcher's, else the evidence's, else the entry's chain place", () => {
+      const solo = entry('anilist:900', { english: 'Starfall Wanderer' }, { kind: 'movie', format: 'MOVIE' });
+      const cat = build({
+        entries: [S1, S2, S3, HARBOR, solo],
+        evidence: [ev('drv5/Box/D1'), ev('drv5/Harbor Line Season 3/D1'), ev('drv5/Mixed/D1')],
+        matches: [
+          { discId: id('drv5/Box/D1'), status: 'unsorted', reason: 'no-disc-number', suggestions: ['anilist:120'], seasons: { 'anilist:120': 2 } },
+          { discId: id('drv5/Harbor Line Season 3/D1'), status: 'unsorted', reason: 'several-fit', suggestions: ['tmdb-tv:7', 'anilist:900'] },
+          { discId: id('drv5/Mixed/D1'), status: 'unsorted', reason: 'sources-disagree', suggestions: ['anilist:450', 'tmdb-tv:7'] },
+        ],
+      });
+      const hints = (path: string): [string, number | null][] => cat.unsorted.find((u) => u.path === path)!.suggestions.map((t) => [t.id, t.seasonHint]);
+      expect(hints('drv5/Box/D1')).toEqual([['anilist:120', 2]]);
+      expect(hints('drv5/Harbor Line Season 3/D1')).toEqual([['tmdb-tv:7', 3], ['anilist:900', null]]);
+      expect(hints('drv5/Mixed/D1')).toEqual([['anilist:450', 3], ['tmdb-tv:7', null]]);
+    });
+
+    it('M7: a series is found by any season\'s names', () => {
+      const series = chain().titles.find((t) => t.id === 'anilist:300')!;
+      expect(series.names.english).toBe('Ember Blade');
+      expect(series.names.synonyms).toEqual(expect.arrayContaining(['Ember Blade Season 2', 'Hinokiri no Ken 2', 'Hinokiri no Ken: Kanketsu-hen']));
+      expect(series.names.synonyms).not.toContain('Ember Blade');
+    });
+
+    it('M9: builds a catalogue of thousands of chained TV entries quickly', () => {
+      const entries: Entry[] = [];
+      const evidence: DiscEvidence[] = [];
+      const matches: DiscMatch[] = [];
+      for (let c = 0; c < 300; c++) {
+        for (let k = 0; k < 20; k++) {
+          const n = 10_000 + c * 100 + k;
+          entries.push(entry(`anilist:${n}`, { english: `Saga ${c} Part ${k + 1}` }, {
+            year: 2000 + k,
+            relations: [
+              ...(k > 0 ? [{ type: 'PREQUEL', id: `anilist:${n - 1}`, format: 'TV', startDate: null }] : []),
+              ...(k < 19 ? [{ type: 'SEQUEL', id: `anilist:${n + 1}`, format: 'TV', startDate: null }] : []),
+            ],
+          }));
+          const path = `drv1/Saga ${c}/P${k + 1}`;
+          evidence.push(ev(path));
+          matches.push(filed(path, `anilist:${n}`, k + 1, 1));
+        }
+      }
+      const started = performance.now();
+      const cat = build({ entries, evidence, matches });
+      expect(performance.now() - started).toBeLessThan(1500);
+      expect(cat.titles).toHaveLength(300);
+      expect(cat.detail('anilist:10000')!.seasons).toHaveLength(20);
+    });
+
+    it('M11: TheDiscDB episodes past the season\'s episode count are not used under it', () => {
+      const one = entry('anilist:77', { english: 'Quiet Orchard' }, { episodes: 3, runtimeMin: 24 });
+      const disc = ev('drv3/Quiet Orchard/D1', { fingerprint: 'FP1', playlists: THREE_EPISODES });
+      const hit: DiscDbHit = {
+        title: 'Quiet Orchard', year: null, kind: 'series', tmdbId: '8', season: 1,
+        episodes: [
+          { playlist: '00001', season: 1, episode: 13, name: 'Later' },
+          { playlist: '00002', season: 1, episode: 14, name: 'Later still' },
+          { playlist: '00003', season: 1, episode: 15, name: null },
+        ],
+      };
+      const cat = build({ entries: [one], evidence: [disc], matches: [filed(disc.path, 'anilist:77', 1, 1)], discdb: { FP1: hit } });
+      expect(cat.detail('anilist:77')!.seasons[0]!.episodes!.map((e) => [e.number, e.name])).toEqual([[1, null], [2, null], [3, null]]);
+    });
   });
 });

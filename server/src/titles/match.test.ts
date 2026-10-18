@@ -32,7 +32,10 @@ function entry(id: string, names: Partial<EntryNames>, more: Partial<Entry> = {}
 const seasons = (n: number, episodes = 12): Entry['seasons'] =>
   Array.from({ length: n }, (_, i) => ({ number: i + 1, episodes, runtimeMin: 24 }));
 
-/** A source answering fixed entries per normalised query, recording every call. */
+/** TMDB's search answers carry no seasons; only the entry by id (`/tv/<id>`) has them. */
+const searchShape = (en: Entry): Entry => (en.source === 'tmdb' && en.kind === 'series' ? { ...en, seasons: [] } : en);
+
+/** A source answering fixed entries per normalised query, recording every call; TMDB series come as search shows them. */
 function fake(results: Record<string, Entry[]>, fail: readonly string[] = [], more: readonly Entry[] = []): MetadataSource & { calls: string[] } {
   const byKey = new Map(Object.entries(results).map(([q, es]) => [normalizeTitle(q), es]));
   const byId = new Map([...Object.values(results).flat(), ...more].map((en) => [en.id, en]));
@@ -42,7 +45,7 @@ function fake(results: Record<string, Entry[]>, fail: readonly string[] = [], mo
     async search(query) {
       calls.push(normalizeTitle(query));
       if (fail.some((f) => normalizeTitle(f) === normalizeTitle(query))) throw new SourceUnavailable('down');
-      return byKey.get(normalizeTitle(query)) ?? [];
+      return (byKey.get(normalizeTitle(query)) ?? []).map(searchShape);
     },
     async entry(id) {
       return byId.get(id) ?? null;
@@ -522,6 +525,85 @@ describe('matchDiscs', () => {
       const bare = series('tmdb-tv:819', 2022, 0);
       expect(await run([bare])).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
       expect(await run([bare], [series('tmdb-tv:819', 2022, 4)])).toMatchObject({ status: 'filed', entryId: 'anilist:803', season: 3 });
+    });
+  });
+
+  describe('final review', () => {
+    /** Evidence as production makes it: the root's name isn't a segment. */
+    const rooted = (path: string, titles: Record<string, string> = {}): DiscEvidence => ({ ...ev(path, titles), segments: path.split('/').slice(1) });
+
+    it('I1: a TMDB series found by search (no seasons) is fetched by id once, and files by its seasons', async () => {
+      const orchard = entry('tmdb-tv:300', { english: 'Glass Orchard' }, { seasons: seasons(3) });
+      const tmdb = fake({ 'Glass Orchard': [orchard] });
+      const entryCalls: string[] = [];
+      const counting: MetadataSource = { search: (q, o) => tmdb.search(q, o), entry: async (id) => { entryCalls.push(id); return tmdb.entry(id); } };
+      const path = 'TV/Glass Orchard Season 2 Disc 1';
+      const second = 'TV/Glass Orchard Season 2 Disc 2';
+      const c = ctx(fake({}), counting);
+      const { matches, entries } = await matchDiscs([ev(path), ev(second)], c);
+      expect(byDisc(matches, path)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:300', season: 2, disc: 1 });
+      expect(byDisc(matches, second)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:300', season: 2, disc: 2 });
+      // the catalogue gets the full entry, with its seasons
+      expect(entries.get('tmdb-tv:300')!.seasons).toHaveLength(3);
+      expect(entryCalls).toEqual(['tmdb-tv:300']);
+      expect(c.cache.get('tmdb-entry:tmdb-tv:300')).toEqual([orchard]);
+    });
+
+    it('I1: a TheDiscDB hit on a TMDB TV set files under its season', async () => {
+      const tmdb = fake({ 'Glass Orchard': [entry('tmdb-tv:300', { english: 'Glass Orchard' }, { seasons: seasons(3) })] });
+      const hit: DiscDbHit = { title: 'Glass Orchard', year: null, kind: 'series', tmdbId: '300', season: 2, episodes: [] };
+      const path = 'TV/Glass Orchard/GLASS_ORCHARD_S2_D1';
+      const { matches } = await matchDiscs([ev(path, {}, 'FP2')], ctx(fake({}), tmdb, { FP2: hit }));
+      expect(byDisc(matches, path)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:300', season: 2 });
+    });
+
+    it("I6: a root's top-level folder is evidence, alone too, but category names still aren't", async () => {
+      const starfall = entry('anilist:900', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { episodes: 12 });
+      const anilist = fake({ 'Starfall Wanderer': [starfall], 星降りの旅人: [starfall], Anime: [entry('anilist:901', { english: 'Anime' })] });
+      const tidy = 'drv0/Starfall Wanderer (星降りの旅人)/Volume 2';
+      const shelf = 'drv0/Anime/BDROM';
+      const { matches } = await matchDiscs([rooted(tidy), rooted(shelf)], ctx(anilist, null));
+      expect(byDisc(matches, tidy)).toMatchObject({ status: 'filed', entryId: 'anilist:900', season: 1, disc: 2, via: ['folder'] });
+      expect(byDisc(matches, shelf)).toMatchObject({ status: 'unsorted', reason: 'no-title' });
+    });
+
+    it('I6: a top-level folder two levels up may be the only evidence; one below the root may not', async () => {
+      const tmdb = fake({ Brasswick: [entry('tmdb-movie:93', { english: 'Brasswick' })] });
+      const top = 'drv0/Brasswick/Extra/BDROM';
+      const below = 'drv0/Shelf/Brasswick/Extra/BDROM';
+      const { matches } = await matchDiscs([rooted(top), rooted(below)], ctx(fake({}), tmdb));
+      expect(byDisc(matches, top)).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:93' });
+      expect(byDisc(matches, below)).toMatchObject({ status: 'unsorted', reason: 'no-title' });
+    });
+
+    it('M2: spellings that differ only in vowels are each searched', async () => {
+      const anilist = fake({});
+      await matchDiscs([ev('Anime/Good Hunter/BDROM'), ev('Anime2/God Hunter/BDROM')], ctx(anilist, null));
+      expect(anilist.calls.filter((q) => q === normalizeTitle('Good Hunter'))).toHaveLength(2);
+    });
+
+    it('M3: five groups failing in a row stop the run; the rest are not looked up', async () => {
+      const names = ['Alpha Reel', 'Bravo Reel', 'Charlie Reel', 'Delta Reel', 'Echo Reel', 'Foxtrot Reel', 'Golf Reel'];
+      const anilist = fake({}, names);
+      const discs = names.map((n, i) => ev(`Anime${i}/${n}/BDROM`));
+      const r = await matchDiscs(discs, ctx(anilist, null));
+      expect(r.aborted).toBe(true);
+      expect(new Set(anilist.calls).size).toBe(5);
+      for (const m of r.matches) expect(m).toMatchObject({ status: 'unsorted', reason: 'source-unreachable' });
+
+      // a success in between resets the count
+      const some = fake({ 'Charlie Reel': [entry('anilist:3', { english: 'Charlie Reel' })] }, names.filter((n) => n !== 'Charlie Reel'));
+      const r2 = await matchDiscs(discs, ctx(some, null));
+      expect(r2.aborted).toBe(false);
+    });
+
+    it("I2: an Unsorted disc carries the matcher's season for each suggestion it resolved", async () => {
+      const s1 = entry('anilist:10', { english: 'Harbor Line' });
+      const s2 = entry('anilist:11', { english: 'Harbor Line 2nd Season' }, { relations: [{ type: 'PREQUEL', id: 'anilist:10', format: 'TV', startDate: null }] });
+      const anilist = fake({ 'Harbor Line': [s2] }, [], [s1]);
+      const discs = ['A', 'B'].map((l) => ev(`Anime/[BDMV] Harbor Line 2nd Season/HARBOR_${l}`));
+      const { matches } = await matchDiscs(discs, ctx(anilist, null));
+      for (const m of matches) expect(m).toMatchObject({ status: 'unsorted', reason: 'no-disc-number', suggestions: ['anilist:11'], seasons: { 'anilist:11': 2 } });
     });
   });
 });
