@@ -50,7 +50,7 @@ npx tsx tools/devices/run.ts --device "sim:iPhone 17" \
 
 `--console <txt>` writes Safari's console log at the end of the run. `--call-timeout <ms>` bounds each WebDriver call.
 
-`probe.ts` opens `probe.html?disc=<disc URL>&token=<token>`, which probes a disc on the disc server instead of a picked folder. The page only accepts a disc on its own server, so the token is never sent anywhere else; `/probe.html` itself is static and needs no token. On this route:
+`probe.ts` opens `probe.html?disc=<disc API base, …/api/discs/<id>/>&token=<token>`, which probes a disc on the disc server instead of a picked folder. The page only accepts a disc on its own server, so the token is never sent anywhere else; `/probe.html` itself is static and needs no token. On this route:
 
 - The "Blob slicing over 4 GiB" row is an HTTP range read past 4 GiB; its detail starts with `server:`.
 - The HEVC row decodes the disc's first HEVC GOP, read over HTTP.

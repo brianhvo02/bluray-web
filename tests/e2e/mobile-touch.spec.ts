@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { telemetry } from './telemetry';
 import { bdjPlane, MENU_DISC as BDJ_MENU_DISC } from './bdj-support';
-import { expectBarHidden, expectBarShown, menuPoint, skipWithoutH264 } from './support';
+import { expectBarHidden, expectBarShown, menuPoint, setFolder, skipWithoutH264 } from './support';
 
 const HIDE_CONTROLS_MS = 3000; // PlayerScreen's idle timeout
 
@@ -14,7 +14,7 @@ const expectMenu = (page: Page, shown: boolean) => expect(page.getByTestId('play
 test('a tap on a menu button activates it', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   await expectMenu(page, true);
   const a = await menuPoint(page, 232, 216);
   await page.touchscreen.tap(a.x, a.y);
@@ -31,7 +31,7 @@ test('a tap on a menu button activates it', async ({ page }) => {
 test("the control bar's empty space belongs to the menu under it; a tap there leaves the menu and the bar as they were (R9)", async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   await expectMenu(page, true);
   const bar = page.getByTestId('control-bar');
   await page.keyboard.press('Shift'); // any key shows the controls (for another 3 s)
@@ -74,7 +74,7 @@ async function longPress(page: Page, x: number, y: number, ms: number, whileDown
 test('portrait, HDMV menu: a tap in the top or the bottom letterbox brings back the controls that idled out (R13, R14)', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   await expectMenu(page, true);
   const bar = page.getByTestId('control-bar');
   await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000); // idled out by the timer
@@ -97,7 +97,7 @@ test('landscape, HDMV menu: a tap on empty picture brings back the controls; a t
   await page.setViewportSize(LANDSCAPE);
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   await expectMenu(page, true);
   const bar = page.getByTestId('control-bar');
   await expectBarHidden(bar, HIDE_CONTROLS_MS + 3_000);
@@ -118,7 +118,7 @@ test('landscape, HDMV menu: a tap on empty picture brings back the controls; a t
 test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignored tap brings the remote and the controls (R13)', async ({ page }) => {
   await page.setViewportSize(LANDSCAPE);
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
   await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
@@ -141,7 +141,7 @@ test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignor
 test('landscape, BD-J menu: a long press shows the controls while held and never reaches Java; a tap still does (R15)', async ({ page }) => {
   await page.setViewportSize(LANDSCAPE);
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
   await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
@@ -166,7 +166,7 @@ test('landscape, BD-J menu: a long press shows the controls while held and never
 
 test('portrait, BD-J menu: a tap in the bottom letterbox brings back the controls without reaching the disc; a tap on the picture reaches it (R13, R14)', async ({ page }) => {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(BDJ_MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
   await expect.poll(async () => (await bdjPlane(page))?.flushes ?? 0, { timeout: 10_000 }).toBeGreaterThan(0);
@@ -188,7 +188,7 @@ test('portrait, BD-J menu: a tap in the bottom letterbox brings back the control
 test('a double tap on the right third seeks forward', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
   const before = (await telemetry(page))?.clockUs ?? 0;
@@ -208,7 +208,7 @@ test('a double tap on the right third seeks forward', async ({ page }) => {
 test('a double tap on the left third seeks back while the controls are hidden and leaves them hidden', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
   await expect(page.getByTestId('player')).toHaveClass(/idle/, { timeout: HIDE_CONTROLS_MS + 2_000 });

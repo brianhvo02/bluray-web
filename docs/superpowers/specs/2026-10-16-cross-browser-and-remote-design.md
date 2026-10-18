@@ -1,7 +1,7 @@
 # Cross-Browser, Mobile, Offline App and Remote Watching from a NAS — Design Spec
 
 Date: 2026-10-16
-Status: Draft
+Status: Step 1 implemented and deployed (2026-10-17). Device gate, iPad (iPad Pro 12.9" 5th gen, iPadOS 27.0.1 Safari, driven remotely with safaridriver; fixture discs handed to the page in place of the Files picker, which can't be automated): all checks pass. disc1 across the play-item boundary at 7.4 ms mean / 9.9 ms worst A/V offset with no drops or underruns; disc2 (B-frames, open GOP) seek; disc3 audio switch LPCM to AC-3; HDMV menu by tap and by the on-screen remote; PGS and forced captions; an ASS file; BD-J (first frame 514 ms); tap to show controls and double tap to seek both ways; phone layout with 44 px targets; the service worker controlling the page while cross-origin isolated. The run found one bug, fixed: touch pointerup reported at (0, 0). Then (same day): iPhone 17 Pro (iOS 27.2 Safari), Safari 26.6.2 and Firefox 158 on the Mac all pass the same checks (desktop: keyboard seeks for double taps, mouse for taps); Mac Safari needed its automation window kept in front, since safaridriver stops delivering input to a hidden window after a navigation. Offline without Airplane Mode: the app was served to the tailnet from the Mac with `tailscale serve`, installed by each browser, then the origin was taken away (serving switched off; Firefox's own offline mode): iPad, iPhone, Firefox and Safari reloaded from the service worker, stayed cross-origin isolated and played disc1. That run found a second bug, fixed: an error-page answer (404) to a navigation was passed through instead of the cached app. Still to run: full discs on iOS through the NAS (step 2).
 Base: step 1 is built on `main` before milestone 5 (BD-J) lands, and runs in parallel with it. BD-J on phones is handed to milestone 5 (§3.9).
 Parent spec: `2026-10-12-bluray-web-player-design.md`. Touches every milestone's UI, and the engine's disc source (§2 of the parent spec).
 
@@ -28,7 +28,7 @@ Success looks like this: the user, abroad, opens the app on an iPhone, picks a d
 Goals:
 
 - Supported browsers (step 1): Chrome/Edge desktop (as today), Chrome Android, Safari macOS, Safari iOS/iPadOS (and so every iOS browser, all WebKit), Firefox desktop. Minimum versions: Safari 26 (macOS and iOS); Chrome and Firefox current stable minus two.
-- Local discs open in all of them, including from a USB drive on iOS/iPadOS (Files app, iOS 18.4+ folder picking) and Android (Storage Access Framework).
+- Local discs open in all of them. On iOS/iPadOS this works but is impractical for full discs: Safari copies every picked file before the page can read it (§3.2), so iPhone and iPad watch discs through the NAS (steps 2–3). Android picks through the Storage Access Framework.
 - Touch works everywhere a mouse or keyboard is needed today: playback controls, seeking, HDMV menu buttons, the on-screen remote.
 - The site installs as an app (home screen, dock) and opens and plays local discs with no network.
 - Discs on the NAS play on any supported device, at home and abroad, with menus and everything else intact.
@@ -78,6 +78,7 @@ No user-agent sniffing, except one documented exception if a platform lies (for 
 - **Pick.** `showDirectoryPicker` where it exists (Chromium desktop, and possibly Chrome Android). Otherwise `<input type=file webkitdirectory>`, which every target supports (iOS from 18.4). On iOS this opens the Files app, where USB drives appear.
 - **Drop.** The landing-screen drop handler gains the `webkitGetAsEntry` + `readEntries` fallback that `src/player/drop-files.ts:30-50` already uses for subtitles. Factor the directory walk out and share it.
 - **Recent discs.** These store `FileSystemDirectoryHandle`s and only work in Chromium. Keep them there, hide the section elsewhere, and show NAS discs (step 2) in the recents list on every browser.
+- **iOS copies picked files (measured 2026-10-17).** On iPadOS 27 a folder pick hands its files to the page only after Safari has copied them out of the Files provider: a 2-file folder took 3 s, a 0.40 GiB clip from a USB drive 61 s (about 7 MB/s), and a full disc folder did not finish in the time the user waited. A full disc (25–40 GB) would take an hour or more on every open. No web API avoids this on iOS. So: the landing screen says so when a pick takes longer than 1.5 s, local folders stay allowed (subtitles, fonts, small discs, the patient), and iOS watching goes through the NAS, whose range reads copy nothing. A one-time import into OPFS was considered and rejected: the same copy time once, plus double storage on the device.
 - **Large files.** Clips above 4 GiB are common. `Blob.slice` beyond 4 GiB on iOS Safari and Android Chrome (through SAF) is unverified; the plan must include an early device test, and if it fails, a documented limitation per platform.
 - **Lazy `getFile()`.** `collectFromDirectoryHandle` (`disc-input.ts:9-18`) calls `getFile()` on every file up front. Fine for local folders; keep as is unless the device test shows it is slow on USB.
 
@@ -124,7 +125,7 @@ BD-J is not part of step 1 (§3.9); until milestone 5 lands, BD-J discs fall bac
 
 - **Playwright projects** for `chromium` (as today, `channel: 'chrome'`), `webkit` and `firefox`, on the existing Linux runners. Playwright's WebKit on Linux is not Safari and generally lacks H.264 in WebCodecs, so in that project the playback tests skip with a stated reason; what it must run is the landing screen, capability messages, folder picking, touch layout and the service worker. Firefox desktop runs the playback tests. The A/V sync tests stay Chrome-only in CI. Real Safari is covered by the real-device gate, not CI; no macOS runner. (My call.)
 - **Mobile emulation** projects (Chromium with a phone viewport and touch) cover layout, touch controls and menu taps.
-- **Real-device gate**, run by hand at the end of step 1 and recorded in this spec's status line, as earlier milestones did: iPhone (iOS 26), iPad (iPadOS 26, USB drive in the Files app), Safari macOS, Firefox desktop. Per device: open a 1080p H.264 disc, a 1080i disc, an HEVC disc where available, navigate an HDMV menu by touch, PGS and ASS subtitles, audio switching, seek, ten minutes of playback with no drift visible (telemetry from `?telemetry=1`), install and open offline.
+- **Real-device gate**, run by hand at the end of step 1 and recorded in this spec's status line, as earlier milestones did: iPhone (iOS 26), iPad (iPadOS 26), Safari macOS, Firefox desktop. On iPhone and iPad, local discs are the small synthetic fixture discs (`fixtures/synthetic/`, copied to the device), since full discs can't be picked in practice (§3.2); full discs on iOS are gated with step 2's NAS streaming. Per device: open a 1080p H.264 disc, a 1080i disc, an HEVC disc where available, navigate an HDMV menu by touch, PGS and ASS subtitles, audio switching, seek, ten minutes of playback with no drift visible (telemetry from `?telemetry=1`), install and open offline.
 - **Android**: the user has no Android device. Chrome Android stays a supported target, verified on the Android emulator (Android Studio, Chrome) for layout, touch, folder picking from emulated storage, H.264 playback and offline install. Hardware HEVC and USB OTG can't be verified there; they are listed as unverified in `docs/known-issues.md` until someone tests on a device. No paid device farm. (My call.)
 - **Early device checks**, as the first tasks of the plan, because they decide go/no-go for pieces of the design: `Blob.slice` beyond 4 GiB from a USB drive on iPad and iPhone, the `AudioContext` sample rate on iOS, worker rAF smoothness on Safari, HEVC decode on iPhone and iPad.
 - `capabilities` and the memory profile get unit tests; touch handling gets component tests.
@@ -197,6 +198,8 @@ Only the UDF versions found on Blu-ray (2.50/2.60, metadata partition) are neede
 
 ## 5. Step 3: WebRTC route, invites and pairing
 
+> Revised 2026-10-17: pairing is by QR or short code (`2026-10-17-nas-server-design.md` §7), built in step 2 together with the rendezvous service; step 3 adds WebRTC signalling to that service and starts with a throughput spike.
+
 ### 5.1 Why
 
 Browser-only access: no Tailscale needed for family and friends, or for the user on a device without it. The device and the NAS connect directly (DTLS-encrypted data channel); the NAS only makes outbound connections, so no port forwarding.
@@ -248,6 +251,7 @@ Browser-only access: no Tailscale needed for family and friends, or for the user
 | Who watches | The user, maybe family and friends | User |
 | BD-J | BD-J discs must work on iPhone; step 1 starts now without BD-J, and milestone 5 carries the phone requirements (§3.9) | User |
 | Test devices | iPhone, iPad, USB drive, Mac; no Android device | User |
+| iOS local discs | Impractical (Safari copies picked files, ~7 MB/s measured); iOS watches through the NAS; the landing screen explains a slow pick | User agreed (2026-10-17) |
 | Rip format | Mostly folders, some `.iso` | User |
 | Android verification | Emulator only; HEVC and USB OTG listed as unverified | My call |
 | ISO support | Step 2, UDF reader ported from libudfread, shared by client and NAS | My call |

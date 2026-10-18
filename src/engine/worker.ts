@@ -11,7 +11,6 @@ import { bdjMissing } from './bdj/requirements';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { loadAudioWasm } from './decode/wasm-audio';
 import { browserVideoCodecApi } from './decode/video-decoder';
-import { HttpSource } from './disc/http-source';
 import { playerSettingsForLocale } from './disc/player-settings';
 import { Player } from './player';
 import type { EngineCommand, EngineEvent } from './protocol';
@@ -81,7 +80,6 @@ const player = new Player({
   },
   // bd_set_player_setting_str as a player application sets it: the browser's language and region
   playerSettings: playerSettingsForLocale(navigator.language),
-  openHttpSource: (disc) => HttpSource.open(disc.baseUrl, disc.token),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
   // BD-J background stills: the browser sniffs the format (PNG, JPEG, GIF) from the bytes
   decodeImage: (bytes) => createImageBitmap(new Blob([new Uint8Array(bytes)])),

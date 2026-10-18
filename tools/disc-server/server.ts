@@ -1,7 +1,9 @@
 /// <reference types="node" />
 /*
- * Development disc server (spec 2026-10-17 §4.5): serves disc folders on the Mac to devices on the home network with
- * HTTP byte ranges, and the built player from the same origin. The seed of the NAS server (cross-browser spec §4).
+ * Development disc server (spec 2026-10-17 §4.5): serves disc folders on the Mac to devices on the home network, and the
+ * built player from the same origin. It speaks the NAS server's disc API (docs/superpowers/specs/2026-10-17-nas-server-
+ * design.md): the library listing, manifests with inlined metadata and range reads under `/api/`, so the player opens
+ * its discs through the same RemoteSource and HttpTransport as a NAS disc (ruling R19).
  *
  *   npm run disc-server -- --root <dir> [--root <dir>…] [--port 8443] [--cert cert.pem --key key.pem] [--dist dist]
  *
@@ -9,13 +11,20 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, readdirSync, readFileSync, realpathSync, statSync, type Stats } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, type Stats } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { createServer as createHttpServer, type IncomingMessage, type RequestListener, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { basename, extname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { DiscEntry, LibraryListing } from '../../src/engine/disc/nas-api';
+// The NAS server's own manifest, file resolution and range parsing: the dev server answers exactly as the NAS does.
+import { buildManifest, largestClip, resolveDiscFile } from '../../server/src/manifest';
+import { parseRange } from '../../server/src/ranges';
+
+export { parseRange };
 
 export interface Disc {
   /** Stable across runs: a hash of the disc folder's real path. */
@@ -23,6 +32,8 @@ export interface Disc {
   readonly name: string;
   /** Real path of the folder that contains BDMV. */
   readonly dir: string;
+  /** The folder relative to the root it was found under, prefixed with that root's name (DiscEntry.path). */
+  readonly path: string;
 }
 
 export interface DiscHandlerOptions {
@@ -80,25 +91,6 @@ export function isLocalAddress(address: string): boolean {
   return false;
 }
 
-/**
- * One `bytes=` range against a file of `size` bytes: the inclusive span, 'unsatisfiable' (416), or null when the
- * header is malformed or asks for several ranges, which RFC 9110 lets a server ignore (the whole file is sent).
- */
-export function parseRange(header: string, size: number): { start: number; end: number } | 'unsatisfiable' | null {
-  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (!m || (m[1] === '' && m[2] === '')) return null;
-  if (m[1] === '') {
-    const suffix = Number(m[2]);
-    if (suffix === 0 || size === 0) return 'unsatisfiable';
-    return { start: Math.max(0, size - suffix), end: size - 1 };
-  }
-  const start = Number(m[1]);
-  const end = m[2] === '' ? Number.POSITIVE_INFINITY : Number(m[2]);
-  if (end < start) return null;
-  if (start >= size) return 'unsatisfiable';
-  return { start, end: Math.min(end, size - 1) };
-}
-
 function childNamed(dir: string, name: string): string | null {
   try {
     const found = readdirSync(dir).find((n) => n.toUpperCase() === name);
@@ -117,11 +109,11 @@ function isDisc(dir: string): boolean {
 /** Every folder under `roots` (or a root itself) that contains BDMV/index.bdmv, sorted by name. */
 export function findDiscs(roots: readonly string[]): Disc[] {
   const discs = new Map<string, Disc>();
-  const visit = (dir: string, depth: number): void => {
+  const visit = (dir: string, depth: number, path: string): void => {
     if (isDisc(dir)) {
       const real = realpathSync(dir);
       const id = createHash('sha256').update(real).digest('hex').slice(0, 16);
-      discs.set(id, { id, name: basename(dir), dir: real });
+      discs.set(id, { id, name: basename(dir), dir: real, path });
       return;
     }
     if (depth >= MAX_DEPTH) return;
@@ -135,31 +127,14 @@ export function findDiscs(roots: readonly string[]): Disc[] {
       if (name.startsWith('.')) continue;
       const child = join(dir, name);
       try {
-        if (statSync(child).isDirectory()) visit(child, depth + 1);
+        if (statSync(child).isDirectory()) visit(child, depth + 1, `${path}/${name}`);
       } catch {
         // unreadable or a dangling link
       }
     }
   };
-  for (const root of roots) visit(resolve(root), 0);
+  for (const root of roots) visit(resolve(root), 0, basename(resolve(root)));
   return [...discs.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-}
-
-/** Every regular file of a disc as a root-relative path (the shape normalizeDiscPaths takes); links leaving the disc are skipped. */
-function manifest(disc: Disc): Array<{ path: string; size: number }> {
-  const files: Array<{ path: string; size: number }> = [];
-  const walk = (rel: string): void => {
-    for (const name of readdirSync(join(disc.dir, rel)).sort()) {
-      if (name.startsWith('.')) continue;
-      const path = rel === '' ? name : `${rel}/${name}`;
-      const stat = containedStat(disc.dir, path);
-      if (!stat) continue;
-      if (stat.isDirectory()) walk(path);
-      else if (stat.isFile()) files.push({ path, size: stat.size });
-    }
-  };
-  walk('');
-  return files;
 }
 
 /** stat of `rel` under `dir`, or null when it does not exist or resolves (through a link) outside `dir`. */
@@ -202,10 +177,11 @@ function tokenMatches(given: string | null, token: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** The token as the NAS server takes it (server/src/app.ts requireToken): `Authorization: Bearer`, else the `t=` query. */
 function requestToken(req: IncomingMessage, url: URL): string | null {
   const header = req.headers.authorization;
   const bearer = header && /^Bearer\s+(.+)$/i.exec(header);
-  return bearer ? bearer[1]!.trim() : url.searchParams.get('token');
+  return bearer ? bearer[1]!.trim() : url.searchParams.get('t');
 }
 
 function plain(res: ServerResponse, status: number, text: string): void {
@@ -213,14 +189,53 @@ function plain(res: ServerResponse, status: number, text: string): void {
   res.end(`${text}\n`);
 }
 
-function json(res: ServerResponse, value: unknown): void {
-  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+function json(res: ServerResponse, value: unknown, status = 200): void {
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(value));
 }
 
-/** A file, whole (200) or one range of it (206), streamed from disk: never more than the asked range is read. */
-function sendFile(req: IncomingMessage, res: ServerResponse, path: string, size: number, headers: Record<string, string>): void {
-  const range = req.headers.range === undefined ? null : parseRange(req.headers.range, size);
+/** Bytes of the regular files under a disc folder's BDMV and CERTIFICATE, the ones its manifest lists (links are not followed). */
+function discBytes(dir: string): number {
+  let total = 0;
+  const walk = (abs: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(abs);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (name.startsWith('.')) continue;
+      try {
+        const st = lstatSync(join(abs, name));
+        if (st.isDirectory()) walk(join(abs, name));
+        else if (st.isFile()) total += st.size;
+      } catch {
+        // vanished meanwhile
+      }
+    }
+  };
+  for (const top of ['BDMV', 'CERTIFICATE']) {
+    const found = childNamed(dir, top);
+    if (found) walk(found);
+  }
+  return total;
+}
+
+/** A disc as the NAS library lists it. */
+function discEntry(disc: Disc): DiscEntry {
+  return { id: disc.id, name: disc.name, path: disc.path, kind: 'folder', sizeBytes: discBytes(disc.dir) };
+}
+
+/** First 4 MiB of the largest clip, as the NAS's probe route sends it (the pre-flight throughput check). */
+const PROBE_BYTES = 4_194_304;
+
+/**
+ * A file, whole (200) or one range of it (206), streamed from disk: never more than the asked range is read. `ranges`
+ * false sends the first `size` bytes whole, whatever the request asks (the probe).
+ */
+function sendFile(req: IncomingMessage, res: ServerResponse, path: string, size: number, headers: Record<string, string>, ranges = true): void {
+  const range = ranges ? parseRange(req.headers.range, size) : null;
   if (range === 'unsatisfiable') {
     res.writeHead(416, { ...headers, 'Content-Range': `bytes */${size}` });
     res.end();
@@ -245,7 +260,17 @@ function sendFile(req: IncomingMessage, res: ServerResponse, path: string, size:
   stream.pipe(res);
 }
 
-/** The request handler: LAN filter, then the player at `/`, then the token-protected disc API under `/discs`. */
+/**
+ * The request handler: LAN filter, then the token-protected NAS disc API under `/api/`, then the player at `/`.
+ *
+ *   GET /api/library?path=                  LibraryListing: every disc, flat (no folders), never scanning
+ *   GET /api/discs/<id>/manifest            DiscManifest (server/src/manifest.ts buildManifest)
+ *   GET|HEAD /api/discs/<id>/files/<path>   a Range of the file (any case, under BDMV or CERTIFICATE), or all of it
+ *   GET|HEAD /api/discs/<id>/probe          the first 4 MiB of the largest clip
+ *
+ * Errors are the NAS's: 401 `{ error: 'unauthorized' }`, 404 `{ error: 'disc-changed' }` for an unknown disc (the
+ * engine shows "This disc changed"), 404 `{ error: 'not found' }` for a missing file.
+ */
 export function createDiscHandler(options: DiscHandlerOptions): RequestListener {
   const remoteOf = options.remoteAddressOf ?? ((req: IncomingMessage) => req.socket.remoteAddress);
   const distDir = options.distDir && existsSync(options.distDir) ? realpathSync(options.distDir) : null;
@@ -257,6 +282,39 @@ export function createDiscHandler(options: DiscHandlerOptions): RequestListener 
     return discs.find((d) => d.id === id);
   };
 
+  const api = async (req: IncomingMessage, res: ServerResponse, url: URL, segments: readonly string[]): Promise<void> => {
+    if (!tokenMatches(requestToken(req, url), options.token)) return json(res, { error: 'unauthorized' }, 401);
+    const read = segments[1] === 'discs' && segments[3] !== 'manifest';
+    if (req.method === 'HEAD' && !read) return plain(res, 405, 'Method not allowed.');
+    if (segments.length === 2 && segments[1] === 'library') {
+      discs = findDiscs(options.roots);
+      const listing: LibraryListing = { folders: [], discs: discs.map(discEntry), scanning: false };
+      return json(res, listing);
+    }
+    if (segments[1] !== 'discs' || segments.length < 4) return json(res, { error: 'not found' }, 404);
+    const disc = discById(segments[2]!);
+    if (!disc || !isDisc(disc.dir)) return json(res, { error: 'disc-changed' }, 404);
+    const headers = { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' };
+    if (segments.length === 4 && segments[3] === 'manifest') return json(res, await buildManifest(disc.dir, { id: disc.id, name: disc.name }));
+    if (segments.length === 4 && segments[3] === 'probe') {
+      const clip = await largestClip(disc.dir);
+      if (!clip) return json(res, { error: 'not found' }, 404);
+      return sendFile(req, res, clip.abs, Math.min(clip.size, PROBE_BYTES), headers, false);
+    }
+    if (segments.length > 4 && segments[3] === 'files') {
+      const file = await resolveDiscFile(disc.dir, segments.slice(4).join('/'));
+      if (!file) return json(res, { error: 'not found' }, 404);
+      let size: number;
+      try {
+        size = (await stat(file)).size;
+      } catch {
+        return json(res, { error: 'not found' }, 404);
+      }
+      return sendFile(req, res, file, size, headers);
+    }
+    return json(res, { error: 'not found' }, 404);
+  };
+
   return (req, res) => {
     const remote = remoteOf(req);
     if (!remote || !isLocalAddress(remote)) return plain(res, 403, 'Only devices on the local network may connect.');
@@ -266,7 +324,7 @@ export function createDiscHandler(options: DiscHandlerOptions): RequestListener 
     const segments = safeSegments(target.split(/[?#]/, 1)[0]!);
     if (!segments) return plain(res, 400, 'Bad path.');
 
-    if (segments[0] !== 'discs') {
+    if (segments[0] !== 'api') {
       if (req.method === 'OPTIONS') return plain(res, 405, 'Method not allowed.');
       return serveApp(req, res, distDir, segments);
     }
@@ -282,22 +340,10 @@ export function createDiscHandler(options: DiscHandlerOptions): RequestListener 
       res.end();
       return;
     }
-    if (!tokenMatches(requestToken(req, url), options.token)) return plain(res, 401, 'Missing or wrong token.');
-
-    if (segments.length === 1) {
-      discs = findDiscs(options.roots);
-      return json(res, discs.map(({ id, name }) => ({ id, name })));
-    }
-    const disc = discById(segments[1]!);
-    if (!disc) return plain(res, 404, 'No such disc.');
-    if (segments.length === 3 && segments[2] === 'manifest') return json(res, { files: manifest(disc) });
-    if (segments.length > 3 && segments[2] === 'file') {
-      const rel = segments.slice(3).join('/');
-      const stat = containedStat(disc.dir, rel);
-      if (!stat?.isFile()) return plain(res, 404, 'No such file.');
-      return sendFile(req, res, join(disc.dir, rel), stat.size, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' });
-    }
-    return plain(res, 404, 'Not found.');
+    api(req, res, url, segments).catch(() => {
+      if (!res.headersSent) json(res, { error: 'internal' }, 500);
+      else res.destroy();
+    });
   };
 }
 
@@ -312,6 +358,24 @@ function serveApp(req: IncomingMessage, res: ServerResponse, distDir: string | n
     'Content-Type': MIME[extname(rel).toLowerCase()] ?? 'application/octet-stream',
     'Cache-Control': 'no-cache',
   });
+}
+
+/** A disc's API base on the server at `origin` (`RemoteDiscSpec.base`, the player's `?disc=`): `<origin>/api/discs/<id>/`. */
+export function discApiBase(origin: string, id: string): string {
+  return `${origin}/api/discs/${encodeURIComponent(id)}/`;
+}
+
+/**
+ * The API base of the disc named `name` on a running disc server at `origin`, looked up in its library listing (what the
+ * device tools open as `?disc=`).
+ */
+export async function servedDiscBase(origin: string, token: string, name: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${origin}/api/library?path=`, { headers: { Authorization: `Bearer ${token}` }, ...(signal ? { signal } : {}) });
+  if (!response.ok) throw new Error(`the disc server answered ${response.status} to /api/library`);
+  const listing = (await response.json()) as LibraryListing;
+  const found = listing.discs.find((d) => d.name === name);
+  if (!found) throw new Error(`the disc server has no disc named "${name}" (it has: ${listing.discs.map((d) => d.name).join(', ')})`);
+  return discApiBase(origin, found.id);
 }
 
 /** The machine's loopback and private LAN IPv4 addresses: the only ones the server listens on. */
@@ -381,7 +445,7 @@ function main(argv: readonly string[]): void {
   const origin = `${scheme}://${lan}:${opts.port}`;
   console.log(`\nPlayer (lists the discs): ${origin}/?token=${token}`);
   console.log(discs.length === 0 ? '\nNo discs (folders containing BDMV/index.bdmv) under the roots.' : '\nDiscs:');
-  for (const d of discs) console.log(`  ${d.name}: ${origin}/?disc=${encodeURIComponent(`${origin}/discs/${d.id}`)}&token=${token}`);
+  for (const d of discs) console.log(`  ${d.name}: ${origin}/?disc=${encodeURIComponent(discApiBase(origin, d.id))}&token=${token}`);
   console.log(`\nListening on ${addresses.map((a) => `${a}:${opts.port}`).join(', ')}. Ctrl-C stops.`);
 }
 

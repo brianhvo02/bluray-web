@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { skipWithoutH264 } from './support';
+import { setFolder, skipWithoutH264 } from './support';
 
 // fixtures/synthetic/disc-subs (scripts/make-subs-disc.ts): a 12 s feature with PG stream 1 (eng: 1–3 s, a forced caption
 // 4–6 s, 8–10 s) and stream 2 (jpn: 2–5 s, 7–9 s). First Play turns English on and plays 00000; title 2 plays 00001,
@@ -23,14 +23,61 @@ async function telemetry(page: Page): Promise<SubtitleTelemetry | null> {
   return page.evaluate(() => (window as unknown as { __blurayTelemetry?: SubtitleTelemetry | null }).__blurayTelemetry ?? null);
 }
 
-/** Polls telemetry until a sample taken in [fromUs, toUs) arrives (samples come every 500 ms) and returns it. */
-async function sampleBetween(page: Page, fromUs: number, toUs: number): Promise<SubtitleTelemetry> {
+type SampleLog = { __telemetrySamples?: SubtitleTelemetry[] };
+
+/**
+ * Records every telemetry sample the page receives. Reading only the latest one misses samples: the main thread can
+ * receive two in one burst, and after a seek the latest one is still the pre-seek sample for a few hundred ms.
+ */
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as SampleLog & { __blurayTelemetry?: SubtitleTelemetry | null };
+    const samples: SubtitleTelemetry[] = [];
+    let latest: SubtitleTelemetry | null = null;
+    w.__telemetrySamples = samples;
+    Object.defineProperty(w, '__blurayTelemetry', {
+      configurable: true,
+      get: () => latest,
+      set: (t: SubtitleTelemetry | null) => {
+        if (t && t !== latest) samples.push(t);
+        latest = t;
+      },
+    });
+  });
+});
+
+const samplesFrom = (page: Page, start: number): Promise<SubtitleTelemetry[]> =>
+  page.evaluate((i) => ((window as unknown as SampleLog).__telemetrySamples ?? []).slice(i), start);
+
+/**
+ * Plays from the start (seeking to 0) and returns the index of the first telemetry sample taken after the seek: the
+ * first one whose clock is behind the sample before it. The clock is first let run past 1 s so that step back shows.
+ */
+async function playFromStart(page: Page): Promise<number> {
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(1_000_000);
+  const mark = (await samplesFrom(page, 0)).length - 1;
+  await seekTo(page, 0);
+  let start = -1;
+  await expect
+    .poll(async () => {
+      const after = await samplesFrom(page, mark);
+      const i = after.findIndex((t, k) => k > 0 && t.clockUs < after[k - 1]!.clockUs);
+      if (i > 0) start = mark + i;
+      return start;
+    }, { timeout: 10_000, intervals: [50] })
+    .toBeGreaterThan(0);
+  return start;
+}
+
+/** Waits for the first sample from index `start` on that was taken in [fromUs, toUs) (samples come every 500 ms) and returns it. */
+async function sampleBetween(page: Page, start: number, fromUs: number, toUs: number): Promise<SubtitleTelemetry> {
   let found: SubtitleTelemetry | null = null;
   await expect
     .poll(async () => {
-      const t = await telemetry(page);
-      if (t && t.clockUs >= fromUs && t.clockUs < toUs) found = t;
-      if (t && t.clockUs >= toUs && !found) throw new Error(`no telemetry sample between ${fromUs} and ${toUs} us (now ${t.clockUs})`);
+      const samples = await samplesFrom(page, start);
+      found = samples.find((t) => t.clockUs >= fromUs && t.clockUs < toUs) ?? null;
+      const past = samples.find((t) => t.clockUs >= toUs);
+      if (past && !found) throw new Error(`no telemetry sample between ${fromUs} and ${toUs} us (next at ${past.clockUs})`);
       return found !== null;
     }, { timeout: 15_000, intervals: [50] })
     .toBe(true);
@@ -40,7 +87,7 @@ async function sampleBetween(page: Page, fromUs: number, toUs: number): Promise<
 async function openSubsDisc(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 }
 
@@ -88,9 +135,9 @@ test('shows a picked PG stream at its time', async ({ page }) => {
   await openMenu(page);
   await expect(page.getByTestId('subtitle-pg-1')).toHaveAttribute('aria-checked', 'true'); // First Play turned English on
   await page.getByTestId('subtitle-pg-1').click();
-  await seekTo(page, 0); // from the start, so the 1 s display set is read again
-  expect((await sampleBetween(page, 1_200_000, 2_800_000)).pg?.objectsShown).toBeGreaterThan(0);
-  expect((await sampleBetween(page, 3_200_000, 3_900_000)).pg?.objectsShown).toBe(0);
+  const start = await playFromStart(page); // from the start, so the 1 s display set is read again
+  expect((await sampleBetween(page, start, 1_200_000, 2_800_000)).pg?.objectsShown).toBeGreaterThan(0);
+  expect((await sampleBetween(page, start, 3_200_000, 3_900_000)).pg?.objectsShown).toBe(0);
   expect((await telemetry(page))!.pgErrors).toBe(0);
 });
 
@@ -98,9 +145,9 @@ test('with subtitles off shows the forced caption only', async ({ page }) => {
   await openSubsDisc(page);
   await openMenu(page);
   await page.getByTestId('subtitle-off').click();
-  await seekTo(page, 0);
-  expect((await sampleBetween(page, 1_200_000, 2_800_000)).pg?.objectsShown ?? 0).toBe(0);
-  const forced = await sampleBetween(page, 4_200_000, 5_800_000);
+  const start = await playFromStart(page);
+  expect((await sampleBetween(page, start, 1_200_000, 2_800_000)).pg?.objectsShown ?? 0).toBe(0);
+  const forced = await sampleBetween(page, start, 4_200_000, 5_800_000);
   expect(forced.pg).toEqual({ objectsShown: 1, forced: 1 });
 });
 

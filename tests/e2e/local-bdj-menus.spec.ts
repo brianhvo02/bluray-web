@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
-import { CHROME_ONLY, expectBarHidden } from './support';
+import { CHROME_ONLY, expectBarHidden, setFolder } from './support';
 
 /**
  * Menu responsiveness on the developer's BD-J discs (5d spec §4.2): a key press or a click reaches a visible menu
@@ -63,7 +63,7 @@ async function timedKey(page: Page, disc: string, key: string, quietMs = 1000): 
 
 async function open(page: Page, disc: string): Promise<void> {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(join(LOCAL, disc));
+  await setFolder(page.getByTestId('folder-input'), join(LOCAL, disc));
 }
 
 test('A_NEW_ERA: arrows and Enter on the main menu show within 0.2 s; a click, which the disc ignores, offers the remote', async ({ page }) => {

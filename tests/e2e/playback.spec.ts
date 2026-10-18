@@ -1,11 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
-import { CHROME_ONLY, skipWithoutH264 } from './support';
-import { collectWindows, expectInSync, telemetry, type TelemetrySample } from './telemetry';
+import { CHROME_ONLY, setFolder, skipWithoutH264 } from './support';
+import { collectWindows, expectInSync, pausedClockUs, recordTelemetrySamples, telemetry, telemetrySamples, type TelemetrySample } from './telemetry';
 
 const DISC = 'fixtures/synthetic/disc1';
 async function openDisc(page: Page, folder = DISC): Promise<void> {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(folder);
+  await setFolder(page.getByTestId('folder-input'), folder);
   await expect(page.getByTestId('playlist-00000')).toBeVisible();
 }
 
@@ -51,6 +51,22 @@ test('skips to the next chapter and is back in sync within a second', async ({ p
   expectInSync(windows);
 });
 
+test('the folder input picks folders from its first render', async ({ page }) => {
+  // Records whether the input ever reached the DOM without webkitdirectory: a folder chosen through it in that window
+  // (or Playwright's setInputFiles(folder), which then throws) would not be read as a folder.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __folderInputSeen?: boolean[] };
+    w.__folderInputSeen = [];
+    new MutationObserver(() => {
+      const input = document.querySelector('[data-testid="folder-input"]');
+      if (input && w.__folderInputSeen!.length === 0) w.__folderInputSeen!.push(input.hasAttribute('webkitdirectory'));
+    }).observe(document, { childList: true, subtree: true });
+  });
+  await page.goto('/');
+  await expect(page.getByTestId('folder-input')).toHaveAttribute('webkitdirectory', '');
+  expect(await page.evaluate(() => (window as unknown as { __folderInputSeen: boolean[] }).__folderInputSeen)).toEqual([true]);
+});
+
 test('opens another disc after closing the current one', async ({ page }) => {
   await openDisc(page);
   await startPlaylist(page, '00000');
@@ -60,7 +76,7 @@ test('opens another disc after closing the current one', async ({ page }) => {
   await expect(page.getByTestId('landing')).toBeVisible();
   await page.waitForTimeout(500);
   await expect(page.getByTestId('landing')).toBeVisible(); // late events from the old disc must not bring the player back
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await startPlaylist(page, '00000');
   await expect.poll(async () => (await page.evaluate(() => (window as unknown as { __blurayTelemetry?: { clockUs: number } | null }).__blurayTelemetry?.clockUs)) ?? 0).toBeGreaterThan(1_000_000);
 });
@@ -76,15 +92,15 @@ test('a key press brings the hidden controls back', async ({ page }) => {
 });
 
 test('pauses and resumes', async ({ page }) => {
+  await recordTelemetrySamples(page);
   await openDisc(page);
   await startPlaylist(page, '00000');
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5000 }).toBeGreaterThan(500_000);
+  const beforePause = (await telemetrySamples(page)).length;
   await page.keyboard.press('Space');
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
-  await page.waitForTimeout(300); // let the last pre-pause telemetry sample land
-  const pausedSample = await telemetry(page);
-  expect(pausedSample).not.toBeNull();
-  const paused = (pausedSample as TelemetrySample).clockUs;
+  // Not the latest sample: up to 500 ms after the pause that is still one taken while playing.
+  const paused = await pausedClockUs(page, beforePause);
   expect(paused).toBeGreaterThan(0);
   await page.waitForTimeout(1000);
   const after = await telemetry(page);
@@ -143,7 +159,7 @@ test('stays in sync for ten minutes (nightly)', async ({ page, browserName, isMo
   test.skip(!process.env.NIGHTLY, 'Set NIGHTLY=1 after generating fixtures/local/long-disc (see the README "Nightly sync test" section).');
   test.setTimeout(13 * 60_000);
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles('fixtures/local/long-disc');
+  await setFolder(page.getByTestId('folder-input'), 'fixtures/local/long-disc');
   await startPlaylist(page, '00000');
   const windows = await collectWindows(page, 590_000_000, 12 * 60_000);
   expectInSync(windows);
@@ -152,25 +168,37 @@ test('stays in sync for ten minutes (nightly)', async ({ page, browserName, isMo
 });
 
 test('holding and slowly dragging the seek bar seeks to where it is released', async ({ page }) => {
+  await recordTelemetrySamples(page);
   await openDisc(page);
   await startPlaylist(page, '00000');
   await page.getByTestId('player').hover();
   const bar = await page.getByTestId('seek').boundingBox();
   if (!bar) throw new Error('seek bar not found');
   const y = bar.y + bar.height / 2;
+  const clockUs = async (): Promise<number> => (await telemetry(page))?.clockUs ?? -1;
   await page.mouse.move(bar.x + bar.width * 0.1, y);
   await page.mouse.down();
   await page.waitForTimeout(3500); // longer than the controls' hide delay
   await expect(page.getByTestId('control-bar')).not.toHaveClass(/hidden/);
+  // Pause while still holding, so from here on only a seek moves the clock: how far the 8 s playlist got while a slow
+  // browser ran the steps above no longer matters.
+  const beforePause = (await telemetrySamples(page)).length;
+  await page.keyboard.press('Space');
+  await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
+  const paused = await pausedClockUs(page, beforePause);
+  const target = paused < 4_000_000 ? 0.75 : 0.25; // a release point at least 2 s away from the paused time
   for (let i = 1; i <= 20; i++) {
-    await page.mouse.move(bar.x + bar.width * (0.1 + (0.6 * i) / 20), y);
+    await page.mouse.move(bar.x + bar.width * (0.1 + ((target - 0.1) * i) / 20), y);
     await page.waitForTimeout(50); // slow enough for Chrome to fire a trailing `change` on release
   }
-  const released = (await telemetry(page))?.clockUs ?? Infinity;
-  expect(released).toBeLessThan(5_000_000); // the drag itself did not seek
+  const afterDrag = (await telemetrySamples(page)).length;
+  await expect.poll(async () => (await telemetrySamples(page, afterDrag)).length, { timeout: 5_000, intervals: [50] }).toBeGreaterThan(0);
+  // the drag itself did not seek (a paused clock can still settle by a few ms, as in "pauses and resumes")
+  expect(Math.abs((await clockUs()) - paused)).toBeLessThan(50_000);
   await page.mouse.up();
-  // Released at 70% of 8 s: the clock must reach the target and stay past it, not snap back to the old time.
-  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 1000, intervals: [50] }).toBeGreaterThanOrEqual(5_500_000);
+  // The clock must reach the release point and stay there, not snap back to the old time.
+  const near = (us: number): boolean => Math.abs(us - target * 8_000_000) < 500_000;
+  await expect.poll(async () => near(await clockUs()), { timeout: 5_000, intervals: [50] }).toBe(true);
   await page.waitForTimeout(500);
-  expect((await telemetry(page))?.clockUs ?? 0).toBeGreaterThanOrEqual(5_500_000);
+  expect(near(await clockUs())).toBe(true);
 });

@@ -1,0 +1,67 @@
+# Lives on the NAS as ~/bluray-server/compose.yaml; written by deploy.sh.
+services:
+  bluray-server:
+    image: bluray-server:latest
+    container_name: bluray-server
+    restart: unless-stopped
+    environment:
+      LIBRARY_ROOTS: drv0=/library-mnt/drv0/BDMVs,drv2=/library-mnt/drv2/BDMVs,drv3=/library-mnt/drv3/BDMVs,drv5=/library-mnt/drv5/BDMVs,drv6=/library-mnt/drv6/BDMVs,drv7=/library-mnt/drv7/BDMVs,drv8=/library-mnt/drv8/BDMVs
+      DATA_DIR: /data
+      PORT: "8080"
+      TZ: America/Los_Angeles
+      NIGHTLY_SCAN_AT: "04:00"
+      PUBLIC_BASE: https://mediaserver.tailnet-8e55.ts.net/bluray/api/
+      TRUSTED_PROXY: caddy
+      # The rendezvous Worker (rendezvous/), where owner codes are registered for lookup by code or QR. Empty: codes are
+      # not registered, and only devices that already know the NAS address can pair.
+      RENDEZVOUS_URL: https://bluray-rendezvous.brianhvo02.workers.dev
+    # Each drive's mount point, not its BDMVs folder: the mount point always exists on the root filesystem, so the
+    # container starts with a drive missing, and create_host_path: false means Docker never makes anything under /mnt.
+    # rslave lets a drive mounted after the container started (a late nofail mount) appear inside it. A root whose
+    # BDMVs folder is missing or empty keeps the discs of its last scan.
+    volumes:
+      - type: bind
+        source: /mnt/drv0
+        target: /library-mnt/drv0
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv2
+        target: /library-mnt/drv2
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv3
+        target: /library-mnt/drv3
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv5
+        target: /library-mnt/drv5
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv6
+        target: /library-mnt/drv6
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv7
+        target: /library-mnt/drv7
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - type: bind
+        source: /mnt/drv8
+        target: /library-mnt/drv8
+        read_only: true
+        bind: { create_host_path: false, propagation: rslave }
+      - bluray-data:/data
+    networks:
+      - caddy_default
+
+volumes:
+  bluray-data:
+
+networks:
+  caddy_default:
+    external: true

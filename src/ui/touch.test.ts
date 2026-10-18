@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { beyondLongPressSlop, classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, MENU_WAKE_ZONE_PX, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap } from './touch';
+import { beyondLongPressSlop, classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, MENU_WAKE_ZONE_PX, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap, tapPoint } from './touch';
 
 const ctx = { width: 900, menuActive: false };
 
@@ -213,5 +213,16 @@ describe('missedMenuTapShowsControls (ruling R13)', () => {
     expect(missedMenuTapShowsControls('touch')).toBe(true);
     expect(missedMenuTapShowsControls('mouse')).toBe(false);
     expect(missedMenuTapShowsControls('pen')).toBe(false);
+  });
+});
+
+describe('tapPoint', () => {
+  it('takes the position from the matching pointerdown (iPadOS reports pointerup at 0,0)', () => {
+    expect(tapPoint({ id: 3, x: 165, y: 310 }, { id: 3, x: 0, y: 0 })).toEqual({ x: 165, y: 310 });
+  });
+
+  it('falls back to the pointerup position without a matching pointerdown', () => {
+    expect(tapPoint(null, { id: 3, x: 40, y: 50 })).toEqual({ x: 40, y: 50 });
+    expect(tapPoint({ id: 2, x: 165, y: 310 }, { id: 3, x: 40, y: 50 })).toEqual({ x: 40, y: 50 });
   });
 });

@@ -1,0 +1,62 @@
+import { NasHttpError, type NasClient, type NasDevice } from './nas-client';
+
+export const ADMIN_MESSAGES = {
+  lastOwner: "You can't remove the last owner.",
+} as const;
+
+/** The admin calls the NAS settings screen makes. */
+export type AdminApi = Pick<NasClient['admin'], 'devices' | 'createCode' | 'revokeDevice' | 'rescan'>;
+
+export interface DeviceRow {
+  readonly id: string;
+  /** `name · paired <date> · last seen <relative>`, the name followed by `(this device)` on this device's row. */
+  readonly text: string;
+  /** This device's own row: revoking it asks for confirmation first. */
+  readonly thisDevice: boolean;
+}
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+const count = (n: number, unit: string): string => `${n} ${unit}${n === 1 ? '' : 's'} ago`;
+
+/** How long ago `at` was: `just now`, `N minutes ago`, `N hours ago` or `N days ago`. */
+export function lastSeen(at: number, now: number): string {
+  const ago = now - at;
+  if (ago < MINUTE) return 'just now';
+  if (ago < HOUR) return count(Math.floor(ago / MINUTE), 'minute');
+  if (ago < DAY) return count(Math.floor(ago / HOUR), 'hour');
+  return count(Math.floor(ago / DAY), 'day');
+}
+
+/** A device's row; `dates` sets the locale and time zone of the pairing date (the browser's by default). */
+export function deviceRow(device: NasDevice, now: number, thisDeviceId: string | null, dates: { locale?: string; timeZone?: string } = {}): DeviceRow {
+  const paired = new Intl.DateTimeFormat(dates.locale, { dateStyle: 'medium', timeZone: dates.timeZone }).format(device.pairedAt);
+  const thisDevice = device.id === thisDeviceId;
+  const name = thisDevice ? `${device.name} (this device)` : device.name;
+  return { id: device.id, text: `${name} · paired ${paired} · last seen ${lastSeen(device.lastSeen, now)}`, thisDevice };
+}
+
+/** Time left on a pairing code, `Expires in m:ss` (seconds rounded up), or `Expired`. */
+export function countdown(expiresAt: number, now: number): string {
+  const seconds = Math.ceil((expiresAt - now) / 1000);
+  if (seconds <= 0) return 'Expired';
+  return `Expires in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/** "New pairing code": a guest code, or an owner code when the Owner box is ticked. */
+export function newCode(api: AdminApi, owner: boolean): ReturnType<AdminApi['createCode']> {
+  return api.createCode(owner);
+}
+
+/** Revokes a device; resolves to null, or to the message to show when the NAS refused. */
+export async function revoke(api: AdminApi, id: string): Promise<string | null> {
+  try {
+    await api.revokeDevice(id);
+    return null;
+  } catch (err) {
+    if (err instanceof NasHttpError && err.status === 409 && err.code === 'last-owner') return ADMIN_MESSAGES.lastOwner;
+    return err instanceof Error ? err.message : String(err);
+  }
+}

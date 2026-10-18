@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import type { DiscFiles, DiscSourceRef, HttpDiscRef } from '../disc/http-source';
+import type { DiscSpec } from '../disc/disc-spec';
 import type { ScreenRect } from './background';
 import type { BdjErrorCode } from './errors';
 import type { Coalesce } from './input';
@@ -23,10 +23,10 @@ export type ToBdj =
       readonly status: SharedArrayBuffer;
       /** The graphics plane (graphics-plane.ts) Java's updateGraphicN draws into. */
       readonly plane: SharedArrayBuffer;
-      /** The picked files; empty when the disc is served over HTTP (`discHttp`): Blobs of remote files cannot cross. */
-      readonly discFiles: readonly (readonly [string, Blob])[];
-      /** A disc served over HTTP: the BD-J worker opens its own HttpSource. */
-      readonly discHttp?: HttpDiscRef;
+      /** Picked files, or a disc on the NAS (or the dev disc server), which the BD-J worker reads with its own RemoteSource. */
+      readonly disc: DiscSpec;
+      /** A NAS disc's read-ahead budget (the engine's memory profile). */
+      readonly readAheadBytes: number;
       readonly discId: string | null;
       readonly classLibrary: ClassLibrarySource;
       /** The memory profile's budgets (none: no limits). */
@@ -34,6 +34,8 @@ export type ToBdj =
       /** Report the memory stats (a `memory` message) at once and every this many ms (telemetry runs only). */
       readonly memoryStatsMs?: number;
     }
+  /** A fresh session token for a NAS disc; may arrive before the boot. */
+  | { readonly type: 'remoteToken'; readonly token: string }
   | { readonly type: 'start'; readonly title: number }
   /** `coalesce`: a key repeat or pointer move, which may merge with the one before it in a full queue (input.ts). */
   | { readonly type: 'event'; readonly ev: number; readonly param: number; readonly coalesce?: Coalesce }
@@ -46,7 +48,9 @@ export type FromBdj =
   /** HStillImageBackgroundConfiguration.displayImage: the still's encoded bytes (null: none) and where it goes. */
   | { readonly type: 'background'; readonly image: Uint8Array | null; readonly rect: ScreenRect }
   | { readonly type: 'failed'; readonly code: BdjFailureCode; readonly message: string }
-  | { readonly type: 'memory'; readonly jvm: JvmMemoryStats; readonly freeType: { readonly wasmBytes: number; readonly faces: number } | null };
+  | { readonly type: 'memory'; readonly jvm: JvmMemoryStats; readonly freeType: { readonly wasmBytes: number; readonly faces: number } | null }
+  /** The NAS answered 401: the engine asks the controller for a fresh token and sends it as remoteToken. */
+  | { readonly type: 'remoteTokenNeeded' };
 
 export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';
 
@@ -62,9 +66,3 @@ export type BdjCallName =
   | 'setVirtualPackage'
   | 'setUOMask'
   | 'setKeyInterest';
-
-/** The boot message's disc fields for picked files or a served disc. */
-export function bootDiscFields(disc: DiscFiles | DiscSourceRef): { readonly discFiles: DiscFiles; readonly discHttp?: HttpDiscRef } {
-  if (!('kind' in disc)) return { discFiles: disc };
-  return disc.kind === 'files' ? { discFiles: disc.entries } : { discFiles: [], discHttp: { baseUrl: disc.baseUrl, token: disc.token } };
-}

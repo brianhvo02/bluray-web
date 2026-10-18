@@ -3,13 +3,14 @@
 FROM ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 
 # The base image has no ca-certificates, which the https snapshot service needs: bootstrap that one package from the
-# live archive, then switch apt to the snapshot for everything else.
+# live archive, then switch apt to the snapshot for everything else. ca-certificates is then reinstalled at the snapshot's
+# version (downgrading a newer live one): the class library's cacerts is generated from it, so it must not drift.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
  && echo 'APT::Snapshot "20261015T000000Z";' > /etc/apt/apt.conf.d/50snapshot \
  && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential meson ninja-build pkg-config git ca-certificates python3 patch \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-downgrades \
+    build-essential meson ninja-build pkg-config git ca-certificates=20260601~24.04.1 python3 patch \
     openjdk-8-jdk-headless ant libfreetype-dev \
  && rm -rf /var/lib/apt/lists/*
 

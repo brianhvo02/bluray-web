@@ -42,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import type { MenuKey } from '../../src/engine/protocol';
 import { parseKeyScript, type KeyStep } from '../../tests/bdj/key-script';
-import { createDiscHandler } from '../disc-server/server';
+import { createDiscHandler, servedDiscBase } from '../disc-server/server';
 import { ensureAppium, parseMs, resolveDevice, safariCaps } from './run';
 import { DeviceSession, PageReloadedError, write } from './session';
 
@@ -776,14 +776,6 @@ async function serve(o: GateOptions): Promise<{ origin: string; token: string; c
   return { origin: `http://127.0.0.1:${o.port}`, token, close: () => new Promise<void>((res) => { server.closeAllConnections(); server.close(() => res()); }) };
 }
 
-async function discId(origin: string, token: string, name: string): Promise<string> {
-  const r = await fetch(`${origin}/discs`, { headers: { authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error(`the disc server answered ${r.status} to /discs`);
-  const found = ((await r.json()) as Array<{ id: string; name: string }>).find((d) => d.name === name);
-  if (!found) throw new Error(`the disc server has no disc named ${name}`);
-  return found.id;
-}
-
 const slug = (s: string): string => s.replace(/^sim:/, 'sim-').replace(/[^A-Za-z0-9._-]+/g, '-');
 
 async function main(): Promise<void> {
@@ -796,8 +788,8 @@ async function main(): Promise<void> {
     for (const disc of o.discs) {
       const cfg = DISCS[disc]!;
       const plan = loadPlan(disc);
-      const id = await discId(server.origin, server.token, disc);
-      const url = `${server.origin}/?telemetry=1&disc=${encodeURIComponent(`${server.origin}/discs/${id}`)}&token=${encodeURIComponent(server.token)}`;
+      const discBase = await servedDiscBase(server.origin, server.token, disc);
+      const url = `${server.origin}/?telemetry=1&disc=${encodeURIComponent(discBase)}&token=${encodeURIComponent(server.token)}`;
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const base = join(o.out, `${slug(o.target)}${o.touch ? '-touch' : ''}-${disc}-${stamp}`);
       const page = new Page(driver);

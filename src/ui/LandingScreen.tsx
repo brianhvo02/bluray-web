@@ -1,43 +1,108 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
+import { LibraryScreen } from './nas/LibraryScreen';
+import { PairScreen } from './nas/PairScreen';
+import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
+import type { NasPairing } from './nas/nas-store';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
-import { listServerDiscs, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
+import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
+import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
+
+/** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
+const COPY_NOTICE_DELAY_MS = 1500;
 
 interface LandingScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
+  readonly nas: NasClient;
+  /** A code from a `?pair=` link: the pair screen opens with it filled in. */
+  readonly pairCode?: string;
 }
 
-export function LandingScreen({ controller, snapshot }: LandingScreenProps): ReactElement {
+export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingScreenProps): ReactElement {
   const [capabilities] = useState(() => checkCapabilities());
   const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  // tools/disc-server: ?disc=<url>&token= or ?token= (spec 2026-10-17 §4.5)
+  // tools/disc-server: ?disc=<disc API base>&token= or ?token= (spec 2026-10-17 §4.5). Each disc's manifest is fetched
+  // before its button is enabled, so the tap opens it at once (audio starts inside the tap), as the NAS pre-flight does.
   const [serverLink] = useState<ServerLink | null>(() => serverLinkFromLocation(window.location.href));
   const [serverDiscs, setServerDiscs] = useState<ServerDisc[] | null>(null);
+  const [serverSpecs, setServerSpecs] = useState<ReadonlyMap<string, RemoteDiscSpec | string>>(new Map());
   const [serverError, setServerError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!serverLink) return;
     let cancelled = false;
     listServerDiscs(serverLink).then(
-      (discs) => !cancelled && setServerDiscs(discs),
+      (discs) => {
+        if (cancelled) return;
+        setServerDiscs(discs);
+        for (const disc of discs) {
+          serverDiscSpec(disc, serverLink.token).then(
+            (spec) => !cancelled && setServerSpecs((m) => new Map(m).set(disc.base, spec)),
+            (err: unknown) => !cancelled && setServerSpecs((m) => new Map(m).set(disc.base, err instanceof Error ? err.message : String(err))),
+          );
+        }
+      },
       (err: unknown) => !cancelled && setServerError(`The disc server could not be reached: ${err instanceof Error ? err.message : String(err)}`),
     );
     return () => {
       cancelled = true;
     };
   }, [serverLink]);
+  /** The folder picker is open or handing over its files (the input fallback); the copy notice shows after COPY_NOTICE_DELAY_MS. */
+  const [awaitingFiles, setAwaitingFiles] = useState(false);
+  const [copyNotice, setCopyNotice] = useState(false);
 
   useEffect(() => {
-    inputRef.current?.setAttribute('webkitdirectory', '');
     listRecentDiscs().then(setRecent, () => setRecent([]));
   }, []);
+
+  /** undefined while loading; null when this device isn't paired. */
+  const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
+  const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
+  const [browsing, setBrowsing] = useState(false);
+  const loadPairing = (): void => {
+    nas.pairing().then(setPairing, () => setPairing(null));
+  };
+  useEffect(loadPairing, [nas]);
+  // A NAS call that finds this device revoked clears the pairing: say so and show the code field again.
+  useEffect(
+    () =>
+      nas.onUnpaired(() => {
+        setBrowsing(false);
+        setLocalError(NAS_MESSAGES.unpaired);
+        loadPairing();
+      }),
+    [nas],
+  );
+  const forgetNas = (): void => {
+    setPairRequested(false);
+    setBrowsing(false);
+    nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
+  };
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const cancel = (): void => setAwaitingFiles(false);
+    input.addEventListener('cancel', cancel);
+    return () => input.removeEventListener('cancel', cancel);
+  }, []);
+
+  useEffect(() => {
+    if (!awaitingFiles) {
+      setCopyNotice(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setCopyNotice(true), COPY_NOTICE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [awaitingFiles]);
 
   const run = (task: Promise<void>): void => {
     task.catch((err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
@@ -68,6 +133,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
     setLocalError(null);
     controller.startAudio(); // must happen inside the click gesture
     if (!capabilities.canPickDirectory) {
+      setAwaitingFiles(true);
       inputRef.current?.click();
       return;
     }
@@ -75,6 +141,7 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
   };
 
   const onInput = (e: ChangeEvent<HTMLInputElement>): void => {
+    setAwaitingFiles(false);
     setLocalError(null);
     const files = e.target.files;
     if (files && files.length > 0) controller.open(collectFromFileList(files));
@@ -113,12 +180,14 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
     );
   };
 
-  const onServerDisc = (disc: ServerDisc): void => {
+  const onServerDisc = (spec: RemoteDiscSpec): void => {
     setLocalError(null);
-    if (serverLink) controller.openRemote({ baseUrl: disc.baseUrl, token: serverLink.token }); // starts audio inside the tap
+    controller.openRemote(spec); // starts audio inside the tap; the server's token lasts the run, so there is no refresh
   };
 
   const error = localError ?? snapshot.error?.message ?? null;
+  const nasWaiting = snapshot.engineState === 'loading' ? snapshot.notices.find((n) => n.code === 'nas-waiting') : undefined;
+  const paired = pairing !== undefined && pairing !== null && !pairRequested;
   const errorPaths = localError ? [] : (snapshot.error?.paths ?? []);
 
   return (
@@ -148,7 +217,8 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         <button type="button" data-testid="open-folder" disabled={!capabilities.core.ok} onClick={onPickFolder}>
           Open disc folder
         </button>
-        <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" onChange={onInput} />
+        {/* webkitdirectory is rendered, not set in an effect: the input must pick folders from the moment it exists */}
+        <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" {...{ webkitdirectory: '' }} onChange={onInput} />
       </div>
       {serverLink && (
         <section className="recent server-discs" data-testid="server-discs">
@@ -157,18 +227,36 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
           {serverDiscs?.length === 0 && <p className="hint">The server has no discs.</p>}
           {serverDiscs && serverDiscs.length > 0 && (
             <ul>
-              {serverDiscs.map((disc) => (
-                <li key={disc.baseUrl}>
-                  <button type="button" disabled={!capabilities.core.ok} onClick={() => onServerDisc(disc)}>
-                    {disc.name}
-                  </button>
-                </li>
-              ))}
+              {serverDiscs.map((disc) => {
+                const spec = serverSpecs.get(disc.base);
+                return (
+                  <li key={disc.base}>
+                    <button
+                      type="button"
+                      disabled={!capabilities.core.ok || typeof spec !== 'object'}
+                      onClick={() => typeof spec === 'object' && onServerDisc(spec)}
+                    >
+                      {disc.name}
+                    </button>
+                    {typeof spec === 'string' && <p className="hint">{spec}</p>}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
       )}
+      {copyNotice && (
+        <p className="status" role="status" data-testid="copy-notice">
+          Waiting for the files… On iPhone and iPad, Safari copies the whole folder before the player can read it, so a full disc can take an hour or more from a USB drive.
+        </p>
+      )}
       {snapshot.engineState === 'loading' && <p className="status">Reading disc…</p>}
+      {nasWaiting && (
+        <p className="status" role="status" data-testid="nas-waiting">
+          {nasWaiting.message}
+        </p>
+      )}
       {error && (
         <div className="error-banner" role="alert" data-testid="error">
           {error}
@@ -183,6 +271,38 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
           )}
         </div>
       )}
+      {pairing !== undefined &&
+        (pairing === null || pairRequested ? (
+          <PairScreen
+            client={nas}
+            initialCode={pairCode}
+            onPaired={() => {
+              setPairRequested(false);
+              setLocalError(null);
+              loadPairing();
+            }}
+          />
+        ) : (
+          <p className="status" data-testid="nas-paired">
+            Paired with the NAS as {pairing.deviceName}.{' '}
+            {!browsing && (
+              <button
+                type="button"
+                data-testid="nas-open"
+                onClick={() => {
+                  setLocalError(null);
+                  setBrowsing(true);
+                }}
+              >
+                Open from NAS
+              </button>
+            )}{' '}
+            <button type="button" data-testid="nas-forget" onClick={forgetNas}>
+              Forget this NAS
+            </button>
+          </p>
+        ))}
+      {paired && browsing && <LibraryScreen nas={nas} controller={controller} onClose={() => setBrowsing(false)} />}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>

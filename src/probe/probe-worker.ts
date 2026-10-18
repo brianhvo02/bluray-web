@@ -3,9 +3,7 @@ import { parseClpi } from '../engine/bdmv/clpi-parser';
 import { CodingType } from '../engine/bdmv/stream-types';
 import { analyzeHevc, hevcCodecString } from '../engine/decode/hevc';
 import type { ByteSource } from '../engine/disc/byte-source';
-import { FileSource } from '../engine/disc/file-source';
-import { HttpSource } from '../engine/disc/http-source';
-import { normalizeDiscPaths } from '../engine/disc/paths';
+import { createByteSource } from '../engine/disc/disc-spec';
 import { M2tsReader } from '../engine/demux/m2ts-reader';
 import type { WorkerInput, WorkerProbe } from './checks';
 
@@ -45,9 +43,12 @@ async function supported(codec: string): Promise<boolean> {
   }
 }
 
+/** The HEVC check reads one GOP in order: a little read-ahead keeps it from fetching each chunk once per small read. */
+const PROBE_READ_AHEAD_BYTES = 16 * 1024 * 1024;
+
 async function openSource(input: WorkerInput): Promise<ByteSource> {
-  if ('server' in input) return HttpSource.open(input.server.baseUrl, input.server.token);
-  return new FileSource(normalizeDiscPaths(input.entries));
+  const disc = 'server' in input ? input.server : { kind: 'files' as const, entries: input.entries };
+  return createByteSource(disc, { fetch: (url, init) => fetch(url, init), readAheadBytes: PROBE_READ_AHEAD_BYTES, onWaiting: () => undefined });
 }
 
 async function hevc(input: WorkerInput): Promise<WorkerProbe['hevc']> {

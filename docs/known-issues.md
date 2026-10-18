@@ -223,8 +223,12 @@ what would change that decision.
 - **The iPadOS detection is the one user-agent exception.** `navigator.platform === 'MacIntel'` with touch points in `src/ui/memory-profile.ts`, because iPadOS reports a Mac.
 - **Constrained memory profile: IG sub-paths over 64 MB don't preload.** The user sees "This disc's menus need more memory than this device allows." and the disc plays without menus.
 - **Canvas-to-`<video>` fullscreen/PiP experiment, left open.** Capturing the canvas into a `<video>` might give iPhone fullscreen and Picture-in-Picture; not tried.
-- **Probe-dependent steps still open until the probe is run on devices:** audio resampling if a device runs a rate other than 48 kHz, a main-thread frame tick if worker rAF is janky, an ASS letter-spacing fallback if `letterSpacing` is missing.
+- **Full discs can't practically be opened from a folder on iPhone or iPad.** Safari copies every picked file out of the Files provider before the page sees it: measured on iPadOS 27, a 0.40 GiB clip from a USB drive took 61 s (about 7 MB/s), so a full disc takes an hour or more on every open. No web API avoids it. The landing screen explains the wait after 1.5 s; iOS watching goes through the NAS (spec steps 2–3).
+- **Offline when the network answers with an error page (fixed).** Found in the tailnet offline test: an origin that had stopped serving still answered the reload with "404 page not found" over the open connection, and the service worker passed it through. A 404 or 5xx answer to a navigation now gets the cached app, as a network failure does (`src/sw.ts`, `tests/e2e/offline.spec.ts`).
+- **Touch pointerup at (0, 0) on the iPad (fixed).** Under remote automation, iPadOS 27 Safari reported a touch's `pointerup` at clientX/clientY 0,0 while `pointerdown` and the synthesized `click` had the real position; taps on menu buttons missed and double taps all fell in the left third. Taps now take their position from the matching `pointerdown` (`tapPoint` in `src/ui/touch.ts`). Whether real fingers do the same is unconfirmed; the fix holds either way.
+- **Probe-dependent steps: none needed on the iPad.** It runs the AudioContext at 48 kHz, has worker `requestAnimationFrame` (p95 18.9 ms) and canvas `letterSpacing`, so no resampling, main-thread frame tick or letter-spacing fallback was built. It lacks canvas `filter`, so ASS blur takes the mask path (Task 13). Re-check on the iPhone when convenient.
 - **Playwright reuses a running preview server on :4173 locally** (`reuseExistingServer`); stop a stale one after changing source.
+- **WebKit on Linux CI runs no real-time playback tests.** On GitHub's GPU-less runners, Playwright's Linux WebKit missed a different set of timing windows on every run (frames presented, remote presses, pauses landing), even on a runner of its own. Tests that need real-time playback skip there (`LINUX_WEBKIT_REALTIME` in `tests/e2e/support.ts`); the landing, capability, folder-picking, layout and offline tests still run. They all run in WebKit on macOS, and real Safari is covered by the real-device test.
 
 ### Device probe results
 
@@ -232,7 +236,8 @@ Fill in from `probe.html` on each device.
 
 | Device | Browser/OS | blob-slice-over-4gib | audio-sample-rate | audio-session | worker-raf | hevc | webgl2-float | canvas-filter | letter-spacing | fullscreen | webkitdirectory | relative-path |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-|  |  |  |  |  |  |  |  |  |  |  |  |  |
+| iPad (2026-10-17) | Safari 27.0.1 (iPadOS, desktop UA) | untested (no clip over 4 GiB handed over) | 48000 | present | rAF, p95 18.9 ms | untested | float and half-float | **missing** | works | yes | yes | paths kept |
+| iPhone |  |  |  |  |  |  |  |  |  |  |  |  |
 
 ## Resolved (for reference)
 

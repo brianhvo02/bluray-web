@@ -23,16 +23,24 @@ function withIsolation(response: Response): Response {
 /** How long a navigation waits for the network before the cached shell is served instead. */
 const NAVIGATION_TIMEOUT_MS = 3000;
 
+/**
+ * A navigation answer that means the app can't be had from the network: a client or server error status. Opaque
+ * redirects (status 0) pass through, so the browser follows them.
+ */
+function navigationFailed(response: Response): boolean {
+  return response.status >= 400;
+}
+
 /** The precached app shell, or the network response when the shell is missing. */
 async function shellOr(network: Promise<Response>): Promise<Response> {
   const shell = await matchPrecache('/index.html');
   return withIsolation(shell ?? (await network));
 }
 
-// Navigations are network-first, so a deploy shows up on the next visit. Offline, or when the network takes longer
-// than NAVIGATION_TIMEOUT_MS, they get the cached shell. Registered before the precache route so it wins for '/' too.
+// Navigations are network-first, so a deploy shows up on the next visit. Offline, when the network answers with an
+// error status, or when it takes longer than NAVIGATION_TIMEOUT_MS, they get the cached shell. Registered before the precache route so it wins for '/' too.
 // The diagnostics page is not precached and must never be answered with the player's shell.
-// Disc reads from tools/disc-server (`/discs/…`, byte ranges, gigabytes) match no route, so they go to the network and
+// Disc reads from tools/disc-server (the NAS disc API under `/api/…`, byte ranges, gigabytes) match no route, so they go to the network and
 // are never cached; the denylist keeps a navigation to one (opening the API in a tab) from getting the shell too.
 registerRoute(
   new NavigationRoute(
@@ -45,7 +53,9 @@ registerRoute(
       });
       try {
         const response = await Promise.race([network, timeout]);
-        if (response) return withIsolation(response);
+        // an error page from the server, a proxy or a CDN (404, 5xx) is as good as offline: the shell is cached
+        if (response && !navigationFailed(response)) return withIsolation(response);
+        if (response) return shellOr(Promise.resolve(response));
       } catch {
         // offline: fall through to the shell
       } finally {
@@ -53,7 +63,7 @@ registerRoute(
       }
       return shellOr(network);
     },
-    { denylist: [/^\/probe(\.html)?(\?.*)?$/, /^\/discs(\/|\?|$)/] },
+    { denylist: [/^\/probe(\.html)?(\?.*)?$/, /^\/api(\/|\?|$)/] },
   ),
 );
 

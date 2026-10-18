@@ -7,13 +7,13 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import type { DiscSpec } from '../disc/disc-spec';
 import type { ScreenRect } from './background';
 import type { PlayerBdjHost } from './player-host';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
-import type { DiscFiles, DiscSourceRef } from '../disc/http-source';
-import { bootDiscFields, type BdjCallName, type BdjFailureCode, type BdjWireValue, type FromBdj, type ToBdj } from './worker-protocol';
+import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
 
 export type { BdjFailureCode } from './worker-protocol';
 
@@ -38,6 +38,8 @@ export interface BdjSessionDeps {
   readonly onLog?: (line: string, error: boolean) => void;
   /** A background still Java asked to show (null: none). */
   readonly onBackground?: (image: Uint8Array | null, rect: ScreenRect) => void;
+  /** The worker's NAS reads got a 401: a fresh token is wanted (setToken delivers it). */
+  readonly onTokenNeeded?: () => void;
   readonly nowMs: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** How long after boot (or the first start) Java has to select a playlist, show a menu or show a background still. */
@@ -74,7 +76,7 @@ export class BdjSession {
   }
 
   /** Settles once the worker has booted, or once the session has ended. */
-  boot(disc: DiscFiles | DiscSourceRef, discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
+  boot(disc: DiscSpec, readAheadBytes: number, discId: string | null, classLibrary: ClassLibrarySource): Promise<void> {
     return new Promise((resolve) => {
       if (this.stopped) return resolve();
       this.armTimeout();
@@ -85,13 +87,19 @@ export class BdjSession {
         registers: this.deps.regs,
         status: this.deps.status.buffer,
         plane: this.deps.plane,
-        ...bootDiscFields(disc),
+        disc,
+        readAheadBytes,
         discId,
         classLibrary,
         ...(memory ? { memory } : {}),
         ...(memoryStatsMs ? { memoryStatsMs } : {}),
       });
     });
+  }
+
+  /** A fresh session token for the worker's NAS reads. */
+  setToken(token: string): void {
+    if (!this.stopped) this.post({ type: 'remoteToken', token });
   }
 
   start(title: number): void {
@@ -159,6 +167,9 @@ export class BdjSession {
         break;
       case 'memory':
         this.deps.onMemory?.(m);
+        break;
+      case 'remoteTokenNeeded':
+        this.deps.onTokenNeeded?.();
         break;
     }
   }

@@ -14,6 +14,7 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseMs, withDevice, write } from './run';
+import { servedDiscBase } from '../disc-server/server';
 
 interface ProbeResult {
   name: string;
@@ -51,17 +52,14 @@ export function parseArgs(argv: readonly string[]): ProbeOptions {
 }
 
 async function discUrl(o: ProbeOptions): Promise<string> {
-  let response: Response;
   try {
-    response = await fetch(`${o.server}/discs`, { headers: { Authorization: `Bearer ${o.token}` }, signal: AbortSignal.timeout(15_000) });
+    return await servedDiscBase(o.server, o.token, o.disc, AbortSignal.timeout(15_000));
   } catch (err) {
-    throw new Error(`could not reach ${o.server}/discs (${String(err)}); over HTTPS set NODE_EXTRA_CA_CERTS to mkcert's rootCA.pem`);
+    if (err instanceof TypeError || (err instanceof DOMException && err.name === 'TimeoutError')) {
+      throw new Error(`could not reach ${o.server} (${String(err)}); over HTTPS set NODE_EXTRA_CA_CERTS to mkcert's rootCA.pem`);
+    }
+    throw err;
   }
-  if (!response.ok) throw new Error(`${o.server}/discs answered ${response.status}`);
-  const discs = (await response.json()) as Array<{ id: string; name: string }>;
-  const disc = discs.find((d) => d.name === o.disc);
-  if (!disc) throw new Error(`the server has no disc named "${o.disc}" (it has: ${discs.map((d) => d.name).join(', ')})`);
-  return `${o.server}/discs/${encodeURIComponent(disc.id)}`;
 }
 
 async function main(): Promise<void> {

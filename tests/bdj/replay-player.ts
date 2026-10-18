@@ -268,7 +268,7 @@ export async function replayPlayerBdj(
     const start = clock.ms;
     t0 = performance.now();
     stepFrom = { events: 0, flushes: 0, at: t0 };
-    await player.handle({ type: 'open', entries: await directoryEntries(dir) });
+    await player.handle({ type: 'open', disc: { kind: 'files', entries: await directoryEntries(dir) } });
     let tailFrom: number | null = null;
     for (;;) {
       if (done && stepIdx >= script.length) {

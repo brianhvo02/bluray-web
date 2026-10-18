@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
-import { createDiscHandler, findDiscs } from '../../../tools/disc-server/server';
+import { createDiscHandler, discApiBase, findDiscs } from '../../../tools/disc-server/server';
+import type { DiscManifest } from '../disc/nas-api';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries } from '../../../tests/helpers/synthetic-disc';
 import { runBdjWorker, type BdjPort } from './bdj-worker';
@@ -24,7 +25,8 @@ describe('runBdjWorker', () => {
       registers: createRegisterBuffer(),
       status: createStatusBlock(),
       plane: createGraphicsPlane(),
-      discFiles: discEntries(fixtureDiscFiles('disc-bdj')),
+      disc: { kind: 'files', entries: discEntries(fixtureDiscFiles('disc-bdj')) },
+      readAheadBytes: 0,
       discId: null,
       classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
     };
@@ -45,7 +47,8 @@ describe('runBdjWorker', () => {
         registers: createRegisterBuffer(),
         status: createStatusBlock(),
         plane: createGraphicsPlane(),
-        discFiles: discEntries(fixtureDiscFiles('disc-bdj')),
+        disc: { kind: 'files', entries: discEntries(fixtureDiscFiles('disc-bdj')) },
+        readAheadBytes: 0,
         discId: null,
         classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
         memory: { classBytes: Infinity, vfsBytes: 64 * 1024 * 1024 },
@@ -60,7 +63,7 @@ describe('runBdjWorker', () => {
     handle.runtime!.jvm.threads.halt(); // ends the reports
   }, 90_000);
 
-  it('opens a disc served over HTTP itself (discHttp), as the engine worker does', async () => {
+  it('reads a disc on the dev disc server itself (a remote DiscSpec, as for a NAS disc), as the engine worker does', async () => {
     const root = fileURLToPath(new URL('../../../fixtures/synthetic/', import.meta.url));
     const paths: string[] = [];
     const handler = createDiscHandler({ roots: [root], token: 't' });
@@ -71,8 +74,17 @@ describe('runBdjWorker', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     try {
       const id = findDiscs([root]).find((d) => d.name === 'disc-bdj')!.id;
+      const base = discApiBase(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, id);
+      const manifest = (await (await fetch(`${base}manifest`, { headers: { Authorization: 'Bearer t' } })).json()) as DiscManifest;
       const received: FromBdj[] = [];
-      const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+      // the engine's part: every call Java makes is answered (0, success), so First Play goes on to select its playlist
+      const port: BdjPort = {
+        onmessage: null,
+        postMessage: (m) => {
+          received.push(m);
+          if (m.type === 'call') setTimeout(() => port.onmessage!({ data: { type: 'reply', id: m.id, value: 0 } }), 0);
+        },
+      };
       runBdjWorker(port);
       port.onmessage!({
         data: {
@@ -80,16 +92,21 @@ describe('runBdjWorker', () => {
           registers: createRegisterBuffer(),
           status: createStatusBlock(),
           plane: createGraphicsPlane(),
-          discFiles: [],
-          discHttp: { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/discs/${id}`, token: 't' },
+          disc: { kind: 'remote', base, token: 't', manifest },
+          readAheadBytes: 16 * 1024 * 1024,
           discId: null,
           classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
         },
       });
       await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      // First Play: the xlet's JAR is read and its Java calls the engine (selectPlaylist)
+      port.onmessage!({ data: { type: 'start', title: 0xffff } });
+      await vi.waitFor(() => expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(true), { timeout: 60_000 });
       expect(received.some((m) => m.type === 'failed')).toBe(false);
-      expect(paths).toContain(`/discs/${id}/manifest`);
-      expect(paths.some((p) => /\/file\/BDMV\/index\.bdmv$/i.test(p))).toBe(true);
+      // the metadata came inlined in the manifest; the worker read the disc's JAR through the files route
+      expect(paths).toContain(`/api/discs/${id}/manifest`);
+      expect(paths.some((p) => p.startsWith(`/api/discs/${id}/files/BDMV/JAR/00000.JAR?t=t`))).toBe(true);
+      expect(paths.some((p) => /INDEX\.BDMV/i.test(p) && p.includes('/files/'))).toBe(false);
     } finally {
       server.closeAllConnections();
       server.close();

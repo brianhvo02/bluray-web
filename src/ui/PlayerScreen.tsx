@@ -8,7 +8,7 @@ import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismiss
 import { EncodingPrompt } from './EncodingPrompt';
 import { keyActionUo, keyToAction, keyWakesControls } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, beyondLongPressSlop, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap, type Tap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, beyondLongPressSlop, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap, tapPoint, type PointerPoint, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
@@ -86,6 +86,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const press = useRef<Press | null>(null);
   /** Whether the controls showed at the last render (a tap at the bottom edge of a menu shows hidden ones, ruling R12). */
   const controlsVisibleRef = useRef(true);
+  /** The last touch pointerdown on the video: a tap's position comes from it (see tapPoint). */
+  const touchDown = useRef<PointerPoint | null>(null);
 
   useEffect(
     () => () => {
@@ -307,8 +309,10 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   // A touch held still over a disc menu shows the controls once LONG_PRESS_MS pass, with the finger still down, and is not
   // sent to the disc (ruling R15): the way back to the controls when every tap on the picture goes to the disc.
+  // The press starts at the pointerdown's position, as a tap's position does (tapPoint).
   const onCanvasPointerDown = (e: PointerEvent<HTMLCanvasElement>): void => {
     if (e.pointerType !== 'touch') return;
+    touchDown.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
     endPress();
     const now = controller.getSnapshot();
     if (!(now.menuActive || now.bdjMenuVisible)) return; // outside a menu a long touch is an ordinary tap
@@ -327,20 +331,23 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
     lastUpWasTouch.current = e.pointerType === 'touch';
     if (e.pointerType !== 'touch') return;
+    // where the finger went down: iPadOS can report a touch's pointerup at (0, 0) (tapPoint)
+    const at = tapPoint(touchDown.current, { id: e.pointerId, x: e.clientX, y: e.clientY });
+    touchDown.current = null;
     if (endPress(e.pointerId)) {
       // the long press showed the controls: no click for the disc, and no tap to pair with
       lastTap.current = null;
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    const tap: Tap = { x: e.clientX - rect.left, timeMs: e.timeStamp };
+    const tap: Tap = { x: at.x - rect.left, timeMs: e.timeStamp };
     // the snapshot the engine last sent: the tap is mapped with the canvas rectangle as it is now (after a rotation too)
     const now = controller.getSnapshot();
     const action = classifyTap(lastTap.current, tap, {
       width: rect.width,
       menuActive: now.menuActive,
       bdjMenuVisible: now.bdjMenuVisible,
-      offPicture: offPicture(e.clientX, e.clientY, rect), // a letterbox or pillarbox band: nothing there reaches the disc
+      offPicture: offPicture(at.x, at.y, rect), // a letterbox or pillarbox band: nothing there reaches the disc
       controlsShown: controlsVisibleRef.current,
     });
     lastTap.current = pairableTap(action, tap);
@@ -350,7 +357,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     }
     switch (action) {
       case 'menuClick': {
-        const point = toMenuSpace(e.clientX, e.clientY, rect);
+        const point = toMenuSpace(at.x, at.y, rect);
         if (point) {
           lastMenuClickPointer.current = e.pointerType;
           controller.pointer('click', point.x, point.y);

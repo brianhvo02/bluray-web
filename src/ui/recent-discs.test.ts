@@ -43,7 +43,7 @@ describe('recent discs', () => {
     await expect(reopenRecentDisc(disc)).resolves.toBeNull();
   });
 
-  it('upgrades a version 2 database to 3, keeping its recent discs', async () => {
+  it('upgrades a version 2 database to 4, keeping its recent discs', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve, reject) => {
       const req = factory.open('bluray-web', 2);
@@ -65,12 +65,12 @@ describe('recent discs', () => {
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
-    expect(db.version).toBe(3);
-    expect([...db.objectStoreNames].sort()).toEqual(['recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
+    expect(db.version).toBe(4);
+    expect([...db.objectStoreNames].sort()).toEqual(['nas', 'recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
     db.close();
   });
 
-  it('upgrades a version 1 database (legacy store only) to 3, dropping the legacy store', async () => {
+  it('upgrades a version 1 database (legacy store only) to 4, dropping the legacy store', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve, reject) => {
       const req = factory.open('bluray-web', 1);
@@ -87,7 +87,7 @@ describe('recent discs', () => {
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
-    expect([...db.objectStoreNames].sort()).toEqual(['recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
+    expect([...db.objectStoreNames].sort()).toEqual(['nas', 'recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
     db.close();
   });
 });

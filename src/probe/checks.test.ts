@@ -42,6 +42,7 @@ function env(over: Partial<ProbeEnv> & { files?: File[]; rate?: number } = {}): 
     createAudioContext: () => ({ sampleRate: over.rate ?? 48000 }) as unknown as BaseAudioContext,
     worker: over.worker ?? (async () => okWorker),
     globals: over.globals ?? {},
+    log: over.log,
   };
 }
 
@@ -119,7 +120,7 @@ describe('runChecks', () => {
   });
 
   it('server route: the slice is a range read, the worker gets the server ref, relative-path is untested', async () => {
-    const server = { baseUrl: 'http://127.0.0.1:8080/discs/abc', token: 't' };
+    const server = { kind: 'remote', base: 'http://127.0.0.1:8080/api/discs/abc/', token: 't', manifest: { discId: 'abc', name: 'Disc', files: [], inline: {} } } as const;
     const big = fakeBigFile('00001.M2TS', 5 * GIB, false) as unknown as ProbeFile;
     let seen: WorkerInput | null = null;
     const r = await runChecks(env({ openDisc: async () => ({ route: 'server', files: [big], server }), worker: async (input) => { seen = input; return okWorker; } }));
@@ -136,5 +137,23 @@ describe('runChecks', () => {
     const r = await pending;
     for (const name of ['worker-raf', 'hevc', 'webgl2-float']) expect(r.find((x) => x.name === name)).toMatchObject({ ok: false, detail: 'timed out' });
     expect(r.find((x) => x.name === 'audio-sample-rate')?.ok).toBe(true);
+  });
+
+  it('logs the files received and each check with its duration', async () => {
+    const lines: string[] = [];
+    await runChecks(env({ log: (l) => lines.push(l) }));
+    expect(lines[0]).toBe('received 1 files, 5.00 GiB');
+    expect(lines).toContain('blob-slice-over-4gib: started');
+    expect(lines.some((l) => /^blob-slice-over-4gib: ok after \d+ ms$/.test(l))).toBe(true);
+    expect(lines.some((l) => /^relative-path: (ok|FAIL) after \d+ ms$/.test(l))).toBe(true);
+  });
+
+  it('a read that never finishes times out after 60 s instead of hanging the probe', async () => {
+    vi.useFakeTimers();
+    const stalled = { ...fakeBigFile('00001.m2ts', 5 * GIB, false), slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(() => undefined) }) } as unknown as File;
+    const run = runChecks(env({ files: [stalled] }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    const r = (await run).find((x) => x.name === 'blob-slice-over-4gib');
+    expect(r).toEqual({ name: 'blob-slice-over-4gib', ok: false, detail: 'timed out' });
   });
 });

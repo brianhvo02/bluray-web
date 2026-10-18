@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { bdjPlane, clickPlane, goldenSettled, MENU_DISC, planeRegion, regionColour, settlesOn } from './bdj-support';
+import { setFolder } from './support';
 import { bdjStartup } from './telemetry';
 
 // BD-J menus on every project: chromium, firefox, webkit and mobile-chromium (playwright.config.ts runs this file there
@@ -14,7 +15,7 @@ const SCREEN_TIMEOUT_MS = 15_000;
 
 async function openMenu(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
   await expect(player).toHaveAttribute('data-playlist', '00001'); // the 60 s playlist behind the menu
@@ -91,7 +92,7 @@ test("a BD-J background still reaches the screen beside the video it plays under
   const viewport = page.viewportSize();
   if (viewport && viewport.width < viewport.height) await page.setViewportSize({ width: viewport.height, height: viewport.width }); // phones: landscape, so the 4:3 video leaves the pillarbox to the still
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles('fixtures/synthetic/disc-bdj-background');
+  await setFolder(page.getByTestId('folder-input'), 'fixtures/synthetic/disc-bdj-background');
   await expect.poll(async () => (await bdjStartup(page))?.firstFrameMs ?? null, { timeout: 30_000 }).not.toBeNull();
   // the left pillarbox: 0-240 of the plane's 1920 is outside the 4:3 picture (240-1680), inside the still (0-960)
   const region = await planeRegion(page, 40, 300, 200, 700);
@@ -110,7 +111,7 @@ test("a BD-J background still reaches the screen beside the video it plays under
 
 test('a browser that cannot start workers from workers (?nonestedworkers=1) names it and opens the picker', async ({ page }) => {
   await page.goto('/?telemetry=1&nonestedworkers=1');
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   await expect(page.getByTestId('playlist-picker')).toBeVisible({ timeout: 30_000 });
   const missing = /BD-J .*which this browser can't run: it lacks workers started from workers\./;
   await expect(notice(page, missing)).toBeVisible();

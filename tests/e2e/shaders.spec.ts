@@ -1,9 +1,9 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 import pixelmatch from 'pixelmatch';
-import { decodePng } from '../ass-trace/png';
+import { decodePng, encodePng } from '../ass-trace/png';
 import { collectWindows, expectInSync, telemetry, type TelemetrySample } from './telemetry';
-import { CHROME_ONLY, skipWithoutH264 } from './support';
+import { CHROME_ONLY, setFolder, skipWithoutH264 } from './support';
 
 test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
@@ -86,7 +86,7 @@ test.beforeEach(async ({ page }) => {
 async function openDisc1(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC1);
+  await setFolder(page.getByTestId('folder-input'), DISC1);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 }
@@ -94,7 +94,7 @@ async function openDisc1(page: Page): Promise<void> {
 async function openSubsDisc(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(SUBS_DISC);
+  await setFolder(page.getByTestId('folder-input'), SUBS_DISC);
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 }
 
@@ -121,6 +121,18 @@ async function pause(page: Page): Promise<void> {
   await page.getByTestId('player').hover();
   await page.getByTestId('play-toggle').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'paused');
+  // The picture can still step one frame after the state says paused (seen on a loaded machine: the frame due at the
+  // paused clock reached the screen late). Wait until two shots 250 ms apart match before a test takes its own.
+  let last = await canvasShot(page);
+  await expect
+    .poll(async () => {
+      await page.waitForTimeout(250);
+      const next = await canvasShot(page);
+      const moved = diffFraction(last, next);
+      last = next;
+      return moved;
+    }, { timeout: 10_000, intervals: [0] })
+    .toBe(0);
 }
 
 /** Sets the seek bar as a user would by dragging it (see subtitles.spec.ts). */
@@ -154,7 +166,7 @@ function expectInverted(shaded: Picture, off: Picture): void {
   for (let c = 0; c < 3; c++) expect(Math.abs(s[c]! - (255 - o[c]!)), `channel ${c}: shaded ${s} off ${o}`).toBeLessThanOrEqual(8);
 }
 
-test('pass-through matches Off', async ({ page }) => {
+test('pass-through matches Off', async ({ page }, testInfo) => {
   await openDisc1(page);
   await addShaders(page, [glsl(BASIC, 'passthrough.glsl'), inputConf([setLine('CTRL+1', 'Passthrough', ['passthrough.glsl'])])]);
   await pause(page);
@@ -162,7 +174,14 @@ test('pass-through matches Off', async ({ page }) => {
   await chooseSet(page, 'Passthrough');
   await expectShaded(page, 'Passthrough');
   const shaded = await canvasShot(page);
-  expect(diffFraction(off, shaded)).toBeLessThan(0.005);
+  const diff = diffFraction(off, shaded);
+  if (diff >= 0.005) {
+    // CI (Linux, no GPU) failed this once at 0.044 and it has not reproduced elsewhere: keep both pictures to look at
+    // (files in the test's output directory, which CI uploads with test-results/)
+    for (const [name, p] of [['off', off], ['shaded', shaded]] as const) writeFileSync(testInfo.outputPath(`${name}.png`), encodePng(p.width, p.height, p.rgba));
+    writeFileSync(testInfo.outputPath('telemetry.json'), JSON.stringify(await shaderTelemetry(page)));
+  }
+  expect(diff).toBeLessThan(0.005);
 });
 
 test('invert inverts', async ({ page }) => {

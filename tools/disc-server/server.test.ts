@@ -3,14 +3,19 @@ import { request, createServer, type IncomingHttpHeaders, type Server } from 'no
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createDiscHandler, findDiscs, isLocalAddress, parseRange } from './server';
+import { createByteSource } from '../../src/engine/disc/disc-spec';
+import type { DiscManifest, LibraryListing } from '../../src/engine/disc/nas-api';
+import { openDisc } from '../../src/engine/disc/open-disc';
+import { createDiscHandler, discApiBase, findDiscs, isLocalAddress, parseRange } from './server';
 
 const TOKEN = 'test-token-0123456789';
 const GIB = 1024 ** 3;
 const BIG_SIZE = 5 * GIB; // over 4 GiB: sizes and offsets beyond 2^32
 const MARK_AT = 4.5 * GIB;
 const MARK = Buffer.from('far-marker');
+const SYNTHETIC = fileURLToPath(new URL('../../fixtures/synthetic/', import.meta.url));
 
 interface Reply {
   readonly status: number;
@@ -22,6 +27,7 @@ let dir: string;
 let distDir: string;
 let server: Server;
 let port: number;
+let origin: string;
 /** The remote address the handler sees; tests set it to check the LAN filter. */
 let remote = '127.0.0.1';
 
@@ -42,10 +48,15 @@ function get(path: string, headers: Record<string, string> = {}, method = 'GET')
 const auth = { authorization: `Bearer ${TOKEN}` };
 
 async function discId(name: string): Promise<string> {
-  const list = JSON.parse((await get('/discs', auth)).body.toString()) as Array<{ id: string; name: string }>;
-  const found = list.find((d) => d.name === name);
-  if (!found) throw new Error(`no disc ${name} in ${JSON.stringify(list)}`);
+  const listing = JSON.parse((await get('/api/library?path=', auth)).body.toString()) as LibraryListing;
+  const found = listing.discs.find((d) => d.name === name);
+  if (!found) throw new Error(`no disc ${name} in ${JSON.stringify(listing)}`);
   return found.id;
+}
+
+/** `/api/discs/<id>/` of the big test disc. */
+async function bigDisc(): Promise<string> {
+  return `/api/discs/${await discId('Big Disc')}/`;
 }
 
 beforeAll(async () => {
@@ -58,19 +69,22 @@ beforeAll(async () => {
   writeSync(fd, MARK, 0, MARK.length, MARK_AT);
   writeSync(fd, Buffer.from([0x47]), 0, 1, BIG_SIZE - 1);
   closeSync(fd);
+  writeFileSync(join(disc, 'notes.txt'), 'outside BDMV: never listed nor served');
   writeFileSync(join(dir, 'library', 'secret.txt'), 'not part of any disc');
   mkdirSync(join(dir, 'library', 'Not A Disc'));
   distDir = join(dir, 'dist');
   mkdirSync(distDir);
   writeFileSync(join(distDir, 'index.html'), '<!doctype html><title>player</title>');
 
-  const handler = createDiscHandler({ roots: [join(dir, 'library')], token: TOKEN, distDir, remoteAddressOf: () => remote });
+  const handler = createDiscHandler({ roots: [join(dir, 'library'), SYNTHETIC], token: TOKEN, distDir, remoteAddressOf: () => remote });
   server = createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
+  origin = `http://127.0.0.1:${port}`;
 });
 
 afterAll(async () => {
+  server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   rmSync(dir, { recursive: true, force: true });
 });
@@ -86,7 +100,7 @@ describe('isLocalAddress', () => {
   });
 });
 
-describe('parseRange', () => {
+describe("parseRange (the NAS server's)", () => {
   it('parses single byte ranges against the size', () => {
     expect(parseRange('bytes=0-9', 100)).toEqual({ start: 0, end: 9 });
     expect(parseRange('bytes=90-', 100)).toEqual({ start: 90, end: 99 });
@@ -101,77 +115,118 @@ describe('parseRange', () => {
     expect(parseRange('bytes=0-1,5-6', 100)).toBeNull();
     expect(parseRange('bytes=9-2', 100)).toBeNull();
     expect(parseRange('items=0-1', 100)).toBeNull();
+    expect(parseRange(undefined, 100)).toBeNull();
   });
 });
 
 describe('findDiscs', () => {
-  it('finds the folders that contain BDMV/index.bdmv, with stable ids', () => {
+  it('finds the folders that contain BDMV/index.bdmv, with stable ids and root-relative paths', () => {
     const a = findDiscs([join(dir, 'library')]);
     const b = findDiscs([join(dir, 'library')]);
     expect(a.map((d) => d.name)).toEqual(['Big Disc']);
     expect(a[0]!.id).toMatch(/^[0-9a-f]{16}$/);
+    expect(a[0]!.path).toBe('library/Big Disc');
     expect(b[0]!.id).toBe(a[0]!.id);
   });
 });
 
-describe('disc server', () => {
-  it('refuses API requests without the token (401)', async () => {
-    expect((await get('/discs')).status).toBe(401);
-    expect((await get('/discs', { authorization: 'Bearer wrong' })).status).toBe(401);
-    const id = await discId('Big Disc');
-    expect((await get(`/discs/${id}/manifest`)).status).toBe(401);
-    expect((await get(`/discs/${id}/file/BDMV/index.bdmv`)).status).toBe(401);
+describe('disc server (the NAS disc API)', () => {
+  it('refuses API requests without the token (401, as the NAS answers)', async () => {
+    const base = await bigDisc();
+    for (const path of ['/api/library?path=', `${base}manifest`, `${base}files/BDMV/index.bdmv`, `${base}probe`]) {
+      const r = await get(path);
+      expect(r.status, path).toBe(401);
+      expect(JSON.parse(r.body.toString()), path).toEqual({ error: 'unauthorized' });
+    }
+    expect((await get('/api/library?path=', { authorization: 'Bearer wrong' })).status).toBe(401);
+    expect((await get(`${base}files/BDMV/index.bdmv?t=wrong`)).status).toBe(401);
   });
 
-  it('accepts the token as ?token= too', async () => {
-    const r = await get(`/discs?token=${TOKEN}`);
+  it('takes the token as Authorization: Bearer or ?t= (what HttpTransport sends), not the old ?token=', async () => {
+    const r = await get(`/api/library?path=&t=${TOKEN}`);
     expect(r.status).toBe(200);
     expect(r.headers['cache-control']).toBe('no-store');
+    expect((await get(`/api/library?path=&token=${TOKEN}`)).status).toBe(401);
   });
 
   it('refuses every request from an address outside the local network (403)', async () => {
     remote = '8.8.8.8';
     try {
-      expect((await get('/discs', auth)).status).toBe(403);
+      expect((await get('/api/library?path=', auth)).status).toBe(403);
       expect((await get('/')).status).toBe(403);
     } finally {
       remote = '127.0.0.1';
     }
     remote = '::ffff:192.168.1.30';
     try {
-      expect((await get('/discs', auth)).status).toBe(200);
+      expect((await get('/api/library?path=', auth)).status).toBe(200);
     } finally {
       remote = '127.0.0.1';
     }
   });
 
-  it('lists discs and serves a manifest of root-relative paths and sizes', async () => {
-    const id = await discId('Big Disc');
-    const r = await get(`/discs/${id}/manifest`, auth);
+  it('lists every disc as the NAS library does: a flat LibraryListing of DiscEntry', async () => {
+    const r = await get('/api/library?path=', auth);
     expect(r.status).toBe(200);
     expect(r.headers['content-type']).toMatch(/^application\/json/);
-    const manifest = JSON.parse(r.body.toString()) as { files: Array<{ path: string; size: number }> };
-    expect(manifest.files).toEqual([
-      { path: 'BDMV/STREAM/00000.m2ts', size: BIG_SIZE },
-      { path: 'BDMV/index.bdmv', size: 18 },
-    ]);
-    expect((await get('/discs/0000000000000000/manifest', auth)).status).toBe(404);
+    const listing = JSON.parse(r.body.toString()) as LibraryListing;
+    expect(listing.folders).toEqual([]);
+    expect(listing.scanning).toBe(false);
+    const big = listing.discs.find((d) => d.name === 'Big Disc');
+    expect(big).toEqual({ id: expect.stringMatching(/^[0-9a-f]{16}$/), name: 'Big Disc', path: 'library/Big Disc', kind: 'folder', sizeBytes: BIG_SIZE + 18 });
+    expect(listing.discs.map((d) => d.name)).toContain('disc1');
   });
 
-  it('refuses paths that climb out of the disc (400)', async () => {
-    const id = await discId('Big Disc');
+  it("serves the NAS's manifest: upper-case paths under BDMV and CERTIFICATE, sizes, and the metadata inlined", async () => {
+    const base = await bigDisc();
+    const r = await get(`${base}manifest`, auth);
+    expect(r.status).toBe(200);
+    expect(r.headers['content-type']).toMatch(/^application\/json/);
+    const manifest = JSON.parse(r.body.toString()) as DiscManifest;
+    expect(manifest).toEqual({
+      discId: base.split('/')[3],
+      name: 'Big Disc',
+      files: [
+        { path: 'BDMV/INDEX.BDMV', size: 18 },
+        { path: 'BDMV/STREAM/00000.M2TS', size: BIG_SIZE },
+      ],
+      inline: { 'BDMV/INDEX.BDMV': Buffer.from('INDX0200abcdefghij').toString('base64') },
+    });
+  });
+
+  it("answers an unknown disc with the NAS's disc-changed 404, a missing file with not found", async () => {
+    const unknown = await get('/api/discs/0000000000000000/manifest', auth);
+    expect(unknown.status).toBe(404);
+    expect(JSON.parse(unknown.body.toString())).toEqual({ error: 'disc-changed' });
+    const base = await bigDisc();
+    for (const p of ['BDMV/MovieObject.bdmv', 'BDMV/STREAM', 'notes.txt']) {
+      const r = await get(`${base}files/${p}`, auth);
+      expect(r.status, p).toBe(404); // missing, a directory, outside BDMV/CERTIFICATE
+      expect(JSON.parse(r.body.toString())).toEqual({ error: 'not found' });
+    }
+  });
+
+  it('refuses paths that climb out of the disc', async () => {
+    const base = await bigDisc();
     for (const p of ['../secret.txt', 'BDMV/../../secret.txt', '%2e%2e/secret.txt', 'BDMV/%2e%2e/%2e%2e/secret.txt', '..%2fsecret.txt', 'BDMV//index.bdmv', './BDMV/index.bdmv', 'BDMV%5c..%5c..%5csecret.txt', 'BDMV/index.bdmv%00']) {
-      const r = await get(`/discs/${id}/file/${p}`, auth);
+      const r = await get(`${base}files/${p}`, auth);
       expect(r.status, p).toBe(400);
     }
-    expect((await get(`/discs/${id}/../../secret.txt`, auth)).status).toBe(400);
-    expect((await get(`/discs/${id}/file/BDMV/MovieObject.bdmv`, auth)).status).toBe(404);
-    expect((await get(`/discs/${id}/file/BDMV/STREAM`, auth)).status).toBe(404); // a directory
+    expect((await get(`${base}../../secret.txt`, auth)).status).toBe(400);
+  });
+
+  it('serves files in any case, as the manifest spells them (upper case) or as they are on disk', async () => {
+    const base = await bigDisc();
+    for (const p of ['BDMV/INDEX.BDMV', 'BDMV/index.bdmv', 'bdmv/Index.Bdmv']) {
+      const r = await get(`${base}files/${p}`, auth);
+      expect(r.status, p).toBe(200);
+      expect(r.body.toString()).toBe('INDX0200abcdefghij');
+    }
   });
 
   it('answers Range: bytes=0-9 with 206 and 10 bytes', async () => {
-    const id = await discId('Big Disc');
-    const r = await get(`/discs/${id}/file/BDMV/index.bdmv`, { ...auth, range: 'bytes=0-9' });
+    const base = await bigDisc();
+    const r = await get(`${base}files/BDMV/INDEX.BDMV`, { ...auth, range: 'bytes=0-9' });
     expect(r.status).toBe(206);
     expect(r.body.toString()).toBe('INDX0200ab');
     expect(r.headers['content-range']).toBe('bytes 0-9/18');
@@ -180,31 +235,38 @@ describe('disc server', () => {
   });
 
   it('answers a whole-file GET with 200, and HEAD with headers only', async () => {
-    const id = await discId('Big Disc');
-    const r = await get(`/discs/${id}/file/BDMV/index.bdmv`, auth);
+    const base = await bigDisc();
+    const r = await get(`${base}files/BDMV/INDEX.BDMV`, auth);
     expect(r.status).toBe(200);
     expect(r.body.toString()).toBe('INDX0200abcdefghij');
-    const h = await get(`/discs/${id}/file/BDMV/STREAM/00000.m2ts`, auth, 'HEAD');
+    const h = await get(`${base}files/BDMV/STREAM/00000.M2TS`, auth, 'HEAD');
     expect(h.status).toBe(200);
     expect(h.headers['content-length']).toBe(String(BIG_SIZE));
     expect(h.body.length).toBe(0);
   });
 
   it('answers a range starting beyond the end of the file with 416', async () => {
-    const id = await discId('Big Disc');
-    const r = await get(`/discs/${id}/file/BDMV/index.bdmv`, { ...auth, range: 'bytes=18-30' });
+    const base = await bigDisc();
+    const r = await get(`${base}files/BDMV/INDEX.BDMV`, { ...auth, range: 'bytes=18-30' });
     expect(r.status).toBe(416);
     expect(r.headers['content-range']).toBe('bytes */18');
   });
 
   it('serves ranges of a file over 4 GiB without reading the rest of it', async () => {
-    const id = await discId('Big Disc');
-    const r = await get(`/discs/${id}/file/BDMV/STREAM/00000.m2ts`, { ...auth, range: `bytes=${MARK_AT}-${MARK_AT + MARK.length - 1}` });
+    const base = await bigDisc();
+    const r = await get(`${base}files/BDMV/STREAM/00000.M2TS`, { ...auth, range: `bytes=${MARK_AT}-${MARK_AT + MARK.length - 1}` });
     expect(r.status).toBe(206);
     expect(r.body.equals(MARK)).toBe(true);
     expect(r.headers['content-range']).toBe(`bytes ${MARK_AT}-${MARK_AT + MARK.length - 1}/${BIG_SIZE}`);
-    const tail = await get(`/discs/${id}/file/BDMV/STREAM/00000.m2ts`, { ...auth, range: 'bytes=-1' });
+    const tail = await get(`${base}files/BDMV/STREAM/00000.M2TS`, { ...auth, range: 'bytes=-1' });
     expect([...tail.body]).toEqual([0x47]);
+  });
+
+  it("serves the probe as the NAS does: the largest clip's first 4 MiB, whole", async () => {
+    const base = await bigDisc();
+    const r = await get(`${base}probe?t=${TOKEN}`);
+    expect(r.status).toBe(200);
+    expect(r.body.length).toBe(4 * 1024 * 1024);
   });
 
   it('serves the built player without a token, cross-origin isolated', async () => {
@@ -219,13 +281,52 @@ describe('disc server', () => {
   });
 
   it('answers a CORS preflight without the token, and only for the API', async () => {
-    const id = await discId('Big Disc');
-    const r = await get(`/discs/${id}/file/BDMV/index.bdmv`, { origin: 'http://localhost:5173', 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization,range' }, 'OPTIONS');
+    const base = await bigDisc();
+    const r = await get(`${base}manifest`, { origin: 'http://localhost:5173', 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization' }, 'OPTIONS');
     expect(r.status).toBe(204);
     expect(r.headers['access-control-allow-origin']).toBe('http://localhost:5173');
     expect(r.headers['access-control-allow-headers']).toMatch(/authorization/i);
-    const g = await get(`/discs/${id}/file/BDMV/index.bdmv`, { ...auth, origin: 'http://localhost:5173', range: 'bytes=0-0' });
+    const g = await get(`${base}files/BDMV/INDEX.BDMV`, { ...auth, origin: 'http://localhost:5173', range: 'bytes=0-0' });
     expect(g.headers['access-control-allow-origin']).toBe('http://localhost:5173');
     expect(g.headers['access-control-expose-headers']).toMatch(/content-range/i);
+    expect((await get('/', { origin: 'http://localhost:5173' }, 'OPTIONS')).status).toBe(405);
+  });
+});
+
+describe("the player's client path against the dev server (RemoteSource + HttpTransport, as for a NAS disc)", () => {
+  /** What the player opens for a served disc: the manifest the UI fetched with the token, then range reads. */
+  async function remoteSource(name: string) {
+    const disc = findDiscs([join(dir, 'library'), SYNTHETIC]).find((d) => d.name === name)!;
+    const base = discApiBase(origin, disc.id);
+    const response = await fetch(`${base}manifest`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const manifest = (await response.json()) as DiscManifest;
+    return createByteSource({ kind: 'remote', base, token: TOKEN, manifest }, { fetch, readAheadBytes: 8 * 1024 * 1024, chunkBytes: 64 * 1024, onWaiting: () => undefined });
+  }
+
+  it('opens the synthetic disc: openDisc succeeds over the manifest and range reads', async () => {
+    const source = await remoteSource('disc1');
+    expect(source.exists('bdmv/index.bdmv')).toBe(true);
+    expect(source.list('BDMV/STREAM')).toEqual(['00001.M2TS', '00002.M2TS']);
+    const disc = await openDisc(source);
+    expect(disc.summaries.length).toBeGreaterThan(0);
+    const head = await source.read('BDMV/STREAM/00001.m2ts', 0, 192);
+    expect(head[4]).toBe(0x47); // a source packet's sync byte, read through the files route
+  });
+
+  it('reads a range past 4 GiB of a sparse clip, by a mixed-case path', async () => {
+    const source = await remoteSource('Big Disc');
+    expect(source.size('BDMV/Stream/00000.m2ts')).toBe(BIG_SIZE);
+    const bytes = await source.read('BDMV/Stream/00000.m2ts', MARK_AT, MARK.length);
+    expect(Buffer.from(bytes).equals(MARK)).toBe(true);
+    const tail = await source.read('BDMV/STREAM/00000.M2TS', BIG_SIZE - 1, 10);
+    expect([...tail]).toEqual([0x47]);
+  });
+
+  it('fails the read as unpaired when the token is wrong (no refresh for the dev server)', async () => {
+    const disc = findDiscs([SYNTHETIC]).find((d) => d.name === 'disc1')!;
+    const base = discApiBase(origin, disc.id);
+    const manifest = (await (await fetch(`${base}manifest`, { headers: { Authorization: `Bearer ${TOKEN}` } })).json()) as DiscManifest;
+    const source = createByteSource({ kind: 'remote', base, token: 'stale', manifest }, { fetch, readAheadBytes: 0, onWaiting: () => undefined });
+    await expect(source.read('BDMV/STREAM/00001.M2TS', 0, 192)).rejects.toMatchObject({ reason: 'nas-unpaired' });
   });
 });

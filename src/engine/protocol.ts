@@ -2,14 +2,16 @@ import type { MemoryProfileName } from './memory-profile';
 import type { JvmMemoryStats } from './bdj/jvm/jvm';
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
-import type { HttpDiscRef } from './disc/http-source';
+import type { DiscSpec } from './disc/disc-spec';
+import type { RemoteFailure } from './disc/http-transport';
 import type { PlaylistSummary } from './disc/open-disc';
 import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory';
-export type ErrorCode = DiscErrorCode | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
+export type NoticeCode = 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
+/** RemoteFailure: a NAS disc changed, the NAS cannot be reached, or this device is no longer paired. */
+export type ErrorCode = DiscErrorCode | RemoteFailure | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
 export interface Telemetry {
   readonly clockUs: number;
@@ -138,9 +140,9 @@ export interface AudioTrack {
 export type MenuKey = 'up' | 'down' | 'left' | 'right' | 'ok' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'topMenu' | 'popup';
 
 export type EngineCommand =
-  | { readonly type: 'open'; readonly entries: ReadonlyArray<readonly [string, Blob]> }
-  /** Open a disc served over HTTP (tools/disc-server): the engine and BD-J workers each read it with an HttpSource. */
-  | { readonly type: 'openRemote'; readonly disc: HttpDiscRef }
+  | { readonly type: 'open'; readonly disc: DiscSpec }
+  /** A fresh session token for the open NAS disc (a scheduled refresh, or the answer to remoteTokenNeeded). Handled at once, not queued. */
+  | { readonly type: 'remoteToken'; readonly token: string }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
   | { readonly type: 'attachAudio'; readonly ring: SharedArrayBuffer }
   | { readonly type: 'resize'; readonly width: number; readonly height: number }
@@ -216,6 +218,10 @@ export type EngineEvent =
   | { readonly type: 'state'; readonly state: PlaybackState }
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
+  /** The condition behind a notice is over (nas-waiting: the read landed). */
+  | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
+  /** The NAS answered 401: send remoteToken with a fresh token within 10 s, or the disc fails as unpaired. */
+  | { readonly type: 'remoteTokenNeeded' }
   | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }

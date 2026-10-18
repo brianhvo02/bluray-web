@@ -1,3 +1,5 @@
+import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
+
 export interface ProbeResult {
   readonly name: string;
   readonly ok: boolean;
@@ -19,11 +21,8 @@ export interface ProbeFile {
   slice(start: number, end: number): { arrayBuffer(): Promise<ArrayBuffer> };
 }
 
-/** A disc served by tools/disc-server: `baseUrl` is `…/discs/<id>`. */
-export interface ProbeServerRef {
-  readonly baseUrl: string;
-  readonly token: string;
-}
+/** A disc served by tools/disc-server, as the NAS's RemoteDiscSpec (manifest, API base `…/api/discs/<id>/`, token). */
+export type ProbeServerRef = RemoteDiscSpec;
 
 /** The disc under test: a folder picked on the device, or a disc on the development disc server (spec 2026-10-17 §4.5). */
 export type ProbeDisc = { readonly route: 'folder'; readonly files: readonly File[] } | { readonly route: 'server'; readonly files: readonly ProbeFile[]; readonly server: ProbeServerRef };
@@ -36,10 +35,14 @@ export interface ProbeEnv {
   createAudioContext(): BaseAudioContext;
   worker(input: WorkerInput): Promise<WorkerProbe>;
   globals: Record<string, unknown>;
+  /** Progress lines (files received, each check's start and end with its duration), shown live by the page. */
+  log?(line: string): void;
 }
 
 const FOUR_GIB = 2 ** 32;
 const WORKER_TIMEOUT_MS = 15000;
+/** Every other check gives up after this, so a stalled read (e.g. a file provider fetching a huge file) still reports. */
+const CHECK_TIMEOUT_MS = 60000;
 const SOURCE_PACKET = 192;
 const ALIGNED_UNIT = SOURCE_PACKET * 32;
 
@@ -112,16 +115,26 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-async function attempt(name: string, fn: () => Promise<ProbeResult> | ProbeResult): Promise<ProbeResult> {
+async function attempt(name: string, fn: () => Promise<ProbeResult> | ProbeResult, log: (line: string) => void): Promise<ProbeResult> {
+  const start = Date.now();
+  log(`${name}: started`);
+  let result: ProbeResult;
   try {
-    return await fn();
+    result = await withTimeout(Promise.resolve().then(fn), CHECK_TIMEOUT_MS);
   } catch (err) {
-    return { name, ok: false, detail: err instanceof Error && err.message === 'timed out' ? 'timed out' : `threw: ${err instanceof Error ? err.message : String(err)}` };
+    result = { name, ok: false, detail: err instanceof Error && err.message === 'timed out' ? 'timed out' : `threw: ${err instanceof Error ? err.message : String(err)}` };
   }
+  log(`${name}: ${result.ok ? 'ok' : 'FAIL'} after ${Date.now() - start} ms`);
+  return result;
 }
+
+const GIB = 2 ** 30;
 
 export async function runChecks(env: ProbeEnv): Promise<ProbeResult[]> {
   const disc = await env.openDisc();
+  const log = env.log ?? ((): void => undefined);
+  const total = disc.files.reduce((sum, f) => sum + f.size, 0);
+  log(`${disc.route === 'server' ? 'listed' : 'received'} ${disc.files.length} files, ${(total / GIB).toFixed(2)} GiB`);
   const g = env.globals;
   const nav = g.navigator as object | undefined;
   const input: WorkerInput = disc.route === 'server' ? { server: disc.server } : { entries: disc.files.map((f) => [f.webkitRelativePath || f.name, f] as const) };
@@ -129,43 +142,43 @@ export async function runChecks(env: ProbeEnv): Promise<ProbeResult[]> {
   workerProbe.catch(() => undefined); // each worker-backed check reports the failure itself
 
   return [
-    await attempt('blob-slice-over-4gib', () => blobSlice(disc)),
+    await attempt('blob-slice-over-4gib', () => blobSlice(disc), log),
     await attempt('audio-sample-rate', () => {
       const context = env.createAudioContext();
       const rate = context.sampleRate;
       void (context as { close?: () => Promise<void> }).close?.().catch(() => undefined);
       return { name: 'audio-sample-rate', ok: rate === 48000, detail: String(rate) };
-    }),
+    }, log),
     await attempt('audio-session', () => {
       const ok = !!nav && 'audioSession' in nav;
       return { name: 'audio-session', ok, detail: ok ? 'present' : 'missing' };
-    }),
+    }, log),
     await attempt('worker-raf', async () => {
       const { raf } = await workerProbe;
       return { name: 'worker-raf', ok: raf.present, detail: `${raf.present ? 'rAF' : 'setTimeout'} p95 ${raf.p95Ms.toFixed(1)} ms` };
-    }),
+    }, log),
     await attempt('hevc', async () => {
       const { hevc } = await workerProbe;
       if (!hevc) return { name: 'hevc', ok: false, detail: `no HEVC clip ${disc.route === 'server' ? 'on the disc' : 'in the folder'}` };
       if (hevc.error) return { name: 'hevc', ok: false, detail: `error: ${hevc.error}` };
       const form = hevc.hvc1 ? 'hvc1' : hevc.hev1 ? 'hev1' : 'unsupported';
       return { name: 'hevc', ok: (hevc.hvc1 || hevc.hev1) && hevc.decoded, detail: hevc.decoded ? form : `${form}, first GOP did not decode` };
-    }),
+    }, log),
     await attempt('webgl2-float', async () => {
       const { webgl } = await workerProbe;
       return { name: 'webgl2-float', ok: webgl.float, detail: `float ${webgl.float}, half-float ${webgl.half}` };
-    }),
-    await attempt('canvas-filter', () => canvasEffect(g, 'filter', 'blur(4px)')),
-    await attempt('letter-spacing', () => canvasEffect(g, 'letterSpacing', '8px')),
+    }, log),
+    await attempt('canvas-filter', () => canvasEffect(g, 'filter', 'blur(4px)'), log),
+    await attempt('letter-spacing', () => canvasEffect(g, 'letterSpacing', '8px'), log),
     await attempt('fullscreen', () => {
       const ok = (g.document as { fullscreenEnabled?: boolean } | undefined)?.fullscreenEnabled === true;
       return { name: 'fullscreen', ok, detail: String(ok) };
-    }),
+    }, log),
     await attempt('webkitdirectory', () => {
       const p = proto(g, 'HTMLInputElement');
       const ok = !!p && 'webkitdirectory' in p;
       return { name: 'webkitdirectory', ok, detail: String(ok) };
-    }),
-    await attempt('relative-path', () => relativePath(disc)),
+    }, log),
+    await attempt('relative-path', () => relativePath(disc), log),
   ];
 }

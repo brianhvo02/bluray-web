@@ -30,6 +30,50 @@ export async function telemetry(page: Page): Promise<TelemetrySample | null> {
   return page.evaluate(() => (window as unknown as { __blurayTelemetry?: TelemetrySample | null }).__blurayTelemetry ?? null);
 }
 
+type SampleLog = { __telemetrySamples?: TelemetrySample[] };
+
+/**
+ * Records every telemetry sample the page receives (call before page.goto). The latest sample can be up to one 500 ms
+ * interval old, so right after a pause or a seek it may still be one taken before it.
+ */
+export async function recordTelemetrySamples(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as SampleLog & { __blurayTelemetry?: TelemetrySample | null };
+    const samples: TelemetrySample[] = [];
+    let latest: TelemetrySample | null = null;
+    w.__telemetrySamples = samples;
+    Object.defineProperty(w, '__blurayTelemetry', {
+      configurable: true,
+      get: () => latest,
+      set: (t: TelemetrySample | null) => {
+        if (t && t !== latest) samples.push(t);
+        latest = t;
+      },
+    });
+  });
+}
+
+/** The samples recorded so far (recordTelemetrySamples), from index `start` on. */
+export const telemetrySamples = (page: Page, start = 0): Promise<TelemetrySample[]> =>
+  page.evaluate((i) => ((window as unknown as SampleLog).__telemetrySamples ?? []).slice(i), start);
+
+/**
+ * The clock where playback stopped, once the page is paused (recordTelemetrySamples): the first two consecutive samples
+ * from index `start` on with the same clock, i.e. both taken while paused. A sample taken while playing differs from the next.
+ */
+export async function pausedClockUs(page: Page, start: number): Promise<number> {
+  let paused: number | null = null;
+  await expect
+    .poll(async () => {
+      const samples = await telemetrySamples(page, start);
+      const i = samples.findIndex((t, k) => k > 0 && t.clockUs === samples[k - 1]!.clockUs);
+      paused = i > 0 ? samples[i]!.clockUs : null;
+      return paused;
+    }, { timeout: 5_000, intervals: [50] })
+    .not.toBeNull();
+  return paused!;
+}
+
 /** Telemetry windows that presented frames, polled until the clock passes `untilUs`. */
 export async function collectWindows(page: Page, untilUs: number, deadlineMs = 20_000): Promise<TelemetrySample[]> {
   const windows: TelemetrySample[] = [];

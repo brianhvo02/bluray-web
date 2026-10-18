@@ -1,6 +1,6 @@
 # disc-server: development disc server
 
-Serves disc folders on this Mac to devices on the home network (iPhone, iPad, the iOS Simulator, other browsers), so a disc opens by URL instead of a folder pick. It also serves the built player from the same origin, so a device loads the app and the disc from one LAN URL in a secure, cross-origin-isolated context (SharedArrayBuffer needs both). Spec: `docs/superpowers/specs/2026-10-17-m5d-bdj-menus-design.md` §4.5. It is the seed of the NAS server (`docs/superpowers/specs/2026-10-16-cross-browser-and-remote-design.md` §4): same range-serving shape, same `HttpSource` in the engine.
+Serves disc folders on this Mac to devices on the home network (iPhone, iPad, the iOS Simulator, other browsers), so a disc opens by URL instead of a folder pick. It also serves the built player from the same origin, so a device loads the app and the disc from one LAN URL in a secure, cross-origin-isolated context (SharedArrayBuffer needs both). Spec: `docs/superpowers/specs/2026-10-17-m5d-bdj-menus-design.md` §4.5. It speaks the NAS server's disc API (`docs/superpowers/specs/2026-10-17-nas-server-design.md`; ruling R19 of the 5d plan): the same library listing, manifest (with the metadata files inlined) and files route, so the player opens its discs through the same `RemoteSource` and `HttpTransport` as a NAS disc. Manifests, file resolution and range parsing are the NAS server's own code (`server/src/manifest.ts`, `server/src/ranges.ts`). Pairing, sessions, folders and ISO images are NAS-only: the dev server has one token per run and lists folder discs flat.
 
 Node built-ins only (run through `tsx`, already a devDependency).
 
@@ -17,9 +17,9 @@ Options: `--root <dir>` (repeatable; every folder up to four levels below that c
 It prints:
 
 - `Player (lists the discs): https://<lan-ip>:8443/?token=…`: the landing screen shows "On the disc server" with a button per disc.
-- One `https://<lan-ip>:8443/?disc=…&token=…` URL per disc, which offers just that disc.
+- One `https://<lan-ip>:8443/?disc=<…/api/discs/<id>/>&token=…` URL per disc, which offers just that disc.
 
-Tap the disc's button to open it (the tap is what lets audio start). The token is new on every run; links from an earlier run answer 401.
+Tap the disc's button to open it (the tap is what lets audio start); it is enabled once the disc's manifest has arrived. The token is new on every run; links from an earlier run answer 401, which the player reports as "no longer paired" (the dev server has no session refresh).
 
 ## Certificates (mkcert)
 
@@ -42,11 +42,14 @@ iPhone and iPad must install and trust the CA too: AirDrop `"$(mkcert -CAROOT)/r
 | Route | Token | Answer |
 | --- | --- | --- |
 | `GET /`, `GET /<file>` | no | The built player from `--dist`, with `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp` (as `public/_headers`) and `Cross-Origin-Resource-Policy: same-origin`. |
-| `GET /discs` | yes | `[{ id, name }]`. `id` is a hash of the disc folder's real path, so it is stable across runs. |
-| `GET /discs/<id>/manifest` | yes | `{ files: [{ path, size }] }`, paths relative to the disc folder (`BDMV/index.bdmv`). |
-| `GET /discs/<id>/file/<path>` | yes | The file: `Range: bytes=a-b` gives 206 with `Content-Range`, a range starting past the end 416, no range 200. Streamed from disk, so files over 4 GiB cost no memory. `HEAD` too. |
+| `GET /api/library?path=` | yes | The NAS's `LibraryListing`: `{ folders: [], discs: [DiscEntry], scanning: false }`, every disc flat. `id` is a hash of the disc folder's real path, so it is stable across runs; `path` is `<root folder name>/<folder below it>`. |
+| `GET /api/discs/<id>/manifest` | yes | The NAS's `DiscManifest`: `{ discId, name, files: [{ path, size }], inline: { path: base64 } }`, upper-case paths under `BDMV` and `CERTIFICATE` only, the files the engine reads whole inlined. |
+| `GET /api/discs/<id>/files/<path>` | yes | The file, its path in any case: `Range: bytes=a-b` gives 206 with `Content-Range`, a range starting past the end 416, no range 200. Streamed from disk, so files over 4 GiB cost no memory. `HEAD` too. |
+| `GET /api/discs/<id>/probe` | yes | The first 4 MiB of the largest clip (the NAS pre-flight's throughput check). |
 
-The token goes in `Authorization: Bearer <token>` (what the player sends) or `?token=`. Disc responses carry `Cache-Control: no-store`, and the service worker never caches them.
+Errors are the NAS's JSON: 401 `{ "error": "unauthorized" }`, 404 `{ "error": "disc-changed" }` for an unknown disc id (the player shows "This disc changed"), 404 `{ "error": "not found" }` for a missing file.
+
+The token goes in `Authorization: Bearer <token>` (what the player sends for the listing and manifests) or `?t=<token>` (what `HttpTransport` sends for file reads, so they need no CORS preflight), as on the NAS. Disc responses carry `Cache-Control: no-store`, and the service worker never caches them.
 
 ## Who can connect
 
@@ -55,8 +58,8 @@ The token goes in `Authorization: Bearer <token>` (what the player sends) or `?t
 - Paths with an empty, `.` or `..` segment, or with `/`, `\` or NUL once decoded, are refused (400). A file is only served if its real path (after links) is inside the disc folder.
 - Read-only: only `GET`, `HEAD` and the CORS preflight `OPTIONS` are answered.
 
-CORS: disc requests from another origin (the Vite dev server on this Mac, for example) get `Access-Control-Allow-Origin` for that origin, so `npm run dev` can open `?disc=https://<lan-ip>:8443/discs/<id>&token=…` too. The token still gates every read.
+CORS: disc requests from another origin (the Vite dev server on this Mac, for example) get `Access-Control-Allow-Origin` for that origin, so `npm run dev` can open `?disc=https://<lan-ip>:8443/api/discs/<id>/&token=…` too. The token still gates every read.
 
 ## Tests
 
-`npx vitest run tools/disc-server src/engine/disc/http-source.test.ts` (plain HTTP on loopback; the 4 GiB case uses a sparse file).
+`npx vitest run tools/disc-server` (plain HTTP on loopback; the 4 GiB case uses a sparse file). It also reads discs through the player's client path (`RemoteSource` over `HttpTransport`) against the server.

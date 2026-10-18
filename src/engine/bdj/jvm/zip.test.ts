@@ -76,6 +76,15 @@ function buildZip(entries: TestEntry[], comment = ''): Uint8Array {
 
 const text = (s: string): Uint8Array => new TextEncoder().encode(s);
 
+/**
+ * toEqual on a large Uint8Array compares element by element through Vitest's deep equality, about 0.75 s per MiB
+ * locally and over 4 s on CI; this does the same check in milliseconds and still names the first differing byte.
+ */
+function expectBytes(actual: Uint8Array, expected: Uint8Array): void {
+  expect(actual.length).toBe(expected.length);
+  expect(actual.findIndex((b, i) => b !== expected[i])).toBe(-1);
+}
+
 function repeat(a: Uint8Array, n: number): Uint8Array {
   const o = new Uint8Array(a.length * n);
   for (let i = 0; i < n; i++) o.set(a, i * a.length);
@@ -98,7 +107,7 @@ describe('inflateAll', () => {
   for (const level of [0, 1, 9]) {
     it(`matches deflateRawSync at level ${level}`, () => {
       for (const src of [random, repetitive]) {
-        expect(inflateAll(new Uint8Array(deflateRawSync(src, { level })))).toEqual(src);
+        expectBytes(inflateAll(new Uint8Array(deflateRawSync(src, { level }))), src);
       }
     });
   }
@@ -139,7 +148,7 @@ describe('inflateRaw', () => {
       }
       n += inf.pull(out, n, out.length - n);
       expect(inf.finished).toBe(true);
-      expect(out.subarray(0, n)).toEqual(src);
+      expectBytes(out.subarray(0, n), src);
     }
   });
   it('gives the same output fed one byte at a time', () => {

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
+import { expectBarHidden, expectBarShown, isLinuxWebKit, LINUX_WEBKIT_REALTIME, setFolder } from './support';
 import { bdjStartup, telemetry } from './telemetry';
 import { bdjPlane, clickPlane, flushedPast, MENU_DISC } from './bdj-support';
-import { expectBarHidden, expectBarShown } from './support';
 
 // fixtures/synthetic/disc-bdj (scripts/make-bdj-disc.ts): First Play is a BD-J object whose xlet starts TitleXlet,
 // which plays playlist 00000 (2 s) and plays it again once it ends; then the player stays 'ended'.
@@ -16,8 +16,10 @@ async function reachesState(page: Page, state: string, timeout: number): Promise
 
 async function open(page: Page, query = ''): Promise<void> {
   await page.goto(`/?telemetry=1${query}`);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
 }
+
+test.beforeEach(({ browserName }) => test.skip(isLinuxWebKit(browserName), LINUX_WEBKIT_REALTIME));
 
 test("plays the playlist the disc's Java selects, with no picker and no notice", async ({ page }) => {
   await open(page);
@@ -62,7 +64,7 @@ test('a BD-J runtime that cannot boot (?bdjfail=1) falls back to the picker with
 
 test('the control bar never covers a BD-J menu: the bottom edge wakes it, a click in its empty space reaches the disc (R9)', async ({ page }) => {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   const player = page.getByTestId('player');
   const bar = page.getByTestId('control-bar');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
@@ -110,7 +112,7 @@ test('the control bar never covers a BD-J menu: the bottom edge wakes it, a clic
 
 test('keys that go to a BD-J menu leave the control bar hidden; a player shortcut shows it (R11)', async ({ page }) => {
   await page.goto('/?telemetry=1');
-  await page.getByTestId('folder-input').setInputFiles(MENU_DISC);
+  await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   const player = page.getByTestId('player');
   const bar = page.getByTestId('control-bar');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });

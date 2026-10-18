@@ -35,6 +35,8 @@ export interface MemoryProfile {
    * one is dropped first if both would not fit.
    */
   readonly bdjDecodedImageBytes: number;
+  /** A NAS disc's read-ahead: bytes fetched ahead of playback and kept. */
+  readonly remoteReadAheadBytes: number;
 }
 
 export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>> = {
@@ -50,6 +52,7 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     // no limit: desktop BD-J writes as much as libbluray lets it
     bdjVfsCacheBytes: Infinity,
     bdjDecodedImageBytes: 64 * MB,
+    remoteReadAheadBytes: 128 * MB,
   },
   constrained: {
     igPreloadLimitBytes: 64 * MB,
@@ -63,5 +66,6 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     bdjVfsCacheBytes: 64 * MB,
     // two 1920x1080 stills (7.9 MB each) while one replaces the other
     bdjDecodedImageBytes: 16 * MB,
+    remoteReadAheadBytes: 48 * MB,
   },
 };

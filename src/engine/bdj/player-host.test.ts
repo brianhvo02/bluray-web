@@ -74,7 +74,7 @@ async function setup(opts: { sounds?: boolean } = {}) {
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
   const entries = discEntries(files);
-  await player.handle({ type: 'open', entries });
+  await player.handle({ type: 'open', disc: { kind: 'files', entries } });
   const source = new FileSource(normalizeDiscPaths(entries));
   const disc = await openDisc(source);
   const regs = new RegisterFile();
