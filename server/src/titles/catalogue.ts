@@ -172,15 +172,21 @@ function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series>
 }
 
 /**
- * An AniList TV entry's place in its chain, counted along single TV PREQUEL links back to a loaded root (a loaded TV
- * entry with no TV prequel), or null when a link leads to an entry that isn't loaded, or branches.
+ * An AniList TV entry's place in its chain, counted along single TV prequel links back to a loaded root (a loaded TV
+ * entry with no TV prequel), or null when a link leads to an entry that isn't loaded, or branches. A prequel is named
+ * by the entry's own PREQUEL relation or by a loaded TV entry's SEQUEL relation to it.
  */
 function chainPlace(en: Entry, entries: ReadonlyMap<string, Entry>): number | null {
+  const tv = [...entries.values()].filter(isAnilistTv);
   let cur = en;
   for (let place = 1; place <= entries.size; place++) {
-    const prequels = cur.relations.filter((r) => r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? ''));
-    if (prequels.length === 0) return place;
-    const next = prequels.length === 1 ? entries.get(prequels[0]!.id) : undefined;
+    const id = cur.id;
+    const prequels = new Set([
+      ...cur.relations.filter((r) => r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? '')).map((r) => r.id),
+      ...tv.filter((x) => x.relations.some((r) => r.type === 'SEQUEL' && r.id === id)).map((x) => x.id),
+    ]);
+    if (prequels.size === 0) return place;
+    const next = prequels.size === 1 ? entries.get([...prequels][0]!) : undefined;
     if (!next || !isAnilistTv(next)) return null;
     cur = next;
   }
@@ -195,12 +201,10 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   for (const e of input.evidence) groupSizes.set(groupKey(e), (groupSizes.get(groupKey(e)) ?? 0) + 1);
   const seriesOf = anilistSeries(entries);
   // AniList season numbers (ruling T7h): the chain's count when the whole chain is loaded, else the matcher's (which
-  // walked the real chain), else the season an owner gave the entry
+  // walked the real chain)
   const matcherSeason = new Map<string, number>();
   for (const m of input.matches) if (m.status === 'filed' && m.season !== null && !matcherSeason.has(m.entryId)) matcherSeason.set(m.entryId, m.season);
-  const ownerSeason = new Map<string, number>();
-  const seasonOf = (series: Series, entryId: string): number | null =>
-    series.number.get(entryId) ?? matcherSeason.get(entryId) ?? ownerSeason.get(entryId) ?? null;
+  const seasonOf = (series: Series, entryId: string): number | null => series.number.get(entryId) ?? matcherSeason.get(entryId) ?? null;
 
   const artById = new Map<string, { small: string; large: string }>();
   const artId = (art: { small: string; large: string } | null): string | null => {
@@ -257,10 +261,10 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   for (const t of owner.ownTitles) ownTitle(t);
 
   /**
-   * Where a disc filed under `titleId` goes. `season` null means: the entry's own season for an AniList TV entry (even
-   * for a bonus disc), the title's extras for an owner's extras of the series itself, the only season of a one-season
-   * series, or the title's extras for an extras disc. An owner's season number counts within the whole AniList series;
-   * a match names the season by its entry. A season the entry or own title doesn't have goes to Unsorted.
+   * Where a disc filed under `titleId` goes. A match names an AniList season by its entry (`season` null: that entry's
+   * season, even for a bonus disc); an owner's choice names the series by any chain id and the season by number.
+   * Otherwise `season` null means the only season of a one-season series, or the title's extras for an extras disc.
+   * A season the entry or own title doesn't have goes to Unsorted.
    */
   const resolve = (titleId: string, seasonNo: number | null, extras: boolean, byOwner: boolean): Target | UnsortedReason => {
     if (titleId.startsWith('own:')) {
@@ -285,17 +289,11 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
         }),
       });
       if (byOwner) {
-        // the owner's season wins: the loaded entry with that number, or the chosen entry when its number is unknown,
-        // or a plain season of that number
-        if (seasonNo !== null) {
-          const m = series.members.find((x) => seasonOf(series, x.id) === seasonNo) ?? (en && seasonOf(series, en.id) === null ? en : undefined);
-          if (!m) return { title: b, season: numbered(b, seasonNo, null, null) };
-          if (seasonOf(series, m.id) === null) ownerSeason.set(m.id, seasonNo);
-          return memberSeason(m, seasonNo);
-        }
-        if (extras && (!en || titleId === series.id)) return { title: b, season: null };
-        const n = en ? seasonOf(series, en.id) : null;
-        return n === null ? 'no-season' : memberSeason(en!, n);
+        // any chain id names the whole series, and only the choice's season picks a season (ruling T7i): the loaded
+        // entry with that number, else a plain season of that number; with no season, the series' extras or Unsorted
+        if (seasonNo === null) return extras ? { title: b, season: null } : 'no-season';
+        const m = series.members.find((x) => seasonOf(series, x.id) === seasonNo);
+        return m ? memberSeason(m, seasonNo) : { title: b, season: numbered(b, seasonNo, null, null) };
       }
       if (!en) return 'no-title';
       const counted = series.number.get(en.id);

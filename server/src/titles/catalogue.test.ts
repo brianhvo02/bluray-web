@@ -178,6 +178,62 @@ describe('buildCatalogue', () => {
     expect(cat.detail(title!.id)!.seasons.map((s) => [s.number, s.label, s.discs.map((d) => d.number)])).toEqual([[3, 'Hinokiri no Ken: Kanketsu-hen', [1, 2, 3]]]);
   });
 
+  it('reads an owner choice by any chain id as the whole series, keeping its meaning as the chain loads (ruling T7i)', () => {
+    const evidence = [ev('drv5/E/S3D1'), ev('drv5/E/Box Extras'), ev('drv5/E/Loose')];
+    const input = {
+      evidence,
+      matches: [
+        filed('drv5/E/S3D1', 'anilist:450', 3, 1),
+        { discId: id('drv5/E/Box Extras'), status: 'unsorted', reason: 'no-season', suggestions: [] } as DiscMatch,
+        { discId: id('drv5/E/Loose'), status: 'unsorted', reason: 'no-season', suggestions: [] } as DiscMatch,
+      ],
+      owner: owner({
+        // saved while only S3 was loaded, when the series' provisional id was anilist:120
+        [id('drv5/E/Box Extras')]: { kind: 'extras', titleId: 'anilist:120', season: null },
+        [id('drv5/E/Loose')]: { kind: 'title', titleId: 'anilist:120', season: null, disc: 1 },
+      }),
+    };
+    for (const entries of [[S3], [S1, S2, S3]]) {
+      const cat = build({ ...input, entries });
+      const detail = cat.detail(cat.titles[0]!.id)!;
+      expect(detail.extras.map((d) => d.copies[0]!.discId)).toEqual([id('drv5/E/Box Extras')]);
+      expect(detail.seasons.map((s) => [s.number, s.extras.length])).toEqual([[3, 0]]);
+      expect(cat.unsorted.map((u) => [u.discId, u.reason])).toEqual([[id('drv5/E/Loose'), 'no-season']]);
+    }
+  });
+
+  it('does not depend on the order of the evidence', () => {
+    const evidence = [ev('drv5/E/S1D1'), ev('drv5/E/Y'), ev('drv5/E/S3 Bonus'), ev('drv5/E/Z')];
+    const matches: DiscMatch[] = [
+      filed('drv5/E/S1D1', 'anilist:300', 1, 1),
+      { discId: id('drv5/E/Y'), status: 'unsorted', reason: 'no-season', suggestions: [] },
+      filed('drv5/E/S3 Bonus', 'anilist:450', null, null, true),
+      { discId: id('drv5/E/Z'), status: 'unsorted', reason: 'no-season', suggestions: [] },
+    ];
+    const choices = owner({
+      [id('drv5/E/Y')]: { kind: 'title', titleId: 'anilist:450', season: 5, disc: 1 },
+      [id('drv5/E/Z')]: { kind: 'title', titleId: 'anilist:450', season: null, disc: 2 },
+    });
+    const view = (cat: Catalogue): unknown => [cat.titles, cat.detail('anilist:300'), [...cat.unsorted].sort((a, b) => a.discId.localeCompare(b.discId))];
+    const forward = build({ entries: [S1, S3], evidence, matches, owner: choices });
+    const backward = build({ entries: [S1, S3], evidence: [...evidence].reverse(), matches, owner: choices });
+    expect(view(backward)).toEqual(view(forward));
+    expect(forward.detail('anilist:300')!.seasons.map((s) => [s.number, s.label])).toEqual([[1, 'Ember Blade'], [5, 'Season 5']]);
+  });
+
+  it('counts a chain through a SEQUEL link whose PREQUEL back-link is missing', () => {
+    const lone2 = entry('anilist:120', { english: 'Ember Blade Season 2' }, { year: 2021 });
+    const cat = build({
+      entries: [S1, lone2],
+      evidence: [ev('drv5/E/S1D1'), ev('drv5/E/S2D1')],
+      matches: [filed('drv5/E/S1D1', 'anilist:300', 1, 1), filed('drv5/E/S2D1', 'anilist:120', 2, 1)],
+    });
+    expect(cat.titles.map((t) => t.id)).toEqual(['anilist:300']);
+    expect(cat.detail('anilist:300')!.seasons.map((s) => s.number)).toEqual([1, 2]);
+    expect(cat.unsorted).toEqual([]);
+    expect(cat.provisional).toEqual([]);
+  });
+
   it('sends a disc whose matcher season disagrees with a whole loaded chain to Unsorted', () => {
     const cat = build({
       entries: [S1, S2, S3],
