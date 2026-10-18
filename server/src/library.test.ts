@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as udf from '../../src/engine/disc/udf';
 import { discId } from './disc-id';
 import { createServer } from './http';
-import { Library, nextNightly } from './library';
+import { Library, SETTLE_MS, nextNightly } from './library';
 import { libraryRoute } from './routes/library';
 
 let tmp: string;
@@ -275,5 +275,78 @@ describe('GET /api/library', () => {
       server.close();
       server.closeAllConnections();
     }
+  });
+});
+
+describe('Downloads group', () => {
+  const MIN = 60_000;
+  const dl = (): { name: string; dir: string; group?: string }[] => [
+    { name: 'drvA', dir: join(tmp, 'a') },
+    { name: 'drvA-dl', dir: join(tmp, 'dl1'), group: 'Downloads' },
+    { name: 'drvB-dl', dir: join(tmp, 'dl2'), group: 'Downloads' },
+  ];
+  const age = (path: string, atMs: number): void => utimesSync(path, atMs / 1000, atMs / 1000);
+
+  beforeEach(() => {
+    touch(join(tmp, 'dl1/Show/Vol 1/BDMV/index.bdmv'));
+    touch(join(tmp, 'dl1/Loose/BDMV/index.bdmv'));
+    touch(join(tmp, 'dl2/Show/Vol 2/BDMV/index.bdmv'));
+  });
+
+  it('shows the group as one folder and merges its roots', async () => {
+    const lib = new Library(dl(), join(tmp, 'library.json'), { ...FAST, now: () => Date.now() + 2 * SETTLE_MS });
+    await lib.scan();
+    const top = lib.list('')!;
+    expect(top.folders).toContainEqual({ name: 'Downloads', path: 'Downloads', discs: 3 });
+    expect(top.folders.map((f) => f.path)).not.toContain('drvA-dl/Show');
+    expect(top.discs.map((d) => d.path)).not.toContain('drvA-dl/Loose');
+    const group = lib.list('Downloads')!;
+    expect(group.folders).toEqual([{ name: 'Show', path: 'Downloads/Show', discs: 2 }]);
+    expect(group.discs.map((d) => d.path)).toEqual(['drvA-dl/Loose']);
+    expect(lib.list('Downloads/Show')!.discs.map((d) => d.path)).toEqual(['drvA-dl/Show/Vol 1', 'drvB-dl/Show/Vol 2']);
+    expect(lib.list('Downloads/Nope')).toBeNull();
+  });
+
+  it('keeps root-based disc paths and ids', async () => {
+    const later = { now: () => Date.now() + 2 * SETTLE_MS };
+    const plain = new Library([{ name: 'drvA-dl', dir: join(tmp, 'dl1') }], join(tmp, 'p.json'), { ...FAST, ...later });
+    await plain.scan();
+    const grouped = new Library(dl(), join(tmp, 'g.json'), { ...FAST, ...later });
+    await grouped.scan();
+    const id = plain.list('drvA-dl')!.discs[0]!.id;
+    expect(grouped.disc(id)?.path).toBe('drvA-dl/Loose');
+  });
+
+  it('skips a disc still downloading until it settles, and keeps an earlier entry', async () => {
+    const t0 = Date.now();
+    const clip = join(tmp, 'dl1/Loose/BDMV/STREAM/00000.m2ts');
+    touch(clip);
+    for (const f of ['dl1/Loose/BDMV/index.bdmv', 'dl1/Show/Vol 1/BDMV/index.bdmv', 'dl2/Show/Vol 2/BDMV/index.bdmv']) age(join(tmp, f), t0 - 120 * MIN);
+    age(clip, t0 - 10 * MIN);
+    let now = t0;
+    const lib = new Library(dl(), join(tmp, 'library.json'), { ...FAST, now: () => now });
+    await lib.scan();
+    expect(lib.list('Downloads')!.discs).toEqual([]);
+    expect(lib.list('Downloads')!.folders[0]!.discs).toBe(2);
+    now = t0 + 51 * MIN; // The clip is 61 minutes old.
+    await lib.scan();
+    expect(lib.list('Downloads')!.discs.map((d) => d.path)).toEqual(['drvA-dl/Loose']);
+    // Written to again, the disc is unsettled but stays listed from the previous scan.
+    age(clip, now - MIN);
+    await lib.scan();
+    expect(lib.list('Downloads')!.discs.map((d) => d.path)).toEqual(['drvA-dl/Loose']);
+  });
+
+  it('applies the settle time to ISO files in a group', async () => {
+    copyFileSync(join(import.meta.dirname, '../../fixtures/synthetic/disc1.iso'), join(tmp, 'dl1/new.iso'));
+    const t0 = Date.now();
+    age(join(tmp, 'dl1/new.iso'), t0 - 10 * MIN);
+    for (const f of ['dl1/Loose/BDMV/index.bdmv', 'dl1/Show/Vol 1/BDMV/index.bdmv', 'dl2/Show/Vol 2/BDMV/index.bdmv']) age(join(tmp, f), t0 - 120 * MIN);
+    const lib = new Library(dl(), join(tmp, 'library.json'), { ...FAST, now: () => t0 });
+    await lib.scan();
+    expect(lib.list('Downloads')!.discs.map((d) => d.name)).not.toContain('new.iso');
+    const settled = new Library(dl(), join(tmp, 'library2.json'), { ...FAST, now: () => t0 + 51 * MIN });
+    await settled.scan();
+    expect(settled.list('Downloads')!.discs.map((d) => d.name)).toContain('new.iso');
   });
 });

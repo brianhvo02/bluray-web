@@ -7,6 +7,8 @@ import { discId } from './disc-id';
 import { isoIsDisc } from './iso';
 
 const MAX_DEPTH = 6;
+/** A disc whose files changed within this long is still downloading and is left out of the library. */
+export const SETTLE_MS = 3_600_000;
 const SKIPPED = new Set(['bk', 'lost+found']);
 
 export interface LibraryOptions {
@@ -14,11 +16,19 @@ export interface LibraryOptions {
   opendir?: (path: string) => Promise<Dir>;
   /** Pause between directory reads, which keeps a scan gentle on disks that ignore ionice. Default 10. */
   scanPauseMs?: number;
+  /** Injected for tests: the current time in ms. Default `Date.now`. */
+  now?: () => number;
 }
 
 interface Node {
   folders: Map<string, FolderEntry>;
   discs: DiscEntry[];
+}
+
+interface LibraryRoot {
+  name: string;
+  dir: string;
+  group?: string;
 }
 
 const byName = (a: { name: string }, b: { name: string }): number => a.name.localeCompare(b.name, 'ja');
@@ -36,17 +46,19 @@ export class Library {
   private running: Promise<void> | null = null;
   private readonly open: (path: string) => Promise<Dir>;
   private readonly pauseMs: number;
+  private readonly now: () => number;
   private reads = 0;
   /** Ids of `.iso` files whose UDF tree has no BDMV/INDEX.BDMV (or that aren't UDF), so a rescan doesn't read them again. */
   private readonly notDiscs = new Set<string>();
 
   constructor(
-    private readonly roots: readonly { name: string; dir: string }[],
+    private readonly roots: readonly { name: string; dir: string; group?: string }[],
     private readonly cacheFile: string,
     options: LibraryOptions = {},
   ) {
     this.open = options.opendir ?? opendir;
     this.pauseMs = options.scanPauseMs ?? 10;
+    this.now = options.now ?? Date.now;
     try {
       const cached: unknown = JSON.parse(readFileSync(cacheFile, 'utf8'));
       if (Array.isArray(cached)) this.install(cached.filter((e) => this.valid(e)));
@@ -61,14 +73,34 @@ export class Library {
 
   list(path: string): { folders: FolderEntry[]; discs: DiscEntry[] } | null {
     const key = path.replace(/\/+$/, '');
-    // The top level shows the children of every root, merged.
-    const nodes = key === '' ? this.roots.map((r) => this.tree.get(r.name)) : [this.tree.get(key)];
+    // A group's folders are listed under the group's name, and merge those of its roots.
+    const slash = key.indexOf('/');
+    const head = slash < 0 ? key : key.slice(0, slash);
+    const members = key === '' ? [] : this.roots.filter((r) => r.group === head);
+    if (members.length > 0) {
+      const rest = slash < 0 ? '' : key.slice(slash);
+      const nodes = members.map((r) => ({ root: r, node: this.tree.get(`${r.name}${rest}`) })).filter((m): m is { root: LibraryRoot; node: Node } => m.node !== undefined);
+      if (nodes.length === 0) return null;
+      return { folders: mergeFolders(nodes.flatMap((m) => this.grouped([...m.node.folders.values()], m.root))), discs: nodes.flatMap((m) => m.node.discs).sort(byName) };
+    }
+    // The top level shows the children of every ungrouped root, merged, and one folder per group.
+    const nodes = key === '' ? this.roots.filter((r) => r.group === undefined).map((r) => this.tree.get(r.name)) : [this.tree.get(key)];
     if (key !== '' && !nodes[0]) return null;
     const present = nodes.filter((n): n is Node => n !== undefined);
-    return {
-      folders: present.flatMap((n) => [...n.folders.values()]).sort(byName),
-      discs: present.flatMap((n) => n.discs).sort(byName),
-    };
+    const folders = present.flatMap((n) => [...n.folders.values()]);
+    if (key === '') {
+      for (const group of new Set(this.roots.flatMap((r) => (r.group === undefined ? [] : [r.group])))) {
+        const inGroup = this.roots.filter((r) => r.group === group).map((r) => this.tree.get(r.name)).filter((n): n is Node => n !== undefined);
+        const discs = inGroup.reduce((sum, n) => sum + n.discs.length + [...n.folders.values()].reduce((s, f) => s + f.discs, 0), 0);
+        if (discs > 0) folders.push({ name: group, path: group, discs });
+      }
+    }
+    return { folders: folders.sort(byName), discs: present.flatMap((n) => n.discs).sort(byName) };
+  }
+
+  /** Folder entries of a grouped root, with their paths moved under the group's name. */
+  private grouped(folders: FolderEntry[], root: LibraryRoot): FolderEntry[] {
+    return folders.map((f) => ({ ...f, path: `${root.group}${f.path.slice(root.name.length)}` }));
   }
 
   disc(id: string): DiscEntry | null {
@@ -126,7 +158,7 @@ export class Library {
     }
   }
 
-  private async scanRoot(root: { name: string; dir: string }, out: DiscEntry[], previous: Map<string, DiscEntry>): Promise<void> {
+  private async scanRoot(root: LibraryRoot, out: DiscEntry[], previous: Map<string, DiscEntry>): Promise<void> {
     let queue: { rel: string; abs: string; depth: number }[] = [{ rel: root.name, abs: root.dir, depth: 0 }];
     while (queue.length > 0) {
       const next: typeof queue = [];
@@ -139,7 +171,7 @@ export class Library {
         }
         const bdmv = entries.find((e) => e.isDir && e.name.toLowerCase() === 'bdmv');
         if (bdmv) {
-          const disc = await this.folderDisc(dir.rel, join(dir.abs, bdmv.name), previous);
+          const disc = await this.folderDisc(dir.rel, join(dir.abs, bdmv.name), previous, root.group !== undefined);
           if (disc) {
             out.push(disc);
             continue;
@@ -151,7 +183,7 @@ export class Library {
           if (e.isDir) {
             if (dir.depth < MAX_DEPTH) next.push({ rel, abs: join(dir.abs, e.name), depth: dir.depth + 1 });
           } else if (e.isFile && e.name.toLowerCase().endsWith('.iso')) {
-            const disc = await this.isoDisc(rel, join(dir.abs, e.name), e.name, previous);
+            const disc = await this.isoDisc(rel, join(dir.abs, e.name), e.name, previous, root.group !== undefined);
             if (disc) out.push(disc);
           }
         }
@@ -181,7 +213,8 @@ export class Library {
    * An ISO disc if the image's UDF tree has BDMV/INDEX.BDMV. Its id is made from the path, image size and mtime; an
    * image whose id is already known either way (a disc in `previous`, or not a disc) isn't read again.
    */
-  private async isoDisc(rel: string, abs: string, name: string, previous: Map<string, DiscEntry>): Promise<DiscEntry | null> {
+  private async isoDisc(rel: string, abs: string, name: string, previous: Map<string, DiscEntry>, settle: boolean): Promise<DiscEntry | null> {
+    if (settle && !(await this.isSettled(abs, this.now()))) return this.keepPrevious(rel, previous);
     let st;
     try {
       st = await stat(abs);
@@ -202,8 +235,49 @@ export class Library {
     return null;
   }
 
+  /**
+   * Whether nothing of a disc changed in the last `SETTLE_MS`. `abs` is an ISO file or a BDMV directory; for the
+   * directory the newest mtime of index.bdmv and the files of PLAYLIST, CLIPINF and STREAM counts.
+   */
+  async isSettled(abs: string, nowMs: number): Promise<boolean> {
+    let newest = 0;
+    try {
+      const st = await stat(abs);
+      newest = st.mtimeMs;
+      if (st.isDirectory()) {
+        const entries = (await this.readDir(abs)) ?? [];
+        const files: string[] = [];
+        for (const e of entries) {
+          const lower = e.name.toLowerCase();
+          if (e.isFile && lower === 'index.bdmv') files.push(join(abs, e.name));
+          else if (e.isDir && (lower === 'playlist' || lower === 'clipinf' || lower === 'stream')) {
+            for (const f of (await this.readDir(join(abs, e.name))) ?? []) if (f.isFile) files.push(join(abs, e.name, f.name));
+          }
+        }
+        newest = 0;
+        for (const f of files) {
+          try {
+            newest = Math.max(newest, (await stat(f)).mtimeMs);
+          } catch {
+            // Vanished mid-scan.
+          }
+        }
+      }
+    } catch {
+      return false;
+    }
+    return nowMs - newest >= SETTLE_MS;
+  }
+
+  /** An unsettled disc keeps its entry from the previous scan, if it had one. */
+  private keepPrevious(rel: string, previous: Map<string, DiscEntry>): DiscEntry | null {
+    for (const d of previous.values()) if (d.path === rel) return d;
+    return null;
+  }
+
   /** A folder disc if `bdmvDir` holds index.bdmv; its size is that of the clips in STREAM, carried over from `previous` when the id is unchanged. */
-  private async folderDisc(rel: string, bdmvDir: string, previous: Map<string, DiscEntry>): Promise<DiscEntry | null> {
+  private async folderDisc(rel: string, bdmvDir: string, previous: Map<string, DiscEntry>, settle: boolean): Promise<DiscEntry | null> {
+    if (settle && !(await this.isSettled(bdmvDir, this.now()))) return this.keepPrevious(rel, previous);
     const entries = await this.readDir(bdmvDir);
     const index = entries?.find((e) => e.isFile && e.name.toLowerCase() === 'index.bdmv');
     if (!entries || !index) return null;
@@ -231,6 +305,15 @@ export class Library {
     }
     return { id, name, path: rel, kind: 'folder', sizeBytes };
   }
+}
+
+function mergeFolders(folders: FolderEntry[]): FolderEntry[] {
+  const merged = new Map<string, FolderEntry>();
+  for (const f of folders) {
+    const prev = merged.get(f.path);
+    merged.set(f.path, prev ? { ...prev, discs: prev.discs + f.discs } : f);
+  }
+  return [...merged.values()].sort(byName);
 }
 
 function buildTree(discs: readonly DiscEntry[]): Map<string, Node> {

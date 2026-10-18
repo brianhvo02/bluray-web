@@ -1,6 +1,8 @@
 export interface LibraryRoot {
   name: string;
   dir: string;
+  /** Roots sharing a group appear as one top-level folder named after it. */
+  group?: string;
 }
 
 export interface Config {
@@ -21,7 +23,7 @@ export interface Config {
 
 const DEFAULT_PUBLIC_BASE = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
 
-/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY` and `RENDEZVOUS_URL`. */
+/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY` and `RENDEZVOUS_URL`. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const roots = (env.LIBRARY_ROOTS ?? '')
     .split(',')
@@ -30,12 +32,20 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     .map((entry) => {
       const eq = entry.indexOf('=');
       if (eq <= 0 || eq === entry.length - 1) throw new Error(`LIBRARY_ROOTS entry "${entry}" is not name=dir`);
-      return { name: entry.slice(0, eq), dir: entry.slice(eq + 1) };
+      const rest = entry.slice(eq + 1);
+      const at = rest.lastIndexOf('@');
+      if (at < 0) return { name: entry.slice(0, eq), dir: rest };
+      const group = rest.slice(at + 1);
+      if (at === 0 || group === '') throw new Error(`LIBRARY_ROOTS entry "${entry}" is not name=dir`);
+      return { name: entry.slice(0, eq), dir: rest.slice(0, at), group };
     });
   const seen = new Set<string>();
   for (const { name } of roots) {
     if (seen.has(name)) throw new Error(`LIBRARY_ROOTS names "${name}" twice`);
     seen.add(name);
+  }
+  for (const { group } of roots) {
+    if (group !== undefined && seen.has(group)) throw new Error(`LIBRARY_ROOTS group "${group}" is also a root name`);
   }
   return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL) };
 }

@@ -82,4 +82,13 @@ describe('loadConfig', () => {
   it.each(['rendezvous', 'ftp://r.example/'])('rejects RENDEZVOUS_URL=%j', (value) => {
     expect(() => loadConfig({ RENDEZVOUS_URL: value })).toThrow(`RENDEZVOUS_URL "${value}" is not an http(s) URL`);
   });
+
+  it('parses a root group written name=dir@group', () => {
+    const { roots } = loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv0-dl=/b@Downloads' });
+    expect(roots).toEqual([{ name: 'drv0', dir: '/a' }, { name: 'drv0-dl', dir: '/b', group: 'Downloads' }]);
+  });
+
+  it('rejects a group named like a root', () => {
+    expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv1=/b@drv0' })).toThrow('group "drv0" is also a root name');
+  });
 });
