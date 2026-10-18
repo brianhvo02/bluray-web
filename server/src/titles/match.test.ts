@@ -674,6 +674,26 @@ describe('matchDiscs', () => {
         }
       });
 
+      it('W3: discs of two group folders numbered differently into one slot both go to no-disc-number; copies stay', async () => {
+        const quill = entry('anilist:995', { english: 'Quill Harbor' }, { year: 2015 });
+        const b = 'drv0/Anime/Quill Harbor';
+        const state = (ms: readonly DiscMatch[], p: string): unknown => { const m = byDisc(ms, p); return m.status === 'filed' ? m.disc : m.status === 'unsorted' ? m.reason : m.status; };
+        const mixed = [`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Volume 2`];
+        const r1 = await run(mixed, fake({ 'Quill Harbor': [quill] }), null);
+        expect(mixed.map((p) => state(r1, p))).toEqual([1, 'no-disc-number', 'no-disc-number']);
+        const three = [`${b}/Volume 1/Disc 1`, `${b}/Volume 2/Disc 1`, `${b}/Volume 2/Disc 2`, `${b}/Volume 3`];
+        const r2 = await run(three, fake({ 'Quill Harbor': [quill] }), null);
+        expect(three.map((p) => state(r2, p))).toEqual([1, 2, 'no-disc-number', 'no-disc-number']);
+        // the same disc in two places (equal content) is two copies of one disc, as before
+        const copies = ['drv0/Anime/Quill Harbor/Volume 1', 'drv1/Backup/Quill Harbor/Volume 1'];
+        const r3 = await matchDiscs(copies.map((p) => ({ ...rooted(p), fingerprint: 'FPQ1' })), ctx(fake({ 'Quill Harbor': [quill] }), null));
+        for (const p of copies) expect(byDisc(r3.matches, p)).toMatchObject({ status: 'filed', entryId: 'anilist:995', disc: 1 });
+        // and one layout on two roots, numbered the same way, is copies too, even without fingerprints
+        const twice = ['drv0', 'drv1'].flatMap((root) => [1, 2].map((d) => `${root}/Anime/Quill Harbor/Volume 1/Disc ${d}`));
+        const r4 = await run(twice, fake({ 'Quill Harbor': [quill] }), null);
+        expect(twice.map((p) => state(r4, p))).toEqual([1, 2, 1, 2]);
+      });
+
       it('numbers Volume M/Disc K discs across the volumes, like boxes, so two volumes never share a slot', async () => {
         const anilist = fake({ 'Starfall Wanderer': [starfallEn] });
         const paths = ['drv0/Starfall Wanderer/Volume 1/Disc 1', 'drv0/Starfall Wanderer/Volume 1/Disc 2', 'drv0/Starfall Wanderer/Volume 2/Disc 1'];
@@ -700,7 +720,7 @@ describe('matchDiscs', () => {
 
       it('an AniList entry fitting one half of English (日本語) and an animated TMDB entry fitting the other are twins', async () => {
         const anilist = fake({ 星降りの旅人: [starfall] });
-        const tv = entry('tmdb-tv:910', { english: 'Starfall Wanderer' }, { year: 2021, seasons: seasons(1), animation: true });
+        const tv = entry('tmdb-tv:910', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { year: 2021, seasons: seasons(1), animation: true });
         const paths = vols('Starfall Wanderer (星降りの旅人)');
         const ms = await run(paths, anilist, fake({ 'Starfall Wanderer': [tv] }));
         paths.forEach((p, i) => expect(byDisc(ms, p)).toMatchObject({ status: 'filed', entryId: 'anilist:900', season: 1, disc: i + 1 }));
@@ -724,9 +744,24 @@ describe('matchDiscs', () => {
         const s2 = entry('anilist:921', { romaji: 'Hoshifuri no Tabibito 2nd Season', native: '星降りの旅人 第2期' }, { year: 2023, relations: [related('PREQUEL', 'anilist:920')] });
         const anilist = fake({ 星降りの旅人: [s2] }, [], [s1]);
         const p = 'drv0/Starfall Wanderer (星降りの旅人)/Season 2/Volume 1';
-        const tv = (n: number) => fake({ 'Starfall Wanderer': [entry('tmdb-tv:930', { english: 'Starfall Wanderer' }, { year: 2021, seasons: seasons(n), animation: true })] });
+        const tv = (n: number) => fake({ 'Starfall Wanderer': [entry('tmdb-tv:930', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { year: 2021, seasons: seasons(n), animation: true })] });
         expect(byDisc(await run([p], anilist, tv(2)), p)).toMatchObject({ status: 'filed', entryId: 'anilist:921', season: 2, disc: 1 });
         expect(byDisc(await run([p], anilist, tv(1)), p)).toMatchObject({ status: 'unsorted' });
+      });
+
+      it('M2b: a segment twin needs TMDB to carry the Japanese name too', async () => {
+        const moon = entry('anilist:906', { english: 'Moonlit Garden', native: '月影の庭' }, { year: 2021 });
+        const star = entry('tmdb-tv:907', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { year: 2021, seasons: seasons(1), animation: true });
+        const paths = vols('Starfall Wanderer (月影の庭)');
+        // TMDB's own Japanese name shows it is another work; with none, nothing ties the halves together
+        for (const t of [star, { ...star, names: { ...star.names, native: null } }]) {
+          const ms = await run(paths, fake({ 月影の庭: [moon] }), fake({ 'Starfall Wanderer': [t] }));
+          for (const p of paths) expect(byDisc(ms, p), String(t.names.native)).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        }
+        // a synonym in Japanese that names the folder's half is enough
+        const named = { ...star, names: { ...star.names, native: null, synonyms: ['月影の庭'] } };
+        const ok = await run(paths, fake({ 月影の庭: [moon] }), fake({ 'Starfall Wanderer': [named] }));
+        for (const p of paths) expect(byDisc(ok, p)).toMatchObject({ status: 'filed', entryId: 'anilist:906' });
       });
 
       it("names that differ only by ’ and ' or & and and are one name, so the entries are twins", async () => {
@@ -772,6 +807,20 @@ describe('matchDiscs', () => {
           const ms = await run([p], fake({ 'Glass Orchard': [orchard] }), fake({ 'Glass Orchard': [film] }));
           expect(byDisc(ms, p), p).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
         }
+      });
+
+      it('W1: films whose names carry a volume still compete with a series', async () => {
+        const tmdb = fake({
+          'Blade Night': [
+            entry('tmdb-movie:992', { english: 'Blade Night: Vol. 1' }, { year: 2003 }),
+            entry('tmdb-movie:993', { english: 'Blade Night: Vol. 2' }, { year: 2004 }),
+            entry('tmdb-tv:994', { english: 'Blade Night' }, { year: 2010, seasons: seasons(1) }),
+          ],
+        });
+        const paths = ['drv0/Movies/Blade Night/Blade Night Vol. 1', 'drv0/Movies/Blade Night/Blade Night Vol. 2'];
+        const ms = await run(paths, fake({}), tmdb);
+        for (const p of paths) expect(byDisc(ms, p)).toMatchObject({ status: 'unsorted' });
+        for (const p of paths) expect(byDisc(ms, p).status === 'unsorted' && (byDisc(ms, p) as { suggestions: readonly string[] }).suggestions).toContain('tmdb-tv:994');
       });
 
       it('M3b: disc numbers alone are not series-shaped; volume numbers among siblings are', async () => {

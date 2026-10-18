@@ -403,13 +403,15 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   // series-shaped evidence (a season number, an episode range, or a volume number among two or more sibling discs) is
   // no film's: TMDB and AniList movies aren't competitors there once a series fits, and an exactly fitting AniList TV
   // entry beats the OVA, ONA, SPECIAL and TV_SHORT entries tied to it by a story link (ruling M3); disc numbers alone
-  // never make it so, since a film comes on two discs too (ruling M3b)
+  // never make it so, since a film comes on two discs too (ruling M3b); a film whose own name carries a volume
+  // (`Blade Night: Vol. 1`) may be what the volumes are, so it still competes (W1)
+  const filmOut = (en: Entry): boolean => en.kind === 'movie' && !names(en).some((n) => parseName(n).volume !== null);
   const seriesShaped = evSeason !== null || named.some((p) => p.parse.episodes !== null) ||
     (siblings >= 2 && named.some((p) => p.parse.volume !== null));
   const filmsOut = seriesShaped && scored.some((s) => s.entry.kind !== 'movie');
   const dropped = new Set<string>();
   if (seriesShaped) {
-    if (filmsOut) for (const s of scored) if (s.entry.kind === 'movie') dropped.add(s.entry.id);
+    if (filmsOut) for (const s of scored) if (filmOut(s.entry)) dropped.add(s.entry.id);
     const tv = scored.filter((s) => s.exact && s.entry.source === 'anilist' && TV_FORMATS.has(s.entry.format ?? '') && !dropped.has(s.entry.id));
     for (const s of scored) {
       const side = s.entry.source === 'anilist' && SIDE_FORMATS.has(s.entry.format ?? '');
@@ -434,7 +436,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
       const place = tv ? await anilistPlace(a, ctx) : null;
       info.set(a.id, { tv, rootYear: place?.root?.year ?? null, place: place?.place ?? null });
     }
-    const tmdb = [...all.values()].filter((en) => en.source === 'tmdb' && !dropped.has(en.id) && !(filmsOut && en.kind === 'movie'));
+    const tmdb = [...all.values()].filter((en) => en.source === 'tmdb' && !dropped.has(en.id) && !(filmsOut && filmOut(en)));
     const titles = named.flatMap((p) => p.parse.candidates);
     const evidenceTitled = tmdb.filter((t) => names(t).some((n) => titles.some((c) => sameTitle(c, n))));
     // TMDB entries named like an AniList entry in any of its languages, even when not like the evidence (ruling T5r):
@@ -541,9 +543,28 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
     }
     out.push(placed
       ? { discId: p.e.discId, status: 'filed', entryId: p.entry.id, season: p.season, disc, bonus: p.bonus, via: p.via }
-      : { discId: p.e.discId, status: 'unsorted', reason: 'no-disc-number', suggestions: [p.entry.id], ...(p.season !== null ? { seasons: { [p.entry.id]: p.season } } : {}) });
+      : unnumbered(p));
   }
-  return out;
+  // two discs of different group folders in one slot whose numbers come from different schemes (`Volume 1/Disc 2`
+  // numbered across volumes, a `Volume 2` disc folder by its own number) can't both be right, and the catalogue would
+  // merge them as copies: neither has a place (W3). Discs numbered the same way in one slot are copies or editions of
+  // one disc, as before, and so are discs with the same content.
+  const byId = new Map(pending.map((p) => [p.e.discId, p]));
+  const scheme = (p: Pending): string => (p.volumeBox ? `v${p.box}:${p.disc}` : p.box !== null && p.box > 1 ? `b${p.box}:${p.disc}` : 'own');
+  return out.map((m, i) => {
+    if (m.status !== 'filed' || m.disc === null || m.bonus) return m;
+    const p = byId.get(m.discId)!;
+    const clash = out.some((o, j) => {
+      if (j === i || o.status !== 'filed' || o.bonus || o.entryId !== m.entryId || o.season !== m.season || o.disc !== m.disc) return false;
+      const q = byId.get(o.discId)!;
+      return q.group !== p.group && scheme(q) !== scheme(p) && (p.e.fingerprint === null || q.e.fingerprint !== p.e.fingerprint);
+    });
+    return clash ? unnumbered(p) : m;
+  });
+}
+
+function unnumbered(p: Pending): DiscMatch {
+  return { discId: p.e.discId, status: 'unsorted', reason: 'no-disc-number', suggestions: [p.entry.id], ...(p.season !== null ? { seasons: { [p.entry.id]: p.season } } : {}) };
 }
 
 /** Running disc numbers across boxes 1..max, or null when a box is missing, a disc unnumbered or a box's numbers have a gap. */
@@ -651,8 +672,14 @@ function twinMatch(a: Entry, rootYear: number | null, t: Entry, named: readonly 
   if (names(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'name';
   if (film) return null;
   if (seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'base';
-  return named.some((p) => p.kind === 'folder' && halves(p.parse.candidates).some(([x, y]) =>
-    quality(a, x, season) === EXACT && names(t).some((n) => sameTitle(y, n)))) ? 'segment' : null;
+  // TMDB must also carry a Japanese name that is the folder's Japanese half or an AniList name: without one nothing
+  // ties the two halves to one work, and with another one TMDB's entry is another work (ruling M2b)
+  const japanese = names(t).filter((n) => JAPANESE.test(n));
+  return named.some((p) => {
+    const cands = p.parse.candidates;
+    const tied = japanese.some((n) => cands.some((c, i) => japaneseHalf(cands, i) && sameTitle(n, c)) || names(a).some((m) => sameTitle(n, m)));
+    return p.kind === 'folder' && tied && halves(cands).some(([x, y]) => quality(a, x, season) === EXACT && names(t).some((n) => sameTitle(y, n)));
+  }) ? 'segment' : null;
 }
 
 /**
