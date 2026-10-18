@@ -10,7 +10,7 @@
 import type { ScreenRect } from './background';
 import type { PlayerBdjHost } from './player-host';
 import type { Coalesce } from './input';
-import type { ClassLibrarySource } from './runtime';
+import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
 import type { DiscFiles, DiscSourceRef } from '../disc/http-source';
 import { bootDiscFields, type BdjCallName, type BdjFailureCode, type BdjWireValue, type FromBdj, type ToBdj } from './worker-protocol';
@@ -42,6 +42,8 @@ export interface BdjSessionDeps {
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** How long after boot (or the first start) Java has to select a playlist, show a menu or show a background still. */
   readonly selectTimeoutMs?: number;
+  /** The memory profile's BD-J budgets, for the boot message. */
+  readonly memory?: BdjMemoryBudgets;
 }
 
 /**
@@ -74,7 +76,8 @@ export class BdjSession {
       if (this.stopped) return resolve();
       this.armTimeout();
       this.bootDone = resolve;
-      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, plane: this.deps.plane, ...bootDiscFields(disc), discId, classLibrary });
+      const memory = this.deps.memory;
+      this.post({ type: 'boot', registers: this.deps.regs, status: this.deps.status.buffer, plane: this.deps.plane, ...bootDiscFields(disc), discId, classLibrary, ...(memory ? { memory } : {}) });
     });
   }
 

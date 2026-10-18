@@ -51,6 +51,33 @@ describe('parseClassFile', () => {
     expect(m.code!.code.length).toBeGreaterThan(0);
     expect(cf.sourceFile).toBe('Bare.java');
   });
+  it('keeps code and annotations in one buffer of their own, so the class file is not kept', () => {
+    const bytes = find('java/awt/Color.class');
+    const cf = parseClassFile(bytes);
+    const annotated = cf.methods.find((m) => m.annotations)!;
+    const code = cf.methods.find((m) => m.code)!.code!.code;
+    expect(annotated.annotations!.buffer).toBe(code.buffer);
+    expect(code.buffer).not.toBe(bytes.buffer);
+    const bare = find('conformance/Bare.class');
+    const b = parseClassFile(bare);
+    const kept = b.methods.flatMap((m) => (m.code ? [m.code.code] : []));
+    expect(kept.length).toBeGreaterThan(1);
+    expect(new Set(kept.map((c) => c.buffer)).size).toBe(1);
+    expect(kept[0]!.buffer).not.toBe(bare.buffer);
+    expect(b.retainedBytes).toBe(kept.reduce((n, c) => n + c.length, 0) + b.methods.reduce((n, m) => n + (m.annotations?.length ?? 0), 0));
+    expect(kept[0]!.buffer.byteLength).toBe(b.retainedBytes);
+    // the bytes are the class file's
+    const sum = b.methods.find((x) => x.name === 'sum')!.code!.code;
+    expect(sum[sum.length - 1]).toBe(0xac); // ireturn
+  });
+  it('reads the LineNumberTable as (pc, line) pairs', () => {
+    const m = parseClassFile(find('conformance/Bare.class')).methods.find((x) => x.name === 'sum')!;
+    const lines = m.code!.lineNumbers;
+    expect(lines).toBeInstanceOf(Uint16Array);
+    expect(lines.length % 2).toBe(0);
+    expect(lines[0]).toBe(0);
+    expect(lines[1]).toBeGreaterThan(0);
+  });
   it('reads BootstrapMethods of Lambdas', () => {
     const cf = parseClassFile(find('conformance/Lambdas.class'));
     expect(cf.bootstrapMethods.length).toBeGreaterThan(0);

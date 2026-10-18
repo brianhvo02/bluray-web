@@ -166,6 +166,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         disc: source,
         discId: m.discId,
         classLibrary: m.classLibrary,
+        ...(m.memory ? { memory: m.memory } : {}),
         host: () =>
           new WorkerBdjHost({
             regs: new SharedRegisterView(m.registers),

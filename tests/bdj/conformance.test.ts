@@ -67,6 +67,18 @@ describe('Bare (before boot)', () => {
   });
 });
 
+describe('class-file bytes the classes keep', () => {
+  it('are counted, and going over the budget is reported once', async () => {
+    const warned: string[] = [];
+    const jvm = new Jvm({ bootJars: BOOT_JARS, nowMs: () => 0, setTimer: () => () => {}, stdout: () => {}, stderr: () => {}, classBytesBudget: 100, warn: (l) => warned.push(l) });
+    await jvm.callStatic('conformance/Bare', 'sum', '()I');
+    const s = jvm.memoryStats();
+    expect(s.classes).toBeGreaterThan(1);
+    expect(s.classFileBytes).toBeGreaterThan(100);
+    expect(warned).toEqual([expect.stringMatching(/^BD-J: classes keep [\d.]+ MB of class files, over the memory budget of 0\.0 MB$/)]);
+  });
+});
+
 describe('after JDK boot', () => {
   let out = '';
   let err = '';
@@ -457,8 +469,10 @@ describe('java.io paths and failures', () => {
     fileTest('exists'),
   ]);
 
+  let lastProbe: Jvm | null = null;
   async function probing(discFiles?: ReadonlyMap<string, Uint8Array<ArrayBuffer>>, failRead?: (path: string) => boolean) {
     const jvm = bootedJvm(() => {}, () => {}, [RT], discFiles, failRead);
+    lastProbe = jvm;
     await jvm.boot();
     jvm.loader.define('FsProbe', probe, null, null);
     const call = async (fn: string, p: string): Promise<JValue | string | null | undefined> => {
@@ -493,6 +507,30 @@ describe('java.io paths and failures', () => {
     expect(await call('zip', '/disc/BDMV/JAR/00001.jar')).toBe('java.util.zip.ZipException: error in opening zip file');
     expect(await call('read', '/disc/BDMV/JAR/00000.jar')).toBe('read');
     expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
+  }, 60_000);
+  it('shares one archive among ZipFiles of an unchanged file, as zip_util does, read from the Vfs without a copy', async () => {
+    const jar = new Uint8Array(file('./conformance.jar'));
+    const call = await probing(new Map([['BDMV/JAR/00000.JAR', jar]]));
+    const jvm = lastProbe!;
+    const vfs = jvm.opts.vfs!;
+    const put = (path: string, bytes: Uint8Array): void => {
+      const h = vfs.open(path, 'w')!;
+      vfs.write(h, bytes, 0, bytes.length);
+      vfs.close(h);
+    };
+    // a disc file is read once, into a copy of the zips' own
+    expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
+    expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 1, zipBytes: jar.length });
+    // a memory file is read in place
+    put('/tmp/a.jar', jar);
+    expect(await call('zip', '/tmp/a.jar')).toBe('opened');
+    expect(await call('zip', '/tmp/a.jar')).toBe('opened');
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 2, zipBytes: jar.length });
+    // rewritten, it is a new file: the open archive keeps the old bytes, which are now its own
+    put('/tmp/a.jar', jar);
+    expect(await call('zip', '/tmp/a.jar')).toBe('opened');
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 3, zipBytes: 2 * jar.length });
   }, 60_000);
 });
 

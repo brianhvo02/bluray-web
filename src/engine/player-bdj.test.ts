@@ -18,6 +18,7 @@ import type { PlayerSettings } from './disc/player-settings';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { Player } from './player';
+import { MEMORY_PROFILES, type MemoryProfileName } from './memory-profile';
 import type { CompositorLike } from './render/compositor';
 import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
@@ -82,6 +83,7 @@ interface HarnessOptions {
   readonly decodeImage?: DecodeImage;
   readonly bdjMissing?: readonly string[];
   readonly planeHashTelemetry?: boolean;
+  readonly memoryProfile?: MemoryProfileName;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -134,6 +136,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   players.push(player);
   const ring = createRing(48_000, 2);
   const views = ringViews(ring);
+  if (opts.memoryProfile) await player.handle({ type: 'setMemoryProfile', profile: opts.memoryProfile });
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
   await player.handle({ type: 'open', entries: discEntries(files) });
@@ -397,6 +400,22 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     const boot = w.sent.find((m) => m.type === 'boot')!;
     const regs = new SharedRegisterView(boot.type === 'boot' ? boot.registers : new SharedArrayBuffer(0));
     expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
+  });
+
+  it("sends the memory profile's BD-J budgets with the boot, from an early worker and from a title's", async () => {
+    for (const profile of ['desktop', 'constrained'] as const) {
+      const w = handWorker();
+      await harness(bdjDisc(), { worker: w.worker, memoryProfile: profile });
+      await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+      const p = MEMORY_PROFILES[profile];
+      expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memory: { classBytes: p.bdjClassCacheBytes, vfsBytes: p.bdjVfsCacheBytes } });
+    }
+    const w = handWorker();
+    const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(1))] }]);
+    const files = bdjDisc({ movieObjects, index: { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'bdj', name: '00001' }] } });
+    await harness(files, { worker: w.worker, memoryProfile: 'constrained' });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memory: { classBytes: MEMORY_PROFILES.constrained.bdjClassCacheBytes } });
   });
 
   it('applies the player settings when an HDMV program hands over to a BD-J title, before the worker boots (R9)', async () => {

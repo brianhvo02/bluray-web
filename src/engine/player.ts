@@ -4,7 +4,7 @@ import type { Mpls, PlayItem } from './bdmv/mpls-parser';
 import { BackgroundStill, type DecodeImage } from './bdj/background';
 import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
 import { PlayerBdjHost } from './bdj/player-host';
-import type { ClassLibrarySource } from './bdj/runtime';
+import type { BdjMemoryBudgets, ClassLibrarySource } from './bdj/runtime';
 import { EarlyBdjWorker } from './bdj/early-worker';
 import { GraphicsPlaneReader, createGraphicsPlane } from './bdj/graphics-plane';
 import { bdjUnsupportedMessage } from './bdj/requirements';
@@ -380,6 +380,7 @@ export class Player {
         this.backgroundDirty = true;
       },
       onError: (message) => this.deps.bdjLog?.(message, true),
+      maxDecodedBytes: () => this.memory.bdjDecodedImageBytes,
     });
   }
 
@@ -752,12 +753,18 @@ export class Player {
           ...bootDiscFields(ref),
           discId: bdid?.discId ?? null,
           classLibrary,
+          memory: this.bdjBudgets(),
         });
       } catch {
         // a class library that does not load fails the session (bootBdj)
       }
     })();
     return early;
+  }
+
+  /** The memory profile's budgets the BD-J worker applies. */
+  private bdjBudgets(): BdjMemoryBudgets {
+    return { classBytes: this.memory.bdjClassCacheBytes, vfsBytes: this.memory.bdjVfsCacheBytes };
   }
 
   /** Terminates an early BD-J worker no title adopted. */
@@ -827,6 +834,7 @@ export class Player {
       },
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
+      memory: this.bdjBudgets(),
     });
     const taps = new TapReactionWatch({
       setTimer: this.deps.setTimer ?? defaultSetTimer,

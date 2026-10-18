@@ -71,11 +71,26 @@ export function slotOf(cls: JClass, name: string, desc: string, isStatic = false
   return f.slot;
 }
 
+/** Every perClass cache's reset of its one-entry fast path. */
+const fastPaths: (() => void)[] = [];
+
+/**
+ * Forgets the classes perClass's fast paths hold: a halted JVM is then held by nothing here (these caches are
+ * module-wide, so in a test process that runs several JVMs the last class seen would keep its whole JVM alive).
+ */
+export function dropPerClassFastPaths(): void {
+  for (const reset of fastPaths) reset();
+}
+
 /** Per-class data an intrinsic computes once (field slots), with a one-entry fast path. */
 export function perClass<T>(make: (cls: JClass) => T): (cls: JClass) => T {
   const all = new WeakMap<JClass, T>();
   let lastCls: JClass | null = null;
   let last: T | undefined;
+  fastPaths.push(() => {
+    lastCls = null;
+    last = undefined;
+  });
   return (cls) => {
     if (cls === lastCls) return last as T;
     let v = all.get(cls);

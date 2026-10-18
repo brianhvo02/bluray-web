@@ -13,6 +13,7 @@ import { Player } from '../../src/engine/player';
 import type { CompositorLike } from '../../src/engine/render/compositor';
 import type { DecodeImage } from '../../src/engine/bdj/background';
 import type { EngineEvent } from '../../src/engine/protocol';
+import type { MemoryProfileName } from '../../src/engine/memory-profile';
 import { fakeVideoCodecApi } from '../helpers/fake-video-decoder';
 import { directoryEntries } from '../helpers/file-blob';
 import { HARNESS_SETTINGS } from './replay';
@@ -81,7 +82,7 @@ export function traceEntryOf(name: BdjCallName, args: readonly BdjWireValue[], v
  * Two ends of an in-process channel between the engine and runBdjWorker: messages are delivered by reference (the
  * disc's Blob stand-ins for clips over 4 GiB cannot be cloned) on a later macrotask, in order, as a MessagePort does.
  */
-function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void): WorkerLike {
+function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void, onHandle: (h: BdjWorkerHandle) => void): WorkerLike {
   let closed = false;
   let handle: BdjWorkerHandle | null = null;
   const port: BdjPort = {
@@ -107,6 +108,7 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
     },
   };
   handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts });
+  onHandle(handle);
   return worker;
 }
 
@@ -142,6 +144,10 @@ export async function replayPlayerBdj(
     script?: readonly KeyStep[];
     /** How long a script step may wait (default 60 s, the harness's --wait-timeout in golden.sh). */
     stepTimeoutMs?: number;
+    /** The memory profile the player runs under (setMemoryProfile before the open; default the player's, desktop). */
+    memoryProfile?: MemoryProfileName;
+    /** Called once the run has ended, before the player closes, with the player and the last BD-J worker started. */
+    beforeClose?: (player: Player, worker: BdjWorkerHandle | null) => void | Promise<void>;
   },
 ): Promise<PlayerBdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
@@ -170,6 +176,7 @@ export async function replayPlayerBdj(
   let lastFlushAt = 0;
   let stepIdx = 0;
   let stepFrom = { events: 0, flushes: 0, at: 0 };
+  let lastWorker: BdjWorkerHandle | null = null;
 
   const onFromBdj = (m: FromBdj): void => {
     if (m.type !== 'call') return;
@@ -200,7 +207,10 @@ export async function replayPlayerBdj(
     ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
     // the replay has its own timeout; the first-playlist timer would measure the virtual clock's real-time steps
     setTimer: () => () => undefined,
-    createBdjWorker: () => inProcessWorker(onToBdj, onFromBdj),
+    createBdjWorker: () =>
+      inProcessWorker(onToBdj, onFromBdj, (h) => {
+        lastWorker = h;
+      }),
     loadClassLibrary: async () => classes,
     bdjLog: opts.log ? (line) => opts.log!(line) : undefined,
     playerSettings: HARNESS_SETTINGS,
@@ -252,6 +262,7 @@ export async function replayPlayerBdj(
     const views = ringViews(ring);
     const left = new Float32Array(128);
     const right = new Float32Array(128);
+    if (opts.memoryProfile) await player.handle({ type: 'setMemoryProfile', profile: opts.memoryProfile });
     await player.handle({ type: 'attachAudio', ring });
     await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
     const start = clock.ms;
@@ -280,6 +291,7 @@ export async function replayPlayerBdj(
     }
     traced = true;
     const end = performance.now();
+    await opts.beforeClose?.(player, lastWorker);
     return {
       trace,
       firstPlaylistMs: (firstPlaylistAt ?? end) - t0,

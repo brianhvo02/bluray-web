@@ -57,6 +57,16 @@ export interface BdjRuntimeDeps {
    * font files, both fetched when text first needs them. Without it, BD-J runs as libbluray built without FreeType.
    */
   readonly fonts?: BdjFontSources;
+  /** The memory profile's BD-J budgets; none by default. */
+  readonly memory?: BdjMemoryBudgets;
+}
+
+/** The memory profile's budgets the BD-J worker applies (memory-profile.ts, bdjClassCacheBytes and bdjVfsCacheBytes). */
+export interface BdjMemoryBudgets {
+  /** Class-file bytes the classes keep: going over is logged once. */
+  readonly classBytes: number;
+  /** The memory mounts' capacity: a write beyond it fails as on a full disk. */
+  readonly vfsBytes: number;
 }
 
 export interface BdjFontSources {
@@ -147,11 +157,14 @@ export class BdjRuntime {
       ...(deps.extraIntrinsics ? { extraIntrinsics: deps.extraIntrinsics } : {}),
       stdout: (s) => this.output(s),
       stderr: (s) => this.output(s),
+      ...(deps.memory ? { classBytesBudget: deps.memory.classBytes } : {}),
+      warn: (line) => deps.log(line),
       vfs: new Vfs({
         disc: deps.disc,
         discPaths: deps.disc.paths(),
         jdkLib: ZipArchive.open(lib.rt),
         nowMs: deps.nowMs,
+        ...(deps.memory ? { memLimitBytes: deps.memory.vfsBytes } : {}),
         ...(fonts ? { jdkLazy: systemFontFiles(fonts.loadDefaultFont) } : {}),
       }),
       systemProperties: JVM_PROPERTIES,

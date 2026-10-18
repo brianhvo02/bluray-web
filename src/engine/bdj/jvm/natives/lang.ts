@@ -75,9 +75,11 @@ export function lineNumber(m: JMethod, pc: number): number {
   if (m.isNative) return -2;
   let best = -1;
   let bestPc = -1;
-  for (const [start, line] of m.code?.lineNumbers ?? []) {
+  const lines = m.code?.lineNumbers;
+  for (let i = 0; lines && i < lines.length; i += 2) {
+    const start = lines[i]!;
     if (start <= pc && start >= bestPc) {
-      best = line;
+      best = lines[i + 1]!;
       bestPc = start;
     }
   }

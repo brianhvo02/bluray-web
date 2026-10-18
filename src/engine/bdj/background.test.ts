@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { BackgroundStill, type ShownStill } from './background';
+import { BackgroundStill, encodedImageSize, type ShownStill } from './background';
 
 /** A stand-in ImageBitmap that records its close. */
-function fakeBitmap(name: string): ImageBitmap & { closed: boolean; name: string } {
-  const b = { name, width: 1920, height: 1080, closed: false, close: () => void (b.closed = true) };
+function fakeBitmap(name: string, width = 1920, height = 1080): ImageBitmap & { closed: boolean; name: string } {
+  const b = { name, width, height, closed: false, close: () => void (b.closed = true) };
   return b as unknown as ImageBitmap & { closed: boolean; name: string };
 }
 
@@ -124,4 +124,63 @@ describe('BackgroundStill', () => {
     await flush();
     expect(bg.current?.rect).toEqual({ x: 0, y: 0.5, width: 1, height: 0.5 });
   });
+
+  it('a still over the memory budget is not shown, by its header or once decoded', async () => {
+    const { decode, pending } = manualDecoder();
+    const changes: (ShownStill | null)[] = [];
+    const errors: string[] = [];
+    const bg = new BackgroundStill({ decode, onChange: (s) => changes.push(s), onError: (m) => errors.push(m), maxDecodedBytes: () => 16 * 1024 * 1024 });
+    bg.show(png(4000, 3000), FULL);
+    expect(pending).toHaveLength(0); // never decoded
+    expect(errors).toEqual(['a 4000x3000 background image (45.8 MB decoded) is over the memory budget of 16.0 MB']);
+    bg.show(new Uint8Array([1]), FULL); // no size in its header
+    const big = fakeBitmap('big', 4000, 3000);
+    pending[0]!.resolve(big);
+    await flush();
+    expect(big.closed).toBe(true);
+    expect(changes).toEqual([]);
+    expect(errors).toHaveLength(2);
+    expect(bg.decodedBytes).toBe(0);
+  });
+
+  it('two 1080p stills fit the constrained budget while one replaces the other; bigger ones replace the shown one first', async () => {
+    const { decode, pending } = manualDecoder();
+    const changes: (ShownStill | null)[] = [];
+    const bg = new BackgroundStill({ decode, onChange: (s) => changes.push(s), maxDecodedBytes: () => 16 * 1024 * 1024 });
+    bg.show(png(1920, 1080), FULL);
+    const a = fakeBitmap('a');
+    pending[0]!.resolve(a);
+    await flush();
+    bg.show(png(1920, 1080), FULL);
+    expect(bg.decodedBytes).toBe(2 * 1920 * 1080 * 4);
+    expect(a.closed).toBe(false); // shown until the new one is decoded
+    const b = fakeBitmap('b');
+    pending[1]!.resolve(b);
+    await flush();
+    expect(a.closed).toBe(true);
+    bg.show(png(1920, 1600), FULL);
+    expect(b.closed).toBe(true); // both would not fit
+    expect(changes.at(-1)).toBeNull();
+    expect(bg.decodedBytes).toBe(1920 * 1600 * 4);
+  });
+
+  it('reads the size a PNG, GIF or JPEG header declares', () => {
+    expect(encodedImageSize(png(1920, 1080))).toEqual({ width: 1920, height: 1080 });
+    expect(encodedImageSize(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x80, 0x07, 0x38, 0x04]))).toEqual({ width: 1920, height: 1080 });
+    // SOI, an APP0 segment of 4 bytes, then SOF2 (progressive): length, precision, height, width
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc2, 0x00, 0x11, 0x08, 0x04, 0x38, 0x07, 0x80, 0x03]);
+    expect(encodedImageSize(jpeg)).toEqual({ width: 1920, height: 1080 });
+    expect(encodedImageSize(new Uint8Array([0xff, 0xd8, 0xff, 0xc4, 0x00, 0x02]))).toBeNull();
+    expect(encodedImageSize(new Uint8Array([1, 2, 3]))).toBeNull();
+  });
 });
+
+/** The start of a PNG: the signature and an IHDR chunk declaring this size. */
+function png(width: number, height: number): Uint8Array {
+  const b = new Uint8Array(33);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const v = new DataView(b.buffer);
+  v.setUint32(16, width);
+  v.setUint32(20, height);
+  return b;
+}

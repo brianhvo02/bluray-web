@@ -77,6 +77,8 @@ export interface FreeType {
   kerning(face: number, left: number, right: number): number;
   /** FT_Done_Face and the face's copy of the font. */
   free(face: number): void;
+  /** The WASM memory (which never shrinks) and the faces open in it (memory accounting). */
+  memoryStats(): { readonly wasmBytes: number; readonly faces: number };
 }
 
 export class FreeTypeError extends Error {
@@ -162,6 +164,10 @@ class WasmFreeType implements FreeType {
 
   kerning(face: number, left: number, right: number): number {
     return this.wasm.ft_kerning(this.check(face), left, right);
+  }
+
+  memoryStats(): { readonly wasmBytes: number; readonly faces: number } {
+    return { wasmBytes: this.wasm.memory.buffer.byteLength, faces: this.faces.size };
   }
 
   free(face: number): void {

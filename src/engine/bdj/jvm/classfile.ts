@@ -34,7 +34,8 @@ export interface CodeAttr {
   readonly maxLocals: number;
   readonly code: Uint8Array;
   readonly handlers: readonly ExceptionHandler[];
-  readonly lineNumbers: readonly (readonly [pc: number, line: number])[];
+  /** The LineNumberTable as (start pc, line) pairs, flattened. */
+  readonly lineNumbers: Uint16Array;
 }
 
 export interface MemberInfo {
@@ -79,6 +80,11 @@ export interface ClassFile {
   readonly annotations: Uint8Array | null;
   /** EnclosingMethod: the class and the NameAndType index (0 when not in a method). */
   readonly enclosingMethod: { readonly cls: string; readonly nat: number } | null;
+  /**
+   * Bytes of the class file the parsed class keeps (code and annotations), copied into one buffer of their own so the
+   * class file itself is not kept.
+   */
+  readonly retainedBytes: number;
 }
 
 export class ClassFormatError extends Error {}
@@ -163,8 +169,42 @@ class Reader {
   }
 }
 
+const NO_LINES = new Uint16Array(0);
+
+/**
+ * Parts of a class file the parsed class keeps (code, annotations). parseClassFile reads them as views of the class
+ * file, then copies them all into one buffer, so the class file (and the rest of the jar entry it came from) is not
+ * kept alive by them.
+ */
+class Kept {
+  private readonly parts: { readonly view: Uint8Array; readonly set: (copy: Uint8Array) => void }[] = [];
+  private total = 0;
+
+  keep(view: Uint8Array, set: (copy: Uint8Array) => void): void {
+    if (view.length === 0) return;
+    this.parts.push({ view, set });
+    this.total += view.length;
+  }
+
+  /** Copies the kept parts into one new buffer and points their owners at the copies; returns its size. */
+  compact(): number {
+    if (this.total === 0) return 0;
+    const out = new Uint8Array(this.total);
+    let at = 0;
+    for (const { view, set } of this.parts) {
+      out.set(view, at);
+      set(out.subarray(at, at + view.length));
+      at += view.length;
+    }
+    return this.total;
+  }
+}
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
 export function parseClassFile(bytes: Uint8Array): ClassFile {
   const r = new Reader(bytes);
+  const kept = new Kept();
   if (r.u4() !== 0xcafebabe) throw new ClassFormatError('bad magic number');
   const minor = r.u2();
   const major = r.u2();
@@ -251,7 +291,11 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
         else if (aname === 'AnnotationDefault') annotationDefault = r.slice(len);
         r.pos = end;
       }
-      list.push({ access: macc, name: mname, desc, code, constantValue, exceptions, signature, annotations, parameterAnnotations, annotationDefault });
+      const member: Mutable<MemberInfo> = { access: macc, name: mname, desc, code, constantValue, exceptions, signature, annotations, parameterAnnotations, annotationDefault };
+      if (annotations) kept.keep(annotations, (c) => (member.annotations = c));
+      if (parameterAnnotations) kept.keep(parameterAnnotations, (c) => (member.parameterAnnotations = c));
+      if (annotationDefault) kept.keep(annotationDefault, (c) => (member.annotationDefault = c));
+      list.push(member);
     }
     return list;
   };
@@ -262,15 +306,17 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
     const code = r.slice(r.u4());
     const handlers: ExceptionHandler[] = [];
     for (let n = r.u2(); n > 0; n--) handlers.push({ startPc: r.u2(), endPc: r.u2(), handlerPc: r.u2(), catchType: r.u2() });
-    const lineNumbers: [number, number][] = [];
+    const lines: number[] = [];
     for (let a = r.u2(); a > 0; a--) {
       const aname = utf8(r.u2());
       const end = r.u4() + r.pos;
       if (end > bytes.length) throw new ClassFormatError('truncated class file');
-      if (aname === 'LineNumberTable') for (let n = r.u2(); n > 0; n--) lineNumbers.push([r.u2(), r.u2()]);
+      if (aname === 'LineNumberTable') for (let n = r.u2(); n > 0; n--) lines.push(r.u2(), r.u2());
       r.pos = end;
     }
-    return { maxStack, maxLocals, code, handlers, lineNumbers };
+    const attr: Mutable<CodeAttr> = { maxStack, maxLocals, code, handlers, lineNumbers: lines.length ? Uint16Array.from(lines) : NO_LINES };
+    kept.keep(code, (c) => (attr.code = c));
+    return attr;
   };
 
   const fields = readMembers();
@@ -309,5 +355,7 @@ export function parseClassFile(bytes: Uint8Array): ClassFile {
     r.pos = end;
   }
 
-  return { major, minor, cp, access, name, superName, interfaces, fields, methods, bootstrapMethods, sourceFile, innerClasses, signature, annotations, enclosingMethod };
+  if (annotations) kept.keep(annotations, (c) => (annotations = c));
+  const retainedBytes = kept.compact();
+  return { major, minor, cp, access, name, superName, interfaces, fields, methods, bootstrapMethods, sourceFile, innerClasses, signature, annotations, enclosingMethod, retainedBytes };
 }

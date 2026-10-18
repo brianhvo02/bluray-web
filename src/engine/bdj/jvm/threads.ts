@@ -13,6 +13,7 @@ import type { JClass, JMethod } from './loader';
 import type { Jvm } from './jvm';
 import { BLOCKED, Invoke, Suspend, ThrowResult, andThen, complete, execute } from './interpreter';
 import type { Frame, NativeResult } from './interpreter';
+import { dropPerClassFastPaths } from './natives/intrinsics/common';
 
 export type ThreadState =
   | 'runnable'
@@ -358,6 +359,7 @@ export class Scheduler {
     }
     this.queue.length = 0;
     this.queued.clear();
+    dropPerClassFastPaths();
     this.pending.clear();
     this.conts.clear();
     this.waiting.clear();

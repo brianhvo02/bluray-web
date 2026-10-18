@@ -23,11 +23,19 @@ import { absolute, suspendRead } from './io';
 interface ZipHandle {
   readonly archive: ZipArchive;
   byName: Map<string, ZipEntry> | null;
+  /** The Vfs path it was opened from, and the ZipFile objects that have it open (zip_util's refs). */
+  readonly path: string;
+  refs: number;
+  /** The file's size when opened; for a memory file, the buffer the archive reads (Vfs.peek). */
+  readonly size: number;
+  readonly peeked: Uint8Array | null;
 }
 
 interface Handles {
   next: bigint;
   readonly zips: Map<bigint, ZipHandle>;
+  /** zip_util's cache of open zips: an open of a file that is open already, and unchanged, shares its handle. */
+  readonly open: Map<string, bigint>;
   readonly entries: Map<bigint, ZipEntry>;
   readonly inflaters: Map<bigint, ZInflater>;
   readonly deflaters: Map<bigint, ZDeflater>;
@@ -37,8 +45,22 @@ const perVm = new WeakMap<Jvm, Handles>();
 
 function handles(jvm: Jvm): Handles {
   let h = perVm.get(jvm);
-  if (!h) perVm.set(jvm, (h = { next: 1n, zips: new Map(), entries: new Map(), inflaters: new Map(), deflaters: new Map() }));
+  if (!h) perVm.set(jvm, (h = { next: 1n, zips: new Map(), open: new Map(), entries: new Map(), inflaters: new Map(), deflaters: new Map() }));
   return h;
+}
+
+/**
+ * The zips Java has open (ZipFile objects sharing one count once) and the archive bytes they keep beyond the Vfs's own
+ * (a memory or /jdk/ file's archive reads the Vfs's bytes), each buffer counted once (Jvm.memoryStats).
+ */
+export function openZipStats(jvm: Jvm): { readonly handles: number; readonly bytes: number } {
+  const zips = perVm.get(jvm)?.zips;
+  const vfsOwn = jvm.opts.vfs?.buffers() ?? new Set<ArrayBufferLike>();
+  const buffers = new Set<ArrayBufferLike>();
+  for (const z of zips?.values() ?? []) if (!vfsOwn.has(z.archive.bytes.buffer)) buffers.add(z.archive.bytes.buffer);
+  let bytes = 0;
+  for (const b of buffers) bytes += b.byteLength;
+  return { handles: zips?.size ?? 0, bytes };
 }
 
 const latin1 = (b: Uint8Array): string => String.fromCharCode(...b);
@@ -284,7 +306,23 @@ export function registerZipNatives(natives: NativeTable): void {
     'java/util/zip/ZipFile.open(Ljava/lang/String;IJZ)J': (ctx, name) => {
       const jvm = ctx.jvm;
       if (name === null) return jvm.throwNew('java/lang/NullPointerException');
-      const data = jvm.opts.vfs ? readWhole(jvm.opts.vfs, absolute(jsStr(jvm, name))) : null;
+      const vfs = jvm.opts.vfs;
+      const path = absolute(jsStr(jvm, name));
+      const h = handles(jvm);
+      // ZIP_Get_From_Cache: the same file, unchanged since (a memory file's peeked buffer is never written again)
+      const peeked = vfs?.peek(path) ?? null;
+      const cachedId = h.open.get(path);
+      const cached = cachedId === undefined ? undefined : h.zips.get(cachedId);
+      if (cachedId !== undefined && cached && vfs) {
+        const same = peeked
+          ? cached.peeked !== null && cached.peeked.buffer === peeked.buffer && cached.peeked.byteOffset === peeked.byteOffset && cached.peeked.length === peeked.length
+          : cached.peeked === null && vfs.stat(path)?.size === cached.size;
+        if (same) {
+          cached.refs++;
+          return cachedId;
+        }
+      }
+      const data = peeked ?? (vfs ? readWhole(vfs, path) : null);
       const open = (bytes: Uint8Array | null): NativeResult => {
         if (bytes === null) return zipException(jvm, 'No such file or directory');
         if (bytes.length === 0) return zipException(jvm, 'zip file is empty');
@@ -295,9 +333,9 @@ export function registerZipNatives(natives: NativeTable): void {
           if (!(e instanceof ZipError)) throw e;
           return zipException(jvm, e.message.includes('end of central directory') ? 'zip END header not found' : 'invalid CEN header (bad signature)');
         }
-        const h = handles(jvm);
         const id = h.next++;
-        h.zips.set(id, { archive, byName: null });
+        h.zips.set(id, { archive, byName: null, path, refs: 1, size: bytes.length, peeked });
+        h.open.set(path, id);
         return id;
       };
       // A read error leaves zip_util's message unset, so the JDK's ZipFile.open throws its generic ZipException.
@@ -355,7 +393,14 @@ export function registerZipNatives(natives: NativeTable): void {
       bytesOf(b).set(raw.subarray(p, p + n), off as number);
       return n;
     },
-    'java/util/zip/ZipFile.close(J)V': (ctx, h) => void handles(ctx.jvm).zips.delete(h as bigint),
+    // ZIP_Close: the archive goes once no ZipFile has it open
+    'java/util/zip/ZipFile.close(J)V': (ctx, id) => {
+      const h = handles(ctx.jvm);
+      const z = h.zips.get(id as bigint);
+      if (!z || --z.refs > 0) return;
+      h.zips.delete(id as bigint);
+      if (h.open.get(z.path) === id) h.open.delete(z.path);
+    },
     'java/util/zip/ZipFile.getZipMessage(J)Ljava/lang/String;': () => null,
     'java/util/jar/JarFile.getMetaInfEntryNames()[Ljava/lang/String;': (ctx, self) => {
       const jvm = ctx.jvm;

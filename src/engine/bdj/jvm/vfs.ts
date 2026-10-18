@@ -35,6 +35,11 @@ export interface VfsOptions {
   readonly app?: ReadonlyMap<string, Uint8Array>;
   /** More read-only files under /jdk/, keyed by path relative to /jdk/, fetched the first time they are read. */
   readonly jdkLazy?: ReadonlyMap<string, LazyFile>;
+  /**
+   * The memory mounts' capacity (/tmp/, /persistent/, /buda/ together, file lengths): a write beyond it fails, as on a
+   * full disk (the memory profile's bdjVfsCacheBytes). Default: none.
+   */
+  readonly memLimitBytes?: number;
 }
 
 /** A file whose size is known up front and whose bytes are fetched when first read (reads of it return promises). */
@@ -56,6 +61,10 @@ interface MemFile {
   buf: Uint8Array;
   len: number;
   mtimeMs: number;
+  /** `buf` was handed out by peek(): it is never written again, a write goes to a copy. */
+  shared: boolean;
+  /** In a directory (not deleted while open): its length counts toward the memory mounts' limit. */
+  linked: boolean;
 }
 type MemNode = MemDir | MemFile;
 
@@ -128,6 +137,18 @@ const SPECIAL_NAMES = new Map([
   ['SOUND.BDMV', 'sound.bdmv'],
 ]);
 
+/** Room a closed file's buffer may keep beyond its length (more is given back, as is more than an eighth of it). */
+const SLACK_KEPT = 4096;
+
+/** Before `file`'s buffer is written in place: a buffer peek() handed out is replaced by a copy. */
+function unshare(file: MemFile): void {
+  if (!file.shared) return;
+  const copy = new Uint8Array(file.buf.length);
+  copy.set(file.buf.subarray(0, file.len));
+  file.buf = copy;
+  file.shared = false;
+}
+
 function newDir(now: number): MemDir {
   return { kind: 'dir', children: new Map(), mtimeMs: now };
 }
@@ -140,10 +161,14 @@ export class Vfs {
   private readonly discDirs = new Map<string, Set<string>>([['', new Set()]]);
   private readonly spelling = new Map<string, string>();
   private readonly jdkCache = new Map<string, Uint8Array>();
+  private readonly memLimit: number;
+  /** The lengths of the files on the memory mounts. */
+  private memUsed = 0;
 
   constructor(opts: VfsOptions) {
     this.disc = opts.disc;
     this.nowMs = opts.nowMs;
+    this.memLimit = opts.memLimitBytes ?? Infinity;
     if (opts.disc) {
       if (!opts.discPaths) throw new Error('Vfs: discPaths is required when a disc is given');
       for (const path of opts.discPaths) {
@@ -208,6 +233,34 @@ export class Vfs {
     }
   }
 
+  /**
+   * What the memory mounts and the /jdk/ cache keep (Jvm.memoryStats): `memBytes` counts the files' allocations,
+   * `memUsed` their lengths (what the limit applies to).
+   */
+  memoryStats(): { readonly memFiles: number; readonly memBytes: number; readonly memUsed: number; readonly jdkCacheBytes: number } {
+    const files = this.memFiles();
+    let jdkCacheBytes = 0;
+    for (const d of this.jdkCache.values()) jdkCacheBytes += d.byteLength;
+    return { memFiles: files.length, memBytes: files.reduce((n, f) => n + f.buf.byteLength, 0), memUsed: this.memUsed, jdkCacheBytes };
+  }
+
+  /** The buffers the memory mounts' files and the /jdk/ cache hold now (memory accounting). */
+  buffers(): Set<ArrayBufferLike> {
+    return new Set([...this.memFiles().map((f) => f.buf.buffer), ...[...this.jdkCache.values()].map((d) => d.buffer)]);
+  }
+
+  private memFiles(): MemFile[] {
+    const out: MemFile[] = [];
+    const visit = (dir: MemDir): void => {
+      for (const node of dir.children.values()) {
+        if (node.kind === 'dir') visit(node);
+        else out.push(node);
+      }
+    };
+    for (const b of this.backings.values()) if (b.type === 'mem') visit(b.root);
+    return out;
+  }
+
   canonicalize(path: string): string {
     const out: string[] = [];
     for (const seg of path.split('/')) {
@@ -265,8 +318,38 @@ export class Vfs {
     const node = t.parent.children.get(t.name);
     if (!node || (node.kind === 'dir' && node.children.size > 0)) return false;
     t.parent.children.delete(t.name);
+    if (node.kind === 'file') this.unlink(node);
     t.parent.mtimeMs = this.nowMs();
     return true;
+  }
+
+  private unlink(file: MemFile): void {
+    if (file.linked) this.memUsed -= file.len;
+    file.linked = false;
+  }
+
+  /** Sets a memory file's length, counting it toward the limit; false (and nothing changes) when it would go over. */
+  private resize(file: MemFile, len: number): boolean {
+    if (file.linked) {
+      const used = this.memUsed - file.len + len;
+      if (len > file.len && used > this.memLimit) return false;
+      this.memUsed = used;
+    }
+    file.len = len;
+    return true;
+  }
+
+  /** Whether writing `length` bytes through `h` at its position fits in the memory mounts' limit. */
+  fits(h: VfsHandle, length: number): boolean {
+    const handle = h as Handle;
+    return this.fitsLength(h, (handle.append ? (handle.node?.len ?? 0) : handle.position) + length);
+  }
+
+  /** Whether `h`'s file can grow to `length` bytes within the memory mounts' limit. */
+  fitsLength(h: VfsHandle, length: number): boolean {
+    const file = (h as Handle).node;
+    if (!file?.linked) return true;
+    return length <= file.len || this.memUsed - file.len + length <= this.memLimit;
   }
 
   rename(from: string, to: string): boolean {
@@ -280,6 +363,7 @@ export class Vfs {
     if (existing && (existing.kind === 'dir' || node.kind === 'dir')) return false;
     if (node.kind === 'dir' && this.isWithin(node, dst.parent)) return false;
     src.parent.children.delete(src.name);
+    if (existing?.kind === 'file') this.unlink(existing);
     dst.parent.children.set(dst.name, node);
     const now = this.nowMs();
     src.parent.mtimeMs = dst.parent.mtimeMs = now;
@@ -300,11 +384,11 @@ export class Vfs {
       if (!node) {
         if (mode === 'r') return null;
         const now = this.nowMs();
-        node = { kind: 'file', buf: new Uint8Array(0), len: 0, mtimeMs: now };
+        node = { kind: 'file', buf: new Uint8Array(0), len: 0, mtimeMs: now, shared: false, linked: true };
         t.parent.children.set(t.name, node);
         t.parent.mtimeMs = now;
       } else if (mode === 'w') {
-        node.len = 0;
+        this.resize(node, 0);
         node.mtimeMs = this.nowMs();
       }
       const file = node;
@@ -361,27 +445,61 @@ export class Vfs {
     });
   }
 
-  /** Returns false when the handle was not opened for writing (read-only mounts and 'r' handles). */
+  /**
+   * Returns false when the handle was not opened for writing (read-only mounts and 'r' handles), or when the write
+   * does not fit in the memory mounts' limit (fits()).
+   */
   write(h: VfsHandle, data: Uint8Array, offset: number, length: number): boolean {
     const handle = h as Handle;
     const file = handle.node;
-    if (!file || !handle.writable) return false;
+    if (!file || !handle.writable || !this.fits(h, length)) return false;
     if (handle.append) handle.position = file.len;
     const end = handle.position + length;
     if (end > file.buf.length) {
       const grown = new Uint8Array(Math.max(end, file.buf.length * 2, 64));
       grown.set(file.buf.subarray(0, file.len));
       file.buf = grown;
-    }
+      file.shared = false;
+    } else unshare(file);
     if (handle.position > file.len) file.buf.fill(0, file.len, handle.position);
     file.buf.set(data.subarray(offset, offset + length), handle.position);
     handle.position = end;
-    if (end > file.len) file.len = end;
+    if (end > file.len) this.resize(file, end);
     file.mtimeMs = this.nowMs();
     return true;
   }
 
-  close(_h: VfsHandle): void {}
+  /** A file written through `h` gives back the room its buffer grew by beyond its length. */
+  close(h: VfsHandle): void {
+    const file = (h as Handle).node;
+    if (!file || !h.writable || file.shared) return;
+    const slack = file.buf.length - file.len;
+    if (slack >= Math.max(SLACK_KEPT, file.len >> 3)) file.buf = file.buf.slice(0, file.len);
+  }
+
+  /**
+   * A whole memory or /jdk/ file's bytes without a copy, for an archive that keeps them (java.util.zip.ZipFile);
+   * null for a disc file, a lazy /jdk/ file not fetched yet, or a missing one. A memory file is never written in
+   * place again: later writes go to a copy, so the bytes returned stay as they are.
+   */
+  peek(path: string): Uint8Array | null {
+    const r = this.resolve(path);
+    if (!r || r.mount === null || r.rest.length === 0) return null;
+    const b = this.backings.get(r.mount)!;
+    if (b.type === 'mem') {
+      const node = this.walk(b.root, r.rest);
+      if (node?.kind !== 'file') return null;
+      node.shared = true;
+      return node.buf.subarray(0, node.len);
+    }
+    if (b.type === 'ro') {
+      const key = r.rest.join('/');
+      if (b.tree.fileSize(key) === undefined) return null;
+      const bytes = b.tree.bytes(key);
+      return bytes instanceof Uint8Array ? bytes : null;
+    }
+    return null;
+  }
 
   /** The path is on a writable (memory) mount, below its root. */
   writable(path: string): boolean {
@@ -406,12 +524,17 @@ export class Vfs {
     const handle = h as Handle;
     const file = handle.node;
     if (!file || !handle.writable) return false;
+    if (!this.fitsLength(h, length)) return false;
     if (length > file.buf.length) {
       const grown = new Uint8Array(length);
       grown.set(file.buf.subarray(0, file.len));
       file.buf = grown;
-    } else if (length > file.len) file.buf.fill(0, file.len, length);
-    file.len = length;
+      file.shared = false;
+    } else if (length > file.len) {
+      unshare(file);
+      file.buf.fill(0, file.len, length);
+    }
+    this.resize(file, length);
     if (handle.position > length) handle.position = length;
     file.mtimeMs = this.nowMs();
     return true;

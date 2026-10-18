@@ -10,7 +10,7 @@ import type { DiscFiles, DiscSourceRef, HttpDiscRef } from '../disc/http-source'
 import type { ScreenRect } from './background';
 import type { BdjErrorCode } from './errors';
 import type { Coalesce } from './input';
-import type { ClassLibrarySource } from './runtime';
+import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 
 /** A call argument or reply value; a Java long crosses as a decimal string. */
 export type BdjWireValue = number | string | boolean | null;
@@ -28,6 +28,8 @@ export type ToBdj =
       readonly discHttp?: HttpDiscRef;
       readonly discId: string | null;
       readonly classLibrary: ClassLibrarySource;
+      /** The memory profile's budgets (none: no limits). */
+      readonly memory?: BdjMemoryBudgets;
     }
   | { readonly type: 'start'; readonly title: number }
   /** `coalesce`: a key repeat or pointer move, which may merge with the one before it in a full queue (input.ts). */

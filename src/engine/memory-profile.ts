@@ -15,6 +15,26 @@ export interface MemoryProfile {
   readonly maxQueuedFrames: (codedWidth: number) => number;
   /** How long a tap on a BD-J menu waits for the disc to react before it counts as ignored (the responsiveness target, 5d spec §3). */
   readonly bdjTapWindowMs: number;
+  /*
+   * BD-J (5d spec §4.5). The constrained values are first estimates from the desktop measurement of A_NEW_ERA and
+   * RENTAL_FAMILY in the Node replay (classes keep 1.3 MB, the memory mounts hold 4.4 MB, one 1080p still decodes to
+   * 7.9 MB); the device measurement sets them (5d plan, Task 14).
+   */
+  /**
+   * Class-file bytes the JVM's classes keep (code and annotations; the rest of each class file is dropped once it is
+   * parsed). Going over is logged once; nothing else changes.
+   */
+  readonly bdjClassCacheBytes: number;
+  /**
+   * The BD-J file system's memory mounts (/tmp/ with libbluray's copies of the disc's JARs and the files it extracts
+   * from them, /persistent/, /buda/): a write beyond this fails as on a full disk.
+   */
+  readonly bdjVfsCacheBytes: number;
+  /**
+   * Decoded BD-J background stills: a still larger than this is not shown; while a replacement decodes, the shown
+   * one is dropped first if both would not fit.
+   */
+  readonly bdjDecodedImageBytes: number;
 }
 
 export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>> = {
@@ -26,6 +46,9 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     maxTextSupersampling: 8,
     maxQueuedFrames: () => 8,
     bdjTapWindowMs: 200,
+    bdjClassCacheBytes: 32 * MB,
+    bdjVfsCacheBytes: 256 * MB,
+    bdjDecodedImageBytes: 64 * MB,
   },
   constrained: {
     igPreloadLimitBytes: 64 * MB,
@@ -35,5 +58,9 @@ export const MEMORY_PROFILES: Readonly<Record<MemoryProfileName, MemoryProfile>>
     maxTextSupersampling: 4,
     maxQueuedFrames: (codedWidth) => (codedWidth >= 3840 ? 4 : 8),
     bdjTapWindowMs: 500,
+    bdjClassCacheBytes: 4 * MB,
+    bdjVfsCacheBytes: 64 * MB,
+    // two 1920x1080 stills (7.9 MB each) while one replaces the other
+    bdjDecodedImageBytes: 16 * MB,
   },
 };

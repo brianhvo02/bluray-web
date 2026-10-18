@@ -450,6 +450,10 @@ export class Loader {
   private readonly defining = new Set<string>();
   private readonly primitives = new Map<string, JClass>();
   private anonymousCount = 0;
+  /** Classes defined from class files, and the class-file bytes they keep (memory accounting). */
+  private definedClasses = 0;
+  private classFileBytes = 0;
+  private overBudget = false;
 
   constructor(
     private readonly jvm: Jvm,
@@ -559,6 +563,7 @@ export class Loader {
     if (loader === null) this.boot.set(name, cls);
     else this.record(loader, name, cls);
     this.setConstants(cls);
+    this.counted(file);
     return cls;
   }
 
@@ -579,7 +584,24 @@ export class Loader {
       cls.resolved[i] = file.cp[i]?.tag === 'class' && p.cls.name === 'java/lang/Class' ? p.nativeData : p;
     }
     this.setConstants(cls);
+    this.counted(file);
     return cls;
+  }
+
+  /** Classes defined so far and the bytes of their class files they keep (Jvm.memoryStats). */
+  get classStats(): { readonly classes: number; readonly retainedBytes: number } {
+    return { classes: this.definedClasses, retainedBytes: this.classFileBytes };
+  }
+
+  private counted(file: ClassFile): void {
+    this.definedClasses++;
+    this.classFileBytes += file.retainedBytes;
+    const budget = this.jvm.opts.classBytesBudget ?? Infinity;
+    if (this.classFileBytes > budget && !this.overBudget) {
+      this.overBudget = true;
+      const mb = (n: number): string => (n / (1024 * 1024)).toFixed(1);
+      this.jvm.opts.warn?.(`BD-J: classes keep ${mb(this.classFileBytes)} MB of class files, over the memory budget of ${mb(budget)} MB`);
+    }
   }
 
   /** The name a class file declares; ClassFormatError if it does not parse. */
