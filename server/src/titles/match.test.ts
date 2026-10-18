@@ -486,4 +486,42 @@ describe('matchDiscs', () => {
       }
     });
   });
+
+  describe('single twin (fix round 4)', () => {
+    const prequel = (id: string): Entry['relations'][number] => ({ type: 'PREQUEL', id, format: 'TV', startDate: null });
+    const s1 = entry('anilist:801', { english: 'Harbor Line' }, { year: 2019 });
+    const s2 = entry('anilist:802', { english: 'Harbor Line Season 2' }, { year: 2021, relations: [prequel('anilist:801')] });
+    const s3 = entry('anilist:803', { english: 'Harbor Line Season 3' }, { year: 2023, relations: [prequel('anilist:802')] });
+    const path = 'Shows/[BDMV] Harbor Line Season 3 Vol.1';
+    const series = (id: string, year: number, n: number) => entry(id, { english: 'Harbor Line' }, { year, seasons: seasons(n), animation: true });
+    const run = async (found: Entry[], more: Entry[] = []) =>
+      byDisc((await matchDiscs([ev(path)], ctx(fake({ 'Harbor Line': [s3] }, [], [s1, s2]), fake({ 'Harbor Line': found }, [], more)))).matches, path);
+
+    it('T5s: two animated TMDB series that both qualify as twins of an AniList season are several-fit (R1)', async () => {
+      const m = await run([series('tmdb-tv:810', 2019, 3), series('tmdb-tv:819', 2022, 3)]);
+      expect(m).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      expect(m.status === 'unsorted' && [...m.suggestions].sort()).toEqual(['anilist:803', 'tmdb-tv:810', 'tmdb-tv:819']);
+    });
+
+    it('T5s: two animated TMDB entries that both qualify as twins of an AniList first season are several-fit (R3)', async () => {
+      const anime = entry('anilist:200', { english: 'Glass Orchard' }, { year: 2019 });
+      const tv = (id: string, year: number) => entry(id, { english: 'Glass Orchard' }, { year, seasons: seasons(1), animation: true });
+      const p = 'Anime/Glass Orchard/DISC1';
+      const { matches } = await matchDiscs([ev(p)], ctx(fake({ 'Glass Orchard': [anime] }), fake({ 'Glass Orchard': [tv('tmdb-tv:201', 2019), tv('tmdb-tv:209', 2020)] })));
+      const m = byDisc(matches, p);
+      expect(m).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      expect(m.status === 'unsorted' && [...m.suggestions].sort()).toEqual(['anilist:200', 'tmdb-tv:201', 'tmdb-tv:209']);
+    });
+
+    it('T5t: a TMDB series with fewer seasons than the AniList chain position is not its twin (R2)', async () => {
+      expect(await run([series('tmdb-tv:819', 2022, 1)])).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      expect(await run([series('tmdb-tv:819', 2022, 4)])).toMatchObject({ status: 'filed', entryId: 'anilist:803', season: 3, disc: 1 });
+    });
+
+    it('T5t: seasons missing from the search result are fetched; still unknown, a base-name match is not a twin', async () => {
+      const bare = series('tmdb-tv:819', 2022, 0);
+      expect(await run([bare])).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      expect(await run([bare], [series('tmdb-tv:819', 2022, 4)])).toMatchObject({ status: 'filed', entryId: 'anilist:803', season: 3 });
+    });
+  });
 });

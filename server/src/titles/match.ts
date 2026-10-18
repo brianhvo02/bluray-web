@@ -293,26 +293,37 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   }
   // an exactly fitting AniList entry wins over TMDB only when every TMDB entry titled like the evidence, of any year, is
   // its animated twin; any other same-titled TMDB entry (live action, unknown genre, another kind or year) means the
-  // evidence may be that one (rulings T5g, T5m)
+  // evidence may be that one (rulings T5g, T5m); and a twin is exactly one TMDB entry, so two twins of one AniList
+  // entry mean one of them is another show (ruling T5s)
   const anilistExact = scored.filter((s) => s.entry.source === 'anilist' && s.exact).map((s) => s.entry);
   let twinIds = new Set<string>();
   let notTwins: Entry[] = [];
+  let severalTwins: Entry[] = [];
   if (anilistExact.length > 0) {
-    const rootYear = new Map<string, number | null>();
+    const info = new Map<string, TwinInfo>();
     for (const a of anilistExact) {
       const tv = a.kind === 'series' && TV_FORMATS.has(a.format ?? '');
-      rootYear.set(a.id, tv ? ((await anilistPlace(a, ctx)).root?.year ?? null) : null);
+      const place = tv ? await anilistPlace(a, ctx) : null;
+      info.set(a.id, { tv, rootYear: place?.root?.year ?? null, place: place?.place ?? null });
     }
-    const isTwin = (t: Entry): boolean => anilistExact.some((a) => twins(a, rootYear.get(a.id)!, t));
     const tmdb = [...all.values()].filter((en) => en.source === 'tmdb');
     const titles = named.flatMap((p) => p.parse.candidates);
     const evidenceTitled = tmdb.filter((t) => names(t).some((n) => titles.some((c) => sameTitle(c, n))));
     // TMDB entries named like an AniList entry in any of its languages, even when not like the evidence (ruling T5r):
     // a live-action one in the year window may be what the disc holds
     const anilistTitled = tmdb.filter((t) => anilistExact.some((a) => seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))));
-    const liveAction = anilistTitled.filter((t) => t.animation !== true && anilistExact.some((a) => inYearWindow(a, rootYear.get(a.id)!, t, true)));
-    notTwins = [...new Set([...evidenceTitled.filter((t) => !isTwin(t)), ...liveAction])];
-    if (notTwins.length === 0) twinIds = new Set([...evidenceTitled, ...anilistTitled].filter(isTwin).map((t) => t.id));
+    const liveAction = anilistTitled.filter((t) => t.animation !== true && anilistExact.some((a) => inYearWindow(a, info.get(a.id)!.rootYear, t, true)));
+    const twinsOf = new Map<string, Entry[]>();
+    for (const a of anilistExact) {
+      const found: Entry[] = [];
+      for (const t of new Set([...evidenceTitled, ...anilistTitled])) if (await isTwin(a, info.get(a.id)!, t, ctx)) found.push(t);
+      twinsOf.set(a.id, found);
+    }
+    const allTwins = new Set([...twinsOf.values()].flat());
+    notTwins = [...new Set([...evidenceTitled.filter((t) => !allTwins.has(t)), ...liveAction])];
+    const several = anilistExact.find((a) => twinsOf.get(a.id)!.length > 1);
+    if (several) severalTwins = [several, ...twinsOf.get(several.id)!];
+    else if (notTwins.length === 0) twinIds = new Set([...allTwins].map((t) => t.id));
   }
   scored = scored.filter((s) => !twinIds.has(s.entry.id));
   if (scored.length === 0) return unsorted('no-title', []);
@@ -336,6 +347,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   if (disagree) return unsorted('sources-disagree', [...ranked, ...universe.filter((en) => pieces.some((p) => fit(p, en, fitSeason) > 0))]);
   // a folder above the disc folder's parent may support a match but is never its only evidence (ruling T5n)
   if (!pieces.some((p) => !p.far && fit(p, best.entry, fitSeason) > 0)) return unsorted('no-title', [best.entry]);
+  if (severalTwins.length > 0) return unsorted('several-fit', severalTwins);
   if (notTwins.length > 0) return unsorted('several-fit', [...ranked, ...notTwins]);
   // rule 1: exactly one entry fits, and no other comes close; AniList and TMDB each fitting exactly, without being
   // twins, fit different things
@@ -478,14 +490,50 @@ function inYearWindow(a: Entry, rootYear: number | null, t: Entry, unknownFits: 
   return t.year >= from && t.year <= a.year + YEAR_SLACK;
 }
 
+/** What `isTwin` needs to know of an AniList entry: whether it is TV, its chain root's year and its place in the chain. */
+interface TwinInfo {
+  readonly tv: boolean;
+  readonly rootYear: number | null;
+  readonly place: number | null;
+}
+
 /**
- * An AniList entry and a TMDB entry for the same title: TMDB marks it animated, a name strictly equal to one of the
- * AniList names or to one with its season stripped (TMDB names the series, AniList the season: `Harbor Line Season 3`),
- * the same kind, and a year in the window (ruling T5q).
+ * How an AniList entry and a TMDB entry name the same title, or null when they aren't twins: TMDB marks it animated, the
+ * same kind, a year in the window (ruling T5q), and a name strictly equal to one of the AniList names (`name`) or only
+ * to one with its season stripped (`base`: TMDB names the series, AniList the season, `Harbor Line Season 3`).
  */
-function twins(a: Entry, rootYear: number | null, t: Entry): boolean {
-  if (t.animation !== true || a.kind !== t.kind || !inYearWindow(a, rootYear, t, false)) return false;
-  return seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)));
+function twinMatch(a: Entry, rootYear: number | null, t: Entry): 'name' | 'base' | null {
+  if (t.animation !== true || a.kind !== t.kind || !inYearWindow(a, rootYear, t, false)) return null;
+  if (names(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'name';
+  return seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y))) ? 'base' : null;
+}
+
+/**
+ * Whether a TMDB entry is an AniList entry's twin. A TMDB TV series must also have at least as many seasons as the
+ * AniList TV entry's place in its chain; when that can't be told (the season count or the place is unknown), only a
+ * full-name match counts (ruling T5t).
+ */
+async function isTwin(a: Entry, info: TwinInfo, t: Entry, ctx: MatchContext): Promise<boolean> {
+  const how = twinMatch(a, info.rootYear, t);
+  if (how === null) return false;
+  if (!info.tv || t.kind !== 'series') return true;
+  if (how === 'name' && (info.place === null || info.place <= 1)) return true;
+  if (info.place === null) return false;
+  const count = await tmdbSeasonCount(t, ctx);
+  return count === 0 ? how === 'name' : count >= info.place;
+}
+
+/** A TMDB series' season count, fetched by id through the cache when the search result has none; 0 when unknown. */
+async function tmdbSeasonCount(t: Entry, ctx: MatchContext): Promise<number> {
+  if (t.seasons.length > 0 || !ctx.tmdb) return t.seasons.length;
+  const key = `tmdb-entry:${t.id}`;
+  let hit = ctx.cache.get(key);
+  if (!hit) {
+    const en = await ctx.tmdb.entry(t.id);
+    hit = en ? [en] : [];
+    ctx.cache.set(key, hit);
+  }
+  return hit[0]?.seasons.length ?? 0;
 }
 
 /** An AniList entry's names, each also with its season stripped. */
