@@ -53,7 +53,8 @@ The token goes in `Authorization: Bearer <token>` (what the player sends for the
 
 ## Who can connect
 
-- The server listens only on loopback and on this Mac's private LAN addresses (10/8, 172.16/12, 192.168/16, 169.254/16), never on `0.0.0.0`, and refuses (403) any request whose source address is not loopback, private, link-local or IPv6 unique-local. Tailscale's 100.64/10 is not accepted: reaching discs from outside the home is the NAS server's job.
+- The server listens only on loopback and on this Mac's private LAN addresses (10/8, 172.16/12, 192.168/16, 169.254/16), never on `0.0.0.0`, and refuses (403) any request whose source address is not loopback, private, link-local or IPv6 unique-local. Tailscale's 100.64/10 is not in that list, but the filter only sees the last hop: a local reverse proxy on this Mac (`tailscale serve`, as the device gate uses it, or any other) connects from loopback and passes it. Behind such a proxy only the per-run token protects the discs, so run one only while you need it; reaching discs from outside the home for real is the NAS server's job.
+- The `Host` header is not checked (no DNS-rebinding guard). Without the token a rebound page reaches only the public player in `dist/`.
 - Every disc request needs the per-run token (401 without it). The built player at `/` is public code and needs none.
 - Paths with an empty, `.` or `..` segment, or with `/`, `\` or NUL once decoded, are refused (400). A file is only served if its real path (after links) is inside the disc folder.
 - Read-only: only `GET`, `HEAD` and the CORS preflight `OPTIONS` are answered.

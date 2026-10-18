@@ -837,6 +837,22 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect([ignoredTaps(h), tapNotices(h)]).toEqual([3, 2]);
   });
 
+  it('counts ignored taps in telemetry per disc: a new open starts again from 0', async () => {
+    const t = manualTimers();
+    const { h, w } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    t.fire(200);
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjPlane?.tapsIgnored).toBe(1);
+    const boots = w.sent.filter((m) => m.type === 'boot').length;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(bdjDisc()) } });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'boot').length).toBe(boots + 1));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'start').length).toBe(2));
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjPlane?.tapsIgnored).toBe(0);
+  });
+
   it('waits 0.5 s on the constrained memory profile', async () => {
     const t = manualTimers();
     const { h } = await menuShown({ setTimer: t.setTimer });

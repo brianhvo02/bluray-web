@@ -36,8 +36,23 @@ export default defineConfig({
   worker: { format: 'es' },
   build: { rollupOptions: { input: { main: resolve(root, 'index.html'), probe: resolve(root, 'probe.html') } } },
   test: {
-    include: ['src/**/*.test.ts', 'tests/local/**/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts', 'tools/**/*.test.ts', 'server/**/*.test.ts', 'rendezvous/**/*.test.ts'],
     environment: 'node',
     passWithNoTests: true,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          include: ['src/**/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts', 'tools/**/*.test.ts', 'server/**/*.test.ts', 'rendezvous/**/*.test.ts'],
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        // The developer's real discs (they skip where fixtures/local is absent, as on CI). Their replays run against wall-time
+        // limits, so they run after every other test, one file at a time, instead of racing the whole suite for the CPU.
+        extends: true,
+        test: { name: 'local', include: ['tests/local/**/*.test.ts'], fileParallelism: false, sequence: { groupOrder: 1 } },
+      },
+    ],
   },
 });

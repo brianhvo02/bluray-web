@@ -660,6 +660,7 @@ export class Player {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
     this.bdjLatency = new InputLatency();
+    this.bdjTapsIgnored = 0;
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
