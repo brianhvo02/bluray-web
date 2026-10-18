@@ -5,7 +5,7 @@ services:
     container_name: bluray-server
     restart: unless-stopped
     environment:
-      LIBRARY_ROOTS: drv0=/library-mnt/drv0/BDMVs,drv2=/library-mnt/drv2/BDMVs,drv3=/library-mnt/drv3/BDMVs,drv5=/library-mnt/drv5/BDMVs,drv6=/library-mnt/drv6/BDMVs,drv7=/library-mnt/drv7/BDMVs,drv8=/library-mnt/drv8/BDMVs
+      LIBRARY_ROOTS: drv0=/library-mnt/drv0/BDMVs,drv2=/library-mnt/drv2/BDMVs,drv3=/library-mnt/drv3/BDMVs,drv5=/library-mnt/drv5/BDMVs,drv6=/library-mnt/drv6/BDMVs,drv7=/library-mnt/drv7/BDMVs,drv8=/library-mnt/drv8/BDMVs,drv2-rips=/library-mnt/drv2/Rips
       DATA_DIR: /data
       PORT: "8080"
       TZ: America/Los_Angeles
