@@ -38,16 +38,13 @@ export const DEFAULT_FONT_PATH = '/jdk/lib/fonts/default-font.ttf';
 export const DEFAULT_FONT_SIZE = 757_076;
 
 /**
- * The files under /jdk/ (Vfs jdkLazy): the twelve JRE font files and DEFAULT_FONT_PATH, all one fetch of the font
- * (a failed fetch is tried again on the next read).
+ * The files under /jdk/ (Vfs jdkLazy): the twelve JRE font files and DEFAULT_FONT_PATH, all one fetch of the font. A
+ * failed fetch is not tried again: later reads fail at once (each would otherwise wait up to the fetch's timeout
+ * again, under BDFontMetrics's class lock).
  */
 export function systemFontFiles(loadDefaultFont: () => Promise<Uint8Array>): Map<string, LazyFile> {
   let loading: Promise<Uint8Array> | null = null;
-  const load = (): Promise<Uint8Array> =>
-    (loading ??= loadDefaultFont().catch((e: unknown) => {
-      loading = null;
-      throw e;
-    }));
+  const load = (): Promise<Uint8Array> => (loading ??= loadDefaultFont());
   const file: LazyFile = { size: DEFAULT_FONT_SIZE, load };
   const files = new Map<string, LazyFile>();
   for (const name of [...JRE_FONT_FILES, DEFAULT_FONT_PATH.slice(DEFAULT_FONT_PATH.lastIndexOf('/') + 1)]) files.set(`lib/fonts/${name}`, file);

@@ -25,7 +25,9 @@ import { absolute, readVfsFile } from './io';
 export interface FontNativeDeps {
   /**
    * FreeType, loaded the first time a font file is opened; calls may share one load. Without it the natives behave
-   * as libbluray built without FreeType (no HAVE_FT2): initN returns 0 and nothing is measured or drawn.
+   * as libbluray built without FreeType (no HAVE_FT2): initN returns 0 and nothing is measured or drawn. A load that
+   * fails is not tried again: every later font fails at once (loadFontN returns 0, so Java throws AWTError), instead of
+   * each waiting up to the fetch's timeout under BDFontMetrics's class lock.
    */
   readonly loadFreeType?: () => Promise<FreeType>;
   /**
@@ -45,6 +47,8 @@ export function registerFontNatives(table: NativeTable, deps: FontNativeDeps = {
   const log = deps.log ?? (() => {});
   let ft: FreeType | null = null;
   let loading: Promise<void> | null = null;
+  /** FreeType could not be loaded: not tried again in this JVM. */
+  let failed = false;
   /** Live faces: the handle Java holds (FT_Face) to FreeType's face. */
   const faces = new Map<bigint, number>();
 
@@ -52,14 +56,14 @@ export function registerFontNatives(table: NativeTable, deps: FontNativeDeps = {
 
   /** Runs `k` with FreeType, loading it first (the calling thread parks meanwhile); null when it cannot be loaded. */
   const withFreeType = (k: (ft: FreeType | null) => NativeResult): NativeResult => {
-    if (ft || !deps.loadFreeType) return k(ft);
+    if (ft || failed || !deps.loadFreeType) return k(ft);
     const load = deps.loadFreeType;
     loading ??= load().then(
       (loaded) => {
         ft = loaded;
       },
       (e: unknown) => {
-        loading = null; // a later font tries again
+        failed = true; // later fonts fail at once
         log(`BD-J: FreeType could not be loaded: ${e instanceof Error ? e.message : String(e)}`);
       },
     );

@@ -11,6 +11,7 @@ import { fixtureDiscFiles } from '../../../../../tests/helpers/fixture-disc';
 import { syntheticSource } from '../../../../../tests/helpers/synthetic-disc';
 import { testBdjFonts } from '../../../../../tests/helpers/bdj-fonts';
 import type { BdjHost } from '../../host';
+import type { FreeType } from '../../fonts/freetype';
 import { DEFAULT_FONT_PATH, DEFAULT_FONT_SIZE, JRE_FONT_FILES, systemFontFiles } from '../../fonts/system-fonts';
 import { Invoke } from '../interpreter';
 import type { NativeResult } from '../interpreter';
@@ -82,6 +83,74 @@ function fnv(words: ArrayLike<number>): string {
   return h.toString(16).padStart(8, '0');
 }
 
+/** Runs `cls.key` with `args` on a new Java thread (initialising `cls` first); the uncaught exception's class, or null. */
+async function runIn(jvm: Jvm, cls: string, key: string, args: readonly JValue[]): Promise<{ ret: JValue | undefined; thrown: string | null }> {
+  const c = jvm.bootClass(cls);
+  let m: JMethod | undefined;
+  for (let k: typeof c | null = c; k && !m; k = k.superClass) m = k.methods.get(key);
+  if (!m) throw new Error(`${cls}.${key} is missing`);
+  const method = m;
+  const t = jvm.threads.spawnWith(jvm.mainThread, (t) =>
+    jvm.withInit(t, c, () =>
+      new Invoke(method, args, (ret) => {
+        t.result = ret;
+        return undefined;
+      }),
+    ),
+  );
+  const ended = new AbortController();
+  t.onTerminate = () => ended.abort();
+  let outcome = t.state === 'terminated' ? 'idle' : await jvm.threads.run(ended.signal);
+  while (outcome === 'idle' && t.state !== 'terminated' && jvm.threads.timersPending) {
+    await jvm.threads.nextTimer();
+    outcome = await jvm.threads.run(ended.signal);
+  }
+  t.onTerminate = null;
+  if (t.state !== 'terminated') throw new Error(`${cls}.${key} did not finish (${outcome})`);
+  if (!t.uncaught) return { ret: t.result, thrown: null };
+  return { ret: undefined, thrown: t.uncaught.cls.name };
+}
+
+/**
+ * A JVM on disc-bdj (with a disc font at PATHS.disc), the libbluray natives over `fonts.loadFreeType`, and the JRE font
+ * files over `fonts.loadDefaultFont`; libbluray's and the natives' log lines go to `logged`.
+ */
+async function bootFontJvm(fonts: { loadFreeType(): Promise<FreeType>; loadDefaultFont(): Promise<Uint8Array> }, logged: string[]): Promise<Jvm> {
+  const files = fixtureDiscFiles('disc-bdj');
+  files.set('BDMV/AUXDATA/00001.otf', new Uint8Array(readFileSync(fileURLToPath(new URL('../../../../../fixtures/ass/fonts/DejaVuSerif.ttf', import.meta.url)))));
+  const source = syntheticSource(files);
+  const jvm = new Jvm({
+    bootJars: BOOT_JARS,
+    nowMs: () => Date.now(),
+    setTimer: (ms, fn) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    },
+    stdout: () => {},
+    stderr: () => {},
+    vfs: new Vfs({
+      disc: source,
+      discPaths: source.paths(),
+      jdkLib: ZipArchive.open(RT),
+      nowMs: () => 0,
+      jdkLazy: systemFontFiles(() => fonts.loadDefaultFont()),
+    }),
+    systemProperties: new Map([
+      ['awt.toolkit', 'java.awt.BDToolkit'],
+      ['java.awt.graphicsenv', 'java.awt.BDGraphicsEnvironment'],
+      ['java.awt.headless', 'false'],
+    ]),
+  });
+  const host = { log: (_file: string | null, _line: number, msg: string) => void logged.push(msg) } as unknown as BdjHost;
+  registerLibblurayNatives(jvm.natives, host, {
+    loadFreeType: () => fonts.loadFreeType(),
+    fallbackFontPath: DEFAULT_FONT_PATH,
+    log: (line) => void logged.push(line),
+  });
+  await jvm.boot();
+  return jvm;
+}
+
 describe('BD-J font and text natives against libbluray', () => {
   let jvm: Jvm;
   let freeTypeLoads = 0;
@@ -92,34 +161,7 @@ describe('BD-J font and text natives against libbluray', () => {
   const jstr = (v: JValue | undefined): string | null => jvm.heap.jsString((v ?? null) as JObject | null);
   const native = (key: string) => jvm.natives.get(key)!;
   const ctx = (): NativeContext => ({ jvm, thread: null, method: null }) as unknown as NativeContext;
-
-  /** Runs `cls.key` with `args` on a new Java thread (initialising `cls` first); the uncaught exception's class, or null. */
-  async function run(cls: string, key: string, args: readonly JValue[]): Promise<{ ret: JValue | undefined; thrown: string | null }> {
-    const c = jvm.bootClass(cls);
-    let m: JMethod | undefined;
-    for (let k: typeof c | null = c; k && !m; k = k.superClass) m = k.methods.get(key);
-    if (!m) throw new Error(`${cls}.${key} is missing`);
-    const method = m;
-    const t = jvm.threads.spawnWith(jvm.mainThread, (t) =>
-      jvm.withInit(t, c, () =>
-        new Invoke(method, args, (ret) => {
-          t.result = ret;
-          return undefined;
-        }),
-      ),
-    );
-    const ended = new AbortController();
-    t.onTerminate = () => ended.abort();
-    let outcome = t.state === 'terminated' ? 'idle' : await jvm.threads.run(ended.signal);
-    while (outcome === 'idle' && t.state !== 'terminated' && jvm.threads.timersPending) {
-      await jvm.threads.nextTimer();
-      outcome = await jvm.threads.run(ended.signal);
-    }
-    t.onTerminate = null;
-    if (t.state !== 'terminated') throw new Error(`${cls}.${key} did not finish (${outcome})`);
-    if (!t.uncaught) return { ret: t.result, thrown: null };
-    return { ret: undefined, thrown: t.uncaught.cls.name };
-  }
+  const run = (cls: string, key: string, args: readonly JValue[]): Promise<{ ret: JValue | undefined; thrown: string | null }> => runIn(jvm, cls, key, args);
 
   async function ok(cls: string, key: string, args: readonly JValue[]): Promise<JValue | undefined> {
     const r = await run(cls, key, args);
@@ -145,44 +187,19 @@ describe('BD-J font and text natives against libbluray', () => {
   }
 
   beforeAll(async () => {
-    const files = fixtureDiscFiles('disc-bdj');
-    files.set('BDMV/AUXDATA/00001.otf', new Uint8Array(readFileSync(fileURLToPath(new URL('../../../../../fixtures/ass/fonts/DejaVuSerif.ttf', import.meta.url)))));
-    const source = syntheticSource(files);
-    jvm = new Jvm({
-      bootJars: BOOT_JARS,
-      nowMs: () => Date.now(),
-      setTimer: (ms, fn) => {
-        const id = setTimeout(fn, ms);
-        return () => clearTimeout(id);
-      },
-      stdout: () => {},
-      stderr: () => {},
-      vfs: new Vfs({
-        disc: source,
-        discPaths: source.paths(),
-        jdkLib: ZipArchive.open(RT),
-        nowMs: () => 0,
-        jdkLazy: systemFontFiles(() => {
+    jvm = await bootFontJvm(
+      {
+        loadFreeType: () => {
+          freeTypeLoads++;
+          return testBdjFonts.loadFreeType();
+        },
+        loadDefaultFont: () => {
           fontLoads++;
           return testBdjFonts.loadDefaultFont();
-        }),
-      }),
-      systemProperties: new Map([
-        ['awt.toolkit', 'java.awt.BDToolkit'],
-        ['java.awt.graphicsenv', 'java.awt.BDGraphicsEnvironment'],
-        ['java.awt.headless', 'false'],
-      ]),
-    });
-    const host = { log: (_file: string | null, _line: number, msg: string) => void logged.push(msg) } as unknown as BdjHost;
-    registerLibblurayNatives(jvm.natives, host, {
-      loadFreeType: () => {
-        freeTypeLoads++;
-        return testBdjFonts.loadFreeType();
+        },
       },
-      fallbackFontPath: DEFAULT_FONT_PATH,
-      log: (line) => void logged.push(line),
-    });
-    await jvm.boot();
+      logged,
+    );
   }, 60_000);
 
   it('initN does not load FreeType; the first font does, once', async () => {
@@ -308,6 +325,46 @@ describe('BD-J font and text natives against libbluray', () => {
   });
 });
 
+describe('BD-J fonts when FreeType cannot be loaded', () => {
+  it('the first font throws AWTError after one wait; later fonts fail at once, without loading again', async () => {
+    const logged: string[] = [];
+    let loads = 0;
+    let waits = 0;
+    const jvm = await bootFontJvm(
+      {
+        // a fetch that times out: the rejection comes later, so a second load would be a second wait
+        loadFreeType: () => {
+          loads++;
+          return new Promise<FreeType>((_resolve, reject) => {
+            setTimeout(() => {
+              waits++;
+              reject(new Error('freetype.wasm: The operation timed out.'));
+            }, 200);
+          });
+        },
+        loadDefaultFont: () => testBdjFonts.loadDefaultFont(),
+      },
+      logged,
+    );
+    const run = (cls: string, key: string, args: readonly JValue[]): Promise<{ ret: JValue | undefined; thrown: string | null }> => runIn(jvm, cls, key, args);
+    const font = async (size: number): Promise<JObject> => {
+      const f = jvm.heap.newObject(jvm.bootClass('java/awt/Font'));
+      expect((await run('java/awt/Font', '<init>(Ljava/lang/String;II)V', [f, jvm.heap.newString('SansSerif'), 0, size])).thrown).toBeNull();
+      return f;
+    };
+    const metrics = 'getFontMetrics(Ljava/awt/Font;)Ljava/awt/BDFontMetrics;';
+    expect((await run('java/awt/BDFontMetrics', 'init()V', [])).thrown).toBeNull();
+    expect((await run('java/awt/BDFontMetrics', metrics, [await font(24)])).thrown).toBe('java/awt/AWTError');
+    expect({ loads, waits }).toEqual({ loads: 1, waits: 1 });
+    const later = [await font(30), await font(36)];
+    const started = Date.now();
+    for (const f of later) expect((await run('java/awt/BDFontMetrics', metrics, [f])).thrown).toBe('java/awt/AWTError');
+    expect(Date.now() - started).toBeLessThan(200); // no second wait
+    expect({ loads, waits }).toEqual({ loads: 1, waits: 1 });
+    expect(logged.filter((l) => /FreeType could not be loaded/.test(l))).toEqual(['BD-J: FreeType could not be loaded: freetype.wasm: The operation timed out.']);
+  }, 60_000);
+});
+
 describe('BD-J font natives without FreeType', () => {
   it('behave as libbluray built without FreeType or fontconfig', () => {
     const table = new NativeTable();
@@ -326,6 +383,16 @@ describe('BD-J font natives without FreeType', () => {
 describe('system fonts', () => {
   it('DEFAULT_FONT_SIZE is the size of src/engine/ass/default-font.ttf', () => {
     expect(file('../../../ass/default-font.ttf').length).toBe(DEFAULT_FONT_SIZE);
+  });
+
+  it('remembers a failed fetch: later reads fail at once with the same error', async () => {
+    let loads = 0;
+    const files = systemFontFiles(() => {
+      loads++;
+      return Promise.reject(new Error('default-font.ttf: HTTP 503'));
+    });
+    for (const f of files.values()) await expect(f.load()).rejects.toThrow('HTTP 503');
+    expect(loads).toBe(1);
   });
 
   it('maps the twelve JRE font files and the fallback path to one fetch of the font', async () => {

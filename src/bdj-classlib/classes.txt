@@ -137,6 +137,7 @@ com/sun/xml/internal/stream/XMLBufferListener
 com/sun/xml/internal/stream/XMLEntityStorage
 com/sun/xml/internal/stream/util/BufferAllocator
 com/sun/xml/internal/stream/util/ThreadLocalBufferAllocator
+java/awt/AWTError
 java/awt/AWTEvent
 java/awt/AWTEvent$1
 java/awt/AWTEvent$2

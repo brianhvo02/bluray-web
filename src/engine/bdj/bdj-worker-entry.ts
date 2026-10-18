@@ -30,14 +30,8 @@ const fetchBytes = async (url: string): Promise<Uint8Array> => {
 
 runBdjWorker(globalThis as unknown as BdjPort, {
   extraIntrinsics: registerClassLibraryIntrinsics,
-  loadFreeType: () =>
-    (freeType ??= loadFreeType(fetch(freetypeWasmUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) })).catch((e: unknown) => {
-      freeType = null; // the natives try again with the next font
-      throw e;
-    })),
-  loadDefaultFont: () =>
-    (defaultFont ??= fetchBytes(defaultFontUrl).catch((e: unknown) => {
-      defaultFont = null;
-      throw e;
-    })),
+  // a failed load is remembered for this worker's session (one BD-J entry): later fonts fail at once rather than each
+  // waiting for the fetch's timeout again (natives/fonts.ts, fonts/system-fonts.ts)
+  loadFreeType: () => (freeType ??= loadFreeType(fetch(freetypeWasmUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) }))),
+  loadDefaultFont: () => (defaultFont ??= fetchBytes(defaultFontUrl)),
 });
