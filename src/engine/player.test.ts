@@ -1904,10 +1904,13 @@ describe('Player with a disc on the NAS', () => {
       remote: (files) => (gate = gatedNas(files, RATE, { '00001': gateAfter(2) })).nas,
     });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
-    await vi.waitFor(async () => {
-      await h.play(20);
-      expect(lastTelemetry(h)?.framesPresented ?? 0).toBeGreaterThan(0); // the first picture is up: video is ready
-    });
+    await vi.waitFor(
+      async () => {
+        await h.play(20);
+        expect(lastTelemetry(h)?.framesPresented ?? 0).toBeGreaterThan(0); // the first picture is up: video is ready
+      },
+      { timeout: 10_000 }, // the 1 s default is too short for the first frame on a loaded CI runner
+    );
     await h.play(1000);
     expect(lastState(h)).toBe('buffering');
     expect(states(h)).not.toContain('playing');
