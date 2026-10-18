@@ -54,6 +54,34 @@ describe('OwnerStore', () => {
     expect(s.snapshot().choices.get('A')).toEqual(title('old'));
   });
 
+  it('updates a propagated copy when the source is re-filed', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('t1'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    s.setChoice('A', 'F', title('t2'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    expect(s.snapshot().choices.get('B')).toEqual(title('t2'));
+  });
+
+  it('keeps the choice of a copy filed directly', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('t1'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    s.setChoice('B', 'F', title('mine'));
+    s.setChoice('A', 'F', title('t3'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    expect(s.snapshot().choices.get('B')).toEqual(title('mine'));
+  });
+
+  it('clears the propagated copies when the source choice is cleared', () => {
+    const s = new OwnerStore(dir);
+    s.setChoice('A', 'F', title('t1'));
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    s.clearChoice('A');
+    s.reattach([{ id: 'A', fingerprint: 'F' }, { id: 'B', fingerprint: 'F' }]);
+    expect(s.snapshot().choices.size).toBe(0);
+  });
+
   it('stores a fingerprint that became known or changed on a present disc', () => {
     const s = new OwnerStore(dir);
     s.setChoice('A', null, title('t'));
@@ -135,9 +163,10 @@ describe('OwnerStore', () => {
     for (const body of [
       '{"choices":[],"ownTitles":[],"displayNames":{},"gate":null}',
       '{"choices":{"A":5},"ownTitles":[],"displayNames":{},"gate":null}',
-      '{"choices":{"A":{"choice":{"kind":"title"},"fingerprint":null,"setAt":1}},"ownTitles":[],"displayNames":{},"gate":null}',
+      '{"choices":{"A":{"choice":{"kind":"title"},"fingerprint":null,"setAt":1,"propagated":false}},"ownTitles":[],"displayNames":{},"gate":null}',
       '{"choices":{},"ownTitles":[{"id":"own:1","kind":"show","name":"x","seasons":null}],"displayNames":{},"gate":null}',
       '{"choices":{},"ownTitles":[],"displayNames":{"A":3},"gate":null}',
+      '{"choices":{"A":{"choice":{"kind":"hidden"},"fingerprint":null,"setAt":1}},"ownTitles":[],"displayNames":{},"gate":null}',
     ]) {
       writeFileSync(join(dir, 'owner.json'), body);
       expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);

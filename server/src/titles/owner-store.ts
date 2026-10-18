@@ -12,7 +12,7 @@ export interface OwnerSnapshot {
 }
 
 interface OwnerData {
-  choices: Record<string, { choice: OwnerChoice; fingerprint: string | null; setAt: number }>;
+  choices: Record<string, { choice: OwnerChoice; fingerprint: string | null; setAt: number; propagated: boolean }>;
   ownTitles: OwnTitle[];
   displayNames: Record<string, string>;
   gate: 'owners' | 'everyone' | null;
@@ -47,7 +47,7 @@ export class OwnerStore {
 
   setChoice(discId: string, fingerprint: string | null, choice: OwnerChoice): void {
     this.update((d) => {
-      d.choices[discId] = { choice, fingerprint, setAt: Date.now() };
+      d.choices[discId] = { choice, fingerprint, setAt: Date.now(), propagated: false };
     });
   }
 
@@ -108,9 +108,12 @@ export class OwnerStore {
    * - A present disc whose fingerprint is known or changed gets it stored.
    * - Every present disc with a non-null fingerprint and no choice of its own takes the choice stored under that
    *   fingerprint. A present disc's own choice always wins.
-   * - When several stored choices share a fingerprint (copies filed differently), the most recently set one
+   * - Such a copy's entry is marked `propagated`. On every reattach it follows the newest direct choice for its
+   *   fingerprint and is removed when none is left (clearing the source clears the copies). A direct choice
+   *   (made with `setChoice`) is never overwritten by propagation.
+   * - When several direct choices share a fingerprint (copies filed differently), the most recently set one
    *   propagates; ties keep the first in file order.
-   * - No entry is ever deleted, even one whose disc is absent: a disc that is only offline (a mount down during
+   * - No direct entry is ever deleted, even one whose disc is absent: a disc that is only offline (a mount down during
    *   the scan) keeps its choice for when it returns. A choice with a null fingerprint stays under its id.
    * The file is written only when something changed.
    */
@@ -122,14 +125,23 @@ export class OwnerStore {
       }
       const source = new Map<string, { choice: OwnerChoice; setAt: number }>();
       for (const entry of Object.values(d.choices)) {
-        if (entry.fingerprint === null) continue;
+        if (entry.propagated || entry.fingerprint === null) continue;
         const best = source.get(entry.fingerprint);
         if (!best || entry.setAt > best.setAt) source.set(entry.fingerprint, { choice: entry.choice, setAt: entry.setAt });
+      }
+      for (const [id, entry] of Object.entries(d.choices)) {
+        if (!entry.propagated) continue;
+        const from = entry.fingerprint === null ? undefined : source.get(entry.fingerprint);
+        if (!from) delete d.choices[id];
+        else {
+          entry.choice = from.choice;
+          entry.setAt = from.setAt;
+        }
       }
       for (const disc of discs) {
         if (disc.fingerprint === null || d.choices[disc.id] !== undefined) continue;
         const from = source.get(disc.fingerprint);
-        if (from) d.choices[disc.id] = { choice: from.choice, fingerprint: disc.fingerprint, setAt: from.setAt };
+        if (from) d.choices[disc.id] = { choice: from.choice, fingerprint: disc.fingerprint, setAt: from.setAt, propagated: true };
       }
     });
   }
@@ -175,7 +187,7 @@ export class OwnerStore {
     const kinds = ['series', 'movie', 'music'];
     for (const [id, e] of Object.entries(choices as Record<string, unknown>)) {
       const entry = e as Record<string, unknown> | null;
-      if (!isObj(entry) || !(entry!.fingerprint === null || str(entry!.fingerprint)) || typeof entry!.setAt !== 'number') bad(`choices.${id}`);
+      if (!isObj(entry) || !(entry!.fingerprint === null || str(entry!.fingerprint)) || typeof entry!.setAt !== 'number' || typeof entry!.propagated !== 'boolean') bad(`choices.${id}`);
       const c = entry!.choice as Record<string, unknown> | null;
       const ok =
         isObj(c) &&
