@@ -18,6 +18,15 @@ const SIZES = new Set(['small', 'large']);
 const TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const INDEX = 'index.json';
 const STORED_NAME = /^[A-Za-z0-9_-]{1,64}-(?:small|large)$/;
+/** Art comes from these hosts over https, never elsewhere (M4). */
+const ART_HOSTS = new Set(['s4.anilist.co', 'image.tmdb.org']);
+
+/** Whether `url` is an https URL on an allowed art host, with no credentials or port. */
+function allowedArtUrl(url: string): boolean {
+  if (!URL.canParse(url)) return false;
+  const u = new URL(url);
+  return u.protocol === 'https:' && ART_HOSTS.has(u.hostname) && u.port === '' && u.username === '' && u.password === '';
+}
 
 interface Stored {
   /** '' for a file found on disk but missing from the index: counted against the budget, fetched again on use. */
@@ -115,6 +124,7 @@ export class ArtCache {
 
   /** The body of `url`, when it is an allowed image within the size cap and arrives within the timeout. */
   private async download(url: string): Promise<{ bytes: Buffer; type: string } | null> {
+    if (!allowedArtUrl(url)) return null;
     const maxBytes = this.opts.maxBytes ?? DEFAULT_MAX_BYTES;
     const abort = new AbortController();
     const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)]);

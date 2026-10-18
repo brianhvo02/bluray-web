@@ -37,7 +37,7 @@ function ev(path: string, titles: Record<string, string> = {}, fingerprint: stri
   };
 }
 
-const POSTER = { small: 'https://img.example/ember-s.jpg', large: 'https://img.example/ember-l.jpg' };
+const POSTER = { small: 'https://s4.anilist.co/ember-s.jpg', large: 'https://s4.anilist.co/ember-l.jpg' };
 const EMBER = entry('anilist:100', { english: 'Ember Blade', romaji: 'Hinokiri no Ken', native: '火斬りの剣' }, { poster: POSTER });
 const A = ev('drv1/Anime/火斬りの剣/[BDMV][220629][火斬りの剣][Vol.1]', { jpn: '火斬りの剣' }, 'FA');
 // a box of three unnumbered-by-name discs, listed out of order
@@ -380,7 +380,7 @@ describe('task 9 review', () => {
     const t = await token(true);
     const guest = await token(false);
     anilist.extra = Array.from({ length: 501 }, (_, i) =>
-      entry(`anilist:${5000 + i}`, { english: `Lantern ${i}` }, { poster: { small: `https://img.example/l${i}-s.jpg`, large: `https://img.example/l${i}-l.jpg` } }));
+      entry(`anilist:${5000 + i}`, { english: `Lantern ${i}` }, { poster: { small: `https://s4.anilist.co/l${i}-s.jpg`, large: `https://s4.anilist.co/l${i}-l.jpg` } }));
     const { titles } = (await (await get('/api/admin/lookup?q=many&source=anilist', t)).json()) as { titles: TitleSummary[] };
     expect(titles).toHaveLength(501);
     const first = titles[0]!.poster!;
@@ -389,7 +389,7 @@ describe('task 9 review', () => {
     const res = await get(`/api/art/${last}?size=large`, t);
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('private, max-age=2592000, immutable');
-    expect(artFetch).toHaveBeenLastCalledWith('https://img.example/l500-l.jpg', expect.anything());
+    expect(artFetch).toHaveBeenLastCalledWith('https://s4.anilist.co/l500-l.jpg', expect.anything());
     expect((await get(`/api/art/${last}`, guest)).status).toBe(404);
     expect((await get(`/api/art/${first}`, t)).status).toBe(404);
     // the catalogue's own art still serves everyone
@@ -515,5 +515,77 @@ describe('task 9 review', () => {
     // the device may look up again
     anilist.hold = null;
     expect((await get('/api/admin/lookup?q=Ember&source=anilist', t)).status).toBe(200);
+  });
+});
+
+describe('final review', () => {
+  const put = (t: string, d: DiscEvidence, body: unknown): Promise<Response> => send('PUT', `/api/admin/discs/${encodeURIComponent(d.discId)}/choice`, t, body);
+  const series = async (t: string, name: string): Promise<OwnTitle> => (await (await send('POST', '/api/admin/titles', t, { kind: 'series', name, seasons: 1 })).json()) as OwnTitle;
+
+  it('I3: numbers the other discs of a folder by their own numbers, so a missing volume leaves a gap', async () => {
+    await start();
+    const t = await token(true);
+    const [v1, v2, v4] = ['Vol.1', 'Vol.2', 'Vol.4'].map((v) => ev(`drv1/Misc/Quiet Reel/Quiet Reel ${v}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    evidence = [v4, v1, v2];
+    const title = await series(t, 'Quiet Reel');
+    const choice = (disc: number): unknown => ({ choice: { kind: 'title', titleId: title.id, season: 1, disc }, applyToGroup: true });
+    const discOf = (d: DiscEvidence): number | null | undefined => {
+      const c = owner.snapshot().choices.get(d.discId);
+      return c?.kind === 'title' ? c.disc : undefined;
+    };
+    expect((await put(t, v1, choice(1))).status).toBe(200);
+    expect([v1, v2, v4].map(discOf)).toEqual([1, 2, 4]);
+    const clear = (): void => [v1, v2, v4].forEach((d) => owner.clearChoice(d.discId));
+    // filing the last one first numbers the others the same way
+    clear();
+    await put(t, v4, choice(4));
+    expect([v1, v2, v4].map(discOf)).toEqual([1, 2, 4]);
+    // the owner's number may differ from the folder's: the others keep their distance from it
+    clear();
+    await put(t, v4, choice(6));
+    expect([v1, v2, v4].map(discOf)).toEqual([3, 4, 6]);
+  });
+
+  it('I3: skips the discs without a number when others in the folder have one, and numbers by position when none has', async () => {
+    await start();
+    const t = await token(true);
+    const [v1, v2, bonus] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Making Of'].map((n) => ev(`drv1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const plain = ['AAA', 'BBB', 'CCC'].map((n) => ev(`drv1/Misc/Plain Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    evidence = [v1, v2, bonus, ...plain];
+    const title = await series(t, 'Quiet Reel');
+    const res = await put(t, v1, { choice: { kind: 'title', titleId: title.id, season: 1, disc: 1 }, applyToGroup: true });
+    expect(await res.json()).toEqual({ skipped: [{ discId: bonus.discId, reason: 'no-number' }] });
+    expect(owner.snapshot().choices.has(bonus.discId)).toBe(false);
+    expect(owner.snapshot().choices.get(v2.discId)).toMatchObject({ disc: 2 });
+
+    const other = await series(t, 'Plain Reel');
+    await put(t, plain[1], { choice: { kind: 'title', titleId: other.id, season: 1, disc: 5 }, applyToGroup: true });
+    expect(plain.map((d) => owner.snapshot().choices.get(d.discId))).toEqual([4, 5, 6].map((disc) => ({ kind: 'title', titleId: other.id, season: 1, disc })));
+  });
+
+  it('M12: refuses to apply a title choice to the folder without a disc number', async () => {
+    await start();
+    const t = await token(true);
+    const title = await series(t, 'Quiet Harbor');
+    const res = await put(t, BOX[1]!, { choice: { kind: 'title', titleId: title.id, season: 1, disc: null }, applyToGroup: true });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'disc-required' });
+    expect(owner.snapshot().choices.size).toBe(0);
+  });
+
+  it("M8: a music title's new name is kept in its discs' choices, so it survives a move", async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FM${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const music = service.catalogue().titles.find((x) => x.kind === 'music')!;
+    expect((await send('PUT', `/api/admin/names/${encodeURIComponent(music.id)}`, t, { name: 'First Light Live' })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live' });
+    // the release folder is tidied: new paths, same discs
+    evidence = [...evidence.filter((e) => !discs.includes(e)), ...discs.map((d, i) => ev(`drv1/Music/Lumen Choir/First Light/BD${i + 1}`, {}, d.fingerprint))];
+    clock += 60_000;
+    await service.runNow();
+    expect(service.catalogue().titles.filter((x) => x.kind === 'music').map((x) => x.names.display)).toEqual(['First Light Live']);
   });
 });

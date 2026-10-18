@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OwnerChoice, OwnTitle, TitleKind } from '../../../src/engine/disc/nas-api';
 import { isCode, lockFile, replaceAtomically } from '../atomic-json';
@@ -32,6 +32,8 @@ function fail(file: string, what: string): never {
  */
 export class OwnerStore {
   private readonly file: string;
+  /** The gate as last read, and the owner.json it was read from (inode, mtime, size), or 'missing' (M10). */
+  private gateRead: { readonly stamp: string; readonly gate: 'owners' | 'everyone' | null } | null = null;
 
   constructor(dir: string) {
     mkdirSync(dir, { recursive: true });
@@ -46,6 +48,21 @@ export class OwnerStore {
       displayNames: new Map(Object.entries(data.displayNames)),
       gate: data.gate,
     };
+  }
+
+  /**
+   * The library gate, read again only when owner.json changes (M10): it is asked on every title and art request.
+   */
+  gate(): 'owners' | 'everyone' | null {
+    let stamp = 'missing';
+    try {
+      const st = statSync(this.file);
+      stamp = `${st.ino}:${st.mtimeMs}:${st.size}`;
+    } catch (err) {
+      if (!isCode(err, 'ENOENT')) throw err;
+    }
+    if (this.gateRead?.stamp !== stamp) this.gateRead = { stamp, gate: this.load().gate };
+    return this.gateRead.gate;
   }
 
   setChoice(discId: string, fingerprint: string | null, choice: OwnerChoice, origin: ChoiceOrigin = 'direct'): void {

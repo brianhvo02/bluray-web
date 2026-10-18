@@ -17,8 +17,8 @@ import type { Catalogue } from './catalogue';
 import { loadDiscDb } from './discdb';
 import type { DiscDbHit } from './discdb';
 import type { DiscEvidence } from './evidence';
-import { groupKey, matchDiscs } from './match';
-import type { DiscMatch } from './match';
+import { CIRCUIT_BREAKER, groupKey, matchDiscs } from './match';
+import type { DiscMatch, MatchResult } from './match';
 import type { OwnerStore } from './owner-store';
 import { parseName } from './parse-name';
 import { SourceUnavailable } from './sources';
@@ -38,6 +38,9 @@ const TV_FORMATS = new Set(['TV', 'TV_SHORT']);
 const ENTRY_KEY = /^(?:anilist|tmdb)-entry:(.+)$/;
 /** Posters of lookup results kept for `GET art/<id>`, at most (ruling T9e). */
 const MAX_LOOKUP_ART = 500;
+/** A run saves and publishes its progress after this many groups, or this long, whichever comes first (ruling F4). */
+const CHECKPOINT_GROUPS = 25;
+const CHECKPOINT_MS = 3 * 60_000;
 
 export interface TitleStatus { readonly running: boolean; readonly groupsDone: number; readonly groupsTotal: number; readonly filed: number; readonly unsorted: number; readonly music: number; readonly lastRunAt: number | null; readonly tmdb: boolean; readonly gate: 'owners' | 'everyone' }
 
@@ -64,11 +67,16 @@ interface Dated<T> {
 
 /** metadata.json. */
 interface MetadataFile {
-  readonly version: 1;
+  readonly version: 2;
   readonly matches: readonly DiscMatch[];
   readonly entries: Record<string, Dated<Entry>>;
-  /** The matcher's cache: search results and entries looked up by id, with when they were fetched. */
-  readonly cache: Record<string, Dated<Entry[]>>;
+  /**
+   * The matcher's cache: search results and entries looked up by id, with when they were fetched, as entry ids over
+   * `pool` (M1), so an entry several searches found is kept once.
+   */
+  readonly cache: Record<string, Dated<string[]>>;
+  /** Every entry the cache names, once; an entry looked up by id wins over a search's copy, which may lack seasons. */
+  readonly pool: Record<string, Entry>;
   /** Each present disc's evidence key and group. */
   readonly discs: Record<string, { readonly key: string; readonly group: string }>;
   /** Each disc id's first-seen time. */
@@ -140,6 +148,8 @@ export class TitleService {
   private cancelTimer: () => void = () => {};
   /** Lookup results' poster URLs by art id, least recently used first. */
   private readonly lookupArt = new Map<string, { small: string; large: string }>();
+  /** A hash of what metadata.json holds, besides `lastRunAt`, so a run that changed nothing doesn't write it (M1). */
+  private savedHash: string | null = null;
 
   constructor(private readonly opts: TitleServiceOptions) {
     this.now = opts.now ?? Date.now;
@@ -171,7 +181,7 @@ export class TitleService {
 
   /** The owner's setting, else the config's. */
   gate(): 'owners' | 'everyone' {
-    return this.opts.owner.snapshot().gate ?? this.opts.titleLibrary ?? 'owners';
+    return this.opts.owner.gate() ?? this.opts.titleLibrary ?? 'owners';
   }
 
   /**
@@ -284,7 +294,7 @@ export class TitleService {
   }
 
   private async run(): Promise<void> {
-    const { owner, anilist, tmdb } = this.opts;
+    const { owner } = this.opts;
     const now = this.now();
     const evidence = this.opts.library.evidence();
     owner.reattach(evidence.map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
@@ -292,17 +302,17 @@ export class TitleService {
     const retryDue = this.due(this.lastRetryAt, RETRY_UNSORTED_MS);
 
     // groups to match: those with a new or changed disc, a disc that left, a source failure, or Unsorted on retry day
-    const discs = new Map(evidence.map((e) => [e.discId, { key: evidenceKey(e), group: groupKey(e) }]));
+    const keys = new Map(evidence.map((e) => [e.discId, { key: evidenceKey(e), group: groupKey(e) }]));
     const dirty = new Set<string>();
-    for (const [id, d] of discs) {
+    for (const [id, d] of keys) {
       const before = this.discs.get(id);
       const m = this.matches.get(id);
       if (!before || before.key !== d.key || !m || (m.status === 'unsorted' && (m.reason === 'source-unreachable' || retryDue))) dirty.add(d.group);
     }
-    for (const [id, d] of this.discs) if (!discs.has(id)) dirty.add(d.group);
+    for (const [id, d] of this.discs) if (!keys.has(id)) dirty.add(d.group);
     // a box family is matched whole, so rule 4 numbers its discs across all its boxes (T8b)
     const families = new Set([...dirty].map(boxFamily).filter((f): f is string => f !== null));
-    if (families.size > 0) for (const d of discs.values()) if (families.has(boxFamily(d.group) ?? '\0')) dirty.add(d.group);
+    if (families.size > 0) for (const d of keys.values()) if (families.has(boxFamily(d.group) ?? '\0')) dirty.add(d.group);
     const toMatch = evidence.filter((e) => dirty.has(groupKey(e)));
 
     // the matcher's cache; on retry day, search results and entry lookups that found nothing, older than a week, are
@@ -314,21 +324,114 @@ export class TitleService {
     }
     this.groupsDone = 0;
     this.groupsTotal = new Set(toMatch.map(groupKey)).size;
-    const result = toMatch.length === 0
-      ? { matches: [], entries: new Map<string, Entry>() }
-      : await matchDiscs(toMatch, { anilist, tmdb, discdb: this.opts.discdb, cache, onGroupDone: () => { this.groupsDone++; } });
 
-    let failed = false;
+    // every CHECKPOINT_GROUPS groups or CHECKPOINT_MS, whichever comes first, the progress is saved and published, so a
+    // restart resumes from the cache and the library fills in as the first run goes (ruling F4)
+    let sinceCheckpoint = 0;
+    let checkpointAt = this.now();
+    const onGroupDone = async (progress: () => { matches: DiscMatch[]; entries: Map<string, Entry> }): Promise<void> => {
+      this.groupsDone++;
+      sinceCheckpoint++;
+      if (sinceCheckpoint < CHECKPOINT_GROUPS && this.now() - checkpointAt < CHECKPOINT_MS) return;
+      sinceCheckpoint = 0;
+      checkpointAt = this.now();
+      const p = progress();
+      await this.checkpoint(p.matches, p.entries, keys, cache, now);
+    };
+    const result: MatchResult = toMatch.length === 0
+      ? { matches: [], entries: new Map<string, Entry>(), aborted: false }
+      : await matchDiscs(toMatch, { anilist: this.opts.anilist, tmdb: this.opts.tmdb, discdb: this.opts.discdb, cache, onGroupDone });
+
+    if (result.aborted) {
+      // the sources are down (M3): what was matched before the failures is kept, the rest waits for the next run
+      console.error(`title matching stopped: AniList or TMDB was unreachable for ${CIRCUIT_BREAKER} folders in a row; the rest are matched on the next run`);
+      const reached = result.matches.filter((m) => !(m.status === 'unsorted' && m.reason === 'source-unreachable'));
+      await this.checkpoint(reached, result.entries, keys, cache, now);
+      return;
+    }
+
+    const discs = new Map(keys);
     const matches = new Map<string, DiscMatch>();
     for (const e of evidence) {
       const m = this.matches.get(e.discId);
       if (m) matches.set(e.discId, m);
     }
-    for (const m of result.matches) {
+    let failed = this.merge(result.matches, matches, discs, null);
+
+    const entries = new Map(this.entries);
+    this.addEntries(entries, result.entries, now);
+    const loaded = await this.loadEntries(entries, matches, cache, now);
+    failed ||= loaded.failed;
+    // unreferenced entries go, unless a lookup failed and the walk is incomplete (C5)
+    if (!failed) for (const id of entries.keys()) if (!loaded.keep.has(id)) entries.delete(id);
+
+    // monthly: entries older than 30 days are fetched again
+    let refreshed = true;
+    if (this.due(this.lastRefreshAt, REFRESH_MS)) {
+      try {
+        for (const [id, d] of entries) {
+          if (now - d.at < REFRESH_MS) continue;
+          const src = this.sourceFor(id);
+          const en = src ? await src.entry(id) : null;
+          if (!en) continue;
+          entries.set(id, { at: now, value: en });
+          cache.set(`${sourceOf(id)}-entry:${id}`, [en]);
+        }
+      } catch (err) {
+        if (!(err instanceof SourceUnavailable)) throw err;
+        refreshed = false;
+      }
+    }
+
+    const nextCache = this.datedCache(cache, now);
+    for (const [k, d] of nextCache) {
+      // search results and lookups that found nothing go after 30 days; other entry lookups stay while their entry does
+      const id = ENTRY_KEY.exec(k)?.[1];
+      if (id === undefined || d.value.length === 0 ? now - d.at >= SEARCH_CACHE_MS : !failed && !entries.has(id)) nextCache.delete(k);
+    }
+
+    this.matches = matches;
+    this.entries = entries;
+    this.cache = nextCache;
+    this.discs = discs;
+    this.lastRunAt = now;
+    if (this.lastRetryAt === null || retryDue) this.lastRetryAt = now;
+    if (this.lastRefreshAt === null || (refreshed && this.due(this.lastRefreshAt, REFRESH_MS))) this.lastRefreshAt = now;
+    this.rebuild();
+    this.save();
+  }
+
+  /**
+   * Saves a run's progress and publishes it (ruling F4): the matches so far over the previous ones, their discs'
+   * evidence keys (discs not reached yet keep their old keys, so a restart matches them again), the entries they name
+   * with their chains, and the cache, so a restart repeats no lookup. Nothing is pruned until the run ends.
+   */
+  private async checkpoint(reached: readonly DiscMatch[], found: ReadonlyMap<string, Entry>, keys: ReadonlyMap<string, { key: string; group: string }>, cache: Map<string, Entry[]>, now: number): Promise<void> {
+    const matches = new Map(this.matches);
+    const discs = new Map(this.discs);
+    this.merge(reached, matches, discs, keys);
+    const entries = new Map(this.entries);
+    this.addEntries(entries, found, now);
+    await this.loadEntries(entries, matches, cache, now);
+    this.matches = matches;
+    this.discs = discs;
+    this.entries = entries;
+    this.cache = this.datedCache(cache, now);
+    this.rebuild();
+    this.save();
+  }
+
+  /**
+   * Puts a run's matches into `matches` and their evidence keys into `discs` (from `keys`; null when `discs` already
+   * holds the new keys). A disc filed before stays filed when a source was unreachable (Review Focus 2), and keeps its
+   * old key, so it is matched again (T8d). Answers whether a source was unreachable.
+   */
+  private merge(results: readonly DiscMatch[], matches: Map<string, DiscMatch>, discs: Map<string, { key: string; group: string }>, keys: ReadonlyMap<string, { key: string; group: string }> | null): boolean {
+    let failed = false;
+    for (const m of results) {
       const before = this.matches.get(m.discId);
       if (m.status === 'unsorted' && m.reason === 'source-unreachable') {
         failed = true;
-        // a disc filed before stays filed (Review Focus 2); a changed one keeps its old key, so it is matched again (T8d)
         if (before && before.status !== 'unsorted') {
           const old = this.discs.get(m.discId);
           if (old) discs.set(m.discId, old);
@@ -336,12 +439,28 @@ export class TitleService {
         }
       }
       matches.set(m.discId, m);
+      const key = keys?.get(m.discId);
+      if (key) discs.set(m.discId, key);
     }
+    return failed;
+  }
 
-    const entries = new Map(this.entries);
-    for (const [id, en] of result.entries) if (!entries.has(id)) entries.set(id, { at: now, value: en });
+  /** Adds the entries a run found; a TMDB series found by search, without seasons, gives way to one with them (I1). */
+  private addEntries(entries: Map<string, Dated<Entry>>, found: ReadonlyMap<string, Entry>, now: number): void {
+    for (const [id, en] of found) {
+      const known = entries.get(id);
+      if (!known || (known.value.seasons.length === 0 && en.seasons.length > 0)) entries.set(id, { at: now, value: en });
+    }
+  }
+
+  /**
+   * Loads the entries owner choices name (C3), every entry on the TV PREQUEL/SEQUEL chain of a filed AniList entry so
+   * its series has its root (C2), and each TMDB series' full entry with its seasons where only a search's copy is known
+   * (I1). Answers the ids to keep, and whether a lookup failed.
+   */
+  private async loadEntries(entries: Map<string, Dated<Entry>>, matches: ReadonlyMap<string, DiscMatch>, cache: Map<string, Entry[]>, now: number): Promise<{ keep: Set<string>; failed: boolean }> {
     const byId = async (id: string): Promise<Entry | null> => {
-      const src = sourceOf(id) === 'anilist' ? anilist : sourceOf(id) === 'tmdb' ? tmdb : null;
+      const src = this.sourceFor(id);
       if (!src) return null;
       const key = `${sourceOf(id)}-entry:${id}`;
       let hit = cache.get(key);
@@ -359,12 +478,10 @@ export class TitleService {
       if (en) entries.set(id, { at: now, value: en });
       return en;
     };
-
     const keep = new Set<string>();
     try {
-      // entries named by owner choices (C3)
       const anilistStarts: string[] = [];
-      for (const c of owner.snapshot().choices.values()) {
+      for (const c of this.opts.owner.snapshot().choices.values()) {
         if (c.kind !== 'title' && c.kind !== 'extras') continue;
         if (sourceOf(c.titleId) === null) continue;
         keep.add(c.titleId);
@@ -375,7 +492,6 @@ export class TitleService {
         if (m.status === 'unsorted') for (const id of m.suggestions) keep.add(id);
         if (m.status === 'filed' && sourceOf(m.entryId) === 'anilist') anilistStarts.push(m.entryId);
       }
-      // every entry on the TV PREQUEL/SEQUEL chain of a filed AniList entry, so its series has its root (C2)
       const walked = new Set<string>();
       for (const start of anilistStarts) {
         const queue = [start];
@@ -393,52 +509,32 @@ export class TitleService {
           }
         }
       }
+      for (const id of keep) {
+        const known = entries.get(id)?.value;
+        if (!known || known.source !== 'tmdb' || known.kind !== 'series' || known.seasons.length > 0) continue;
+        const full = await byId(id);
+        if (full && full.seasons.length > 0) entries.set(id, { at: now, value: full });
+      }
     } catch (err) {
       if (!(err instanceof SourceUnavailable)) throw err;
-      failed = true;
+      return { keep, failed: true };
     }
-    // unreferenced entries go, unless a lookup failed and the walk is incomplete (C5)
-    if (!failed) for (const id of entries.keys()) if (!keep.has(id)) entries.delete(id);
+    return { keep, failed: false };
+  }
 
-    // monthly: entries older than 30 days are fetched again
-    let refreshed = true;
-    if (this.due(this.lastRefreshAt, REFRESH_MS)) {
-      try {
-        for (const [id, d] of entries) {
-          if (now - d.at < REFRESH_MS) continue;
-          const src = sourceOf(id) === 'anilist' ? anilist : sourceOf(id) === 'tmdb' ? tmdb : null;
-          const en = src ? await src.entry(id) : null;
-          if (!en) continue;
-          entries.set(id, { at: now, value: en });
-          cache.set(`${sourceOf(id)}-entry:${id}`, [en]);
-        }
-      } catch (err) {
-        if (!(err instanceof SourceUnavailable)) throw err;
-        refreshed = false;
-      }
-    }
+  private sourceFor(id: string): MetadataSource | null {
+    return sourceOf(id) === 'anilist' ? this.opts.anilist : sourceOf(id) === 'tmdb' ? this.opts.tmdb : null;
+  }
 
-    const nextCache = new Map<string, Dated<Entry[]>>();
+  /** The run's cache with fetch times: an unchanged result keeps its time; keys the run didn't see are kept. */
+  private datedCache(cache: ReadonlyMap<string, Entry[]>, now: number): Map<string, Dated<Entry[]>> {
+    const next = new Map<string, Dated<Entry[]>>();
     for (const [k, v] of cache) {
       const before = this.cache.get(k);
-      nextCache.set(k, before && before.value === v ? before : { at: now, value: v });
+      next.set(k, before && before.value === v ? before : { at: now, value: v });
     }
-    for (const [k, d] of this.cache) if (!nextCache.has(k)) nextCache.set(k, d);
-    for (const [k, d] of nextCache) {
-      // search results and lookups that found nothing go after 30 days; other entry lookups stay while their entry does
-      const id = ENTRY_KEY.exec(k)?.[1];
-      if (id === undefined || d.value.length === 0 ? now - d.at >= SEARCH_CACHE_MS : !failed && !entries.has(id)) nextCache.delete(k);
-    }
-
-    this.matches = matches;
-    this.entries = entries;
-    this.cache = nextCache;
-    this.discs = discs;
-    this.lastRunAt = now;
-    if (this.lastRetryAt === null || retryDue) this.lastRetryAt = now;
-    if (this.lastRefreshAt === null || (refreshed && this.due(this.lastRefreshAt, REFRESH_MS))) this.lastRefreshAt = now;
-    this.rebuild();
-    this.save();
+    for (const [k, d] of this.cache) if (!next.has(k)) next.set(k, d);
+    return next;
   }
 
   /** Reads metadata.json; a malformed one is set aside as `metadata.json.corrupt-<time>` and matching starts afresh (T8e). */
@@ -462,27 +558,49 @@ export class TitleService {
     }
     this.matches = new Map(data.matches.map((m) => [m.discId, m]));
     this.entries = new Map(Object.entries(data.entries));
-    this.cache = new Map(Object.entries(data.cache));
+    this.cache = new Map(Object.entries(data.cache).map(([k, d]) => [k, { at: d.at, value: d.value.map((id) => data.pool[id]!) }]));
     this.discs = new Map(Object.entries(data.discs));
     for (const [id, at] of Object.entries(data.firstSeen)) this.firstSeen.set(id, at);
     this.lastRunAt = data.lastRunAt;
     this.lastRetryAt = data.lastRetryAt;
     this.lastRefreshAt = data.lastRefreshAt;
+    this.savedHash = this.contentHash(this.serialize());
   }
 
+  /** Writes metadata.json, unless nothing but `lastRunAt` changed since it was last written or read (M1). */
   private save(): void {
-    const data: MetadataFile = {
-      version: 1,
+    const data = this.serialize();
+    const hash = this.contentHash(data);
+    if (hash === this.savedHash) return;
+    replaceAtomically(this.file, JSON.stringify(data));
+    this.savedHash = hash;
+  }
+
+  private contentHash(data: MetadataFile): string {
+    return createHash('sha256').update(JSON.stringify({ ...data, lastRunAt: null })).digest('hex');
+  }
+
+  private serialize(): MetadataFile {
+    const pool: Record<string, Entry> = {};
+    const cache: Record<string, Dated<string[]>> = {};
+    for (const [k, d] of this.cache) {
+      cache[k] = { at: d.at, value: d.value.map((en) => en.id) };
+      for (const en of d.value) if (!(en.id in pool)) pool[en.id] = en;
+    }
+    // an entry looked up by id is the full one
+    for (const [k, d] of this.cache) if (ENTRY_KEY.test(k)) for (const en of d.value) pool[en.id] = en;
+    return {
+      version: 2,
       matches: [...this.matches.values()],
       entries: Object.fromEntries(this.entries),
-      cache: Object.fromEntries(this.cache),
+      cache,
+      pool,
       discs: Object.fromEntries(this.discs),
       firstSeen: Object.fromEntries(this.firstSeen),
       lastRunAt: this.lastRunAt,
       lastRetryAt: this.lastRetryAt,
       lastRefreshAt: this.lastRefreshAt,
     };
-    replaceAtomically(this.file, JSON.stringify(data));
   }
 }
 
@@ -496,16 +614,18 @@ const isMatch = (v: unknown): boolean => {
   if (!isObject(v) || !isString(v.discId)) return false;
   if (v.status === 'filed') return isString(v.entryId) && Array.isArray(v.via);
   if (v.status === 'music') return isString(v.group) && isString(v.name);
-  return v.status === 'unsorted' && isString(v.reason) && Array.isArray(v.suggestions) && v.suggestions.every(isString);
+  return v.status === 'unsorted' && isString(v.reason) && Array.isArray(v.suggestions) && v.suggestions.every(isString) &&
+    (v.seasons === undefined || values(v.seasons, (n) => Number.isSafeInteger(n)));
 };
 const values = (v: unknown, each: (x: unknown) => boolean): boolean => isObject(v) && Object.values(v).every(each);
 
 /** Whether a parsed metadata.json has the shape `MetadataFile` describes, down to its elements. */
 function validMetadata(data: unknown): data is MetadataFile {
-  return isObject(data) && data.version === 1 &&
+  return isObject(data) && data.version === 2 &&
     Array.isArray(data.matches) && data.matches.every(isMatch) &&
     values(data.entries, (d) => isDated(d, isEntry)) &&
-    values(data.cache, (d) => isDated(d, (x) => Array.isArray(x) && x.every(isEntry))) &&
+    values(data.pool, isEntry) &&
+    values(data.cache, (d) => isDated(d, (x) => Array.isArray(x) && x.every((id) => isString(id) && Object.hasOwn(data.pool as object, id)))) &&
     values(data.discs, (d) => isObject(d) && isString(d.key) && isString(d.group)) &&
     values(data.firstSeen, isTime) &&
     [data.lastRunAt, data.lastRetryAt, data.lastRefreshAt].every((t) => t === null || isTime(t));

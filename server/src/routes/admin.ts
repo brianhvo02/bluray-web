@@ -276,6 +276,8 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
   const choice = isObject(body) && hasKeys(body, ['choice'], ['applyToGroup']) ? parseChoice(body.choice) : null;
   const applyToGroup = isObject(body) ? (body.applyToGroup ?? false) : false;
   if (choice === null || typeof applyToGroup !== 'boolean') throw new HttpError(400, 'bad choice');
+  // the other discs are numbered from this one's number (ruling T11h, M12)
+  if (applyToGroup && choice.kind === 'title' && choice.disc === null) throw new HttpError(400, 'disc-required');
   const evidence = library.evidence();
   const disc = evidence.find((e) => e.discId === discId);
   if (!disc) return json(404, { error: 'unknown disc' });
@@ -283,17 +285,20 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
     if (choice.titleId.startsWith('own:') && !owner.snapshot().ownTitles.some((t) => t.id === choice.titleId)) throw new HttpError(400, 'unknown title');
   }
   owner.setChoice(discId, disc.fingerprint, choice);
-  const skipped: { discId: string; reason: 'direct' | 'copy' }[] = [];
+  const skipped: { discId: string; reason: 'direct' | 'copy' | 'no-number' }[] = [];
   if (applyToGroup) {
-    // the group's discs in parsed order (number, then folder); the others are numbered from this one's place. A disc
-    // the owner chose for itself keeps its choice, while one filed with a group takes the new one (ruling T9f); a copy
-    // keeps following its source while there is one (ruling T9i)
+    // the group's discs in parsed order (number, then folder). A disc the owner chose for itself keeps its choice,
+    // while one filed with a group takes the new one (ruling T9f); a copy keeps following its source while there is
+    // one (ruling T9i). Under a title, the others are numbered by their own numbers, keeping their distance from this
+    // one's (I3): a missing volume leaves a gap. Only when no disc in the group has a number are they numbered by
+    // place; when some have one, those without are left as they are ('no-number').
     const group = groupKey(disc);
     const order = evidence
       .filter((e) => groupKey(e) === group)
       .sort((a, b) => (parsedNumber(a) ?? Infinity) - (parsedNumber(b) ?? Infinity) || naturalOrder(a.path, b.path));
     const at = order.indexOf(disc);
-    const base = choice.kind === 'title' ? (choice.disc ?? at + 1) : null;
+    const own = parsedNumber(disc);
+    const anyNumber = order.some((e) => parsedNumber(e) !== null);
     for (const [i, e] of order.entries()) {
       if (e === disc) continue;
       const origin = owner.choiceOrigin(e.discId);
@@ -302,9 +307,14 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
         continue;
       }
       let c: OwnerChoice = choice;
-      if (choice.kind === 'title' && base !== null) {
-        const n = base + i - at;
-        c = { ...choice, disc: n >= 1 ? n : null };
+      if (choice.kind === 'title' && choice.disc !== null) {
+        const theirs = parsedNumber(e);
+        const n = own !== null && theirs !== null ? theirs - own + choice.disc : anyNumber ? null : choice.disc + i - at;
+        if (n === null || n < 1) {
+          skipped.push({ discId: e.discId, reason: 'no-number' });
+          continue;
+        }
+        c = { ...choice, disc: n };
       }
       owner.setChoice(e.discId, e.fingerprint, c, 'group');
     }
@@ -336,9 +346,24 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       const body = await readJson(req);
       const value = isObject(body) && hasKeys(body, ['name']) ? (body.name === null ? null : name(body.name)) : undefined;
       if (value === undefined) throw new HttpError(400, 'bad name');
-      const known = library.evidence().some((e) => e.discId === id) || service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own);
+      const music = service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own);
+      const known = music || library.evidence().some((e) => e.discId === id);
       if (!known) return json(404, { error: 'unknown id' });
       owner.setDisplayName(id!, value);
+      // a music title's id comes from its folder; the name is also kept in each disc's music choice, which follows the
+      // disc when the folder moves (M8). A copy keeps following its source.
+      if (music) {
+        const byId = new Map(library.evidence().map((e) => [e.discId, e]));
+        const detail = service.catalogue().detail(id!);
+        const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
+        for (const discId of discIds) {
+          const origin = owner.choiceOrigin(discId);
+          if (origin?.kind === 'copy' && origin.source !== null) continue;
+          const had = owner.snapshot().choices.get(discId);
+          if (value === null && had?.kind !== 'music') continue;
+          owner.setChoice(discId, byId.get(discId)?.fingerprint ?? null, { kind: 'music', name: value }, origin?.kind === 'group' ? 'group' : 'direct');
+        }
+      }
       rebuildAfter(titles, library);
       return { status: 204 };
     }

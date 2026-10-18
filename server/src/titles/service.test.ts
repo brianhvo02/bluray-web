@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { normalizeTitle } from '../../../src/engine/disc/title-text';
+import { normalizeStrict, normalizeTitle } from '../../../src/engine/disc/title-text';
 import { ArtCache } from './art';
 import type { DiscEvidence } from './evidence';
 import { OwnerStore } from './owner-store';
@@ -34,7 +34,13 @@ function entry(id: string, names: Partial<EntryNames>, more: Partial<Entry> = {}
   };
 }
 
-/** A source answering fixed entries per normalised query and by id, counting calls; `down` makes every call throw. */
+/** TMDB's search answers carry no seasons; only the entry by id has them. */
+const searchShape = (en: Entry): Entry => (en.source === 'tmdb' && en.kind === 'series' ? { ...en, seasons: [] } : en);
+
+/**
+ * A source answering fixed entries per normalised query (TMDB series as search shows them) and by id, counting calls;
+ * `down` makes every call throw.
+ */
 function fake(results: Record<string, Entry[]>, more: readonly Entry[] = []): MetadataSource & { calls: string[]; down: boolean; failIds: Set<string>; byId: Map<string, Entry> } {
   const byKey = new Map(Object.entries(results).map(([q, es]) => [normalizeTitle(q), es]));
   const byId = new Map([...Object.values(results).flat(), ...more].map((en) => [en.id, en]));
@@ -46,7 +52,7 @@ function fake(results: Record<string, Entry[]>, more: readonly Entry[] = []): Me
     async search(query: string): Promise<Entry[]> {
       src.calls.push(`search:${normalizeTitle(query)}`);
       if (src.down) throw new SourceUnavailable('down');
-      return byKey.get(normalizeTitle(query)) ?? [];
+      return (byKey.get(normalizeTitle(query)) ?? []).map(searchShape);
     },
     async entry(id: string): Promise<Entry | null> {
       src.calls.push(`entry:${id}`);
@@ -106,7 +112,8 @@ function service(opts: { evidence: () => readonly DiscEvidence[]; anilist: Metad
   });
 }
 
-const metadata = (): { cache: Record<string, unknown>; entries: Record<string, unknown> } => JSON.parse(readFileSync(join(dir, 'metadata.json'), 'utf8'));
+interface File { cache: Record<string, { at: number; value: unknown[] }>; pool: Record<string, Entry>; entries: Record<string, { at: number; value: Entry }>; lastRunAt: number | null }
+const metadata = (): File => JSON.parse(readFileSync(join(dir, 'metadata.json'), 'utf8')) as File;
 const discsOf = (s: TitleService, id: string): number | undefined => s.catalogue().titles.find((t) => t.id === id)?.discs;
 const reasonOf = (s: TitleService, d: DiscEvidence): string | undefined => s.catalogue().unsorted.find((u) => u.discId === d.discId)?.reason;
 
@@ -336,7 +343,7 @@ describe('TitleService', () => {
     const anilist = fake({ 火斬りの剣: [EMBER] });
     const s = service({ evidence: () => [A], anilist });
     await s.runNow();
-    expect(Object.keys(metadata().cache)).toContain(`anilist:${normalizeTitle('火斬りの剣')}`);
+    expect(Object.keys(metadata().cache)).toContain(`anilist:${normalizeStrict('火斬りの剣')}`);
     anilist.byId.set('anilist:100', { ...EMBER, names: { ...EMBER.names, english: 'Ember Blade (renamed)' } });
     anilist.calls.length = 0;
     clock += 31 * DAY;
@@ -437,7 +444,8 @@ describe('TitleService', () => {
   it.each([
     ['not JSON', '{'],
     ['the wrong shape', JSON.stringify({ version: 1, matches: 'x' })],
-    ['a bad entry', JSON.stringify({ version: 1, matches: [], entries: { a: { at: 1 } }, cache: {}, discs: {}, firstSeen: {}, lastRunAt: null, lastRetryAt: null, lastRefreshAt: null })],
+    ['a bad entry', JSON.stringify({ version: 2, matches: [], entries: { a: { at: 1 } }, cache: {}, pool: {}, discs: {}, firstSeen: {}, lastRunAt: null, lastRetryAt: null, lastRefreshAt: null })],
+    ['a cache naming an entry the pool lacks', JSON.stringify({ version: 2, matches: [], entries: {}, cache: { 'anilist:x': { at: 1, value: ['anilist:1'] } }, pool: {}, discs: {}, firstSeen: {}, lastRunAt: null, lastRetryAt: null, lastRefreshAt: null })],
   ])('sets a metadata.json that is %s aside and starts afresh (T8e)', async (_, text) => {
     writeFileSync(join(dir, 'metadata.json'), text);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -461,6 +469,117 @@ describe('TitleService', () => {
     expect(s.gate()).toBe('everyone');
     owner.setGate('owners');
     expect(s.gate()).toBe('owners');
+  });
+});
+
+describe('TitleService final review', () => {
+  /** Made-up titles, one group each. */
+  const reels = (n: number): { entries: Entry[]; discs: DiscEvidence[]; names: string[] } => {
+    const names = Array.from({ length: n }, (_, i) => `Reel ${String.fromCharCode(65 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`);
+    return {
+      names,
+      entries: names.map((name, i) => entry(`anilist:${5000 + i}`, { english: name }, { episodes: 12 })),
+      discs: names.map((name) => ev(`drv1/Anime/${name}/[BDMV] ${name} Vol.1`, { eng: name })),
+    };
+  };
+  const results = (es: Entry[]): Record<string, Entry[]> => Object.fromEntries(es.map((en) => [en.names.english!, [en]]));
+
+  it('I1: keeps the full TMDB entry, with its seasons, for a suggestion the matcher did not fetch', async () => {
+    const tmdb = fake({
+      Brasswick: [entry('tmdb-tv:7', { english: 'Brasswick' }, { seasons: [1, 2, 3].map((number) => ({ number, episodes: 12, runtimeMin: 24 })), year: 2019 })],
+      'Lantern Coast': [entry('tmdb-tv:8', { english: 'Lantern Coast' }, { seasons: [{ number: 1, episodes: 10, runtimeMin: 45 }], year: 2005 })],
+    });
+    const disc = ev('drv1/TV/Brasswick (2019) S02/DISC2', { eng: 'Lantern Coast' });
+    const s = service({ evidence: () => [disc], anilist: fake({}), tmdb });
+    await s.runNow();
+    expect(reasonOf(s, disc)).toBe('sources-disagree');
+    expect(s.catalogue().unsorted[0]!.suggestions.map((t) => t.id)).toContain('tmdb-tv:8');
+    expect(metadata().entries['tmdb-tv:8']!.value.seasons).toHaveLength(1);
+    expect(s.catalogue().unsorted[0]!.suggestions.find((t) => t.id === 'tmdb-tv:8')!.seasons).toBe(1);
+  });
+
+  it('I5: saves progress every 25 groups, publishes it, and a restarted run resumes without repeating lookups', async () => {
+    const { entries, discs, names } = reels(30);
+    const anilist = fake(results(entries));
+    const crashAt = normalizeTitle(names[27]!);
+    const crashing: MetadataSource = {
+      search: async (q, o) => {
+        if (normalizeTitle(q) === crashAt) throw new Error('process killed');
+        return anilist.search(q, o);
+      },
+      entry: (id) => anilist.entry(id),
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const s = service({ evidence: () => discs, anilist: crashing });
+    await s.runNow();
+    expect(error).toHaveBeenCalledWith('title matching failed', expect.any(Error));
+    error.mockRestore();
+    expect(s.catalogue().titles).toHaveLength(25);
+
+    const restarted = service({ evidence: () => discs, anilist });
+    expect(restarted.catalogue().titles).toHaveLength(25);
+    anilist.calls.length = 0;
+    await restarted.runNow();
+    expect(restarted.catalogue().titles).toHaveLength(30);
+    for (const name of names.slice(0, 25)) expect(anilist.calls).not.toContain(`search:${normalizeTitle(name)}`);
+    expect(anilist.calls).toContain(`search:${normalizeTitle(names[29]!)}`);
+  });
+
+  it('I5: saves progress every 3 minutes when groups are slow', async () => {
+    const { entries, discs, names } = reels(4);
+    const anilist = fake(results(entries));
+    const crashAt = normalizeTitle(names[2]!);
+    const slow: MetadataSource = {
+      search: async (q, o) => {
+        clock += 200_000;
+        if (normalizeTitle(q) === crashAt) throw new Error('process killed');
+        return anilist.search(q, o);
+      },
+      entry: (id) => anilist.entry(id),
+    };
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await service({ evidence: () => discs, anilist: slow }).runNow();
+    error.mockRestore();
+    expect(service({ evidence: () => discs, anilist }).catalogue().titles.map((t) => t.names.english)).toEqual(names.slice(0, 2));
+  });
+
+  it('M1: keeps search results as entry ids over one pool, and leaves metadata.json alone when a run changes nothing', async () => {
+    const anilist = fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER] });
+    const s = service({ evidence: () => [A, A2], anilist });
+    await s.runNow();
+    const file = metadata();
+    expect(Object.keys(file.cache).length).toBeGreaterThan(1);
+    for (const d of Object.values(file.cache)) for (const x of d.value) expect(typeof x).toBe('string');
+    expect(Object.keys(file.pool)).toEqual(['anilist:100']);
+    const firstRun = file.lastRunAt;
+    clock += DAY;
+    await s.runNow();
+    expect(metadata().lastRunAt).toBe(firstRun);
+    // and a restart reads the ids back
+    expect(service({ evidence: () => [A, A2], anilist }).catalogue().titles.map((t) => t.id)).toEqual(['anilist:100']);
+  });
+
+  it('M3: stops after five groups fail in a row, keeps the catalogue as it was, logs once, and tries again next run', async () => {
+    const { entries, discs } = reels(7);
+    const anilist = fake({ ...results(entries), 火斬りの剣: [EMBER] });
+    let evidence: DiscEvidence[] = [A];
+    const s = service({ evidence: () => evidence, anilist });
+    await s.runNow();
+    evidence = [A, ...discs];
+    anilist.down = true;
+    anilist.calls.length = 0;
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clock += 60_000;
+    await s.runNow();
+    expect(log).toHaveBeenCalledTimes(1);
+    log.mockRestore();
+    expect(new Set(anilist.calls).size).toBe(5);
+    expect(s.catalogue().titles.map((t) => t.id)).toEqual(['anilist:100']);
+    expect(s.catalogue().unsorted).toEqual([]);
+    anilist.down = false;
+    clock += 60_000;
+    await s.runNow();
+    expect(s.catalogue().titles).toHaveLength(8);
   });
 });
 

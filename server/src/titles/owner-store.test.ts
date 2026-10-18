@@ -202,4 +202,21 @@ describe('OwnerStore', () => {
       expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);
     }
   });
+
+  it('M10: reads the gate again only when owner.json changes', () => {
+    const s = new OwnerStore(dir);
+    expect(s.gate()).toBeNull();
+    s.setGate('everyone');
+    expect(s.gate()).toBe('everyone');
+    // whole seconds, which file times keep exactly
+    const file = join(dir, 'owner.json');
+    utimesSync(file, 1_700_000_000, 1_700_000_000);
+    expect(s.gate()).toBe('everyone');
+    // the same size and times, but unreadable: the cached gate answers without reading the file
+    writeFileSync(file, '#'.repeat(statSync(file).size));
+    utimesSync(file, 1_700_000_000, 1_700_000_000);
+    expect(s.gate()).toBe('everyone');
+    utimesSync(file, 1_700_000_000, 1_700_000_005);
+    expect(() => s.gate()).toThrow(/corrupt/);
+  });
 });
