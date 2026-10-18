@@ -36,8 +36,8 @@ MIT License:
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
 
-TMDB (server/src/titles/tmdb.ts): This product uses the TMDB API but is not
-endorsed or certified by TMDB.
+TMDB (server/src/titles/tmdb.ts):
+This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 AniList (server/src/titles/anilist.ts): the AniList API is free for
 non-commercial use under its terms (https://docs.anilist.co/guide/terms-of-use),

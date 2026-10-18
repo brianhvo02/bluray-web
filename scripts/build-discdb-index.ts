@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { indexDisc, mergeIndex } from '../server/src/titles/discdb';
+import { discDbKind, indexDisc, mergeIndex } from '../server/src/titles/discdb';
 import type { DiscDbHit, DiscDbIndex } from '../server/src/titles/discdb';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -37,8 +37,10 @@ function cloneOrUpdate(): void {
   }
 }
 
+/** A regular file's JSON (no symlinks), or null. */
 const readJson = (file: string): unknown => {
   try {
+    if (!lstatSync(file).isFile()) return null;
     return JSON.parse(readFileSync(file, 'utf8').replace(/^﻿/, ''));
   } catch {
     return null;
@@ -62,6 +64,7 @@ function main(): void {
 
   const records: { hash: string; hit: DiscDbHit }[] = [];
   let discs = 0;
+  let otherType = 0;
   // data/{movie,series}/<Title (Year)>/metadata.json and <Title (Year)>/<release>/discNN.json; data/sets holds
   // box-set listings without disc records.
   for (const kind of ['movie', 'series']) {
@@ -73,6 +76,7 @@ function main(): void {
         for (const file of list(join(kindDir, title, release), 'file')) {
           if (!/^disc\d+\.json$/.test(file)) continue;
           discs++;
+          if (discDbKind(metadata) === null) otherType++;
           const record = indexDisc(readJson(join(kindDir, title, release, file)), metadata);
           if (record) records.push(record);
         }
@@ -86,7 +90,10 @@ function main(): void {
   const body = hashes.map((h) => `${JSON.stringify(h)}:${JSON.stringify(index[h])}`).join(',\n');
   mkdirSync(dirname(OUT), { recursive: true });
   writeFileSync(OUT, `{"source":${JSON.stringify(source)},"discs":{\n${body}\n}}\n`);
-  console.log(`${discs} disc records, ${records.length} indexed, ${hashes.length} hashes, ${conflicts} conflicting hashes left out; ${commit}`);
+  console.log(
+    `${discs} disc records, ${otherType} left out for a Type other than Series or Movie, ${records.length} indexed, ` +
+      `${hashes.length} hashes, ${conflicts} conflicting hashes left out; ${commit}`,
+  );
 }
 
 main();

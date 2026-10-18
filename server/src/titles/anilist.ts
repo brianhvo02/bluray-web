@@ -86,14 +86,21 @@ export function createAniList(fetch: typeof globalThis.fetch, pacer: Pacer): Met
       } catch {
         throw new SourceUnavailable('anilist: network error');
       }
-      if (res.status === 429) throw new RateLimited(retryAfterMs(res.headers.get('Retry-After')));
-      if (res.status === 404) return null;
-      if (!res.ok) throw new SourceUnavailable(`anilist: HTTP ${res.status}`);
+      if (!res.ok) {
+        await res.body?.cancel();
+        if (res.status === 429) throw new RateLimited(retryAfterMs(res.headers.get('Retry-After')));
+        if (res.status === 404) return null;
+        throw new SourceUnavailable(`anilist: HTTP ${res.status}`);
+      }
+      let body: { data?: unknown; errors?: unknown };
       try {
-        return ((await res.json()) as { data?: unknown }).data ?? null;
+        body = (await res.json()) as typeof body;
       } catch {
         throw new SourceUnavailable('anilist: unreadable response');
       }
+      // A GraphQL error with no data is a failed query, not an empty answer.
+      if ((body.data === null || body.data === undefined) && body.errors !== undefined) throw new SourceUnavailable('anilist: query failed');
+      return body.data ?? null;
     });
 
   return {
@@ -101,7 +108,7 @@ export function createAniList(fetch: typeof globalThis.fetch, pacer: Pacer): Met
       const variables: Record<string, unknown> = { search, type: 'ANIME' };
       if (opts.kind) variables.format_in = opts.kind === 'movie' ? ['MOVIE'] : SERIES_FORMATS;
       if (opts.year !== undefined) {
-        variables.startDate_greater = opts.year * 10_000;
+        variables.startDate_greater = opts.year * 10_000 - 1; // exclusive: YYYY0000 (year only) is in
         variables.startDate_lesser = (opts.year + 1) * 10_000;
       }
       const data = (await query(SEARCH, variables)) as { Page?: { media?: readonly Media[] | null } | null } | null;

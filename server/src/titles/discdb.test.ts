@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { indexDisc, loadDiscDb, mergeIndex } from './discdb';
+import { discDbKind, indexDisc, loadDiscDb, mergeIndex } from './discdb';
 import type { DiscDbHit } from './discdb';
 
 let tmp: string;
@@ -37,10 +37,18 @@ describe('loadDiscDb', () => {
     expect(db.lookup('00000000000000000000000000000000')).toBeNull();
     expect(db.lookup('__proto__')).toBeNull();
   });
+
+  it('throws for a missing file, a corrupt one and JSON that is not an index', () => {
+    expect(() => loadDiscDb(join(tmp, 'missing.json'))).toThrow();
+    writeFileSync(join(tmp, 'corrupt.json'), '{"source":');
+    expect(() => loadDiscDb(join(tmp, 'corrupt.json'))).toThrow();
+    writeFileSync(join(tmp, 'other.json'), '[1, 2]');
+    expect(() => loadDiscDb(join(tmp, 'other.json'))).toThrow('not a TheDiscDB index');
+  });
 });
 
 describe('indexDisc', () => {
-  const metadata = { Title: 'Starfall Wanderer', FullTitle: 'Starfall Wanderer', Type: 'Series', Year: 2023, ExternalIds: { Tmdb: '990101' } };
+  const metadata = { Title: 'Starfall Wanderer', FullTitle: 'Starfall Wanderer (TV Series 2023– )', Type: 'Series', Year: 2023, ExternalIds: { Tmdb: '990101' } };
   const disc = {
     Index: 1,
     Name: 'Disc 1',
@@ -57,6 +65,20 @@ describe('indexDisc', () => {
 
   it('keeps the hash, title, year, kind, TMDB id and mapped episodes', () => {
     expect(indexDisc(disc, metadata)).toEqual({ hash: '0123456789ABCDEF0123456789ABCDEF', hit: series });
+  });
+
+  it('names the title by Title, falling back to FullTitle', () => {
+    expect(indexDisc(disc, { ...metadata, FullTitle: '星降りの旅人' })?.hit.title).toBe('Starfall Wanderer');
+    expect(indexDisc(disc, { ...metadata, Title: '' })?.hit.title).toBe('Starfall Wanderer (TV Series 2023– )');
+    expect(indexDisc(disc, { ...metadata, Title: undefined, FullTitle: undefined })).toBeNull();
+  });
+
+  it('leaves out a title whose Type is neither Series nor Movie', () => {
+    expect(indexDisc(disc, { ...metadata, Type: 'Set' })).toBeNull();
+    expect(indexDisc(disc, { ...metadata, Type: undefined })).toBeNull();
+    expect(discDbKind({ Type: 'Movie' })).toBe('movie');
+    expect(discDbKind({ Type: 'Series' })).toBe('series');
+    expect(discDbKind(null)).toBeNull();
   });
 
   it('gives a disc spanning seasons no season', () => {

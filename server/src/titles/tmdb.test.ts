@@ -64,7 +64,7 @@ describe('createTmdb', () => {
     ]);
   });
 
-  it('reads a TV entry with its seasons, episode counts and episode run time', async () => {
+  it('reads a TV entry with its seasons from 1, episode counts and episode run time', async () => {
     const { fetch, urls } = fakeTmdb({ '/3/tv/990101': () => json(fixture('tmdb-tv.json')) });
     const entry = await createTmdb(fetch, pacer(), KEY).entry('tmdb-tv:990101');
     expect(urls[0]!.searchParams.get('api_key')).toBe(KEY);
@@ -75,12 +75,32 @@ describe('createTmdb', () => {
       episodes: 37,
       runtimeMin: 24,
       seasons: [
-        { number: 0, episodes: 2, runtimeMin: 24 },
         { number: 1, episodes: 24, runtimeMin: 24 },
         { number: 2, episodes: 13, runtimeMin: 24 },
       ],
       poster: { small: 'https://image.tmdb.org/t/p/w185/pStarfallPoster.jpg', large: 'https://image.tmdb.org/t/p/w500/pStarfallPoster.jpg' },
     });
+  });
+
+  it("falls back to the last aired episode's runtime, then to null", async () => {
+    const tv = fixture('tmdb-tv.json') as Record<string, unknown>;
+    const { fetch } = fakeTmdb({
+      '/3/tv/1': () => json({ ...tv, id: 1, episode_run_time: [], last_episode_to_air: { id: 5, runtime: 23, season_number: 2, episode_number: 13 } }),
+      '/3/tv/2': () => json({ ...tv, id: 2, episode_run_time: [], last_episode_to_air: null }),
+    });
+    const tmdb = createTmdb(fetch, pacer(), KEY);
+    expect((await tmdb.entry('tmdb-tv:1'))?.runtimeMin).toBe(23);
+    const none = await tmdb.entry('tmdb-tv:2');
+    expect(none?.runtimeMin).toBeNull();
+    expect(none?.seasons[0]?.runtimeMin).toBeNull();
+  });
+
+  it('cancels the body of an error response', async () => {
+    let cancelled = false;
+    const body = new ReadableStream({ cancel: () => void (cancelled = true) });
+    const fetch = (async () => new Response(body, { status: 500 })) as typeof globalThis.fetch;
+    await expect(createTmdb(fetch, pacer(), KEY).search('x')).rejects.toBeInstanceOf(SourceUnavailable);
+    expect(cancelled).toBe(true);
   });
 
   it('reads a movie entry with its runtime', async () => {

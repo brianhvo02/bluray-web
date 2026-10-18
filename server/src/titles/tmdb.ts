@@ -24,6 +24,7 @@ interface Show {
   readonly number_of_episodes?: number | null;
   readonly episode_run_time?: readonly number[] | null;
   readonly runtime?: number | null;
+  readonly last_episode_to_air?: { readonly runtime?: number | null } | null;
   readonly seasons?: readonly { readonly season_number: number; readonly episode_count: number }[] | null;
 }
 
@@ -34,7 +35,8 @@ const yearOf = (date: string | null | undefined): number | null => {
 
 function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
   const tv = kind === 'series';
-  const runtimeMin = tv ? (s.episode_run_time?.[0] ?? null) : (s.runtime ?? null);
+  // TV: `episode_run_time` is empty for many newer series; the last aired episode's runtime stands in.
+  const runtimeMin = tv ? (s.episode_run_time?.[0] || s.last_episode_to_air?.runtime || null) : (s.runtime ?? null);
   return {
     source: 'tmdb',
     id: `${tv ? 'tmdb-tv' : 'tmdb-movie'}:${s.id}`,
@@ -44,7 +46,7 @@ function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
     year: yearOf(tv ? s.first_air_date : s.release_date),
     episodes: tv ? (s.number_of_episodes ?? null) : null,
     runtimeMin: runtimeMin || null,
-    seasons: (s.seasons ?? []).map((season) => ({ number: season.season_number, episodes: season.episode_count, runtimeMin: runtimeMin || null })),
+    seasons: (s.seasons ?? []).filter((season) => season.season_number > 0).map((season) => ({ number: season.season_number, episodes: season.episode_count, runtimeMin: runtimeMin || null })),
     relations: [],
     poster: s.poster_path ? { small: `${IMAGES}/w185${s.poster_path}`, large: `${IMAGES}/w500${s.poster_path}` } : null,
     banner: s.backdrop_path ? `${IMAGES}/w1280${s.backdrop_path}` : null,
@@ -64,9 +66,12 @@ export function createTmdb(fetch: typeof globalThis.fetch, pacer: Pacer, apiKey:
       } catch {
         throw new SourceUnavailable(`tmdb: network error on ${path}`);
       }
-      if (res.status === 429) throw new RateLimited(retryAfterMs(res.headers.get('Retry-After')));
-      if (res.status === 404) return null;
-      if (!res.ok) throw new SourceUnavailable(`tmdb: HTTP ${res.status} on ${path}`);
+      if (!res.ok) {
+        await res.body?.cancel();
+        if (res.status === 429) throw new RateLimited(retryAfterMs(res.headers.get('Retry-After')));
+        if (res.status === 404) return null;
+        throw new SourceUnavailable(`tmdb: HTTP ${res.status} on ${path}`);
+      }
       try {
         return await res.json();
       } catch {

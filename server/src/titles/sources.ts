@@ -18,7 +18,8 @@ export interface Entry {
   readonly year: number | null;
   readonly episodes: number | null;
   readonly runtimeMin: number | null;
-  readonly seasons: readonly { readonly number: number; readonly episodes: number; readonly runtimeMin: number | null }[]; // TMDB TV only
+  /** TMDB TV only, numbered from 1: season 0 (TMDB's "Specials") is left out. */
+  readonly seasons: readonly { readonly number: number; readonly episodes: number; readonly runtimeMin: number | null }[];
   /** AniList only. `startDate` is AniList's FuzzyDateInt, YYYYMMDD with 00 for an unknown month or day. */
   readonly relations: readonly { readonly type: string; readonly id: string; readonly format: string | null; readonly startDate: number | null }[];
   readonly poster: { readonly small: string; readonly large: string } | null; // source URLs

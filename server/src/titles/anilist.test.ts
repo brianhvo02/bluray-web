@@ -71,7 +71,7 @@ describe('createAniList', () => {
     await anilist.search('Hoshifuri', { kind: 'movie', year: 2022 });
     await anilist.search('Hoshifuri', { kind: 'series' });
     const vars = calls.map((c) => (JSON.parse(String(c.init?.body)) as { variables: Record<string, unknown> }).variables);
-    expect(vars[0]).toMatchObject({ format_in: ['MOVIE'], startDate_greater: 20220000, startDate_lesser: 20230000 });
+    expect(vars[0]).toMatchObject({ format_in: ['MOVIE'], startDate_greater: 20219999, startDate_lesser: 20230000 });
     expect(vars[1]).toMatchObject({ format_in: ['TV', 'TV_SHORT', 'OVA', 'ONA', 'SPECIAL'] });
     expect(vars[1]).not.toHaveProperty('startDate_greater');
   });
@@ -100,6 +100,20 @@ describe('createAniList', () => {
     expect(await anilist.entry('anilist:1')).toBeNull();
     expect(await anilist.entry('tmdb-tv:1')).toBeNull();
     expect(calls).toHaveLength(1);
+  });
+
+  it('throws SourceUnavailable for a 200 that carries GraphQL errors and no data', async () => {
+    const failed = createAniList(fakeFetch(() => json({ data: null, errors: [{ message: 'Internal Server Error', status: 500 }] })).fetch, pacer());
+    await expect(failed.search('x')).rejects.toBeInstanceOf(SourceUnavailable);
+    await expect(failed.entry('anilist:1')).rejects.toBeInstanceOf(SourceUnavailable);
+  });
+
+  it('cancels the body of an error response', async () => {
+    let cancelled = false;
+    const body = new ReadableStream({ cancel: () => void (cancelled = true) });
+    const anilist = createAniList(fakeFetch(() => new Response(body, { status: 503 })).fetch, pacer());
+    await expect(anilist.search('x')).rejects.toBeInstanceOf(SourceUnavailable);
+    expect(cancelled).toBe(true);
   });
 
   it('throws SourceUnavailable on network errors and 5xx', async () => {
