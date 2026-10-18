@@ -143,16 +143,19 @@ const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 const OTHER_GENRES = /^(?:ドラマ|drama|実写|live|特撮|action)$/i;
 /** Common kanji variants (itaiji) folded to one form, as disc titles and metadata spell names either way (ruling M7f). */
 const KANJI_VARIANTS: Readonly<Record<string, string>> = {
-  弍: '弐', 髙: '高', 﨑: '崎', 嵜: '崎', 邊: '辺', 邉: '辺', 斎: '斉', 齊: '斉', 齋: '斉', 濱: '浜', 澤: '沢', 國: '国', 實: '実',
+  弍: '弐', 髙: '高', 﨑: '崎', 嵜: '崎', 邊: '辺', 邉: '辺', 齊: '斉', 齋: '斎', 濱: '浜', 澤: '沢', 國: '国', 實: '実',
   圓: '円', 櫻: '桜', 學: '学', 聲: '声', 廣: '広', 嶋: '島', 嶌: '島', 惠: '恵', 眞: '真', 萬: '万', 會: '会', 體: '体', 鐵: '鉄',
   傳: '伝', 氣: '気', 劍: '剣', 劒: '剣', 剱: '剣', 劔: '剣', 號: '号', 黑: '黒', 靑: '青', 戀: '恋', 藝: '芸', 舊: '旧', 繪: '絵',
   應: '応', 驛: '駅', 樂: '楽', 對: '対', 戰: '戦', 獸: '獣', 稻: '稲', 莊: '荘', 龜: '亀', 鬪: '闘', 鬥: '闘', 曉: '暁',
 };
 const KANJI_VARIANT = new RegExp(`[${Object.keys(KANJI_VARIANTS).join('')}]`, 'gu');
 
+/** No Blu-ray disc came out before this (YYYYMMDD): an earlier "date" is some other number (ruling M11b). */
+const BLU_RAY_FIRST = 20060601;
+
 /**
  * The disc's release date as YYYYMMDD, from a bracketed `[YYMMDD]` (20YY) or `[YYYYMMDD]` on the disc folder or the
- * two folders above it, nearest first; only a valid date that isn't in the future (ruling M11).
+ * two folders above it, nearest first; only a valid date from 2006-06-01 on that isn't in the future (rulings M11, M11b).
  */
 function releaseDate(segments: readonly string[]): number | null {
   const today = new Date();
@@ -164,7 +167,7 @@ function releaseDate(segments: readonly string[]): number | null {
       const date = new Date(Date.UTC(y, mo - 1, da));
       const valid = y >= 1900 && date.getUTCFullYear() === y && date.getUTCMonth() === mo - 1 && date.getUTCDate() === da;
       const value = y * 10_000 + mo * 100 + da;
-      if (valid && value <= now) return value;
+      if (valid && value <= now && value >= BLU_RAY_FIRST) return value;
     }
   }
   return null;
@@ -431,10 +434,16 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
  */
 async function decide(e: DiscEvidence, given: readonly Piece[], hit: DiscDbHit | null, siblings: number, ctx: MatchContext, entries: Map<string, Entry>):
   Promise<DiscMatch | Omit<Pending, 'group' | 'releaseCount' | 'folderDiscs'>> {
-  // a disc folder's label names something only when no disc title or other folder name fits any entry; its disc
-  // number still counts (ruling M13)
-  const othersFit = given.some((p) => !p.label && p.found.some((en) => fit(p, en, null) > 0));
-  const pieces = othersFit ? given.map((p) => (p.label ? { ...p, parse: { ...p.parse, candidates: [] }, found: [] } : p)) : given;
+  // a disc folder's label is set aside, when other evidence fits an entry, if its own exact fits are ambiguous (two or
+  // more entries) or include an entry the other evidence fits: it adds nothing then. A label naming exactly one entry
+  // that nothing else fits is kept, so a misplaced disc shows as a disagreement. Its disc number always counts
+  // (rulings M13, M13b)
+  const otherFits = new Set(given.flatMap((p) => (p.label ? [] : p.found.filter((en) => fit(p, en, null) > 0).map((en) => en.id))));
+  const setAside = (p: Piece): boolean => {
+    const exact = new Set(p.found.filter((en) => fit(p, en, null) === EXACT).map((en) => en.id));
+    return exact.size >= 2 || [...exact].some((id) => otherFits.has(id));
+  };
+  const pieces = otherFits.size > 0 ? given.map((p) => (p.label && setAside(p) ? { ...p, parse: { ...p.parse, candidates: [] }, found: [] } : p)) : given;
   const compat = new Map<string, Compat>();
   const unsorted = (reason: UnsortedReason, suggest: readonly Entry[]): DiscMatch => {
     const ids = [...new Set(suggest.map((en) => en.id))].slice(0, MAX_SUGGESTIONS);
@@ -457,10 +466,17 @@ async function decide(e: DiscEvidence, given: readonly Piece[], hit: DiscDbHit |
   if (hit?.year != null) years.push(hit.year);
 
   // everything the lookups found, before the year, season and format filters; an entry that started after the disc's
-  // release date (`[170426]` on its release folder) can't be on it, and is no fit at all (ruling M11)
+  // release date (`[170426]` on its release folder) can't be on it, and is no fit at all (ruling M11), when an entry
+  // of its story that started in time is there too (a later season against the first; ruling M11b): an unrelated
+  // same-named entry, an original or a remake, still competes
   const released = releaseDate(e.segments);
   const all = new Map<string, Entry>();
-  for (const p of pieces) for (const en of p.found) if (released === null || !startedAfter(en, released)) all.set(en.id, en);
+  for (const p of pieces) for (const en of p.found) all.set(en.id, en);
+  if (released !== null) {
+    const late = [...all.values()].filter((en) => startedAfter(en, released));
+    const inTime = [...all.values()].filter((en) => !startedAfter(en, released));
+    for (const en of late) if (inTime.some((o) => storyLinked(o, en))) all.delete(en.id);
+  }
   let scored: Scored[] = [];
   for (const en of all.values()) {
     if (!yearFits(en, years)) continue;
@@ -518,9 +534,9 @@ async function decide(e: DiscEvidence, given: readonly Piece[], hit: DiscDbHit |
   // too (W1, ruling M7c): leniency here only leaves the disc several-fit
   const namedLoosely = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
     const base = parseName(n).candidates[0] ?? n;
-    const sc = normalizeStrict(c);
-    const sn = normalizeStrict(n);
-    const holds = sc !== '' && sn !== '' && (sc.includes(sn) || sn.includes(sc));
+    const sc = folded(c);
+    const sn = folded(n);
+    const holds = sc !== '' && sn !== '' && (sc.includes(sn) || sn.includes(sc)); // kanji variants folded too (R3-3)
     return holds || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
   }));
   // for a lone fit, a Japanese name agrees with a Japanese title it holds or is held in, after kana and kanji-variant
@@ -851,6 +867,10 @@ function twinMatch(a: Entry, rootYear: number | null, t: Entry, named: readonly 
   // a TMDB series' first-air year may be up to TMDB_TV_EARLY years before the AniList chain root's (ruling M12)
   const early = a.kind === 'series' && t.kind === 'series' ? TMDB_TV_EARLY : YEAR_SLACK;
   if (t.animation !== true || (a.kind !== t.kind && !film) || !inYearWindow(a, rootYear, t, false, early)) return null;
+  // in the widened years only, TMDB must carry a Japanese name the AniList entry shares, so a same-named Western
+  // cartoon doesn't pass for the twin (ruling M12b)
+  const widened = early > YEAR_SLACK && t.year !== null && a.year !== null && t.year < (rootYear ?? a.year) - YEAR_SLACK;
+  if (widened && !names(t).some((n) => JAPANESE.test(n) && names(a).some((m) => folded(m) === folded(n)))) return null;
   if (names(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'name';
   if (film) return null;
   if (seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))) return 'base';

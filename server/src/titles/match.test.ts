@@ -478,8 +478,9 @@ describe('matchDiscs', () => {
       const series = entry('tmdb-tv:810', { english: 'Harbor Line' }, { year: 2019, seasons: seasons(3), animation: true });
       expect(await run(series)).toMatchObject({ status: 'filed', entryId: 'anilist:803', season: 3, disc: 1 });
       expect(await run({ ...series, animation: false })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
-      // more than three years before the chain root's year: not the same series (TMDB may date it by an early special, M12)
-      expect(await run({ ...series, year: 2016 })).toMatchObject({ status: 'filed', entryId: 'anilist:803' });
+      // more than three years before the chain root's year: not the same series (TMDB may date it by an early special, M12);
+      // in the widened years only with a Japanese name the AniList entry shares (M12b), which neither has here
+      expect(await run({ ...series, year: 2016 })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
       expect(await run({ ...series, year: 2015 })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
     });
 
@@ -1223,7 +1224,8 @@ describe('matchDiscs', () => {
         expect(await state('drv0/Anime/[BDMV][180124][Brasswick][Vol.02]', anilist(), null)).toBe('several-fit');
         // a TMDB entry by its first-air date, and an entry with only a year
         const tmdbLater = fake({ Brasswick: [entry('tmdb-tv:3002', { english: 'Brasswick' }, { year: 2017, startDate: 20171101, seasons: seasons(1), animation: false })] });
-        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', fake({ Brasswick: [s1] }), tmdbLater)).toBe('anilist:3000#2');
+        // an unrelated entry that started later still competes (M11b): it may be a remake on a later disc
+        expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', fake({ Brasswick: [s1] }), tmdbLater)).toBe('several-fit');
         const yearOnly = fake({ Brasswick: [s1, { ...s2, startDate: undefined, year: 2018 }] });
         expect(await state('drv0/Anime/[BDMV][170426][Brasswick][Vol.02]', yearOnly, null)).toBe('anilist:3000#2');
       });
@@ -1244,6 +1246,14 @@ describe('matchDiscs', () => {
       expect(await state(p, fake({ 'Quill Harbor': [anime] }), tv(2024))).toBe('anilist:3100#1');
       expect(await state(p, fake({ 'Quill Harbor': [anime] }), tv(2023))).toBe('anilist:3100#1');
       expect(await state(p, fake({ 'Quill Harbor': [anime] }), tv(2022))).toBe('several-fit');
+      // M12b: in the widened years, TMDB needs the Japanese name too; an animated show of the name without one isn't a twin
+      const cartoon = fake({ 'Quill Harbor': [entry('tmdb-tv:3103', { english: 'Quill Harbor' }, { year: 2024, seasons: seasons(1), animation: true })] });
+      expect(await state(p, fake({ 'Quill Harbor': [anime] }), cartoon)).toBe('several-fit');
+      const otherJapanese = fake({ 'Quill Harbor': [entry('tmdb-tv:3104', { english: 'Quill Harbor', native: '羽の港町' }, { year: 2024, seasons: seasons(1), animation: true })] });
+      expect(await state(p, fake({ 'Quill Harbor': [anime] }), otherJapanese)).toBe('several-fit');
+      // within a year it needs no Japanese name, as before
+      const near = fake({ 'Quill Harbor': [entry('tmdb-tv:3105', { english: 'Quill Harbor' }, { year: 2025, seasons: seasons(1), animation: true })] });
+      expect(await state(p, fake({ 'Quill Harbor': [anime] }), near)).toBe('anilist:3100#1');
       // a TMDB movie keeps one year either way
       const film = fake({ 'Quill Harbor': [entry('tmdb-movie:3102', { english: 'Quill Harbor', native: '羽根の港' }, { year: 2024, animation: true })] });
       const anilistFilm = fake({ 'Quill Harbor': [{ ...anime, format: 'MOVIE', kind: 'movie' }] });
@@ -1282,6 +1292,50 @@ describe('matchDiscs', () => {
       expect(await state('drv0/Anime/[BDMV][Brasswick][US]/BRASSWICK_D2', ...sources())).toBe('several-fit');
       // and a live-action entry within a year of the evidence still does
       expect(await state('drv0/Anime/[BDMV][Brasswick_2006][US]/BRASSWICK_D2', fake({ Brasswick: [anime] }), fake({ Brasswick: [twin, { ...live, year: 2007 }] }))).toBe('several-fit');
+    });
+
+    describe('round 3 review', () => {
+      it('M13b: a label that alone names one entry no other evidence fits is kept, so the disagreement shows', async () => {
+        const glass = entry('anilist:3500', { english: 'Glass Orchard' }, { year: 2019, format: 'MOVIE', kind: 'movie' });
+        const star = entry('anilist:3501', { english: 'Starfall Wanderer' }, { year: 2019, format: 'MOVIE', kind: 'movie' });
+        const main = entry('anilist:3502', { english: 'Harbor Line' }, { year: 2019, format: 'MOVIE', kind: 'movie' });
+        const spin = entry('anilist:3503', { english: 'Harbor Line Origins' }, { year: 2021, format: 'MOVIE', kind: 'movie' });
+        const anilist = () => fake({ 'Glass Orchard': [glass], 'STARFALL WANDERER': [star], 'Harbor Line': [main], 'HARBOR LINE ORIGINS': [spin] });
+        expect(await state('drv0/Movies/Glass Orchard/STARFALL_WANDERER', anilist(), null)).toBe('sources-disagree');
+        expect(await state('drv0/Movies/Harbor Line/HARBOR_LINE_ORIGINS', anilist(), null)).not.toMatch(/^anilist:3502/);
+        // a label naming the folder's entry adds nothing, and is set aside
+        expect(await state('drv0/Movies/Glass Orchard/GLASS_ORCHARD', fake({ 'Glass Orchard': [glass] }), null)).toBe('anilist:3500#null');
+      });
+
+      it('M11b: a date before Blu-ray, or an unrelated later entry, rules nothing out', async () => {
+        const old = entry('anilist:3600', { english: 'Glass Orchard' }, { year: 1998, startDate: 19980405 });
+        const neu = entry('anilist:3601', { english: 'Glass Orchard' }, { year: 2019, startDate: 20190410 });
+        const run = (p: string) => state(p, fake({ 'Glass Orchard': [old, neu] }), null);
+        for (const p of ['drv0/Anime/[BDMV][Glass Orchard][010203]/Vol.1', 'drv0/Anime/[BDMV][Glass Orchard][20010203]/Vol.1',
+          'drv0/Anime/[BDMV][Glass Orchard][010203][190925]/Vol.1', 'drv0/Anime/[BDMV][190301][Glass Orchard]/Vol.1',
+          'drv0/[BDMV][180101][Collection]/Glass Orchard/Vol.1']) {
+          expect(await run(p), p).toBe('several-fit');
+        }
+        // between a season and its sequel too, a date before Blu-ray (2006-06-01) is no release date
+        const s1 = { ...old, relations: [{ type: 'SEQUEL', id: 'anilist:3601', format: 'TV', startDate: null }] };
+        const s2 = { ...neu, relations: [{ type: 'PREQUEL', id: 'anilist:3600', format: 'TV', startDate: null }] };
+        expect(await state('drv0/Anime/[BDMV][Glass Orchard][010203]/Vol.1', fake({ 'Glass Orchard': [s1, s2] }), null)).toBe('several-fit');
+        expect(await state('drv0/Anime/[BDMV][060531][Glass Orchard]/Vol.1', fake({ 'Glass Orchard': [s1, s2] }), null)).toBe('several-fit');
+        expect(await state('drv0/Anime/[BDMV][060601][Glass Orchard]/Vol.1', fake({ 'Glass Orchard': [s1, s2] }), null)).toBe('anilist:3600#1');
+      });
+
+      it('R3-3: the drop side folds kanji variants, so an itaiji spelling never drops the real anime', async () => {
+        const anime = entry('anilist:3700', { english: 'Takahashi Garden', native: '高橋の庭' }, { year: 2015, format: 'MOVIE', kind: 'movie' });
+        const live = entry('tmdb-movie:3701', { english: 'Takahashi Garden', native: '髙橋の庭' }, { year: 2015, animation: false });
+        const r = byDisc((await matchDiscs([rooted('drv0/Movies/Takahashi Garden/BDROM', { jpn: '髙橋の庭' })], ctx(fake({ 'Takahashi Garden': [anime] }), fake({ 'Takahashi Garden': [live], 髙橋の庭: [live] })))).matches, 'drv0/Movies/Takahashi Garden/BDROM');
+        expect(r).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      });
+
+      it('斎 and 斉 are different names', async () => {
+        const film = entry('tmdb-movie:3800', { english: 'Ocean', native: '斉の庭' }, { year: 2010 });
+        const r = byDisc((await matchDiscs([rooted('drv0/Movies/Ocean/BDROM', { jpn: '斎の庭' })], ctx(fake({}), fake({ Ocean: [film] })))).matches, 'drv0/Movies/Ocean/BDROM');
+        expect(r).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
+      });
     });
   });
 });
