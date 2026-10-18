@@ -1134,6 +1134,35 @@ describe('matchDiscs', () => {
         }
       });
 
+      it('R1: a held Japanese name counts only at a word boundary or with a known affix', async () => {
+        const lone = async (native: string, jpn: string) =>
+          (await states([['drv0/Movies/Ocean/BDROM', { jpn }]], fake({}), fake({ Ocean: [entry('tmdb-movie:2200', { english: 'Ocean', native }, { year: 2010 })] })))[0];
+        // run together, it is another word: M7b
+        expect(await lone('海の家', '海')).toBe('sources-disagree');
+        expect(await lone('海', '海の家')).toBe('sources-disagree');
+        expect(await lone('星降りの旅人', '星')).toBe('sources-disagree');
+        // set off by a space or a mark, or a known affix, it is the same work
+        for (const [native, jpn] of [['劇場版 海の家', '海の家'], ['劇場版海の家', '海の家'], ['海の家 冬の章', '海の家'], ['海の家・夏', '海の家'], ['海の家第2期', '海の家'],
+          ['映画 海の家', '海の家'], ['海の家 総集編', '海の家'], ['『海の家』', '海の家'], ['海の家 OVA', '海の家'], ['海の家', '劇場版 海の家']]) {
+          expect(await lone(native!, jpn!), `${native} / ${jpn}`).toBe('tmdb-movie:2200#null');
+        }
+        // drop side: a live film named 海の家 is no competitor to an anime film named 海 when the disc says 海
+        const anime = entry('anilist:2201', { english: 'Ocean', native: '海' }, { year: 2010, format: 'MOVIE', kind: 'movie' });
+        const live = entry('tmdb-movie:2202', { english: 'Ocean', native: '海の家' }, { year: 2010, animation: false });
+        expect(await states([['drv0/Movies/Ocean/BDROM', { jpn: '海' }]], fake({ Ocean: [anime], 海: [anime] }), fake({ Ocean: [live] }))).toEqual(['anilist:2201#null']);
+      });
+
+      it('R2: every disc under an M10 release folder counts, whatever its match', async () => {
+        const brasswick = entry('anilist:2300', { english: 'Brasswick' }, { year: 2016 });
+        const other = entry('anilist:2301', { english: 'Starfall Wanderer', native: '星降りの旅人' }, { year: 2016 });
+        const run = (paths: readonly (string | [string, Record<string, string>])[]) => states(paths, fake({ Brasswick: [brasswick], 星降りの旅人: [other] }), null);
+        const R = 'drv0/Anime';
+        expect(await run([`${R}/[Brasswick][Vol.2]/BDROM`, [`${R}/[Brasswick][Vol.2]/BDROM2`, { jpn: '星降りの旅人' }]])).toEqual([N, 'sources-disagree']);
+        expect(await run([`${R}/[Brasswick][Vol.1]/BDROM`, `${R}/[Brasswick][Vol.1]/DISC2/BDROM`, `${R}/[Brasswick][Vol.2]/BDROM`])).toEqual([N, N, N]);
+        // bonus-named discs don't count
+        expect(await run([`${R}/[Brasswick][Vol.2]/BDROM`, `${R}/[Brasswick][Vol.2]/BONUS`])).toEqual(['anilist:2300#2', 'anilist:2300#null']);
+      });
+
       it('W5: a year run into a title stays in it', async () => {
         const other = entry('anilist:2000', { native: '星の海' }, { year: 2021, format: 'MOVIE', kind: 'movie' });
         const mine = entry('anilist:2001', { native: '星の海2020年' }, { year: 2023, format: 'MOVIE', kind: 'movie' });

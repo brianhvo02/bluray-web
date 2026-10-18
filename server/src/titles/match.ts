@@ -134,9 +134,19 @@ const FILM_FORMATS = new Set(['MOVIE', 'SPECIAL', 'OVA']);
 /** A disc folder's label that names only a disc (`BD`, `BDROM`, `BD_VIDEO`, `DISC_2`); `Blu-ray`, `DVD` and such are categories. */
 const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3})?$/i;
 /** A disc folder's generic label with no number, which takes its release folder's volume (ruling M10). */
+const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 /** Genres besides anime that can share a bracket with the anime tag (W4). */
 const OTHER_GENRES = /^(?:ドラマ|drama|実写|live|特撮|action)$/i;
-const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
+/** What sets a word off in a Japanese name: a space, punctuation or a symbol (`・ ： 『』 【】 〜 -`), or the long-vowel dash. */
+const BOUNDARY = /[\s\p{P}\p{S}ー〜]/u;
+/** Affixes that make a Japanese name the same work's (R1): `劇場版`, `映画`, `特別編`, `総集編`, `完全版`, `OVA`, seasons and chapters. */
+const AFFIX = /^(?:劇場版|映画|特別編|総集編|完全版|ova|season\s*\d+|\d+(?:st|nd|rd|th)\s*season|第\s*[0-9一二三四五六七八九十]+\s*(?:期|章|クール|シリーズ))$/i;
+
+/** The discs under a folder, in its subfolders too, leaving out those in or named as a bonus folder (R2). */
+function discsUnder(folder: string, evidence: readonly DiscEvidence[]): number {
+  const depth = folder === '' ? 0 : folder.split('/').length;
+  return evidence.filter((e) => e.path.startsWith(`${folder}/`) && !e.path.split('/').slice(depth).some((seg) => parseName(seg).bonus)).length;
+}
 
 /** The parent folder path of the disc folder or ISO. */
 export function groupKey(e: DiscEvidence): string {
@@ -189,6 +199,8 @@ interface Pending {
   readonly unplaceable: boolean;
   /** Numbered by its release folder's volume, as a generic disc folder (ruling M10). */
   readonly fromParent: boolean;
+  /** For such a disc: the discs under its release folder, subfolders included, whatever their match, bonus ones left out (R2). */
+  readonly folderDiscs: number;
 }
 
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
@@ -234,7 +246,7 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
     }
     if (lookup.length > 0) {
       try {
-        const r = await matchGroup(key, lookup, ctx, entries);
+        const r = await matchGroup(key, lookup, ctx, entries, evidence);
         for (const m of r.done) byDisc.set(m.discId, m);
         pending.push(...r.pending);
         matched.add(key);
@@ -299,7 +311,8 @@ function nameParse(text: string): ParsedName {
   return { ...parse, candidates: parse.candidates.filter((c) => !CATEGORIES.has(normalizeStrict(c))) };
 }
 
-async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: MatchContext, entries: Map<string, Entry>): Promise<{ done: DiscMatch[]; pending: Pending[] }> {
+async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: MatchContext, entries: Map<string, Entry>, evidence: readonly DiscEvidence[]):
+  Promise<{ done: DiscMatch[]; pending: Pending[] }> {
   const search = async (source: string, src: MetadataSource, query: string, year: number | null): Promise<Entry[]> => {
     // keyed strictly, so `God X` doesn't reuse what `Good X` found (M2)
     const key = `${source}:${normalizeStrict(query)}${year === null ? '' : `:${year}`}`;
@@ -362,7 +375,7 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
 
     const result = await decide(e, pieces, hit, discs.length, ctx, entries);
     if ('status' in result) done.push(result);
-    else pending.push({ ...result, group, releaseCount });
+    else pending.push({ ...result, group, releaseCount, folderDiscs: result.fromParent ? discsUnder(group, evidence) : 1 });
   }
   return { done, pending };
 }
@@ -372,7 +385,7 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
  * disc's group, itself included.
  */
 async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit | null, siblings: number, ctx: MatchContext, entries: Map<string, Entry>):
-  Promise<DiscMatch | Omit<Pending, 'group' | 'releaseCount'>> {
+  Promise<DiscMatch | Omit<Pending, 'group' | 'releaseCount' | 'folderDiscs'>> {
   const compat = new Map<string, Compat>();
   const unsorted = (reason: UnsortedReason, suggest: readonly Entry[]): DiscMatch => {
     const ids = [...new Set(suggest.map((en) => en.id))].slice(0, MAX_SUGGESTIONS);
@@ -453,10 +466,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   const namedAtAll = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
     const base = parseName(n).candidates[0] ?? n;
     // one name holding the other (`劇場版 X`, `X 冬の章` against `X`) isn't another title either (W1)
-    const sc = normalizeStrict(c);
-    const sn = normalizeStrict(n);
-    const holds = sc !== '' && sn !== '' && (sc.includes(sn) || sn.includes(sc));
-    return holds || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
+    return heldAtBoundary(c, n) || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
   }));
   const fitsOf = (en: Entry): string[] => candidates.filter((c) => quality(en, c, fitSeason) > 0);
   if (japaneseTitles.length > 0) {
@@ -656,11 +666,9 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, fa
   const kinds = new Map<string, Set<string>>();
   for (const { p } of numbered) kinds.set(slotKey(p), (kinds.get(slotKey(p)) ?? new Set()).add(kind(p)));
   // a generic disc folder takes its release folder's volume only as that release's single disc: once any of those
-  // folders holds another disc of the entry, no disc numbered so keeps its number (W3)
+  // folders holds another disc, whatever it matched, no disc numbered so keeps its number (W3, R2)
   const shared = new Set<string>();
-  for (const p of pending) {
-    if (p.fromParent && pending.some((q) => q !== p && !q.bonus && q.entry.id === p.entry.id && q.group === p.group)) shared.add(slotKey(p));
-  }
+  for (const p of pending) if (p.fromParent && p.folderDiscs > 1) shared.add(slotKey(p));
   return out.map((m) => {
     if (m.status !== 'filed' || m.disc === null || m.bonus) return m;
     const p = byId.get(m.discId)!;
@@ -809,6 +817,25 @@ function animeTagged(segment: string): boolean {
   const brackets = [...segment.normalize('NFKC').matchAll(/[[【]([^\]】]*)[\]】]/g)].map((m) => (m[1] ?? '').split(/[+\s,/&]+/).filter((t) => t !== ''));
   if (brackets.some((tokens) => tokens.some((t) => OTHER_GENRES.test(t)))) return false;
   return brackets.some((tokens) => tokens.some((t) => t === 'アニメ' || t.toLowerCase() === 'anime') && tokens.every(isTagWord));
+}
+
+/**
+ * Whether one Japanese name holds the other as a word (W1, R1): the rest of the longer one is set off by a space or a
+ * mark (`X 冬の章`, `X・夏`, `『X』`), or is a known affix (`劇場版X`, `X第2期`). `海` in `海の家` or `星` in `星降りの旅人`
+ * is not.
+ */
+function heldAtBoundary(a: string, b: string): boolean {
+  const x = a.normalize('NFKC').toLowerCase().trim();
+  const y = b.normalize('NFKC').toLowerCase().trim();
+  if (x === '' || y === '' || x === y) return false;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  const at = long.indexOf(short);
+  if (at < 0) return false;
+  const before = long.slice(0, at);
+  const after = long.slice(at + short.length);
+  const ok = (rest: string, edge: string | undefined): boolean =>
+    rest === '' || (edge !== undefined && BOUNDARY.test(edge)) || AFFIX.test(rest.replace(/[\s\p{P}\p{S}]+/gu, ' ').trim());
+  return ok(before, before.at(-1)) && ok(after, after[0]);
 }
 
 /** Whether two AniList entries are tied by a story link, in either direction. */
