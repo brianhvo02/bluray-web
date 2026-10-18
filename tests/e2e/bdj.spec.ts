@@ -139,6 +139,12 @@ test('a click on the video with an empty BD-J plane is play/pause, not a menu cl
   await expect(page.getByTestId('player')).toHaveAttribute('data-bdj-menu', 'false');
   await page.getByTestId('video-canvas').click();
   await reachesState(page, 'paused', 5_000);
+  // with no menu shown the control bar's empty space is the bar's own: a click there would not reach the video (R9)
+  const bar = page.getByTestId('control-bar');
+  await expectBarShown(bar);
+  const barBox = (await bar.boundingBox())!;
+  const pad = { x: barBox.x + 6, y: barBox.y + barBox.height - 4 };
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('[data-testid="control-bar"]') !== null, pad)).toBe(true);
   await expect(notice(page, /doesn't respond to taps/)).toHaveCount(0);
   await page.getByTestId('remote-toggle').click();
   await expect(page.getByTestId('remote-pad')).toBeVisible();

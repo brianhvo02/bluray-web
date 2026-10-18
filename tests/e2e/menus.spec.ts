@@ -141,9 +141,12 @@ test('the control bar never covers the menu: only the bottom edge wakes it, it h
   const a = await menuPoint(page, 232, 216);
   await page.mouse.click(a.x, a.y);
   await expectMenu(page, false);
-  // outside the menu any move wakes the bar again
+  // outside the menu any move wakes the bar again, and its empty space is the bar's own: a click there misses the video
   await page.mouse.move(x, box.y + box.height / 3);
   await expectBarShown(bar, 1_000);
+  await page.mouse.move(x, bottom - 10);
+  const padOutside = await barPadding(page);
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('[data-testid="control-bar"]') !== null, padOutside)).toBe(true);
 });
 
 test("keys that go to the menu leave the control bar hidden; a player shortcut shows it (R11)", async ({ page }) => {
