@@ -21,6 +21,8 @@ export interface Catalogue {
   readonly unsorted: readonly UnsortedItem[];
   readonly hidden: readonly DiscRef[];
   art(id: string): { small: string; large: string } | null;
+  /** AniList series whose chain isn't loaded back to its root: their id may change once it is (ruling T7h). */
+  readonly provisional: readonly string[];
 }
 
 export interface CatalogueInput {
@@ -47,7 +49,10 @@ const isAnilistTv = (en: Entry): boolean => en.source === 'anilist' && TV_FORMAT
 /** An AniList series: a chain of TV entries in start-date order, and each one's season number. */
 interface Series {
   readonly id: string;
+  /** The root isn't loaded, so the id is the root reached so far. */
+  readonly provisional: boolean;
   readonly members: readonly Entry[];
+  /** A member's place in its chain, for members whose whole PREQUEL chain back to a loaded root is loaded. */
   readonly number: ReadonlyMap<string, number>;
 }
 
@@ -94,8 +99,8 @@ type Target = { readonly title: TitleBuild; readonly season: SeasonBuild | null 
 /**
  * AniList series (rulings T7a, T7f). TV/TV_SHORT entries and the TV ids their SEQUEL/PREQUEL relations name, loaded or
  * not, form a graph; a connected part of it is one series. Its root is the node with no prequel (the earliest by start
- * date if several), so the series id is the first season's even when that entry isn't loaded. A loaded entry's season
- * number is its place on the longest prequel path from a root. Seasons that aren't loaded are absent, never invented.
+ * date if several), so the series id is the first season's even when that entry isn't loaded; while the root isn't
+ * loaded the series is provisional. Seasons that aren't loaded are absent, never invented.
  */
 function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series> {
   const isTvNode = (id: string): boolean => {
@@ -155,10 +160,31 @@ function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series>
     const members = [...ids].filter((id) => entries.has(id))
       .sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0) || byDate(a, b))
       .map((id) => entries.get(id)!);
-    const series: Series = { id: roots[0]!, members, number: new Map(members.map((en) => [en.id, (depth.get(en.id) ?? 0) + 1])) };
+    const number = new Map<string, number>();
+    for (const en of members) {
+      const place = chainPlace(en, entries);
+      if (place !== null) number.set(en.id, place);
+    }
+    const series: Series = { id: roots[0]!, provisional: number.get(roots[0]!) !== 1, members, number };
     for (const id of ids) out.set(id, series);
   }
   return out;
+}
+
+/**
+ * An AniList TV entry's place in its chain, counted along single TV PREQUEL links back to a loaded root (a loaded TV
+ * entry with no TV prequel), or null when a link leads to an entry that isn't loaded, or branches.
+ */
+function chainPlace(en: Entry, entries: ReadonlyMap<string, Entry>): number | null {
+  let cur = en;
+  for (let place = 1; place <= entries.size; place++) {
+    const prequels = cur.relations.filter((r) => r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? ''));
+    if (prequels.length === 0) return place;
+    const next = prequels.length === 1 ? entries.get(prequels[0]!.id) : undefined;
+    if (!next || !isAnilistTv(next)) return null;
+    cur = next;
+  }
+  return null; // a cycle
 }
 
 export function buildCatalogue(input: CatalogueInput): Catalogue {
@@ -168,6 +194,13 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   const groupSizes = new Map<string, number>();
   for (const e of input.evidence) groupSizes.set(groupKey(e), (groupSizes.get(groupKey(e)) ?? 0) + 1);
   const seriesOf = anilistSeries(entries);
+  // AniList season numbers (ruling T7h): the chain's count when the whole chain is loaded, else the matcher's (which
+  // walked the real chain), else the season an owner gave the entry
+  const matcherSeason = new Map<string, number>();
+  for (const m of input.matches) if (m.status === 'filed' && m.season !== null && !matcherSeason.has(m.entryId)) matcherSeason.set(m.entryId, m.season);
+  const ownerSeason = new Map<string, number>();
+  const seasonOf = (series: Series, entryId: string): number | null =>
+    series.number.get(entryId) ?? matcherSeason.get(entryId) ?? ownerSeason.get(entryId) ?? null;
 
   const artById = new Map<string, { small: string; large: string }>();
   const artId = (art: { small: string; large: string } | null): string | null => {
@@ -240,24 +273,39 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       return { title: b, season: numbered(b, n, null, null) };
     }
     const en = entries.get(titleId);
-    // filed under an entry that isn't loaded yet (ruling T7c)
-    if (!en) return 'no-title';
-    if (isAnilistTv(en)) {
-      const series = seriesOf.get(en.id)!;
+    // an AniList series, by the id of any entry in its chain, loaded or not
+    const series = seriesOf.get(titleId);
+    if (series) {
       const b = seriesTitle(series);
-      let member: Entry | undefined = en;
-      if (byOwner && seasonNo !== null) member = series.members.find((m) => series.number.get(m.id) === seasonNo);
-      else if (byOwner && extras && seasonNo === null && en.id === series.id) return { title: b, season: null };
-      if (!member) return 'no-season';
-      const n = series.number.get(member.id)!;
-      return {
+      const memberSeason = (m: Entry, n: number): Target => ({
         title: b,
         season: season(b, {
-          id: `${member.id}#season`, label: member.names.english ?? member.names.romaji ?? `Season ${n}`, number: n, order: series.members.indexOf(member),
-          info: { episodes: member.episodes, runtimeMin: member.runtimeMin }, discDbSeason: null,
+          id: `${m.id}#season`, label: m.names.english ?? m.names.romaji ?? `Season ${n}`, number: n, order: n,
+          info: { episodes: m.episodes, runtimeMin: m.runtimeMin }, discDbSeason: null,
         }),
-      };
+      });
+      if (byOwner) {
+        // the owner's season wins: the loaded entry with that number, or the chosen entry when its number is unknown,
+        // or a plain season of that number
+        if (seasonNo !== null) {
+          const m = series.members.find((x) => seasonOf(series, x.id) === seasonNo) ?? (en && seasonOf(series, en.id) === null ? en : undefined);
+          if (!m) return { title: b, season: numbered(b, seasonNo, null, null) };
+          if (seasonOf(series, m.id) === null) ownerSeason.set(m.id, seasonNo);
+          return memberSeason(m, seasonNo);
+        }
+        if (extras && (!en || titleId === series.id)) return { title: b, season: null };
+        const n = en ? seasonOf(series, en.id) : null;
+        return n === null ? 'no-season' : memberSeason(en!, n);
+      }
+      if (!en) return 'no-title';
+      const counted = series.number.get(en.id);
+      if (seasonNo !== null && counted !== undefined && counted !== seasonNo) return 'no-season';
+      const n = seasonNo ?? seasonOf(series, en.id);
+      if (n === null) return extras ? { title: b, season: null } : 'no-season';
+      return memberSeason(en, n);
     }
+    // filed under an entry that isn't loaded yet (ruling T7c)
+    if (!en) return 'no-title';
     const b = entryTitle(en);
     if (b.single) return { title: b, season: null };
     const n = seasonNo ?? (extras ? null : en.seasons.length === 1 ? en.seasons[0]!.number : undefined);
@@ -458,6 +506,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     unsorted,
     hidden,
     art: (id) => artById.get(id) ?? null,
+    provisional: [...new Set([...seriesOf.values()].filter((x) => x.provisional && builds.has(x.id)).map((x) => x.id))],
   };
 }
 

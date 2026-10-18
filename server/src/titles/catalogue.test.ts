@@ -132,11 +132,12 @@ describe('buildCatalogue', () => {
       matches: [filed('drv5/Ember Blade/S2D1', 'anilist:120', 2, 1), filed('drv5/Ember Blade/S3D1', 'anilist:450', 3, 1)],
     });
     expect(later.titles.map((t) => t.id)).toEqual(['anilist:300']);
+    expect(later.provisional).toEqual(['anilist:300']);
     expect(later.detail('anilist:300')!.seasons.map((s) => [s.number, s.label])).toEqual([[2, 'Ember Blade Season 2'], [3, 'Hinokiri no Ken: Kanketsu-hen']]);
     expect(chain().titles.filter((t) => t.kind === 'series').map((t) => t.id)).toEqual(['anilist:300']);
   });
 
-  it('joins a chain across a season that is not loaded, never inventing it', () => {
+  it('joins a chain across a season that is not loaded, and files an owner\'s season in it', () => {
     const cat = build({
       entries: [S1, S3],
       evidence: [ev('drv5/Ember Blade/S1D1'), ev('drv5/Ember Blade/S3D1'), ev('drv5/Ember Blade/S3D2'), ev('drv5/Ember Blade/S2D1')],
@@ -152,11 +153,40 @@ describe('buildCatalogue', () => {
       }),
     });
     expect(cat.titles.map((t) => t.id)).toEqual(['anilist:300']);
+    // the owner's season wins (ruling T7h): season 2 is the owner's, not invented by the catalogue
     expect(cat.detail('anilist:300')!.seasons.map((s) => [s.number, s.label, s.discs.map((d) => d.number)])).toEqual([
       [1, 'Ember Blade', [1]],
+      [2, 'Season 2', [1]],
       [3, 'Hinokiri no Ken: Kanketsu-hen', [1, 2]],
     ]);
-    expect(cat.unsorted.map((u) => [u.discId, u.reason])).toEqual([[id('drv5/Ember Blade/S2D1'), 'no-season']]);
+    expect(cat.unsorted).toEqual([]);
+    expect(cat.provisional).toEqual([]);
+  });
+
+  it('numbers a season by the matcher when its chain is not loaded back to the root (ruling T7h)', () => {
+    const cat = build({ entries: [S3], evidence: [ev('drv5/E/S3D1'), ev('drv5/E/S3D2'), ev('drv5/E/S3D3')], matches: [
+      filed('drv5/E/S3D1', 'anilist:450', 3, 1),
+      { discId: id('drv5/E/S3D2'), status: 'unsorted', reason: 'no-disc-number', suggestions: [] },
+      { discId: id('drv5/E/S3D3'), status: 'unsorted', reason: 'no-disc-number', suggestions: [] },
+    ], owner: owner({
+      // the series by a chain id that isn't loaded, and by the root id it will have
+      [id('drv5/E/S3D2')]: { kind: 'title', titleId: 'anilist:120', season: 3, disc: 2 },
+      [id('drv5/E/S3D3')]: { kind: 'title', titleId: 'anilist:450', season: 3, disc: 3 },
+    }) });
+    const [title] = cat.titles;
+    expect(cat.provisional).toEqual([title!.id]);
+    expect(cat.detail(title!.id)!.seasons.map((s) => [s.number, s.label, s.discs.map((d) => d.number)])).toEqual([[3, 'Hinokiri no Ken: Kanketsu-hen', [1, 2, 3]]]);
+  });
+
+  it('sends a disc whose matcher season disagrees with a whole loaded chain to Unsorted', () => {
+    const cat = build({
+      entries: [S1, S2, S3],
+      evidence: [ev('drv5/E/S1D1'), ev('drv5/E/S2D1')],
+      matches: [filed('drv5/E/S1D1', 'anilist:300', 1, 1), filed('drv5/E/S2D1', 'anilist:120', 3, 1)],
+    });
+    expect(cat.detail('anilist:300')!.seasons.map((s) => s.number)).toEqual([1]);
+    expect(cat.unsorted.map((u) => [u.discId, u.reason])).toEqual([[id('drv5/E/S2D1'), 'no-season']]);
+    expect(cat.provisional).toEqual([]);
   });
 
   it('keeps season ids apart from title ids', () => {
