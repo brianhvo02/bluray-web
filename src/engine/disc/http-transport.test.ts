@@ -154,6 +154,23 @@ describe('createByteSource (remote)', () => {
     expect(Array.from(await source.read('BDMV/STREAM/00001.M2TS', 0, 1))).toEqual([2]);
     expect(nas.requested).toEqual(['BDMV/STREAM/00001.M2TS']);
   });
+
+  it('reads past 4 GiB: offsets and the Range header beyond 2^32, chunk-aligned, a mixed-case path asked as listed', async () => {
+    const chunk = 2 * 1024 * 1024;
+    const { fetch, seen } = recording((_url) => new Response(new Uint8Array(chunk).fill(7), { status: 206 }));
+    const spec = {
+      kind: 'remote',
+      base: FAKE_NAS_BASE,
+      token: 'tok',
+      manifest: { discId: 'd1', name: 'Big', files: [{ path: 'BDMV/STREAM/00001.M2TS', size: 6_000_000_000 }], inline: {} },
+    } as const;
+    const source = createByteSource(spec, { fetch, readAheadBytes: 0, chunkBytes: chunk, onWaiting: () => undefined });
+    expect(source.size('bdmv/stream/00001.m2ts')).toBe(6_000_000_000);
+    const bytes = await source.read('bdmv/stream/00001.m2ts', 5_000_000_000, 4);
+    expect(Array.from(bytes)).toEqual([7, 7, 7, 7]);
+    const first = Math.floor(5_000_000_000 / chunk) * chunk;
+    expect(seen).toEqual([{ url: `${FAKE_NAS_BASE}files/BDMV/STREAM/00001.M2TS?t=tok`, headers: { range: `bytes=${first}-${first + chunk - 1}` } }]);
+  });
 });
 
 describe('TokenRelay', () => {

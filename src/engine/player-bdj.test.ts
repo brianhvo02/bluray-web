@@ -11,13 +11,17 @@ import { createRing, renderQuantum, ringViews } from './audio/ring';
 import { runBdjWorker } from './bdj/bdj-worker';
 import { ZipArchive } from './bdj/jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './bdj/runtime';
-import type { WorkerLike } from './bdj/session';
+import { DUMP_WAIT_MS, type WorkerLike } from './bdj/session';
 import type { FromBdj, ToBdj } from './bdj/worker-protocol';
+import type { DecodeImage } from './bdj/background';
 import { SharedRegisterView } from './bdj/shared-registers';
 import type { PlayerSettings } from './disc/player-settings';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { Player } from './player';
+import { MEMORY_PROFILES, type MemoryProfileName } from './memory-profile';
+import type { CompositorLike } from './render/compositor';
+import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
 import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
@@ -58,6 +62,8 @@ interface Harness {
   /** Everything the engine sent to the BD-J worker. */
   readonly sent: ToBdj[];
   readonly terminated: () => boolean;
+  /** How many BD-J workers the player created. */
+  readonly workers: () => number;
   /** Paths read from the fake NAS (remote harness only). */
   readonly requested: readonly string[];
   /** Delivers a message to the engine as if the BD-J worker had sent it. */
@@ -76,6 +82,12 @@ interface HarnessOptions {
   readonly worker?: WorkerLike;
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
   readonly playerSettings?: PlayerSettings;
+  readonly compositor?: CompositorLike;
+  readonly decodeImage?: DecodeImage;
+  readonly bdjMissing?: readonly string[];
+  readonly planeHashTelemetry?: boolean;
+  readonly memoryProfile?: MemoryProfileName;
+  readonly memoryTelemetry?: boolean;
   /** Serve the disc from a fake NAS: the engine and the BD-J worker read it by HTTP range reads. */
   readonly remote?: boolean;
 }
@@ -85,6 +97,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   const events: EngineEvent[] = [];
   const sent: ToBdj[] = [];
   let terminated = false;
+  let workers = 0;
   let toEngine: MessagePort | null = null;
   const clock = { ms: 1000 };
   const nas = opts.remote ? fakeNas(files) : null;
@@ -94,9 +107,10 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     nowMs: () => clock.ms,
     requestFrame: () => undefined,
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
-    createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+    createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
     setTimer: opts.setTimer ?? (() => () => undefined),
     createBdjWorker: () => {
+      workers++;
       if (opts.worker) return opts.worker;
       const { port1, port2 } = new MessageChannel();
       runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0], nas ? { fetch: nas.fetch } : {});
@@ -122,11 +136,16 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     },
     loadClassLibrary: async () => classes,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
+    ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
+    ...(opts.bdjMissing ? { bdjMissing: opts.bdjMissing } : {}),
+    ...(opts.planeHashTelemetry ? { planeHashTelemetry: true } : {}),
+    ...(opts.memoryTelemetry ? { memoryTelemetry: true } : {}),
     ...(nas ? { fetch: nas.fetch } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
   const views = ringViews(ring);
+  if (opts.memoryProfile) await player.handle({ type: 'setMemoryProfile', profile: opts.memoryProfile });
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
   await player.handle({ type: 'open', disc: nas ? nas.spec : { kind: 'files', entries: discEntries(files) } });
@@ -137,6 +156,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     events,
     sent,
     terminated: () => terminated,
+    workers: () => workers,
     requested: nas?.requested ?? [],
     inject: (m) => toEngine!.postMessage(m),
     async play(ms) {
@@ -182,26 +202,36 @@ async function playing(files = bdjDisc()): Promise<Harness> {
 }
 
 describe('Player with BD-J titles (in-process BD-J worker)', () => {
+  it('a browser that lacks something BD-J needs opens the disc to the picker, naming it, and starts no worker', async () => {
+    const h = await harness(bdjDisc(), { bdjMissing: ['workers started from workers'] });
+    await h.play(500);
+    expect(h.workers()).toBe(0);
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'titles', usesBdj: true, bdjSupported: false, bdjMissing: ['workers started from workers'] }));
+    expect(h.events).toContainEqual({
+      type: 'notice',
+      code: 'bdj',
+      message: "This disc uses BD-J (Java) menus, which this browser can't run: it lacks workers started from workers. Choose a playlist to play.",
+    });
+    expect(h.events).not.toContainEqual(expect.objectContaining({ type: 'bdjActive', active: true }));
+    expect(lastState(h)).toBe('idle');
+  });
+
   it('runs First Play from a disc on the NAS: the engine and the BD-J worker both read it by range reads', async () => {
     const h = await harness(fixtureDiscFiles('disc-bdj'), { remote: true });
     await until(h, () => lastState(h) === 'playing' && playlistsPlayed(h).length > 0);
     expect(playlistsPlayed(h)).toEqual(['00000']);
     const boot = h.sent.find((m) => m.type === 'boot');
-    expect(boot).toMatchObject({ disc: { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/' }, readAheadBytes: 128 * 1024 * 1024 });
+    expect(boot).toMatchObject({ disc: { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/' }, readAheadBytes: 16 * 1024 * 1024 }); // the BD-J worker's own budget (R20)
     expect(h.requested).toContain('BDMV/JAR/00000.JAR'); // only the BD-J worker reads the jar
     expect(h.requested).toContain('BDMV/STREAM/00000.M2TS');
   }, 90_000);
 
-  it('runs First Play: Java plays playlist 00000 with no picker and a menu-hidden notice', async () => {
+  it('runs First Play: Java plays playlist 00000 with no picker and no notice', async () => {
     const h = await playing();
     expect(h.events).toContainEqual(expect.objectContaining({ type: 'titles', bdjSupported: true }));
     expect(h.events).toContainEqual({ type: 'bdjActive', active: true });
-    expect(h.events).toContainEqual({
-      type: 'notice',
-      code: 'bdj-menu-hidden',
-      message: "This disc's menu isn't shown yet. The disc is playing on its own; choose a playlist to take over.",
-    });
-    expect(notices(h)).not.toContain('bdj');
+    expect(notices(h)).toEqual([]); // 5c's "menu isn't shown yet" is gone: menus are drawn and take input
+    expect(h.events.some((e) => e.type === 'bdjMenu')).toBe(false); // disc-bdj draws nothing
     expect(playlistsPlayed(h)).toEqual(['00000']);
     expect(h.sent.filter((m) => m.type === 'start')).toEqual([{ type: 'start', title: 0xffff }]);
     // the disc's playlist masks pause and seeks, but under a BD-J title the UI is told only of menu call and title search
@@ -250,6 +280,48 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(notices(h)).not.toContain('uo-masked');
     await until(h, () => bdjEvents(h, BdjEvent.SEEK).length >= 2);
     expect(bdjEvents(h, BdjEvent.SEEK)).toEqual([1.2 * 45_000, 2 * 45_000]);
+  }, 90_000);
+
+  /** disc-bdj with playlist 00000's one 4 s play item a still: Java plays 00000 and selects it again when it ends. */
+  const stillDisc = (still: { mode: number; time?: number }) =>
+    bdjDisc({
+      playlists: [
+        { id: '00000', clipIds: ['00000'], chapterEverySeconds: 1, uoMask: PLAYBACK_MASKED, stills: { 0: still } },
+        { id: '00001', clipIds: ['00001'], chapterEverySeconds: 1 },
+      ],
+    });
+  const clockUs = (h: Harness): number => h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : [])).at(-1) ?? 0;
+
+  it('holds at the end of an infinite still play item, as _bd_read_locked does under BD-J: no END_OF_PLAYLIST', async () => {
+    const h = await playing(stillDisc({ mode: 2 }));
+    await h.play(8000);
+    expect(bdjEvents(h, BdjEvent.END_OF_PLAYLIST)).toEqual([]);
+    expect(playlistsPlayed(h)).toEqual(['00000']);
+    expect(clockUs(h)).toBeGreaterThanOrEqual(3_600_000);
+    expect(clockUs(h)).toBeLessThan(4_000_000);
+  }, 90_000);
+
+  it('holds a time still for its still_time, then the playlist ends (bd_read_skip_still)', async () => {
+    const h = await playing(stillDisc({ mode: 1, time: 2 }));
+    await until(h, () => clockUs(h) >= 3_600_000);
+    await h.play(1500);
+    expect(bdjEvents(h, BdjEvent.END_OF_PLAYLIST)).toEqual([]);
+    await until(h, () => bdjEvents(h, BdjEvent.END_OF_PLAYLIST).length > 0);
+    expect(playlistsPlayed(h).length).toBeGreaterThanOrEqual(1);
+  }, 90_000);
+
+  it('a pause and play from Java during a still hold go back to playing, and the time still still ends', async () => {
+    const h = await playing(stillDisc({ mode: 1, time: 5 }));
+    await until(h, () => clockUs(h) >= 3_600_000);
+    await h.play(300); // held at the item's end
+    h.inject({ type: 'call', id: 9101, name: 'selectRate', args: [0, 0] }); // a rate change, not BDJ_PLAYBACK_STOP
+    await until(h, () => lastState(h) === 'paused');
+    h.inject({ type: 'call', id: 9102, name: 'selectRate', args: [1, 0] });
+    await until(h, () => h.sent.some((m) => m.type === 'reply' && m.id === 9102));
+    await h.play(100);
+    expect(lastState(h)).toBe('playing');
+    expect(bdjEvents(h, BdjEvent.END_OF_PLAYLIST)).toEqual([]);
+    await until(h, () => bdjEvents(h, BdjEvent.END_OF_PLAYLIST).length > 0); // still_time (5 s) passed: on to the end
   }, 90_000);
 
   it("refuses a menu call masked by Java's UO mask, with uo-masked and UO_MASKED to Java", async () => {
@@ -350,6 +422,22 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
   });
 
+  it("sends the memory profile's BD-J budgets with the boot, from an early worker and from a title's", async () => {
+    for (const profile of ['desktop', 'constrained'] as const) {
+      const w = handWorker();
+      await harness(bdjDisc(), { worker: w.worker, memoryProfile: profile });
+      await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+      const p = MEMORY_PROFILES[profile];
+      expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memory: { classBytes: p.bdjClassCacheBytes, vfsBytes: p.bdjVfsCacheBytes } });
+    }
+    const w = handWorker();
+    const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(1))] }]);
+    const files = bdjDisc({ movieObjects, index: { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'bdj', name: '00001' }] } });
+    await harness(files, { worker: w.worker, memoryProfile: 'constrained' });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memory: { classBytes: MEMORY_PROFILES.constrained.bdjClassCacheBytes } });
+  });
+
   it('applies the player settings when an HDMV program hands over to a BD-J title, before the worker boots (R9)', async () => {
     const w = handWorker();
     const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(1))] }]);
@@ -369,10 +457,62 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     clock.advance(19_999);
     expect(notices(h)).not.toContain('bdj-failed');
     clock.advance(1);
+    // the worker is asked for its thread dump first; one that does not answer is stopped DUMP_WAIT_MS later
+    expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    expect(notices(h)).not.toContain('bdj-failed');
+    clock.advance(DUMP_WAIT_MS);
     expect(h.events.find((e) => e.type === 'notice' && e.code === 'bdj-failed')).toMatchObject({
-      message: "BD-J couldn't start this disc (timeout: no playlist was selected within 20 s). Choose a playlist to play.",
+      message: "BD-J couldn't start this disc (timeout: no playlist was selected and nothing was shown within 20 s). Choose a playlist to play.",
     });
     expect(h.events.filter((e) => e.type === 'bdjActive').at(-1)).toEqual({ type: 'bdjActive', active: false });
+    expect(w.terminated()).toBe(true);
+  });
+
+  /** A booted hand-driven title on a virtual timer clock, and its plane's writer. */
+  async function bootedOnClock(): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; clock: VirtualClock; writer: GraphicsPlaneWriter }> {
+    const clock = new VirtualClock();
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot') throw new Error('no boot');
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    return { h, w, clock, writer: new GraphicsPlaneWriter(boot.plane) };
+  }
+
+  it('a menu Java shows without selecting a playlist keeps BD-J alive past the 20 s timeout (ruling R7)', async () => {
+    const { h, w, clock, writer } = await bootedOnClock();
+    clock.advance(10_000);
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 100, 100, 299, 149);
+    await h.play(20); // the flush becomes visible at the next tick: bdjMenu visible
+    expect(h.events).toContainEqual({ type: 'bdjMenu', visible: true });
+    clock.advance(60_000);
+    expect(notices(h)).not.toContain('bdj-failed');
+    expect(w.terminated()).toBe(false);
+  });
+
+  it('a background still Java shows without selecting a playlist keeps BD-J alive past the 20 s timeout (ruling R7)', async () => {
+    const { h, w, clock } = await bootedOnClock();
+    w.emit({ type: 'background', image: new Uint8Array([1, 2, 3]), rect: { x: 0, y: 0, width: 1, height: 1 } });
+    clock.advance(60_000);
+    expect(notices(h)).not.toContain('bdj-failed');
+    expect(w.terminated()).toBe(false);
+  });
+
+  it('a title that draws nothing, shows no still and selects nothing still falls back at 20 s', async () => {
+    const { h, w, clock, writer } = await bootedOnClock();
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0); // an opened but empty plane is no menu
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 100, 299, 149);
+    w.emit({ type: 'background', image: null, rect: { x: 0, y: 0, width: 1, height: 1 } }); // a cleared still neither
+    await h.play(20);
+    clock.advance(19_999);
+    expect(notices(h)).not.toContain('bdj-failed');
+    clock.advance(1);
+    expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    w.emit({ type: 'dumped' });
+    expect(notices(h)).toContain('bdj-failed');
     expect(w.terminated()).toBe(true);
   });
 
@@ -400,6 +540,500 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
     return { h, w };
   }
+
+  /** A compositor that records its calls by name; drawBdj also notes the plane's buffer and copies it, as the real one does. */
+  function recordingCompositor(): { readonly compositor: CompositorLike; readonly calls: string[]; readonly planes: SharedArrayBuffer[] } {
+    const calls: string[] = [];
+    const planes: SharedArrayBuffer[] = [];
+    const image = { data: new Uint8ClampedArray(1920 * 1080 * 4), width: 1920, height: 1080 } as ImageData;
+    const compositor: CompositorLike = {
+      resize: () => void calls.push('resize'),
+      drawVideo: () => void calls.push('drawVideo'),
+      drawIg: () => void calls.push('drawIg'),
+      drawBdj: (plane) => {
+        calls.push('drawBdj');
+        planes.push(plane.buffer);
+        plane.copyDirtyInto(image);
+      },
+      clearBdj: () => void calls.push('clearBdj'),
+      setBackground: (still) => void calls.push(still ? `setBackground:${(still.image as unknown as { name: string }).name}` : 'setBackground:null'),
+    };
+    return { compositor, calls, planes };
+  }
+
+  /** A booted hand-driven BD-J title whose Java has drawn a menu into the plane, shown by a recording compositor. */
+  async function menuShown(
+    opts: HarnessOptions = {},
+    wrap: (c: CompositorLike) => CompositorLike = (c) => c,
+  ): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; rec: ReturnType<typeof recordingCompositor>; writer: GraphicsPlaneWriter }> {
+    const w = handWorker();
+    const rec = recordingCompositor();
+    const h = await harness(bdjDisc(), { ...opts, worker: w.worker, compositor: wrap(rec.compositor) });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot') throw new Error('no boot');
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    const writer = new GraphicsPlaneWriter(boot.plane);
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 100, 100, 299, 149);
+    await h.play(50);
+    expect(rec.planes.at(-1)).toBe(boot.plane);
+    expect(new GraphicsPlaneReader(boot.plane).visible()).toBe(true);
+    return { h, w, rec, writer };
+  }
+
+  it("draws Java's plane on its flush, with no playlist playing, and not again until it changes", async () => {
+    const { h, rec, writer } = await menuShown();
+    const at = rec.calls.length;
+    await h.play(50);
+    // a visible plane is drawn whenever the picture is; with no playlist nothing changed, so nothing is drawn
+    expect(rec.calls.slice(at)).toEqual([]);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 100, 299, 149); // the menu taken down
+    await h.play(20);
+    expect(rec.calls.slice(at)).toEqual(['drawVideo', 'drawBdj']);
+  });
+
+  it('repaints with the plane drawn last when the window is resized (Review Focus 1)', async () => {
+    const { h, rec } = await menuShown();
+    const at = rec.calls.length;
+    await h.player.handle({ type: 'resize', width: 390, height: 844 });
+    expect(rec.calls.slice(at)).toEqual(['resize', 'drawVideo', 'drawBdj']);
+  });
+
+  /** After `leave`, the plane is cleared at once (a repaint without it) and never drawn again (Review Focus 2). */
+  async function clearedBy(leave: (h: Harness, w: ReturnType<typeof handWorker>) => Promise<void>): Promise<void> {
+    const { h, w, rec, writer } = await menuShown();
+    const at = rec.calls.length;
+    await leave(h, w);
+    const after = rec.calls.slice(at);
+    expect(after.slice(0, 2)).toEqual(['clearBdj', 'drawVideo']);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 0, 0, 9, 9); // a worker still drawing as it dies
+    await h.play(500);
+    expect(rec.calls.slice(at)).not.toContain('drawBdj');
+    expect(w.terminated()).toBe(true);
+  }
+
+  it('clears the plane at once when the user picks a playlist in the picker', async () => {
+    await clearedBy((h) => h.player.handle({ type: 'playPlaylist', playlistId: '00001' }));
+  });
+
+  it('clears the plane at once when the disc closes', async () => {
+    await clearedBy((h) => h.player.handle({ type: 'close' }));
+  });
+
+  it('clears the plane at once when BD-J fails', async () => {
+    await clearedBy(async (h, w) => {
+      w.emit({ type: 'failed', code: 'internal', message: 'boom' });
+      expect(notices(h)).toContain('bdj-failed');
+    });
+  });
+
+  // ---- keys, pointer and taps (5d Task 8) ----
+
+  /** Timers the test fires by hand; the BD-J first-playlist timeout (20 s) is among them and never fired. */
+  function manualTimers() {
+    const timers: { ms: number; fn: () => void; cancelled: boolean }[] = [];
+    return {
+      setTimer: (ms: number, fn: () => void) => {
+        const t = { ms, fn, cancelled: false };
+        timers.push(t);
+        return () => void (t.cancelled = true);
+      },
+      /** Live timers of `ms`. */
+      armed: (ms: number) => timers.filter((t) => t.ms === ms && !t.cancelled),
+      /** Fires the live timers of `ms`, as if that much time had passed. */
+      fire(ms: number) {
+        for (const t of timers.filter((x) => x.ms === ms && !x.cancelled)) {
+          t.cancelled = true;
+          t.fn();
+        }
+      },
+    };
+  }
+
+  /** startedHand with the given timers. */
+  async function startedHandWith(opts: HarnessOptions): Promise<{ readonly h: Harness; readonly w: ReturnType<typeof handWorker> }> {
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { ...opts, worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    return { h, w };
+  }
+
+  const ALL_FLAGS = 0xe0000000;
+  const INPUT_EVENTS: ReadonlySet<number> = new Set([BdjEvent.VK_KEY, BdjEvent.MOUSE, BdjEvent.UO_MASKED]);
+  /** The input events (and UO_MASKED) sent to the worker since `from`. */
+  const inputSent = (w: ReturnType<typeof handWorker>, from = 0): Array<{ ev: number; param: number; coalesce?: string }> =>
+    w.sent.slice(from).flatMap((m) => (m.type === 'event' && INPUT_EVENTS.has(m.ev) ? [{ ev: m.ev, param: m.param >>> 0, ...(m.coalesce ? { coalesce: m.coalesce } : {}) }] : []));
+  const vkKey = (vk: number) => ({ ev: BdjEvent.VK_KEY, param: (ALL_FLAGS | vk) >>> 0 });
+
+  it('sends arrows, OK, digits and the pop-up key to Java as bd_user_input does', async () => {
+    const { h, w } = await startedHand();
+    const from = w.sent.length;
+    for (const key of ['up', 'down', 'left', 'right', 'ok', '0', '7', 'popup'] as const) await h.player.handle({ type: 'menuKey', key });
+    expect(inputSent(w, from)).toEqual([12, 13, 14, 15, 16, 0, 7, 11].map(vkKey));
+  });
+
+  it('sends keys whatever the key interest table, and the pop-up key whatever the UO mask (libbluray filters neither for BD-J)', async () => {
+    const { h, w } = await startedHand();
+    w.emit({ type: 'call', id: 1, name: 'setKeyInterest', args: [0] });
+    const from = w.sent.length;
+    await h.player.handle({ type: 'menuKey', key: 'popup' });
+    await h.player.handle({ type: 'menuKey', key: 'ok' });
+    expect(inputSent(w, from)).toEqual([vkKey(11), vkKey(16)]);
+  });
+
+  it('makes Top Menu a menu call: refused with UO_MASKED under the menu call mask, never a VK_KEY', async () => {
+    const { h, w } = await startedHand();
+    w.emit({ type: 'call', id: 1, name: 'setUOMask', args: [true, false] });
+    await vi.waitFor(() => expect(h.events.some((e) => e.type === 'uoMask' && e.masked.includes('menuCall'))).toBe(true));
+    const from = w.sent.length;
+    await h.player.handle({ type: 'menuKey', key: 'topMenu' });
+    expect(inputSent(w, from)).toEqual([{ ev: BdjEvent.UO_MASKED, param: 0 }]);
+    expect(notices(h)).toContain('uo-masked');
+    w.emit({ type: 'call', id: 2, name: 'setUOMask', args: [false, false] });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'reply' && m.id === 2)).toBe(true));
+    const before = w.sent.length;
+    await h.player.handle({ type: 'menuKey', key: 'topMenu' });
+    expect(inputSent(w, before)).toEqual([]);
+    await vi.waitFor(() => expect(w.sent.slice(before).some((m) => m.type === 'start' && m.title === 0)).toBe(true));
+  });
+
+  it("forwards a held key's repeats in order, marked so a full queue may merge them (Review Focus 2)", async () => {
+    const { h, w } = await startedHand();
+    const from = w.sent.length;
+    await h.player.handle({ type: 'menuKey', key: 'down' });
+    for (let i = 0; i < 3; i++) await h.player.handle({ type: 'menuKey', key: 'down', repeat: true });
+    await h.player.handle({ type: 'menuKey', key: 'ok' });
+    const repeat = { ...vkKey(13), coalesce: 'repeat' };
+    expect(inputSent(w, from)).toEqual([vkKey(13), repeat, repeat, repeat, vkKey(16)]);
+  });
+
+  it('sends a click as BDJ_EVENT_MOUSE then the activate key, and a move as a mergeable BDJ_EVENT_MOUSE', async () => {
+    const { h, w } = await startedHand();
+    const from = w.sent.length;
+    await h.player.handle({ type: 'pointer', kind: 'move', x: 100.4, y: 50 });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 232, y: 216 });
+    expect(inputSent(w, from)).toEqual([
+      { ev: BdjEvent.MOUSE, param: (100 << 16) | 50, coalesce: 'move' },
+      { ev: BdjEvent.MOUSE, param: (232 << 16) | 216 },
+      vkKey(17), // BD_VK_MOUSE_ACTIVATE
+    ]);
+    expect(h.events.some((e) => e.type === 'pointerTarget')).toBe(false); // HDMV's cursor feedback has no BD-J counterpart
+  });
+
+  it('times a key and a click to the frame that shows their plane change (telemetry bdj.inputLatencyMs)', async () => {
+    const { h, writer } = await menuShown();
+    await h.player.handle({ type: 'menuKey', key: 'down' });
+    await h.play(STEP_MS * 3); // frames with the plane unchanged answer nothing
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    await h.play(STEP_MS);
+    await h.player.handle({ type: 'pointer', kind: 'move', x: 5, y: 5 }); // a move is not timed
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 200, y: 120 });
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-3), 100, 100, 299, 149);
+    await h.play(600); // a telemetry interval, with no playlist playing
+    expect(lastTelemetry(h)?.bdj?.inputLatencyMs).toEqual({ last: Math.round(STEP_MS), max: Math.round(STEP_MS * 4), count: 2 });
+  });
+
+  it("times an input whose flush lands in the middle of a frame's paint, which copies and shows it (Firefox gate)", async () => {
+    // Java flushes on the BD-J worker's thread: here after the frame has found nothing pending and before its copy
+    let midPaint: (() => void) | null = null;
+    const { h, w, writer } = await menuShown({ decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap }, (c) => ({
+      ...c,
+      drawVideo: (frame) => {
+        c.drawVideo(frame);
+        const flush = midPaint;
+        midPaint = null;
+        flush?.();
+      },
+    }));
+    await h.player.handle({ type: 'menuKey', key: 'down' });
+    await h.play(STEP_MS * 3);
+    midPaint = () => updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    // a background still makes the next frame repaint everything, the visible plane included
+    w.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1920, height: 1080 } });
+    await h.play(600);
+    expect(midPaint).toBeNull(); // the flush did land inside a paint
+    expect(lastTelemetry(h)?.bdj?.inputLatencyMs?.count).toBe(1);
+  });
+
+  it('telemetry carries the plane hash once the plane has settled for an interval, only when asked (test-only)', async () => {
+    const { h, writer } = await menuShown({ planeHashTelemetry: true });
+    const hashes = (): (string | null | undefined)[] => h.events.flatMap((e) => (e.type === 'telemetry' && e.telemetry.bdjPlane ? [e.telemetry.bdjPlane.hash] : []));
+    await h.play(1200); // the interval that sees the plane first, then one that sees it unchanged
+    const settled = new GraphicsPlaneReader(writer.buffer).hash();
+    expect(hashes().at(-1)).toBe(settled);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    await h.play(600);
+    expect(hashes().at(-1)).toBeNull(); // changed since the last telemetry
+    await h.play(600);
+    expect(hashes().at(-1)).toBe(new GraphicsPlaneReader(writer.buffer).hash());
+    expect(hashes().at(-1)).not.toBe(settled);
+
+    const plain = await menuShown();
+    await plain.h.play(1200);
+    expect(lastTelemetry(plain.h)?.bdjPlane).toEqual({ flushes: expect.any(Number), tapsIgnored: 0 });
+  });
+
+  it("telemetry carries BD-J's memory, from the worker's reports and the engine's buffers, only when asked (test-only)", async () => {
+    const { h, w } = await menuShown({ memoryTelemetry: true });
+    expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memoryStatsMs: 5000 });
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjMemory).toEqual({ jvm: null, freeType: null, planeBytes: (16 + 1920 * 1080) * 4, stillBytes: 0, compositorBytes: 0 });
+    const jvm = { bootJarBytes: 1, classes: 2, classFileBytes: 3, zipHandles: 4, zipBytes: 5, vfsFiles: 6, vfsBytes: 7, vfsUsedBytes: 8, jdkFileBytes: 9 };
+    w.emit({ type: 'memory', jvm, freeType: { wasmBytes: 2097152, faces: 1 } });
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjMemory).toMatchObject({ jvm, freeType: { wasmBytes: 2097152, faces: 1 } });
+
+    const plain = await menuShown();
+    expect(plain.w.sent.find((m) => m.type === 'boot')).not.toHaveProperty('memoryStatsMs');
+    await plain.h.play(600);
+    expect(lastTelemetry(plain.h)).not.toHaveProperty('bdjMemory');
+  });
+
+  it('reports the BD-J menu turning visible and empty, on changes only, and empty when BD-J stops', async () => {
+    const { h, writer } = await menuShown();
+    const menu = (): boolean[] => h.events.flatMap((e) => (e.type === 'bdjMenu' ? [e.visible] : []));
+    expect(menu()).toEqual([true]);
+    await h.play(50);
+    expect(menu()).toEqual([true]);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 100, 299, 149);
+    await h.play(20);
+    expect(menu()).toEqual([true, false]);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 0, 0, 9, 9);
+    await h.play(20);
+    expect(menu()).toEqual([true, false, true]);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    expect(menu()).toEqual([true, false, true, false]);
+    const order = h.events.filter((e) => e.type === 'bdjMenu' || e.type === 'bdjActive').slice(-2);
+    expect(order).toEqual([{ type: 'bdjMenu', visible: false }, { type: 'bdjActive', active: false }]);
+  });
+
+  const TAP_MESSAGE = "This disc's menu doesn't respond to taps here. Use the remote.";
+  const tapNotices = (h: Harness): number => h.events.filter((e) => e.type === 'notice' && e.code === 'bdj-tap-ignored').length;
+  const ignoredTaps = (h: Harness): number => h.events.filter((e) => e.type === 'bdjTapIgnored').length;
+
+  it('opens the remote on a tap the menu ignores, with the notice once per menu (desktop: 0.2 s)', async () => {
+    const t = manualTimers();
+    const { h, writer } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    expect(t.armed(200)).toHaveLength(1);
+    t.fire(200);
+    expect(ignoredTaps(h)).toBe(1);
+    expect(h.events).toContainEqual({ type: 'notice', code: 'bdj-tap-ignored', message: TAP_MESSAGE });
+    // the same menu: the remote opens again, without the notice
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 10, y: 10 });
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([2, 1]);
+    // the plane is cleared, then a menu shows again: a new menu, whose first ignored tap has the notice
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080), 100, 100, 299, 149);
+    await h.play(20);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 0, 0, 9, 9);
+    await h.play(20);
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 10, y: 10 });
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([3, 2]);
+  });
+
+  it('counts ignored taps in telemetry per disc: a new open starts again from 0', async () => {
+    const t = manualTimers();
+    const { h, w } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    t.fire(200);
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjPlane?.tapsIgnored).toBe(1);
+    const boots = w.sent.filter((m) => m.type === 'boot').length;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(bdjDisc()) } });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'boot').length).toBe(boots + 1));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'start').length).toBe(2));
+    await h.play(600);
+    expect(lastTelemetry(h)?.bdjPlane?.tapsIgnored).toBe(0);
+  });
+
+  it('waits 0.5 s on the constrained memory profile', async () => {
+    const t = manualTimers();
+    const { h } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'setMemoryProfile', profile: 'constrained' });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    expect(t.armed(200)).toHaveLength(0);
+    expect(t.armed(500)).toHaveLength(1);
+    t.fire(500);
+    expect(tapNotices(h)).toBe(1);
+  });
+
+  it('says nothing when the menu reacts within the window: a flush, a control call or a register write', async () => {
+    const t = manualTimers();
+    const { h, w, writer } = await menuShown({ setTimer: t.setTimer });
+    // a flush
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    t.fire(200);
+    // a control call
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    w.emit({ type: 'call', id: 1, name: 'selectRate', args: [1, START] });
+    t.fire(200);
+    // a register write
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    w.emit({ type: 'call', id: 2, name: 'writeReg', args: [0, 5, 42, 0] });
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([0, 0]);
+    const boot = w.sent.find((m) => m.type === 'boot');
+    if (boot?.type !== 'boot') throw new Error('no boot');
+    expect(new SharedRegisterView(boot.registers).gprRead(5)).toBe(42);
+  });
+
+  it('does not count a reaction that came just before the tap', async () => {
+    const t = manualTimers();
+    const { h, w, writer } = await menuShown({ setTimer: t.setTimer });
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    w.emit({ type: 'call', id: 1, name: 'writeReg', args: [0, 5, 42, 0] });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([1, 1]);
+  });
+
+  it('a second tap within the window replaces the first: one bdjTapIgnored', async () => {
+    const t = manualTimers();
+    const { h } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 961, y: 540 });
+    expect(t.armed(200)).toHaveLength(1);
+    t.fire(200);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([1, 1]);
+  });
+
+  it('forwards a click on an empty plane without watching it: no remote, no notice (Review Focus 3)', async () => {
+    const t = manualTimers();
+    const { h, w } = await startedHandWith({ setTimer: t.setTimer });
+    const from = w.sent.length;
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    expect(inputSent(w, from)).toHaveLength(2);
+    expect(t.armed(200)).toHaveLength(0);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([0, 0]);
+  });
+
+  it('drops a tap still waiting for its reaction when BD-J stops', async () => {
+    const t = manualTimers();
+    const { h } = await menuShown({ setTimer: t.setTimer });
+    await h.player.handle({ type: 'pointer', kind: 'click', x: 960, y: 540 });
+    expect(t.armed(200)).toHaveLength(1);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    expect(t.armed(200)).toHaveLength(0);
+    expect([ignoredTaps(h), tapNotices(h)]).toEqual([0, 0]);
+  });
+
+  /** Stand-in ImageBitmaps named after the bytes they were decoded from; `hold()` makes the next decodes wait for `release()`. */
+  function bitmaps() {
+    const made: { name: string; closed: boolean }[] = [];
+    let gate: Promise<void> = Promise.resolve();
+    let open: () => void = () => undefined;
+    const decode: DecodeImage = async (bytes) => {
+      await gate;
+      const b = { name: String.fromCharCode(...bytes), width: 1920, height: 1080, closed: false, close: () => void (b.closed = true) };
+      made.push(b);
+      return b as unknown as ImageBitmap;
+    };
+    return {
+      made,
+      decode,
+      hold: () => void (gate = new Promise((r) => (open = r))),
+      release: () => open(),
+    };
+  }
+
+  const still = (name: string): FromBdj => ({ type: 'background', image: new TextEncoder().encode(name), rect: { x: 0, y: 0, width: 1, height: 1 } });
+
+  /** A menu shown by a hand-driven worker, whose Java then asked for the still 'bg' under it. */
+  async function backgroundShown() {
+    const img = bitmaps();
+    const w = handWorker();
+    const rec = recordingCompositor();
+    const h = await harness(bdjDisc(), { worker: w.worker, compositor: rec.compositor, decodeImage: img.decode });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot') throw new Error('no boot');
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    const writer = new GraphicsPlaneWriter(boot.plane);
+    updateGraphic(writer, 1920, 1080, null, 0, 0, 0, 0);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-1), 100, 100, 299, 149);
+    await h.play(50);
+    const at = rec.calls.length;
+    w.emit(still('bg'));
+    await vi.waitFor(() => expect(img.made).toHaveLength(1));
+    await h.play(20);
+    // the still goes under the video, and the picture is repainted although no playlist plays
+    expect(rec.calls.slice(at)).toEqual(['setBackground:bg', 'drawVideo', 'drawBdj']);
+    return { h, w, rec, writer, img };
+  }
+
+  it("shows Java's background still under the video and the plane, with no playlist playing", async () => {
+    const { h, w, rec, img } = await backgroundShown();
+    // a newer still replaces it; the old bitmap is closed once the compositor has the new one
+    const at = rec.calls.length;
+    w.emit(still('bg2'));
+    await vi.waitFor(() => expect(img.made).toHaveLength(2));
+    await h.play(20);
+    expect(rec.calls.slice(at)).toEqual(['setBackground:bg2', 'drawVideo', 'drawBdj']);
+    expect(img.made.map((b) => b.closed)).toEqual([true, false]);
+    // Java's displayImage(null) takes it down
+    w.emit({ type: 'background', image: null, rect: { x: 0, y: 0, width: 1, height: 1 } });
+    await h.play(20);
+    expect(rec.calls.slice(-3)).toEqual(['setBackground:null', 'drawVideo', 'drawBdj']);
+    expect(img.made[1]!.closed).toBe(true);
+  });
+
+  /** After `leave`, the background still goes with the plane, in the same repaint, and its bitmap is closed. */
+  async function backgroundClearedBy(leave: (h: Harness, w: ReturnType<typeof handWorker>) => Promise<void>): Promise<void> {
+    const { h, w, rec, img } = await backgroundShown();
+    const at = rec.calls.length;
+    await leave(h, w);
+    expect(rec.calls.slice(at, at + 3)).toEqual(['setBackground:null', 'clearBdj', 'drawVideo']);
+    expect(img.made[0]!.closed).toBe(true);
+    // a still the dying worker still sends is not shown
+    w.emit(still('late'));
+    await h.play(200);
+    expect(rec.calls.slice(at).filter((c) => c.startsWith('setBackground:') && c !== 'setBackground:null')).toEqual([]);
+    expect(img.made).toHaveLength(1);
+  }
+
+  it('clears the background still at once when the user picks a playlist in the picker', async () => {
+    await backgroundClearedBy((h) => h.player.handle({ type: 'playPlaylist', playlistId: '00001' }));
+  });
+
+  it('clears the background still at once when the disc closes', async () => {
+    await backgroundClearedBy((h) => h.player.handle({ type: 'close' }));
+  });
+
+  it('clears the background still at once when BD-J fails', async () => {
+    await backgroundClearedBy(async (_h, w) => w.emit({ type: 'failed', code: 'internal', message: 'boom' }));
+  });
+
+  it('clears the background still at once when another disc opens', async () => {
+    const other = buildSyntheticDisc({ clips: [syntheticClip('00009', 4, { audio: CodingType.LPCM })], playlists: [{ id: '00009', clipIds: ['00009'] }] });
+    await backgroundClearedBy((h) => h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(other) } }));
+  });
+
+  it('closes a still whose decode finishes after BD-J stopped, without showing it', async () => {
+    const img = bitmaps();
+    img.hold();
+    const w = handWorker();
+    const rec = recordingCompositor();
+    const h = await harness(bdjDisc(), { worker: w.worker, compositor: rec.compositor, decodeImage: img.decode });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    w.emit(still('slow'));
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+    img.release();
+    await vi.waitFor(() => expect(img.made).toHaveLength(1));
+    await h.play(50);
+    expect(img.made[0]!.closed).toBe(true);
+    expect(rec.calls.filter((c) => c.startsWith('setBackground'))).toEqual([]);
+  });
 
   it('a playlist Java asked for that is still loading when the disc closes never opens afterwards', async () => {
     const { h, w } = await startedHand();
@@ -459,7 +1093,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await until(h, () => lastState(h) === 'playing');
     await h.play(600);
     // a playlist the user chose is not Java's first playlist
-    expect(lastTelemetry(h)?.bdj).toEqual({ bootMs: null, firstPlaylistMs: null, firstFrameMs: null });
+    expect(lastTelemetry(h)?.bdj).toEqual({ bootMs: null, firstPlaylistMs: null, firstFrameMs: null, inputLatencyMs: null });
   }, 90_000);
 
   it('falls back to the picker with bdj-failed on an unreadable libbluray jar (the browser\'s ?bdjfail=1 hook)', async () => {

@@ -1,0 +1,17 @@
+# RENTAL_FAMILY (local disc): the language picker, English, the main menu, then PLAY. The picker shows over playlist
+# 01355 (its flush comes before that playlist's event, so the first step waits for the plane alone); English plays
+# 01535 from mark 1, then BD-J title 0 plays 00149, over which the main menu draws after about 15 s. PLAY plays 01495,
+# then BD-J title 1 the feature, 00800, with a position bar that hides itself after a few seconds.
+#
+# Restricted check: during the feature the disc saves its playback position about once a second, as nanoseconds in
+# GPR 518 (low word) and 519 (high word). The values, and how many writes fall before the run ends, depend on when its
+# timer fires, in libbluray's runs as in ours, so the writes after the feature starts are left out of both (settled.py,
+# tests/bdj/settled.ts); that both sides made some is still checked. The writes of 0 at start-up are compared.
+#! vary gpr 518 519 after playlist 800
+wait still 1500   # the language picker, ENGLISH focused
+key ok            # ENGLISH
+wait playlist 149 # the main menu's playlist (the picker's plane was cleared before it)
+wait still 1500   # the main menu, PLAY focused
+key ok            # PLAY
+wait playlist 800 # the feature
+wait still 1500   # the position bar has gone

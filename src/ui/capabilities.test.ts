@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkCapabilities, showStorageHint } from './capabilities';
 
-const base = { VideoDecoder: class {}, AudioWorkletNode: class {}, OffscreenCanvas: class {}, SharedArrayBuffer, crossOriginIsolated: true };
+const base = { VideoDecoder: class {}, AudioWorkletNode: class {}, OffscreenCanvas: class {}, SharedArrayBuffer, crossOriginIsolated: true, Atomics, WebAssembly, Worker: class {} };
 
 describe('checkCapabilities', () => {
   it('passes a fully capable Chromium-like environment', () => {
@@ -17,6 +17,7 @@ describe('checkCapabilities', () => {
     };
     expect(checkCapabilities(g)).toEqual({
       core: { ok: true, missing: [] },
+      bdj: { ok: true, missing: [] },
       canPickDirectory: true,
       canPickFolderInput: false,
       canRememberDiscs: true,
@@ -58,6 +59,13 @@ describe('checkCapabilities', () => {
     expect(report.fullscreen).toBe('webkit');
     expect(report.mediaSession).toBe(true);
     expect(report.wakeLock).toBe(false);
+  });
+
+  it('names what BD-J menus need that the page lacks', () => {
+    const { WebAssembly: _w, ...noWasm } = base;
+    void _w;
+    expect(checkCapabilities(noWasm).bdj).toEqual({ ok: false, missing: ['WebAssembly'] });
+    expect(checkCapabilities({ ...base, crossOriginIsolated: false }).bdj.missing).toEqual(['cross-origin isolation (SharedArrayBuffer)']);
   });
 
   it('reports no fullscreen when the document disables it (iPhone)', () => {

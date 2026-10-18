@@ -67,6 +67,34 @@ describe('Bare (before boot)', () => {
   });
 });
 
+describe('class-file bytes the classes keep', () => {
+  it('are counted, and going over the budget is reported once', async () => {
+    const warned: string[] = [];
+    const jvm = new Jvm({ bootJars: BOOT_JARS, nowMs: () => 0, setTimer: () => () => {}, stdout: () => {}, stderr: () => {}, classBytesBudget: 100, warn: (l) => warned.push(l) });
+    await jvm.callStatic('conformance/Bare', 'sum', '()I');
+    const s = jvm.memoryStats();
+    expect(s.classes).toBeGreaterThan(1);
+    expect(s.classFileBytes).toBeGreaterThan(100);
+    expect(warned).toEqual([expect.stringMatching(/^BD-J: classes keep [\d.]+ MB of class files, over the memory budget of 0\.0 MB$/)]);
+  });
+});
+
+describe('kept annotation bytes', () => {
+  it("are a runtime-visible annotation's bytes as HotSpot's reflection hands them out, after the class file is dropped", () => {
+    const jvm = new Jvm({ bootJars: BOOT_JARS, nowMs: () => 0, setTimer: () => () => {}, stdout: () => {}, stderr: () => {} });
+    const target = jvm.loader.loadBoot('conformance/Reflect$Target')!;
+    const add = target.file!.methods.find((m) => m.name === 'add')!;
+    const bytes = new Int8Array(add.annotations!.buffer, add.annotations!.byteOffset, add.annotations!.length);
+    let sum = 0;
+    for (const b of bytes) sum = (Math.imul(sum, 31) + b) | 0;
+    // @Tag("adder") on Reflect.Target.add: length and `sum = sum * 31 + b` over Method.annotations, as a Java program
+    // printed them on HotSpot 8 (the class library has no AnnotationParser, so Java cannot read them in our JVM)
+    expect([bytes.length, sum]).toEqual([11, -1974274957]);
+    expect(add.annotations!.buffer).toBe(add.code!.code.buffer);
+    expect(target.file!.methods.find((m) => m.name === 'secret')!.annotations).toBeNull();
+  });
+});
+
 describe('after JDK boot', () => {
   let out = '';
   let err = '';
@@ -287,6 +315,30 @@ describe('I/O and zip on the JDK class path alone', () => {
   );
 });
 
+// Green threads switch only between bytecodes, but they do switch inside java.util.concurrent's read-then-CAS loops,
+// so a CAS can lose to another thread as on HotSpot. A one-bytecode slice runs the putters in lockstep, which makes
+// ConcurrentHashMap.addCount lose its baseCount CAS every time and take the counter-cell path (fullAddCount), which
+// seeds the thread's probe from ThreadLocalRandom. A disc's class loader hit it at random and its xlet failed to load.
+describe('java.util.concurrent when threads race', () => {
+  it('Concurrent prints what HotSpot prints, after its putters lost a CAS to each other', async () => {
+    const io = { out: '', err: '' };
+    const jvm = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT, file('./conformance.jar')]);
+    await jvm.boot();
+    const slice = jvm.threads.slice;
+    jvm.threads.slice = 1;
+    try {
+      await runCapturing(jvm, io, 'conformance/Concurrent');
+    } finally {
+      jvm.threads.slice = slice;
+    }
+    expect(io.err).toBe('');
+    expect(io.out).toBe(new TextDecoder().decode(file('./conformance/Concurrent.out')));
+    const cls = jvm.loader.loadBoot('conformance/Concurrent')!;
+    const map = cls.staticValues[cls.findField('map', 'Ljava/util/concurrent/ConcurrentHashMap;')!.slot] as JObject;
+    expect(jvm.getField(map, 'counterCells', '[Ljava/util/concurrent/ConcurrentHashMap$CounterCell;')).not.toBeNull();
+  }, 60_000);
+});
+
 describe('URLClassLoader', () => {
   const io = { out: '', err: '' };
   let jvm: Jvm;
@@ -457,8 +509,10 @@ describe('java.io paths and failures', () => {
     fileTest('exists'),
   ]);
 
+  let lastProbe: Jvm | null = null;
   async function probing(discFiles?: ReadonlyMap<string, Uint8Array<ArrayBuffer>>, failRead?: (path: string) => boolean) {
     const jvm = bootedJvm(() => {}, () => {}, [RT], discFiles, failRead);
+    lastProbe = jvm;
     await jvm.boot();
     jvm.loader.define('FsProbe', probe, null, null);
     const call = async (fn: string, p: string): Promise<JValue | string | null | undefined> => {
@@ -493,6 +547,30 @@ describe('java.io paths and failures', () => {
     expect(await call('zip', '/disc/BDMV/JAR/00001.jar')).toBe('java.util.zip.ZipException: error in opening zip file');
     expect(await call('read', '/disc/BDMV/JAR/00000.jar')).toBe('read');
     expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
+  }, 60_000);
+  it('shares one archive among ZipFiles of an unchanged file, as zip_util does, read from the Vfs without a copy', async () => {
+    const jar = new Uint8Array(file('./conformance.jar'));
+    const call = await probing(new Map([['BDMV/JAR/00000.JAR', jar]]));
+    const jvm = lastProbe!;
+    const vfs = jvm.opts.vfs!;
+    const put = (path: string, bytes: Uint8Array): void => {
+      const h = vfs.open(path, 'w')!;
+      vfs.write(h, bytes, 0, bytes.length);
+      vfs.close(h);
+    };
+    // a disc file is read once, into a copy of the zips' own
+    expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
+    expect(await call('zip', '/disc/BDMV/JAR/00000.jar')).toBe('opened');
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 1, zipBytes: jar.length });
+    // a memory file is read in place
+    put('/tmp/a.jar', jar);
+    expect(await call('zip', '/tmp/a.jar')).toBe('opened');
+    expect(await call('zip', '/tmp/a.jar')).toBe('opened');
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 2, zipBytes: jar.length, vfsBytes: jar.length }); // the shared bytes count once
+    // rewritten, it is a new file: the open archive keeps the old bytes, which are now its own
+    put('/tmp/a.jar', jar);
+    expect(await call('zip', '/tmp/a.jar')).toBe('opened');
+    expect(jvm.memoryStats()).toMatchObject({ zipHandles: 3, zipBytes: 2 * jar.length, vfsBytes: jar.length, vfsUsedBytes: jar.length });
   }, 60_000);
 });
 

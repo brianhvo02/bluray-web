@@ -13,6 +13,7 @@ import type { JClass, JMethod } from './loader';
 import type { Jvm } from './jvm';
 import { BLOCKED, Invoke, Suspend, ThrowResult, andThen, complete, execute } from './interpreter';
 import type { Frame, NativeResult } from './interpreter';
+import { dropPerClassFastPaths } from './natives/intrinsics/common';
 
 export type ThreadState =
   | 'runnable'
@@ -50,6 +51,8 @@ export class JThread {
   exited = false;
   /** Called when the thread terminates, so a caller waiting for it can stop the scheduler while others run on. */
   onTerminate: (() => void) | null = null;
+  /** The object whose monitor the thread last blocked or waited on (thread dumps only; stale once it runs). */
+  blocker: JObject | null = null;
   constructor(
     readonly id: number,
     public javaThread: JObject | null,
@@ -216,6 +219,7 @@ export class Scheduler {
       return true;
     }
     t.state = 'blocked-monitor';
+    t.blocker = o;
     if (!m.entrySet.includes(t)) m.entrySet.push(t);
     return false;
   }
@@ -232,6 +236,7 @@ export class Scheduler {
     if (ms < 0) return this.jvm.throwNew('java/lang/IllegalArgumentException', 'timeout value is negative');
     if (takeInterrupt(t)) return this.jvm.throwNew('java/lang/InterruptedException');
     this.waiting.set(t, { o, count: m.count });
+    t.blocker = o;
     m.waitSet.push(t);
     t.state = ms > 0 ? 'timed-waiting' : 'waiting';
     this.release(m);
@@ -310,6 +315,7 @@ export class Scheduler {
     const o = this.jvm.mirror(c);
     monitorOf(o).waitSet.push(t);
     this.waiting.set(t, { o, count: 0 });
+    t.blocker = o;
     t.state = 'waiting';
     return blocked();
   }
@@ -358,6 +364,7 @@ export class Scheduler {
     }
     this.queue.length = 0;
     this.queued.clear();
+    dropPerClassFastPaths();
     this.pending.clear();
     this.conts.clear();
     this.waiting.clear();
@@ -383,6 +390,40 @@ export class Scheduler {
   /** The thread, already blocked, computes its result with `fn` when it next runs (to retry a monitor entry). */
   onWake(t: JThread, fn: () => NativeResult): void {
     this.pending.set(t, fn);
+  }
+
+  /**
+   * A thread dump for diagnostics (no effect on the threads): the scheduler's counts, then each live thread's id,
+   * name, state, what it waits on and who owns that monitor, and its top `depth` frames, innermost first.
+   */
+  dump(frameText: (m: JMethod, pc: number) => string, depth = 8): string[] {
+    const lines = [
+      `threads: ${this.live.length} live, ${this.queue.length} queued, ${this.yielded.length} yielded, ${this.io} on I/O, ${this.timers.size} timed, ` +
+        `${this.timerWaiters.length} timer waiters${this.running ? ', running' : ''}${this.halted ? ', halted' : ''}`,
+    ];
+    for (const t of this.live) {
+      let on = '';
+      const o = t.blocker;
+      if (o && (t.state === 'blocked-monitor' || t.state === 'waiting' || t.state === 'timed-waiting')) {
+        const owner = o.monitor?.owner;
+        on = ` on ${objectText(o)}${this.waiting.get(t)?.count === 0 ? ' (class initialisation)' : ''}${owner ? `, owned by #${owner.id}` : ''}`;
+      }
+      const flags = `${this.timers.has(t) ? ', timer' : ''}${this.queued.has(t) ? ', queued' : ''}${this.pending.has(t) ? ', woken' : ''}${this.permits.has(t) ? ', permit' : ''}`;
+      lines.push(`#${t.id} "${this.threadName(t)}" ${t.yielding ? 'yielding' : t.state}${on}${flags}`);
+      for (const f of t.frames.slice(-depth).reverse()) lines.push(`    at ${frameText(f.method, f.pc)}`);
+      if (t.frames.length > depth) lines.push(`    ... ${t.frames.length - depth} more`);
+    }
+    return lines;
+  }
+
+  private threadName(t: JThread): string {
+    const o = t.javaThread;
+    if (!o) return '(attached)';
+    const f = o.cls.findField('name', 'Ljava/lang/String;') ?? o.cls.findField('name', '[C');
+    const v = f && !f.isStatic ? o.fields[f.slot] : null;
+    if (!v || typeof v !== 'object') return '?';
+    if ('data' in v && v.data instanceof Uint16Array) return String.fromCharCode(...v.data);
+    return this.jvm.heap.jsString(v) ?? '?';
   }
 
   /**
@@ -486,6 +527,7 @@ export class Scheduler {
   private makeRunnable(t: JThread): void {
     if (this.halted) return;
     t.state = 'runnable';
+    t.blocker = null; // woken, or given its monitor back
     this.enqueue(t);
     this.wake?.();
   }
@@ -558,6 +600,13 @@ export class Scheduler {
   private illegalMonitorState(): JavaThrowable {
     return new JavaThrowable(this.jvm.throwNew('java/lang/IllegalMonitorStateException').exception);
   }
+}
+
+/** An object as a thread dump names it: its class and identity hash, or the class a mirror stands for. */
+function objectText(o: JObject): string {
+  const c = o.nativeData as JClass | null | undefined;
+  if (o.cls.name === 'java/lang/Class' && c && typeof c === 'object' && 'name' in c) return `class ${c.name.replace(/\//g, '.')}`;
+  return `${o.cls.name.replace(/\//g, '.')}@${(o.hash >>> 0).toString(16)}`;
 }
 
 function monitorOf(o: JObject): Monitor {

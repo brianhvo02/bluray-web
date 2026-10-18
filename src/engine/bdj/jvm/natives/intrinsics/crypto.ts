@@ -62,7 +62,7 @@ const TWO_32 = 4294967296;
  * least significant word, as unsigned 32-bit words with a carry; returns the carry. The 64-bit products are split into
  * 16-bit halves so every step is exact in doubles.
  */
-const mulAdd: IntrinsicFn = (_jvm, _t, _m, stack, base) => {
+export const mulAdd: IntrinsicFn = (_jvm, _t, _m, stack, base) => {
   const outArr = stack[base] as JArray | null;
   const inArr = stack[base + 1] as JArray | null;
   let offset = stack[base + 2] as number;

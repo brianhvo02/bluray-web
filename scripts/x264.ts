@@ -11,10 +11,13 @@ function splitAccessUnits(stream: Uint8Array): Uint8Array[] {
   return starts.map((s, k) => stream.subarray(s, k + 1 < starts.length ? starts[k + 1] : stream.length));
 }
 
-/** IDR every second at 24 fps, no B-frames, AUD before every access unit, SPS/PPS repeated at every IDR. */
-export function encodeTestVideo(frames: number): Uint8Array[] {
+/**
+ * IDR every second at 24 fps, no B-frames, AUD before every access unit, SPS/PPS repeated at every IDR. `size` is the
+ * picture's width x height (16:9 by default).
+ */
+export function encodeTestVideo(frames: number, size = '640x360'): Uint8Array[] {
   const h264 = execFileSync('ffmpeg', [
-    '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=24', '-frames:v', String(frames),
+    '-v', 'error', '-f', 'lavfi', '-i', `testsrc2=size=${size}:rate=24`, '-frames:v', String(frames),
     '-c:v', 'libx264', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
     '-x264-params', 'keyint=24:min-keyint=24:scenecut=0:bframes=0:aud=1:repeat-headers=1', '-f', 'h264', '-',
   ], { maxBuffer: 1 << 30 });

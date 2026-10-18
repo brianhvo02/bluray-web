@@ -23,4 +23,11 @@ describe('PlaylistPicker', () => {
     expect(titleButton(html, 1)).not.toContain('disabled');
     expect(html).not.toContain('This disc uses BD-J menus');
   });
+
+  it('names what the browser lacks when BD-J cannot run here', () => {
+    const html = renderToStaticMarkup(
+      createElement(PlaylistPicker, { playlists: [], usesBdj: true, bdjSupported: false, bdjMissing: ['workers started from workers'], titles, onPick: () => undefined, onCloseDisc: () => undefined }),
+    );
+    expect(html).toContain("This disc uses BD-J menus, which this browser can&#x27;t run: it lacks workers started from workers.");
+  });
 });

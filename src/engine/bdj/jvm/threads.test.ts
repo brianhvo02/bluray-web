@@ -195,6 +195,15 @@ describe('monitors', () => {
     const b = spawn('ba');
     expect(await runWithClock(jvm, clock)).toBe('deadlock');
     expect([a.state, b.state]).toEqual(['blocked-monitor', 'blocked-monitor']);
+    // the thread dump names each blocked thread, the monitor it waits for, that monitor's owner and the frames
+    const dump = jvm.threads.dump((m) => `${m.cls.name}.${m.name}`);
+    expect(dump[0]).toBe('threads: 2 live, 0 queued, 0 yielded, 0 on I/O, 0 timed, 0 timer waiters');
+    expect(dump.slice(1)).toEqual([
+      `#${a.id} "(attached)" blocked-monitor on class java.lang.Integer, owned by #${b.id}`,
+      '    at T.ab',
+      `#${b.id} "(attached)" blocked-monitor on class java.lang.String, owned by #${a.id}`,
+      '    at T.ba',
+    ]);
   });
 
   it('a synchronized method reached through an Invoke waits for the monitor', async () => {
@@ -343,6 +352,7 @@ describe('wait and notify', () => {
     expect(await runWithClock(jvm, clock)).toBe('idle');
     expect([w.state, s.state, w.uncaught, s.uncaught]).toEqual(['terminated', 'terminated', null, null]);
     expect(get('done')).toBe(1);
+    expect(w.blocker).toBeNull(); // it waited on the monitor, then took it back
   });
 
   it('wait(100) returns once the clock has advanced 100 ms', async () => {

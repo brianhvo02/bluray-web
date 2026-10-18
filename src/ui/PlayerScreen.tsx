@@ -6,16 +6,28 @@ import { collectDroppedFiles, splitPick } from '../player/drop-files';
 import { checkCapabilities } from './capabilities';
 import { FULLSCREEN_HINT_TEXT, evaluateFullscreenHint, markFullscreenHintDismissed, safeLocalStorage, toggleFullscreen } from './fullscreen';
 import { EncodingPrompt } from './EncodingPrompt';
-import { keyActionUo, keyToAction } from './keyboard';
+import { keyActionUo, keyToAction, keyWakesControls } from './keyboard';
 import { toMenuSpace } from './pointer';
-import { classifyTap, DOUBLE_TAP_MS, idleAfterTap, pairableTap, tapPoint, type PointerPoint, type Tap } from './touch';
+import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTap, beyondLongPressSlop, isHoverPointer, isMenuLongPress, LONG_PRESS_MS, menuPointerEffect, missedMenuTapShowsControls, offPicture, pairableTap, tapPoint, type PointerPoint, type Tap } from './touch';
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
 
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
+const TAP_NOTICE_MS = 6000;
 
+
+/** A touch held on the video over a disc menu: where and when it went down, and whether it moved or showed the controls. */
+interface Press {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly downAt: number;
+  moved: boolean;
+  fired: boolean;
+  timer: number | null;
+}
 
 interface PlayerScreenProps {
   readonly controller: PlayerController;
@@ -48,7 +60,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [idle, setIdle] = useState(false);
+  const [idle, setIdleState] = useState(false);
+  /** Whether a hover pointer (moving over a disc menu) hid the controls, rather than the idle timer or a tap (ruling R12). */
+  const [hiddenByHover, setHiddenByHover] = useState(false);
+  const setIdle = (next: boolean, byHover = false): void => {
+    setIdleState(next);
+    setHiddenByHover(next && byHover);
+  };
   const [activity, setActivity] = useState(0);
   const [pressed, setPressed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -64,12 +82,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   const idleRef = useRef(idle);
   idleRef.current = idle;
   const lastUpWasTouch = useRef(false);
+  /** A touch on the video over a disc menu that may become a long press (ruling R15). */
+  const press = useRef<Press | null>(null);
+  /** Whether the controls showed at the last render (a tap at the bottom edge of a menu shows hidden ones, ruling R12). */
+  const controlsVisibleRef = useRef(true);
   /** The last touch pointerdown on the video: a tap's position comes from it (see tapPoint). */
   const touchDown = useRef<PointerPoint | null>(null);
 
   useEffect(
     () => () => {
       if (tapTimer.current !== null) window.clearTimeout(tapTimer.current);
+      if (press.current?.timer != null) window.clearTimeout(press.current.timer);
     },
     [],
   );
@@ -88,10 +111,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      // Any key shows the controls again, like mouse movement does.
-      setIdle(false);
-      setActivity((a) => a + 1);
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Any key shows the controls again, like mouse movement does, except a key that goes to a disc menu (ruling R11):
+      // the bar never comes over the menu.
+      const modified = e.ctrlKey || e.metaKey || e.altKey;
+      const shown = controller.getSnapshot();
+      const inMenu = shown.menuActive || shown.bdjMenuVisible;
+      const textEntry = e.target instanceof HTMLTextAreaElement || (e.target instanceof HTMLInputElement && e.target.type !== 'range');
+      if (keyWakesControls(modified || textEntry ? null : keyToAction(e.key, { menuActive: inMenu }), inMenu)) {
+        setIdle(false);
+        setActivity((a) => a + 1);
+      }
+      if (modified) return;
       const target = e.target;
       if (target instanceof HTMLTextAreaElement) return;
       if (target instanceof Element && target.closest('.audio-menu-list, .shader-dialog')) return; // an open audio or subtitle menu handles its own keys
@@ -101,7 +131,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         // Only the volume slider keeps its native arrow-key stepping; on the seek bar arrows seek by 10 s.
         if (e.key.startsWith('Arrow') && target.dataset.role === 'volume') return;
       }
-      const menuActive = controller.getSnapshot().menuActive;
+      // a BD-J menu on screen takes the arrows, Enter and digits as an HDMV menu does
+      const now = controller.getSnapshot();
+      const menuActive = now.menuActive || now.bdjMenuVisible;
       if (target instanceof HTMLButtonElement) {
         // A focused button keeps Space and Enter, except that while a disc menu is shown Enter is the menu's OK: after
         // clicking Pop-up or Top Menu the focus stays there, and a second click would close or restart the menu.
@@ -140,7 +172,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           controller.shiftSubtitles(action.deltaMs);
           break;
         case 'menuKey':
-          controller.menuKey(action.key);
+          controller.menuKey(action.key, e.repeat);
           break;
       }
     };
@@ -164,10 +196,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   }, [pressed]);
 
   useEffect(() => {
-    if (!playing || pressed || menuOpen) return; // holding a control (e.g. the seek thumb) or an open menu keeps the controls up
-    const timer = window.setTimeout(() => setIdle(true), HIDE_CONTROLS_MS);
+    // holding a control (e.g. the seek thumb), an open menu, or the remote over a disc menu keeps the controls up
+    if (!controlsMayIdle({ playing, pressed, menuOpen, remoteOpen, inMenu: snapshot.menuActive || snapshot.bdjMenuVisible })) return;
+    const timer = window.setTimeout(() => {
+      if (!idleRef.current) setIdle(true); // controls a hover pointer already hid stay marked as hidden by it
+    }, HIDE_CONTROLS_MS);
     return () => window.clearTimeout(timer);
-  }, [playing, activity, pressed, menuOpen]);
+  }, [playing, activity, pressed, menuOpen, remoteOpen, snapshot.menuActive, snapshot.bdjMenuVisible]);
 
   const trackNotice = snapshot.notices.find((n) => n.code === 'audio-track')?.message;
   useEffect(() => {
@@ -200,6 +235,38 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  // The first tap a BD-J menu ignores opens the remote, with the controls it sits over, once per menu (with the notice):
+  // a remote the user closes stays closed until the next menu.
+  // A touch on an HDMV menu that hit no button shows the controls (ruling R13); a mouse click that missed leaves them.
+  // (On a BD-J menu the ignored-tap rule below opens the remote with them.)
+  const lastMenuClickPointer = useRef('mouse');
+  const tapMisses = snapshot.menuTapMisses;
+  const seenTapMisses = useRef(tapMisses);
+  useEffect(() => {
+    if (tapMisses === seenTapMisses.current) return;
+    seenTapMisses.current = tapMisses;
+    if (!missedMenuTapShowsControls(lastMenuClickPointer.current)) return;
+    setIdle(false);
+    setActivity((a) => a + 1);
+  }, [tapMisses]);
+
+  const remoteRequests = snapshot.bdjRemoteRequests;
+  const seenRemoteRequests = useRef(remoteRequests);
+  useEffect(() => {
+    if (remoteRequests === seenRemoteRequests.current) return;
+    seenRemoteRequests.current = remoteRequests;
+    setRemoteOpen(true);
+    setIdle(false);
+    setActivity((a) => a + 1);
+  }, [remoteRequests]);
+
+  const tapNotice = snapshot.notices.find((n) => n.code === 'bdj-tap-ignored');
+  useEffect(() => {
+    if (!tapNotice) return;
+    const timer = window.setTimeout(() => controller.dismissNotice('bdj-tap-ignored'), TAP_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [controller, tapNotice]);
+
   const maskedNotice = snapshot.notices.find((n) => n.code === 'uo-masked');
   useEffect(() => {
     if (!maskedNotice) return;
@@ -207,8 +274,18 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     return () => window.clearTimeout(timer);
   }, [controller, maskedNotice]);
 
+  // A BD-J title hears the mouse wherever it is over the picture (BDJ_EVENT_MOUSE), as libbluray's hosts send it.
   const onCanvasPointerMove = (e: PointerEvent<HTMLCanvasElement>): void => {
-    if (e.pointerType === 'touch' || !snapshot.menuActive) return;
+    if (e.pointerType === 'touch') {
+      const p = press.current;
+      if (p && p.id === e.pointerId && !p.moved && beyondLongPressSlop(p, { x: e.clientX, y: e.clientY })) {
+        p.moved = true; // a drag, not a long press
+        if (p.timer !== null) window.clearTimeout(p.timer);
+        p.timer = null;
+      }
+      return;
+    }
+    if (!(snapshot.menuActive || snapshot.bdjActive)) return;
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
     if (!point) return;
     const first = pendingMove.current === null;
@@ -221,18 +298,58 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     });
   };
 
+  /** Ends a pending long press (its timer); returns whether it had already shown the controls. */
+  const endPress = (pointerId?: number): boolean => {
+    const p = press.current;
+    if (!p || (pointerId !== undefined && p.id !== pointerId)) return false;
+    if (p.timer !== null) window.clearTimeout(p.timer);
+    press.current = null;
+    return p.fired;
+  };
+
+  // A touch held still over a disc menu shows the controls once LONG_PRESS_MS pass, with the finger still down, and is not
+  // sent to the disc (ruling R15): the way back to the controls when every tap on the picture goes to the disc.
+  // The press starts at the pointerdown's position, as a tap's position does (tapPoint).
   const onCanvasPointerDown = (e: PointerEvent<HTMLCanvasElement>): void => {
-    if (e.pointerType === 'touch') touchDown.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    if (e.pointerType !== 'touch') return;
+    touchDown.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    endPress();
+    const now = controller.getSnapshot();
+    if (!(now.menuActive || now.bdjMenuVisible)) return; // outside a menu a long touch is an ordinary tap
+    const p: Press = { id: e.pointerId, x: e.clientX, y: e.clientY, downAt: performance.now(), moved: false, fired: false, timer: null };
+    p.timer = window.setTimeout(() => {
+      p.timer = null;
+      const s = controller.getSnapshot();
+      if (!isMenuLongPress({ inMenu: s.menuActive || s.bdjMenuVisible, heldMs: performance.now() - p.downAt, moved: p.moved })) return;
+      p.fired = true;
+      setIdle(false);
+      setActivity((a) => a + 1);
+    }, LONG_PRESS_MS);
+    press.current = p;
   };
 
   const onCanvasPointerUp = (e: PointerEvent<HTMLCanvasElement>): void => {
     lastUpWasTouch.current = e.pointerType === 'touch';
     if (e.pointerType !== 'touch') return;
-    const rect = e.currentTarget.getBoundingClientRect();
+    // where the finger went down: iPadOS can report a touch's pointerup at (0, 0) (tapPoint)
     const at = tapPoint(touchDown.current, { id: e.pointerId, x: e.clientX, y: e.clientY });
     touchDown.current = null;
+    if (endPress(e.pointerId)) {
+      // the long press showed the controls: no click for the disc, and no tap to pair with
+      lastTap.current = null;
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
     const tap: Tap = { x: at.x - rect.left, timeMs: e.timeStamp };
-    const action = classifyTap(lastTap.current, tap, { width: rect.width, menuActive: snapshot.menuActive });
+    // the snapshot the engine last sent: the tap is mapped with the canvas rectangle as it is now (after a rotation too)
+    const now = controller.getSnapshot();
+    const action = classifyTap(lastTap.current, tap, {
+      width: rect.width,
+      menuActive: now.menuActive,
+      bdjMenuVisible: now.bdjMenuVisible,
+      offPicture: offPicture(at.x, at.y, rect), // a letterbox or pillarbox band: nothing there reaches the disc
+      controlsShown: controlsVisibleRef.current,
+    });
     lastTap.current = pairableTap(action, tap);
     if (tapTimer.current !== null) {
       window.clearTimeout(tapTimer.current);
@@ -241,9 +358,16 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
     switch (action) {
       case 'menuClick': {
         const point = toMenuSpace(at.x, at.y, rect);
-        if (point) controller.pointer('click', point.x, point.y);
+        if (point) {
+          lastMenuClickPointer.current = e.pointerType;
+          controller.pointer('click', point.x, point.y);
+        }
         break;
       }
+      case 'showControls':
+        setIdle(false);
+        setActivity((a) => a + 1);
+        break;
       case 'seekBack':
       case 'seekForward': {
         const op = keyActionUo({ type: 'seekBy', deltaUs: 0 }, uoContext(controller));
@@ -272,12 +396,16 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
       lastUpWasTouch.current = false; // the click the browser synthesized after a tap, already handled on pointerup
       return;
     }
-    if (!snapshot.menuActive) {
+    const now = controller.getSnapshot();
+    if (!(now.menuActive || now.bdjMenuVisible)) {
       controller.togglePlay();
       return;
     }
     const point = toMenuSpace(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
-    if (point) controller.pointer('click', point.x, point.y);
+    if (point) {
+      lastMenuClickPointer.current = 'mouse'; // a click event from a mouse or pen (a touch's is ignored above)
+      controller.pointer('click', point.x, point.y);
+    }
   };
 
   /** A menu key from the control bar or the remote: checked against the UO mask like the keyboard. */
@@ -294,7 +422,34 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
 
   const isVideoTouch = (e: PointerEvent<HTMLElement>): boolean => e.pointerType === 'touch' && e.target === canvasRef.current;
 
-  const controlsVisible = !idle || !playing;
+  const inMenu = snapshot.menuActive || snapshot.bdjMenuVisible;
+  const controlsVisible = controlsShown({ idle, playing, inMenu, hiddenByHover });
+  controlsVisibleRef.current = controlsVisible;
+
+  /**
+   * A pointer move or press anywhere in the player. Over a disc menu a mouse or pen wakes the bar only at the bottom edge
+   * (or over the bar it woke) and hides it at once elsewhere (ruling R9); otherwise any move wakes it, and a touch on the
+   * video is left to the tap handling.
+   */
+  const onPlayerPointer = (e: PointerEvent<HTMLDivElement>): void => {
+    if (isVideoTouch(e)) return;
+    const now = controller.getSnapshot();
+    const root = rootRef.current;
+    if (!root || !isHoverPointer(e.pointerType) || !(now.menuActive || now.bdjMenuVisible)) {
+      wake();
+      return;
+    }
+    const bar = controlsVisible ? root.querySelector('.control-bar') : null;
+    const effect = menuPointerEffect({
+      y: e.clientY,
+      playerBottom: root.getBoundingClientRect().bottom,
+      barTop: bar ? bar.getBoundingClientRect().top : null,
+      overControls: e.target instanceof Element && e.target.closest('.control-bar, .remote-pad') !== null,
+      held: pressed || menuOpen || remoteOpen,
+    });
+    if (effect === 'wake') wake();
+    else if (effect === 'hide') setIdle(true, true);
+  };
   // No current playlist (first pick, failed pick) shows the picker — but not while a pick is still loading, nor while a
   // BD-J title runs (Java opens its playlists itself; the Playlists button still opens the picker).
   const showPicker = pickerOpen || (snapshot.currentPlaylistId === null && snapshot.engineState !== 'loading' && !snapshot.bdjActive);
@@ -302,15 +457,14 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
   return (
     <div
       ref={rootRef}
-      className={`player${controlsVisible ? '' : ' idle'}`}
+      className={`player${controlsVisible ? '' : ' idle'}${inMenu ? ' in-menu' : ''}`}
       data-testid="player"
       data-state={snapshot.engineState}
       data-playlist={snapshot.currentPlaylistId ?? undefined}
       data-audio-tracks={snapshot.audioTracks.length}
       data-menu-active={snapshot.menuActive}
-      onPointerMove={(e) => {
-        if (!isVideoTouch(e)) wake();
-      }}
+      data-bdj-menu={snapshot.bdjMenuVisible}
+      onPointerMove={onPlayerPointer}
       onDragOver={onDragOver}
       onDrop={onDrop}
       onPointerDown={(e) => {
@@ -321,7 +475,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
             window.clearTimeout(tapTimer.current);
             tapTimer.current = null;
           }
-          wake();
+          onPlayerPointer(e);
         } // a touch on the video shows or hides the controls on its own, after the double-tap window
       }}
     >
@@ -329,9 +483,13 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         ref={canvasRef}
         className={`player-canvas${snapshot.menuActive && snapshot.pointerButton !== null ? ' over-button' : ''}`}
         data-testid="video-canvas"
-        onPointerMove={onCanvasPointerMove}
         onPointerDown={onCanvasPointerDown}
+        onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
+        onPointerCancel={(e) => endPress(e.pointerId)}
+        onContextMenu={(e) => {
+          if (press.current) e.preventDefault(); // a long press over a menu shows the controls, not the browser's menu
+        }}
         onClick={onCanvasClick}
       />
       <div className="notices">
@@ -361,6 +519,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           playlists={snapshot.playlists}
           usesBdj={snapshot.usesBdj}
           bdjSupported={snapshot.bdjSupported}
+          bdjMissing={snapshot.bdjMissing}
           titles={snapshot.indexTitles?.titles}
           onPickTitle={(title) => {
             setPickerOpen(false);
@@ -375,7 +534,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           onCloseDisc={() => controller.closeDisc()}
         />
       )}
-      {remoteOpen && controlsVisible && snapshot.indexTitles && <RemotePad onKey={sendMenuKey} />}
+      {remoteOpen && controlsVisible && (snapshot.indexTitles || snapshot.bdjActive) && <RemotePad onKey={sendMenuKey} />}
       {snapshot.encodingPrompt && <EncodingPrompt fileName={snapshot.encodingPrompt.names.join(', ')} onAnswer={answerEncoding} />}
       <ControlBar
         controller={controller}

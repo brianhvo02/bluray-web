@@ -20,6 +20,8 @@ export interface BdjoSpec {
   readonly apps: readonly BdjoAppSpec[];
   readonly keyInterest?: number; // 32-bit key interest table, top 11 bits used
   readonly fileAccess?: string; // default "."
+  /** The initial HAVi configuration (libbluray GraphicsResolution id): 1 is 1920x1080; default 6 (960x540). */
+  readonly haviConfig?: number;
 }
 
 /** A string that is a length byte, the bytes, and one pad byte when the length is even (libbluray `_read_app_string`). */
@@ -72,7 +74,7 @@ export function buildBdjo(spec: BdjoSpec): Uint8Array<ArrayBuffer> {
   // terminal info
   sections.push(w.position);
   w.u32(10).ascii('*****');
-  w.bits(4, 6).bits(1, 0).bits(1, 0).bits(34, 0); // HAVi configuration 6 (1920x1080), masks off, padding
+  w.bits(4, spec.haviConfig ?? 6).bits(1, 0).bits(1, 0).bits(34, 0); // HAVi configuration (default 6: 960x540), masks off, padding
 
   // application cache info
   sections.push(w.position);

@@ -1,4 +1,5 @@
 import type { MemoryProfileName } from './memory-profile';
+import type { JvmMemoryStats } from './bdj/jvm/jvm';
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
 import type { DiscSpec } from './disc/disc-spec';
@@ -8,7 +9,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'bdj-menu-hidden' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
+export type NoticeCode = 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
 /** RemoteFailure: a NAS disc changed, the NAS cannot be reached, or this device is no longer paired. */
 export type ErrorCode = DiscErrorCode | RemoteFailure | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
@@ -55,13 +56,44 @@ export interface Telemetry {
    * the first frame of that playlist was presented. Each is null until it happens; the whole is null when no BD-J title
    * has run since the disc opened.
    */
-  readonly bdj: BdjStartup | null;
+  readonly bdj: BdjTelemetry | null;
+  /**
+   * While a BD-J title runs: its graphics plane's flushes and the taps on its menu that brought no reaction. `hash` is
+   * the plane's hash (tools/bdj-trace's) once it has stayed unchanged for a telemetry interval, else null; only with
+   * PlayerDeps.planeHashTelemetry (test-only, ?telemetry=1), as it costs a pass over the whole plane.
+   */
+  readonly bdjPlane: { readonly flushes: number; readonly tapsIgnored: number; readonly hash?: string | null } | null;
+  /** While a BD-J title runs, what it holds in memory; only with PlayerDeps.memoryTelemetry (?telemetry=1). */
+  readonly bdjMemory?: BdjMemoryTelemetry | null;
+}
+
+/** BD-J's memory (5d spec §4.5), for the device measurements; sizes in bytes. */
+export interface BdjMemoryTelemetry {
+  /** The JVM's own accounting, as the BD-J worker last reported it (every BDJ_MEMORY_STATS_MS); null before. */
+  readonly jvm: JvmMemoryStats | null;
+  /** FreeType's WASM memory and open faces in the BD-J worker; null until FreeType is loaded. */
+  readonly freeType: { readonly wasmBytes: number; readonly faces: number } | null;
+  /** The graphics plane's shared buffer. */
+  readonly planeBytes: number;
+  /** Decoded background stills, shown and being decoded. */
+  readonly stillBytes: number;
+  /** The compositor's copy of the plane (canvas and ImageData); 0 while it has none. */
+  readonly compositorBytes: number;
 }
 
 export interface BdjStartup {
   readonly bootMs: number | null;
   readonly firstPlaylistMs: number | null;
   readonly firstFrameMs: number | null;
+}
+
+export interface BdjTelemetry extends BdjStartup {
+  /**
+   * Menu responsiveness (5d spec §4.2) since the disc opened: from a key press or a click/tap reaching the engine to
+   * the next presented frame containing a BD-J plane change published after it, in ms (last, largest, and how many
+   * inputs were answered); null before any. Pointer moves are not counted.
+   */
+  readonly inputLatencyMs: { readonly last: number; readonly max: number; readonly count: number } | null;
 }
 
 /** A set of mpv user shaders, in the order they run. */
@@ -137,8 +169,9 @@ export type EngineCommand =
   /** 0 = top menu. */
   | { readonly type: 'playTitle'; readonly title: number }
   | { readonly type: 'menuCall' }
-  | { readonly type: 'menuKey'; readonly key: MenuKey }
-  /** In the 1920×1080 menu space. */
+  /** `repeat`: a held key's auto-repeat (KeyboardEvent.repeat), which a BD-J title's full input queue may merge. */
+  | { readonly type: 'menuKey'; readonly key: MenuKey; readonly repeat?: boolean }
+  /** In the 1920×1080 menu space. Under a BD-J title a move is BDJ_EVENT_MOUSE, a click also the activate key. */
   | { readonly type: 'pointer'; readonly kind: 'move' | 'click'; readonly x: number; readonly y: number }
   /** Forget the open disc ("Open another disc"). */
   | { readonly type: 'close' }
@@ -148,9 +181,16 @@ export type EngineCommand =
 
 export type EngineEvent =
   /** `bdjSupported`: this engine runs BD-J titles. */
-  | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly bdjSupported: boolean; readonly warnings: readonly string[] }
-  /** A BD-J title started (the disc's Java code drives playback; its menu is not drawn) or BD-J stopped. */
+  | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly bdjSupported: boolean; readonly bdjMissing?: readonly string[]; readonly warnings: readonly string[] }
+  /** A BD-J title started (the disc's Java code drives playback and draws its menus) or BD-J stopped. */
   | { readonly type: 'bdjActive'; readonly active: boolean }
+  /**
+   * The BD-J graphics plane turned visible (any pixel with non-zero alpha) or empty; on changes only, and false when
+   * BD-J stops. While it is visible, taps and clicks on the video go to the disc.
+   */
+  | { readonly type: 'bdjMenu'; readonly visible: boolean }
+  /** A tap on a BD-J menu brought no reaction within the window: the UI opens the on-screen remote. */
+  | { readonly type: 'bdjTapIgnored' }
   /** After 'titles', for discs whose First Play is an HDMV object. */
   | { readonly type: 'indexTitles'; readonly titles: ReadonlyArray<{ readonly number: number; readonly kind: 'hdmv' | 'bdj' }>; readonly hasTopMenu: boolean }
   | { readonly type: 'uoMask'; readonly masked: readonly UoOp[] }
@@ -161,6 +201,8 @@ export type EngineEvent =
   | { readonly type: 'soundEffect'; readonly id: number }
   /** After a pointer move: the menu button under the pointer, for the cursor. */
   | { readonly type: 'pointerTarget'; readonly button: number | null }
+  /** A pointer click on an HDMV menu hit no button of the shown page (the graphics controller's hit test): the disc took no action. */
+  | { readonly type: 'menuTapMissed' }
   | { readonly type: 'chapters'; readonly playlistId: string; readonly durationUs: number; readonly chapters: readonly Chapter[] }
   | { readonly type: 'tracks'; readonly audio: readonly AudioTrack[]; readonly selectedAudio: number | null }
   /** Files of a load are not UTF-8 and no encoding was given: ask the user, then send addTextSubtitles again with one. */

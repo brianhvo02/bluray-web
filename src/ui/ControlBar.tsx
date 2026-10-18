@@ -198,7 +198,7 @@ export function ControlBar({ controller, snapshot, shaderModel, shaderState, vis
             Pop-up
           </button>
         )}
-        {hdmv && (
+        {(hdmv || snapshot.bdjActive) && (
           <button type="button" aria-pressed={remoteOpen} aria-label="Remote" data-testid="remote-toggle" onClick={onToggleRemote}>
             Remote
           </button>

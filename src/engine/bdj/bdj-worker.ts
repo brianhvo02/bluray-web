@@ -7,13 +7,15 @@
  */
 
 import type { Clpi } from '../bdmv/clpi-parser';
-import { createByteSource } from '../disc/disc-spec';
+import { BDJ_REMOTE_CHUNK_BYTES, BDJ_REMOTE_IN_FLIGHT, createByteSource } from '../disc/disc-spec';
 import { TokenRelay } from '../disc/http-transport';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
 import { RemoteSource } from '../disc/remote-source';
 import { BdjError } from './errors';
+import type { FreeType } from './fonts/freetype';
 import type { NativeTable } from './jvm/natives/index';
+import { GraphicsPlaneReader, GraphicsPlaneWriter } from './graphics-plane';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
@@ -23,6 +25,35 @@ import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from '
 export interface BdjPort {
   postMessage(message: FromBdj): void;
   onmessage: ((event: { readonly data: ToBdj }) => void) | null;
+}
+
+/**
+ * Whether Java has shown it runs, as the session's start-up timeout counts it (BdjSession.alive, ruling R7): a
+ * selected playlist, a visible plane or a shown background still. Only a deadlock before that is a boot stall.
+ */
+export class StartupWatch {
+  private shown = false;
+  private dumped = false;
+
+  call(name: BdjCallName, args: readonly BdjWireValue[]): void {
+    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.shown = true;
+  }
+
+  /** A background still was shown (null: one was cleared, which shows nothing). */
+  still(image: Uint8Array | null): void {
+    if (image) this.shown = true;
+  }
+
+  plane(visible: boolean): void {
+    if (visible) this.shown = true;
+  }
+
+  /** A deadlock outcome: true for the first one while Java has shown nothing, which the worker dumps. */
+  deadlock(): boolean {
+    if (this.shown || this.dumped) return false;
+    this.dumped = true;
+    return true;
+  }
 }
 
 export interface BdjWorkerHandle {
@@ -54,6 +85,13 @@ function eventLoopTurn(): () => Promise<void> {
 export interface BdjWorkerOptions {
   /** JvmOptions.extraIntrinsics: the class library's intrinsics (src/bdj-classlib/intrinsics), which the engine does not carry. */
   readonly extraIntrinsics?: (table: NativeTable) => void;
+  /**
+   * FreeType for the BD-J text natives (java_awt_BDFontMetrics.c, java_awt_BDGraphics.c), loaded when text is first
+   * needed, not at boot: the entry fetches src/wasm/freetype/freetype.wasm. Calls share one load.
+   */
+  readonly loadFreeType?: () => Promise<FreeType>;
+  /** The bundled fallback font (src/engine/ass/default-font.ttf), the JRE font files' bytes; fetched when first read. */
+  readonly loadDefaultFont?: () => Promise<Uint8Array>;
   /** Reads a NAS disc's files; the worker's fetch by default. */
   readonly fetch?: typeof fetch;
 }
@@ -64,13 +102,16 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let booted = false;
   let ended = false;
   const waiting: TitleMessage[] = [];
-  const replies = new Map<number, (value: number | string) => void>();
+  const replies = new Map<number, { readonly name: BdjCallName; readonly resolve: (value: number | string) => void }>();
   let nextId = 1;
   let looping = false;
   let dirty = false;
   let driving: AbortController | null = null;
   /** The runtime's log repeats each line the host logs; the host's copy carries the error flag. */
   let hostLine: string | null = null;
+  /** FreeType once loaded (memory stats). */
+  let freeType: FreeType | null = null;
+  const loadFreeType = options.loadFreeType;
   /** A NAS disc's fresh tokens from the engine; the latest is kept for a source created after it arrived. */
   const tokens = new TokenRelay(
     () => post({ type: 'remoteTokenNeeded' }),
@@ -81,6 +122,11 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   );
   let latestToken: string | null = null;
   let remote: RemoteSource | null = null;
+  let waitingSince = 0;
+  /** Whether Java has shown it runs (the deadlock dump is for start-up only). */
+  const startup = new StartupWatch();
+  /** The plane Java draws into, read for its visibility. */
+  let planeView: GraphicsPlaneReader | null = null;
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -104,8 +150,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
 
   const call = (name: BdjCallName, args: readonly BdjWireValue[]): Promise<number | string> => {
     const id = nextId++;
+    startup.call(name, args);
     return new Promise((resolve) => {
-      replies.set(id, resolve);
+      replies.set(id, { name, resolve });
       post({ type: 'call', id, name, args });
     });
   };
@@ -124,8 +171,10 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         while (dirty && !ended) {
           dirty = false;
           driving = new AbortController();
-          await rt!.run({ signal: driving.signal });
+          const outcome = await rt!.run({ signal: driving.signal });
+          startup.plane(planeView?.visible() ?? false);
           if (rt!.exitStatus !== null) fail(null);
+          else if (outcome === 'deadlock') deadlocked();
         }
       } catch (e) {
         fail(e);
@@ -139,7 +188,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const deliver = (m: TitleMessage): void => {
     try {
       if (m.type === 'start') rt!.start(m.title);
-      else rt!.processEvent(m.ev, m.param);
+      else rt!.processEvent(m.ev, m.param, m.coalesce);
     } catch (e) {
       fail(e);
       return;
@@ -151,7 +200,19 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     const t0 = performance.now();
     try {
       const fetchFn = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
-      const disc = createByteSource(m.disc, { fetch: fetchFn, readAheadBytes: m.readAheadBytes, onWaiting: () => undefined, refreshToken: () => tokens.request() });
+      // the BD-J read-ahead budget (memory profile bdjRemoteReadAheadBytes), in BD-J-sized requests (ruling R20)
+      const disc = createByteSource(m.disc, {
+        fetch: fetchFn,
+        readAheadBytes: m.readAheadBytes,
+        chunkBytes: BDJ_REMOTE_CHUNK_BYTES,
+        inFlight: BDJ_REMOTE_IN_FLIGHT,
+        // a read that has waited WAITING_AFTER_MS on the NAS, and how long it took in the end
+        onWaiting: (on) => {
+          if (on) waitingSince = performance.now();
+          post({ type: 'log', line: on ? 'BD-J worker: disc reads are waiting for the network' : `BD-J worker: disc reads waited ${Math.round(performance.now() - waitingSince)} ms`, error: false });
+        },
+        refreshToken: () => tokens.request(),
+      });
       if (disc instanceof RemoteSource) {
         remote = disc;
         if (latestToken !== null) disc.setToken(latestToken);
@@ -170,14 +231,21 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (!model) throw new Error('the disc model is not loaded yet');
         return model;
       };
+      planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
         disc,
         discId: m.discId,
         classLibrary: m.classLibrary,
+        ...(m.memory ? { memory: m.memory } : {}),
         host: () =>
           new WorkerBdjHost({
             regs: new SharedRegisterView(m.registers),
             status: new StatusBlockReader(m.status),
+            plane: new GraphicsPlaneWriter(m.plane),
+            background: (image, rect) => {
+              startup.still(image);
+              post({ type: 'background', image, rect });
+            },
             call,
             get disc() {
               return loaded().disc;
@@ -198,6 +266,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         },
         yieldTask: eventLoopTurn(),
         ...(options.extraIntrinsics ? { extraIntrinsics: options.extraIntrinsics } : {}),
+        ...(loadFreeType && options.loadDefaultFont
+          ? { fonts: { loadFreeType: () => loadFreeType().then((ft) => (freeType = ft)), loadDefaultFont: options.loadDefaultFont } }
+          : {}),
         log: (line) => {
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });
@@ -214,7 +285,38 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     if (ended) return;
     booted = true;
     post({ type: 'booted', bootMs: performance.now() - t0 });
+    if (m.memoryStatsMs) reportMemory(m.memoryStatsMs);
     for (const w of waiting.splice(0)) deliver(w);
+  };
+
+  /**
+   * Every live Java thread is blocked with no timer or read to wake it: only an event or a title start can. A menu
+   * waiting for keys is in this state; before Java has shown it runs it is how a boot stall looks, so the first one
+   * then is dumped (the others are counted in the next dump).
+   */
+  let deadlocks = 0;
+  const deadlocked = (): void => {
+    deadlocks++;
+    if (startup.deadlock()) dump('every Java thread is blocked before it selected a playlist or showed anything');
+  };
+
+  /** Logs the worker's state and a thread dump (the engine asks at its start-up timeout; the first deadlock). */
+  const dump = (reason: string): void => {
+    const calls = [...replies].map(([id, c]) => `${c.name}#${id}`);
+    const lines = [
+      `BD-J thread dump (${reason}): ${booted ? 'booted' : rt ? 'booting' : 'not booting'}, ${looping ? 'driving' : 'idle'}, ` +
+        `${waiting.length} messages waiting for the boot, ${calls.length ? `waiting for the engine's reply to ${calls.join(', ')}` : 'no call waiting for the engine'}, ` +
+        `${deadlocks} deadlock outcomes`,
+      ...(rt ? rt.threadDump() : []),
+    ];
+    post({ type: 'log', line: lines.join('\n'), error: false });
+  };
+
+  /** Posts the memory stats now and every `everyMs` until the session ends (Vfs.buffers walks the tree: keep it coarse). */
+  const reportMemory = (everyMs: number): void => {
+    if (ended || !rt || rt.jvm.threads.isHalted) return;
+    post({ type: 'memory', jvm: rt.jvm.memoryStats(), freeType: freeType?.memoryStats() ?? null });
+    setTimeout(() => reportMemory(everyMs), everyMs);
   };
 
   port.onmessage = ({ data: m }) => {
@@ -233,10 +335,14 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (booted) deliver(m);
         else waiting.push(m);
         break;
+      case 'dump':
+        dump(m.reason);
+        post({ type: 'dumped' });
+        break;
       case 'reply': {
-        const resolve = replies.get(m.id);
+        const c = replies.get(m.id);
         replies.delete(m.id);
-        resolve?.(m.value);
+        c?.resolve(m.value);
         if (!looping) kick();
         break;
       }

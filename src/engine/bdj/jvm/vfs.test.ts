@@ -126,6 +126,44 @@ describe('/app/', () => {
   });
 });
 
+describe('lazy /jdk/ files', () => {
+  it('exist with their size before they are fetched, and fetch once on the first read', async () => {
+    let loads = 0;
+    let fail = true;
+    const jdkLazy = new Map([
+      [
+        'lib/fonts/A.ttf',
+        {
+          size: 3,
+          load: () => {
+            loads++;
+            return fail ? Promise.reject(new Error('offline')) : Promise.resolve(new Uint8Array([7, 8, 9]));
+          },
+        },
+      ],
+    ]);
+    const { vfs } = make({ jdkLazy });
+    expect(vfs.stat('/jdk/lib/fonts/A.ttf')).toEqual({ kind: 'file', size: 3, mtimeMs: 0 });
+    expect(vfs.list('/jdk/lib/fonts')).toEqual(['A.ttf']);
+    expect(loads).toBe(0);
+    const h = vfs.open('/jdk/lib/fonts/A.ttf', 'r')!;
+    const out = new Uint8Array(3);
+    await expect(vfs.read(h, out, 0, 3)).rejects.toThrow('offline');
+    expect(h.position).toBe(0);
+    fail = false;
+    expect(await vfs.read(h, out, 0, 2)).toBe(2);
+    expect(vfs.read(h, out, 2, 1)).toBe(1);
+    expect([...out]).toEqual([7, 8, 9]);
+    expect(loads).toBe(2);
+  });
+
+  it('rejects bytes of the wrong size', async () => {
+    const { vfs } = make({ jdkLazy: new Map([['lib/x', { size: 4, load: () => Promise.resolve(new Uint8Array(2)) }]]) });
+    const h = vfs.open('/jdk/lib/x', 'r')!;
+    await expect(vfs.read(h, new Uint8Array(4), 0, 4)).rejects.toThrow(/expected 4 bytes, got 2/);
+  });
+});
+
 describe('memory mounts', () => {
   it('supports mkdir, nested files, sizes, append and mtime', () => {
     const { vfs, clock } = make();
@@ -231,5 +269,62 @@ describe('paths', () => {
     expect(vfs.stat('/tmp/../etc')).toBeNull();
     expect(vfs.list('/')).toEqual(['app', 'buda', 'disc', 'jdk', 'persistent', 'tmp']);
     expect(vfs.mounts).toEqual(['/disc/', '/tmp/', '/persistent/', '/buda/', '/jdk/', '/app/']);
+  });
+
+  it('peek hands out a memory file without a copy, and later writes go to a copy', () => {
+    const { vfs } = make();
+    writeFile(vfs, '/tmp/j', 'abcdef');
+    const seen = vfs.peek('/tmp/j')!;
+    expect(dec.decode(seen)).toBe('abcdef');
+    expect(vfs.peek('/tmp/j')!.buffer).toBe(seen.buffer);
+    const h = vfs.open('/tmp/j', 'rw')!;
+    vfs.write(h, enc.encode('XY'), 0, 2);
+    expect(vfs.truncate(h, 3)).toBe(true);
+    expect(dec.decode(seen)).toBe('abcdef');
+    expect(readAll(vfs, '/tmp/j')).toBe('XYc');
+    writeFile(vfs, '/tmp/j', 'z');
+    expect(dec.decode(seen)).toBe('abcdef');
+    expect(vfs.peek('/jdk/lib/currency.data')?.length).toBe(vfs.stat('/jdk/lib/currency.data')!.size);
+    expect([vfs.peek('/disc/BDMV/index.bdmv'), vfs.peek('/tmp/missing'), vfs.peek('/tmp')]).toEqual([null, null, null]);
+  });
+
+  it('gives back the room a written file grew by when it is closed', () => {
+    const { vfs } = make();
+    const h = vfs.open('/tmp/big', 'w')!;
+    for (let i = 0; i < 20; i++) vfs.write(h, new Uint8Array(1000).fill(i), 0, 1000);
+    expect(vfs.memoryStats().memBytes).toBeGreaterThan(20_000 + 4096);
+    vfs.close(h);
+    expect(vfs.memoryStats()).toEqual({ memFiles: 1, memBytes: 20_000, memUsed: 20_000, jdkCacheBytes: 0 });
+    const out = new Uint8Array(20_000);
+    expect(vfs.read(vfs.open('/tmp/big', 'r')!, out, 0, out.length)).toBe(20_000);
+    expect([out[0], out[19_999]]).toEqual([0, 19]);
+  });
+
+  it('a write or truncate beyond the memory mounts\' limit fails, as on a full disk', () => {
+    const full: string[] = [];
+    const { vfs } = make({ memLimitBytes: 10, onFull: (path, limit) => full.push(`${path} ${limit}`) });
+    writeFile(vfs, '/tmp/a', '123456');
+    const h = vfs.open('/persistent/b', 'w')!;
+    expect(vfs.fits(h, 4)).toBe(true);
+    expect(vfs.fits(h, 5)).toBe(false);
+    expect(vfs.write(h, enc.encode('12345'), 0, 5)).toBe(false);
+    expect(vfs.stat('/persistent/b')?.size).toBe(0);
+    expect(vfs.write(h, enc.encode('1234'), 0, 4)).toBe(true);
+    expect(vfs.truncate(h, 5)).toBe(false);
+    expect(full).toEqual(['/persistent/b 10', '/persistent/b 10', '/persistent/b 10']);
+    // overwriting in place and shrinking always fit
+    h.position = 0;
+    expect(vfs.write(h, enc.encode('abcd'), 0, 4)).toBe(true);
+    expect(vfs.truncate(h, 1)).toBe(true);
+    expect(vfs.memoryStats().memUsed).toBe(7);
+    // a deleted file, a file emptied by 'w' and one replaced by a rename give their room back
+    expect(vfs.delete('/tmp/a')).toBe(true);
+    expect(vfs.memoryStats().memUsed).toBe(1);
+    writeFile(vfs, '/tmp/c', '123456789');
+    vfs.open('/tmp/c', 'w');
+    expect(vfs.memoryStats().memUsed).toBe(1);
+    writeFile(vfs, '/tmp/d', '12345');
+    expect(vfs.rename('/persistent/b', '/tmp/d')).toBe(true);
+    expect(vfs.memoryStats().memUsed).toBe(1);
   });
 });

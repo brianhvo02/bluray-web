@@ -21,7 +21,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     hdmv/uo-mask.ts       from src/libbluray/bdnav/uo_mask.c, uo_mask.h, uo_mask_table.h
     hdmv/vm.ts            from src/libbluray/hdmv/hdmv_vm.c
     nav/timeline.ts      derived from libbluray navigation time math
-    nav/packets.ts       derived from libbluray navigation.c (_fill_clip, _fill_mark) and clpi_parse.c (clpi_lookup_spn)
+    nav/packets.ts       derived from libbluray navigation.c (_fill_clip, _fill_mark), clpi_parse.c (clpi_lookup_spn) and bluray.c (_find_next_playmark)
     nav/navigator.ts      from src/libbluray/bluray.c (HDMV title and navigation parts, _find_ig_stream, _preload_ig_subpath, _preload_subpaths, _init_ig_stream, bd_user_input, bd_mouse_select)
     nav/subtitles.ts      from src/libbluray/bluray.c (_find_pg_stream, _init_pg_stream, _select_pg_textst_stream, PSR2 events)
     nav/stream-psrs.ts    from src/libbluray/bluray.c (_update_stream_psr_by_lang)
@@ -51,21 +51,35 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
     bdj/worker-host.ts    from src/libbluray/bluray.c (the natives answered in the BD-J worker: bdpriv_reg_read,
                           bdpriv_get_uo_mask, bd_tell_time, bd_get_disc_info, bd_get_playlist_info) and
                           bdj/native/org_videolan_Libbluray.c (getAacsDataN)
+    bdj/graphics-plane.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c
+                          (Java_org_videolan_Libbluray_updateGraphicN, _updateGraphic), bluray.c (bdpriv_bdj_osd_cb,
+                          bdpriv_lock_osd_buffer, bdpriv_unlock_osd_buffer) and the ARGB overlay commands of
+                          decoders/overlay.h (BD_ARGB_OVERLAY_INIT, DRAW, FLUSH, CLOSE; BD_ARGB_BUFFER)
     bdj/jvm/natives/libbluray.ts from src/libbluray/bdj/native/org_videolan_Libbluray.c, bdjo.c, util.c,
-                          org_videolan_Logger.c, java_awt_BDFontMetrics.c and java_awt_BDGraphics.c (font and text
-                          natives as fixed-metric stubs), bdj/bdjo_parse.c (bdjo_get), disc/disc.c
+                          org_videolan_Logger.c, bdj/bdjo_parse.c (bdjo_get), disc/disc.c
                           (disc_cache_bdrom_file, disc_open_dir) and file/file.c (file_mkdirs)
+    bdj/jvm/natives/fonts.ts from src/libbluray/bdj/native/java_awt_BDFontMetrics.c (initN, destroyN,
+                          unloadFontConfigN, resolveFontN, getFontFamilyAndStyleN, loadFontN, destroyFontN,
+                          charWidthN, stringWidthN, charsWidthN) and java_awt_BDGraphics.c (drawStringN)
     bdj/runtime.ts        from src/libbluray/bdj/bdj.c (bdj_open, _create_jvm properties, _bdj_init,
                           bdj_process_event, bdj_close) and bluray.c (_start_bdj, _stop_bdj)
     bdj/events.ts         from src/libbluray/bluray.c (_process_psr_write_event, _process_psr_change_event, BD-J event sites)
     bdj/player-host.ts    from src/libbluray/bluray.c (bdpriv_*, _open_playlist, bd_set_rate, _play_title, _update_uo_mask,
                           _close_playlist, _seek_internal, bd_get_sound_effect, bd_select_angle, _bd_set_virtual_package)
     player.ts (BD-J titles) from src/libbluray/bluray.c (_play_bdj, _start_bdj, _stop_bdj via _play_hdmv,
-                          _try_play_title and _try_menu_call at UO restriction RELAXED, bd_set_rate's BDJ_EVENT_RATE)
+                          _try_play_title and _try_menu_call at UO restriction RELAXED, bd_set_rate's BDJ_EVENT_RATE,
+                          bd_mouse_select's and bd_user_input's BD-J branches)
+    bdj/input.ts          from src/libbluray/bluray.c (bd_user_input's BD-J branch, _get_key_uo_index,
+                          bd_mouse_select's BD-J branch) and keys.h; its bounded event queue and ignored-tap
+                          watch are original
     hdmv/uo-mask.ts uoMaskBits from src/libbluray/bluray.c (bdpriv_get_uo_mask)
     bdj/jvm/natives/intrinsics/graphics.ts from src/libbluray/bdj/java/java/awt/BDGraphicsBase.java (drawSpanN,
                           applyComposite, alphaBlend), Area.java (add) and BDRootWindow.java (isBackBufferClear)
     bdj/jvm/natives/intrinsics/image.ts from src/libbluray/bdj/java/java/awt/BDImageConsumer.java (setPixels)
+    bdj/jvm/natives/havi.ts from src/libbluray/bdj/java/org/havi/ui/HStillImageBackgroundConfiguration.java
+                          (displayImage's fields; the still itself is shown where libbluray leaves it unimplemented),
+                          HBackgroundImage.java and java/awt/BDToolkitBase.java (createImage(String): where the
+                          still's file is named)
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
   subs/srt.ts and subs/text-renderer.ts (SubRip subtitles) are original
@@ -157,6 +171,17 @@ FFmpeg decoders (src/wasm/audio/), LGPL-2.1-or-later
   audio.wasm is built from FFmpeg n9.0.2 (ac3, eac3, dca decoders) and src/wasm/audio/shim.c.
   See src/wasm/audio/NOTICE for the exact source and build.
 
+FreeType (https://freetype.org), FreeType License (FTL)
+  Portions of this software are copyright © 2023 The FreeType Project
+  (www.freetype.org). All rights reserved.
+  freetype.wasm (src/wasm/freetype/), which bdj/fonts/freetype.ts loads for
+  BD-J text, is built from FreeType 2.13.2 as Ubuntu 24.04 ships it, used
+  under the FreeType License (FreeType is dual FTL / GPLv2). The licence text
+  is src/wasm/freetype/FTL.TXT; src/wasm/freetype/NOTICE has the exact source
+  and build. bdj/fonts/freetype.ts and src/wasm/freetype/shim.c are original
+  code that makes the FreeType calls of libbluray's
+  src/libbluray/bdj/native/java_awt_BDFontMetrics.c and java_awt_BDGraphics.c.
+
 DoppioJVM (https://github.com/plasma-umass/doppio), MIT
   Commit 41f41fbae16f23d2791471e150eeb50ad1247eb8 (cloned into .cache/doppio).
   Derived functions:
@@ -206,12 +231,15 @@ fdlibm 5.3 (the C library behind the JDK's StrictMath)
   above) is original code. The engine's intrinsics for class-library methods
   are reimplementations of specified behaviour: SHA-1 compression
   (natives/intrinsics/crypto.ts), BigInteger.implMulAdd's word
-  multiply-accumulate (crypto.ts), PNGImageDecoder.update_crc (the PNG
-  specification's CRC-32, png.ts), the java.lang.String methods and the UTF-8
-  decoder's ASCII copy (strings.ts), Arrays.fill (arrays.ts) and
+  multiply-accumulate (crypto.ts), PNGImageDecoder.update_crc
+  (the PNG specification's CRC-32, png.ts), the java.lang.String methods,
+  StringBuilder.append(String), Integer.parseInt, Character.digit and the UTF-8
+  decoder's ASCII copy (strings.ts), Math.min/max, Arrays.copyOfRange and
+  new String(char[], int, int) (lang.ts), Arrays.fill (arrays.ts) and
   IndexColorModel.getRGB's palette lookup (color-model.ts). Intrinsics that
   derive from OpenJDK's code (DirectColorModel.getRGB, Rectangle.intersection,
-  PNGImageDecoder.produceImage's row loop) are not part of the engine: they
+  PNGImageDecoder.produceImage's row loop, the jar and manifest scanning of
+  jar-text.ts) are not part of the engine: they
   live with the class library in src/bdj-classlib/intrinsics/, under GPLv2
   with the Classpath Exception, and a JVM gets them only through
   JvmOptions.extraIntrinsics (the BD-J worker's entry passes them).

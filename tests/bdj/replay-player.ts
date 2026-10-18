@@ -3,16 +3,22 @@ import { fileURLToPath } from 'node:url';
 import { createRing, renderQuantum, ringViews } from '../../src/engine/audio/ring';
 import { registerClassLibraryIntrinsics } from '../../src/bdj-classlib/intrinsics/index';
 import { runBdjWorker, type BdjPort, type BdjWorkerHandle } from '../../src/engine/bdj/bdj-worker';
+import { GraphicsPlaneReader, GraphicsPlaneWriter, planeHash } from '../../src/engine/bdj/graphics-plane';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import type { ClassLibrarySource } from '../../src/engine/bdj/runtime';
 import type { WorkerLike } from '../../src/engine/bdj/session';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from '../../src/engine/bdj/worker-protocol';
 import { createAudioDecoderFactory } from '../../src/engine/decode/audio-decoder';
 import { Player } from '../../src/engine/player';
+import type { CompositorLike } from '../../src/engine/render/compositor';
+import type { DecodeImage } from '../../src/engine/bdj/background';
 import type { EngineEvent } from '../../src/engine/protocol';
+import type { MemoryProfileName } from '../../src/engine/memory-profile';
 import { fakeVideoCodecApi } from '../helpers/fake-video-decoder';
 import { directoryEntries } from '../helpers/file-blob';
 import { HARNESS_SETTINGS } from './replay';
+import { testBdjFonts } from '../helpers/bdj-fonts';
+import type { KeyStep, SettledStep } from './key-script';
 
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../src/bdj-classlib/${name}`, import.meta.url))));
 
@@ -30,6 +36,25 @@ export interface PlayerBdjReplay {
   readonly virtualMs: number;
   /** Everything the player emitted up to the end of the run (not the close that follows). */
   readonly events: readonly EngineEvent[];
+  /** The graphics plane of the last BD-J worker started, as the engine reads it. */
+  readonly plane: GraphicsPlaneReader | null;
+  /** With a script: the plane hash at every flush, in order (tools/bdj-trace's `{"plane":"flush"}` lines). */
+  readonly flushes: readonly string[];
+  /** With a script: each step as it ran, a `wait still` step with the hash of the plane it settled on. */
+  readonly steps: readonly SettledStep[];
+}
+
+/** Records the plane's hash at every flush of every GraphicsPlaneWriter (the BD-J worker runs in process) until undone. */
+function hookFlushes(record: (hash: string) => void): () => void {
+  const proto = GraphicsPlaneWriter.prototype;
+  const flush = proto.flush;
+  proto.flush = function (this: GraphicsPlaneWriter): void {
+    flush.call(this);
+    record(planeHash(this.buffer)); // the writer holds the plane's lock here
+  };
+  return () => {
+    proto.flush = flush;
+  };
 }
 
 /** sixDigits: %.6g of a Java float, as trace.patch prints selectRateN's rate. */
@@ -57,7 +82,7 @@ export function traceEntryOf(name: BdjCallName, args: readonly BdjWireValue[], v
  * Two ends of an in-process channel between the engine and runBdjWorker: messages are delivered by reference (the
  * disc's Blob stand-ins for clips over 4 GiB cannot be cloned) on a later macrotask, in order, as a MessagePort does.
  */
-function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void): WorkerLike {
+function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void, onHandle: (h: BdjWorkerHandle) => void): WorkerLike {
   let closed = false;
   let handle: BdjWorkerHandle | null = null;
   const port: BdjPort = {
@@ -82,7 +107,8 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
       handle?.runtime?.jvm.threads.halt();
     },
   };
-  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics });
+  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts });
+  onHandle(handle);
   return worker;
 }
 
@@ -91,12 +117,38 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
  * a render loop), with BD-J in an in-process runBdjWorker and the bdj-trace harness's player settings. The player's
  * clock is virtual and runs ahead in steps as fast as the engine keeps up, so playlists end through the player's own
  * end-of-playlist path in a fraction of their duration. Records Java's calls as the engine replies to them and stops
- * after the `occurrence`-th reply to `until` (a trace name such as selectPlaylistN). A thrown Error carries the trace
- * recorded so far as `trace`.
+ * after the `occurrence`-th reply to `until` (a trace name such as selectPlaylistN), or, with `untilPlane`, once it
+ * returns true for the graphics plane (checked after every step). With `script` (tools/bdj-trace's key scripts), the
+ * steps run as the harness runs them, in wall time (`wait still`) and on the player's events (`wait playlist`: a
+ * `chapters` event), keys and clicks going in as the UI sends them (menuKey, pointer), and the player's clock kept to
+ * wall time, as libbluray's reads are; the run then ends only once the script has finished too. A thrown Error carries what was recorded so far as `trace`, `steps`, `flushes` and `events`.
  */
 export async function replayPlayerBdj(
   discDir: URL | string,
-  opts: { until: string; occurrence?: number; timeoutMs?: number; log?: (line: string) => void; classLibrary?: ClassLibrarySource },
+  opts: {
+    until: string;
+    occurrence?: number;
+    timeoutMs?: number;
+    log?: (line: string) => void;
+    classLibrary?: ClassLibrarySource;
+    untilPlane?: (plane: GraphicsPlaneReader) => boolean;
+    /** Also ends the run once it returns true for the calls traced so far (checked after each reply). */
+    untilTrace?: (trace: readonly TraceEntry[]) => boolean;
+    /** Once the run would end, go on this long (wall time), still tracing, so calls past the end show up. */
+    tailMs?: number;
+    /** The player's compositor (default: one that draws nothing). */
+    compositor?: CompositorLike;
+    /** PlayerDeps.decodeImage, for background stills (default: none, so none are shown). */
+    decodeImage?: DecodeImage;
+    /** A key script to replay (key-script.ts), with the plane hashed at every flush. */
+    script?: readonly KeyStep[];
+    /** How long a script step may wait (default 60 s, the harness's --wait-timeout in golden.sh). */
+    stepTimeoutMs?: number;
+    /** The memory profile the player runs under (setMemoryProfile before the open; default the player's, desktop). */
+    memoryProfile?: MemoryProfileName;
+    /** Called once the run has ended, before the player closes, with the player and the last BD-J worker started. */
+    beforeClose?: (player: Player, worker: BdjWorkerHandle | null) => void | Promise<void>;
+  },
 ): Promise<PlayerBdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
   const occurrence = opts.occurrence ?? 1;
@@ -112,8 +164,19 @@ export async function replayPlayerBdj(
   const clock = { ms: 1000 };
   let seen = 0;
   let done = false;
+  /** Tracing stops at `done`, or, with a tail, when the tail is over. */
+  let traced = false;
   let firstPlaylistAt: number | null = null;
   let t0 = 0;
+  let plane: GraphicsPlaneReader | null = null;
+  const script = opts.script ?? [];
+  const stepTimeoutMs = opts.stepTimeoutMs ?? 60_000;
+  const flushes: string[] = [];
+  const steps: SettledStep[] = [];
+  let lastFlushAt = 0;
+  let stepIdx = 0;
+  let stepFrom = { events: 0, flushes: 0, at: 0 };
+  let lastWorker: BdjWorkerHandle | null = null;
 
   const onFromBdj = (m: FromBdj): void => {
     if (m.type !== 'call') return;
@@ -121,13 +184,17 @@ export async function replayPlayerBdj(
     if (m.name === 'selectPlaylist' && firstPlaylistAt === null) firstPlaylistAt = performance.now();
   };
   const onToBdj = (m: ToBdj): void => {
-    if (m.type !== 'reply' || done) return;
+    if (m.type === 'boot') plane = new GraphicsPlaneReader(m.plane);
+    if (m.type !== 'reply' || traced) return;
     const c = calls.get(m.id);
     if (!c) return;
     calls.delete(m.id);
     const e = traceEntryOf(c.name, c.args, m.value);
     trace.push(e);
-    if (e.call === opts.until && ++seen >= occurrence) done = true;
+    if ((e.call === opts.until && ++seen >= occurrence) || opts.untilTrace?.(trace)) {
+      done = true;
+      if (!opts.tailMs) traced = true;
+    }
   };
 
   const player = new Player({
@@ -136,45 +203,113 @@ export async function replayPlayerBdj(
     nowMs: () => clock.ms,
     requestFrame: () => undefined,
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm in the replay'))),
-    createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+    createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
+    ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
     // the replay has its own timeout; the first-playlist timer would measure the virtual clock's real-time steps
     setTimer: () => () => undefined,
-    createBdjWorker: () => inProcessWorker(onToBdj, onFromBdj),
+    createBdjWorker: () =>
+      inProcessWorker(onToBdj, onFromBdj, (h) => {
+        lastWorker = h;
+      }),
     loadClassLibrary: async () => classes,
     bdjLog: opts.log ? (line) => opts.log!(line) : undefined,
     playerSettings: HARNESS_SETTINGS,
   });
   const fail = (why: string): Error =>
-    Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), { trace: [...trace] });
+    Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), {
+      trace: [...trace],
+      steps: [...steps],
+      flushes: [...flushes],
+      events: [...events],
+      threadDump: (lastWorker as BdjWorkerHandle | null)?.runtime?.threadDump() ?? [],
+    });
+  /** Runs the script's steps from the current one while their waits hold (bdj_trace.c's step loop). */
+  const runSteps = async (): Promise<void> => {
+    while (stepIdx < script.length) {
+      const s = script[stepIdx]!;
+      // where the next step's waits count from: a key or click is sent at once, so what it causes, even while it is
+      // being handed over, belongs to the next step (bdj_trace.c takes step_flushes before running a step's input)
+      const mark = { events: events.length, flushes: flushes.length, at: performance.now() };
+      let held = true;
+      switch (s.kind) {
+        case 'waitFlush':
+          held = flushes.length >= s.n;
+          break;
+        case 'waitStill':
+          held = flushes.length > stepFrom.flushes && performance.now() - lastFlushAt >= s.ms;
+          break;
+        case 'waitPlaylist':
+          held = events.slice(stepFrom.events).some((e) => e.type === 'chapters' && Number(e.playlistId) === s.playlist);
+          break;
+        case 'key':
+          await player.handle({ type: 'menuKey', key: s.key });
+          break;
+        case 'pointer':
+          await player.handle({ type: 'pointer', kind: s.click ? 'click' : 'move', x: s.x, y: s.y });
+          break;
+      }
+      if (!held) {
+        if (performance.now() - stepFrom.at > stepTimeoutMs) throw fail(`script step ${stepIdx} "${s.text}" did not hold within ${stepTimeoutMs} ms`);
+        return;
+      }
+      steps.push({ script: 'step', n: stepIdx, step: s.text, ...(s.kind === 'waitStill' ? { hash: flushes.at(-1) ?? null } : {}) });
+      stepIdx++;
+      stepFrom = s.kind === 'key' || s.kind === 'pointer' ? mark : { events: events.length, flushes: flushes.length, at: performance.now() };
+    }
+  };
+  const unhook = script.length
+    ? hookFlushes((hash) => {
+        flushes.push(hash);
+        lastFlushAt = performance.now();
+      })
+    : () => undefined;
   try {
     const ring = createRing(48_000, 2);
     const views = ringViews(ring);
     const left = new Float32Array(128);
     const right = new Float32Array(128);
+    if (opts.memoryProfile) await player.handle({ type: 'setMemoryProfile', profile: opts.memoryProfile });
     await player.handle({ type: 'attachAudio', ring });
     await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
     const start = clock.ms;
     t0 = performance.now();
+    stepFrom = { events: 0, flushes: 0, at: t0 };
     await player.handle({ type: 'open', disc: { kind: 'files', entries: await directoryEntries(dir) } });
-    while (!done) {
+    let tailFrom: number | null = null;
+    for (;;) {
+      if (done && stepIdx >= script.length) {
+        tailFrom ??= performance.now();
+        if (performance.now() - tailFrom >= (opts.tailMs ?? 0)) break;
+      }
       if (performance.now() - t0 > timeoutMs) throw fail(`timed out after ${timeoutMs} ms`);
       const failed = events.find((e) => e.type === 'notice' && e.code === 'bdj-failed');
       if (failed?.type === 'notice') throw fail(`BD-J failed (${failed.message})`);
       if (events.some((e) => e.type === 'state' && e.state === 'error')) throw fail('the player failed');
-      clock.ms += STEP_MS;
-      for (let q = 0; q < 5; q++) renderQuantum(views, left, right);
+      // a script runs in wall time, as the harness reads in real time: the player's clock must not run ahead of it
+      if (!script.length || clock.ms - start <= performance.now() - t0) {
+        clock.ms += STEP_MS;
+        for (let q = 0; q < 5; q++) renderQuantum(views, left, right);
+      }
       player.tick();
       await new Promise((r) => setTimeout(r, 1));
+      if (opts.untilPlane && plane && opts.untilPlane(plane)) done = true;
+      await runSteps();
     }
+    traced = true;
     const end = performance.now();
+    await opts.beforeClose?.(player, lastWorker);
     return {
       trace,
       firstPlaylistMs: (firstPlaylistAt ?? end) - t0,
       untilMs: end - t0,
       virtualMs: clock.ms - start,
       events: [...events], // before the close in finally
+      plane,
+      flushes: [...flushes],
+      steps: [...steps],
     };
   } finally {
     await player.handle({ type: 'close' });
+    unhook();
   }
 }

@@ -19,8 +19,23 @@ export interface PlayerSnapshot {
   readonly usesBdj: boolean;
   /** The engine runs BD-J titles. */
   readonly bdjSupported: boolean;
-  /** A BD-J title drives playback (its menu is not drawn): no playlist yet is no reason to show the picker. */
+  /** What this browser lacks to run BD-J (named in the picker); empty when nothing is missing. */
+  readonly bdjMissing: readonly string[];
+  /** A BD-J title drives playback: no playlist yet is no reason to show the picker. */
   readonly bdjActive: boolean;
+  /** The BD-J graphics plane shows something: taps, clicks, arrows, Enter and digits go to the disc. */
+  readonly bdjMenuVisible: boolean;
+  /** Taps on a BD-J menu the disc ignored, counted since the page loaded. */
+  readonly bdjTapsIgnored: number;
+  /**
+   * Times the on-screen remote was opened for an ignored tap, counted since the page loaded: once per menu (from the
+   * BD-J plane turning visible), with the notice; a remote the user then closes stays closed until the next menu.
+   */
+  readonly bdjRemoteRequests: number;
+  /** The current BD-J menu has already opened the remote for an ignored tap. */
+  readonly bdjRemoteOpenedInMenu: boolean;
+  /** Clicks on an HDMV menu that hit no button, counted since the page loaded (a touch that missed shows the controls). */
+  readonly menuTapMisses: number;
   readonly warnings: readonly string[];
   readonly currentPlaylistId: string | null;
   readonly durationUs: number;
@@ -82,7 +97,13 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   playlists: [],
   usesBdj: false,
   bdjSupported: false,
+  bdjMissing: [],
   bdjActive: false,
+  bdjMenuVisible: false,
+  bdjTapsIgnored: 0,
+  bdjRemoteRequests: 0,
+  bdjRemoteOpenedInMenu: false,
+  menuTapMisses: 0,
   warnings: [],
   currentPlaylistId: null,
   durationUs: 0,
@@ -113,7 +134,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjMissing: e.bdjMissing ?? [], bdjActive: false, bdjMenuVisible: false, bdjRemoteOpenedInMenu: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };
@@ -139,6 +160,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, menuActive: e.active, popupAvailable: e.popupAvailable, pointerButton: e.active ? s.pointerButton : null };
     case 'pointerTarget':
       return { ...s, pointerButton: e.button };
+    case 'menuTapMissed':
+      return { ...s, menuTapMisses: s.menuTapMisses + 1 };
     case 'soundEffects':
     case 'soundEffect':
       return s; // handed to the audio output by the controller
@@ -149,8 +172,15 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'uoMask':
       return { ...s, uoMask: e.masked };
     case 'bdjActive':
-      // once BD-J stops, the disc's playback is no longer its own
-      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, notices: s.notices.filter((n) => n.code !== 'bdj-menu-hidden') };
+      // once BD-J stops, its menu and the notice about it go
+      return e.active ? { ...s, bdjActive: true } : { ...s, bdjActive: false, bdjMenuVisible: false, bdjRemoteOpenedInMenu: false, notices: s.notices.filter((n) => n.code !== 'bdj-tap-ignored') };
+    case 'bdjMenu':
+      // a plane turning visible is a new menu: its first ignored tap opens the remote again
+      return { ...s, bdjMenuVisible: e.visible, bdjRemoteOpenedInMenu: e.visible && !s.bdjMenuVisible ? false : s.bdjRemoteOpenedInMenu };
+    case 'bdjTapIgnored':
+      return s.bdjRemoteOpenedInMenu
+        ? { ...s, bdjTapsIgnored: s.bdjTapsIgnored + 1 }
+        : { ...s, bdjTapsIgnored: s.bdjTapsIgnored + 1, bdjRemoteRequests: s.bdjRemoteRequests + 1, bdjRemoteOpenedInMenu: true };
     case 'indexTitles':
       return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':
@@ -361,9 +391,9 @@ export class PlayerController {
     this.startAudio();
     // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
     // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay;
-    // the picked playlist stops a BD-J title, so its menu-hidden notice goes.
+    // the picked playlist stops a BD-J title, so its ignored-tap notice goes.
     const playlistScoped = (code: string): boolean =>
-      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-menu-hidden';
+      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-tap-ignored';
     this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
     this.post({ type: 'playPlaylist', playlistId });
   }
@@ -601,8 +631,9 @@ export class PlayerController {
     return false;
   }
 
-  menuKey(key: MenuKey): void {
-    this.post({ type: 'menuKey', key });
+  /** `repeat`: a held key's auto-repeat. */
+  menuKey(key: MenuKey, repeat = false): void {
+    this.post(repeat ? { type: 'menuKey', key, repeat } : { type: 'menuKey', key });
   }
 
   /** (x, y) in the 1920×1080 menu space. */

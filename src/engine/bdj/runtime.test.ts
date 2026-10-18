@@ -146,6 +146,16 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(lines).toContain("Libbluray:0: INFO: Using Java 1.8 (5b) from '/jdk'");
   }, 60_000);
 
+  it('logs the first write the memory budget refuses, naming the path and the budget, and only that one', () => {
+    const { rt, lines } = runtime({ memory: { classBytes: Infinity, vfsBytes: 4 } });
+    const vfs = rt.jvm.opts.vfs!;
+    const h = vfs.open('/tmp/x', 'w')!;
+    expect(vfs.write(h, new Uint8Array(4), 0, 4)).toBe(true);
+    expect(vfs.write(h, new Uint8Array(1), 0, 1)).toBe(false);
+    expect(vfs.write(h, new Uint8Array(1), 0, 1)).toBe(false);
+    expect(lines.filter((l) => l.includes('No space'))).toEqual(['BD-J: no room to write /tmp/x: the BD-J files in memory are at the budget of 0.0 MB (No space left on device)']);
+  });
+
   it("passes the disc's id.bdmv disc ID to Libbluray.init, or 32 zeros without one, as _bdj_init does", async () => {
     const currentDisc = async (rt: BdjRuntime): Promise<string | null> => {
       const dm = (await rt.jvm.callStatic('org/bluray/ti/DiscManager', 'getDiscManager', '()Lorg/bluray/ti/DiscManager;')) as JObject;
@@ -196,6 +206,26 @@ describe('BdjRuntime on disc-bdj', () => {
     expect(events).toHaveLength(3);
     expect(overlapped).toBe(false);
     expect(trace().filter((e) => CONTROL_CALLS.has(e.call)).map((e) => JSON.stringify(e))).toEqual(GOLDEN);
+  }, 60_000);
+
+  it("bounds a held key's repeats waiting behind a running event, in order (input.ts)", async () => {
+    const { rt } = runtime();
+    await rt.boot();
+    const threads = rt.jvm.threads;
+    const params: number[] = [];
+    const spawn = threads.spawn.bind(threads);
+    threads.spawn = (javaThread, m, args) => {
+      if (m.name === 'processEvent') params.push(Number(args[1]) >>> 0);
+      return spawn(javaThread, m, args);
+    };
+    rt.start(FIRST_PLAY); // its event runs while the keys wait
+    rt.processEvent(BdjEvent.VK_KEY, 0xe000000d); // DOWN
+    for (let i = 0; i < 40; i++) rt.processEvent(BdjEvent.VK_KEY, 0xe000000d, 'repeat');
+    rt.processEvent(BdjEvent.VK_KEY, 0xe0000010); // ENTER: never dropped
+    expect(rt.pendingEvents).toBe(9);
+    expect(await rt.run({ until: isSelectPlaylist })).toBe('until');
+    await rt.run();
+    expect(params).toEqual([FIRST_PLAY, ...Array(8).fill(0xe000000d), 0xe0000010]);
   }, 60_000);
 
   it('rejects run() with an internal error when the host throws, with the Java stack at fault', async () => {

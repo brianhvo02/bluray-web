@@ -2,10 +2,10 @@
 import { parseClpi } from '../engine/bdmv/clpi-parser';
 import { CodingType } from '../engine/bdmv/stream-types';
 import { analyzeHevc, hevcCodecString } from '../engine/decode/hevc';
-import { FileSource } from '../engine/disc/file-source';
-import { normalizeDiscPaths } from '../engine/disc/paths';
+import type { ByteSource } from '../engine/disc/byte-source';
+import { createByteSource } from '../engine/disc/disc-spec';
 import { M2tsReader } from '../engine/demux/m2ts-reader';
-import type { WorkerProbe } from './checks';
+import type { WorkerInput, WorkerProbe } from './checks';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope & { requestAnimationFrame?: (cb: (t: number) => void) => number };
 
@@ -43,8 +43,16 @@ async function supported(codec: string): Promise<boolean> {
   }
 }
 
-async function hevc(entries: ReadonlyArray<readonly [string, File]>): Promise<WorkerProbe['hevc']> {
-  const source = new FileSource(normalizeDiscPaths(entries));
+/** The HEVC check reads one GOP in order: a little read-ahead keeps it from fetching each chunk once per small read. */
+const PROBE_READ_AHEAD_BYTES = 16 * 1024 * 1024;
+
+async function openSource(input: WorkerInput): Promise<ByteSource> {
+  const disc = 'server' in input ? input.server : { kind: 'files' as const, entries: input.entries };
+  return createByteSource(disc, { fetch: (url, init) => fetch(url, init), readAheadBytes: PROBE_READ_AHEAD_BYTES, onWaiting: () => undefined });
+}
+
+async function hevc(input: WorkerInput): Promise<WorkerProbe['hevc']> {
+  const source = await openSource(input);
   let target: { clip: string; pid: number } | null = null;
   for (const name of source.list('BDMV/CLIPINF')) {
     if (!name.endsWith('.CLPI')) continue;
@@ -114,12 +122,12 @@ async function hevc(entries: ReadonlyArray<readonly [string, File]>): Promise<Wo
   return result;
 }
 
-scope.onmessage = async (event: MessageEvent<{ entries: Array<readonly [string, File]> }>) => {
-  const { entries } = event.data;
+scope.onmessage = async (event: MessageEvent<WorkerInput>) => {
+  const input = event.data;
   const [raf, gl, hevcResult] = await Promise.all([
     timerP95(),
     Promise.resolve().then(webgl).catch(() => ({ float: false, half: false })),
-    hevc(entries).catch((err: unknown) => ({ hvc1: false, hev1: false, decoded: false, error: err instanceof Error ? err.message : String(err) })),
+    hevc(input).catch((err: unknown) => ({ hvc1: false, hev1: false, decoded: false, error: err instanceof Error ? err.message : String(err) })),
   ]);
   const probe: WorkerProbe = { hevc: hevcResult, raf, webgl: gl };
   scope.postMessage(probe);

@@ -39,17 +39,24 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .player { position: relative; height: 100%; background: #000; overflow: hidden; }
 .player.idle { cursor: auto; }
-@media (hover: hover) { .player.idle { cursor: none; } }
+@media (hover: hover) { .player.idle:not(.in-menu) { cursor: none; } } /* over a disc menu the cursor stays (ruling R9) */
 .player-canvas { width: 100%; height: 100%; display: block; touch-action: manipulation; } /* no double-tap zoom competing with double-tap seek */
+/* a long press over a menu shows the controls (ruling R15): no iOS callout or text selection competing with it */
+.player-canvas { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .player-canvas.over-button { cursor: pointer; }
 .notices { position: absolute; z-index: 20; top: 12px; left: 12px; right: 12px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .notices > * { pointer-events: auto; }
 .notice { background: rgba(30, 30, 36, 0.92); border-radius: 8px; padding: 8px 12px; display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+/* Passes taps through: it sits at the centre of the picture, over a disc menu that may be showing (task 14c). */
 .spinner { pointer-events: none; position: absolute; top: 50%; left: 50%; width: 48px; height: 48px; margin: -24px; border: 4px solid #ffffff33; border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .control-bar { position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 16px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); transition: opacity 0.2s; }
 .control-bar.hidden { opacity: 0; pointer-events: none; }
+/* Over a disc menu the bar's empty space (gradient, padding, spacer) passes clicks through to the menu (ruling R9);
+   elsewhere the whole bar takes them, so a click that misses a control doesn't pause the video. */
+.player.in-menu .control-bar { pointer-events: none; }
+.player.in-menu .control-bar:not(.hidden) :is(.seek-bar, button, input, select, .audio-menu-list, .shader-report, .shader-dialog) { pointer-events: auto; }
 .control-row { display: flex; align-items: center; gap: 8px; }
 .control-row .spacer { flex: 1; }
 .time { font-variant-numeric: tabular-nums; }
@@ -109,128 +116,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .shader-dialog ul { margin: 0; padding: 0; list-style: none; max-height: 30vh; overflow: auto; }
 .shader-dialog li { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 2px 0; }
 
-/* The NAS title library (spec §14): Library, Series and Season. Touch targets are at least 44 px everywhere. */
-.titles {
-  --t-ground: #121214; --t-surface: #1c1c20; --t-text: #ededef; --t-muted: #a1a1aa; --t-accent: #f2b84b; --t-on-accent: #1a1405; --t-border: #3a3a42;
-  display: flex; flex-direction: column; gap: 16px; min-width: 0;
-  background: var(--t-ground); color: var(--t-text); border-radius: 12px; padding: 16px;
-  font-family: system-ui, -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
-}
-.titles h2, .titles h3 { margin: 0; }
-.titles [hidden] { display: none; }
-.titles button { min-height: 44px; background: var(--t-surface); border-color: var(--t-border); }
-.titles button:focus-visible, .title-search:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; }
-.titles-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.titles-actions { display: flex; gap: 8px; }
-.title-icon-button { min-width: 44px; }
-.title-icon-button[aria-label] { font-size: 1.2em; }
-.title-muted { color: var(--t-muted); font-size: 0.9em; overflow-wrap: anywhere; }
-.title-search { box-sizing: border-box; width: 100%; height: 48px; padding: 0 16px; font: inherit; color: var(--t-text); background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 12px; }
-.title-search::placeholder { color: var(--t-muted); }
-.title-shelves { display: flex; flex-wrap: wrap; gap: 8px; }
-.titles .title-chip { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 6px 16px; }
-.titles .title-chip.selected { background: var(--t-accent); border-color: var(--t-accent); color: var(--t-on-accent); }
-.title-chip-count { color: inherit; opacity: 0.7; font-variant-numeric: tabular-nums; }
-.title-section { font-size: 1em; font-weight: 600; }
-.title-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
-.titles .title-card { width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 0; text-align: left; background: none; border: none; }
-.title-poster { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 8px; background: var(--t-surface); }
-.titles .poster-placeholder { display: flex; align-items: center; justify-content: center; box-sizing: border-box; border: 1px solid var(--t-border); color: var(--t-muted); font-weight: 600; font-size: 1.4em; letter-spacing: 0.04em; }
-.title-card-name { overflow-wrap: anywhere; line-height: 1.3; }
-.title-card-native { line-height: 1.3; }
-.title-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.titles .title-row, .titles .episode-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 12px; text-align: left; border-radius: 10px; }
-.title-thumb { flex: none; display: block; width: 48px; height: 72px; object-fit: cover; border-radius: 6px; background: var(--t-ground); font-size: 0.9em; }
-.title-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.title-row-name { overflow-wrap: anywhere; }
-.title-chevron { flex: none; color: var(--t-muted); font-size: 1.4em; }
-.titles .extras-row { border-style: dashed; background: none; }
-.titles .title-link { align-self: center; background: none; border: none; color: var(--t-accent); text-decoration: underline; text-underline-offset: 3px; }
-.titles .title-back { min-width: 44px; font-size: 1.4em; line-height: 1; padding: 0 12px; align-self: flex-start; }
-.series-screen { padding-top: 0; overflow: hidden; }
-.series-banner { position: relative; height: 220px; margin: 0 -16px; background: linear-gradient(160deg, #2a2a31, var(--t-ground)); }
-.series-banner-art { display: block; width: 100%; height: 100%; object-fit: cover; }
-.titles .series-banner-art.poster-placeholder { display: none; }
-.titles .title-thumb.poster-placeholder { font-size: 0.9em; }
-.titles .title-back.on-banner { position: absolute; top: 12px; left: 12px; background: rgba(18, 18, 20, 0.7); }
-.series-head { display: flex; align-items: flex-end; gap: 16px; margin-top: -78px; position: relative; }
-.series-poster { flex: none; display: block; width: 104px; height: 156px; object-fit: cover; border-radius: 8px; background: var(--t-surface); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
-.series-names { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.series-names h2 { font-size: 1.3em; overflow-wrap: anywhere; }
-.series-meta { color: var(--t-muted); font-size: 0.85em; margin-top: 4px; }
-.season-head { display: flex; align-items: center; gap: 12px; }
-.season-head-text { min-width: 0; display: flex; flex-direction: column; }
-.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 10px; }
-.titles .segmented button { background: none; border: none; border-radius: 8px; }
-.titles .segmented button.selected { background: var(--t-accent); color: var(--t-on-accent); }
-.episode-number { flex: none; width: 2.5em; text-align: center; color: var(--t-muted); font-variant-numeric: tabular-nums; }
-.disc-card { display: flex; flex-direction: column; gap: 6px; padding: 12px; background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 10px; }
-.disc-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.titles .disc-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 12px; text-align: left; background: var(--t-ground); }
-.disc-copy-drive { font-size: 0.85em; color: var(--t-accent); }
-.disc-copy-folder { font-size: 0.9em; color: var(--t-muted); overflow-wrap: anywhere; }
-.disc-copy-owned { display: flex; flex-direction: column; gap: 4px; }
-.owner-refile { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.owner-refile > div { align-self: stretch; }
-.titles .owner-refile > .title-link { align-self: flex-start; padding: 0 4px; }
-
-/* The owner screens (spec §9, mockups 4 and 5): Unsorted, Hidden and the Music shelf's renames. */
-.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.owner-cards { display: flex; flex-direction: column; gap: 16px; }
-.owner-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 12px; min-width: 0; }
-.owner-why { margin: 0; color: var(--t-accent); font-size: 0.9em; }
-.owner-disc { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.owner-disc-name { overflow-wrap: anywhere; }
-.owner-subhead { margin: 0; font-size: 0.85em; font-weight: 600; color: var(--t-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-.owner-options { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.titles .owner-option { width: 100%; display: flex; align-items: center; gap: 12px; padding: 6px 10px; text-align: left; border-radius: 10px; background: var(--t-ground); }
-.titles .owner-option.selected { border-color: var(--t-accent); box-shadow: inset 0 0 0 1px var(--t-accent); }
-.owner-option-poster { flex: none; display: block; width: 32px; height: 48px; object-fit: cover; border-radius: 4px; background: var(--t-surface); }
-.titles .owner-option-poster.poster-placeholder { font-size: 0.7em; }
-.owner-search { display: flex; gap: 8px; }
-.owner-search .title-search { flex: 1; min-width: 0; height: 44px; }
-.owner-numbers { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.owner-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; color: var(--t-muted); min-width: 0; }
-.owner-field input { box-sizing: border-box; width: 100%; min-height: 44px; padding: 0 12px; font: inherit; font-size: 1.1em; color: var(--t-text); background: var(--t-ground); border: 1px solid var(--t-border); border-radius: 8px; }
-.owner-field input:disabled { opacity: 0.45; }
-.owner-field input:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; }
-.titles .owner-primary { background: var(--t-accent); border-color: var(--t-accent); color: var(--t-on-accent); font-weight: 600; }
-.owner-links { display: flex; flex-wrap: wrap; gap: 4px 16px; }
-.titles .owner-links .title-link { align-self: auto; padding: 0 4px; }
-.owner-catalogue { margin: 0; }
-.owner-catalogue a { color: var(--t-muted); text-underline-offset: 3px; display: inline-block; min-height: 44px; line-height: 44px; }
-.owner-message { margin: 0; color: var(--t-muted); font-size: 0.9em; }
-.owner-notice { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--t-accent); border-radius: 10px; background: var(--t-ground); }
-.owner-notice p { margin: 0; }
-.owner-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
-.owner-skipped { margin: 0; padding-left: 20px; }
-.owner-form { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--t-border); border-radius: 10px; background: var(--t-ground); }
-.owner-kinds { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; border: none; }
-.owner-kinds legend { padding: 0; margin-bottom: 4px; font-size: 0.9em; color: var(--t-muted); }
-.owner-radio { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; }
-.owner-radio input { width: 20px; height: 20px; accent-color: var(--t-accent); }
-.owner-number input { max-width: 8em; }
-.owner-row { display: flex; flex-direction: column; gap: 8px; }
-.owner-row-main { display: flex; align-items: center; gap: 8px; }
-.owner-row-main .title-row-text { padding: 0 4px; }
-.owner-row-main > .title-row { flex: 1; min-width: 0; }
-.admin-titles { display: flex; flex-direction: column; gap: 8px; }
-.admin-titles p { margin: 0; }
-.admin-switch { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; }
-.admin-switch input { width: 24px; height: 24px; }
-.admin-confirm-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.admin-tmdb { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 0.85em; opacity: 0.85; }
-.admin-own { display: flex; flex-direction: column; gap: 8px; }
-.admin-own h4 { margin: 8px 0 0; }
-.admin-own-row { display: flex; flex-direction: column; gap: 8px; }
-.admin-own-main { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
-.admin-own-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.admin-own-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.admin-own-form input { min-height: 44px; box-sizing: border-box; font: inherit; }
-/* Confirm and cancel buttons in NAS settings are 44 px on every screen, not only on phones. */
-.admin-confirm button, .admin-confirm-box button, .admin-own-actions button, .admin-titles button { min-height: 44px; min-width: 44px; }
-.admin-confirm-box .admin-confirm { flex-wrap: wrap; }
-
 /* Phones and tablets: 44 px hit targets, wrapping controls, safe areas, menus as bottom sheets. */
 @media (max-width: 600px), (pointer: coarse) {
   .control-bar { padding: 12px max(16px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
@@ -249,8 +134,6 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .playlist { grid-template-columns: 56px 64px 1fr auto; gap: 8px; }
   .encoding-prompt ul { grid-template-columns: 1fr; }
   .remote-pad { right: max(16px, env(safe-area-inset-right)); bottom: calc(max(12px, env(safe-area-inset-bottom)) + 150px); }
-  .landing:has(.titles) { padding: 16px; }
-  .titles { margin: 0 -16px; border-radius: 0; }
 }
 @media (pointer: coarse) {
   button, .audio-menu-list button { min-width: 44px; min-height: 44px; }

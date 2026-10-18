@@ -1,10 +1,14 @@
 import { AudioWriter } from './audio/audio-writer';
 import { OUTPUT_SAMPLE_RATE, RingWriter, ringViews } from './audio/ring';
-import { type PlayItem } from './bdmv/mpls-parser';
+import type { Mpls, PlayItem } from './bdmv/mpls-parser';
+import { BackgroundStill, type DecodeImage } from './bdj/background';
 import { bdjPlaybackEvents, type BdjPlaybackEvents } from './bdj/events';
 import { PlayerBdjHost } from './bdj/player-host';
-import type { ClassLibrarySource } from './bdj/runtime';
+import type { BdjMemoryBudgets, ClassLibrarySource } from './bdj/runtime';
 import { EarlyBdjWorker } from './bdj/early-worker';
+import { GraphicsPlaneReader, createGraphicsPlane } from './bdj/graphics-plane';
+import { bdjUnsupportedMessage } from './bdj/requirements';
+import { BDJ_EVENT_MOUSE, InputLatency, TapReactionWatch, UoRestriction, bdjMouseParam, bdjUserInput } from './bdj/input';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
 import { REGISTER_WORDS } from './bdj/shared-registers';
 import { StatusBlockWriter, createStatusBlock } from './bdj/status-block';
@@ -29,7 +33,7 @@ import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
 import type { UoOp } from './hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
-import { lookupSpn } from './nav/packets';
+import { itemPackets, lookupSpn, markTitlePkt, nextPlaymark } from './nav/packets';
 import { PgStreamControl } from './nav/subtitles';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
@@ -43,7 +47,8 @@ import { AssRenderer } from './ass/renderer';
 import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import type { AudioTrack, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
+import type { AudioTrack, BdjMemoryTelemetry, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
+import type { FromBdj } from './bdj/worker-protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
 import { UNAVAILABLE, type ShaderBackend } from './shaders/webgl-backend';
@@ -59,7 +64,7 @@ const NO_SUBTITLES_MESSAGE = 'this file has no subtitles we can read';
 const SOME_SUBTITLES_MESSAGE = 'Some lines of this file could not be read';
 const PLACE_FILES_MESSAGE = "Place each subtitle file at its episode's start in the subtitle menu";
 const NO_SHADER_BACKEND_MESSAGE = 'Shaders are unavailable here';
-const BDJ_MENU_HIDDEN_MESSAGE = "This disc's menu isn't shown yet. The disc is playing on its own; choose a playlist to take over.";
+const BDJ_TAP_IGNORED_MESSAGE = "This disc's menu doesn't respond to taps here. Use the remote.";
 const MIN_TEXT_SCALE = 0.5;
 const MAX_TEXT_SCALE = 2;
 /** The operation each menu key is (pop-up depends on whether the pop-up is shown). */
@@ -84,6 +89,11 @@ export interface PlayerDeps {
   readonly createShaderBackend?: (events: { lost(): void; restored(): void }) => ShaderBackend | string;
   /** A new BD-J worker (bdj/bdj-worker.ts) for each BD-J session. */
   readonly createBdjWorker?: () => WorkerLike;
+  /**
+   * What this browser lacks to run BD-J (bdj/requirements.ts bdjMissing on the engine worker's global): when any is
+   * missing, BD-J discs and titles open to the picker with a notice naming it.
+   */
+  readonly bdjMissing?: readonly string[];
   /** The BD-J class library jars; fetched once, as soon as a BD-J disc is opened. */
   readonly loadClassLibrary?: () => Promise<ClassLibrarySource>;
   /** One-shot timer, cancelled by the returned function (the BD-J first-playlist timeout); setTimeout by default. */
@@ -92,6 +102,15 @@ export interface PlayerDeps {
   readonly bdjLog?: (line: string, error: boolean) => void;
   /** bd_set_player_setting_str's languages and country, written to the program's registers when a BD-J title is entered. */
   readonly playerSettings?: PlayerSettings;
+  /**
+   * Test-only (E2E, ?telemetry=1): telemetry carries the BD-J plane's hash once it settles (bdjPlane.hash), so a
+   * browser test can compare it with the libbluray golden's.
+   */
+  readonly planeHashTelemetry?: boolean;
+  /** Test-only (?telemetry=1): telemetry carries BD-J's memory (bdjMemory), which the BD-J worker reports every 5 s. */
+  readonly memoryTelemetry?: boolean;
+  /** Decodes a BD-J background still (createImageBitmap); without it, background stills are not shown. */
+  readonly decodeImage?: DecodeImage;
   /** Reads a NAS disc's files (HttpTransport); the global fetch by default. */
   readonly fetch?: typeof fetch;
   /** A NAS disc's range request size (REMOTE_CHUNK_BYTES) and read-ahead budget (the memory profile's) when set. */
@@ -126,6 +145,8 @@ interface TextTrack {
 
 /** Decoded frames held for presentation and chunks inside the decoder: kept small (GPU memory, decoder pools). */
 const MAX_DECODE_QUEUE = 8;
+/** How often the BD-J worker reports its memory in telemetry runs (its stats walk the file tree: kept coarse). */
+const BDJ_MEMORY_STATS_MS = 5000;
 const MENU_MEMORY_MESSAGE = "This disc's menus need more memory than this device allows.";
 const NAS_WAITING_MESSAGE = 'Waiting for the NAS drive…';
 /** A NAS disc starts once this much stream is read ahead (Global Constraints). */
@@ -148,6 +169,8 @@ const NEXT_CHAPTER_GUARD_US = 500_000;
 const PREV_CHAPTER_RESTART_US = 3_000_000;
 /** A still play item is held this close to its end, so the last frame stays on screen. */
 const STILL_MARGIN_US = 40_000;
+/** mpls still_mode 1: a time still of still_time seconds (2 is an infinite still). */
+const STILL_TIME = 1;
 const SCR_PER_MS = 90;
 const INDEX_ID_NONE = 0xffff;
 const TITLE_FIRST_PLAY = 0xffff;
@@ -196,6 +219,7 @@ interface EarlyBdj {
   readonly worker: EarlyBdjWorker;
   readonly regs: RegisterFile;
   readonly status: StatusBlockWriter;
+  readonly plane: GraphicsPlaneReader;
 }
 
 /**
@@ -209,11 +233,19 @@ interface BdjTitle {
   /** The title registers, shared with the BD-J worker (the navigator's, when HDMV handed over). */
   readonly regs: RegisterFile;
   readonly status: StatusBlockWriter;
+  /** The graphics plane Java draws into (one per worker: a terminated worker can never write into the next one's). */
+  readonly plane: GraphicsPlaneReader;
   /** Cuts the title off from the player: its port, events and callbacks do nothing afterwards. */
   readonly end: () => void;
   /** The title to start once the worker has booted; null once booted. */
   pendingTitle: number | null;
   booted: boolean;
+  /** The plane's visible() as last reported in a bdjMenu event. */
+  menuVisible: boolean;
+  /** Taps forwarded to Java, waiting for a reaction (the ignored-tap rule). */
+  readonly taps: TapReactionWatch;
+  /** The BD-J worker's last memory report (memoryTelemetry). */
+  memory: Extract<FromBdj, { type: 'memory' }> | null;
 }
 
 interface Session {
@@ -295,6 +327,12 @@ export class Player {
   private held = false;
   /** The play item whose end was reported to the navigator; reset on an item change and on every seek. */
   private navEndReported: number | null = null;
+  /**
+   * A BD-J title's playlist holds at the end of a still play item (_bd_read_locked returns nothing more): for ever for an
+   * infinite still, or until `untilMs` (nowMs) for a time still, after which presentation goes on as bd_read_skip_still
+   * lets it. Released by a new playlist, a seek and the end of BD-J.
+   */
+  private bdjStill: { readonly item: number; readonly untilMs: number | null } | null = null;
   private menuActive = false;
   /** Draw operations of the last repaint of the IG plane. */
   private igDraws = 0;
@@ -316,11 +354,17 @@ export class Player {
   /** The opening (then open) disc's NAS source, which takes token refreshes. */
   private remote: RemoteSource | null = null;
   private bdj: BdjTitle | null = null;
+  /** Taps on a BD-J menu that brought no reaction (telemetry). */
+  private bdjTapsIgnored = 0;
+  /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
+  private planeSeen: { plane: GraphicsPlaneReader; version: number; hash: string | null } | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
   /** When the open command for this disc arrived (nowMs), and BD-J start-up times since then (telemetry `bdj`). */
   private openedAtMs = 0;
   private bdjStartup: { bootMs: number | null; firstPlaylistMs: number | null; firstFrameMs: number | null } | null = null;
+  /** Keys and taps sent to BD-J menus, until their plane change is presented (telemetry `bdj.inputLatencyMs`). */
+  private bdjLatency = new InputLatency();
   private unsubscribePg: (() => void) | null = null;
   /** The PG track list last sent in a 'subtitles' event ('' forces the next one). */
   private sentPgTracks = '';
@@ -337,9 +381,24 @@ export class Player {
   private shaderStage: ShaderStage | null = null;
   /** The shader set changed: the next paint redraws the current frame even when nothing else changed. */
   private shadersDirty = false;
+  /** The video under the BD-J plane was redrawn without it (no playlist): the next paint draws the plane again. */
+  private bdjDirty = false;
+  /** The BD-J title's background still, under the video; cleared with the BD-J plane (stopBdj). */
+  private readonly background: BackgroundStill;
+  /** The background still changed: the next paint redraws the video over it. */
+  private backgroundDirty = false;
 
   constructor(private readonly deps: PlayerDeps) {
     this.clock = new MasterClock(deps.nowMs);
+    this.background = new BackgroundStill({
+      decode: deps.decodeImage ?? (() => Promise.reject(new Error('this player has no image decoder'))),
+      onChange: (still) => {
+        this.compositor?.setBackground?.(still);
+        this.backgroundDirty = true;
+      },
+      onError: (message) => this.deps.bdjLog?.(message, true),
+      maxDecodedBytes: () => this.memory.bdjDecodedImageBytes,
+    });
   }
 
   /** Commands run strictly one at a time, in arrival order. */
@@ -364,6 +423,7 @@ export class Player {
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
           if (this.shaderStage) this.compositor.setShaderStage?.(this.shaderStage);
+          if (this.background.current) this.compositor.setBackground?.(this.background.current);
           this.startRenderLoop();
           break;
         case 'attachAudio':
@@ -372,10 +432,7 @@ export class Player {
           break;
         case 'resize':
           this.compositor?.resize(cmd.width, cmd.height);
-          this.compositor?.drawVideo(this.presenter.current);
-          if (this.pg) this.compositor?.drawPg?.(this.pg.plane);
-          if (this.textOn && this.textTrack) this.compositor?.drawText?.(this.textTrack.renderer, this.clock.nowUs(), this.textOptions());
-          if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
+          this.repaint();
           break;
         case 'playPlaylist':
           this.stopBdj();
@@ -391,7 +448,7 @@ export class Player {
           else if (!this.refused('menuCall')) this.playTitle(0);
           break;
         case 'menuKey':
-          this.menuKey(cmd.key);
+          this.menuKey(cmd.key, cmd.repeat === true);
           break;
         case 'pointer':
           this.pointer(cmd.kind, cmd.x, cmd.y);
@@ -471,9 +528,17 @@ export class Player {
     this.navigator?.tick(this.clock.nowUs());
     if (this.bdj) {
       this.bdj.status.setTime45(this.titleTime45());
+      this.updateBdjMenu(this.bdj);
     }
     const s = this.session;
-    if (!s) return;
+    if (!s) {
+      // a BD-J menu can show with no playlist playing
+      if (this.bdj) {
+        this.paint(null, this.clock.nowUs());
+        this.maybeEmitTelemetry(null);
+      }
+      return;
+    }
     this.updatePlayback(s);
     this.syncNavigator(s);
     const now = this.clock.nowUs();
@@ -499,22 +564,36 @@ export class Player {
     this.maybeEmitTelemetry(s);
   }
 
+  /** Redraws the current picture at once: the video and every plane over it. */
+  private repaint(): void {
+    this.compositor?.drawVideo(this.presenter.current);
+    if (this.pg) this.compositor?.drawPg?.(this.pg.plane);
+    if (this.textOn && this.textTrack) this.compositor?.drawText?.(this.textTrack.renderer, this.clock.nowUs(), this.textOptions());
+    if (this.navigator?.igPlane) this.compositor?.drawIg?.(this.navigator.igPlane);
+    if (this.bdj) this.compositor?.drawBdj?.(this.bdj.plane);
+  }
+
   /**
-   * Video, then the PG plane, the text subtitles and the IG plane. A change to any of them repaints the video and
-   * everything over it (an overlay replaces pixels, it does not blend with what it covered).
+   * Video, then the PG plane, the text subtitles, the IG plane and the BD-J plane. A change to any of them repaints the
+   * video and everything over it (an overlay replaces pixels, it does not blend with what it covered). The BD-J plane
+   * changes only when Java flushes (or opens or closes it), so a half-drawn menu never shows.
    */
   private paint(frame: VideoFrame | null, nowUs: number): void {
     const nav = this.navigator;
     const pg = this.pg?.plane ?? null;
     const ig = nav?.igPlane ?? null;
+    const bdj = this.bdj?.plane ?? null;
+    const bdjChanged = bdj !== null && (bdj.pending() || this.bdjDirty);
+    this.bdjDirty = false;
     const text = this.textOn && this.compositor?.drawText ? this.textTrack : null;
     const textOpts = this.textOptions();
     const pgChanged = pg !== null && pg.dirty() !== null;
     const igChanged = ig !== null && ig.dirty() !== null;
     const textChanged = this.subtitlesDirty || (text !== null && text.renderer.changed(nowUs, textOpts));
     this.subtitlesDirty = false;
-    const changed = pgChanged || igChanged || textChanged || this.shadersDirty;
+    const changed = pgChanged || igChanged || textChanged || bdjChanged || this.shadersDirty || this.backgroundDirty;
     this.shadersDirty = false;
+    this.backgroundDirty = false;
     if (frame) this.compositor?.drawVideo(frame);
     else if (changed) this.compositor?.drawVideo(this.presenter.current);
     if (!(frame || changed)) return;
@@ -529,6 +608,13 @@ export class Player {
       else ig.takeDirty();
     }
     if (igChanged && nav) this.igDraws = nav.takeDrawCount();
+    if (bdj && (bdjChanged || bdj.visible())) {
+      const copied = bdj.copiedVersion();
+      this.compositor?.drawBdj?.(bdj);
+      // this frame shows what its copy took, which may be a flush that landed after bdjChanged was computed: Java
+      // flushes on the BD-J worker's thread (a copy that waited for the writer took nothing, and answers nothing)
+      if (bdj.copiedVersion() !== copied) this.bdjLatency.presented(this.deps.nowMs(), bdj.copiedVersion());
+    }
   }
 
   private setVideoShaders(set: ShaderSetData | null): void {
@@ -573,6 +659,8 @@ export class Player {
   private async open(spec: DiscSpec): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
+    this.bdjLatency = new InputLatency();
+    this.bdjTapsIgnored = 0;
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
@@ -600,10 +688,10 @@ export class Player {
     this.bindPg(this.pgRegs);
     this.resetTextSubtitles();
     this.emitSubtitles();
-    this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, bdjSupported: this.bdjSupported, warnings: disc.warnings });
+    this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, bdjSupported: this.bdjSupported, bdjMissing: this.deps.bdjMissing ?? [], warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
-    if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
+    if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', this.bdjUnsupported('disc'));
     // bdjActive goes out before 'idle', so the UI never shows the picker in between
     const bdjFirstPlay = disc.index.firstPlay.kind === 'bdj' && this.bdjSupported;
     if (bdjFirstPlay) this.enterBdj(TITLE_FIRST_PLAY, null, early);
@@ -656,7 +744,16 @@ export class Player {
   }
 
   private get bdjSupported(): boolean {
-    return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined;
+    return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined && (this.deps.bdjMissing?.length ?? 0) === 0;
+  }
+
+  /** The notice when BD-J cannot run: what the browser lacks, or (a build without BD-J) that it is not supported. */
+  private bdjUnsupported(what: 'disc' | 'title'): string {
+    const missing = this.deps.bdjMissing ?? [];
+    if (missing.length > 0) return bdjUnsupportedMessage(missing, what);
+    return what === 'disc'
+      ? 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.'
+      : 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.';
   }
 
   /** _fill_disc_info's profile switch (bd_open). */
@@ -693,7 +790,12 @@ export class Player {
     const library = this.bdjClassLibrary;
     const createWorker = this.deps.createBdjWorker;
     if (index.firstPlay.kind !== 'bdj' || !library || !createWorker) return null;
-    const early: EarlyBdj = { worker: new EarlyBdjWorker(createWorker()), regs: this.newProgramRegs(index, true), status: new StatusBlockWriter(createStatusBlock()) };
+    const early: EarlyBdj = {
+      worker: new EarlyBdjWorker(createWorker()),
+      regs: this.newProgramRegs(index, true),
+      status: new StatusBlockWriter(createStatusBlock()),
+      plane: new GraphicsPlaneReader(createGraphicsPlane()),
+    };
     this.applyBdjSettings(early.regs);
     this.earlyBdj = early;
     void (async () => {
@@ -705,16 +807,37 @@ export class Player {
           type: 'boot',
           registers: early.regs.shared!,
           status: early.status.buffer,
+          plane: early.plane.buffer,
           disc: this.discSpec,
-          readAheadBytes: this.memory.remoteReadAheadBytes,
+          readAheadBytes: this.memory.bdjRemoteReadAheadBytes,
           discId: bdid?.discId ?? null,
           classLibrary,
+          memory: this.bdjBudgets(),
+          ...(this.deps.memoryTelemetry ? { memoryStatsMs: BDJ_MEMORY_STATS_MS } : {}),
         });
       } catch {
         // a class library that does not load fails the session (bootBdj)
       }
     })();
     return early;
+  }
+
+  /** telemetry bdjMemory: the BD-J worker's last report and the engine's own BD-J buffers. */
+  private bdjMemory(): BdjMemoryTelemetry | null {
+    const entry = this.bdj;
+    if (!entry) return null;
+    return {
+      jvm: entry.memory?.jvm ?? null,
+      freeType: entry.memory?.freeType ?? null,
+      planeBytes: entry.plane.buffer.byteLength,
+      stillBytes: this.background.decodedBytes,
+      compositorBytes: this.compositor?.bdjBytes?.() ?? 0,
+    };
+  }
+
+  /** The memory profile's budgets the BD-J worker applies. */
+  private bdjBudgets(): BdjMemoryBudgets {
+    return { classBytes: this.memory.bdjClassCacheBytes, vfsBytes: this.memory.bdjVfsCacheBytes };
   }
 
   /** Terminates an early BD-J worker no title adopted. */
@@ -743,6 +866,7 @@ export class Player {
     const programRegs = early?.regs ?? (regs?.shared ? regs : this.newProgramRegs(disc.index, disc.usesBdj));
     if (!early) this.applyBdjSettings(programRegs); // an early worker's registers have them already
     const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
+    const plane = early?.plane ?? new GraphicsPlaneReader(createGraphicsPlane());
     let entry: BdjTitle | null = null;
     let ended = false;
     const live = (): boolean => !ended;
@@ -770,24 +894,49 @@ export class Player {
       host,
       regs: programRegs.shared!,
       status,
+      plane: plane.buffer,
       time45: () => this.titleTime45(),
       onFailed: (code, message) => {
         if (live()) this.bdjFailed(code, message);
       },
       onLog: this.deps.bdjLog,
+      onBackground: (image, rect) => {
+        if (!live()) return;
+        if (image && this.deps.decodeImage) this.background.show(image, rect);
+        else this.background.clear();
+      },
       onTokenNeeded: () => {
         if (live()) this.deps.emit({ type: 'remoteTokenNeeded' });
       },
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
+      memory: this.bdjBudgets(),
+      ...(this.deps.memoryTelemetry
+        ? {
+            memoryStatsMs: BDJ_MEMORY_STATS_MS,
+            onMemory: (m: Extract<FromBdj, { type: 'memory' }>) => {
+              if (live() && entry) entry.memory = m;
+            },
+          }
+        : {}),
     });
-    entry = { session, host, events, regs: programRegs, status, end: () => void (ended = true), pendingTitle: null, booted: false };
+    const taps = new TapReactionWatch({
+      setTimer: this.deps.setTimer ?? defaultSetTimer,
+      // a plane publication (flush, init, close) or anything Java sent: a call (playback, registers, titles) or a still
+      activity: () => plane.version() + session.activity,
+      ignored: (notice) => {
+        if (!live()) return;
+        this.bdjTapsIgnored++;
+        this.deps.emit({ type: 'bdjTapIgnored' });
+        if (notice) this.notice('bdj-tap-ignored', BDJ_TAP_IGNORED_MESSAGE);
+      },
+    });
+    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, taps, memory: null };
     this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
     this.deps.emit({ type: 'bdjActive', active: true });
     this.deps.emit({ type: 'uoMask', masked: [] });
-    this.notice('bdj-menu-hidden', BDJ_MENU_HIDDEN_MESSAGE);
     void host.handle('selectTitle', [title]); // _play_title: PSR4, then the title's object
     void this.bootBdj(entry, library);
   }
@@ -801,7 +950,7 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
-    await entry.session.boot(this.discSpec, this.memory.remoteReadAheadBytes, this.bdjDiscId, classes);
+    await entry.session.boot(this.discSpec, this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
     if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();
@@ -856,10 +1005,20 @@ export class Player {
     if (!entry) return;
     entry.host.dispose();
     entry.end();
+    entry.taps.cancel();
+    this.bdjLatency.clearPending();
     this.bdj = null;
+    this.planeSeen = null;
+    this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
+    // the menu goes at once (Review Focus 2): nothing of the plane or the background still is drawn again
+    this.background.clear();
+    this.backgroundDirty = false; // repainted here
+    this.compositor?.clearBdj?.();
+    this.repaint();
     if (this.pgRegs && this.navRegs !== entry.regs) this.bindPg(this.pgRegs);
+    if (entry.menuVisible) this.deps.emit({ type: 'bdjMenu', visible: false });
     this.deps.emit({ type: 'bdjActive', active: false });
     this.deps.emit({ type: 'uoMask', masked: [] });
   }
@@ -972,9 +1131,9 @@ export class Player {
     if (!this.navigator.startTitle(title)) this.stopNavigator();
   }
 
-  private menuKey(key: MenuKey): void {
+  private menuKey(key: MenuKey, repeat = false): void {
     if (this.bdj) {
-      if (key === 'topMenu') this.bdjPlayTitle(this.bdj, 0); // other keys reach Java in 5d
+      this.bdjUserInput(this.bdj, key === 'topMenu' ? BdVk.ROOT_MENU : MENU_KEY_VK[key], repeat);
       return;
     }
     const nav = this.navigator;
@@ -985,15 +1144,57 @@ export class Player {
     else nav.userInput(MENU_KEY_VK[key]);
   }
 
+  /**
+   * bd_user_input under a BD-J title: the root menu key is a menu call (bd_menu_call, checked against the menu call
+   * mask), every other key goes to Java as BDJ_EVENT_VK_KEY, unfiltered by key interest and by the UO mask (libbluray
+   * checks neither for BD-J titles at UO restriction RELAXED).
+   */
+  private bdjUserInput(entry: BdjTitle, vk: number, repeat: boolean): void {
+    const input = bdjUserInput(vk, { level: UoRestriction.RELAXED, popupShown: false, isUoMasked: (op) => entry.host.isUoMasked(op) });
+    // a held key's repeats are not new presses; the first answer times the press
+    if (input.kind !== 'none' && !repeat) this.bdjLatency.input(this.deps.nowMs(), entry.plane.version());
+    if (input.kind === 'menuCall') this.bdjPlayTitle(entry, 0);
+    else if (input.kind === 'event') entry.session.event(input.ev, input.param, repeat ? 'repeat' : undefined);
+  }
+
+  /** Reports the plane turning visible or empty; a newly visible plane is a new menu for the ignored-tap rule. */
+  private updateBdjMenu(entry: BdjTitle): void {
+    const visible = entry.plane.visible();
+    if (visible === entry.menuVisible) return;
+    entry.menuVisible = visible;
+    if (visible) {
+      entry.taps.menuShown();
+      entry.session.menuShown(); // a menu on screen is no hang, even with no playlist selected
+    }
+    this.deps.emit({ type: 'bdjMenu', visible });
+  }
+
   /** A move selects the button under the pointer (bd_mouse_select) and reports it; a click also activates it. */
   private pointer(kind: 'move' | 'click', x: number, y: number): void {
-    const nav = this.navigator;
-    if (!nav) return;
     const px = Math.max(0, Math.min(0xffff, Math.round(x)));
     const py = Math.max(0, Math.min(0xffff, Math.round(y)));
+    const entry = this.bdj;
+    if (entry) {
+      // bd_mouse_select → BDJ_EVENT_MOUSE; a click is then bd_user_input(BD_VK_MOUSE_ACTIVATE)
+      entry.session.event(BDJ_EVENT_MOUSE, bdjMouseParam(px, py), kind === 'move' ? 'move' : undefined);
+      if (kind === 'move') return;
+      this.bdjUserInput(entry, BdVk.MOUSE_ACTIVATE, false);
+      this.updateBdjMenu(entry);
+      // only a tap on a shown menu can be ignored (the UI sends others only when the plane is empty)
+      if (entry.menuVisible) entry.taps.tap(this.memory.bdjTapWindowMs);
+      return;
+    }
+    const nav = this.navigator;
+    if (!nav) return;
+    // the button under the pointer on the page shown now, before the move or the activation can change the page
+    const hit = nav.hitTest(px, py);
     nav.mouseSelect(px, py);
-    if (kind === 'click') nav.userInput(BdVk.MOUSE_ACTIVATE);
-    else this.deps.emit({ type: 'pointerTarget', button: nav.hitTest(px, py) });
+    if (kind === 'move') {
+      this.deps.emit({ type: 'pointerTarget', button: hit });
+      return;
+    }
+    nav.userInput(BdVk.MOUSE_ACTIVATE);
+    if (hit === null && this.menuActive) this.deps.emit({ type: 'menuTapMissed' }); // the UI shows its controls for a touch that missed (ruling R13)
   }
 
   private onNavigatorEvent(e: NavigatorEvent): void {
@@ -1009,7 +1210,7 @@ export class Player {
         break;
       case 'bdjTitle':
         if (this.bdjSupported) this.navigatorToBdj(e.title);
-        else this.notice('bdj', 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.');
+        else this.notice('bdj', this.bdjUnsupported('title'));
         break;
       case 'error':
         // The picker shows an 'error' event's message (PlayerScreen reads snapshot.error) once the session is gone.
@@ -1232,14 +1433,22 @@ export class Player {
     }
   }
 
-  /** syncNavigator for a BD-J title: item changes, the marks passed and the position (bd_set_scr). */
+  /** syncNavigator for a BD-J title: item changes, the marks passed and the position (bd_set_scr), and play-item stills. */
   private syncBdj(s: Session): void {
     const listener = this.bdjListener;
-    if (!listener || (this.state !== 'playing' && this.state !== 'paused') || this.held) return;
+    if (!listener || (this.state !== 'playing' && this.state !== 'paused')) return;
+    const still = this.bdjStill;
+    if (still) {
+      // a time still ends as a player's bd_read_skip_still after BD_EVENT_STILL_TIME ends it: on into the next item
+      if (still.untilMs === null || this.deps.nowMs() < still.untilMs) return;
+      this.releaseBdjStill();
+    }
+    if (this.held) return;
     const now = this.clock.nowUs();
     const { item, clipTime45 } = s.timeline.locate(now);
     if (item.index !== this.navItem) {
       this.navItem = item.index;
+      this.navEndReported = null;
       listener.playItemChanged(item.index);
     }
     const marks: number[] = [];
@@ -1249,12 +1458,53 @@ export class Player {
     }
     if (marks.length > 0) listener.marksReached(marks, item.index, lookupSpn(this.disc?.clips.get(s.playItems[item.index]!.clipId), clipTime45, true));
     if (this.navSeeksPending === 0) listener.position(item.index, clipTime45); // not the old position while a seek is queued
+    // _bd_read_locked: at the end of a still play item the read stops (BD_EVENT_STILL_TIME), under BD-J as under HDMV
+    const pi = s.playItems[item.index];
+    if (this.state === 'playing' && pi && pi.stillMode !== 0 && this.navEndReported !== item.index && now >= s.timeline.itemStartUs(item.index) + ticks45ToUs(item.outTime - item.inTime) - STILL_MARGIN_US) {
+      this.navEndReported = item.index;
+      // the time still's timer runs on wall time (nowMs): libbluray leaves it to the application (BD_EVENT_STILL_TIME)
+      this.bdjStill = { item: item.index, untilMs: pi.stillMode === STILL_TIME ? this.deps.nowMs() + pi.stillTime * 1000 : null };
+      this.setHold(true);
+    }
   }
 
-  /** _find_next_playmark: the first mark after `timeUs`. */
-  private nextMarkAfter(timeline: Timeline, timeUs: number): number {
-    for (let i = 0; i < timeline.markCount; i++) if (timeline.markTimeUs(i) > timeUs) return i;
-    return -1;
+  private releaseBdjStill(): void {
+    if (!this.bdjStill) return;
+    this.bdjStill = null;
+    this.setHold(false);
+  }
+
+  /**
+   * _find_next_playmark at read position `sPos` (title packets): the first mark whose packet lies after it. Marks are
+   * then reached by time (syncNavigator, syncBdj).
+   */
+  private nextMarkAt(mpls: Mpls, sPos: number): number {
+    return nextPlaymark(sPos, mpls.marks, mpls.playItems, this.disc?.clips);
+  }
+
+  /** s_pos after _seek_internal to playlist time `timeUs`: the title packet of the EP map entry at or before it. */
+  private titlePktAt(timeline: Timeline, playItems: readonly PlayItem[], timeUs: number): number {
+    const clips = this.disc?.clips;
+    const { item, clipTime45 } = timeline.locate(timeUs);
+    const geometry = itemPackets(playItems, clips)[item.index]!;
+    const clip = clips?.get(playItems[item.index]!.clipId);
+    return geometry.titlePkt + (clip ? lookupSpn(clip, clipTime45, true) - geometry.startPkt : 0);
+  }
+
+  /**
+   * s_pos once a playlist opened at `at` (_open_playlist, then bd_seek_playitem / bd_seek_mark / bd_seek): 0 at its
+   * start, an item's title_pkt, a mark's, or the packet of a time.
+   */
+  private openTitlePkt(mpls: Mpls, timeline: Timeline, at: PlayAt, startUs: number): number {
+    const clips = this.disc?.clips;
+    if (at.item !== undefined && at.item >= 0 && at.item < timeline.items.length) {
+      if (at.clipTime45 !== undefined) return this.titlePktAt(timeline, mpls.playItems, startUs);
+      return itemPackets(mpls.playItems, clips)[at.item]!.titlePkt;
+    }
+    if (at.mark !== undefined && at.mark >= 0 && at.mark < mpls.marks.length) {
+      return markTitlePkt(mpls.marks[at.mark]!, itemPackets(mpls.playItems, clips), mpls.playItems, clips);
+    }
+    return 0;
   }
 
   /**
@@ -1278,7 +1528,9 @@ export class Player {
     const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
     this.navItem = startItem;
     this.navEndReported = null;
-    this.navNextMark = this.nextMarkAfter(timeline, startUs);
+    this.releaseBdjStill();
+    const openPkt = this.openTitlePkt(mpls, timeline, at, startUs);
+    this.navNextMark = this.nextMarkAt(mpls, openPkt);
     if (caller === 'navigator' && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
     if (caller === 'bdj') this.bdjListener?.playlistStarted(playlistId, startItem);
     this.setState('loading');
@@ -1386,7 +1638,7 @@ export class Player {
     this.sentPgTracks = '';
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
-    await this.startAt(startUs, caller !== 'bdj');
+    await this.startAt(startUs, caller !== 'bdj', openPkt);
     return true;
   }
 
@@ -1400,7 +1652,7 @@ export class Player {
         // like an audio switch: re-read from now with the new PID, so the current subtitle shows without waiting for the next
         const s = this.session;
         if (s) this.enqueue(async () => {
-          if (this.session === s) await this.startAt(this.clock.nowUs(), this.wantPlaying);
+          if (this.session === s) await this.startAt(this.clock.nowUs(), this.wantPlaying, 'keep');
         });
       },
     });
@@ -1660,6 +1912,7 @@ export class Player {
     if (!s) return;
     this.session = null;
     this.codedWidth = 0;
+    this.releaseBdjStill();
     this.deps.emit({ type: 'playlistCleared' });
     this.seekGeneration++;
     s.pipeline.stop();
@@ -1670,6 +1923,7 @@ export class Player {
     this.presenter.clear();
     this.ring?.setPlaying(false);
     this.compositor?.drawVideo(null);
+    this.bdjDirty = true;
     this.wantPlaying = false;
   }
 
@@ -1700,16 +1954,25 @@ export class Player {
     s.audioErrorDisabled = false;
     s.audioStalledBeat = null;
     this.emitTracks(s);
-    await this.startAt(this.clock.nowUs(), this.wantPlaying);
+    await this.startAt(this.clock.nowUs(), this.wantPlaying, 'keep');
   }
 
-  private async startAt(targetUs: number, autoplay: boolean): Promise<void> {
+  /**
+   * Restarts presentation at `targetUs`. `marks`: where mark tracking resumes (_find_next_playmark): by default from the
+   * target's packet (a seek), from the given title packet (a playlist open), or `keep` for a re-read at the current
+   * position that libbluray never makes (an audio or subtitle switch, an audio rebase).
+   */
+  private async startAt(targetUs: number, autoplay: boolean, marks?: number | 'keep'): Promise<void> {
     const s = this.session;
     if (!s) return;
     const gen = ++this.seekGeneration;
     this.navEndReported = null;
+    this.releaseBdjStill();
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
-    this.navNextMark = this.nextMarkAfter(s.timeline, t);
+    if (marks !== 'keep') {
+      const mpls = this.disc?.playlists.get(s.playlistId);
+      this.navNextMark = mpls ? this.nextMarkAt(mpls, marks ?? this.titlePktAt(s.timeline, s.playItems, t)) : -1;
+    }
     s.pipeline.stop();
     this.navigator?.seekGraphics(); // queued units from the old read position are dropped; the menu stays
     this.pg?.seek(); // GC_CTRL_PG_RESET in _seek_internal: the subtitle on screen goes
@@ -1777,11 +2040,13 @@ export class Player {
       return;
     }
     if (this.state === 'paused' && this.audioRecovered(s)) {
-      await this.startAt(this.clock.nowUs(), true); // rebase onto the recovered audio output
+      await this.startAt(this.clock.nowUs(), true, 'keep'); // rebase onto the recovered audio output
       return;
     }
     this.wantPlaying = true;
-    if (this.state === 'paused') this.setState('buffering');
+    // during a still the read is stopped on purpose (_bd_read_locked returns nothing): playing, with the output held
+    // until the still ends, not buffering for data that never comes
+    if (this.state === 'paused') this.setState(this.held ? 'playing' : 'buffering');
   }
 
   /** Audio was disabled by a stalled output that has since started running again. */
@@ -2094,14 +2359,19 @@ export class Player {
     this.deps.emit({ type: 'time', timeUs: Math.round(timeUs) });
   }
 
-  private maybeEmitTelemetry(s: Session): void {
+  /**
+   * `s` is null for a BD-J menu shown with no playlist: the playback counters are then 0. The BD-J plane hash
+   * (settledPlaneHash) runs on this frame path only in telemetry runs (planeHashTelemetry), once per settled plane
+   * version, and may cause a one-frame hitch there.
+   */
+  private maybeEmitTelemetry(s: Session | null): void {
     const nowMs = this.deps.nowMs();
     if (nowMs - this.lastTelemetryMs < TELEMETRY_INTERVAL_MS) return;
     this.lastTelemetryMs = nowMs;
     const offsets = this.offsets;
     this.offsets = [];
     const ring = this.ring;
-    const stats = s.pipeline.stats;
+    const stats = s?.pipeline.stats ?? { corruptPackets: 0, continuityErrors: 0 };
     this.deps.emit({
       type: 'telemetry',
       telemetry: {
@@ -2119,8 +2389,8 @@ export class Player {
         audioDecodeErrors: this.audioDecodeErrors,
         continuityErrors: stats.continuityErrors,
         decoderErrors: this.decoderErrors,
-        openGopStarts: s.decoder.openGop.starts,
-        leadingPicturesSkipped: s.decoder.openGop.leadingSkipped,
+        openGopStarts: s?.decoder.openGop.starts ?? 0,
+        leadingPicturesSkipped: s?.decoder.openGop.leadingSkipped ?? 0,
         menu: this.menuActive && this.navRegs ? { page: this.navRegs.psrRead(PSR.MENU_PAGE_ID), selectedButton: this.navRegs.psrRead(PSR.SELECTED_BUTTON_ID), buttonsDrawn: this.igDraws } : null,
         igErrors: this.navigator?.igErrors ?? 0,
         soundsPlayed: this.soundsPlayed,
@@ -2130,9 +2400,26 @@ export class Player {
         textFile: this.textOn ? this.textTrack?.renderer.fileAt(this.clock.nowUs())?.file ?? null : null,
         ass: this.assStats(),
         shader: this.shaderStage?.stats ?? null,
-        bdj: this.bdjStartup ? { ...this.bdjStartup } : null,
+        bdj: this.bdjStartup ? { ...this.bdjStartup, inputLatencyMs: this.bdjLatency.stats } : null,
+        ...(this.deps.memoryTelemetry ? { bdjMemory: this.bdjMemory() } : {}),
+        bdjPlane: this.bdj ? { flushes: this.bdj.plane.flushCount(), tapsIgnored: this.bdjTapsIgnored, ...(this.deps.planeHashTelemetry ? { hash: this.settledPlaneHash(this.bdj.plane) } : {}) } : null,
       },
     });
+  }
+
+  /**
+   * The plane's hash once no flush, init or close has changed it since the last telemetry; null while it changes (or
+   * while the writer holds it: tried again at the next telemetry). Hashed once per settled version.
+   */
+  private settledPlaneHash(plane: GraphicsPlaneReader): string | null {
+    const version = plane.version();
+    const seen = this.planeSeen;
+    if (!seen || seen.plane !== plane || seen.version !== version) {
+      this.planeSeen = { plane, version, hash: null };
+      return null;
+    }
+    seen.hash ??= plane.tryHash();
+    return seen.hash;
   }
 
   private sinceOpenMs(): number {

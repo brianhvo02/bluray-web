@@ -30,6 +30,8 @@ export interface ByteSourceDeps {
   readonly readAheadBytes: number;
   /** Size of one range request; REMOTE_CHUNK_BYTES by default. */
   readonly chunkBytes?: number;
+  /** Range requests in flight at most while reading ahead; REMOTE_IN_FLIGHT by default. */
+  readonly inFlight?: number;
   onWaiting(waiting: boolean): void;
   /** A fresh session token after a 401; without it a 401 means unpaired. */
   refreshToken?(): Promise<string>;
@@ -37,6 +39,12 @@ export interface ByteSourceDeps {
 
 export const REMOTE_CHUNK_BYTES = 2 * 1024 * 1024;
 export const REMOTE_IN_FLIGHT = 4;
+/**
+ * The BD-J worker's NAS reads (ruling R20): JAR entries, fonts and metadata, mostly small and scattered, so smaller
+ * requests and fewer of them at once than playback's; a JAR read in order still streams at 4 MB in flight.
+ */
+export const BDJ_REMOTE_CHUNK_BYTES = 512 * 1024;
+export const BDJ_REMOTE_IN_FLIGHT = 2;
 
 /** The disc's bytes: picked files from disk, or the NAS by HTTP range reads. */
 export function createByteSource(spec: DiscSpec, deps: ByteSourceDeps): FileSource | RemoteSource {
@@ -48,7 +56,7 @@ export function createByteSource(spec: DiscSpec, deps: ByteSourceDeps): FileSour
   return new RemoteSource(spec.manifest, transport, {
     readAheadBytes: deps.readAheadBytes,
     chunkBytes: deps.chunkBytes ?? REMOTE_CHUNK_BYTES,
-    inFlight: REMOTE_IN_FLIGHT,
+    inFlight: deps.inFlight ?? REMOTE_IN_FLIGHT,
     onWaiting: (waiting) => deps.onWaiting(waiting),
   });
 }

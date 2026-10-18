@@ -7,6 +7,7 @@ import { readFontFile } from './ass/font-tables';
 import { createFontFaceLoader } from './ass/fonts';
 import { createCanvasMeasurer } from './ass/measure';
 import { drawWarped } from './ass/warp';
+import { bdjMissing } from './bdj/requirements';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { loadAudioWasm } from './decode/wasm-audio';
 import { browserVideoCodecApi } from './decode/video-decoder';
@@ -24,11 +25,30 @@ interface WorkerScope {
 
 const scope = self as unknown as WorkerScope;
 /**
- * Test-only (E2E): the page names the worker this when opened with ?bdjfail=1 (create-controller.ts, like ?telemetry=1).
- * The libbluray jar is then unreadable, so every BD-J boot fails and the fallback (spec §5) can be seen in the browser.
+ * Test-only (E2E) flags the page puts in the worker's name, 'bluray-engine:<flag>,<flag>' (create-controller.ts, from
+ * the page's query, like ?telemetry=1):
+ * - bdjfail (?bdjfail=1): the libbluray jar is unreadable, so every BD-J boot fails and the fallback (spec §5) can be
+ *   seen in the browser;
+ * - nonestedworkers (?nonestedworkers=1): the worker behaves as if it could not start workers, so the capability
+ *   fallback (spec m5d §4.5) can be seen in a browser that has them;
+ * - telemetry (?telemetry=1): telemetry carries the BD-J plane's settled hash (PlayerDeps.planeHashTelemetry) and BD-J's
+ *   memory (PlayerDeps.memoryTelemetry).
  */
-const BDJ_FAIL_WORKER_NAME = 'bluray-engine:bdjfail'; // the same name in src/player/create-controller.ts
-const brokenClassLibrary = (self as unknown as { name?: string }).name === BDJ_FAIL_WORKER_NAME;
+const testFlags = new Set(((self as unknown as { name?: string }).name ?? '').split(':')[1]?.split(',') ?? []);
+const brokenClassLibrary = testFlags.has('bdjfail');
+const g = self as unknown as Record<string, unknown>;
+/** What this browser lacks to run BD-J, seen from this worker (the one that starts the BD-J worker). */
+const bdjMissingHere = bdjMissing(
+  {
+    SharedArrayBuffer: g.SharedArrayBuffer,
+    crossOriginIsolated: g.crossOriginIsolated,
+    Atomics: g.Atomics,
+    Worker: testFlags.has('nonestedworkers') ? undefined : g.Worker,
+    WebAssembly: g.WebAssembly,
+    OffscreenCanvas: g.OffscreenCanvas,
+  },
+  { inWorker: true },
+);
 const ASSET_FETCH_TIMEOUT_MS = 20_000; // the audio wasm, the default font and the class library jars
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
@@ -50,6 +70,9 @@ const player = new Player({
   createShaderBackend: (events) => createWebGlBackend((w, h) => new OffscreenCanvas(w, h), events),
   // Commands run one at a time, so a stalled download would block every later one: give up and report it instead.
   createAudioDecoder: createAudioDecoderFactory(() => loadAudioWasm(fetch(audioWasmUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) }))),
+  bdjMissing: bdjMissingHere,
+  planeHashTelemetry: testFlags.has('telemetry'),
+  memoryTelemetry: testFlags.has('telemetry'),
   createBdjWorker: () => new Worker(new URL('./bdj/bdj-worker-entry.ts', import.meta.url), { type: 'module' }),
   loadClassLibrary: async () => {
     const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);
@@ -58,6 +81,8 @@ const player = new Player({
   // bd_set_player_setting_str as a player application sets it: the browser's language and region
   playerSettings: playerSettingsForLocale(navigator.language),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
+  // BD-J background stills: the browser sniffs the format (PNG, JPEG, GIF) from the bytes
+  decodeImage: (bytes) => createImageBitmap(new Blob([new Uint8Array(bytes)])),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)
   createAssDeps: async () => {
     const response = await fetch(defaultFontUrl, { signal: AbortSignal.timeout(ASSET_FETCH_TIMEOUT_MS) });

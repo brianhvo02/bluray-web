@@ -1,0 +1,13 @@
+# disc-bdj-menu: arrows move the focus between the three buttons, Enter on Play starts playlist 00000.
+# MenuXlet plays playlist 00001 behind its menu and shows the menu once it has started.
+wait still 1000   # the menu, Play focused (its first paint may come before playlist 00001's event, so no playlist wait)
+key down          # Chapters
+wait still 1000
+key down          # Extras
+wait still 1000
+key up            # Chapters
+wait still 1000
+key up            # Play
+wait still 1000
+key ok            # Play: the menu closes and playlist 00000 starts
+wait playlist 0

@@ -132,5 +132,13 @@ public class Exceptions {
         } catch (Exception e) {
             System.out.println("catch-super " + (e instanceof Custom));
         }
+        // the LineNumberTable as Throwable's stack trace reads it
+        try {
+            Integer.parseInt("x");
+        } catch (NumberFormatException e) {
+            StackTraceElement here = null;
+            for (StackTraceElement s : e.getStackTrace()) if (s.getClassName().equals("conformance.Exceptions")) here = s;
+            System.out.println("line " + here.getMethodName() + " " + here.getLineNumber() + " " + (e.getStackTrace()[0].getLineNumber() > 0));
+        }
     }
 }

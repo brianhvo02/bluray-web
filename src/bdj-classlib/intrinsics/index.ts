@@ -16,13 +16,16 @@
 
 import type { NativeTable } from '../../engine/bdj/jvm/natives/index';
 import { colorModelIntrinsics, directRGB } from './color-model';
+import { jarTextIntrinsics, jarTextLoopHooks } from './jar-text';
 import { pngLoopHooks } from './png-rows';
 import { rectangleIntersection } from './rectangle';
 
 /** Installs the class library's intrinsics, loop hooks and helpers (JvmOptions.extraIntrinsics). */
 export function registerClassLibraryIntrinsics(table: NativeTable): void {
   table.intrinsify(colorModelIntrinsics);
+  table.intrinsify(jarTextIntrinsics);
   table.hookLoops(pngLoopHooks);
+  table.hookLoops(jarTextLoopHooks);
   table.helpers.rectangleIntersection = rectangleIntersection;
   table.helpers.pixelConverters.set('java/awt/image/DirectColorModel', directRGB);
 }

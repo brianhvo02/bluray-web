@@ -1,0 +1,22 @@
+{"call":"setUOMaskN","args":[false,false],"ret":null}
+{"call":"setKeyInterestN","args":[0],"ret":null}
+{"call":"writeRegN","args":[1,4,65535,-1],"ret":0}
+{"call":"selectPlaylistN","args":[1,-1,-1,"-1"],"ret":1}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"call":"selectRateN","args":[0,2],"ret":1}
+{"call":"selectPlaylistN","args":[-1,-1,-1,"-1"],"ret":1}
+{"call":"selectPlaylistN","args":[0,-1,-1,"-1"],"ret":1}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"call":"selectRateN","args":[0,2],"ret":1}
+{"script":"step","n":0,"step":"wait still 1000","hash":"cf4977a0"}
+{"script":"step","n":1,"step":"key down"}
+{"script":"step","n":2,"step":"wait still 1000","hash":"c3e52cc0"}
+{"script":"step","n":3,"step":"key down"}
+{"script":"step","n":4,"step":"wait still 1000","hash":"a20b7560"}
+{"script":"step","n":5,"step":"key up"}
+{"script":"step","n":6,"step":"wait still 1000","hash":"c3e52cc0"}
+{"script":"step","n":7,"step":"key up"}
+{"script":"step","n":8,"step":"wait still 1000","hash":"cf4977a0"}
+{"script":"step","n":9,"step":"key ok"}
+{"script":"step","n":10,"step":"wait playlist 0"}
+{"script":"end","hash":"4521ddc5"}

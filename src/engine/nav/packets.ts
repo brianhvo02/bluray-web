@@ -1,5 +1,6 @@
 /*
- * Derived from libbluray navigation code (src/libbluray/bdnav/navigation.c: _fill_clip, _fill_mark; clpi_parse.c: clpi_lookup_spn)
+ * Derived from libbluray navigation code (src/libbluray/bdnav/navigation.c: _fill_clip, _fill_mark; clpi_parse.c: clpi_lookup_spn;
+ * src/libbluray/bluray.c: _find_next_playmark)
  * Copyright (C) 2009-2010  John Stebbins
  * Copyright (C) 2012  Petri Hintukainen <phintuka@users.sourceforge.net>
  *
@@ -9,7 +10,7 @@
  */
 
 import type { Clpi } from '../bdmv/clpi-parser';
-import type { PlayItem } from '../bdmv/mpls-parser';
+import type { PlayItem, PlayListMark } from '../bdmv/mpls-parser';
 
 /**
  * clpi_lookup_spn without the STC refinement: `before` gives the packet of the last EP map entry at or before the time
@@ -53,4 +54,26 @@ export function itemPackets(playItems: readonly PlayItem[], clips: ReadonlyMap<s
     pos += endPkt - startPkt;
   });
   return out;
+}
+
+/** _fill_mark: a play mark's title_pkt (an invalid play_item_ref counts as item 0). */
+export function markTitlePkt(mark: PlayListMark, items: readonly ItemPackets[], playItems: readonly PlayItem[], clips: ReadonlyMap<string, Clpi> | undefined): number {
+  const ref = mark.playItemRef < items.length ? mark.playItemRef : 0;
+  const item = items[ref];
+  const pi = playItems[ref];
+  if (!item || !pi) return 0;
+  const clip = clips?.get(pi.clipId);
+  const clipPkt = clip ? lookupSpn(clip, mark.time, true) : item.startPkt;
+  return item.titlePkt + clipPkt - item.startPkt;
+}
+
+/**
+ * _find_next_playmark: the first mark whose title packet lies after the read position `sPos` (title packets), -1 when
+ * none does. A playlist opened at its start reads from packet 0 (the first item's start_pkt), so a mark at the first
+ * item's IN time, at the packet of its EP map entry, is still ahead and the first read reaches it.
+ */
+export function nextPlaymark(sPos: number, marks: readonly PlayListMark[], playItems: readonly PlayItem[], clips: ReadonlyMap<string, Clpi> | undefined): number {
+  const items = itemPackets(playItems, clips);
+  for (let i = 0; i < marks.length; i++) if (markTitlePkt(marks[i]!, items, playItems, clips) > sPos) return i;
+  return -1;
 }

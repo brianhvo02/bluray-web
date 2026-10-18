@@ -24,6 +24,20 @@ javac -nowarn -source 1.3 -target 1.3 \
   -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
   -d "$T/xlets-mixed" tests/bdj/xlets/src/bdjweb/mixed/*.java
 $MK tests/bdj/xlets/mixed.jar "$T/xlets-mixed" -
+# the background still disc's xlet (disc-bdj-background), with the still it shows (bg.png) at the jar's root
+mkdir "$T/xlets-background"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets-background" tests/bdj/xlets/src/bdjweb/background/*.java
+cp tests/bdj/xlets/src/bdjweb/background/bg.png "$T/xlets-background/"
+$MK tests/bdj/xlets/background.jar "$T/xlets-background" -
+# the BD-J menu disc's xlet (disc-bdj-menu), with its logo (logo.png) and background still (bg.png) at the jar's root
+mkdir "$T/xlets-menu"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets-menu" tests/bdj/xlets/src/bdjweb/menu/*.java
+cp tests/bdj/xlets/src/bdjweb/menu/logo.png tests/bdj/xlets/src/bdjweb/menu/bg.png "$T/xlets-menu/"
+$MK tests/bdj/xlets/menu.jar "$T/xlets-menu" -
 
 # the JVM conformance programs (package conformance) and HotSpot's stdout for each class with a main; every program runs
 # twice and the outputs must match
@@ -93,6 +107,23 @@ $MK $OUT/rt-bdj.jar "$T/stage" -
 cp /usr/share/common-licenses/GPL-2 $OUT/LICENSE
 sed -n '/^"CLASSPATH" EXCEPTION TO THE GPL$/,/^OpenJDK Trademark Notice/p' \
   /usr/share/doc/openjdk-8-jre-headless/copyright | sed '$d' | sed '$d' > $OUT/ASSEMBLY_EXCEPTION
+# the JDK's notice for its Apache-licensed components (Xerces among them): the section of THIRD_PARTY_README from its
+# "%%" line to the end of the Apache License 2.0 text
+awk '/^%% This notice is provided with respect to the following which may be/ { on = 1 }
+     on { print }
+     on && /^--- end of LICENSE ---$/ { exit }' "$JAVA_HOME/THIRD_PARTY_README" > $OUT/THIRD_PARTY_APACHE
+grep -q '^  Apache Xerces Java ' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache Xerces section" >&2; exit 1; }
+grep -q 'Apache License' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache License text" >&2; exit 1; }
+cat > $OUT/SAX_NOTICE <<'EOF'
+The org/xml/sax classes in rt-bdj.jar are OpenJDK's copies of SAX (http://www.saxproject.org), which carry Oracle's
+GPLv2 with the Classpath Exception header and, below it, the SAX project's own notice, for example in
+org/xml/sax/helpers/DefaultHandler.java:
+
+  // DefaultHandler.java - default implementation of the core handlers.
+  // http://www.saxproject.org
+  // Written by David Megginson
+  // NO WARRANTY!  This class is in the public domain.
+EOF
 SRC_PKG="$(dpkg-query -W -f='${source:Package}' openjdk-8-jre-headless)"
 SRC_VER="$(dpkg-query -W -f='${source:Version}' openjdk-8-jre-headless)"
 SNAPSHOT=20261015T000000Z
@@ -102,6 +133,15 @@ SNAPSHOT=20261015T000000Z
   echo "The one exception is lib/security/cacerts, the keystore ca-certificates-java $(dpkg-query -W -f='${Version}' ca-certificates-java)"
   echo "generates from ca-certificates $(dpkg-query -W -f='${Version}' ca-certificates): its entries' creation dates are set to"
   echo "2026-10-15T00:00:00Z (tools/bdj-classlib/normalize-jks.py) so the jar is reproducible."
+  echo
+  echo "Third-party code among those classes:"
+  echo "- com/sun/org/apache/xerces/internal/** (Apache Xerces Java, as bundled in OpenJDK's JAXP) and"
+  echo "  com/sun/xml/internal/stream/Entity*: Apache License 2.0. The JDK's notice for its Apache components, with the"
+  echo "  license text, is THIRD_PARTY_APACHE (from the JDK's THIRD_PARTY_README; it carries no separate Xerces NOTICE"
+  echo "  file). The other JAXP classes (javax/xml/parsers, jdk/xml/internal, the rest of com/sun/xml/internal/stream) are"
+  echo "  GPLv2 with the Classpath Exception."
+  echo "- org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain"
+  echo "  notice (SAX_NOTICE)."
   echo
   echo "OpenJDK binary package: $(dpkg-query -W openjdk-8-jre-headless)"
   echo "Corresponding source:   Ubuntu source package $SRC_PKG $SRC_VER,"

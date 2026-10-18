@@ -8,12 +8,10 @@ import { RecordingHost } from '../../host';
 import type { BdjHost } from '../../host';
 import { parseClassFile } from '../classfile';
 import { Jvm } from '../jvm';
-import type { JThread } from '../threads';
 import type { JArray, JObject, JValue } from '../values';
 import { Vfs } from '../vfs';
 import { ZipArchive } from '../zip';
 import { NativeTable } from './index';
-import type { NativeContext } from './index';
 import { registerLibblurayNatives } from './libbluray';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
@@ -197,21 +195,5 @@ describe('libbluray natives', () => {
     await jvm.callStatic('org/videolan/Logger', 'logN', desc, [0, str('A.java'), 7, str('hello')]);
     await jvm.callStatic('org/videolan/Logger', 'logN', desc, [1, null, 0, str('')]);
     expect(host.trace.slice(before)).toEqual([{ call: 'logN', args: ['A.java', 7, 'hello'], ret: null }]);
-  });
-
-  it('stub font metrics: 0.6 em advances, 0.8 em ascent, 0.2 em descent', () => {
-    const ctx = { jvm, thread: {} as JThread, method: null } as unknown as NativeContext;
-    const fn = (key: string) => jvm.natives.get(`java/awt/BDFontMetrics.${key}`)!;
-    const metrics = jvm.heap.newObject(jvm.bootClass('java/awt/BDFontMetrics'));
-    const lib = fn('initN()J')(ctx) as bigint;
-    expect(lib).not.toBe(0n);
-    const face = fn('loadFontN(JLjava/lang/String;I)J')(ctx, metrics, lib, str('/jdk/lib/fonts/LucidaSansRegular.ttf'), 20) as bigint;
-    expect(face).not.toBe(0n);
-    expect(field(metrics, 'ascent', 'I')).toBe(16);
-    expect(field(metrics, 'descent', 'I')).toBe(4);
-    expect(field(metrics, 'maxAdvance', 'I')).toBe(12);
-    expect(fn('stringWidthN(JLjava/lang/String;)I')(ctx, metrics, face, str('abc'))).toBe(36);
-    expect(fn('charWidthN(JC)I')(ctx, metrics, face, 0x41)).toBe(12);
-    expect(fn('resolveFontN(Ljava/lang/String;I)Ljava/lang/String;')(ctx, str('Arial'), 0)).toSatisfy((s: JValue) => jstr(s) === 'Arial');
   });
 });

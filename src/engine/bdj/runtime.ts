@@ -12,6 +12,9 @@
 
 import type { ByteSource } from '../disc/byte-source';
 import { BdjError } from './errors';
+import { enqueueBdjEvent, type Coalesce, type QueuedBdjEvent } from './input';
+import type { FreeType } from './fonts/freetype';
+import { DEFAULT_FONT_PATH, systemFontFiles } from './fonts/system-fonts';
 import type { BdjErrorCode } from './errors';
 import type { BdjHost, TraceEntry } from './host';
 import { Jvm } from './jvm/jvm';
@@ -19,6 +22,7 @@ import { externalName } from './jvm/loader';
 import type { JMethod } from './jvm/loader';
 import { lineNumber } from './jvm/natives/lang';
 import type { NativeTable } from './jvm/natives/index';
+import { registerHaviNatives } from './jvm/natives/havi';
 import { registerLibblurayNatives } from './jvm/natives/libbluray';
 import type { StackTrace } from './jvm/jvm';
 import type { JThread } from './jvm/threads';
@@ -48,6 +52,27 @@ export interface BdjRuntimeDeps {
   /** JvmOptions.extraIntrinsics: the class library's intrinsics, which the engine does not carry. */
   readonly extraIntrinsics?: (table: NativeTable) => void;
   readonly log: (line: string) => void;
+  /**
+   * Text: FreeType for the font natives and the bundled fallback font (src/engine/ass/default-font.ttf) as the JRE's
+   * font files, both fetched when text first needs them. Without it, BD-J runs as libbluray built without FreeType.
+   */
+  readonly fonts?: BdjFontSources;
+  /** The memory profile's BD-J budgets; none by default. */
+  readonly memory?: BdjMemoryBudgets;
+}
+
+/** The memory profile's budgets the BD-J worker applies (memory-profile.ts, bdjClassCacheBytes and bdjVfsCacheBytes). */
+export interface BdjMemoryBudgets {
+  /** Class-file bytes the classes keep: going over is logged once. */
+  readonly classBytes: number;
+  /** The memory mounts' capacity: a write beyond it fails as on a full disk. */
+  readonly vfsBytes: number;
+}
+
+export interface BdjFontSources {
+  readonly loadFreeType: () => Promise<FreeType>;
+  /** The bytes of src/engine/ass/default-font.ttf. */
+  readonly loadDefaultFont: () => Promise<Uint8Array>;
 }
 
 export type RunOutcome = 'idle' | 'until' | 'aborted' | 'deadlock';
@@ -111,10 +136,11 @@ export class BdjRuntime {
   /** Aborts the drive in progress (run, or stop's). */
   private driving: AbortController | null = null;
   private active: Promise<unknown> | null = null;
-  private readonly events: [number, number][] = [];
+  private readonly events: QueuedBdjEvent[] = [];
   private eventThread: JThread | null = null;
   /** The drive in progress checks whether it is done. */
   private settle: (() => void) | null = null;
+  private vfsFullLogged = false;
 
   constructor(private readonly deps: BdjRuntimeDeps) {
     const inner = deps.host(
@@ -123,6 +149,7 @@ export class BdjRuntime {
     );
     this.host = inner;
     const lib = deps.classLibrary;
+    const fonts = deps.fonts;
     this.jvm = new Jvm({
       bootJars: [lib.libbluray, lib.libblurayAwt, lib.rt],
       nowMs: deps.nowMs,
@@ -131,10 +158,32 @@ export class BdjRuntime {
       ...(deps.extraIntrinsics ? { extraIntrinsics: deps.extraIntrinsics } : {}),
       stdout: (s) => this.output(s),
       stderr: (s) => this.output(s),
-      vfs: new Vfs({ disc: deps.disc, discPaths: deps.disc.paths(), jdkLib: ZipArchive.open(lib.rt), nowMs: deps.nowMs }),
+      ...(deps.memory ? { classBytesBudget: deps.memory.classBytes } : {}),
+      warn: (line) => deps.log(line),
+      vfs: new Vfs({
+        disc: deps.disc,
+        discPaths: deps.disc.paths(),
+        jdkLib: ZipArchive.open(lib.rt),
+        nowMs: deps.nowMs,
+        ...(deps.memory ? { memLimitBytes: deps.memory.vfsBytes, onFull: (path, limit) => this.vfsFull(path, limit) } : {}),
+        ...(fonts ? { jdkLazy: systemFontFiles(fonts.loadDefaultFont) } : {}),
+      }),
       systemProperties: JVM_PROPERTIES,
     });
-    registerLibblurayNatives(this.jvm.natives, this.logging(inner));
+    const host = this.logging(inner);
+    registerLibblurayNatives(
+      this.jvm.natives,
+      host,
+      fonts ? { loadFreeType: fonts.loadFreeType, fallbackFontPath: DEFAULT_FONT_PATH, log: deps.log } : { log: deps.log },
+    );
+    registerHaviNatives(this.jvm.natives, host);
+  }
+
+  /** The memory mounts' limit refused a write (ENOSPC for Java): logged the first time only. */
+  private vfsFull(path: string, limit: number): void {
+    if (this.vfsFullLogged) return;
+    this.vfsFullLogged = true;
+    this.deps.log(`BD-J: no room to write ${path}: the BD-J files in memory are at the budget of ${(limit / (1024 * 1024)).toFixed(1)} MB (No space left on device)`);
   }
 
   /** Runtime.halt's status, once Java has halted the JVM; nothing runs after that. */
@@ -192,11 +241,17 @@ export class BdjRuntime {
    * bdj_process_event: queues Libbluray.processEvent, which the next run() executes on a fresh Java thread. Events
    * run one at a time in order, as libbluray's synchronous calls under bd->mutex do.
    */
-  processEvent(ev: number, param: number): void {
+  processEvent(ev: number, param: number, coalesce?: Coalesce): void {
     this.checkRunning();
     this.logEvent(ev, param);
-    this.events.push([ev | 0, param | 0]);
+    // libbluray's caller waits for Java; ours does not, so held keys and pointer moves are bounded (input.ts)
+    enqueueBdjEvent(this.events, { ev: ev | 0, param: param | 0, ...(coalesce ? { coalesce } : {}) });
     this.pump();
+  }
+
+  /** Events waiting for the event before them to return (tests). */
+  get pendingEvents(): number {
+    return this.events.length;
   }
 
   /** Starts the next queued event once the previous one has returned. */
@@ -206,7 +261,7 @@ export class BdjRuntime {
         this.events.length = 0;
         return;
       }
-      const [ev, param] = this.events.shift()!;
+      const { ev, param } = this.events.shift()!;
       const t = this.spawn('processEvent', '(II)Z', [ev, param]);
       const finished = (): void => {
         if (t.uncaught) this.deps.log(`bdj_process_event(${ev >>> 0},${param >>> 0}) failed (uncaught exception): ${this.jvm.describe(t.uncaught)}`);
@@ -231,7 +286,8 @@ export class BdjRuntime {
 
   private logEvent(ev: number, param: number): void {
     if (ev > BDJ_EVENT_LAST) this.deps.log(`bdj_process_event(${ev},${param}): unknown event`);
-    else if (ev !== BdjEvent.PTS) this.deps.log(`bdj_process_event(${EVENT_NAMES[ev]},${param})`);
+    // PTS and pointer moves come many times a second (libbluray logs all of them at debug level)
+    else if (ev !== BdjEvent.PTS && ev !== BdjEvent.MOUSE) this.deps.log(`bdj_process_event(${EVENT_NAMES[ev]},${param})`);
   }
 
   /**
@@ -274,6 +330,13 @@ export class BdjRuntime {
         this.jvm.threads.halt();
       }
     });
+  }
+
+  /** A thread dump of the Java threads (diagnostics: the boot timeout, a deadlock), with the events still queued. */
+  threadDump(): string[] {
+    const lines = this.jvm.threads.dump(frameText);
+    lines.push(`events: ${this.events.length} queued${this.eventThread ? `, #${this.eventThread.id} running one` : ''}`);
+    return lines;
   }
 
   private onTrace(e: TraceEntry): void {

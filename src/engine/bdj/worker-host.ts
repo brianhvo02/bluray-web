@@ -1,7 +1,8 @@
 /*
  * The BdjHost of the BD-J worker. The natives it answers locally follow libbluray src/libbluray/bluray.c
  * (bdpriv_reg_read, bdpriv_get_uo_mask, bd_tell_time, bd_get_disc_info, bd_get_playlist_info) and
- * bdj/native/org_videolan_Libbluray.c (getAacsDataN); the others are calls to the engine worker.
+ * bdj/native/org_videolan_Libbluray.c (getAacsDataN; updateGraphicN in graphics-plane.ts); the others are calls to the
+ * engine worker.
  * Copyright (C) 2010-2017  Petri Hintukainen <phintuka@users.sourceforge.net>
  *
  * Ported to TypeScript and modified for bluray-web, 2026.
@@ -11,7 +12,9 @@
 
 import type { Clpi } from '../bdmv/clpi-parser';
 import type { DiscModel } from '../disc/open-disc';
+import type { ScreenRect } from './background';
 import { playlistInfo, titleInfos } from './disc-info';
+import { updateGraphic, type GraphicsPlaneWriter } from './graphics-plane';
 import type { BdjHost, PlaylistInfo, TitleInfo } from './host';
 import type { SharedRegisterView } from './shared-registers';
 import type { StatusBlockReader } from './status-block';
@@ -20,6 +23,10 @@ import type { BdjCallName, BdjWireValue } from './worker-protocol';
 export interface WorkerBdjHostOptions {
   readonly regs: SharedRegisterView;
   readonly status: StatusBlockReader;
+  /** Where updateGraphicN draws; without one, graphics are dropped. */
+  readonly plane?: GraphicsPlaneWriter;
+  /** Where displayImage's background stills go (the engine worker); without it, they are dropped. */
+  readonly background?: (image: Uint8Array | null, rect: ScreenRect) => void;
   readonly call: (name: BdjCallName, args: readonly BdjWireValue[]) => Promise<number | string>;
   /** Read only once Java asks for disc information (the worker boots the JDK while it loads these). */
   readonly disc: DiscModel;
@@ -107,8 +114,15 @@ export class WorkerBdjHost implements BdjHost {
     return this.int('setVirtualPackage', [vpPath, psrBackup]);
   }
 
-  /** The menu is not shown in 5c. */
-  updateGraphic(_width: number, _height: number, _argb: Int32Array | null, _x0: number, _y0: number, _x1: number, _y1: number): void {}
+  /** Java_org_videolan_Libbluray_updateGraphicN, into the shared graphics plane (graphics-plane.ts). */
+  updateGraphic(width: number, height: number, argb: Int32Array | null, x0: number, y0: number, x1: number, y1: number): void {
+    if (this.opts.plane) updateGraphic(this.opts.plane, width, height, argb, x0, y0, x1, y1);
+  }
+
+  /** A background still for the engine (natives/havi.ts); no reply, as displayImage returns at once. */
+  displayImage(image: Uint8Array | null, rect: ScreenRect): void {
+    this.opts.background?.(image, rect);
+  }
 
   log(file: string | null, line: number, msg: string, error: boolean): void {
     this.opts.log(`${file ?? 'JVM'}:${line}: ${msg}`, error);

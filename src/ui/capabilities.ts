@@ -1,5 +1,12 @@
+import { bdjMissing } from '../engine/bdj/requirements';
+
 export interface CapabilityReport {
   readonly core: { readonly ok: boolean; readonly missing: readonly string[] };
+  /**
+   * What BD-J menus need (engine/bdj/requirements.ts), as far as the page can see: whether a worker may start workers
+   * is known only inside the engine worker, which checks again before it runs BD-J and names what it lacks.
+   */
+  readonly bdj: { readonly ok: boolean; readonly missing: readonly string[] };
   /** showDirectoryPicker */
   readonly canPickDirectory: boolean;
   /** webkitdirectory on a file input */
@@ -31,8 +38,10 @@ export function checkCapabilities(g: Bag = globalThis as unknown as Bag): Capabi
   const handleProto = obj(obj(g.FileSystemHandle)?.prototype);
   const nav = obj(g.navigator);
 
+  const bdj = bdjMissing(g);
   return {
     core: { ok: missing.length === 0, missing },
+    bdj: { ok: bdj.length === 0, missing: bdj },
     canPickDirectory: typeof g.showDirectoryPicker === 'function',
     canPickFolderInput: inputProto !== undefined && 'webkitdirectory' in inputProto,
     canRememberDiscs: handleProto !== undefined && 'queryPermission' in handleProto,

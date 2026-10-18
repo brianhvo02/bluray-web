@@ -169,6 +169,22 @@ describe('PlayerController', () => {
     expect(audio.starts).toBe(2);
   });
 
+  it('opens a served disc (the dev disc server speaks the NAS API) with openRemote, starting audio in the gesture', async () => {
+    const worker = new FakeWorker();
+    const audio = new FakeAudio();
+    const c = new PlayerController(worker, audio);
+    const spec = { kind: 'remote', base: 'https://192.168.1.5:8443/api/discs/abc/', token: 'tok', manifest: { discId: 'abc', name: 'Disc', files: [], inline: {} } } as const;
+    c.openRemote(spec);
+    expect(c.getSnapshot().engineState).toBe('loading');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(worker.posted).toEqual([
+      { type: 'open', disc: spec },
+      { type: 'attachAudio', ring: audio.ring },
+    ]);
+    expect(audio.starts).toBe(1);
+  });
+
   it('opens a NAS disc, answers the engine\'s token requests and relays scheduled refreshes', async () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
@@ -339,6 +355,12 @@ describe('menus', () => {
     expect(s.pointerButton).toBeNull();
   });
 
+  it('counts menu clicks that missed every button', () => {
+    let s = reduceEvent({ ...INITIAL_SNAPSHOT, menuActive: true }, { type: 'menuTapMissed' });
+    s = reduceEvent(s, { type: 'menuTapMissed' });
+    expect(s.menuTapMisses).toBe(2);
+  });
+
   it('posts menu keys and pointer moves and clicks', () => {
     const { worker, controller } = make();
     controller.menuKey('ok');
@@ -380,26 +402,86 @@ describe('titles and the top menu', () => {
     expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] }).indexTitles).toBeNull();
   });
 
-  it('records BD-J support and whether a BD-J title runs; the menu-hidden notice goes when BD-J stops', () => {
+  it('records BD-J support and whether a BD-J title runs; the menu state and the ignored-tap notice go when BD-J stops', () => {
     let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'titles', playlists: [summary], usesBdj: true, bdjSupported: true, warnings: [] });
-    expect(s).toMatchObject({ usesBdj: true, bdjSupported: true, bdjActive: false });
+    expect(s).toMatchObject({ usesBdj: true, bdjSupported: true, bdjActive: false, bdjMenuVisible: false });
     s = reduceEvent(s, { type: 'bdjActive', active: true });
-    s = reduceEvent(s, { type: 'notice', code: 'bdj-menu-hidden', message: 'hidden' });
-    expect(s).toMatchObject({ bdjActive: true, notices: [{ code: 'bdj-menu-hidden', message: 'hidden' }] });
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'notice', code: 'bdj-tap-ignored', message: 'ignored' });
+    expect(s).toMatchObject({ bdjActive: true, bdjMenuVisible: true, notices: [{ code: 'bdj-tap-ignored', message: 'ignored' }] });
     s = reduceEvent(s, { type: 'bdjActive', active: false });
     s = reduceEvent(s, { type: 'notice', code: 'bdj-failed', message: 'failed' });
-    expect(s.bdjActive).toBe(false);
+    expect(s).toMatchObject({ bdjActive: false, bdjMenuVisible: false });
     expect(s.notices.map((n) => n.code)).toEqual(['bdj-failed']);
     s = reduceEvent(s, { type: 'bdjActive', active: true });
-    expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] })).toMatchObject({ bdjActive: false, bdjSupported: false });
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    expect(reduceEvent(s, { type: 'titles', playlists: [], usesBdj: false, bdjSupported: false, warnings: [] })).toMatchObject({ bdjActive: false, bdjSupported: false, bdjMenuVisible: false });
   });
 
-  it('drops the menu-hidden notice when the user picks a playlist (BD-J stops)', () => {
+  it('follows the BD-J menu turning visible and empty', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'bdjMenu', visible: true });
+    expect(s.bdjMenuVisible).toBe(true);
+    s = reduceEvent(s, { type: 'bdjMenu', visible: false });
+    expect(s.bdjMenuVisible).toBe(false);
+  });
+
+  it('counts the taps the disc ignored (each opens the remote)', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'bdjTapIgnored' });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s.bdjTapsIgnored).toBe(2);
+    expect(s.notices).toEqual([]); // the notice is the engine's, once per menu
+  });
+
+  it('asks for the remote on the first ignored tap of each BD-J menu only', () => {
+    let s = reduceEvent(INITIAL_SNAPSHOT, { type: 'bdjActive', active: true });
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s).toMatchObject({ bdjTapsIgnored: 1, bdjRemoteRequests: 1, bdjRemoteOpenedInMenu: true });
+    // the user closed the remote: later ignored taps in this menu do not force it open again
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s).toMatchObject({ bdjTapsIgnored: 3, bdjRemoteRequests: 1 });
+    // a repeated visible report is the same menu
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s.bdjRemoteRequests).toBe(1);
+    // the plane empties and shows again: a new menu
+    s = reduceEvent(s, { type: 'bdjMenu', visible: false });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' }); // (the engine sends none on an empty plane; still not a new menu)
+    expect(s.bdjRemoteRequests).toBe(1);
+    s = reduceEvent(s, { type: 'bdjMenu', visible: true });
+    s = reduceEvent(s, { type: 'bdjTapIgnored' });
+    expect(s).toMatchObject({ bdjRemoteRequests: 2, bdjRemoteOpenedInMenu: true });
+    // BD-J stopping ends the menu too
+    s = reduceEvent(s, { type: 'bdjActive', active: false });
+    expect(s.bdjRemoteOpenedInMenu).toBe(false);
+  });
+
+  it('the controller opens the remote once per menu from the engine events', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
-    worker.emit({ type: 'notice', code: 'bdj-menu-hidden', message: 'hidden' });
+    worker.emit({ type: 'bdjActive', active: true });
+    worker.emit({ type: 'bdjMenu', visible: true });
+    worker.emit({ type: 'bdjTapIgnored' });
+    worker.emit({ type: 'notice', code: 'bdj-tap-ignored', message: 'ignored' });
+    worker.emit({ type: 'bdjTapIgnored' });
+    expect(c.getSnapshot()).toMatchObject({ bdjRemoteRequests: 1, bdjTapsIgnored: 2 });
+  });
+
+  it('drops the ignored-tap notice when the user picks a playlist (BD-J stops)', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    worker.emit({ type: 'notice', code: 'bdj-tap-ignored', message: 'ignored' });
     c.playPlaylist('00000');
     expect(c.getSnapshot().notices).toEqual([]);
+  });
+
+  it('posts menu keys, marking a held key\'s repeats', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.menuKey('down');
+    c.menuKey('down', true);
+    expect(worker.posted).toEqual([{ type: 'menuKey', key: 'down' }, { type: 'menuKey', key: 'down', repeat: true }]);
   });
 
   it('posts playTitle and menuCall', () => {

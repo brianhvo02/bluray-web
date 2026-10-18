@@ -546,7 +546,8 @@ const SIG_LOC = 0x04034b50;
 
 export class ZipArchive {
   private constructor(
-    private readonly bytes: Uint8Array,
+    /** The whole archive, which the archive keeps. */
+    readonly bytes: Uint8Array,
     readonly entries: ReadonlyMap<string, ZipEntry>,
     readonly names: readonly string[],
     /** Every central-directory record in order, duplicates included. */

@@ -180,7 +180,8 @@ describe('PlayerBdjHost', () => {
     await startPlaylist(h, 1);
     await untilState(h, 'ended', 20_000);
     await h.play(500);
-    expect(h.of(BdjEvent.MARK)).toEqual([1, 2, 3]);
+    // mark 0 is at the IN time, past the first item's start_pkt 0 (its EP map entry follows the PAT and PMT), so the first read reaches it as libbluray's does
+    expect(h.of(BdjEvent.MARK)).toEqual([0, 1, 2, 3]);
     expect(h.of(BdjEvent.END_OF_PLAYLIST)).toEqual([1]);
   }, 30_000);
 

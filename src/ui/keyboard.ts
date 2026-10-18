@@ -63,6 +63,15 @@ export function keyToAction(key: string, ctx: KeyContext = { menuActive: false }
   }
 }
 
+/**
+ * Whether a key press shows the controls (ruling R11). Over a disc menu, keys that go to the disc (arrows, Enter, digits,
+ * Top Menu, pop-up: any menu key) leave the control bar as it is, so it never comes over the menu; every other key,
+ * player shortcuts included, wakes it as anywhere else. `action` is null for a key that maps to nothing.
+ */
+export function keyWakesControls(action: KeyAction | null, inMenu: boolean): boolean {
+  return !(inMenu && action?.type === 'menuKey');
+}
+
 const MENU_KEY_UO: Partial<Record<MenuKey, UoOp>> = { up: 'moveUp', down: 'moveDown', left: 'moveLeft', right: 'moveRight', ok: 'activate', topMenu: 'menuCall' };
 
 /** The disc user operation (UO) a key action performs, checked against the disc's UO mask before it is sent; null if none. */

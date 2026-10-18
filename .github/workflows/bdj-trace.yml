@@ -5,10 +5,15 @@ on:
     branches: [main]
     paths:
       - 'tools/bdj-trace/**'
+      - 'src/engine/ass/default-font.ttf'
       - 'scripts/make-bdj-disc.ts'
       - 'scripts/make-bdj-mixed-disc.ts'
+      - 'scripts/make-bdj-menu-disc.ts'
       - 'fixtures/synthetic/disc-bdj/**'
       - 'fixtures/synthetic/disc-bdj-mixed/**'
+      - 'fixtures/synthetic/disc-bdj-menu/**'
+      - 'fixtures/bdj-fonts/**'
+      - 'tests/bdj/scripts/**'
       - 'tests/bdj/xlets/**'
       - 'tests/bdj/golden/**'
       - 'tests/helpers/bdjo-builder.ts'
@@ -19,10 +24,15 @@ on:
   pull_request:
     paths:
       - 'tools/bdj-trace/**'
+      - 'src/engine/ass/default-font.ttf'
       - 'scripts/make-bdj-disc.ts'
       - 'scripts/make-bdj-mixed-disc.ts'
+      - 'scripts/make-bdj-menu-disc.ts'
       - 'fixtures/synthetic/disc-bdj/**'
       - 'fixtures/synthetic/disc-bdj-mixed/**'
+      - 'fixtures/synthetic/disc-bdj-menu/**'
+      - 'fixtures/bdj-fonts/**'
+      - 'tests/bdj/scripts/**'
       - 'tests/bdj/xlets/**'
       - 'tests/bdj/golden/**'
       - 'tests/helpers/bdjo-builder.ts'

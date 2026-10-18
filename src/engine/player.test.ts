@@ -927,6 +927,19 @@ describe('Player with HDMV navigation', () => {
       await untilPlaylist(h, '00001');
     });
 
+    it('reports a click that hits no button as missed, and not one on a button (ruling R13)', async () => {
+      const h = await inputMenu();
+      await h.player.handle({ type: 'pointer', kind: 'click', x: 500, y: 500 });
+      expect(h.events.filter((e) => e.type === 'menuTapMissed')).toHaveLength(1);
+      await h.play(600);
+      expect(lastTelemetry(h)!.menu).not.toBeNull(); // the menu is still shown, nothing activated
+      await h.player.handle({ type: 'pointer', kind: 'move', x: 500, y: 500 });
+      expect(h.events.filter((e) => e.type === 'menuTapMissed')).toHaveLength(1); // a move is no tap
+      await h.player.handle({ type: 'pointer', kind: 'click', x: 104, y: 102 });
+      expect(h.events.filter((e) => e.type === 'menuTapMissed')).toHaveLength(1);
+      await untilPlaylist(h, '00001');
+    });
+
     it('ignores menu keys and pointer input without a navigator', async () => {
       const h = await harness(CodingType.LPCM);
       await h.player.handle({ type: 'menuKey', key: 'ok' });

@@ -4,8 +4,8 @@
  * functions), bdj/native/bdjo.c (_make_terminal_info, _make_app_cache_info, _make_accessible_playlists, _make_app,
  * _make_app_management_table, bdjo_make_jobj), bdj/native/util.c (bdj_make_object, bdj_make_array),
  * bdj/native/org_videolan_Logger.c, bdj/bdjo_parse.c (bdjo_get), disc/disc.c (disc_cache_bdrom_file,
- * disc_open_dir) and file/file.c (file_mkdirs). The font and text natives of bdj/native/java_awt_BDFontMetrics.c and
- * java_awt_BDGraphics.c are stubs with fixed metrics. libbluray's java/io/FileInputStream natives share the JDK's.
+ * disc_open_dir) and file/file.c (file_mkdirs). The font and text natives (bdj/native/java_awt_BDFontMetrics.c,
+ * java_awt_BDGraphics.c) are in fonts.ts. libbluray's java/io/FileInputStream natives share the JDK's.
  * Copyright (C) 2010  William Hahne
  * Copyright (C) 2012-2019  Petri Hintukainen <phintuka@users.sourceforge.net>
  *
@@ -18,14 +18,16 @@ import { parseBdjo } from '../../../bdmv/bdjo-parser';
 import type { Bdjo, BdjoApp } from '../../../bdmv/bdjo-parser';
 import { ParseError } from '../../../util/byte-reader';
 import type { BdjHost, PlaylistInfo, StreamInfo, TitleInfo, TraceEntry } from '../../host';
-import { Invoke, Suspend, ThrowResult, andThen } from '../interpreter';
+import { Invoke, andThen } from '../interpreter';
 import type { NativeResult } from '../interpreter';
 import type { Jvm } from '../jvm';
 import type { JArray, JObject, JValue } from '../values';
 import type { Vfs } from '../vfs';
 import type { NativeContext, NativeTable } from './index';
-import { closeStream, openInto, readBytes, suspendRead } from './io';
-import { jsStr, method, none } from './util';
+import { registerFontNatives } from './fonts';
+import type { FontNativeDeps } from './fonts';
+import { closeStream, openInto, readBytes, readVfsFile, suspendRead } from './io';
+import { method, none } from './util';
 
 const DISC = '/disc/';
 const TITLE_TYPE_HDMV = 1;
@@ -206,38 +208,6 @@ function makeBdjo(ctx: NativeContext, p: Bdjo): NativeResult {
   );
 }
 
-/** Reads a whole VFS file, suspending on disc reads; null when it is missing or a read fails. */
-function readAll(vfs: Vfs, path: string, k: (bytes: Uint8Array | null) => NativeResult): NativeResult {
-  const h = vfs.open(path, 'r');
-  if (!h) return k(null);
-  const out = new Uint8Array(h.size());
-  let off = 0;
-  const done = (bytes: Uint8Array | null): NativeResult => {
-    vfs.close(h);
-    return k(bytes);
-  };
-  const got = (n: number): NativeResult => {
-    if (n <= 0) return done(null);
-    off += n;
-    return step();
-  };
-  const step = (): NativeResult => {
-    while (off < out.length) {
-      const r = vfs.read(h, out, off, out.length - off);
-      if (typeof r !== 'number') {
-        return new Suspend(
-          r.catch(() => -1),
-          (n) => (n instanceof ThrowResult ? n : got(n as number)),
-        );
-      }
-      if (r <= 0) return done(null);
-      off += r;
-    }
-    return done(out);
-  };
-  return step();
-}
-
 /** file_mkdirs: creates the missing directories above the file `path`. */
 function mkdirs(vfs: Vfs, path: string): boolean {
   const end = path.lastIndexOf('/');
@@ -255,7 +225,7 @@ function mkdirs(vfs: Vfs, path: string): boolean {
 function cacheBdromFile(vfs: Vfs, relPath: string, cachePath: string, k: (result: number) => NativeResult): NativeResult {
   if (cachePath === '' || !mkdirs(vfs, cachePath)) return k(-1);
   if (relPath === '' || relPath.endsWith('/') || relPath.endsWith('\\')) return k(0);
-  return readAll(vfs, DISC + relPath, (bytes) => {
+  return readVfsFile(vfs, DISC + relPath, (bytes) => {
     if (!bytes) return k(-1);
     const out = vfs.open(cachePath, 'w');
     if (!out) return k(-1);
@@ -277,9 +247,9 @@ function bdjoGet(vfs: Vfs, file: string, k: (bdjo: Bdjo | null) => NativeResult)
       throw e;
     }
   };
-  return readAll(vfs, `${DISC}BDMV/BDJO/${file}`, (bytes) => {
+  return readVfsFile(vfs, `${DISC}BDMV/BDJO/${file}`, (bytes) => {
     const bdjo = parse(bytes);
-    return bdjo ? k(bdjo) : readAll(vfs, `${DISC}BDMV/BACKUP/BDJO/${file}`, (backup) => k(parse(backup)));
+    return bdjo ? k(bdjo) : readVfsFile(vfs, `${DISC}BDMV/BACKUP/BDJO/${file}`, (backup) => k(parse(backup)));
   });
 }
 
@@ -288,13 +258,6 @@ function vfsOf(jvm: Jvm): Vfs {
   if (!vfs) throw new Error('libbluray natives need a Vfs');
   return vfs;
 }
-
-/** The stub font face libbluray's FreeType calls would load: each glyph 0.6 em wide, ascent 0.8 em, descent 0.2 em. */
-interface StubFace {
-  readonly advance: number;
-}
-
-const stubAdvance = (size: number): number => Math.floor((size * 6) / 10);
 
 /** A host answer: a promise parks the calling thread, and a rejected one throws a RuntimeException in it. */
 function answer<T>(ctx: NativeContext, r: T | Promise<T>, toJava: (v: T) => JValue | undefined): NativeResult {
@@ -305,11 +268,10 @@ const int = (v: number): number => v;
 const long = (v: bigint): bigint => BigInt.asIntN(64, v);
 const voidOf = (): undefined => undefined;
 
-export function registerLibblurayNatives(table: NativeTable, host: BdjHost): void {
+/** The natives libbluray registers; `fonts` gives the font and text natives (fonts.ts) FreeType. */
+export function registerLibblurayNatives(table: NativeTable, host: BdjHost, fonts: FontNativeDeps = {}): void {
   const record = (e: TraceEntry): void => host.record?.(e);
-  const faces = new Map<bigint, StubFace>();
-  let nextFace = 1n;
-  const advanceOf = (face: JValue): number | null => faces.get(face as bigint)?.advance ?? null;
+  registerFontNatives(table, fonts);
 
   table.register({
     'org/videolan/Libbluray.getTitleInfosN(J)[Lorg/videolan/TitleInfo;': (ctx) => {
@@ -395,46 +357,5 @@ export function registerLibblurayNatives(table: NativeTable, host: BdjHost): voi
     'java/io/FileInputStream.open(Ljava/lang/String;)V': (ctx, self, name) => openInto(ctx, self, name, 'r'),
     'java/io/FileInputStream.readBytes([BII)I': readBytes,
     'java/io/FileInputStream.close0()I': closeStream,
-
-    'java/awt/BDFontMetrics.initN()J': () => 1n,
-    'java/awt/BDFontMetrics.destroyN(J)V': none,
-    'java/awt/BDFontMetrics.resolveFontN(Ljava/lang/String;I)Ljava/lang/String;': (_ctx, family) => family,
-    'java/awt/BDFontMetrics.unloadFontConfigN()V': none,
-    'java/awt/BDFontMetrics.getFontFamilyAndStyleN(JLjava/lang/String;)[Ljava/lang/String;': (ctx, _lib, name) => {
-      const path = jsStr(ctx.jvm, name);
-      const base = path.slice(path.lastIndexOf('/') + 1);
-      const dot = base.lastIndexOf('.');
-      return strings(ctx, [dot > 0 ? base.slice(0, dot) : base, 'Regular']);
-    },
-    'java/awt/BDFontMetrics.loadFontN(JLjava/lang/String;I)J': (ctx, self, lib, _name, size) => {
-      if (lib === 0n) return 0n;
-      const em = size as number;
-      const jvm = ctx.jvm;
-      const o = self as JObject;
-      jvm.setField(o, 'ascent', 'I', Math.floor((em * 8) / 10));
-      jvm.setField(o, 'descent', 'I', Math.floor((em * 2) / 10));
-      jvm.setField(o, 'leading', 'I', 0);
-      jvm.setField(o, 'maxAdvance', 'I', stubAdvance(em));
-      const face = nextFace++;
-      faces.set(face, { advance: stubAdvance(em) });
-      return face;
-    },
-    'java/awt/BDFontMetrics.destroyFontN(J)V': (_ctx, _self, face) => void faces.delete(face as bigint),
-    'java/awt/BDFontMetrics.charWidthN(JC)I': (_ctx, _self, face) => advanceOf(face) ?? 0,
-    'java/awt/BDFontMetrics.stringWidthN(JLjava/lang/String;)I': (ctx, _self, face, s) => {
-      const advance = advanceOf(face);
-      return advance === null ? 0 : jsStr(ctx.jvm, s).length * advance;
-    },
-    'java/awt/BDFontMetrics.charsWidthN(J[CII)I': (ctx, _self, face, chars, offset, length) => {
-      const advance = advanceOf(face);
-      if (advance === null || (length as number) <= 0) return 0;
-      const n = chars === null ? -1 : ((chars as JArray).data as Uint16Array).length;
-      const off = offset as number;
-      const len = length as number;
-      if (n < 0) return ctx.jvm.throwNew('java/lang/NullPointerException');
-      if (off < 0 || off + len > n) return ctx.jvm.throwNew('java/lang/ArrayIndexOutOfBoundsException');
-      return len * advance;
-    },
-    'java/awt/BDGraphicsBase.drawStringN(JLjava/lang/String;III)V': none,
   });
 }

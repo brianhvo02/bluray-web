@@ -31,5 +31,20 @@ RUN cd /src/libbluray \
       -Dbdj_jar=enabled -Dfreetype=enabled -Dfontconfig=disabled -Dlibxml2=disabled \
  && ninja -C build && ninja -C build install && ldconfig
 
+# Font fallback. fontconfig is off, so libbluray's BDFontMetrics maps the JRE logical names (serif, sansserif,
+# monospaced, dialog, dialoginput, default; plain/bold/italic/bold-italic) to the Lucida files under
+# $JAVA_HOME/jre/lib/fonts/, which the headless JDK does not ship. Every one of those files is a link to the bundled
+# default-font.ttf (src/engine/ass/default-font.ttf, staged into the build context by build.sh), so bluray-web can
+# resolve the same names to the same file. See README.md.
+COPY default-font.ttf /usr/local/share/fonts/default-font.ttf
+RUN mkdir -p $JAVA_HOME/jre/lib/fonts && cd $JAVA_HOME/jre/lib/fonts \
+ && for f in LucidaBrightRegular LucidaBrightDemiBold LucidaBrightItalic LucidaBrightDemiItalic \
+             LucidaSansRegular LucidaSansDemiBold LucidaSansOblique LucidaSansDemiOblique \
+             LucidaTypewriterRegular LucidaTypewriterBold LucidaTypewriterOblique LucidaTypewriterBoldOblique; do \
+      ln -s /usr/local/share/fonts/default-font.ttf $f.ttf; \
+    done
+
+# libpng (for --dump-planes) is already installed as a dependency of libfreetype-dev.
 COPY bdj_trace.c /src/bdj_trace.c
-RUN gcc -O1 -Wall -Wextra -Werror -o /usr/local/bin/bdj_trace /src/bdj_trace.c $(pkg-config --cflags --libs libbluray)
+RUN gcc -O1 -Wall -Wextra -Werror -pthread -o /usr/local/bin/bdj_trace /src/bdj_trace.c \
+      $(pkg-config --cflags --libs libbluray libpng)

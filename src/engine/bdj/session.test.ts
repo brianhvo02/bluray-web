@@ -8,7 +8,8 @@ import type { DiscSpec } from '../disc/disc-spec';
 import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
-import { BdjSession, type BdjFailureCode, type WorkerLike } from './session';
+import { BdjSession, DUMP_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
+import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
@@ -97,6 +98,7 @@ function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) 
     },
     regs: createRegisterBuffer(),
     status: new StatusBlockWriter(statusBuf),
+    plane: createGraphicsPlane(),
     time45: () => time45,
     onFailed: (code, message) => void failures.push([code, message]),
     onLog: (line) => void logs.push(line),
@@ -187,7 +189,12 @@ describe('BdjSession rules', () => {
     h.clock.advance(19_999);
     expect(h.failures).toEqual([]);
     h.clock.advance(1);
-    expect(h.failures.map(([c]) => c)).toEqual(['timeout']);
+    // the engine's side goes to the log and the worker is asked for a thread dump; its answer ends the session
+    expect(h.logs.at(-1)).toBe('BD-J start-up timeout: booted, the engine is answering selectPlaylist#1, 0 messages held');
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    expect(h.failures).toEqual([]);
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
     expect(f.terminated()).toBe(true);
   });
 
@@ -198,9 +205,33 @@ describe('BdjSession rules', () => {
     h.clock.advance(19_999);
     expect(h.failures).toEqual([]);
     h.clock.advance(1);
+    expect(h.logs.at(-1)).toBe('BD-J start-up timeout: not booted, no call in the engine, 0 messages held');
+    // a worker whose event loop is blocked never answers: the session fails DUMP_WAIT_MS later all the same
+    h.clock.advance(DUMP_WAIT_MS - 1);
+    expect(h.failures).toEqual([]);
+    h.clock.advance(1);
+    expect(h.logs.at(-1)).toBe(`BD-J worker sent no thread dump within ${DUMP_WAIT_MS} ms (its event loop is blocked)`);
     expect(h.failures.map(([c]) => c)).toEqual(['timeout']);
     expect(f.terminated()).toBe(true);
     await booted; // settles at the stop
+  });
+
+  it('once the timeout has fired, Java is no longer answered while its dump comes: the fallback starts nothing', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    h.clock.advance(20_000);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [5, -1, -1, '-1'] });
+    f.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1, height: 1 } });
+    f.emit({ type: 'dumped' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(h.calls).toEqual([]);
+    expect(f.sent.some((m) => m.type === 'reply')).toBe(false);
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+    expect(h.logs.some((l) => l.includes('selected its first playlist'))).toBe(false);
   });
 
   it('a selected playlist cancels the timeout', async () => {
@@ -212,6 +243,21 @@ describe('BdjSession rules', () => {
     expect(h.failures).toEqual([]);
     await until(() => f.sent.some((m) => m.type === 'reply'));
     expect(f.sent.at(-1)).toEqual({ type: 'reply', id: 1, value: 1 });
+  });
+
+  it('a menu shown or a background still shown cancels the timeout; a cleared still does not (ruling R7)', () => {
+    for (const show of ['menu', 'still'] as const) {
+      const f = fakeWorker();
+      const h = session(f.worker);
+      h.session.start(FIRST_PLAY);
+      f.emit({ type: 'background', image: null, rect: { x: 0, y: 0, width: 1, height: 1 } });
+      h.clock.advance(10_000);
+      if (show === 'menu') h.session.menuShown();
+      else f.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1, height: 1 } });
+      h.clock.advance(60_000);
+      expect(h.failures).toEqual([]);
+      expect(h.logs).toContain(show === 'menu' ? 'BD-J showed a menu 10000 ms after boot' : 'BD-J showed a background still 10000 ms after boot');
+    }
   });
 
   it('ignores messages after stop() and terminates the worker', async () => {

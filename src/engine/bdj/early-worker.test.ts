@@ -19,6 +19,7 @@ const BOOT: Extract<ToBdj, { type: 'boot' }> = {
   type: 'boot',
   registers: new SharedArrayBuffer(8),
   status: new SharedArrayBuffer(8),
+  plane: new SharedArrayBuffer(8),
   disc: { kind: 'files', entries: [] },
   readAheadBytes: 0,
   discId: null,

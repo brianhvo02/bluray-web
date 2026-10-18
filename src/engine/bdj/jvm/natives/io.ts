@@ -180,8 +180,21 @@ function writeFd(jvm: Jvm, fd: JObject | null, bytes: Uint8Array): NativeResult 
     return undefined;
   }
   const h = handleOfFd(jvm, fd);
-  if (!h || !vfsOf(jvm)!.write(h, bytes, 0, bytes.length)) return jvm.throwNew('java/io/IOException', 'Bad file descriptor');
+  const vfs = vfsOf(jvm)!;
+  // the memory mounts' limit (the memory profile's) is a full disk: write(2) fails with ENOSPC
+  if (h && !vfs.fits(h, bytes.length)) return jvm.throwNew('java/io/IOException', NO_SPACE);
+  if (!h || !vfs.write(h, bytes, 0, bytes.length)) return jvm.throwNew('java/io/IOException', 'Bad file descriptor');
   return undefined;
+}
+
+/** strerror(ENOSPC), as the JDK's write and ftruncate failures report it. */
+const NO_SPACE = 'No space left on device';
+
+/** RandomAccessFile.setLength and FileChannel.truncate: ftruncate. */
+function truncateFd(jvm: Jvm, h: VfsHandle | null, len: bigint): NativeResult | null {
+  const vfs = vfsOf(jvm)!;
+  if (h?.writable && !vfs.fitsLength(h, Number(len))) return jvm.throwNew('java/io/IOException', NO_SPACE);
+  return h && vfs.truncate(h, Number(len)) ? null : jvm.throwNew('java/io/IOException', 'Bad file descriptor');
 }
 
 function writeBytes(ctx: NativeContext, self: JValue, b: JValue, off: JValue, len: JValue): NativeResult {
@@ -314,9 +327,7 @@ export function registerIoNatives(natives: NativeTable): void {
       return h ? BigInt(h.size()) : ctx.jvm.throwNew('java/io/IOException', 'Stream Closed');
     },
     'java/io/RandomAccessFile.setLength(J)V': (ctx, self, len) => {
-      const h = handleOf(ctx.jvm, self);
-      if (!h || !vfsOf(ctx.jvm)!.truncate(h, Number(len as bigint))) return ctx.jvm.throwNew('java/io/IOException', 'Bad file descriptor');
-      return undefined;
+      return truncateFd(ctx.jvm, handleOf(ctx.jvm, self), len as bigint) ?? undefined;
     },
     'java/io/RandomAccessFile.close0()V': (ctx, self) => void closeStream(ctx, self),
 
@@ -339,8 +350,7 @@ export function registerIoNatives(natives: NativeTable): void {
       return BigInt(h.position);
     },
     'sun/nio/ch/FileDispatcherImpl.truncate0(Ljava/io/FileDescriptor;J)I': (ctx, fd, len) => {
-      const h = handleOfFd(ctx.jvm, fd as JObject | null);
-      return h && vfsOf(ctx.jvm)!.truncate(h, Number(len as bigint)) ? 0 : ctx.jvm.throwNew('java/io/IOException', 'Bad file descriptor');
+      return truncateFd(ctx.jvm, handleOfFd(ctx.jvm, fd as JObject | null), len as bigint) ?? 0;
     },
     'sun/nio/ch/FileDispatcherImpl.read0(Ljava/io/FileDescriptor;JI)I': (ctx, fd, address, len) => {
       const h = handleOfFd(ctx.jvm, fd as JObject | null);
@@ -376,4 +386,36 @@ export function registerIoNatives(natives: NativeTable): void {
     'sun/nio/fs/UnixNativeDispatcher.init()I': () => 0,
     'sun/nio/fs/UnixNativeDispatcher.getcwd()[B': (ctx) => byteArray(ctx.jvm, new Uint8Array([0x2f])),
   });
+}
+
+/** Reads a whole VFS file, suspending on disc reads; null when it is missing or a read fails. */
+export function readVfsFile(vfs: Vfs, path: string, k: (bytes: Uint8Array | null) => NativeResult): NativeResult {
+  const h = vfs.open(path, 'r');
+  if (!h) return k(null);
+  const out = new Uint8Array(h.size());
+  let off = 0;
+  const done = (bytes: Uint8Array | null): NativeResult => {
+    vfs.close(h);
+    return k(bytes);
+  };
+  const got = (n: number): NativeResult => {
+    if (n <= 0) return done(null);
+    off += n;
+    return step();
+  };
+  const step = (): NativeResult => {
+    while (off < out.length) {
+      const r = vfs.read(h, out, off, out.length - off);
+      if (typeof r !== 'number') {
+        return new Suspend(
+          r.catch(() => -1),
+          (n) => (n instanceof ThrowResult ? n : got(n as number)),
+        );
+      }
+      if (r <= 0) return done(null);
+      off += r;
+    }
+    return done(out);
+  };
+  return step();
 }
