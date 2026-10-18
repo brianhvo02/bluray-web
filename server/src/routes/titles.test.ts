@@ -563,6 +563,21 @@ describe('final review', () => {
     expect(plain.map((d) => owner.snapshot().choices.get(d.discId))).toEqual([4, 5, 6].map((disc) => ({ kind: 'title', titleId: other.id, season: 1, disc })));
   });
 
+  it("N3: filing an unnumbered disc keeps the others' own numbers, and skips one whose number clashes or that has none", async () => {
+    await start();
+    const t = await token(true);
+    const [v1, v2, v3, interviews, making] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Vol.3', 'Quiet Reel Interviews', 'Quiet Reel Making Of']
+      .map((n) => ev(`drv1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence];
+    evidence = [making, v3, interviews, v1, v2];
+    const title = await series(t, 'Quiet Reel');
+    const res = await put(t, making, { choice: { kind: 'title', titleId: title.id, season: 1, disc: 3 }, applyToGroup: true });
+    expect(await res.json()).toEqual({ skipped: [{ discId: v3.discId, reason: 'conflict' }, { discId: interviews.discId, reason: 'no-number' }] });
+    const choices = owner.snapshot().choices;
+    expect([v1, v2].map((d) => choices.get(d.discId))).toEqual([1, 2].map((disc) => ({ kind: 'title', titleId: title.id, season: 1, disc })));
+    expect(choices.has(v3.discId)).toBe(false);
+    expect(choices.has(interviews.discId)).toBe(false);
+  });
+
   it('M12: refuses to apply a title choice to the folder without a disc number', async () => {
     await start();
     const t = await token(true);

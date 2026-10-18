@@ -86,7 +86,12 @@ export function lookupFailure(err: unknown): string {
 
 /** Why "Apply to the other discs" left a disc as it was (ruling T11c, I3). */
 export function skippedText(reason: SkippedDisc['reason']): string {
-  return reason === 'direct' ? 'filed separately' : reason === 'copy' ? 'follows its copy' : 'no disc number in its name';
+  switch (reason) {
+    case 'direct': return 'filed separately';
+    case 'copy': return 'follows its copy';
+    case 'conflict': return "its number clashes with this disc's";
+    case 'no-number': return 'no disc number in its name';
+  }
 }
 
 /** The apply offer's disc number: a positive number, else null (Apply waits for one, ruling T11h). */
@@ -101,4 +106,21 @@ export function applyNumber(text: string): number | null {
 export function seasonPrefill(t: TitleSummary | UnsortedSuggestion): string {
   const hint = 'seasonHint' in t ? t.seasonHint : null;
   return t.kind === 'series' && hint !== null ? String(hint) : '';
+}
+
+/** The Season field and whether it holds a suggestion's hint rather than the owner's typing. */
+export interface SeasonField {
+  readonly season: string;
+  readonly hinted: boolean;
+}
+
+/**
+ * The Season field once a title is picked (ruling F2, N2): a season the owner typed stays; otherwise it takes the
+ * pick's hint, and a pick without one clears an earlier hint.
+ */
+export function seasonOnPick(t: TitleSummary | UnsortedSuggestion, field: SeasonField): SeasonField {
+  if (field.season !== '' && !field.hinted) return field;
+  const prefill = seasonPrefill(t);
+  if (prefill !== '') return { season: prefill, hinted: true };
+  return field.hinted ? { season: '', hinted: false } : field;
 }

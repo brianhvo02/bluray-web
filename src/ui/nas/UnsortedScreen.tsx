@@ -3,7 +3,7 @@ import type { OwnerChoice, TitleKind, TitleSummary, UnsortedItem, UnsortedReason
 import type { NasClient, SkippedDisc } from './nas-client';
 import { Poster } from './Poster';
 import { displayName } from './title-model';
-import { applyNumber, blurayComSearchUrl, discPlace, lookupFailure, mergeResults, parseNumber, reasonText, seasonPrefill, skippedText, suggestionLine, titleChoice } from './unsorted-model';
+import { applyNumber, blurayComSearchUrl, discPlace, lookupFailure, mergeResults, parseNumber, reasonText, seasonOnPick, skippedText, suggestionLine, titleChoice } from './unsorted-model';
 
 const PAGE = 50;
 const MAX_NAME = 200;
@@ -162,15 +162,10 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
   const pick = (t: TitleSummary | UnsortedSuggestion): void => {
     setPicked(t);
     // Season starts at the suggestion's hint; without one it is blank and must be given (ruling F2), but what the
-    // owner typed stays
-    const prefill = seasonPrefill(t);
-    if (prefill !== '') {
-      setSeason(prefill);
-      setHinted(true);
-    } else if (hinted) {
-      setSeason('');
-      setHinted(false);
-    }
+    // owner typed stays (N2)
+    const next = seasonOnPick(t, { season, hinted });
+    setSeason(next.season);
+    setHinted(next.hinted);
   };
 
   const choose = (choice: OwnerChoice, text: string): void => {

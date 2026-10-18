@@ -285,13 +285,14 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
     if (choice.titleId.startsWith('own:') && !owner.snapshot().ownTitles.some((t) => t.id === choice.titleId)) throw new HttpError(400, 'unknown title');
   }
   owner.setChoice(discId, disc.fingerprint, choice);
-  const skipped: { discId: string; reason: 'direct' | 'copy' | 'no-number' }[] = [];
+  const skipped: { discId: string; reason: 'direct' | 'copy' | 'no-number' | 'conflict' }[] = [];
   if (applyToGroup) {
     // the group's discs in parsed order (number, then folder). A disc the owner chose for itself keeps its choice,
     // while one filed with a group takes the new one (ruling T9f); a copy keeps following its source while there is
     // one (ruling T9i). Under a title, the others are numbered by their own numbers, keeping their distance from this
     // one's (I3): a missing volume leaves a gap. Only when no disc in the group has a number are they numbered by
-    // place; when some have one, those without are left as they are ('no-number').
+    // place; when some have one, those without are left as they are ('no-number'). When this disc has no number of its
+    // own, the others keep theirs, and one that would take the number given here is left as it is ('conflict', N3).
     const group = groupKey(disc);
     const order = evidence
       .filter((e) => groupKey(e) === group)
@@ -309,7 +310,11 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
       let c: OwnerChoice = choice;
       if (choice.kind === 'title' && choice.disc !== null) {
         const theirs = parsedNumber(e);
-        const n = own !== null && theirs !== null ? theirs - own + choice.disc : anyNumber ? null : choice.disc + i - at;
+        const n = theirs !== null ? (own !== null ? theirs - own + choice.disc : theirs) : anyNumber ? null : choice.disc + i - at;
+        if (own === null && theirs !== null && theirs === choice.disc) {
+          skipped.push({ discId: e.discId, reason: 'conflict' });
+          continue;
+        }
         if (n === null || n < 1) {
           skipped.push({ discId: e.discId, reason: 'no-number' });
           continue;

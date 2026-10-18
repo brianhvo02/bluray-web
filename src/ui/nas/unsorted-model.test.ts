@@ -5,6 +5,7 @@ import {
   REASON_TEXT,
   applyNumber,
   seasonPrefill,
+  seasonOnPick,
   blurayComSearchUrl,
   discPlace,
   lookupFailure,
@@ -108,6 +109,7 @@ describe('skippedText', () => {
     expect(skippedText('direct')).toBe('filed separately');
     expect(skippedText('copy')).toBe('follows its copy');
     expect(skippedText('no-number')).toBe('no disc number in its name');
+    expect(skippedText('conflict')).toBe("its number clashes with this disc's");
   });
 });
 
@@ -127,5 +129,20 @@ describe('seasonPrefill', () => {
     // a search result has no hint
     expect(seasonPrefill(summary({ id: 'anilist:2' }))).toBe('');
     expect(seasonPrefill({ ...summary({ id: 'tmdb-movie:2', kind: 'movie' }), seasonHint: 3 })).toBe('');
+  });
+});
+
+describe('seasonOnPick', () => {
+  const hinted = { ...summary({ id: 'anilist:2' }), seasonHint: 2 };
+  const plain = summary({ id: 'anilist:3' });
+  it("fills Season from a hint only when the owner hasn't typed one (N2)", () => {
+    expect(seasonOnPick(hinted, { season: '', hinted: false })).toEqual({ season: '2', hinted: true });
+    // a hint replaces an earlier hint
+    expect(seasonOnPick({ ...hinted, seasonHint: 3 }, { season: '2', hinted: true })).toEqual({ season: '3', hinted: true });
+    // what the owner typed stays, with or without a hint
+    expect(seasonOnPick(hinted, { season: '4', hinted: false })).toEqual({ season: '4', hinted: false });
+    expect(seasonOnPick(plain, { season: '4', hinted: false })).toEqual({ season: '4', hinted: false });
+    // a pick without a hint clears an earlier hint
+    expect(seasonOnPick(plain, { season: '2', hinted: true })).toEqual({ season: '', hinted: false });
   });
 });

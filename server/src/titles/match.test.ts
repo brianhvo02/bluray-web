@@ -567,13 +567,54 @@ describe('matchDiscs', () => {
       expect(byDisc(matches, shelf)).toMatchObject({ status: 'unsorted', reason: 'no-title' });
     });
 
-    it('I6: a top-level folder two levels up may be the only evidence; one below the root may not', async () => {
+    it("F6: a top-level folder is the only evidence only as the disc folder's parent; two levels up it only supports", async () => {
       const tmdb = fake({ Brasswick: [entry('tmdb-movie:93', { english: 'Brasswick' })] });
+      const parent = 'drv0/Brasswick/BDROM';
       const top = 'drv0/Brasswick/Extra/BDROM';
       const below = 'drv0/Shelf/Brasswick/Extra/BDROM';
-      const { matches } = await matchDiscs([rooted(top), rooted(below)], ctx(fake({}), tmdb));
-      expect(byDisc(matches, top)).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:93' });
+      const { matches } = await matchDiscs([rooted(parent), rooted(top), rooted(below)], ctx(fake({}), tmdb));
+      expect(byDisc(matches, parent)).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:93' });
+      expect(byDisc(matches, top)).toMatchObject({ status: 'unsorted', reason: 'no-title' });
       expect(byDisc(matches, below)).toMatchObject({ status: 'unsorted', reason: 'no-title' });
+      // two levels up, it still supports the disc's own evidence
+      const backed = 'drv0/Brasswick/Extra/Brasswick';
+      const r = await matchDiscs([rooted(backed)], ctx(fake({}), tmdb));
+      expect(byDisc(r.matches, backed)).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:93' });
+    });
+
+    it('F6: an organising top-level folder named like a title never files the discs two levels below it', async () => {
+      const tmdb = fake({ Watched: [entry('tmdb-movie:1', { english: 'Watched' })] });
+      const paths = ['drv0/Watched/Unknown Series/Unknown Series Vol.1', 'drv0/Watched/Some Unknown Thing/BDROM'];
+      const { matches } = await matchDiscs(paths.map((p) => rooted(p)), ctx(fake({}), tmdb));
+      for (const p of paths) expect(byDisc(matches, p)).toMatchObject({ status: 'unsorted', reason: 'no-title' });
+    });
+
+    it('F7: a checkpoint publishes box 2 and up as Unsorted until every group of its box family is matched', async () => {
+      const tmdb = (): MetadataSource => fake({ Brasswick: [entry('tmdb-tv:7', { english: 'Brasswick' }, { seasons: seasons(1) })] });
+      const run = async (paths: readonly string[]): Promise<{ checkpoints: DiscMatch[][]; final: DiscMatch[] }> => {
+        const checkpoints: DiscMatch[][] = [];
+        const c: MatchContext = { ...ctx(fake({}), tmdb()), onGroupDone: (progress) => { checkpoints.push(progress().matches); } };
+        return { checkpoints, final: (await matchDiscs(paths.map((p) => ev(p)), c)).matches };
+      };
+      const box2 = 'TV/Brasswick BOX 2/DISC1';
+      const state = (ms: readonly DiscMatch[], path: string): unknown => {
+        const m = ms.find((x) => x.discId === `id:${path}`);
+        return m?.status === 'filed' ? m.disc : m?.status === 'unsorted' ? m.reason : m?.status;
+      };
+      // box 3 has a gap, which the final pass sees: box 2 never shows as filed on the way
+      const gap = ['TV/Brasswick BOX 1/DISC1', 'TV/Brasswick BOX 1/DISC2', box2, 'TV/Brasswick BOX 3/DISC1', 'TV/Brasswick BOX 3/DISC3'];
+      const r1 = await run(gap);
+      expect(state(r1.final, box2)).toBe('no-disc-number');
+      expect(r1.checkpoints).toHaveLength(3);
+      for (const cp of r1.checkpoints) if (cp.some((m) => m.discId === `id:${box2}`)) expect(state(cp, box2)).toBe('no-disc-number');
+      // box 1 needs no other box, so it files at once
+      expect(state(r1.checkpoints[0]!, 'TV/Brasswick BOX 1/DISC2')).toBe(2);
+      // a whole family without a gap: Unsorted at the checkpoint before box 3, filed once every box is matched
+      const whole = ['TV/Brasswick BOX 1/DISC1', 'TV/Brasswick BOX 1/DISC2', box2, 'TV/Brasswick BOX 3/DISC1'];
+      const r2 = await run(whole);
+      expect(state(r2.checkpoints[1]!, box2)).toBe('no-disc-number');
+      expect(state(r2.checkpoints[2]!, box2)).toBe(3);
+      expect(state(r2.final, box2)).toBe(3);
     });
 
     it('M2: spellings that differ only in vowels are each searched', async () => {

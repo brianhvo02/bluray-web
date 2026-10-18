@@ -78,7 +78,10 @@ const MAX_ANCESTORS = 2;
  * evidence (ruling T5n).
  */
 const FAR_ANCESTOR = 2;
-/** The root's top-level folders: evidence like any folder, and never too far up to be the only evidence (ruling F5). */
+/**
+ * The root's top-level folders: evidence like any folder, but like any folder the only evidence just when the disc
+ * folder sits right under it; two or more levels up it only supports other evidence (ruling F6, correcting F5).
+ */
 const TOP_LEVEL_DEPTH = 0;
 /** Groups failing in a row (SourceUnavailable) before a run stops, leaving the rest for the next run (M3). */
 export const CIRCUIT_BREAKER = 5;
@@ -167,11 +170,20 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
   const byDisc = new Map<string, DiscMatch>();
   const entries = new Map<string, Entry>();
   const pending: Pending[] = [];
+  /** Groups matched in this run; one that failed or wasn't reached isn't. */
+  const matched = new Set<string>();
+  // a disc of box 2 and up is numbered only once every group of its box family is matched, so a checkpoint (or a run
+  // that lost a group to an unreachable source) never files one that the whole family would leave Unsorted (ruling F7)
+  const familyMatched = (p: Pending): boolean => {
+    const prefix = boxFamily(p.e.path);
+    for (const g of groups.keys()) if ((prefix === '' || g === prefix || g.startsWith(`${prefix}/`)) && !matched.has(g)) return false;
+    return true;
+  };
   const unreachable = (e: DiscEvidence): DiscMatch => ({ discId: e.discId, status: 'unsorted', reason: 'source-unreachable', suggestions: [] });
   const progress = (): { matches: DiscMatch[]; entries: Map<string, Entry> } => {
     const placed = new Map(entries);
     const out = new Map(byDisc);
-    for (const m of placeDiscs(pending, placed)) out.set(m.discId, m);
+    for (const m of placeDiscs(pending, placed, familyMatched)) out.set(m.discId, m);
     return { matches: [...out.values()], entries: placed };
   };
   let failures = 0;
@@ -192,17 +204,30 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
         const r = await matchGroup(key, lookup, ctx, entries);
         for (const m of r.done) byDisc.set(m.discId, m);
         pending.push(...r.pending);
+        matched.add(key);
         failures = 0;
       } catch (err) {
         if (!(err instanceof SourceUnavailable)) throw err;
         for (const e of lookup) byDisc.set(e.discId, unreachable(e));
         aborted = ++failures >= CIRCUIT_BREAKER;
       }
+    } else {
+      matched.add(key);
     }
     await ctx.onGroupDone?.(progress);
   }
-  for (const m of placeDiscs(pending, entries)) byDisc.set(m.discId, m);
+  for (const m of placeDiscs(pending, entries, familyMatched)) byDisc.set(m.discId, m);
   return { matches: evidence.map((e) => byDisc.get(e.discId)!), entries, aborted };
+}
+
+/**
+ * The folder a disc's box family shares: the parent of the deepest folder on its path that names a box (`Brasswick BOX
+ * 2`), or '' (the whole run) when no folder does.
+ */
+function boxFamily(path: string): string {
+  const parts = path.split('/');
+  for (let j = parts.length - 1; j > 0; j--) if (parseName(parts[j]!).box !== null) return parts.slice(0, j).join('/');
+  return '';
 }
 
 /**
@@ -250,14 +275,14 @@ async function matchGroup(group: string, discs: readonly DiscEvidence[], ctx: Ma
   };
 
   // folders above the discs, from the group folder up to the first one that names something, at most MAX_ANCESTORS
-  // up; a root's top-level folder counts (category names are dropped by nameParse) and may be the only evidence
+  // up; a root's top-level folder counts (category names are dropped by nameParse), and is far like any other (F6)
   const segs = discs[0]!.segments;
   const ancestors: Piece[] = [];
   const ancestorText: string[] = [];
   for (let i = segs.length - 2; i >= TOP_LEVEL_DEPTH && i >= segs.length - 1 - MAX_ANCESTORS; i--) {
     const parse = nameParse(segs[i]!);
     const found = await lookUp(parse);
-    ancestors.push({ kind: 'folder', own: false, far: i > TOP_LEVEL_DEPTH && segs.length - 1 - i >= FAR_ANCESTOR, parse, found });
+    ancestors.push({ kind: 'folder', own: false, far: segs.length - 1 - i >= FAR_ANCESTOR, parse, found });
     ancestorText.push(segs[i]!.normalize('NFKC'));
     if (found.some((en) => parse.candidates.some((c) => quality(en, c, parse.season) > 0))) break;
   }
@@ -429,9 +454,9 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
  * order, only when every box from 1 up is present and each box's disc numbers run from 1 with no gap (ruling T5h);
  * otherwise discs of box 2 and up have no place. Unnumbered discs are numbered in folder order when their group folder
  * gives the release's disc count and they are exactly that many. A bonus disc needs no number,
- * nor does a movie that is the only disc of its entry in its group.
+ * nor does a movie that is the only disc of its entry in its group. A disc of box 2 and up waits for `familyMatched`.
  */
-function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>): DiscMatch[] {
+function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>, familyMatched: (p: Pending) => boolean): DiscMatch[] {
   const out: DiscMatch[] = [];
   const same = (a: Pending, b: Pending): boolean => !b.bonus && a.entry.id === b.entry.id && a.season === b.season;
   for (const p of pending) {
@@ -439,7 +464,7 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>): D
     let disc: number | null = p.disc;
     let placed = p.bonus;
     if (!placed && p.box !== null && p.box > 1) {
-      const running = boxRunning(pending.filter((q) => same(p, q) && q.box !== null));
+      const running = familyMatched(p) ? boxRunning(pending.filter((q) => same(p, q) && q.box !== null)) : null;
       disc = running?.get(p) ?? null;
       placed = disc !== null;
     } else if (!placed && disc !== null) {
