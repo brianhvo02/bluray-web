@@ -83,6 +83,11 @@ const FAR_ANCESTOR = 2;
  * folder sits right under it; two or more levels up it only supports other evidence (ruling F6, correcting F5).
  */
 const TOP_LEVEL_DEPTH = 0;
+/**
+ * The matching rules' version. Bump it whenever the matching rules change (what files, where, or as what): the title
+ * service then re-matches every disc on its next run, from its lookup cache, so the library follows the new rules.
+ */
+export const MATCH_RULES_VERSION = 2;
 /** Groups failing in a row (SourceUnavailable) before a run stops, leaving the rest for the next run (M3). */
 export const CIRCUIT_BREAKER = 5;
 /** Prequel links followed to find an AniList entry's place in its chain. */

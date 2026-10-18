@@ -6,6 +6,7 @@ import { normalizeStrict, normalizeTitle } from '../../../src/engine/disc/title-
 import { ArtCache } from './art';
 import type { DiscEvidence } from './evidence';
 import { OwnerStore } from './owner-store';
+import { MATCH_RULES_VERSION } from './match';
 import { downloadRootNames, fixtureSources, loadDiscDbOrNone, TitleService } from './service';
 import { SourceUnavailable } from './sources';
 import type { Entry, EntryNames, MetadataSource } from './sources';
@@ -145,6 +146,51 @@ describe('TitleService', () => {
     clock += DAY;
     await s.runNow();
     expect(anilist.calls).toEqual([]);
+  });
+
+  describe('matching rules version', () => {
+    const sources = () => fake({ 火斬りの剣: [EMBER], 'Hinokiri no Ken': [EMBER], 'Starfall Traveler': [STARFALL] });
+    const rewrite = (change: (data: Record<string, unknown>) => void): void => {
+      const data = JSON.parse(readFileSync(join(dir, 'metadata.json'), 'utf8')) as Record<string, unknown>;
+      change(data);
+      writeFileSync(join(dir, 'metadata.json'), JSON.stringify(data));
+    };
+    const evidence = () => [A, A2, B];
+
+    it('stores the rules version, and an unchanged one re-matches nothing', async () => {
+      expect(Number.isSafeInteger(MATCH_RULES_VERSION)).toBe(true);
+      await service({ evidence, anilist: sources() }).runNow();
+      expect((metadata() as unknown as { rulesVersion: unknown }).rulesVersion).toBe(MATCH_RULES_VERSION);
+      expect((metadata() as unknown as { version: unknown }).version).toBe(2);
+      const anilist = sources();
+      const s = service({ evidence, anilist });
+      clock += DAY;
+      await s.runNow();
+      expect(s.status().groupsTotal).toBe(0);
+      expect(anilist.calls).toEqual([]);
+    });
+
+    it('re-matches every disc when the stored version differs or is missing, from the cache, with no new source calls', async () => {
+      for (const change of [(d: Record<string, unknown>) => { d.rulesVersion = MATCH_RULES_VERSION - 1; }, (d: Record<string, unknown>) => { delete d.rulesVersion; }]) {
+        await service({ evidence, anilist: sources() }).runNow();
+        rewrite(change);
+        const anilist = sources();
+        const s = service({ evidence, anilist });
+        // the older file loads, it isn't set aside
+        expect(readdirSync(dir).filter((f) => f.includes('corrupt'))).toEqual([]);
+        expect(s.catalogue().titles.map((t) => t.id).sort()).toEqual(['anilist:100', 'anilist:400']);
+        clock += DAY;
+        await s.runNow();
+        expect(s.status().groupsTotal).toBe(2);
+        expect(s.status().groupsDone).toBe(2);
+        expect(anilist.calls).toEqual([]);
+        expect((metadata() as unknown as { rulesVersion: unknown }).rulesVersion).toBe(MATCH_RULES_VERSION);
+        // and the next run is back to nothing
+        await s.runNow();
+        expect(s.status().groupsTotal).toBe(0);
+        rmSync(join(dir, 'metadata.json'));
+      }
+    });
   });
 
   it('keeps filed discs filed when the source is unreachable, marks the new groups and retries them next run (Review Focus 2)', async () => {

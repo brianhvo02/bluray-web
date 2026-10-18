@@ -17,7 +17,7 @@ import type { Catalogue } from './catalogue';
 import { loadDiscDb } from './discdb';
 import type { DiscDbHit } from './discdb';
 import type { DiscEvidence } from './evidence';
-import { CIRCUIT_BREAKER, groupKey, matchDiscs } from './match';
+import { CIRCUIT_BREAKER, groupKey, MATCH_RULES_VERSION, matchDiscs } from './match';
 import type { DiscMatch, MatchResult } from './match';
 import type { OwnerStore } from './owner-store';
 import { parseName } from './parse-name';
@@ -84,6 +84,11 @@ interface MetadataFile {
   readonly lastRunAt: number | null;
   readonly lastRetryAt: number | null;
   readonly lastRefreshAt: number | null;
+  /**
+   * The `MATCH_RULES_VERSION` the matches were made under; missing in files from before it, which then re-match too.
+   * Optional, so such a file still loads.
+   */
+  readonly rulesVersion?: number;
 }
 
 const evidenceKey = (e: DiscEvidence): string => createHash('sha256').update(JSON.stringify(e)).digest('hex').slice(0, 32);
@@ -140,6 +145,8 @@ export class TitleService {
   private lastRunAt: number | null = null;
   private lastRetryAt: number | null = null;
   private lastRefreshAt: number | null = null;
+  /** The matching rules the matches were made under (null: unknown, from a file before the field). */
+  private rulesVersion: number | null = null;
   private built!: Catalogue;
   private running: Promise<void> | null = null;
   private again = false;
@@ -301,13 +308,15 @@ export class TitleService {
     for (const e of evidence) if (!this.firstSeen.has(e.discId)) this.firstSeen.set(e.discId, now);
     const retryDue = this.due(this.lastRetryAt, RETRY_UNSORTED_MS);
 
-    // groups to match: those with a new or changed disc, a disc that left, a source failure, or Unsorted on retry day
+    // groups to match: those with a new or changed disc, a disc that left, a source failure, or Unsorted on retry day;
+    // every group when the matching rules changed since the matches were made (the cache still saves the lookups)
     const keys = new Map(evidence.map((e) => [e.discId, { key: evidenceKey(e), group: groupKey(e) }]));
+    const rulesChanged = this.rulesVersion !== MATCH_RULES_VERSION;
     const dirty = new Set<string>();
     for (const [id, d] of keys) {
       const before = this.discs.get(id);
       const m = this.matches.get(id);
-      if (!before || before.key !== d.key || !m || (m.status === 'unsorted' && (m.reason === 'source-unreachable' || retryDue))) dirty.add(d.group);
+      if (rulesChanged || !before || before.key !== d.key || !m || (m.status === 'unsorted' && (m.reason === 'source-unreachable' || retryDue))) dirty.add(d.group);
     }
     for (const [id, d] of this.discs) if (!keys.has(id)) dirty.add(d.group);
     // a box family is matched whole, so rule 4 numbers its discs across all its boxes (T8b)
@@ -395,6 +404,8 @@ export class TitleService {
     this.cache = nextCache;
     this.discs = discs;
     this.lastRunAt = now;
+    // only a run that got through sets the version: a stopped one (M3) leaves the rest to re-match next time
+    this.rulesVersion = MATCH_RULES_VERSION;
     if (this.lastRetryAt === null || retryDue) this.lastRetryAt = now;
     if (this.lastRefreshAt === null || (refreshed && this.due(this.lastRefreshAt, REFRESH_MS))) this.lastRefreshAt = now;
     this.rebuild();
@@ -564,6 +575,7 @@ export class TitleService {
     this.lastRunAt = data.lastRunAt;
     this.lastRetryAt = data.lastRetryAt;
     this.lastRefreshAt = data.lastRefreshAt;
+    this.rulesVersion = data.rulesVersion ?? null;
     this.savedHash = this.contentHash(this.serialize());
   }
 
@@ -600,6 +612,7 @@ export class TitleService {
       lastRunAt: this.lastRunAt,
       lastRetryAt: this.lastRetryAt,
       lastRefreshAt: this.lastRefreshAt,
+      ...(this.rulesVersion !== null ? { rulesVersion: this.rulesVersion } : {}),
     };
   }
 }
@@ -628,5 +641,6 @@ function validMetadata(data: unknown): data is MetadataFile {
     values(data.cache, (d) => isDated(d, (x) => Array.isArray(x) && x.every((id) => isString(id) && Object.hasOwn(data.pool as object, id)))) &&
     values(data.discs, (d) => isObject(d) && isString(d.key) && isString(d.group)) &&
     values(data.firstSeen, isTime) &&
-    [data.lastRunAt, data.lastRetryAt, data.lastRefreshAt].every((t) => t === null || isTime(t));
+    [data.lastRunAt, data.lastRetryAt, data.lastRefreshAt].every((t) => t === null || isTime(t)) &&
+    (data.rulesVersion === undefined || Number.isSafeInteger(data.rulesVersion));
 }
