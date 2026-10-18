@@ -774,6 +774,21 @@ describe('matchDiscs', () => {
         }
       });
 
+      it('M3b: disc numbers alone are not series-shaped; volume numbers among siblings are', async () => {
+        const tmdb = (): MetadataSource => fake({ 'Quiet Meadow': [
+          entry('tmdb-tv:990', { english: 'Quiet Meadow' }, { year: 2015, seasons: seasons(1) }),
+          entry('tmdb-movie:991', { english: 'Quiet Meadow' }, { year: 2015 }),
+        ] });
+        for (const pair of [['DISC1', 'DISC2'], ['D1', 'D2'], ['Disc 1', 'Disc 2']]) {
+          const paths = pair.map((d) => `drv0/Quiet Meadow/${d}`);
+          const ms = await run(paths, fake({}), tmdb());
+          for (const p of paths) expect(byDisc(ms, p), p).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+        }
+        const paths = ['drv0/Quiet Meadow/Volume 1', 'drv0/Quiet Meadow/Volume 2'];
+        const ms = await run(paths, fake({}), tmdb());
+        paths.forEach((p, i) => expect(byDisc(ms, p)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:990', season: 1, disc: i + 1 }));
+      });
+
       it('an AniList TV entry beats its own related OVA, ONA, SPECIAL and TV_SHORT entries', async () => {
         const tv = entry('anilist:970', { english: 'Harbor Line', native: '港線' }, { year: 2019, relations: [related('SIDE_STORY', 'anilist:971', 'SPECIAL'), related('ALTERNATIVE', 'anilist:974', 'OVA')] });
         const specials = entry('anilist:971', { english: 'Harbor Line Specials', native: '港線' }, { format: 'SPECIAL', year: 2020, relations: [related('PARENT', 'anilist:970')] });

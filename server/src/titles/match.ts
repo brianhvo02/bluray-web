@@ -400,11 +400,12 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     all.set(full.id, full);
     scored[i] = { ...s, entry: full };
   }
-  // series-shaped evidence (a season number, an episode range, or a volume or disc number among two or more sibling
-  // discs) is no film's: TMDB and AniList movies aren't competitors there once a series fits, and an exactly fitting
-  // AniList TV entry beats the OVA, ONA, SPECIAL and TV_SHORT entries tied to it by a story link (ruling M3)
+  // series-shaped evidence (a season number, an episode range, or a volume number among two or more sibling discs) is
+  // no film's: TMDB and AniList movies aren't competitors there once a series fits, and an exactly fitting AniList TV
+  // entry beats the OVA, ONA, SPECIAL and TV_SHORT entries tied to it by a story link (ruling M3); disc numbers alone
+  // never make it so, since a film comes on two discs too (ruling M3b)
   const seriesShaped = evSeason !== null || named.some((p) => p.parse.episodes !== null) ||
-    (siblings >= 2 && named.some((p) => p.parse.volume !== null || p.parse.disc !== null));
+    (siblings >= 2 && named.some((p) => p.parse.volume !== null));
   const filmsOut = seriesShaped && scored.some((s) => s.entry.kind !== 'movie');
   const dropped = new Set<string>();
   if (seriesShaped) {
