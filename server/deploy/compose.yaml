@@ -12,9 +12,9 @@ services:
       NIGHTLY_SCAN_AT: "04:00"
       PUBLIC_BASE: https://mediaserver.tailnet-8e55.ts.net/bluray/api/
       TRUSTED_PROXY: caddy
-      # The rendezvous Worker's URL (https://bluray-rendezvous.<account>.workers.dev), set after its first deploy;
-      # empty, codes are not registered with it.
-      RENDEZVOUS_URL: ""
+      # The rendezvous Worker (rendezvous/), where owner codes are registered for lookup by code or QR. Empty: codes are
+      # not registered, and only devices that already know the NAS address can pair.
+      RENDEZVOUS_URL: https://bluray-rendezvous.brianhvo02.workers.dev
     # Each drive's mount point, not its BDMVs folder: the mount point always exists on the root filesystem, so the
     # container starts with a drive missing, and create_host_path: false means Docker never makes anything under /mnt.
     # rslave lets a drive mounted after the container started (a late nofail mount) appear inside it. A root whose
