@@ -171,8 +171,11 @@ describe('matchDiscs', () => {
     const loose = 'TV/BRASSWICK S02/BRASSWICK S02 VOL.2';
     const bare = 'TV/BRASSWICK S02/DISC3';
     const { matches } = await matchDiscs([ev(loose), ev(bare)], ctx(fake({}), tmdb));
-    expect(byDisc(matches, loose)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:700', season: 2, disc: 2, via: ['folder'] });
-    expect(byDisc(matches, bare)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:700', season: 2, disc: 3, via: ['folder'] });
+    // both inherit the title; a VOL and a DISC number in one season are two numbering kinds, so neither is placed (M5b)
+    expect(byDisc(matches, loose)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number', suggestions: ['tmdb-tv:700'], seasons: { 'tmdb-tv:700': 2 } });
+    expect(byDisc(matches, bare)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number', suggestions: ['tmdb-tv:700'], seasons: { 'tmdb-tv:700': 2 } });
+    const alone = await matchDiscs([ev(loose)], ctx(fake({}), fake({ Brasswick: [entry('tmdb-tv:700', { english: 'Brasswick' }, { seasons: seasons(3) })] })));
+    expect(byDisc(alone.matches, loose)).toMatchObject({ status: 'filed', entryId: 'tmdb-tv:700', season: 2, disc: 2, via: ['folder'] });
     expect(tmdb.calls.filter((q) => q === 'brasswick')).toHaveLength(1);
   });
 
@@ -663,9 +666,11 @@ describe('matchDiscs', () => {
         const season = 'drv0/Starfall Wanderer (星降りの旅人)/Season 1/Volume 1';
         const disc = 'drv0/Starfall Wanderer/Volume 1/Disc 3';
         const deep = 'drv0/Starfall Wanderer (星降りの旅人)/Season 1/Volume 2/Disc 1';
-        const ms = await run([season, disc], anilist, null);
-        expect(byDisc(ms, season)).toMatchObject({ status: 'filed', entryId: 'anilist:900', season: 1, disc: 1, via: ['folder'] });
-        expect(byDisc(ms, disc)).toMatchObject({ status: 'filed', entryId: 'anilist:900', season: 1, disc: 3, via: ['folder'] });
+        // run apart: in one run, a bare Volume 1 and Volume 1/Disc 3 are two numbering kinds of one season (M5b)
+        expect(byDisc(await run([season], anilist, null), season)).toMatchObject({ status: 'filed', entryId: 'anilist:900', season: 1, disc: 1, via: ['folder'] });
+        expect(byDisc(await run([disc], anilist, null), disc)).toMatchObject({ status: 'filed', entryId: 'anilist:900', season: 1, disc: 3, via: ['folder'] });
+        const both = await run([season, disc], anilist, null);
+        for (const p of [season, disc]) expect(byDisc(both, p)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number' });
         // Season N/Volume M/Disc K puts the title three folders up: still found, and Volume 2 waits for Volume 1
         expect(byDisc(await run([deep], anilist, null), deep)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number', suggestions: ['anilist:900'] });
         for (const label of ['Box 1', 'Vol.1', 'BD', 'BDROM', 'DISC_2']) {
@@ -733,6 +738,14 @@ describe('matchDiscs', () => {
         expect(await states([`${b}/Quill Harbor Vol.2 Disc 1`])).toEqual([N]);
         // and agrees with the folder layout, so the two are copies
         expect(await states([`${b}/Quill Harbor Vol.1 Disc 2`, `${c}/Volume 1/Disc 2`])).toEqual([2, 2]);
+        // M5b: one numbering kind per season, even with no shared slot (Q3b, Q3): `Disc 1` says Volume 1 has more discs
+        expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 2`])).toEqual([N, N]);
+        expect(await states([`${b}/Quill Harbor Vol.1 Disc 1`, `${b}/Quill Harbor Vol.2`])).toEqual([N, N]);
+        // folders and names of one kind in one family still run together (Q4), and one layout on two roots is copies (Q5)
+        expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 1/Disc 2`, `${b}/Quill Harbor Vol.2 Disc 1`])).toEqual([1, 2, 3]);
+        expect(await states([`${b}/Quill Harbor Vol.1 Disc 1`, `${b}/Quill Harbor Vol.2 Disc 1`, `${c}/Quill Harbor Vol.1 Disc 1`, `${c}/Quill Harbor Vol.2 Disc 1`])).toEqual([1, 2, 1, 2]);
+        // F2: inside a box, a name with a volume and a disc number has no place (Q8)
+        expect(await states([`${b}/BOX 1/Quill Harbor Vol.1 Disc 1`, `${b}/BOX 1/Quill Harbor Vol.1 Disc 2`, `${b}/BOX 1/Quill Harbor Vol.2 Disc 1`])).toEqual([N, N, N]);
         // N6: one layout on two roots is copies
         expect(await states([`${b}/Volume 1/Disc 1`, `${b}/Volume 2/Disc 1`, `${c}/Volume 1/Disc 1`, `${c}/Volume 2/Disc 1`])).toEqual([1, 2, 1, 2]);
         // editions numbered by their own volume stay copies
