@@ -75,7 +75,8 @@ describe('readFolderEvidence', () => {
   });
 
   it('skips a numeric entity that is not a code point', async () => {
-    put(join(tmp, 'BD/BDMV/META/DL/bdmt_eng.xml'), bdmt('eng', 'Foo&#x110000; &#99999999; Bar&#33;'));
+    // the same name as the fixture's file, so it replaces it on case-sensitive file systems too
+    put(join(tmp, 'BD/BDMV/META/DL/BDMT_ENG.XML'), bdmt('eng', 'Foo&#x110000; &#99999999; Bar&#33;'));
     const ev = await readFolderEvidence(entry, join(tmp, 'BD'));
     expect(ev.discTitles.find((t) => t.lang === 'eng')?.name).toBe('Foo Bar!');
   });

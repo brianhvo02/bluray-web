@@ -9,7 +9,7 @@
  * Wanderer's runtime of 0.0667 minutes (4 s) makes disc1's 4-second playlist 00001 its one episode.
  */
 import { spawn } from 'node:child_process';
-import { cpSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -107,7 +107,19 @@ async function startRendezvous(): Promise<void> {
   }).listen(RENDEZVOUS_PORT);
 }
 
+/** Sets every file and folder under `dir` to `when`, deepest first. */
+function backdateTree(dir: string, when: Date): void {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) backdateTree(join(dir, e.name), when);
+    else utimesSync(join(dir, e.name), when, when);
+  }
+  utimesSync(dir, when, when);
+}
+
 async function main(): Promise<void> {
+  // A fresh checkout (CI) gives the fixtures modification times of minutes ago, and the scan leaves out discs written in
+  // the last hour (a download still in progress). The copies below keep these times, so set them in the past first.
+  backdateTree(join(REPO, 'fixtures/synthetic'), new Date('2024-01-01T00:00:00Z'));
   rmSync(NAS_E2E_DIR, { recursive: true, force: true });
   mkdirSync(NAS_E2E_DIR, { recursive: true });
   cpSync(join(REPO, 'fixtures/synthetic'), NAS_ROOT, { recursive: true, preserveTimestamps: true });
