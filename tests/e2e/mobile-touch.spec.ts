@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { telemetry } from './telemetry';
-import { expectBarHidden, expectBarShown, skipWithoutH264 } from './support';
+import { bdjPlane, MENU_DISC as BDJ_MENU_DISC } from './bdj-support';
+import { expectBarHidden, expectBarShown, menuPoint, skipWithoutH264 } from './support';
 
 const HIDE_CONTROLS_MS = 3000; // PlayerScreen's idle timeout
 
@@ -9,17 +10,6 @@ const MENU_DISC = 'fixtures/synthetic/disc-menu'; // see menus.spec.ts for its l
 const DISC = 'fixtures/synthetic/disc1'; // playlist 00000 is 8 s long
 
 const expectMenu = (page: Page, shown: boolean) => expect(page.getByTestId('player')).toHaveAttribute('data-menu-active', String(shown), { timeout: 5_000 });
-
-/** Page coordinates of a point in the 1920x1080 menu, letterboxed in the canvas as the compositor draws it. */
-async function menuPoint(page: Page, x: number, y: number): Promise<{ x: number; y: number }> {
-  const box = (await page.getByTestId('video-canvas').boundingBox())!;
-  const scale = Math.min(box.width / 1920, box.height / 1080);
-  const width = Math.round(1920 * scale);
-  const height = Math.round(1080 * scale);
-  const left = box.x + Math.floor((box.width - width) / 2);
-  const top = box.y + Math.floor((box.height - height) / 2);
-  return { x: left + ((x + 0.5) * width) / 1920, y: top + ((y + 0.5) * height) / 1080 };
-}
 
 test('a tap on a menu button activates it', async ({ page }) => {
   await page.goto('/?telemetry=1');
@@ -123,11 +113,7 @@ test('landscape, HDMV menu: a tap on empty picture brings back the controls; a t
   await expectMenu(page, false);
 });
 
-// fixtures/synthetic/disc-bdj-menu: see bdj.spec.ts (Play at x 160-679, y 360-459 of the plane, with a MouseListener)
-const BDJ_MENU_DISC = 'fixtures/synthetic/disc-bdj-menu';
-
-const bdjPlane = (page: Page): Promise<{ flushes: number; tapsIgnored: number } | null> =>
-  page.evaluate(() => (window as unknown as { __blurayTelemetry?: { bdjPlane: { flushes: number; tapsIgnored: number } | null } | null }).__blurayTelemetry?.bdjPlane ?? null);
+// fixtures/synthetic/disc-bdj-menu: see bdj-support.ts (Play at x 160-679, y 360-459 of the plane, with a MouseListener)
 
 test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignored tap brings the remote and the controls (R13)', async ({ page }) => {
   await page.setViewportSize(LANDSCAPE);

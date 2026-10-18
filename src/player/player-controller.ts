@@ -19,6 +19,8 @@ export interface PlayerSnapshot {
   readonly usesBdj: boolean;
   /** The engine runs BD-J titles. */
   readonly bdjSupported: boolean;
+  /** What this browser lacks to run BD-J (named in the picker); empty when nothing is missing. */
+  readonly bdjMissing: readonly string[];
   /** A BD-J title drives playback: no playlist yet is no reason to show the picker. */
   readonly bdjActive: boolean;
   /** The BD-J graphics plane shows something: taps, clicks, arrows, Enter and digits go to the disc. */
@@ -95,6 +97,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   playlists: [],
   usesBdj: false,
   bdjSupported: false,
+  bdjMissing: [],
   bdjActive: false,
   bdjMenuVisible: false,
   bdjTapsIgnored: 0,
@@ -131,7 +134,7 @@ function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
 export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
   switch (e.type) {
     case 'titles':
-      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjActive: false, bdjMenuVisible: false, bdjRemoteOpenedInMenu: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
+      return { ...s, playlists: e.playlists, usesBdj: e.usesBdj, bdjSupported: e.bdjSupported, bdjMissing: e.bdjMissing ?? [], bdjActive: false, bdjMenuVisible: false, bdjRemoteOpenedInMenu: false, warnings: e.warnings, error: null, currentPlaylistId: null, chapters: [], durationUs: 0, timeUs: 0, audioTracks: [], selectedAudio: null, indexTitles: null, subtitles: null, encodingPrompt: null };
     case 'chapters':
       // Notices are not cleared here: the engine emits a playlist's own notices before this event.
       return { ...s, currentPlaylistId: e.playlistId, durationUs: e.durationUs, chapters: e.chapters, timeUs: 0, error: null };

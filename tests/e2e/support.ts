@@ -26,3 +26,14 @@ export async function expectBarShown(bar: Locator, timeout = 5_000): Promise<voi
   await expect(bar).not.toHaveClass(/hidden/, { timeout });
   await expect(bar).toHaveCSS('opacity', '1');
 }
+
+/** Page coordinates of a point in the 1920x1080 menu, letterboxed in the canvas as the compositor draws it. */
+export async function menuPoint(page: Page, x: number, y: number): Promise<{ x: number; y: number }> {
+  const box = (await page.getByTestId('video-canvas').boundingBox())!;
+  const scale = Math.min(box.width / 1920, box.height / 1080);
+  const width = Math.round(1920 * scale);
+  const height = Math.round(1080 * scale);
+  const left = box.x + Math.floor((box.width - width) / 2);
+  const top = box.y + Math.floor((box.height - height) / 2);
+  return { x: left + ((x + 0.5) * width) / 1920, y: top + ((y + 0.5) * height) / 1080 };
+}

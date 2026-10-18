@@ -54,8 +54,12 @@ export interface Telemetry {
    * has run since the disc opened.
    */
   readonly bdj: BdjTelemetry | null;
-  /** While a BD-J title runs: its graphics plane's flushes and the taps on its menu that brought no reaction. */
-  readonly bdjPlane: { readonly flushes: number; readonly tapsIgnored: number } | null;
+  /**
+   * While a BD-J title runs: its graphics plane's flushes and the taps on its menu that brought no reaction. `hash` is
+   * the plane's hash (tools/bdj-trace's) once it has stayed unchanged for a telemetry interval, else null; only with
+   * PlayerDeps.planeHashTelemetry (test-only, ?telemetry=1), as it costs a pass over the whole plane.
+   */
+  readonly bdjPlane: { readonly flushes: number; readonly tapsIgnored: number; readonly hash?: string | null } | null;
 }
 
 export interface BdjStartup {
@@ -158,7 +162,7 @@ export type EngineCommand =
 
 export type EngineEvent =
   /** `bdjSupported`: this engine runs BD-J titles. */
-  | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly bdjSupported: boolean; readonly warnings: readonly string[] }
+  | { readonly type: 'titles'; readonly playlists: readonly PlaylistSummary[]; readonly usesBdj: boolean; readonly bdjSupported: boolean; readonly bdjMissing?: readonly string[]; readonly warnings: readonly string[] }
   /** A BD-J title started (the disc's Java code drives playback and draws its menus) or BD-J stopped. */
   | { readonly type: 'bdjActive'; readonly active: boolean }
   /**

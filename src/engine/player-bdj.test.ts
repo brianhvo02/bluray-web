@@ -60,6 +60,8 @@ interface Harness {
   /** Everything the engine sent to the BD-J worker. */
   readonly sent: ToBdj[];
   readonly terminated: () => boolean;
+  /** How many BD-J workers the player created. */
+  readonly workers: () => number;
   /** Delivers a message to the engine as if the BD-J worker had sent it. */
   inject(m: FromBdj): void;
   play(ms: number): Promise<void>;
@@ -78,6 +80,8 @@ interface HarnessOptions {
   readonly playerSettings?: PlayerSettings;
   readonly compositor?: CompositorLike;
   readonly decodeImage?: DecodeImage;
+  readonly bdjMissing?: readonly string[];
+  readonly planeHashTelemetry?: boolean;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -85,6 +89,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   const events: EngineEvent[] = [];
   const sent: ToBdj[] = [];
   let terminated = false;
+  let workers = 0;
   let toEngine: MessagePort | null = null;
   const clock = { ms: 1000 };
   const player = new Player({
@@ -96,6 +101,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
     setTimer: opts.setTimer ?? (() => () => undefined),
     createBdjWorker: () => {
+      workers++;
       if (opts.worker) return opts.worker;
       const { port1, port2 } = new MessageChannel();
       runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0]);
@@ -122,6 +128,8 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     loadClassLibrary: async () => classes,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
     ...(opts.decodeImage ? { decodeImage: opts.decodeImage } : {}),
+    ...(opts.bdjMissing ? { bdjMissing: opts.bdjMissing } : {}),
+    ...(opts.planeHashTelemetry ? { planeHashTelemetry: true } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
@@ -136,6 +144,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     events,
     sent,
     terminated: () => terminated,
+    workers: () => workers,
     inject: (m) => toEngine!.postMessage(m),
     async play(ms) {
       for (let elapsed = 0; elapsed < ms; elapsed += STEP_MS) {
@@ -180,6 +189,20 @@ async function playing(files = bdjDisc()): Promise<Harness> {
 }
 
 describe('Player with BD-J titles (in-process BD-J worker)', () => {
+  it('a browser that lacks something BD-J needs opens the disc to the picker, naming it, and starts no worker', async () => {
+    const h = await harness(bdjDisc(), { bdjMissing: ['workers started from workers'] });
+    await h.play(500);
+    expect(h.workers()).toBe(0);
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'titles', usesBdj: true, bdjSupported: false, bdjMissing: ['workers started from workers'] }));
+    expect(h.events).toContainEqual({
+      type: 'notice',
+      code: 'bdj',
+      message: "This disc uses BD-J (Java) menus, which this browser can't run: it lacks workers started from workers. Choose a playlist to play.",
+    });
+    expect(h.events).not.toContainEqual(expect.objectContaining({ type: 'bdjActive', active: true }));
+    expect(lastState(h)).toBe('idle');
+  });
+
   it('runs First Play: Java plays playlist 00000 with no picker and no notice', async () => {
     const h = await playing();
     expect(h.events).toContainEqual(expect.objectContaining({ type: 'titles', bdjSupported: true }));
@@ -664,6 +687,24 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-3), 100, 100, 299, 149);
     await h.play(600); // a telemetry interval, with no playlist playing
     expect(lastTelemetry(h)?.bdj?.inputLatencyMs).toEqual({ last: Math.round(STEP_MS), max: Math.round(STEP_MS * 4), count: 2 });
+  });
+
+  it('telemetry carries the plane hash once the plane has settled for an interval, only when asked (test-only)', async () => {
+    const { h, writer } = await menuShown({ planeHashTelemetry: true });
+    const hashes = (): (string | null | undefined)[] => h.events.flatMap((e) => (e.type === 'telemetry' && e.telemetry.bdjPlane ? [e.telemetry.bdjPlane.hash] : []));
+    await h.play(1200); // the interval that sees the plane first, then one that sees it unchanged
+    const settled = new GraphicsPlaneReader(writer.buffer).hash();
+    expect(hashes().at(-1)).toBe(settled);
+    updateGraphic(writer, 1920, 1080, new Int32Array(1920 * 1080).fill(-2), 100, 100, 299, 149);
+    await h.play(600);
+    expect(hashes().at(-1)).toBeNull(); // changed since the last telemetry
+    await h.play(600);
+    expect(hashes().at(-1)).toBe(new GraphicsPlaneReader(writer.buffer).hash());
+    expect(hashes().at(-1)).not.toBe(settled);
+
+    const plain = await menuShown();
+    await plain.h.play(1200);
+    expect(lastTelemetry(plain.h)?.bdjPlane).toEqual({ flushes: expect.any(Number), tapsIgnored: 0 });
   });
 
   it('reports the BD-J menu turning visible and empty, on changes only, and empty when BD-J stops', async () => {

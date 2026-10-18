@@ -20,8 +20,10 @@ const ORG_ID = 0x7fff0001;
 const BDJ_INTERACTIVE = 3;
 
 // First Play is the BD-J title: it shows its background still, then plays playlist 00000 (real H.264, as disc-bdj).
+// The video is 4:3, so it is pillarboxed in the 16:9 screen and the still's left edge stays visible beside it (the
+// browser E2E, bdj-menu.spec.ts, looks for it there).
 const files = buildSyntheticDisc({
-  clips: [{ clipId: '00000', videoAus: encodeTestVideo(2 * 24), keyIndices: [0, 24], startPts: CLIP_START_PTS, audio: CodingType.LPCM }],
+  clips: [{ clipId: '00000', videoAus: encodeTestVideo(2 * 24, '480x360'), keyIndices: [0, 24], startPts: CLIP_START_PTS, audio: CodingType.LPCM }],
   playlists: [{ id: '00000', clipIds: ['00000'] }],
 });
 

@@ -512,6 +512,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
           playlists={snapshot.playlists}
           usesBdj={snapshot.usesBdj}
           bdjSupported={snapshot.bdjSupported}
+          bdjMissing={snapshot.bdjMissing}
           titles={snapshot.indexTitles?.titles}
           onPickTitle={(title) => {
             setPickerOpen(false);

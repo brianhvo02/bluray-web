@@ -7,6 +7,7 @@ import { PlayerBdjHost } from './bdj/player-host';
 import type { ClassLibrarySource } from './bdj/runtime';
 import { EarlyBdjWorker } from './bdj/early-worker';
 import { GraphicsPlaneReader, createGraphicsPlane } from './bdj/graphics-plane';
+import { bdjUnsupportedMessage } from './bdj/requirements';
 import { BDJ_EVENT_MOUSE, InputLatency, TapReactionWatch, UoRestriction, bdjMouseParam, bdjUserInput } from './bdj/input';
 import { BdjSession, type BdjFailureCode, type WorkerLike } from './bdj/session';
 import { REGISTER_WORDS } from './bdj/shared-registers';
@@ -86,6 +87,11 @@ export interface PlayerDeps {
   readonly createShaderBackend?: (events: { lost(): void; restored(): void }) => ShaderBackend | string;
   /** A new BD-J worker (bdj/bdj-worker.ts) for each BD-J session. */
   readonly createBdjWorker?: () => WorkerLike;
+  /**
+   * What this browser lacks to run BD-J (bdj/requirements.ts bdjMissing on the engine worker's global): when any is
+   * missing, BD-J discs and titles open to the picker with a notice naming it.
+   */
+  readonly bdjMissing?: readonly string[];
   /** The BD-J class library jars; fetched once, as soon as a BD-J disc is opened. */
   readonly loadClassLibrary?: () => Promise<ClassLibrarySource>;
   /** One-shot timer, cancelled by the returned function (the BD-J first-playlist timeout); setTimeout by default. */
@@ -96,6 +102,11 @@ export interface PlayerDeps {
   readonly playerSettings?: PlayerSettings;
   /** Opens a disc served over HTTP (the worker builds an HttpSource); without it `openRemote` fails. */
   readonly openHttpSource?: (disc: HttpDiscRef) => Promise<ByteSource>;
+  /**
+   * Test-only (E2E, ?telemetry=1): telemetry carries the BD-J plane's hash once it settles (bdjPlane.hash), so a
+   * browser test can compare it with the libbluray golden's.
+   */
+  readonly planeHashTelemetry?: boolean;
   /** Decodes a BD-J background still (createImageBitmap); without it, background stills are not shown. */
   readonly decodeImage?: DecodeImage;
 }
@@ -328,6 +339,8 @@ export class Player {
   private bdj: BdjTitle | null = null;
   /** Taps on a BD-J menu that brought no reaction (telemetry). */
   private bdjTapsIgnored = 0;
+  /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
+  private planeSeen: { plane: GraphicsPlaneReader; version: number; hash: string | null } | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
   /** When the open command for this disc arrived (nowMs), and BD-J start-up times since then (telemetry `bdj`). */
@@ -650,10 +663,10 @@ export class Player {
     this.bindPg(this.pgRegs);
     this.resetTextSubtitles();
     this.emitSubtitles();
-    this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, bdjSupported: this.bdjSupported, warnings: disc.warnings });
+    this.deps.emit({ type: 'titles', playlists: disc.summaries, usesBdj: disc.usesBdj, bdjSupported: this.bdjSupported, bdjMissing: this.deps.bdjMissing ?? [], warnings: disc.warnings });
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
-    if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.');
+    if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', this.bdjUnsupported('disc'));
     // bdjActive goes out before 'idle', so the UI never shows the picker in between
     const bdjFirstPlay = disc.index.firstPlay.kind === 'bdj' && this.bdjSupported;
     if (bdjFirstPlay) this.enterBdj(TITLE_FIRST_PLAY, null, early);
@@ -672,7 +685,16 @@ export class Player {
   }
 
   private get bdjSupported(): boolean {
-    return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined;
+    return this.deps.createBdjWorker !== undefined && this.deps.loadClassLibrary !== undefined && (this.deps.bdjMissing?.length ?? 0) === 0;
+  }
+
+  /** The notice when BD-J cannot run: what the browser lacks, or (a build without BD-J) that it is not supported. */
+  private bdjUnsupported(what: 'disc' | 'title'): string {
+    const missing = this.deps.bdjMissing ?? [];
+    if (missing.length > 0) return bdjUnsupportedMessage(missing, what);
+    return what === 'disc'
+      ? 'This disc uses BD-J (Java) menus, which are not supported. Choose a playlist to play.'
+      : 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.';
   }
 
   /** _fill_disc_info's profile switch (bd_open). */
@@ -894,6 +916,7 @@ export class Player {
     entry.taps.cancel();
     this.bdjLatency.clearPending();
     this.bdj = null;
+    this.planeSeen = null;
     this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
@@ -1095,7 +1118,7 @@ export class Player {
         break;
       case 'bdjTitle':
         if (this.bdjSupported) this.navigatorToBdj(e.title);
-        else this.notice('bdj', 'This title uses BD-J (Java), which is not supported. Choose a playlist to play.');
+        else this.notice('bdj', this.bdjUnsupported('title'));
         break;
       case 'error':
         // The picker shows an 'error' event's message (PlayerScreen reads snapshot.error) once the session is gone.
@@ -2268,9 +2291,24 @@ export class Player {
         ass: this.assStats(),
         shader: this.shaderStage?.stats ?? null,
         bdj: this.bdjStartup ? { ...this.bdjStartup, inputLatencyMs: this.bdjLatency.stats } : null,
-        bdjPlane: this.bdj ? { flushes: this.bdj.plane.flushCount(), tapsIgnored: this.bdjTapsIgnored } : null,
+        bdjPlane: this.bdj ? { flushes: this.bdj.plane.flushCount(), tapsIgnored: this.bdjTapsIgnored, ...(this.deps.planeHashTelemetry ? { hash: this.settledPlaneHash(this.bdj.plane) } : {}) } : null,
       },
     });
+  }
+
+  /**
+   * The plane's hash once no flush, init or close has changed it since the last telemetry; null while it changes (or
+   * while the writer holds it: tried again at the next telemetry). Hashed once per settled version.
+   */
+  private settledPlaneHash(plane: GraphicsPlaneReader): string | null {
+    const version = plane.version();
+    const seen = this.planeSeen;
+    if (!seen || seen.plane !== plane || seen.version !== version) {
+      this.planeSeen = { plane, version, hash: null };
+      return null;
+    }
+    seen.hash ??= plane.tryHash();
+    return seen.hash;
   }
 
   private sinceOpenMs(): number {

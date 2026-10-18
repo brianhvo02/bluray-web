@@ -311,6 +311,16 @@ export class GraphicsPlaneReader extends PlaneViews {
       this.release();
     }
   }
+
+  /** hash() without waiting for the writer's lock (the render path must not block): null while the writer holds it. */
+  tryHash(): string | null {
+    if (!this.acquire(READER_LOCK_MS)) return null;
+    try {
+      return planeHash(this.buffer);
+    } finally {
+      this.release();
+    }
+  }
 }
 
 /**

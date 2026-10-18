@@ -139,6 +139,11 @@ export function LandingScreen({ controller, snapshot }: LandingScreenProps): Rea
         onDrop={onDrop}
       >
         <p>Drop a decrypted Blu-ray folder here: the disc folder, or the BDMV folder inside it.</p>
+        {capabilities.core.ok && !capabilities.bdj.ok && (
+          <p className="hint" data-testid="bdj-capability-hint">
+            BD-J (Java) menus can't run in this browser: it lacks {capabilities.bdj.missing.join(', ')}. Discs with them open to their playlists.
+          </p>
+        )}
         {storageHint && <p className="hint">On Safari, add the app to your Home Screen or Dock so your settings aren't cleared after 7 days without a visit.</p>}
         <button type="button" data-testid="open-folder" disabled={!capabilities.core.ok} onClick={onPickFolder}>
           Open disc folder
