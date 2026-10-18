@@ -77,6 +77,13 @@ export type UnsortedReason = 'no-title' | 'several-fit' | 'no-season' | 'episode
 export type TitleKind = 'series' | 'movie' | 'music';
 export interface TitleNames { readonly english: string | null; readonly romaji: string | null; readonly native: string | null; readonly synonyms: readonly string[]; readonly display: string | null }
 export interface TitleSummary { readonly id: string; readonly kind: TitleKind; readonly names: TitleNames; readonly poster: string | null; readonly year: number | null; readonly seasons: number; readonly discs: number; readonly addedAt: number; readonly own: boolean }
+export interface DiscRef { readonly discId: string; readonly root: string; readonly folder: string; readonly displayName: string | null }
+export interface DiscSlot { readonly number: number | null; readonly label: string; readonly copies: readonly DiscRef[] }
+export interface EpisodeRef { readonly number: number; readonly name: string | null; readonly runtimeMin: number | null; readonly discId: string; readonly playlistId: string }
+/** A movie's or music title's discs are one season with `number: null` and label ''. */
+export interface SeasonDetail { readonly id: string; readonly label: string; readonly number: number | null; readonly discs: readonly DiscSlot[]; readonly episodes: readonly EpisodeRef[] | null; readonly extras: readonly DiscSlot[] }
+/** `poster` and `banner` are art ids for `GET art/<id>`, never source URLs. */
+export interface TitleDetail { readonly title: TitleSummary; readonly banner: string | null; readonly seasons: readonly SeasonDetail[]; readonly related: readonly TitleSummary[]; readonly extras: readonly DiscSlot[] }
 
 /** What the owner decided for one disc (spec §7). */
 export type OwnerChoice =
