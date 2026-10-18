@@ -114,6 +114,33 @@ sudo APPIUM_HOME="$PWD/.cache/appium" .cache/appium/node_modules/.bin/appium dri
 
 Nothing to set up. WebDriverAgent needs no signing there, and the Simulator shares the Mac's network, so plain HTTP on `127.0.0.1` is a secure context and the disc server needs no certificate. To test HTTPS there anyway, add the mkcert root with `xcrun simctl keychain booted add-root-cert "$(mkcert -CAROOT)/rootCA.pem"`. Simulator Safari runs on the Mac's media stack and CPU, so codec support and timings there say nothing about the real devices.
 
+## The BD-J gate (`gate.ts`)
+
+The 5d device gate (spec §4.5, §7) on one device or browser, for each BD-J disc under `fixtures/local` (A_NEW_ERA, RENTAL_FAMILY):
+
+1. Opens the disc by its disc-server URL and taps or clicks its button.
+2. Records `bdj.firstFrameMs` (the first frame of Java's first playlist).
+3. Drives the menu to the feature with the disc's key script (`tests/bdj/scripts/<disc>.play.keys`), and checks the BD-J plane at every `wait still` against libbluray's settled hashes (`tests/bdj/golden/local/`). A computer uses the keyboard. A touch target taps the menu, which the disc ignores, so the on-screen remote opens; it then taps the remote's buttons.
+4. Records `bdj.inputLatencyMs` for every input.
+5. Before the key that starts the feature, it stays in the menu for `--stay-ms` (default 10 minutes). It moves the focus every `--cycle-ms`, samples `bdjMemory` every `--sample-ms`, and then checks that the menu settled back on its golden plane.
+6. Fails at once on a page reload. On iOS a reload means a memory kill.
+
+```sh
+npm run build
+npx tsx tools/devices/gate.ts --target "sim:iPhone 17" --stay-ms 600000     # Simulator (Appium)
+npx tsx tools/devices/gate.ts --target chrome --startup-runs 5              # installed Chrome (Playwright); --touch: Pixel 7 emulation
+npx tsx tools/devices/gate.ts --target firefox --disc RENTAL_FAMILY         # installed Firefox (Playwright over WebDriver BiDi)
+npx tsx tools/devices/gate.ts --target safari                               # Safari on this Mac (safaridriver)
+npx tsx tools/devices/gate.ts --target ios:<udid> --server https://<lan-ip>:8443 --token <token>   # real iPhone/iPad (safaridriver)
+```
+
+Without `--server`, the gate serves `dist/` and `fixtures/local` itself on `http://127.0.0.1:4183` (`--port`), which is enough for this Mac and the Simulator. A real device needs the HTTPS disc server (`tools/disc-server`) and its token. Results go to `.superpowers/sdd/2026-10-17-m5d-bdj-menus/gate/` (`--out`), one JSON file per disc plus screenshots; tokens are never written. An A_NEW_ERA run skips with a reason where `VideoDecoder` has no HEVC. `--startup-runs n` opens the disc n more times first and records each first frame: the first open in a fresh browser is cold, and the rest are warm. The exit code is 1 when a disc fails.
+
+Two notes on the drivers:
+
+- Safari on the Mac needs Develop → Allow Remote Automation and an unlocked screen, because safaridriver delivers no input while the screen is locked. The gate checks for a locked screen and stops with a message. It also brings Safari to the front after each navigation.
+- On a real iPhone or iPad (`ios:<udid>`), the gate uses plain `safaridriver` with the device as the target, not Appium. Web Inspector and Remote Automation must be on. iPadOS 27 has two quirks: an element click never lifts the finger, and several taps in one action list merge into one. So every tap is its own touch pointer action, followed by `DELETE /actions`.
+
 ## Not here
 
 Device UDIDs, Apple IDs, team IDs, certificates and tokens stay out of the repository: pass them on the command line or in the environment.
