@@ -474,7 +474,8 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   }));
   // for filing a lone fit, only the same name or one differing by a known affix agrees (ruling M7d): leniency there
   // would file the disc
-  const namedStrictlyOrAffixed = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n) || affixed(c, n)));
+  // (or by kana alone: hiragana and katakana are one script here, ruling M7e)
+  const namedStrictlyOrAffixed = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n) || kanaFolded(c) === kanaFolded(n) || affixed(c, n)));
   const fitsOf = (en: Entry): string[] => candidates.filter((c) => quality(en, c, fitSeason) > 0);
   if (japaneseTitles.length > 0) {
     const named = scored.filter((s) => !dropped.has(s.entry.id) && namedStrictly(s.entry)).map((s) => new Set(fitsOf(s.entry)));
@@ -825,6 +826,9 @@ function animeTagged(segment: string): boolean {
   if (brackets.some((tokens) => tokens.some((t) => OTHER_GENRES.test(t)))) return false;
   return brackets.some((tokens) => tokens.some((t) => t === 'アニメ' || t.toLowerCase() === 'anime') && tokens.every(isTagWord));
 }
+
+/** A name under `normalizeStrict` with katakana folded to hiragana, and no long-vowel folding (ruling M7e). */
+const kanaFolded = (text: string): string => normalizeStrict(text).replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
 
 /**
  * Whether two Japanese names differ only by a known affix, with or without a space (ruling M7d): `劇場版 X`, `映画X`

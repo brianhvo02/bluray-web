@@ -1064,11 +1064,14 @@ describe('matchDiscs', () => {
         expect(await one(p, fake({}), fake({ 'Glass Orchard': [film] }), { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree', suggestions: ['tmdb-movie:1600'] });
       });
 
-      it('files as before with no Japanese name, a season variant of it, or no Japanese evidence', async () => {
+      it('files as before with no Japanese name, a kana or season variant of it, or no Japanese evidence', async () => {
         const runWith = (native: string | null, titles: Record<string, string>) => one(p, fake({}), fake({ 'Glass Orchard': [{ ...film, names: { ...film.names, native } }] }), titles);
         expect(await runWith(null, { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
-        // a kana variant is not strictly the same name (M7d)
-        expect(await runWith('がらすの果樹園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
+        // a kana variant is the same name (M7e), but not with another difference that isn't an affix
+        expect(await runWith('がらすの果樹園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
+        expect(await runWith('がらすの果樹園 殺人事件', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
+        // and kana folding only: a long vowel spelled out is still another name
+        expect(await runWith('ガラスノ果樹園ー', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
         expect(await runWith('ガラスの果樹園 第2期', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
         expect(await runWith('硝子の果樹園', {})).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
       });
