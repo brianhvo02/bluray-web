@@ -15,14 +15,44 @@ services:
       # The rendezvous Worker's URL (https://bluray-rendezvous.<account>.workers.dev), set after its first deploy;
       # empty, codes are not registered with it.
       RENDEZVOUS_URL: ""
+    # Long syntax with create_host_path: false, so a missing drive never gets an empty folder made under /mnt;
+    # if one is missing, the container fails to start rather than serve an empty drive.
     volumes:
-      - /mnt/drv0/BDMVs:/library/drv0:ro
-      - /mnt/drv2/BDMVs:/library/drv2:ro
-      - /mnt/drv3/BDMVs:/library/drv3:ro
-      - /mnt/drv5/BDMVs:/library/drv5:ro
-      - /mnt/drv6/BDMVs:/library/drv6:ro
-      - /mnt/drv7/BDMVs:/library/drv7:ro
-      - /mnt/drv8/BDMVs:/library/drv8:ro
+      - type: bind
+        source: /mnt/drv0/BDMVs
+        target: /library/drv0
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: /mnt/drv2/BDMVs
+        target: /library/drv2
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: /mnt/drv3/BDMVs
+        target: /library/drv3
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: /mnt/drv5/BDMVs
+        target: /library/drv5
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: /mnt/drv6/BDMVs
+        target: /library/drv6
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: /mnt/drv7/BDMVs
+        target: /library/drv7
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: /mnt/drv8/BDMVs
+        target: /library/drv8
+        read_only: true
+        bind: { create_host_path: false }
       - bluray-data:/data
     networks:
       - caddy_default
