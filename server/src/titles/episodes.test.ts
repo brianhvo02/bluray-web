@@ -58,7 +58,7 @@ describe('guessEpisodes', () => {
   });
 
   it('counts runtimes within 25% of the season runtime as episodes', () => {
-    const d = { discId: 'd1', playlists: [pl('00001', 18.5, ['00001']), pl('00002', 29.5, ['00002']), pl('00003', 17.5, ['00003']), pl('00004', 30.5, ['00004'])] };
+    const d = { discId: 'd1', playlists: [pl('00001', 18.5, ['00001']), pl('00002', 29.5, ['00002']), pl('00003', 14, ['00003']), pl('00004', 39, ['00004'])] };
     expect(guessEpisodes({ episodes: 2, runtimeMin: 24 }, [d], 1)!.map((e) => e.playlistId)).toEqual(['00001', '00002']);
   });
 
@@ -74,5 +74,20 @@ describe('guessEpisodes', () => {
     // the playlists' own clips run against their playlist order
     const crossed = { discId: 'd1', playlists: [pl('00001', 24, ['00002']), pl('00002', 24, ['00001'])] };
     expect(guessEpisodes({ episodes: 2, runtimeMin: 24 }, [crossed], 1)).toBeNull();
+  });
+});
+
+describe('guessEpisodes uncertain runtimes (ruling T7g)', () => {
+  it('is null when a playlist is neither clearly an episode nor clearly not one', () => {
+    const special = { discId: 'd1', playlists: [...disc('d1').playlists, pl('00006', 23, ['00011'])] };
+    const finale = { discId: 'd4', playlists: [pl('00001', 24, ['00001']), pl('00002', 24, ['00002']), pl('00003', 32, ['00003'])] };
+    expect(guessEpisodes(SEASON, [special, disc('d2'), disc('d3'), finale], 1)).toBeNull();
+    const longish = { discId: 'd1', playlists: [pl('00001', 24, ['00001']), pl('00002', 15, ['00002'])] };
+    expect(guessEpisodes({ episodes: 1, runtimeMin: 24 }, [longish], 1)).toBeNull();
+  });
+
+  it('lets a play-all in the uncertain band pass', () => {
+    const d = { discId: 'd1', playlists: [pl('00001', 18.5, ['00001']), pl('00002', 19, ['00002']), pl('00003', 37.5, ['00001', '00002'])] };
+    expect(guessEpisodes({ episodes: 2, runtimeMin: 24 }, [d], 1)!.map((e) => e.playlistId)).toEqual(['00001', '00002']);
   });
 });

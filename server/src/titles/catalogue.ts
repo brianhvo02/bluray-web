@@ -10,7 +10,7 @@ import type {
 import type { DiscDbHit } from './discdb';
 import { guessEpisodes } from './episodes';
 import type { DiscEvidence } from './evidence';
-import { groupKey } from './match';
+import { groupKey, musicRelease } from './match';
 import type { DiscMatch } from './match';
 import type { OwnerSnapshot } from './owner-store';
 import type { Entry } from './sources';
@@ -31,10 +31,13 @@ export interface CatalogueInput {
   readonly discdb: { lookup(fp: string): DiscDbHit | null };
   /** Each disc id's first-seen time. */
   readonly addedAt: ReadonlyMap<string, number>;
+  /** Roots in the Downloads group: their copies come after the others. */
+  readonly downloadRoots: ReadonlySet<string>;
 }
 
 const TV_FORMATS = new Set(['TV', 'TV_SHORT']);
-const CHAIN_LINKS = new Set(['SEQUEL', 'PREQUEL']);
+/** Relations that tie a film or OVA to a series; CHARACTER, OTHER and the like don't. */
+const STORY_LINKS = new Set(['SEQUEL', 'PREQUEL', 'PARENT', 'SIDE_STORY', 'SUMMARY']);
 
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
 const lastSegment = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
@@ -89,40 +92,70 @@ interface TitleBuild {
 type Target = { readonly title: TitleBuild; readonly season: SeasonBuild | null };
 
 /**
- * AniList series from the TV entries at hand (ruling T7a): entries linked by SEQUEL/PREQUEL form one chain, ordered by
- * start date. A link to an entry that isn't at hand is not followed, so a gap splits a chain rather than inventing a
- * season. Season numbers count from the chain's first entry, offset by the matcher's numbering (which saw the whole
- * chain) when a filed disc gives it.
+ * AniList series (rulings T7a, T7f). TV/TV_SHORT entries and the TV ids their SEQUEL/PREQUEL relations name, loaded or
+ * not, form a graph; a connected part of it is one series. Its root is the node with no prequel (the earliest by start
+ * date if several), so the series id is the first season's even when that entry isn't loaded. A loaded entry's season
+ * number is its place on the longest prequel path from a root. Seasons that aren't loaded are absent, never invented.
  */
-function anilistSeries(entries: ReadonlyMap<string, Entry>, matches: readonly DiscMatch[]): Map<string, Series> {
-  const tv = [...entries.values()].filter(isAnilistTv);
-  const links = new Map<string, Set<string>>(tv.map((en) => [en.id, new Set<string>()]));
-  for (const en of tv) {
+function anilistSeries(entries: ReadonlyMap<string, Entry>): Map<string, Series> {
+  const isTvNode = (id: string): boolean => {
+    const en = entries.get(id);
+    return en === undefined || isAnilistTv(en);
+  };
+  const next = new Map<string, Set<string>>();
+  const prev = new Map<string, Set<string>>();
+  const node = (id: string): void => {
+    if (!next.has(id)) { next.set(id, new Set()); prev.set(id, new Set()); }
+  };
+  const link = (from: string, to: string): void => {
+    node(from);
+    node(to);
+    next.get(from)!.add(to);
+    prev.get(to)!.add(from);
+  };
+  for (const en of entries.values()) {
+    if (!isAnilistTv(en)) continue;
+    node(en.id);
     for (const r of en.relations) {
-      if (!CHAIN_LINKS.has(r.type) || !links.has(r.id) || r.id === en.id) continue;
-      links.get(en.id)!.add(r.id);
-      links.get(r.id)!.add(en.id);
+      if (r.id === en.id || !TV_FORMATS.has(r.format ?? '') || !isTvNode(r.id)) continue;
+      if (r.type === 'PREQUEL') link(r.id, en.id);
+      else if (r.type === 'SEQUEL') link(en.id, r.id);
     }
   }
   // an entry's start date is on the relations pointing at it
   const start = new Map<string, number>();
   for (const en of entries.values()) for (const r of en.relations) if (r.startDate !== null && !start.has(r.id)) start.set(r.id, r.startDate);
-  const when = (en: Entry): number => start.get(en.id) ?? (en.year !== null ? en.year * 10000 : Number.MAX_SAFE_INTEGER);
+  const when = (id: string): number => {
+    const year = entries.get(id)?.year ?? null;
+    return start.get(id) ?? (year !== null ? year * 10000 : Number.MAX_SAFE_INTEGER);
+  };
+  const byDate = (a: string, b: string): number => when(a) - when(b) || naturalOrder(a, b);
 
   const out = new Map<string, Series>();
-  for (const first of tv) {
-    if (out.has(first.id)) continue;
-    const ids = new Set([first.id]);
-    const queue = [first.id];
-    while (queue.length > 0) for (const next of links.get(queue.shift()!)!) if (!ids.has(next)) { ids.add(next); queue.push(next); }
-    const members = [...ids].map((id) => entries.get(id)!).sort((a, b) => when(a) - when(b) || naturalOrder(a.id, b.id));
-    let offset = 0;
-    for (const m of matches) {
-      if (m.status !== 'filed' || m.season === null || !ids.has(m.entryId)) continue;
-      offset = Math.max(0, m.season - (members.findIndex((en) => en.id === m.entryId) + 1));
-      break;
+  for (const first of next.keys()) {
+    if (out.has(first) || !entries.has(first)) continue;
+    const ids = new Set([first]);
+    const queue = [first];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      for (const n of [...next.get(id)!, ...prev.get(id)!]) if (!ids.has(n)) { ids.add(n); queue.push(n); }
     }
-    const series: Series = { id: members[0]!.id, members, number: new Map(members.map((en, i) => [en.id, i + 1 + offset])) };
+    const roots = [...ids].filter((id) => prev.get(id)!.size === 0).sort(byDate);
+    if (roots.length === 0) roots.push([...ids].sort(byDate)[0]!); // a cycle
+    // longest path from a root, bounded so that a cycle ends
+    const depth = new Map(roots.map((id) => [id, 0]));
+    const walk = [...roots];
+    while (walk.length > 0) {
+      const id = walk.shift()!;
+      const d = depth.get(id)! + 1;
+      for (const n of next.get(id)!) {
+        if (d < ids.size && d > (depth.get(n) ?? -1)) { depth.set(n, d); walk.push(n); }
+      }
+    }
+    const members = [...ids].filter((id) => entries.has(id))
+      .sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0) || byDate(a, b))
+      .map((id) => entries.get(id)!);
+    const series: Series = { id: roots[0]!, members, number: new Map(members.map((en) => [en.id, (depth.get(en.id) ?? 0) + 1])) };
     for (const id of ids) out.set(id, series);
   }
   return out;
@@ -134,7 +167,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   const matchById = new Map(input.matches.map((m) => [m.discId, m]));
   const groupSizes = new Map<string, number>();
   for (const e of input.evidence) groupSizes.set(groupKey(e), (groupSizes.get(groupKey(e)) ?? 0) + 1);
-  const seriesOf = anilistSeries(entries, input.matches);
+  const seriesOf = anilistSeries(entries);
 
   const artById = new Map<string, { small: string; large: string }>();
   const artId = (art: { small: string; large: string } | null): string | null => {
@@ -169,14 +202,14 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     });
   };
   const entryTitle = (en: Entry): TitleBuild => builds.get(en.id) ?? newTitle({
-    id: en.id, kind: en.kind, names: entryNames(en), year: en.year, own: false,
+    id: en.id, kind: en.source === 'anilist' ? 'movie' : en.kind, names: entryNames(en), year: en.year, own: false,
     single: en.source === 'anilist' || en.kind === 'movie', row: en.source === 'anilist' ? en : undefined,
     poster: artId(en.poster), banner: artId(bannerArt(en.banner)),
   });
   const singleSeason = (b: TitleBuild, info: SeasonBuild['info']): SeasonBuild =>
-    season(b, { id: `${b.id}:discs`, label: '', number: null, order: 0, info, discDbSeason: null });
-  const numbered = (b: TitleBuild, n: number, info: SeasonBuild['info'], discDbSeason: number | null): SeasonBuild =>
-    season(b, { id: `${b.id}:s${n}`, label: `Season ${n}`, number: n, order: n, info, discDbSeason });
+    season(b, { id: `${b.id}#discs`, label: '', number: null, order: 0, info, discDbSeason: null });
+  const numbered = (b: TitleBuild, n: number, info: SeasonBuild['info'], discDbSeason: number | null, fixed = false): SeasonBuild =>
+    season(b, { id: `${b.id}#s${n}`, label: `Season ${n}`, number: n, order: n, info, discDbSeason }, fixed);
 
   const ownTitle = (t: OwnTitle): TitleBuild => {
     const existing = builds.get(t.id);
@@ -185,15 +218,16 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       id: t.id, kind: t.kind, names: { english: null, romaji: null, native: null, synonyms: [], display: t.name },
       poster: null, banner: null, year: null, own: true, single: t.kind !== 'series',
     });
-    if (t.kind === 'series') for (let n = 1; n <= (t.seasons ?? 0); n++) season(b, { id: `${b.id}:s${n}`, label: `Season ${n}`, number: n, order: n, info: null, discDbSeason: null }, true);
+    if (t.kind === 'series') for (let n = 1; n <= (t.seasons ?? 0); n++) numbered(b, n, null, null, true);
     return b;
   };
   for (const t of owner.ownTitles) ownTitle(t);
 
   /**
-   * Where a disc filed under `titleId` goes. `season` null means: the entry's own season for an AniList TV entry, the
-   * only season of a one-season series, or the title's extras for an extras disc. An owner's season number counts
-   * within the whole AniList series; a match names the season by its entry.
+   * Where a disc filed under `titleId` goes. `season` null means: the entry's own season for an AniList TV entry (even
+   * for a bonus disc), the title's extras for an owner's extras of the series itself, the only season of a one-season
+   * series, or the title's extras for an extras disc. An owner's season number counts within the whole AniList series;
+   * a match names the season by its entry. A season the entry or own title doesn't have goes to Unsorted.
    */
   const resolve = (titleId: string, seasonNo: number | null, extras: boolean, byOwner: boolean): Target | UnsortedReason => {
     if (titleId.startsWith('own:')) {
@@ -202,7 +236,8 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       const b = ownTitle(t);
       if (b.single || (seasonNo === null && extras)) return { title: b, season: null };
       const n = seasonNo ?? (t.seasons === 1 ? 1 : null);
-      return n === null ? 'no-season' : { title: b, season: numbered(b, n, null, null) };
+      if (n === null || n < 1 || (t.seasons !== null && n > t.seasons)) return 'no-season';
+      return { title: b, season: numbered(b, n, null, null) };
     }
     const en = entries.get(titleId);
     // filed under an entry that isn't loaded yet (ruling T7c)
@@ -212,13 +247,13 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       const b = seriesTitle(series);
       let member: Entry | undefined = en;
       if (byOwner && seasonNo !== null) member = series.members.find((m) => series.number.get(m.id) === seasonNo);
-      else if (extras && seasonNo === null) return { title: b, season: null };
+      else if (byOwner && extras && seasonNo === null && en.id === series.id) return { title: b, season: null };
       if (!member) return 'no-season';
       const n = series.number.get(member.id)!;
       return {
         title: b,
         season: season(b, {
-          id: member.id, label: member.names.english ?? member.names.romaji ?? `Season ${n}`, number: n, order: series.members.indexOf(member),
+          id: `${member.id}#season`, label: member.names.english ?? member.names.romaji ?? `Season ${n}`, number: n, order: series.members.indexOf(member),
           info: { episodes: member.episodes, runtimeMin: member.runtimeMin }, discDbSeason: null,
         }),
       };
@@ -229,6 +264,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     if (n === undefined) return 'no-season';
     if (n === null) return { title: b, season: null };
     const s = en.seasons.find((x) => x.number === n);
+    if (!s && en.seasons.length > 0) return 'no-season';
     return { title: b, season: numbered(b, n, s ? { episodes: s.episodes, runtimeMin: s.runtimeMin } : null, n) };
   };
 
@@ -238,17 +274,20 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     else if (extras) b.extras.push(p);
     else {
       const row = b.row;
-      const info = row !== null && row.kind === 'series' ? { episodes: row.episodes, runtimeMin: row.runtimeMin } : null;
+      const info = row !== null && row.format !== 'MOVIE' ? { episodes: row.episodes, runtimeMin: row.runtimeMin } : null;
       singleSeason(b, info).discs.push(p);
     }
   };
 
-  const music = (e: DiscEvidence, group: string, name: string, displayName: string | null): void => {
+  /** The name in an owner's music choice on any disc of a music title, by title id. */
+  const musicChoiceNames = new Map<string, string>();
+  const music = (e: DiscEvidence, group: string, name: string, choiceName: string | null): void => {
     const id = `music:${hash(group, 16)}`;
     const b = builds.get(id) ?? newTitle({
-      id, kind: 'music', names: { english: name, romaji: null, native: null, synonyms: [], display: owner.displayNames.get(id) ?? displayName },
+      id, kind: 'music', names: { english: name, romaji: null, native: null, synonyms: [], display: null },
       poster: null, banner: null, year: null, own: false, single: true,
     });
+    if (choiceName !== null && !musicChoiceNames.has(id)) musicChoiceNames.set(id, choiceName);
     singleSeason(b, null).discs.push({ e, disc: null });
   };
 
@@ -276,7 +315,8 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
         continue;
       }
       if (choice.kind === 'music') {
-        const group = match?.status === 'music' ? match.group : e.segments.slice(0, -1).join('/') || e.segments.join('/');
+        // the music release folder, as the matcher finds it, else the disc folder itself
+        const group = match?.status === 'music' ? match.group : (musicRelease(e) ?? e.segments.join('/'));
         music(e, group, match?.status === 'music' ? match.name : lastSegment(group), choice.name);
         continue;
       }
@@ -308,23 +348,22 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     put(target, { e, disc }, extras);
   }
 
-  // AniList rows (films, OVAs) related to a series in the catalogue are listed under it, not on their own
+  // AniList rows (films, OVAs) tied to a series in the catalogue by a story relation are also listed under it (T7e)
   const relatedOf = new Map<string, TitleBuild[]>();
-  const attached = new Set<string>();
   const seriesBuilds = [...builds.values()].filter((s) => s.series !== null);
   for (const b of builds.values()) {
     const row = b.row;
     if (row === null) continue;
     const parent =
-      row.relations.map((r) => seriesOf.get(r.id)).map((s) => (s ? builds.get(s.id) : undefined)).find((s) => s !== undefined) ??
-      seriesBuilds.find((s) => s.series!.members.some((m) => m.relations.some((r) => r.id === row.id)));
+      row.relations.filter((r) => STORY_LINKS.has(r.type)).map((r) => seriesOf.get(r.id)).map((s) => (s ? builds.get(s.id) : undefined)).find((s) => s !== undefined) ??
+      seriesBuilds.find((s) => s.series!.members.some((m) => m.relations.some((r) => r.id === row.id && STORY_LINKS.has(r.type))));
     if (!parent) continue;
-    attached.add(b.id);
     relatedOf.set(parent.id, [...(relatedOf.get(parent.id) ?? []), b]);
   }
 
+  const download = (root: string): number => Number(input.downloadRoots.has(root));
   const copyOrder = (a: DiscRef, b: DiscRef): number =>
-    Number(a.root.endsWith('-dl')) - Number(b.root.endsWith('-dl')) || naturalOrder(a.root, b.root) || naturalOrder(a.folder, b.folder);
+    download(a.root) - download(b.root) || naturalOrder(a.root, b.root) || naturalOrder(a.folder, b.folder);
   const slots = (placed: readonly Placed[]): DiscSlot[] => {
     const byKey = new Map<string, Placed[]>();
     for (const p of placed) {
@@ -341,17 +380,24 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       .sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity) || naturalOrder(a.copies[0]!.folder, b.copies[0]!.folder));
   };
 
-  /** TheDiscDB's episodes when every disc has a hit (spec §8, 1), else the guess; episodes play from the first copy. */
+  /**
+   * TheDiscDB's episodes when every disc's first copy has a hit (spec §8, 1), else the guess. Episodes play from the
+   * first copy; a TheDiscDB episode whose playlist that copy lacks plays from a copy that has it, or is left out.
+   */
   const episodes = (s: SeasonBuild, discs: readonly DiscSlot[]): EpisodeRef[] | null => {
     if (s.info === null || discs.length === 0) return null;
-    const firsts = discs.map((d) => evidenceById.get(d.copies[0]!.discId)!);
+    const copies = discs.map((d) => d.copies.map((c) => evidenceById.get(c.discId)!));
+    const firsts = copies.map((cs) => cs[0]!);
     const hits = firsts.map((e) => (e.fingerprint !== null ? input.discdb.lookup(e.fingerprint) : null));
     if (hits.every((h) => h !== null && h.episodes.length > 0)) {
-      const out = firsts.flatMap((e, i) => hits[i]!.episodes
+      const out = copies.flatMap((cs, i) => hits[i]!.episodes
         .filter((ep) => s.discDbSeason === null || ep.season === s.discDbSeason)
-        .map((ep): EpisodeRef => {
-          const playlist = e.playlists.find((p) => p.id === ep.playlist);
-          return { number: ep.episode, name: ep.name, runtimeMin: playlist ? Math.round(playlist.durationS / 60) : null, discId: e.discId, playlistId: ep.playlist };
+        .flatMap((ep): EpisodeRef[] => {
+          for (const e of cs) {
+            const playlist = e.playlists.find((p) => p.id === ep.playlist);
+            if (playlist) return [{ number: ep.episode, name: ep.name, runtimeMin: Math.round(playlist.durationS / 60), discId: e.discId, playlistId: ep.playlist }];
+          }
+          return [];
         }));
       if (out.length > 0) return out.sort((a, b) => a.number - b.number);
     }
@@ -371,7 +417,8 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     const extras = slots(b.extras);
     const placed = [...[...b.seasons.values()].flatMap((s) => [...s.discs, ...s.extras]), ...b.extras];
     const summary: TitleSummary = {
-      id: b.id, kind: b.kind, names: b.names, poster: b.poster, year: b.year,
+      id: b.id, kind: b.kind, poster: b.poster, year: b.year,
+      names: b.kind === 'music' && !b.own ? { ...b.names, display: owner.displayNames.get(b.id) ?? musicChoiceNames.get(b.id) ?? null } : b.names,
       seasons: b.single ? 0 : seasons.length,
       discs: seasons.reduce((n, s) => n + s.discs.length + s.extras.length, extras.length),
       addedAt: placed.reduce((max, p) => Math.max(max, input.addedAt.get(p.e.discId) ?? 0), 0),
@@ -400,7 +447,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
   }));
 
   const byYear = (a: TitleSummary, b: TitleSummary): number => (a.year ?? Infinity) - (b.year ?? Infinity) || naturalOrder(a.id, b.id);
-  const titles = [...summaries.values()].filter((s) => !attached.has(s.id)).sort((a, b) => naturalOrder(a.id, b.id));
+  const titles = [...summaries.values()].sort((a, b) => naturalOrder(a.id, b.id));
   return {
     titles,
     detail(id) {

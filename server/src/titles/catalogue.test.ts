@@ -55,6 +55,7 @@ function build(input: {
   owner?: OwnerSnapshot;
   discdb?: Record<string, DiscDbHit>;
   addedAt?: Record<string, number>;
+  downloadRoots?: string[];
 }): Catalogue {
   return buildCatalogue({
     matches: input.matches,
@@ -63,6 +64,7 @@ function build(input: {
     owner: input.owner ?? owner(),
     discdb: { lookup: (fp) => input.discdb?.[fp] ?? null },
     addedAt: new Map(Object.entries(input.addedAt ?? {})),
+    downloadRoots: new Set(input.downloadRoots ?? []),
   });
 }
 
@@ -109,9 +111,9 @@ describe('buildCatalogue', () => {
     expect(detail.seasons[0]!.discs[0]).toEqual({ number: 1, label: 'Disc 1', copies: [{ discId: id('drv5/Ember Blade/S1D1'), root: 'drv5', folder: 'Ember Blade/S1D1', displayName: null }] });
   });
 
-  it('lists a related film under the series and not on its own', () => {
+  it('lists a related film under the series and on its own (ruling T7e)', () => {
     const cat = chain();
-    expect(cat.titles.map((t) => t.id)).not.toContain('anilist:500');
+    expect(cat.titles.find((t) => t.id === 'anilist:500')).toMatchObject({ kind: 'movie', names: { english: 'Ember Blade: Ashfall' } });
     const detail = cat.detail('anilist:300')!;
     expect(detail.related.map((t) => [t.id, t.kind])).toEqual([['anilist:500', 'movie']]);
     const film = cat.detail('anilist:500')!;
@@ -123,15 +125,67 @@ describe('buildCatalogue', () => {
     expect(cat.titles.map((t) => [t.id, t.kind])).toEqual([['anilist:500', 'movie']]);
   });
 
-  it('never invents a season missing from the entries', () => {
+  it('names a series after its root even when the root is not loaded (ruling T7f)', () => {
+    const later = build({
+      entries: [S3, S2],
+      evidence: [ev('drv5/Ember Blade/S2D1'), ev('drv5/Ember Blade/S3D1')],
+      matches: [filed('drv5/Ember Blade/S2D1', 'anilist:120', 2, 1), filed('drv5/Ember Blade/S3D1', 'anilist:450', 3, 1)],
+    });
+    expect(later.titles.map((t) => t.id)).toEqual(['anilist:300']);
+    expect(later.detail('anilist:300')!.seasons.map((s) => [s.number, s.label])).toEqual([[2, 'Ember Blade Season 2'], [3, 'Hinokiri no Ken: Kanketsu-hen']]);
+    expect(chain().titles.filter((t) => t.kind === 'series').map((t) => t.id)).toEqual(['anilist:300']);
+  });
+
+  it('joins a chain across a season that is not loaded, never inventing it', () => {
     const cat = build({
       entries: [S1, S3],
-      evidence: [ev('drv5/Ember Blade/S1D1'), ev('drv5/Ember Blade/S3D1')],
-      matches: [filed('drv5/Ember Blade/S1D1', 'anilist:300', 1, 1), filed('drv5/Ember Blade/S3D1', 'anilist:450', 3, 1)],
+      evidence: [ev('drv5/Ember Blade/S1D1'), ev('drv5/Ember Blade/S3D1'), ev('drv5/Ember Blade/S3D2'), ev('drv5/Ember Blade/S2D1')],
+      matches: [
+        filed('drv5/Ember Blade/S1D1', 'anilist:300', 1, 1),
+        filed('drv5/Ember Blade/S3D1', 'anilist:450', 3, 1),
+        { discId: id('drv5/Ember Blade/S3D2'), status: 'unsorted', reason: 'no-disc-number', suggestions: [] },
+        { discId: id('drv5/Ember Blade/S2D1'), status: 'unsorted', reason: 'no-disc-number', suggestions: [] },
+      ],
+      owner: owner({
+        [id('drv5/Ember Blade/S3D2')]: { kind: 'title', titleId: 'anilist:300', season: 3, disc: 2 },
+        [id('drv5/Ember Blade/S2D1')]: { kind: 'title', titleId: 'anilist:300', season: 2, disc: 1 },
+      }),
     });
-    expect(cat.detail('anilist:300')!.seasons.map((s) => s.number)).toEqual([1]);
-    // the season's number still follows the matcher, which saw the whole chain
-    expect(cat.detail('anilist:450')!.seasons.map((s) => [s.number, s.label])).toEqual([[3, 'Hinokiri no Ken: Kanketsu-hen']]);
+    expect(cat.titles.map((t) => t.id)).toEqual(['anilist:300']);
+    expect(cat.detail('anilist:300')!.seasons.map((s) => [s.number, s.label, s.discs.map((d) => d.number)])).toEqual([
+      [1, 'Ember Blade', [1]],
+      [3, 'Hinokiri no Ken: Kanketsu-hen', [1, 2]],
+    ]);
+    expect(cat.unsorted.map((u) => [u.discId, u.reason])).toEqual([[id('drv5/Ember Blade/S2D1'), 'no-season']]);
+  });
+
+  it('keeps season ids apart from title ids', () => {
+    const detail = chain().detail('anilist:300')!;
+    expect(detail.seasons.map((s) => s.id)).not.toContain('anilist:300');
+    expect(new Set(detail.seasons.map((s) => s.id)).size).toBe(3);
+  });
+
+  it('files an AniList bonus disc without a season in its entry\'s season extras', () => {
+    const cat = build({
+      entries: [S1, S2],
+      evidence: [ev('drv5/E/S2D1'), ev('drv5/E/S2 Bonus')],
+      matches: [filed('drv5/E/S2D1', 'anilist:120', 2, 1), filed('drv5/E/S2 Bonus', 'anilist:120', null, null, true)],
+    });
+    const detail = cat.detail('anilist:300')!;
+    expect(detail.seasons.map((s) => [s.number, s.extras.map((d) => d.copies[0]!.discId)])).toEqual([[2, [id('drv5/E/S2 Bonus')]]]);
+    expect(detail.extras).toEqual([]);
+  });
+
+  it('ties a film to a series only through story relations', () => {
+    const crossover = entry('anilist:600', { english: 'Crossover Night' }, { kind: 'movie', format: 'MOVIE', relations: [{ type: 'CHARACTER', id: 'anilist:300', format: 'TV', startDate: null }] });
+    const ova = entry('anilist:601', { english: 'Ember Blade: Hot Springs' }, { format: 'OVA', relations: [{ type: 'SIDE_STORY', id: 'anilist:300', format: 'TV', startDate: null }] });
+    const cat = build({
+      entries: [S1, crossover, ova],
+      evidence: [ev('drv5/E/S1D1'), ev('drv5/X/Crossover'), ev('drv5/E/OVA')],
+      matches: [filed('drv5/E/S1D1', 'anilist:300', 1, 1), filed('drv5/X/Crossover', 'anilist:600', null, null), filed('drv5/E/OVA', 'anilist:601', null, null)],
+    });
+    expect(cat.detail('anilist:300')!.related.map((t) => [t.id, t.kind])).toEqual([['anilist:601', 'movie']]);
+    expect(cat.titles.map((t) => t.id)).toEqual(['anilist:300', 'anilist:600', 'anilist:601']);
   });
 
   it('gives a TMDB TV entry one series with its seasons', () => {
@@ -146,6 +200,7 @@ describe('buildCatalogue', () => {
 
   it('lists two discs filed as the same season and disc as copies of one disc, BDMVs before Downloads', () => {
     const cat = build({
+      downloadRoots: ['drv1-dl'],
       entries: [HARBOR],
       evidence: [ev('drv1-dl/Harbor.Line.S05.BluRay/DISC1'), ev('drv7/Harbor Line/Season 5/Disc 1')],
       matches: [filed('drv1-dl/Harbor.Line.S05.BluRay/DISC1', 'tmdb-tv:7', 5, 1), filed('drv7/Harbor Line/Season 5/Disc 1', 'tmdb-tv:7', 5, 1)],
@@ -320,5 +375,110 @@ describe('buildCatalogue', () => {
       addedAt: { [id('drv2/H/D1')]: 1000, [id('drv2/H/D2')]: 5000 },
     });
     expect(cat.titles[0]!.addedAt).toBe(5000);
+  });
+
+  it('orders copies on Downloads roots last by the roots given, not by their names', () => {
+    const cat = build({
+      downloadRoots: ['drv1'],
+      entries: [HARBOR],
+      evidence: [ev('drv1/Harbor/S1D1'), ev('drv7/Harbor/S1D1')],
+      matches: [filed('drv1/Harbor/S1D1', 'tmdb-tv:7', 1, 1), filed('drv7/Harbor/S1D1', 'tmdb-tv:7', 1, 1)],
+    });
+    expect(cat.detail('tmdb-tv:7')!.seasons[0]!.discs[0]!.copies.map((c) => c.root)).toEqual(['drv7', 'drv1']);
+  });
+
+  it('takes a TheDiscDB episode from a copy that has its playlist, and drops one no copy has', () => {
+    const one = entry('tmdb-tv:8', { english: 'Quiet Orchard' }, { seasons: [{ number: 1, episodes: 3, runtimeMin: 24 }] });
+    const main = ev('drv3/Quiet Orchard/D1', { fingerprint: 'FP1', playlists: [pl('00001', 24, ['00001'])] });
+    const copy = ev('drv3-dl/Quiet.Orchard/D1', { fingerprint: 'FP2', playlists: [pl('00001', 24, ['00001']), pl('00009', 25, ['00009'])] });
+    const hit: DiscDbHit = {
+      title: 'Quiet Orchard', year: null, kind: 'series', tmdbId: '8', season: 1,
+      episodes: [{ playlist: '00001', season: 1, episode: 1, name: null }, { playlist: '00009', season: 1, episode: 2, name: null }, { playlist: '00042', season: 1, episode: 3, name: null }],
+    };
+    const cat = build({
+      downloadRoots: ['drv3-dl'], entries: [one], evidence: [copy, main], discdb: { FP1: hit },
+      matches: [filed(main.path, 'tmdb-tv:8', 1, 1), filed(copy.path, 'tmdb-tv:8', 1, 1)],
+    });
+    expect(cat.detail('tmdb-tv:8')!.seasons[0]!.episodes!.map((e) => [e.number, e.discId, e.playlistId, e.runtimeMin])).toEqual([
+      [1, main.discId, '00001', 24],
+      [2, copy.discId, '00009', 25],
+    ]);
+  });
+
+  it('guesses the whole season when only some discs have a TheDiscDB hit', () => {
+    const two = entry('tmdb-tv:9', { english: 'Paper Lanterns' }, { seasons: [{ number: 1, episodes: 6, runtimeMin: 24 }] });
+    const d1 = ev('drv3/Paper Lanterns/D1', { fingerprint: 'FPA', playlists: THREE_EPISODES });
+    const d2 = ev('drv3/Paper Lanterns/D2', { fingerprint: 'FPB', playlists: THREE_EPISODES });
+    const hit: DiscDbHit = { title: 'Paper Lanterns', year: null, kind: 'series', tmdbId: '9', season: 1, episodes: [{ playlist: '00003', season: 1, episode: 1, name: 'Wick' }] };
+    const cat = build({ entries: [two], evidence: [d1, d2], discdb: { FPA: hit }, matches: [filed(d1.path, 'tmdb-tv:9', 1, 1), filed(d2.path, 'tmdb-tv:9', 1, 2)] });
+    expect(cat.detail('tmdb-tv:9')!.seasons[0]!.episodes!.map((e) => [e.number, e.name, e.discId, e.playlistId])).toEqual([
+      [1, null, d1.discId, '00001'], [2, null, d1.discId, '00002'], [3, null, d1.discId, '00003'],
+      [4, null, d2.discId, '00001'], [5, null, d2.discId, '00002'], [6, null, d2.discId, '00003'],
+    ]);
+  });
+
+  it('sends a season past a TMDB entry\'s or an own series\' seasons to Unsorted', () => {
+    const saga: OwnTitle = { id: 'own:7a', kind: 'series', name: 'Home Saga', seasons: 2 };
+    const cat = build({
+      entries: [HARBOR],
+      evidence: [ev('drv2/Harbor/S6D1'), ev('drv0/Saga/S3')],
+      matches: [filed('drv2/Harbor/S6D1', 'tmdb-tv:7', 6, 1), { discId: id('drv0/Saga/S3'), status: 'unsorted', reason: 'no-title', suggestions: [] }],
+      owner: owner({ [id('drv0/Saga/S3')]: { kind: 'title', titleId: 'own:7a', season: 3, disc: 1 } }, [saga]),
+    });
+    expect(cat.unsorted.map((u) => [u.discId, u.reason])).toEqual([[id('drv2/Harbor/S6D1'), 'no-season'], [id('drv0/Saga/S3'), 'no-season']]);
+    expect(cat.detail('own:7a')!.seasons.map((s) => [s.number, s.discs.length])).toEqual([[1, 0], [2, 0]]);
+  });
+
+  it('files an "extras of" choice in the season or title it names', () => {
+    const cat = build({
+      entries: [HARBOR],
+      evidence: [ev('drv2/Harbor/S2D1'), ev('drv2/Harbor/Making Of'), ev('drv2/Harbor/Interviews')],
+      matches: [
+        filed('drv2/Harbor/S2D1', 'tmdb-tv:7', 2, 1),
+        { discId: id('drv2/Harbor/Making Of'), status: 'unsorted', reason: 'no-season', suggestions: [] },
+        { discId: id('drv2/Harbor/Interviews'), status: 'unsorted', reason: 'no-season', suggestions: [] },
+      ],
+      owner: owner({
+        [id('drv2/Harbor/Making Of')]: { kind: 'extras', titleId: 'tmdb-tv:7', season: 2 },
+        [id('drv2/Harbor/Interviews')]: { kind: 'extras', titleId: 'tmdb-tv:7', season: null },
+      }),
+    });
+    const detail = cat.detail('tmdb-tv:7')!;
+    expect(detail.seasons[0]!.extras.map((d) => d.copies[0]!.discId)).toEqual([id('drv2/Harbor/Making Of')]);
+    expect(detail.extras.map((d) => d.copies[0]!.discId)).toEqual([id('drv2/Harbor/Interviews')]);
+    expect(cat.unsorted).toEqual([]);
+  });
+
+  it('returns the discs of a deleted own title to Unsorted', () => {
+    const cat = build({
+      evidence: [ev('drv0/Home/Garden')],
+      matches: [{ discId: id('drv0/Home/Garden'), status: 'unsorted', reason: 'no-title', suggestions: [] }],
+      owner: owner({ [id('drv0/Home/Garden')]: { kind: 'title', titleId: 'own:deleted', season: null, disc: null } }),
+    });
+    expect(cat.titles).toEqual([]);
+    expect(cat.unsorted.map((u) => [u.discId, u.reason])).toEqual([[id('drv0/Home/Garden'), 'no-title']]);
+  });
+
+  it('groups discs the owner marks as Music by their release folder', () => {
+    const release = 'Fictive Band - Night Tour [CD][FLAC+BDMV]';
+    const discs = [ev('drv4-dl/Live/Concert A'), ev('drv4-dl/Live/Concert B'), ev(`drv4-dl/Live/${release}/BD1`), ev(`drv4-dl/Live/${release}/BD2`)];
+    const cat = build({
+      evidence: discs,
+      matches: discs.map((e) => ({ discId: e.discId, status: 'unsorted', reason: 'no-title', suggestions: [] }) as DiscMatch),
+      owner: owner(Object.fromEntries(discs.map((e) => [e.discId, { kind: 'music', name: null } as OwnerChoice]))),
+    });
+    expect(cat.titles.map((t) => [t.names.english, t.discs]).sort()).toEqual([['Concert A', 1], ['Concert B', 1], [release, 2]]);
+  });
+
+  it('takes a music title\'s name from a choice on any of its discs, the title\'s display name first', () => {
+    const group = 'Music/Other Group - Spring';
+    const bd1 = ev(`drv1-dl/${group}/BD1`);
+    const bd2 = ev(`drv1-dl/${group}/BD2`);
+    const matches: DiscMatch[] = [bd1, bd2].map((e) => ({ discId: e.discId, status: 'music', group, name: 'Other Group - Spring' }));
+    const choices = { [bd2.discId]: { kind: 'music', name: 'Renamed' } as OwnerChoice };
+    const cat = build({ evidence: [bd1, bd2], matches, owner: owner(choices) });
+    expect(cat.titles.map((t) => [t.names.display, t.discs])).toEqual([['Renamed', 2]]);
+    const named = build({ evidence: [bd1, bd2], matches, owner: owner(choices, [], { [cat.titles[0]!.id]: 'Spring Live' }) });
+    expect(named.titles[0]!.names.display).toBe('Spring Live');
   });
 });

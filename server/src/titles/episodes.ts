@@ -9,6 +9,12 @@ type Playlist = DiscEvidence['playlists'][number];
 
 /** Playlists within this share of the season's episode runtime are episodes. */
 const RUNTIME_TOLERANCE = 0.25;
+/**
+ * Playlists between the episode window and these shares of the runtime may or may not be episodes (a special, a long
+ * finale), so a disc holding one, other than a play-all, isn't guessed (ruling T7g).
+ */
+const UNCERTAIN_BELOW = 0.6;
+const UNCERTAIN_ABOVE = 1.6;
 
 const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true });
 
@@ -36,7 +42,7 @@ export function guessEpisodes(
 }
 
 /**
- * One disc's episode playlists in order, or null when they can't be ordered. Play-all playlists (at least two
+ * One disc's episode playlists in order, or null when they can't be ordered or a runtime is uncertain. Play-all playlists (at least two
  * episodes long) and short ones (openings, endings, previews) fall outside the runtime window. Playlists with the same
  * clip list count once. Clips shared by several episodes (an opening, an ending) are allowed, but each episode needs a
  * clip of its own, and those clips must run in playlist order.
@@ -44,12 +50,20 @@ export function guessEpisodes(
 function discEpisodes(playlists: readonly Playlist[], runtimeS: number): Playlist[] | null {
   const lo = runtimeS * (1 - RUNTIME_TOLERANCE);
   const hi = runtimeS * (1 + RUNTIME_TOLERANCE);
+  const key = (p: Playlist): string => p.clips.join('/');
+  // a play-all holds every clip of two or more other playlists that aren't short
+  const playAll = (p: Playlist): boolean =>
+    new Set(playlists
+      .filter((q) => q.clips.length > 0 && key(q) !== key(p) && q.durationS >= runtimeS * UNCERTAIN_BELOW && q.clips.every((c) => p.clips.includes(c)))
+      .map(key)).size >= 2;
+  const uncertain = (p: Playlist): boolean =>
+    (p.durationS >= runtimeS * UNCERTAIN_BELOW && p.durationS < lo) || (p.durationS > hi && p.durationS <= runtimeS * UNCERTAIN_ABOVE);
+  if (playlists.some((p) => uncertain(p) && !playAll(p))) return null;
   const seen = new Set<string>();
   const candidates: Playlist[] = [];
   for (const p of [...playlists].sort((a, b) => naturalOrder(a.id, b.id))) {
-    const key = p.clips.join('/');
-    if (p.clips.length === 0 || p.durationS < lo || p.durationS > hi || seen.has(key)) continue;
-    seen.add(key);
+    if (p.clips.length === 0 || p.durationS < lo || p.durationS > hi || seen.has(key(p))) continue;
+    seen.add(key(p));
     candidates.push(p);
   }
   const uses = new Map<string, number>();

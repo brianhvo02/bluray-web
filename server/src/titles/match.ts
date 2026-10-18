@@ -173,7 +173,7 @@ export async function matchDiscs(evidence: readonly DiscEvidence[], ctx: MatchCo
  * The release folder of a music disc, or null when the disc isn't music: the deepest segment whose name shows a CD-plus-BD
  * release, else, under a `Music` folder, the disc's parent folder (or the disc folder itself when its parent is `Music`).
  */
-function musicRelease(e: DiscEvidence): string | null {
+export function musicRelease(e: DiscEvidence): string | null {
   const segs = e.segments;
   for (let i = segs.length - 1; i >= 0; i--) {
     if (parseName(segs[i]!).music) return segs.slice(0, i + 1).join('/');
