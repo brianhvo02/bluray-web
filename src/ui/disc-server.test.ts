@@ -22,16 +22,23 @@ describe('serverLinkFromLocation', () => {
   });
 });
 
-describe('serverLinkFromLocation with sameOrigin', () => {
-  it('accepts a disc on the page origin and refuses one elsewhere, so the token never leaves the server', () => {
-    const page = 'https://192.168.1.5:8443/probe.html?token=tok&disc=';
-    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://192.168.1.5:8443/api/discs/abc/')}`, { sameOrigin: true })?.disc).toBe('https://192.168.1.5:8443/api/discs/abc/');
-    expect(serverLinkFromLocation(`${page}${encodeURIComponent('/api/discs/abc/')}`, { sameOrigin: true })?.disc).toBe('https://192.168.1.5:8443/api/discs/abc/');
-    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://evil.example/api/discs/abc/')}`, { sameOrigin: true })).toBeNull();
-    expect(serverLinkFromLocation(`${page}${encodeURIComponent('http://192.168.1.5:8443/api/discs/abc/')}`, { sameOrigin: true })).toBeNull();
-    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://192.168.1.5:9000/api/discs/abc/')}`, { sameOrigin: true })).toBeNull();
-    // the player keeps cross-origin links (the Vite dev server opening a disc on the disc server)
-    expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://evil.example/api/discs/abc/')}`)).not.toBeNull();
+describe('serverLinkFromLocation and origins', () => {
+  it('accepts a disc on the page origin and ignores one elsewhere, so the token never leaves the server', () => {
+    for (const path of ['/', '/probe.html']) {
+      const page = `https://192.168.1.5:8443${path}?token=tok&disc=`;
+      expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://192.168.1.5:8443/api/discs/abc/')}`)?.disc).toBe('https://192.168.1.5:8443/api/discs/abc/');
+      expect(serverLinkFromLocation(`${page}${encodeURIComponent('/api/discs/abc/')}`)?.disc).toBe('https://192.168.1.5:8443/api/discs/abc/');
+      expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://evil.example/api/discs/abc/')}`)).toBeNull();
+      expect(serverLinkFromLocation(`${page}${encodeURIComponent('http://192.168.1.5:8443/api/discs/abc/')}`)).toBeNull();
+      expect(serverLinkFromLocation(`${page}${encodeURIComponent('https://192.168.1.5:9000/api/discs/abc/')}`)).toBeNull();
+    }
+  });
+
+  it('ignores a production player link to a disc server elsewhere, rather than falling back to its own list', () => {
+    const href = `https://bluray-web.pages.dev/?disc=${encodeURIComponent('https://192.168.1.5:8443/api/discs/abc/')}&token=tok`;
+    expect(serverLinkFromLocation(href)).toBeNull();
+    // and the Vite dev server does not reach across to the disc server either
+    expect(serverLinkFromLocation(`http://localhost:5173/?disc=${encodeURIComponent('https://192.168.1.5:8443/api/discs/abc/')}&token=tok`)).toBeNull();
   });
 });
 

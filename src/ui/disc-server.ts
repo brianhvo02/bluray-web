@@ -2,7 +2,8 @@
  * Discs served by the development disc server (tools/disc-server), which speaks the NAS server's disc API: the same
  * `RemoteDiscSpec` (manifest with inlined metadata, then range reads) the NAS screens open. The page learns about a
  * disc from its own URL: `?disc=<disc API base>&token=<token>` names one disc (`…/api/discs/<id>/`), `?token=<token>`
- * alone lists the discs of the server the page was loaded from (the server serves the built player too).
+ * alone lists the discs of the server the page was loaded from (the server serves the built player too). Both name the
+ * page's own origin only.
  */
 
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
@@ -30,11 +31,11 @@ export const SERVER_REQUEST_TIMEOUT_MS = 20_000;
 const DISC_PATH = /^(.*\/api\/)discs\/([^/]+)\/?$/;
 
 /**
- * `sameOrigin` refuses a `disc` URL on another origin than the page, so the token is only ever sent back to the server
- * that served the page (the probe page uses it). The player allows other origins: `npm run dev` opens discs on the
- * disc server across origins (tools/disc-server/README.md, CORS).
+ * The link in a page URL, or null. A `disc` URL on another origin than the page is ignored: links come from the disc
+ * server that served the page, so the token only ever goes back to it, and a `?disc=` link to the production player
+ * cannot make it fetch from (or send a token to) a server named in the link.
  */
-export function serverLinkFromLocation(href: string, options: { readonly sameOrigin?: boolean } = {}): ServerLink | null {
+export function serverLinkFromLocation(href: string): ServerLink | null {
   const page = new URL(href);
   const token = page.searchParams.get('token');
   if (!token) return null;
@@ -47,7 +48,7 @@ export function serverLinkFromLocation(href: string, options: { readonly sameOri
     return null;
   }
   if (disc.protocol !== 'https:' && disc.protocol !== 'http:') return null;
-  if (options.sameOrigin && disc.origin !== page.origin) return null;
+  if (disc.origin !== page.origin) return null;
   const m = DISC_PATH.exec(disc.pathname);
   if (!m) return null;
   return { token, disc: `${disc.origin}${m[1]}discs/${m[2]}/`, api: `${disc.origin}${m[1]}` };

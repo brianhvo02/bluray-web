@@ -47,3 +47,16 @@ test('a link with a stale token lists nothing and says why', async ({ page }) =>
   await page.goto(`${origin}/?token=stale`);
   await expect(page.getByTestId('server-discs')).toContainText('401');
 });
+
+test("the player ignores a ?disc= link to a server other than the one that served it, and fetches nothing from it", async ({ page }) => {
+  const base = await servedDiscBase(origin, TOKEN, 'disc-bdj');
+  const toServer: string[] = [];
+  page.on('request', (r) => {
+    if (r.url().startsWith(origin)) toServer.push(r.url());
+  });
+  await page.goto(`/?disc=${encodeURIComponent(base)}&token=${TOKEN}`); // the preview server's player, on another origin
+  await expect(page.getByTestId('folder-input')).toBeAttached();
+  await page.waitForTimeout(1_000);
+  await expect(page.getByTestId('server-discs')).toHaveCount(0);
+  expect(toServer).toEqual([]);
+});

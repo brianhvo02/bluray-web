@@ -58,7 +58,7 @@ The token goes in `Authorization: Bearer <token>` (what the player sends for the
 - Paths with an empty, `.` or `..` segment, or with `/`, `\` or NUL once decoded, are refused (400). A file is only served if its real path (after links) is inside the disc folder.
 - Read-only: only `GET`, `HEAD` and the CORS preflight `OPTIONS` are answered.
 
-CORS: API requests from the Vite dev server (port 5173 on loopback or a private LAN address) get `Access-Control-Allow-Origin` for that origin, as do the server's own origin; any other origin gets none, so `npm run dev` can open `?disc=https://<lan-ip>:8443/api/discs/<id>/&token=…` too. The token still gates every read.
+The player and the probe page follow `?disc=` links only to their own origin: open discs from the URLs the server prints, which load the player from the server itself. A `?disc=` naming another origin is ignored and nothing is fetched from it, so a link to the production player cannot point it, with a token, at a server. CORS: API requests from the Vite dev server (port 5173 on loopback or a private LAN address) still get `Access-Control-Allow-Origin` for that origin, as do the server's own origin; any other origin gets none. The token still gates every read.
 
 ## Tests
 
