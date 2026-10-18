@@ -1067,11 +1067,11 @@ describe('matchDiscs', () => {
       it('files as before with no Japanese name, a kana or season variant of it, or no Japanese evidence', async () => {
         const runWith = (native: string | null, titles: Record<string, string>) => one(p, fake({}), fake({ 'Glass Orchard': [{ ...film, names: { ...film.names, native } }] }), titles);
         expect(await runWith(null, { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
-        // a kana variant is the same name (M7e), but not with another difference that isn't an affix
+        // a kana variant is the same name (M7e), and one held in the other agrees (M7f)
         expect(await runWith('がらすの果樹園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
-        expect(await runWith('がらすの果樹園 殺人事件', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
-        // and kana folding only: a long vowel spelled out is still another name
-        expect(await runWith('ガラスノ果樹園ー', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
+        expect(await runWith('がらすの果樹園 殺人事件', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
+        // with no containment either way, even after the folds, it disagrees
+        expect(await runWith('がらすの林檎園', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'unsorted', reason: 'sources-disagree' });
         expect(await runWith('ガラスの果樹園 第2期', { jpn: 'ガラスの果樹園' })).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
         expect(await runWith('硝子の果樹園', {})).toMatchObject({ status: 'filed', entryId: 'tmdb-movie:1600' });
       });
@@ -1138,21 +1138,17 @@ describe('matchDiscs', () => {
         }
       });
 
-      it('R1: a held Japanese name counts only at a word boundary or with a known affix', async () => {
+      it('M7f: a lone fit agrees with any Japanese title it holds or is held in, after kana and kanji-variant folds', async () => {
         const lone = async (native: string, jpn: string) =>
           (await states([['drv0/Movies/Ocean/BDROM', { jpn }]], fake({}), fake({ Ocean: [entry('tmdb-movie:2200', { english: 'Ocean', native }, { year: 2010 })] })))[0];
-        // run together, it is another word: M7b
-        expect(await lone('海の家', '海')).toBe('sources-disagree');
-        expect(await lone('海', '海の家')).toBe('sources-disagree');
-        expect(await lone('星降りの旅人', '星')).toBe('sources-disagree');
-        // M7d: only a known affix makes it the same work, with or without a space (劇場版, 映画 before; the rest after)
-        for (const [native, jpn] of [['劇場版 海の家', '海の家'], ['劇場版海の家', '海の家'], ['海の家第2期', '海の家'], ['映画 海の家', '海の家'], ['海の家 総集編', '海の家'],
-          ['『海の家』', '海の家'], ['海の家 OVA', '海の家'], ['海の家', '劇場版 海の家'], ['海の家 完全版', '海の家'], ['海の家 Season 2', '海の家'], ['海の家 第3章', '海の家']]) {
+        // the disc's bdmt title is noisy (extra words, truncation, kanji variants): containment either way agrees
+        for (const [native, jpn] of [['海の家', '海'], ['海', '海の家'], ['星降りの旅人', '星'], ['劇場版 海の家', '海の家'], ['海の家第2期', '海の家'], ['海 殺人事件', '海'],
+          ['ガラスの果樹園', 'ガラスの果樹園 本編'], ['ガラスの果樹園', 'ガラスの果樹園 BOX'], ['ガラスの果樹園', 'ガラスの果'], ['星降りの旅人 弐', '星降りの旅人 弍'],
+          ['髙橋の澤', '高橋の沢'], ['カラーズ', 'カラ']]) {
           expect(await lone(native!, jpn!), `${native} / ${jpn}`).toBe('tmdb-movie:2200#null');
         }
-        // a space or a mark alone is not enough, nor an affix on the wrong side, nor a long-vowel dash
-        for (const [native, jpn] of [['海 殺人事件', '海'], ['青い 海', '海'], ['海・空', '海'], ['『海』の作り方', '海'], ['ヒカリ映画', 'ヒカリ'], ['OVA海', '海'],
-          ['海の家 冬の章', '海の家'], ['海の家・夏', '海の家'], ['カラーズ', 'カラ'], ['海ー', '海']]) {
+        // no containment at all, even after the folds: another work
+        for (const [native, jpn] of [['空の城', '海'], ['硝子の果樹園', 'ガラスの果樹園'], ['月の庭', '星の庭']]) {
           expect(await lone(native!, jpn!), `${native} / ${jpn}`).toBe('sources-disagree');
         }
         // drop side (M7c): a live film whose Japanese name holds the disc's at all still competes

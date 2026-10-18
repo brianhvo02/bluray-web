@@ -87,7 +87,7 @@ const TOP_LEVEL_DEPTH = 0;
  * The matching rules' version. Bump it whenever the matching rules change (what files, where, or as what): the title
  * service then re-matches every disc on its next run, from its lookup cache, so the library follows the new rules.
  */
-export const MATCH_RULES_VERSION = 3;
+export const MATCH_RULES_VERSION = 4;
 /** Groups failing in a row (SourceUnavailable) before a run stops, leaving the rest for the next run (M3). */
 export const CIRCUIT_BREAKER = 5;
 /** Prequel links followed to find an AniList entry's place in its chain. */
@@ -137,10 +137,14 @@ const STRUCTURE_LABEL = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|DIS[CK])(?:[ _.-]?\d{1,3
 const GENERIC_DISC = /^(?:BD(?:[ _-]?(?:ROM|VIDEO))?|BDMV|DIS[CK]|VIDEO)$/i;
 /** Genres besides anime that can share a bracket with the anime tag (W4). */
 const OTHER_GENRES = /^(?:ドラマ|drama|実写|live|特撮|action)$/i;
-/** Affixes before a Japanese name that keep it the same work's (M7d): `劇場版`, `映画`. */
-const PREFIX_AFFIX = /^(?:劇場版|映画)$/;
-/** Affixes after it: `特別編`, `総集編`, `完全版`, `OVA`, `Season N`, `第N期`, `第N章`, `第Nクール`, `第Nシリーズ` (M7d). */
-const SUFFIX_AFFIX = /^(?:特別編|総集編|完全版|ova|season\s*\d+|\d+(?:st|nd|rd|th)\s*season|第\s*[0-9一二三四五六七八九十]+\s*(?:期|章|クール|シリーズ))$/i;
+/** Common kanji variants (itaiji) folded to one form, as disc titles and metadata spell names either way (ruling M7f). */
+const KANJI_VARIANTS: Readonly<Record<string, string>> = {
+  弍: '弐', 髙: '高', 﨑: '崎', 嵜: '崎', 邊: '辺', 邉: '辺', 斎: '斉', 齊: '斉', 齋: '斉', 濱: '浜', 澤: '沢', 國: '国', 實: '実',
+  圓: '円', 櫻: '桜', 學: '学', 聲: '声', 廣: '広', 嶋: '島', 嶌: '島', 惠: '恵', 眞: '真', 萬: '万', 會: '会', 體: '体', 鐵: '鉄',
+  傳: '伝', 氣: '気', 劍: '剣', 劒: '剣', 剱: '剣', 劔: '剣', 號: '号', 黑: '黒', 靑: '青', 戀: '恋', 藝: '芸', 舊: '旧', 繪: '絵',
+  應: '応', 驛: '駅', 樂: '楽', 對: '対', 戰: '戦', 獸: '獣', 稻: '稲', 莊: '荘', 龜: '亀', 鬪: '闘', 鬥: '闘', 曉: '暁',
+};
+const KANJI_VARIANT = new RegExp(`[${Object.keys(KANJI_VARIANTS).join('')}]`, 'gu');
 
 /** The discs under a folder, in its subfolders too, leaving out those in or named as a bonus folder (R2). */
 function discsUnder(folder: string, evidence: readonly DiscEvidence[]): number {
@@ -472,10 +476,14 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
     const holds = sc !== '' && sn !== '' && (sc.includes(sn) || sn.includes(sc));
     return holds || sameTitle(c, n) || sameTitle(c, base) || foldedTitle(c, n) || foldedTitle(c, base);
   }));
-  // for filing a lone fit, only the same name or one differing by a known affix agrees (ruling M7d): leniency there
-  // would file the disc
-  // (or by kana alone: hiragana and katakana are one script here, ruling M7e)
-  const namedStrictlyOrAffixed = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => sameTitle(c, n) || kanaFolded(c) === kanaFolded(n) || affixed(c, n)));
+  // for a lone fit, a Japanese name agrees with a Japanese title it holds or is held in, after kana and kanji-variant
+  // folds, since disc titles are noisy (extra words such as `本編` or `BOX`, truncation, itaiji); only no containment
+  // at all contradicts it (ruling M7f, replacing M7d and M7e)
+  const agreesInJapanese = (en: Entry): boolean => japaneseNames(en).some((n) => japaneseTitles.some((c) => {
+    const fc = folded(c);
+    const fn = folded(n);
+    return fc !== '' && fn !== '' && (fc.includes(fn) || fn.includes(fc));
+  }));
   const fitsOf = (en: Entry): string[] => candidates.filter((c) => quality(en, c, fitSeason) > 0);
   if (japaneseTitles.length > 0) {
     const named = scored.filter((s) => !dropped.has(s.entry.id) && namedStrictly(s.entry)).map((s) => new Set(fitsOf(s.entry)));
@@ -562,7 +570,7 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   if (!best.exact) return unsorted(names(best.entry).some((n) => parseName(n).season !== null) ? 'no-season' : 'no-title', ranked);
   // the evidence's Japanese titles name something else than the entry's Japanese names: the disc may be another work
   // of the same name, so it isn't filed (ruling M7b)
-  if (japaneseTitles.length > 0 && japaneseNames(best.entry).length > 0 && !namedStrictlyOrAffixed(best.entry)) return unsorted('sources-disagree', [best.entry]);
+  if (japaneseTitles.length > 0 && japaneseNames(best.entry).length > 0 && !agreesInJapanese(best.entry)) return unsorted('sources-disagree', [best.entry]);
 
   const bonus = named.some((p) => p.parse.bonus);
   // rule 3: the season or movie is resolved; a bonus disc without a season goes to the title's extras
@@ -827,24 +835,11 @@ function animeTagged(segment: string): boolean {
   return brackets.some((tokens) => tokens.some((t) => t === 'アニメ' || t.toLowerCase() === 'anime') && tokens.every(isTagWord));
 }
 
-/** A name under `normalizeStrict` with katakana folded to hiragana, and no long-vowel folding (ruling M7e). */
-const kanaFolded = (text: string): string => normalizeStrict(text).replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-
-/**
- * Whether two Japanese names differ only by a known affix, with or without a space (ruling M7d): `劇場版 X`, `映画X`
- * before, `X 完全版`, `X第2期`, `X OVA` after. A space or a mark alone (`X 殺人事件`, `青い X`, `X・空`) or an affix on
- * the other side (`X映画`, `OVA X`) is another title.
- */
-function affixed(a: string, b: string): boolean {
-  const x = a.normalize('NFKC').toLowerCase().trim();
-  const y = b.normalize('NFKC').toLowerCase().trim();
-  if (x === '' || y === '' || x === y) return false;
-  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
-  const at = long.indexOf(short);
-  if (at < 0) return false;
-  const before = long.slice(0, at).trim();
-  const after = long.slice(at + short.length).trim();
-  return (before === '' || PREFIX_AFFIX.test(before)) && (after === '' || SUFFIX_AFFIX.test(after)) && (before !== '' || after !== '');
+/** A name under `normalizeStrict`, with katakana folded to hiragana (no long-vowel folding) and kanji variants to one form (M7e, M7f). */
+function folded(text: string): string {
+  return normalizeStrict(text)
+    .replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60))
+    .replace(KANJI_VARIANT, (c) => KANJI_VARIANTS[c] ?? c);
 }
 
 /** Whether two AniList entries are tied by a story link, in either direction. */
