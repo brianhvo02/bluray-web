@@ -298,10 +298,21 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
   let twinIds = new Set<string>();
   let notTwins: Entry[] = [];
   if (anilistExact.length > 0) {
+    const rootYear = new Map<string, number | null>();
+    for (const a of anilistExact) {
+      const tv = a.kind === 'series' && TV_FORMATS.has(a.format ?? '');
+      rootYear.set(a.id, tv ? ((await anilistPlace(a, ctx)).root?.year ?? null) : null);
+    }
+    const isTwin = (t: Entry): boolean => anilistExact.some((a) => twins(a, rootYear.get(a.id)!, t));
+    const tmdb = [...all.values()].filter((en) => en.source === 'tmdb');
     const titles = named.flatMap((p) => p.parse.candidates);
-    const sameTitled = [...all.values()].filter((en) => en.source === 'tmdb' && names(en).some((n) => titles.some((c) => sameTitle(c, n))));
-    notTwins = sameTitled.filter((t) => !anilistExact.some((a) => twins(a, t)));
-    if (notTwins.length === 0) twinIds = new Set(sameTitled.map((t) => t.id));
+    const evidenceTitled = tmdb.filter((t) => names(t).some((n) => titles.some((c) => sameTitle(c, n))));
+    // TMDB entries named like an AniList entry in any of its languages, even when not like the evidence (ruling T5r):
+    // a live-action one in the year window may be what the disc holds
+    const anilistTitled = tmdb.filter((t) => anilistExact.some((a) => seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)))));
+    const liveAction = anilistTitled.filter((t) => t.animation !== true && anilistExact.some((a) => inYearWindow(a, rootYear.get(a.id)!, t, true)));
+    notTwins = [...new Set([...evidenceTitled.filter((t) => !isTwin(t)), ...liveAction])];
+    if (notTwins.length === 0) twinIds = new Set([...evidenceTitled, ...anilistTitled].filter(isTwin).map((t) => t.id));
   }
   scored = scored.filter((s) => !twinIds.has(s.entry.id));
   if (scored.length === 0) return unsorted('no-title', []);
@@ -456,12 +467,30 @@ function yearFits(en: Entry, years: readonly number[]): boolean {
 }
 
 /**
- * An AniList entry and a TMDB entry for the same title: TMDB marks it animated, a strictly equal name, the same kind,
- * years within YEAR_SLACK.
+ * Whether a TMDB entry's year fits an AniList entry's (ruling T5q). A TMDB series is dated by its first season, so for a
+ * series the window runs from the AniList chain root's year (the first TV season; this entry's own year when the chain
+ * is unknown) to this entry's year, each widened by YEAR_SLACK; a movie keeps YEAR_SLACK on both sides. A missing year
+ * fits when `unknownFits`.
  */
-function twins(a: Entry, t: Entry): boolean {
-  if (t.animation !== true || a.kind !== t.kind || a.year === null || t.year === null || Math.abs(a.year - t.year) > YEAR_SLACK) return false;
-  return names(a).some((x) => names(t).some((y) => sameTitle(x, y)));
+function inYearWindow(a: Entry, rootYear: number | null, t: Entry, unknownFits: boolean): boolean {
+  if (a.year === null || t.year === null) return unknownFits;
+  const from = (a.kind === 'series' ? (rootYear ?? a.year) : a.year) - YEAR_SLACK;
+  return t.year >= from && t.year <= a.year + YEAR_SLACK;
+}
+
+/**
+ * An AniList entry and a TMDB entry for the same title: TMDB marks it animated, a name strictly equal to one of the
+ * AniList names or to one with its season stripped (TMDB names the series, AniList the season: `Harbor Line Season 3`),
+ * the same kind, and a year in the window (ruling T5q).
+ */
+function twins(a: Entry, rootYear: number | null, t: Entry): boolean {
+  if (t.animation !== true || a.kind !== t.kind || !inYearWindow(a, rootYear, t, false)) return false;
+  return seriesNames(a).some((x) => names(t).some((y) => sameTitle(x, y)));
+}
+
+/** An AniList entry's names, each also with its season stripped. */
+function seriesNames(a: Entry): string[] {
+  return names(a).flatMap((n) => [n, parseName(n).candidates[0] ?? n]);
 }
 
 /** An AniList entry by id, through the cache. */
@@ -477,28 +506,29 @@ async function anilistEntry(id: string, ctx: MatchContext): Promise<Entry | null
 }
 
 /**
- * An AniList TV/TV_SHORT entry's place in its chain of TV prequels, and the season its names carry. With no TV prequel
- * it is 1, unless its name carries a sequel marker, when the prequel is missing from the data and the place is unknown.
+ * An AniList TV/TV_SHORT entry's place in its chain of TV prequels, the chain's root (its first TV season), and the
+ * season its names carry. With no TV prequel it is 1 and its own root, unless its name carries a sequel marker, when the
+ * prequel is missing from the data and the place and root are unknown.
  */
-async function anilistPlace(en: Entry, ctx: MatchContext): Promise<{ place: number | null; named: number | null }> {
+async function anilistPlace(en: Entry, ctx: MatchContext): Promise<{ place: number | null; named: number | null; root: Entry | null }> {
   const seen = new Set(names(en).map((n) => parseName(n).season).filter((s): s is number => s !== null));
   const named = seen.size === 1 ? [...seen][0]! : null;
   const tvPrequels = (x: Entry) => x.relations.filter((r) => r.type === 'PREQUEL' && TV_FORMATS.has(r.format ?? ''));
   if (tvPrequels(en).length === 0) {
     const sequel = seen.size > 1 || (named !== null && named > 1) ||
       names(en).some((n) => SEQUEL_MARK.test(n.normalize('NFKC')) || SEQUEL_ROMAN.test(n.normalize('NFKC')));
-    return { place: sequel ? null : 1, named };
+    return sequel ? { place: null, named, root: null } : { place: 1, named, root: en };
   }
   let cur = en;
   for (let place = 1; place <= MAX_CHAIN; place++) {
     const prev = tvPrequels(cur);
-    if (prev.length === 0) return { place, named };
+    if (prev.length === 0) return { place, named, root: cur };
     if (prev.length > 1) break;
     const next = await anilistEntry(prev[0]!.id, ctx);
     if (!next) break;
     cur = next;
   }
-  return { place: null, named };
+  return { place: null, named, root: null };
 }
 
 /** Whether an entry can be the evidence's season (rule 3), and which season it files under (see DiscMatch). */

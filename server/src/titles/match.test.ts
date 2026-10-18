@@ -459,4 +459,31 @@ describe('matchDiscs', () => {
       }
     });
   });
+
+  describe('twin rules (fix round 3)', () => {
+    const prequel = (id: string): Entry['relations'][number] => ({ type: 'PREQUEL', id, format: 'TV', startDate: null });
+
+    it('T5q: a TMDB series dated from the chain root is the twin of a later AniList season', async () => {
+      const s1 = entry('anilist:801', { english: 'Harbor Line' }, { year: 2019 });
+      const s2 = entry('anilist:802', { english: 'Harbor Line Season 2' }, { year: 2021, relations: [prequel('anilist:801')] });
+      const s3 = entry('anilist:803', { english: 'Harbor Line Season 3' }, { year: 2023, relations: [prequel('anilist:802')] });
+      const path = 'Shows/[BDMV] Harbor Line Season 3 Vol.1';
+      const run = async (t: Entry) => byDisc((await matchDiscs([ev(path)], ctx(fake({ 'Harbor Line': [s3] }, [], [s1, s2]), fake({ 'Harbor Line': [t] })))).matches, path);
+      const series = entry('tmdb-tv:810', { english: 'Harbor Line' }, { year: 2019, seasons: seasons(3), animation: true });
+      expect(await run(series)).toMatchObject({ status: 'filed', entryId: 'anilist:803', season: 3, disc: 1 });
+      expect(await run({ ...series, animation: false })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      // before the chain root's year minus one: not the same series
+      expect(await run({ ...series, year: 2016 })).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+    });
+
+    it('T5r: a live-action TMDB entry named like the AniList entry, but not like the evidence, is several-fit (G4)', async () => {
+      const anime = entry('anilist:200', { english: 'Glass Orchard', romaji: 'Garasu no Kajuen', native: 'ガラスの果樹園' }, { year: 2019 });
+      const path = 'Drama/[BDMV] ガラスの果樹園 DISC1';
+      for (const names of [{ english: 'Glass Orchard' }, { english: 'Garasu no Kajuen' }]) {
+        const drama = entry('tmdb-tv:203', names, { year: 2020, seasons: seasons(1), animation: false });
+        const { matches } = await matchDiscs([ev(path, { jpn: 'ガラスの果樹園' })], ctx(fake({ ガラスの果樹園: [anime] }), fake({ ガラスの果樹園: [drama] })));
+        expect(byDisc(matches, path), names.english).toMatchObject({ status: 'unsorted', reason: 'several-fit' });
+      }
+    });
+  });
 });
