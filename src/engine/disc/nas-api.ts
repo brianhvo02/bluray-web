@@ -73,3 +73,16 @@ export interface DiscManifest {
 
 /** Why the NAS's title matcher left a disc in Unsorted (spec §7), shown to the owner. */
 export type UnsortedReason = 'no-title' | 'several-fit' | 'no-season' | 'episode-past-season' | 'no-disc-number' | 'sources-disagree' | 'source-unreachable';
+
+export type TitleKind = 'series' | 'movie' | 'music';
+export interface TitleNames { readonly english: string | null; readonly romaji: string | null; readonly native: string | null; readonly synonyms: readonly string[]; readonly display: string | null }
+export interface TitleSummary { readonly id: string; readonly kind: TitleKind; readonly names: TitleNames; readonly poster: string | null; readonly year: number | null; readonly seasons: number; readonly discs: number; readonly addedAt: number; readonly own: boolean }
+
+/** What the owner decided for one disc (spec §7). */
+export type OwnerChoice =
+  | { readonly kind: 'title'; readonly titleId: string; readonly season: number | null; readonly disc: number | null }
+  | { readonly kind: 'music'; readonly name: string | null }
+  | { readonly kind: 'extras'; readonly titleId: string; readonly season: number | null }
+  | { readonly kind: 'hidden' };
+export interface OwnTitle { readonly id: string; readonly kind: TitleKind; readonly name: string; readonly seasons: number | null }
+export interface UnsortedItem { readonly discId: string; readonly path: string; readonly discTitles: readonly { readonly lang: string; readonly name: string }[]; readonly reason: UnsortedReason; readonly suggestions: readonly TitleSummary[]; readonly catalogueNumber: string | null; readonly group: string; readonly groupSize: number }

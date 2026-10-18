@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { isCode, lockFile, replaceAtomically, syncDir, writeSynced } from './atomic-json';
 import type { Device, PairingCode } from './auth';
 
 export interface AuthData {
@@ -9,42 +10,6 @@ export interface AuthData {
 }
 
 const SECRET_BYTES = 32;
-const LOCK_WAIT_MS = 5_000;
-const LOCK_STALE_MS = 10_000;
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function isCode(err: unknown, code: string): boolean {
-  return (err as NodeJS.ErrnoException | null)?.code === code;
-}
-
-/** Writes `data` to a new mode-600 file at `path` and flushes it to disk. */
-function writeSynced(path: string, data: string | Buffer): void {
-  const fd = openSync(path, 'w', 0o600);
-  try {
-    const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
-    for (let at = 0; at < bytes.length; ) at += writeSync(fd, bytes, at);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** Flushes a directory entry change; not every platform allows it, hence best effort. */
-function syncDir(dir: string): void {
-  try {
-    const fd = openSync(dir, 'r');
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    // Best effort.
-  }
-}
 
 /**
  * Creates the mode-600 file `path` holding `data` unless it already exists. link() rather than rename():
@@ -124,14 +89,11 @@ export class Store {
 
   /** Runs `change` on a fresh copy of the data under the lock, then writes the result. */
   update<T>(change: (data: AuthData) => T): T {
-    const release = this.lock();
+    const release = lockFile(this.file);
     try {
       const data = this.load();
       const result = change(data);
-      const temp = `${this.file}.${process.pid}.tmp`;
-      writeSynced(temp, JSON.stringify(data));
-      renameSync(temp, this.file);
-      syncDir(this.dir);
+      replaceAtomically(this.file, JSON.stringify(data));
       this.cached = { key: this.fileKey(), data };
       return result;
     } finally {
@@ -164,31 +126,5 @@ export class Store {
       fail(this.file, 'not valid JSON');
     }
     return validate(this.file, parsed);
-  }
-
-  /**
-   * Takes the lock file. The wait blocks the event loop, which is acceptable here: the lock is only
-   * contended by the one-shot `owner-code` command, holders keep it for a single small file write
-   * (well under a millisecond), and auth changes are rare (pairing, session starts, admin actions).
-   */
-  private lock(): () => void {
-    const path = `${this.file}.lock`;
-    const deadline = Date.now() + LOCK_WAIT_MS;
-    for (;;) {
-      try {
-        closeSync(openSync(path, 'wx', 0o600));
-        return () => unlinkSync(path);
-      } catch (err) {
-        if (!isCode(err, 'EEXIST')) throw err;
-      }
-      try {
-        // A holder that died mid-write leaves its lock behind.
-        if (Date.now() - statSync(path).mtimeMs > LOCK_STALE_MS) unlinkSync(path);
-      } catch (err) {
-        if (!isCode(err, 'ENOENT')) throw err;
-      }
-      if (Date.now() > deadline) throw new Error(`${path} is held`);
-      sleepSync(10);
-    }
   }
 }
