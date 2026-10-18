@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { collectWindows, expectInSync, telemetry } from './telemetry';
-import { CHROME_ONLY, skipWithoutH264 } from './support';
+import { CHROME_ONLY, setFolder, skipWithoutH264 } from './support';
 
 test.skip(({ browserName, isMobile }) => browserName !== 'chromium' || isMobile, CHROME_ONLY);
 
@@ -31,7 +31,7 @@ test('plays every audio track of the disc in sync', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
 
@@ -65,7 +65,7 @@ test('plays every audio track of the disc in sync', async ({ page }) => {
 test('A cycles the audio track and shows which one is playing', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
   await page.keyboard.press('a');
@@ -76,7 +76,7 @@ test('A cycles the audio track and shows which one is playing', async ({ page })
 test('the audio menu works from the keyboard without seeking or changing volume', async ({ page }) => {
   await page.goto('/?telemetry=1');
   await skipWithoutH264(page);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
   await page.getByTestId('playlist-00000').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-state', 'playing', { timeout: 10_000 });
   await page.getByTestId('player').hover();
