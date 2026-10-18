@@ -115,7 +115,8 @@ describe('ArtCache', () => {
     await art.get(ID1, 'small', 'https://img.example/1');
     await art.get(ID2, 'small', 'https://img.example/2');
     await art.get(ID1, 'small', 'https://img.example/1');
-    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'index.json'), 'utf8'))[`${ID1}-small`].usedAt).toBe(3));
+    // 10 s, not vi.waitFor's 1 s default: a loaded CI runner can miss the debounced save by more than a second
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'index.json'), 'utf8'))[`${ID1}-small`].usedAt).toBe(3), { timeout: 10_000 });
     const restarted = new ArtCache(dir, fetcher(10), 25, { now });
     await restarted.get(ID3, 'small', 'https://img.example/3');
     expect(existsSync(join(dir, `${ID1}-small`))).toBe(true);
