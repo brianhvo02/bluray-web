@@ -9,6 +9,9 @@ const LONG_VOWELS: Readonly<Record<string, string>> = { ā: 'a', ī: 'i', ū: 'u
 /**
  * NFKC, lower case, long vowels folded (`ō`→`o`, `ū`→`u`, `ou`→`o`, `oo`→`o`, `uu`→`u`, within a word), katakana folded
  * to hiragana, and punctuation, symbols and spaces removed. Romaji is not transliterated.
+ *
+ * The vowel folding also merges some English pairs (`Good`/`God`, `Moon`/`Mon`, `Soul`/`Sol`), so a short query can
+ * find more than it should. The matcher must not treat a normalised match as proof on its own.
  */
 export function normalizeTitle(text: string): string {
   return text
@@ -22,8 +25,12 @@ export function normalizeTitle(text: string): string {
     .replace(/ /g, '');
 }
 
-/** True when the normalised query is a substring of a normalised name (an empty query matches any name). */
+/**
+ * True when the normalised query is a substring of a normalised name. A query that normalises to nothing matches no
+ * name; the search UI shows the full list for a blank query itself.
+ */
 export function titleMatches(query: string, names: readonly string[]): boolean {
   const q = normalizeTitle(query);
+  if (q === '') return false;
   return names.some((name) => normalizeTitle(name).includes(q));
 }

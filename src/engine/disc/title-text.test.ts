@@ -39,4 +39,9 @@ describe('titleMatches', () => {
     expect(titleMatches('moonrise', ['Starfall Wanderer', '星降りの旅人'])).toBe(false);
     expect(titleMatches('starfall', [])).toBe(false);
   });
+
+  it('is false for a query that normalises to nothing', () => {
+    expect(titleMatches('', ['Starfall Wanderer'])).toBe(false);
+    expect(titleMatches(' !! ', ['Starfall Wanderer'])).toBe(false);
+  });
 });

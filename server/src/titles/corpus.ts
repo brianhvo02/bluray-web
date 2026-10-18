@@ -30,7 +30,7 @@ export const NAME_CORPUS: readonly { readonly text: string; readonly expected: P
   { text: '盤上の風 第8巻 DISC2', expected: { candidates: ['盤上の風'], volume: 8, disc: 2 } },
   { text: 'Silent Archive Act.2 下巻', expected: { volume: 2 } },
   { text: 'Silent Archive 上巻', expected: { candidates: ['Silent Archive'], volume: 1 } },
-  { text: '星降りの旅人 2', expected: { candidates: ['星降りの旅人'], volume: 2 } },
+  { text: '星降りの旅人 2', expected: { candidates: ['星降りの旅人', '星降りの旅人 2'], volume: 2 } },
   { text: 'Orbit Patrol: The Long Watch Season 2 Disc 2', expected: { candidates: ['Orbit Patrol: The Long Watch'], season: 2, disc: 2 } },
   { text: 'IRONWOOD Blu-ray Box Season3 Disc3', expected: { candidates: ['IRONWOOD'], season: 3, disc: 3 } },
 
@@ -39,7 +39,7 @@ export const NAME_CORPUS: readonly { readonly text: string; readonly expected: P
   { text: 'Lantern.Road.2025.2160p.USA.UHD.Blu-ray.HEVC-GRP', expected: { candidates: ['Lantern Road'], year: 2025 } },
   { text: 'Quiet.Harbor.S02E05.1080p.Blu-ray.REMUX.AVC.FLAC.2.0-GRP', expected: { candidates: ['Quiet Harbor'], season: 2, music: false } },
   { text: 'Crimson.Gale.Fleet.Vol.3.1080p.BluRay.AVC-GRP', expected: { candidates: ['Crimson Gale Fleet'], volume: 3 } },
-  { text: 'BDROM_22', expected: { candidates: ['BDROM 22'] } },
+  { text: 'BDROM_22', expected: { candidates: [], disc: null } },
 
   // Loose
   { text: 'RIVERSIDE S02 VOL.2', expected: { candidates: ['RIVERSIDE'], season: 2, volume: 2 } },
@@ -65,4 +65,51 @@ export const NAME_CORPUS: readonly { readonly text: string; readonly expected: P
   { text: 'Ｖｏｌ．３', expected: { candidates: [], volume: 3 } },
   { text: '盤上の風 ＤＩＳＣ２', expected: { candidates: ['盤上の風'], disc: 2 } },
   { text: '夜明けの約束（よあけのやくそく）　第８巻', expected: { candidates: ['夜明けの約束', 'よあけのやくそく'], volume: 8 } },
+
+  // Review round 1: when unsure, an empty candidate or a null number, never a wrong one
+  // bonus words only in brackets, as `Live Event`, or next to Bonus/特典 (ruling T3b)
+  { text: 'Starlight Live!', expected: { candidates: ['Starlight Live!'], bonus: false } },
+  { text: 'Event Horizon', expected: { candidates: ['Event Horizon'], bonus: false } },
+  { text: 'Foo Live', expected: { candidates: ['Foo Live'], bonus: false } },
+  { text: 'Foo [Live Blu-ray]', expected: { candidates: ['Foo'], bonus: true } },
+  { text: 'Foo Bonus Live', expected: { candidates: ['Foo'], bonus: true } },
+  { text: 'Foo Live特典', expected: { bonus: true } },
+  // release tokens that are also words keep the title
+  { text: 'Fin and Feather', expected: { candidates: ['Fin and Feather'] } },
+  { text: 'Iso Tribe', expected: { candidates: ['Iso Tribe'] } },
+  { text: 'The Box Vol.1', expected: { candidates: ['The Box'], volume: 1 } },
+  { text: 'Foo.Bar.ITA.1080p.BluRay.AVC-GRP', expected: { candidates: ['Foo Bar'] } },
+  { text: 'Foo Bar BD-BOX', expected: { candidates: ['Foo Bar'] } },
+  // ranges name a box or series folder
+  { text: 'Season 1-3', expected: { candidates: [], season: null } },
+  { text: 'Foo S01-S03', expected: { candidates: ['Foo'], season: null } },
+  { text: 'Foo Disc 1-3', expected: { candidates: ['Foo'], disc: null } },
+  { text: 'Foo D1-D3', expected: { candidates: ['Foo'], disc: null } },
+  // the scene year is the last year-like token before the release tags, 1900 to next year
+  { text: 'Glass.Orchard.2049.1080p.BluRay-GRP', expected: { candidates: ['Glass Orchard 2049'], year: null } },
+  { text: 'Glass.Orchard.2049.2017.1080p.BluRay-GRP', expected: { candidates: ['Glass Orchard 2049'], year: 2017 } },
+  // nesting-aware groups; group tags and lone tags are not candidates
+  { text: '[BDMV][Foo [Bar] Baz][Vol.2]', expected: { candidates: ['Foo'], volume: 2 } },
+  { text: 'Foo (Bar (Baz)) Vol.1', expected: { candidates: ['Foo', 'Bar'], volume: 1 } },
+  { text: '[GRP]', expected: { candidates: [] } },
+  { text: '[SubGroup]', expected: { candidates: [] } },
+  { text: '[GRP] Foo - 05 [1080p]', expected: { candidates: ['Foo'], episodes: [5, 5] } },
+  { text: '[GRP][Foo Bar][Vol.1]', expected: { candidates: ['Foo Bar'], volume: 1 } },
+  // generic disc labels
+  { text: 'BDROM', expected: { candidates: [] } },
+  { text: 'BD_VIDEO', expected: { candidates: [] } },
+  { text: 'BD_ROM', expected: { candidates: [] } },
+  { text: 'VIDEO_TS', expected: { candidates: [] } },
+  { text: 'DISC', expected: { candidates: [], disc: null } },
+  { text: 'DISC_2', expected: { candidates: [], disc: 2 } },
+  { text: '01', expected: { candidates: [] } },
+  // episodes, parts and cours
+  { text: 'Foo S01E05', expected: { candidates: ['Foo'], season: 1, episodes: [5, 5] } },
+  { text: 'Foo Season 2 Part 2', expected: { candidates: ['Foo Part 2'], season: 2 } },
+  { text: 'Foo 2nd Cour', expected: { candidates: ['Foo 2nd Cour'], season: null } },
+  { text: 'Foo Part 2', expected: { candidates: ['Foo Part 2'], season: null } },
+  // numeric parens, all-caps labels, two volumes at once
+  { text: 'Foo (1)', expected: { candidates: ['Foo'] } },
+  { text: 'ABC_TITLE_3_1', expected: { candidates: ['ABC TITLE'], season: null, volume: null, disc: null, episodes: null } },
+  { text: 'Silent Archive 上巻 下巻', expected: { candidates: ['Silent Archive'], volume: null } },
 ];

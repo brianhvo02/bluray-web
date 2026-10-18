@@ -1,6 +1,9 @@
 /**
  * Name parsing (spec §7): turns a folder name or a disc title into candidate titles plus the season, volume, disc, box,
  * year, episodes, bonus and music markers it carries. Original code; the corpus in corpus.ts pins its behaviour.
+ *
+ * When a name is unclear the parser gives an empty candidate or a null number, never a guess: candidates and numbers
+ * feed AniList and TMDB lookups directly, and a wrong one can file a disc under the wrong title.
  */
 
 export interface ParsedName {
@@ -15,143 +18,255 @@ export interface ParsedName {
   readonly music: boolean; // [CD] or FLAC together with BDMV; an artist – title pattern under a Music folder is the grouping's call
 }
 
-type Structure = { -readonly [K in keyof Omit<ParsedName, 'candidates'>]: ParsedName[K] };
+type NumberField = 'season' | 'volume' | 'disc' | 'box' | 'year';
 
-/** Where a stripped token was: title text is cut here, and the first non-empty piece is the title. */
+/** What a scan has found so far. A number seen twice with different values is a conflict and ends up null. */
+class Found {
+  readonly numbers = new Map<NumberField, number | 'conflict'>();
+  episodes: readonly [number, number] | null = null;
+  bonus = false;
+
+  set(field: NumberField, n: number): void {
+    if (!Number.isFinite(n)) return;
+    const had = this.numbers.get(field);
+    this.numbers.set(field, had === undefined || had === n ? n : 'conflict');
+  }
+
+  get(field: NumberField): number | null {
+    const n = this.numbers.get(field);
+    return typeof n === 'number' ? n : null;
+  }
+}
+
+/** Where a structure token was: the title is cut here, and the first non-empty piece is the title. */
 const CUT = '\u0000';
+/** Where a release tag was: also a cut, and an ambiguous tag next to one is a tag too. */
+const TAG = '\u0001';
+const MARK = `[${CUT}${TAG}]`;
 
 const KANJI_DIGITS: Readonly<Record<string, number>> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
 /** An ASCII number, or a kanji one up to 99 (`八`, `十二`, `二十`). */
 const NUM = '(\\d{1,3}|[一二三四五六七八九十]{1,3})';
 
-function toNumber(text: string): number {
+function toNumber(text: string | undefined): number {
+  if (text === undefined) return Number.NaN;
   if (/^\d+$/.test(text)) return Number(text);
   const [tens, ones] = text.split('十');
   if (ones === undefined) return KANJI_DIGITS[text] ?? Number.NaN;
   return (tens === '' ? 1 : (KANJI_DIGITS[tens ?? ''] ?? Number.NaN)) * 10 + (ones === '' ? 0 : (KANJI_DIGITS[ones] ?? Number.NaN));
 }
 
-type Field = 'season' | 'volume' | 'disc' | 'box';
-const set = (s: Structure, field: Field, text: string | undefined): void => {
-  const n = toNumber(text ?? '');
-  if (s[field] === null && Number.isFinite(n)) s[field] = n;
-};
-
 /**
  * Structure tokens, in the order they are tried. Each is replaced by a cut, so the title is the text before it.
- * Ranges come before single numbers, and `2nd Season` before `Season 2`.
+ * Ranges come first and set nothing (they name a box or series folder), and `2nd Season` comes before `Season 2`.
  */
-const STRUCTURE: readonly { readonly re: RegExp; readonly read: (s: Structure, m: string[]) => void }[] = [
-  // a volume range names a box or series folder, not one volume
+const STRUCTURE: readonly { readonly re: RegExp; readonly read: (f: Found, m: string[]) => void }[] = [
   { re: /\bVol(?:ume)?\.?[ ._]*\d{1,3}\s*[-~]\s*(?:Vol(?:ume)?\.?[ ._]*)?\d{1,3}\b/gi, read: () => {} },
-  { re: /第(\d{1,4})話?\s*[-~]\s*第?(\d{1,4})話/g, read: (s, m) => { s.episodes ??= [Number(m[1]), Number(m[2])]; } },
-  { re: /第(\d{1,4})話/g, read: (s, m) => { s.episodes ??= [Number(m[1]), Number(m[1])]; } },
-  { re: /\bS(\d{1,2})(?:E\d{1,3})?\b/gi, read: (s, m) => set(s, 'season', m[1]) },
-  { re: /\b(\d{1,2})(?:st|nd|rd|th)[ ._]*Season\b/gi, read: (s, m) => set(s, 'season', m[1]) },
-  { re: /\bSeason[ ._]*(\d{1,2})\b/gi, read: (s, m) => set(s, 'season', m[1]) },
-  { re: new RegExp(`第${NUM}(?:期|シリーズ)`, 'g'), read: (s, m) => set(s, 'season', m[1]) },
-  { re: /\bVol(?:ume)?\.?[ ._]*(\d{1,3})\b/gi, read: (s, m) => set(s, 'volume', m[1]) },
-  { re: new RegExp(`第?${NUM}巻`, 'g'), read: (s, m) => set(s, 'volume', m[1]) },
-  { re: /上巻/g, read: (s) => set(s, 'volume', '1') },
-  { re: /下巻/g, read: (s) => set(s, 'volume', '2') },
-  { re: /\bDis[ck][ ._]*(\d{1,2})\b/gi, read: (s, m) => set(s, 'disc', m[1]) },
-  { re: /ディスク(\d{1,2})/g, read: (s, m) => set(s, 'disc', m[1]) },
-  { re: /\bD(\d{1,2})\b/g, read: (s, m) => set(s, 'disc', m[1]) },
-  { re: /\bBOX[ ._]*(\d{1,2})\b/gi, read: (s, m) => set(s, 'box', m[1]) },
+  { re: /\bSeason[ ._]*\d{1,2}\s*[-~]\s*(?:Season[ ._]*)?\d{1,2}\b/gi, read: () => {} },
+  { re: /\bS\d{1,2}\s*[-~]\s*S\d{1,2}\b/gi, read: () => {} },
+  { re: /\bDis[ck][ ._]*\d{1,2}\s*[-~]\s*(?:Dis[ck][ ._]*)?\d{1,2}\b/gi, read: () => {} },
+  { re: /\bD\d{1,2}\s*[-~]\s*D?\d{1,2}\b/g, read: () => {} },
+  { re: /上巻\s*[・,、&＆~-]?\s*下巻/g, read: (f) => { f.set('volume', 1); f.set('volume', 2); } },
+  { re: /第(\d{1,4})話?\s*[-~]\s*第?(\d{1,4})話/g, read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[2])]; } },
+  { re: /第(\d{1,4})話/g, read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
+  {
+    re: /\bS(\d{1,2})(?:E(\d{1,3}))?\b/gi,
+    read: (f, m) => {
+      f.set('season', toNumber(m[1]));
+      if (m[2] !== undefined) f.episodes ??= [Number(m[2]), Number(m[2])];
+    },
+  },
+  { re: /\b(\d{1,2})(?:st|nd|rd|th)[ ._]*Season\b/gi, read: (f, m) => f.set('season', toNumber(m[1])) },
+  { re: /\bSeason[ ._]*(\d{1,2})\b/gi, read: (f, m) => f.set('season', toNumber(m[1])) },
+  { re: new RegExp(`第${NUM}(?:期|シリーズ)`, 'g'), read: (f, m) => f.set('season', toNumber(m[1])) },
+  { re: /\bVol(?:ume)?\.?[ ._]*(\d{1,3})\b/gi, read: (f, m) => f.set('volume', toNumber(m[1])) },
+  { re: new RegExp(`第?${NUM}巻`, 'g'), read: (f, m) => f.set('volume', toNumber(m[1])) },
+  { re: /上巻/g, read: (f) => f.set('volume', 1) },
+  { re: /下巻/g, read: (f) => f.set('volume', 2) },
+  { re: /\bDis[ck][ ._]*(\d{1,2})\b/gi, read: (f, m) => f.set('disc', toNumber(m[1])) },
+  { re: /ディスク(\d{1,2})/g, read: (f, m) => f.set('disc', toNumber(m[1])) },
+  { re: /\bD(\d{1,2})\b/g, read: (f, m) => f.set('disc', toNumber(m[1])) },
+  { re: /\bBOX[ ._]*(\d{1,2})\b/gi, read: (f, m) => f.set('box', toNumber(m[1])) },
+  // a fansub-style episode number: `Foo - 05` before tags or at the end
+  { re: new RegExp(`\\s-\\s(\\d{2,4})(?:v\\d)?(?=\\s*(?:${MARK}|$))`, 'g'), read: (f, m) => { f.episodes ??= [Number(m[1]), Number(m[1])]; } },
 ];
 
 /** Bonus markers that are never part of a title, so they cut it. */
 const BONUS_CUT = /映像特典|特典(?:DISC|ディスク)?|\bBonus\b/gi;
-/** Bonus markers that can also be title words, so they only set the flag. */
-const BONUS_WORD = /\b(?:Event|Live)\b/i;
+/** `Live`/`Event` mark a bonus disc only as `Live Event` or next to Bonus/特典 (inside brackets, on their own too). */
+const BONUS_PHRASE = /\bLive\s*Event\b|(?:\bBonus|特典)\s*(?:Live|Event)\b|\b(?:Live|Event)\s*(?:Bonus\b|特典)/i;
+const BONUS_WORD = /\b(?:Live|Event)\b/i;
 
-/** Release, format, codec and region tokens: they end a title wherever they appear. */
-const TECH = new RegExp(
-  [
-    '\\d{3,4}[pi]', '4K', 'UHD', 'Blu-?ray', 'BDRip', 'BDMV', 'BD', 'DVD', 'ISO', 'REMUX', 'AVC', 'HEVC', 'H\\.?26[45]', 'x26[45]',
-    'MPEG-?2', 'VC-?1', 'LPCM', 'PCM', 'FLAC', 'AAC', 'AC-?3', 'E-?AC-?3', 'DTS(?:-HD)?(?:[ .]MA)?', 'TrueHD', 'Atmos', 'HDR(?:10)?',
-    'JPN', 'USA', 'ITA', 'ENG', 'GER', 'FRA', 'ESP', 'KOR', 'CHN', 'BOX', 'Fin',
-  ].map((t) => `\\b${t}\\b`).join('|') + '|初回(?:生産)?限定版|完全生産限定版|通常版',
+const word = (tokens: readonly string[]): string => tokens.map((t) => `\\b${t}\\b`).join('|');
+/** Release, format, codec and region tokens that are never title words: they end a title wherever they appear. */
+const STRONG_TAG = new RegExp(
+  word([
+    '\\d{3,4}[pi]', 'UHD', 'Blu-?ray', 'BD-?BOX', 'BDRip', 'BDMV', 'REMUX', 'AVC', 'HEVC', 'H\\.?26[45]', 'x26[45]', 'MPEG-?2', 'VC-?1', 'LPCM',
+    'PCM', 'FLAC', 'AAC', 'AC-?3', 'E-?AC-?3', 'DTS(?:-HD)?(?:[ .]MA)?', 'TrueHD', 'Atmos', 'HDR(?:10)?', 'JPN', 'USA', 'GER', 'FRA',
+    'ESP', 'KOR', 'CHN',
+  ]) + '|初回(?:生産)?限定版|完全生産限定版|通常版',
   'gi',
 );
-/** Tags that only count inside brackets, since outside them they may be title words. */
+/** Tags that are also words (`Fin and Feather`, `The Box`): tags only inside brackets or next to another tag. */
+const WEAK_TAG = new RegExp(word(['4K', 'BD', 'DVD', 'ISO', 'ITA', 'ENG', 'BOX(?![ ._]*\\d)', 'Fin']), 'gi');
+const WEAK_BEFORE_TAG = new RegExp(`(?:${WEAK_TAG.source})(?=[\\s.+\\-]*${TAG})`, 'gi');
+const WEAK_AFTER_TAG = new RegExp(`(?<=${TAG}[\\s.+\\-]*)(?:${WEAK_TAG.source})`, 'gi');
+/** Group contents that are tags only inside brackets. */
 const BRACKET_TAG = /^(?:CD|CUE|LOG|BK|SCANS?|WAV|MP3|アニメ|映画|ドラマ|Anime|Movie)$/i;
-const WHOLE_TECH = new RegExp(`^(?:${TECH.source})$`, 'i');
-const TECH_START = new RegExp(`^\\s*(?:${TECH.source})`, 'i');
+const WHOLE_TAG = new RegExp(`^(?:${STRONG_TAG.source}|${WEAK_TAG.source})$`, 'i');
 /** `ABCD-12345`, `XXCL-1234~5`. */
 const CATALOGUE = /\b[A-Z]{2,5}-\d{3,5}(?:~\d{1,2})?\b/g;
 /** `2025.03.26`, `2025-03-26`. */
 const DATE = /\b(?:19|20)\d{2}[.\-/]\d{1,2}[.\-/]\d{1,2}\b/g;
+/** A disc folder's generic label, which names no title: `BDROM`, `BD_VIDEO`, `VIDEO_TS`, `DISC_2`, `01`. */
+const GENERIC_LABEL = /^(?:(?:BDROM|BD[ _-]?ROM|BD[ _-]?VIDEO|BD|BLU-?RAY|VIDEO_TS|DVD)(?:[ _.-]?\d{1,3})?|DIS[CK](?:[ _.-]?(\d{1,2}))?|\d+)$/i;
+/** `Part 2`, `2nd Cour`, `Cour 2`: kept on the title, since AniList titles carry them. */
+const PART = /^\s*(?:Part[ ._]*\d{1,2}|\d{1,2}(?:st|nd|rd|th)[ ._]*Cour|Cour[ ._]*\d{1,2})\b/i;
+const YEAR = /\b((?:19|20)\d{2})\b/g;
 const TRIM = /^[\s\-–—:~_.,・/|+&]+|[\s\-–—:~_.,・/|+&]+$/g;
 const CJK_END = /^(.*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}])\s+(\d{1,2})$/u;
 
-/** Strips structure and tags from free text, recording what it finds, and returns the title piece left (or ''). */
-function scan(text: string, s: Structure, scene: boolean): string {
-  let t = text.replace(DATE, CUT).replace(CATALOGUE, CUT);
-  if (scene) {
-    // `Title.2025.2160p…`: a year token after the title and before the release tokens
-    t = t.replace(/(?<=\S\s)((?:19|20)\d{2})(?=\s+\S|\s*$)/, (y, _g, offset: number) => {
-      const rest = t.slice(offset + y.length);
-      if (rest.trim() !== '' && !TECH_START.test(rest)) return y;
-      s.year ??= Number(y);
-      return CUT;
-    });
+const clean = (piece: string): string => piece.replace(/\s+/g, ' ').replace(TRIM, '');
+const hasLetter = (text: string): boolean => /\p{L}/u.test(text);
+
+/** Marks release tags: strong ones anywhere, ambiguous ones inside brackets or next to another tag. */
+function markTags(text: string, bracket: boolean): string {
+  let t = text.replace(STRONG_TAG, TAG);
+  if (bracket) return t.replace(WEAK_TAG, TAG);
+  for (let before = ''; before !== t; ) {
+    before = t;
+    t = t.replace(WEAK_BEFORE_TAG, TAG).replace(WEAK_AFTER_TAG, TAG);
   }
-  for (const { re, read } of STRUCTURE) t = t.replace(re, (...m: string[]) => (read(s, m), CUT));
-  t = t.replace(BONUS_CUT, () => ((s.bonus = true), CUT)).replace(TECH, CUT);
-  for (const piece of t.split(CUT)) {
-    const clean = piece.replace(/\s+/g, ' ').replace(TRIM, '');
-    if (/[\p{L}\p{N}]/u.test(clean)) return clean;
-  }
-  return '';
+  return t;
 }
 
-/** A bracketed or parenthesised group's content: a tag, a date, a year, an episode range, or title text. */
-function scanGroup(content: string, s: Structure, paren: boolean): string {
-  const c = content.trim();
+/**
+ * Takes a year from the last year-like token directly before the release tags (or at the end of a scene name), after
+ * some title text, and only from 1900 to next year: `Glass.Orchard.2049.2017.1080p` is 2017, `….2049.1080p` none.
+ */
+function markYear(t: string, f: Found, scene: boolean): string {
+  const end = new RegExp(`^\\s*(?:${TAG}${scene ? '|$' : ''})`);
+  let last: RegExpExecArray | null = null;
+  for (const m of t.matchAll(YEAR)) if (end.test(t.slice(m.index + m[0].length)) && hasLetter(t.slice(0, m.index))) last = m;
+  if (last === null) return t;
+  const year = Number(last[1]);
+  if (year < 1900 || year > new Date().getFullYear() + 1) return t;
+  f.set('year', year);
+  return t.slice(0, last.index) + CUT + t.slice(last.index + last[0].length);
+}
+
+/** Strips structure and tags from free text, recording what it finds, and returns the title piece left (or ''). */
+function scan(text: string, f: Found, opts: { readonly scene: boolean; readonly bracket: boolean }): string {
+  let t = markTags(text.replace(DATE, CUT).replace(CATALOGUE, CUT), opts.bracket);
+  t = markYear(t, f, opts.scene);
+  for (const { re, read } of STRUCTURE) t = t.replace(re, (...m: string[]) => (read(f, m), CUT));
+  t = t.replace(BONUS_CUT, () => ((f.bonus = true), CUT));
+  const pieces = t.split(new RegExp(MARK));
+  const at = pieces.findIndex((p) => hasLetter(clean(p)));
+  if (at < 0) return '';
+  const part = PART.exec(pieces[at + 1] ?? '');
+  return clean(`${pieces[at] ?? ''} ${part ? part[0].trim() : ''}`);
+}
+
+interface Group {
+  readonly bracket: boolean; // [..] or 【..】, else (..)
+  readonly content: string;
+  readonly start: number;
+}
+
+/** Top-level bracket and paren groups, nesting-aware; the text outside them keeps a cut where each group was. */
+function splitGroups(text: string): { outside: string; groups: Group[] } {
+  const groups: Group[] = [];
+  let outside = '';
+  let depth = 0;
+  let start = 0;
+  let open = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] ?? '';
+    if ('[【('.includes(c)) {
+      if (depth === 0) {
+        start = i;
+        open = c;
+      }
+      depth++;
+    } else if (depth > 0 && ']】)'.includes(c)) {
+      depth--;
+      if (depth === 0) {
+        groups.push({ bracket: open !== '(', content: text.slice(start + 1, i), start });
+        outside += CUT;
+      }
+    } else if (depth === 0) {
+      outside += c;
+    }
+  }
+  if (depth > 0) outside += text.slice(start); // an unclosed group is plain text
+  return { outside, groups };
+}
+
+/** A group's content: a tag, a date, a year, an episode range, or title text (nested groups are cut out). */
+function scanGroup(group: Group, f: Found): string {
+  const c = splitGroups(group.content).outside.trim();
+  if (group.bracket && BONUS_WORD.test(c)) f.bonus = true;
   if (/^\d{6}$|^\d{8}$/.test(c)) return '';
   const year = /^((?:19|20)\d{2})$/.exec(c);
   if (year) {
-    s.year ??= Number(year[1]);
+    f.set('year', Number(year[1]));
     return '';
   }
-  const range = paren ? /^(\d{1,4})\s*[-~]\s*(\d{1,4})$/.exec(c) : null;
+  const range = group.bracket ? null : /^(\d{1,4})\s*[-~]\s*(\d{1,4})$/.exec(c);
   if (range) {
-    s.episodes ??= [Number(range[1]), Number(range[2])];
+    f.episodes ??= [Number(range[1]), Number(range[2])];
     return '';
   }
-  if (c.split(/[+\s,/]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TECH.test(tag))) return '';
-  return scan(c, s, false);
+  if (group.bracket && c.split(/[+\s,/]+/).every((tag) => tag === '' || BRACKET_TAG.test(tag) || WHOLE_TAG.test(tag))) return '';
+  return scan(c, f, { scene: false, bracket: group.bracket });
 }
 
 export function parseName(text: string): ParsedName {
-  const s: Structure = { season: null, volume: null, disc: null, box: null, year: null, episodes: null, bonus: false, music: false };
-  const nfkc = text.normalize('NFKC');
-  s.music = /\[CD\]/i.test(nfkc) || (/\bFLAC\b/i.test(nfkc) && /\bBDMV\b/i.test(nfkc));
-  if (BONUS_WORD.test(nfkc)) s.bonus = true;
+  const f = new Found();
+  const nfkc = text.normalize('NFKC').trim();
+  const music = /\[CD\]/i.test(nfkc) || (/\bFLAC\b/i.test(nfkc) && /\bBDMV\b/i.test(nfkc));
+  if (BONUS_PHRASE.test(nfkc)) f.bonus = true;
 
-  const brackets: string[] = [];
-  const parens: string[] = [];
-  let outside = nfkc
-    .replace(/\[([^[\]]*)\]|【([^】]*)】/g, (_m, a?: string, b?: string) => (brackets.push(a ?? b ?? ''), CUT))
-    .replace(/\(([^()]*)\)/g, (_m, a: string) => (parens.push(a), CUT));
-  // scene names separate words with dots or underscores and have no spaces
-  const scene = !/\s/.test(outside) && /[._]/.test(outside);
-  if (scene) outside = outside.replace(/[._]/g, ' ');
-
-  const found = [
-    ...outside.split(CUT).map((piece) => scan(piece, s, scene)).filter((c) => c !== '').slice(0, 1),
-    ...brackets.map((g) => scanGroup(g, s, false)),
-    ...parens.map((g) => scanGroup(g, s, true)),
-  ];
-  const candidates = [...new Set(found.filter((c) => c !== ''))];
-
-  // a disc title like `星降りの旅人 2` ends in its volume
-  const first = candidates[0];
-  const tail = first === undefined || s.volume !== null || s.disc !== null ? null : CJK_END.exec(first);
-  if (tail) {
-    candidates[0] = tail[1] ?? first ?? '';
-    s.volume = Number(tail[2]);
+  let candidates: string[] = [];
+  const label = GENERIC_LABEL.exec(nfkc);
+  if (label) {
+    if (label[1] !== undefined) f.set('disc', Number(label[1]));
+  } else {
+    const { outside: raw, groups } = splitGroups(nfkc);
+    // scene names and disc labels separate words with dots or underscores and have no spaces
+    const scene = !/\s/.test(raw) && /[._]/.test(raw);
+    const capsLabel = scene && /^[A-Z0-9_]+$/.test(raw.replaceAll(CUT, '')) && raw.includes('_');
+    const outside = scene ? raw.replace(/[._]/g, ' ') : raw;
+    let title = outside.split(CUT).map((piece) => scan(piece, f, { scene, bracket: false })).find((c) => c !== '') ?? '';
+    if (capsLabel) title = clean(title.split(' ').filter((w) => !/^\d+$/.test(w)).join(' ')); // `ABC_TITLE_3_1`
+    const brackets = groups.filter((g) => g.bracket).map((g) => ({ g, title: scanGroup(g, f) }));
+    const parens = groups.filter((g) => !g.bracket).map((g) => scanGroup(g, f));
+    // bracket text is a title only when nothing outside is (the `[BDMV][date][Title][Vol.N]` style), and a lone word in
+    // the first group, with a title after it, is a release group
+    const bracketTitles = title !== '' ? [] : brackets.filter(({ g, title: t }, i) =>
+      t !== '' && !(g.start === 0 && !/\s/.test(t) && brackets.slice(i + 1).some((b) => b.title !== '')));
+    const loneTag = groups.length === 1 && groups[0]?.bracket === true && clean(raw.replaceAll(CUT, '')) === '' && !/\s/.test(groups[0].content.trim());
+    candidates = [title, ...(loneTag ? [] : bracketTitles.map((b) => b.title)), ...parens].filter(hasLetter);
   }
-  return { candidates, ...s };
+  candidates = [...new Set(candidates)];
+
+  // a disc title like `星降りの旅人 2` ends in its volume; the whole name stays as a candidate for a sequel named so
+  const first = candidates[0];
+  const tail = first === undefined || f.numbers.has('volume') || f.numbers.has('disc') ? null : CJK_END.exec(first);
+  if (tail && first !== undefined) {
+    candidates.splice(0, 1, tail[1] ?? first, first);
+    f.set('volume', Number(tail[2]));
+  }
+  return {
+    candidates,
+    season: f.get('season'),
+    volume: f.get('volume'),
+    disc: f.get('disc'),
+    box: f.get('box'),
+    year: f.get('year'),
+    episodes: f.episodes,
+    bonus: f.bonus,
+    music,
+  };
 }
