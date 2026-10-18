@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { opendir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -222,6 +222,66 @@ describe('Library scan behaviour', () => {
     );
     const lib = new Library(roots(), file, FAST);
     expect(lib.list('')!.discs).toEqual([good]);
+  });
+});
+
+describe('Library evidence', () => {
+  const bdmt = '<disclib><di:discinfo><di:title><di:name>Single One</di:name></di:title></di:discinfo></disclib>';
+  const single = (): string => join(tmp, 'a/[BDMV] Single #1 100%/bdmv');
+
+  beforeEach(() => {
+    touch(join(single(), 'STREAM/00001.m2ts'), '12345');
+    touch(join(single(), 'META/DL/bdmt_eng.xml'), bdmt);
+  });
+
+  it('records evidence for each disc, folder and ISO, and keeps it out of the listing', async () => {
+    const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
+    await lib.scan();
+    const byPath = new Map(lib.evidence().map((e) => [e.path, e]));
+    expect([...byPath.keys()].sort()).toEqual(['drvA/Series (シリーズ)/Vol 1', 'drvA/[BDMV] Single #1 100%', 'drvA/disc.iso', 'drvB/Other']);
+    const folder = byPath.get('drvA/[BDMV] Single #1 100%')!;
+    expect(folder.discTitles).toEqual([{ lang: 'eng', name: 'Single One' }]);
+    expect(folder.fingerprint).toMatch(/^[0-9A-F]{32}$/);
+    expect(folder.discId).toBe(lib.list('drvA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.id);
+    expect(byPath.get('drvA/disc.iso')!.playlists.length).toBeGreaterThan(0);
+    expect(lib.list('drvA')!.discs.every((d) => !('evidence' in d))).toBe(true);
+  });
+
+  it('caches evidence in library.json and does not read it again for an unchanged disc', async () => {
+    const file = join(tmp, 'library.json');
+    await new Library(roots(), file, FAST).scan();
+    writeFileSync(join(single(), 'META/DL/bdmt_eng.xml'), bdmt.replace('Single One', 'Changed'));
+    rmSync(join(tmp, 'a/junk.iso')); // A new Library would probe this non-disc again.
+    const lib = new Library(roots(), file, FAST);
+    const title = (): string | undefined => lib.evidence().find((e) => e.path === 'drvA/[BDMV] Single #1 100%')?.discTitles[0]?.name;
+    expect(title()).toBe('Single One');
+    const reads = vi.spyOn(udf.UdfImage, 'open');
+    await lib.scan();
+    expect(reads).not.toHaveBeenCalled();
+    reads.mockRestore();
+    expect(title()).toBe('Single One');
+  });
+
+  it('reads evidence on the next scan for a cache written without it', async () => {
+    const file = join(tmp, 'library.json');
+    await new Library(roots(), file, FAST).scan();
+    const old = (JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>[]).map(({ evidence: _, ...d }) => d);
+    writeFileSync(file, JSON.stringify(old));
+    const lib = new Library(roots(), file, FAST);
+    expect(lib.list('')!.discs).toHaveLength(3);
+    expect(lib.evidence()).toEqual([]);
+    await lib.scan();
+    expect(lib.evidence()).toHaveLength(4);
+    expect(lib.evidence().map((e) => e.discId).sort()).toEqual(old.map((d) => d.id as string).sort());
+  });
+
+  it('calls onScanned after every completed scan', async () => {
+    const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
+    const calls: number[] = [];
+    lib.onScanned(() => calls.push(lib.evidence().length));
+    await lib.scan();
+    await lib.scan();
+    expect(calls).toEqual([4, 4]);
   });
 });
 

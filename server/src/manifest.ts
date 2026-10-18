@@ -104,7 +104,7 @@ export async function resolveDiscFile(dir: string, path: string): Promise<string
 }
 
 /** Every regular file under the disc folder's BDMV and CERTIFICATE, upper-cased; on a case clash the first name wins. */
-async function listFiles(dir: string): Promise<{ path: string; abs: string }[]> {
+export async function listFiles(dir: string): Promise<{ path: string; abs: string }[]> {
   const out = new Map<string, string>();
   const walk = async (abs: string, rel: string): Promise<void> => {
     const sorted = (await entries(abs)).sort((a, b) => (a.name < b.name ? -1 : 1));

@@ -53,6 +53,14 @@ export async function isoUnchanged(entry: DiscEntry, abs: string): Promise<boole
   }
 }
 
+/** The UDF tree of the image at `abs` (path → file). A file whose extents go past the end of the image is left out: it could not be served whole. */
+export function readIsoTree(abs: string): Promise<ReadonlyMap<string, UdfFile>> {
+  return withImage(abs, async (read, size) => {
+    const files = await readUdf(read);
+    return new Map(files.filter((f) => f.extents.every((e) => e.offset < 0 || e.offset + e.length <= size)).map((f) => [f.path, f]));
+  });
+}
+
 /** The parsed UDF trees of the last `max` ISO discs used, by disc id (path → file), so range reads don't re-parse. */
 export class IsoTrees {
   private readonly trees = new Map<string, Promise<ReadonlyMap<string, UdfFile>>>();
@@ -64,11 +72,7 @@ export class IsoTrees {
     if (tree) {
       this.trees.delete(id);
     } else {
-      tree = withImage(abs, async (read, size) => {
-        const files = await readUdf(read);
-        // A file whose extents go past the end of the image is left out: it could not be served whole.
-        return new Map(files.filter((f) => f.extents.every((e) => e.offset < 0 || e.offset + e.length <= size)).map((f) => [f.path, f]));
-      });
+      tree = readIsoTree(abs);
       // A failed parse isn't kept: the next request tries again.
       tree.catch(() => {
         if (this.trees.get(id) === tree) this.trees.delete(id);
