@@ -198,6 +198,8 @@ interface GateDriver {
   evaluateAsync<T>(expression: string): Promise<T>;
   /** A touch on a touch target, a mouse click otherwise, at page (CSS viewport) coordinates. */
   tap(x: number, y: number): Promise<void>;
+  /** A touch held for `ms` at page coordinates (touch targets whose driver can hold one). */
+  longPress?(x: number, y: number, ms: number): Promise<void>;
   /** A key on the keyboard (computers only). */
   press(key: MenuKey): Promise<void>;
   /** A click on the first element `selector` matches, where coordinates are not enough (Safari on the Mac). */
@@ -281,6 +283,14 @@ class PlaywrightDriver implements GateDriver {
   async tap(x: number, y: number): Promise<void> {
     if (this.touch) await this.page.touchscreen.tap(x, y);
     else await this.page.mouse.click(x, y);
+  }
+  /** A held touch through the DevTools Protocol (Chrome's touch emulation: pointerType 'touch'). */
+  async longPress(x: number, y: number, ms: number): Promise<void> {
+    const cdp = await this.page.context().newCDPSession(this.page);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    await sleep(ms);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await cdp.detach();
   }
   async press(key: MenuKey): Promise<void> {
     const k = PW_KEYS[key];
@@ -369,6 +379,21 @@ class SafariDriver implements GateDriver {
     });
     await this.call('DELETE', '/actions').catch(() => undefined);
   }
+  async longPress(x: number, y: number, ms: number): Promise<void> {
+    if (!this.udid) throw new Error('a long press is a touch: only on a device');
+    await this.call('POST', '/actions', {
+      actions: [{
+        type: 'pointer', id: 'finger', parameters: { pointerType: 'touch' },
+        actions: [
+          { type: 'pointerMove', x: Math.round(x), y: Math.round(y), origin: 'viewport', duration: 0 },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pause', duration: ms },
+          { type: 'pointerUp', button: 0 },
+        ],
+      }],
+    });
+    await this.call('DELETE', '/actions').catch(() => undefined);
+  }
   /** Element click: Safari on the Mac. (On iPadOS 27 an element click never lifts the finger: see tap.) */
   async click(selector: string): Promise<void> {
     if (this.udid) throw new Error('element clicks are unreliable on iOS: tap instead');
@@ -429,6 +454,15 @@ const SNAPSHOT =
 const visibleExpr = (sel: string): string =>
   `(() => { const e = [...document.querySelectorAll(${JSON.stringify(sel)})].find((x) => x.getClientRects().length > 0); if (!e) return null;` +
   ` const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`;
+
+/** Whether the control bar is shown: an idled-out bar (class hidden) still has a box, but its buttons take no taps. */
+const BAR_SHOWN = "(() => { const b = document.querySelector('[data-testid=control-bar]'); return !!b && !b.classList.contains('hidden'); })()";
+
+/** A point in a band of the canvas off the 1920x1080 picture (top letterbox, else left pillarbox), or null. */
+const BAND_POINT =
+  "(() => { const r = document.querySelector('[data-testid=video-canvas]').getBoundingClientRect(); const s = Math.min(r.width / 1920, r.height / 1080);" +
+  ' const top = (r.height - 1080 * s) / 2; const left = (r.width - 1920 * s) / 2;' +
+  ' return top > 12 ? { x: r.x + r.width / 2, y: r.y + top / 2 } : left > 12 ? { x: r.x + left / 2, y: r.y + r.height / 2 } : null; })()';
 
 class Page {
   private marker = '';
@@ -512,6 +546,78 @@ interface MemorySample {
   playlist: string | null;
 }
 
+/** The gate's first tap on the menu, as it happened. */
+export interface FirstTap {
+  tapsIgnoredBefore: number;
+  tapsIgnoredAfter: number;
+  /** Whether the engine counted the tap as ignored by the disc (bdjPlane.tapsIgnored grew). */
+  ignored: boolean;
+  /** What was under the tap point just before the tap (a data-testid or a class): the canvas, or what took it. */
+  tapTarget: string | null;
+  remoteOpened: boolean;
+  how: string;
+}
+
+/** What openRemote needs from the page on a touch target (the gate's Page; a model in gate.test.ts). */
+export interface RemoteOps {
+  remoteOpen(): Promise<boolean>;
+  tapsIgnored(): Promise<number>;
+  /** Taps the menu at the disc's tap point; returns what was under it (see FirstTap.tapTarget). */
+  tapMenu(): Promise<string | null>;
+  /** Waits up to `ms` for the remote to show; whether it did. */
+  waitRemote(ms: number): Promise<boolean>;
+  /** Whether the control bar is shown, so its buttons take taps (an idled-out bar lets them fall through). */
+  barShown(): Promise<boolean>;
+  /** Shows the controls without reaching the disc (a tap off the picture, or a long press); says how. */
+  showControls(): Promise<string>;
+  tapRemoteToggle(): Promise<void>;
+}
+
+/** How long the first tap is given to open the remote: the ignored-tap window and the engine's telemetry, with margin. */
+const FIRST_TAP_WAIT_MS = 4000;
+/** How long a tap on the Remote toggle is given. */
+const TOGGLE_WAIT_MS = 3000;
+
+/**
+ * Makes sure the on-screen remote shows (touch targets): a tap on the menu that the disc ignores opens it (5d spec §4.2);
+ * otherwise the controls are shown first (they idle out after 3 s, and an idled-out bar lets a tap on its Remote button
+ * fall through to the picture) and the Remote button is tapped, checking each time that the remote is not already open
+ * (a second tap would close it). Returns the first tap as it happened, or null when the remote was already open.
+ */
+export async function openRemote(ops: RemoteOps, tries = 3): Promise<FirstTap | null> {
+  if (await ops.remoteOpen()) return null;
+  const before = await ops.tapsIgnored();
+  const tapTarget = await ops.tapMenu();
+  let opened = await ops.waitRemote(FIRST_TAP_WAIT_MS);
+  const after = await ops.tapsIgnored();
+  const ignored = after > before;
+  let how = 'tap on the menu, ignored by the disc';
+  const tried: string[] = [];
+  for (let i = 0; !opened && i < tries; i++) {
+    if (await ops.remoteOpen()) {
+      opened = true;
+      how = 'tap on the menu, ignored by the disc (the remote opened late)';
+      break;
+    }
+    let shown = 'controls already shown';
+    if (!(await ops.barShown())) shown = `controls shown by ${await ops.showControls()}`;
+    if (!(await ops.barShown())) {
+      tried.push(`${shown}, but the bar stayed hidden`);
+      continue;
+    }
+    await ops.tapRemoteToggle();
+    opened = await ops.waitRemote(TOGGLE_WAIT_MS);
+    how = `Remote button in the controls (${shown}; the first tap ${ignored ? 'was' : 'was not'} counted as ignored)`;
+    if (!opened) tried.push(`${shown}, Remote tapped, no remote`);
+  }
+  if (!opened) {
+    throw new Error(
+      `the remote did not open: the first tap (on ${tapTarget ?? 'nothing'}) was ${ignored ? '' : 'not '}counted as ignored, then ${tried.join('; ') || 'nothing'}`,
+    );
+  }
+  return { tapsIgnoredBefore: before, tapsIgnoredAfter: after, ignored, tapTarget, remoteOpened: opened, how };
+}
+
 export interface GateResult {
   target: string;
   via: string;
@@ -526,7 +632,7 @@ export interface GateResult {
   startup?: { bootMs: number | null; firstPlaylistMs: number | null; firstFrameMs: number | null };
   steps: StepRecord[];
   inputs: InputRecord[];
-  firstTap?: { tapsIgnoredBefore: number; tapsIgnoredAfter: number; remoteOpened: boolean; how: string };
+  firstTap?: FirstTap;
   latency: { telemetry: unknown; script: ReturnType<typeof stats>; stay: ReturnType<typeof stats>; all: ReturnType<typeof stats> } | null;
   stay?: { ms: number; inputs: number; answered: number; hashAfter: string | null; expected: string | null; ok: boolean };
   memory: MemorySample[];
@@ -621,33 +727,56 @@ class DiscRun {
 
   /** On a touch target, makes sure the on-screen remote shows: a tap on the menu the disc ignores opens it. */
   private async ensureRemote(): Promise<void> {
-    if (await this.page.visible('[data-testid=remote-pad]', 'the remote')) return;
-    const before = (await this.page.snapshot('the remote')).t?.bdjPlane?.tapsIgnored ?? 0;
-    const [px, py] = this.cfg.tapPoint;
-    const p = await this.page.planePoint(px, py, 'a tap on the menu');
-    await this.page.d.tap(p.x, p.y);
-    let how = 'tap on the menu, ignored by the disc';
-    let opened = await this.page.until<boolean>("!!document.querySelector('[data-testid=remote-pad]')", 'the remote after a tap on the menu', 4000).catch((err: unknown) => {
-      if (err instanceof PageReloadedError) throw err;
-      return false;
-    });
-    if (!opened) {
-      how = 'Remote button in the controls (the disc took the tap on the menu)';
-      if (!(await this.page.visible('[data-testid=remote-toggle]', 'the remote button'))) {
-        // a tap off the picture (a letterbox band) shows the controls
-        const band = await this.page.probe<{ x: number; y: number } | null>(
-          "(() => { const r = document.querySelector('[data-testid=video-canvas]').getBoundingClientRect(); const s = Math.min(r.width / 1920, r.height / 1080);" +
-            ' const top = (r.height - 1080 * s) / 2; return top > 12 ? { x: r.x + r.width / 2, y: r.y + top / 2 } : null; })()',
-          'the letterbox',
+    const page = this.page;
+    const remoteShown = "!!document.querySelector('[data-testid=remote-pad]')";
+    const ops: RemoteOps = {
+      remoteOpen: async () => page.probe<boolean>(remoteShown, 'the remote'),
+      tapsIgnored: async () => (await page.snapshot('the remote')).t?.bdjPlane?.tapsIgnored ?? 0,
+      tapMenu: async () => {
+        const [px, py] = this.cfg.tapPoint;
+        const p = await page.planePoint(px, py, 'a tap on the menu');
+        // what the tap will land on: the canvas, or something over it (the buffering spinner took it on the iPhone)
+        const target = await page.probe<string | null>(
+          `(() => { const e = document.elementFromPoint(${p.x}, ${p.y}); return e ? (e.getAttribute('data-testid') ?? (e.className || e.tagName.toLowerCase())) : null; })()`,
+          'a tap on the menu',
         );
-        if (band) await this.page.d.tap(band.x, band.y);
-      }
-      await this.page.tapOn('[data-testid=remote-toggle]', 'the remote button');
-      opened = await this.page.until<boolean>("!!document.querySelector('[data-testid=remote-pad]')", 'the remote', 5000);
-    }
-    const after = (await this.page.snapshot('the remote')).t?.bdjPlane?.tapsIgnored ?? 0;
-    this.r.firstTap ??= { tapsIgnoredBefore: before, tapsIgnoredAfter: after, remoteOpened: opened, how };
-    this.log(`remote open (${how})`);
+        await page.d.tap(p.x, p.y);
+        return target;
+      },
+      waitRemote: async (ms) =>
+        page.until<boolean>(remoteShown, 'the remote', ms).catch((err: unknown) => {
+          if (err instanceof PageReloadedError) throw err;
+          return false;
+        }),
+      barShown: async () => page.probe<boolean>(BAR_SHOWN, 'the controls'),
+      showControls: async () => {
+        // a tap off the picture (a letterbox or pillarbox band) shows the controls without reaching the disc (R13, R14);
+        // where the picture fills the canvas, a long press does (R15)
+        const band = await page.probe<{ x: number; y: number } | null>(BAND_POINT, 'the letterbox');
+        let how: string;
+        if (band) {
+          await page.d.tap(band.x, band.y);
+          how = 'a tap off the picture';
+        } else if (page.d.longPress) {
+          const [px, py] = this.cfg.tapPoint;
+          const p = await page.planePoint(px, py, 'a long press on the menu');
+          await page.d.longPress(p.x, p.y, 800);
+          how = 'a long press';
+        } else {
+          return 'nothing (no band and no long press on this driver)';
+        }
+        await page.until<boolean>(BAR_SHOWN, 'the controls', 1500).catch((err: unknown) => {
+          if (err instanceof PageReloadedError) throw err;
+          return false;
+        });
+        return how;
+      },
+      tapRemoteToggle: async () => page.tapOn('[data-testid=remote-toggle]', 'the remote button'),
+    };
+    const first = await openRemote(ops);
+    if (!first) return;
+    this.r.firstTap ??= first;
+    this.log(`remote open (${first.how}; the tap landed on ${first.tapTarget})`);
   }
 
   private async input(key: MenuKey, during: 'script' | 'stay'): Promise<InputRecord> {

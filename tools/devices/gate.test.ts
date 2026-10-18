@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPlan, loadPlan, parseGateArgs, stats } from './gate';
+import { buildPlan, loadPlan, openRemote, parseGateArgs, stats, type RemoteOps } from './gate';
 
 const KEYS = ['wait playlist 149', 'wait still 1500   # menu', 'key right', 'wait still 1000', 'key ok', 'wait playlist 40'].join('\n');
 const golden = (steps: Array<[string, string?]>, end = 'eeee'): string =>
@@ -60,5 +60,74 @@ describe('stats', () => {
     expect(stats([])).toBeNull();
     expect(stats([5, 1, 3])).toEqual({ n: 3, median: 3, max: 5, min: 1 });
     expect(stats([4, 1, 3, 2])).toEqual({ n: 4, median: 2.5, max: 4, min: 1 });
+  });
+});
+
+/**
+ * A model of the player for openRemote: the control bar idles out (hidden: its buttons take no taps, which fall through
+ * to the picture below), a tap the disc ignores opens the remote with the controls, and the Remote toggle opens it
+ * only while the bar is shown.
+ */
+function fakePlayer(o: { ignoresTap: boolean; barShown: boolean; toggleWorks?: boolean }): RemoteOps & { calls: string[] } {
+  const s = { bar: o.barShown, remote: false, ignored: 0 };
+  const calls: string[] = [];
+  return {
+    calls,
+    remoteOpen: async () => s.remote,
+    tapsIgnored: async () => s.ignored,
+    tapMenu: async () => {
+      calls.push('tapMenu');
+      if (o.ignoresTap) {
+        s.ignored++;
+        s.remote = true;
+        s.bar = true;
+        return 'video-canvas';
+      }
+      s.bar = true; // the tap woke the controls (the buffering spinner took it)...
+      return 'spinner';
+    },
+    waitRemote: async () => {
+      if (!o.ignoresTap) s.bar = false; // ...and they idled out during the wait
+      return s.remote;
+    },
+    barShown: async () => s.bar,
+    showControls: async () => {
+      calls.push('showControls');
+      s.bar = true;
+      return 'a tap in the letterbox';
+    },
+    tapRemoteToggle: async () => {
+      calls.push('tapRemoteToggle');
+      if (s.bar && o.toggleWorks !== false) s.remote = !s.remote;
+    },
+  };
+}
+
+describe('openRemote (the gate on a touch target)', () => {
+  it('records a tap the disc ignored, which opened the remote by itself', async () => {
+    const p = fakePlayer({ ignoresTap: true, barShown: false });
+    const first = await openRemote(p);
+    expect(first).toEqual({ tapsIgnoredBefore: 0, tapsIgnoredAfter: 1, ignored: true, tapTarget: 'video-canvas', remoteOpened: true, how: 'tap on the menu, ignored by the disc' });
+    expect(p.calls).toEqual(['tapMenu']);
+  });
+
+  it('shows the controls that idled out before tapping the Remote toggle, and records the first tap as not ignored', async () => {
+    const p = fakePlayer({ ignoresTap: false, barShown: false });
+    const first = await openRemote(p);
+    expect(first).toMatchObject({ tapsIgnoredBefore: 0, tapsIgnoredAfter: 0, ignored: false, tapTarget: 'spinner', remoteOpened: true });
+    expect(first!.how).toMatch(/Remote button.*a tap in the letterbox/);
+    expect(p.calls).toEqual(['tapMenu', 'showControls', 'tapRemoteToggle']);
+  });
+
+  it('does nothing when the remote is already open', async () => {
+    const p = fakePlayer({ ignoresTap: true, barShown: true });
+    await openRemote(p);
+    expect(await openRemote(p)).toBeNull();
+    expect(p.calls).toEqual(['tapMenu']);
+  });
+
+  it('fails, saying what the first tap did, when the toggle never opens the remote', async () => {
+    const p = fakePlayer({ ignoresTap: false, barShown: false, toggleWorks: false });
+    await expect(openRemote(p)).rejects.toThrow(/the remote did not open.*spinner.*not counted as ignored/);
   });
 });

@@ -200,6 +200,15 @@ what would change that decision.
   beyond it fails as on a full disk (IOException "No space left on device", logged once with the path and the budget),
   so a disc whose BD-J files exceed it fails to mount its app and falls back to the picker. libbluray has no such limit,
   and desktop has none. The local discs use 4.4 MB (A_NEW_ERA) and 1.4 MB (RENTAL_FAMILY).
+- **Ignored taps on the iPhone gate (Task 14c, 2026-10-18).** On the iPhone, A_NEW_ERA's tap on the menu centre was
+  never counted as ignored. The cause was not the reaction window: idling in A_NEW_ERA's main menu for about 45 s through the
+  real Player (local replay, playlist 00149 behind it) brings no control call, no register write and no plane change
+  after the menu settles, so the 0.5 s window has nothing to catch and the reaction rule is unchanged. The tap never
+  reached the engine: the disc server's read-ahead held the menu playlist in `buffering` on the iPhone, and the
+  buffering spinner, centred on the picture, took the tap, so it only woke the controls. The spinner now passes taps
+  through (`pointer-events: none`). The gate's fallback (tap Remote when the first tap opens nothing) tapped an
+  idled-out control bar, so the tap fell through to the picture; it now shows the controls first and records what lay
+  under the first tap (`firstTap.tapTarget`).
 - **BD-J worker slow-read log (Task 14b).** The BD-J worker logs a slow disc read only at RemoteSource's waiting threshold (`WAITING_AFTER_MS`, 3 s), with how long it waited; reads from picked files (FileSource) are not timed.
 
 ## Audio
