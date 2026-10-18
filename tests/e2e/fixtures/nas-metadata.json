@@ -32,5 +32,56 @@
       "poster": null,
       "banner": null
     }
+  ],
+  "Ember Tide": [
+    {
+      "source": "anilist",
+      "id": "anilist:900111",
+      "kind": "series",
+      "format": "TV",
+      "names": { "english": "Ember Tide", "romaji": null, "native": "燃える潮", "synonyms": [] },
+      "animation": true,
+      "year": 2021,
+      "episodes": 12,
+      "runtimeMin": 24,
+      "seasons": [],
+      "relations": [],
+      "poster": null,
+      "banner": null
+    }
+  ],
+  "Paper Comet": [
+    {
+      "source": "anilist",
+      "id": "anilist:900112",
+      "kind": "series",
+      "format": "TV",
+      "names": { "english": "Paper Comet", "romaji": null, "native": "紙の彗星", "synonyms": [] },
+      "animation": true,
+      "year": 2021,
+      "episodes": 12,
+      "runtimeMin": 24,
+      "seasons": [],
+      "relations": [],
+      "poster": null,
+      "banner": null
+    }
+  ],
+  "Glass Orchard": [
+    {
+      "source": "anilist",
+      "id": "anilist:900113",
+      "kind": "series",
+      "format": "TV",
+      "names": { "english": "Glass Orchard", "romaji": null, "native": "硝子の果樹園", "synonyms": [] },
+      "animation": true,
+      "year": 2021,
+      "episodes": 12,
+      "runtimeMin": 24,
+      "seasons": [],
+      "relations": [],
+      "poster": null,
+      "banner": null
+    }
   ]
 }

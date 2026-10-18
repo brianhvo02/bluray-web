@@ -199,6 +199,71 @@ describe('NasClient', () => {
     expect(server.auth.verify(fresh!)).not.toBeNull();
   });
 
+  it("sends the owner's title routes, and reads Retry-After and a copy's source from refusals", async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const real = server.fetch;
+    const sent: string[] = [];
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length) + url.search;
+      if (route.startsWith('session')) {
+        server.nas = undefined;
+        try {
+          return await real(url, init);
+        } finally {
+          server.nas = answer;
+        }
+      }
+      sent.push(`${init?.method ?? 'GET'} ${route}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`);
+      if (route.startsWith('admin/unsorted')) return Response.json({ items: [], total: 0 });
+      if (route === 'admin/hidden') return Response.json({ discs: [{ discId: 'd1', root: 'drv5', folder: 'A/B', displayName: null }] });
+      if (route.startsWith('admin/lookup?q=Ember') && url.searchParams.get('source') === 'tmdb') return Response.json({ error: 'too-many-lookups' }, { status: 429, headers: { 'Retry-After': '7' } });
+      if (route.startsWith('admin/lookup')) return Response.json({ titles: [{ id: 'anilist:1' }] });
+      if (route === 'admin/discs/d%2F1/choice' && init?.method === 'PUT') {
+        return JSON.parse(String(init.body)).applyToGroup ? Response.json({ skipped: [{ discId: 'd2', reason: 'copy' }] }) : new Response(null, { status: 204 });
+      }
+      if (route === 'admin/discs/d%2F1/choice') return Response.json({ error: 'copy-follows-source', source: 'd0' }, { status: 409 });
+      if (route === 'admin/titles' || route.startsWith('admin/titles/')) {
+        return init?.method === 'DELETE' ? new Response(null, { status: 204 }) : Response.json({ id: 'own:x', kind: 'music', name: 'Live 2024', seasons: null });
+      }
+      return new Response(null, { status: 204 });
+    };
+    server.nas = answer;
+
+    expect(await nas.admin.unsorted(50, 50)).toEqual({ items: [], total: 0 });
+    expect(await nas.admin.hidden()).toEqual([{ discId: 'd1', root: 'drv5', folder: 'A/B', displayName: null }]);
+    expect(await nas.admin.lookup('星 & co', 'anilist')).toEqual([{ id: 'anilist:1' }]);
+    await expect(nas.admin.lookup('Ember', 'tmdb')).rejects.toMatchObject({ status: 429, code: 'too-many-lookups', detail: { retryAfter: 7 } });
+    const choice = { kind: 'title', titleId: 'anilist:1', season: 1, disc: 2 } as const;
+    expect(await nas.admin.setChoice('d/1', choice)).toEqual([]);
+    expect(await nas.admin.setChoice('d/1', choice, true)).toEqual([{ discId: 'd2', reason: 'copy' }]);
+    await expect(nas.admin.clearChoice('d/1')).rejects.toMatchObject({ status: 409, code: 'copy-follows-source', detail: { source: 'd0' } });
+    await nas.admin.setName('music:ab', 'Spring Live');
+    await nas.admin.setName('music:ab', null);
+    await nas.admin.createTitle('music', 'Live 2024', null);
+    await nas.admin.createTitle('series', 'Ember Tide', 2);
+    await nas.admin.renameTitle('own:x', 'Live 2025');
+    await nas.admin.deleteTitle('own:x');
+    await nas.admin.setTitleLibrary('everyone');
+    expect(sent).toEqual([
+      'GET admin/unsorted?offset=50&limit=50',
+      'GET admin/hidden',
+      'GET admin/lookup?q=%E6%98%9F%20%26%20co&source=anilist',
+      'GET admin/lookup?q=Ember&source=tmdb',
+      `PUT admin/discs/d%2F1/choice ${JSON.stringify({ choice })}`,
+      `PUT admin/discs/d%2F1/choice ${JSON.stringify({ choice, applyToGroup: true })}`,
+      'DELETE admin/discs/d%2F1/choice',
+      'PUT admin/names/music%3Aab {"name":"Spring Live"}',
+      'PUT admin/names/music%3Aab {"name":null}',
+      'POST admin/titles {"kind":"music","name":"Live 2024"}',
+      'POST admin/titles {"kind":"series","name":"Ember Tide","seasons":2}',
+      'PATCH admin/titles/own%3Ax {"name":"Live 2025"}',
+      'DELETE admin/titles/own%3Ax',
+      'PUT admin/settings/title-library {"gate":"everyone"}',
+    ]);
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();

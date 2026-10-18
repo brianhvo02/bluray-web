@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
-import { countdown, deviceRow, newCode, revoke } from './admin-model';
-import type { NasClient, NasDevice } from './nas-client';
+import { TMDB_ATTRIBUTION, countdown, deviceRow, matchingStatus, newCode, revoke } from './admin-model';
+import type { NasClient, NasDevice, NasTitleStatus } from './nas-client';
 import { qrSvg } from './qr';
 
 interface AdminScreenProps {
@@ -14,6 +14,8 @@ interface AdminScreenProps {
 
 /** While a code is shown, the devices list is reloaded this often, so the device that redeems it turns up. */
 const DEVICE_POLL_MS = 3_000;
+/** While titles are being matched, the status is reloaded this often. */
+const STATUS_POLL_MS = 5_000;
 
 interface ShownCode {
   readonly code: string;
@@ -23,6 +25,106 @@ interface ShownCode {
 }
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * The title library's part of NAS settings: the matching status, the release gate (off by default; turning it on asks
+ * first) and TMDB's attribution. Absent when the NAS has no title library (its status route answers 404).
+ */
+function TitleLibrarySettings({ nas, now }: { nas: NasClient; now: () => number }): ReactElement {
+  const [status, setStatus] = useState<NasTitleStatus | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [everyone, setEveryone] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    let timer: number | undefined;
+    const load = (): void => {
+      nas.admin.titleStatus().then(
+        (s) => {
+          if (!live) return;
+          setStatus(s);
+          if (s.running) timer = window.setTimeout(load, STATUS_POLL_MS);
+        },
+        () => {
+          if (live) setMissing(true);
+        },
+      );
+    };
+    load();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [nas]);
+
+  const setGate = (open: boolean): void => {
+    setBusy(true);
+    setError(null);
+    nas.admin.setTitleLibrary(open ? 'everyone' : 'owners').then(
+      () => {
+        setBusy(false);
+        setConfirming(false);
+        setEveryone(open);
+      },
+      (err: unknown) => {
+        setBusy(false);
+        setError(message(err));
+      },
+    );
+  };
+
+  const shown = status === null ? null : matchingStatus(status, now());
+  return (
+    <section className="admin-titles" data-testid="nas-title-settings" aria-labelledby="admin-titles-head">
+      <h3 id="admin-titles-head">Title library</h3>
+      {shown && (
+        <div data-testid="nas-matching">
+          <p className="status">{shown.progress}</p>
+          <p className="status">{shown.counts}</p>
+          {shown.tmdb && <p className="status">{shown.tmdb}</p>}
+        </div>
+      )}
+      {!missing && status !== null && (
+        <>
+          <label className="admin-switch">
+            <input
+              type="checkbox"
+              role="switch"
+              data-testid="nas-gate"
+              checked={everyone || confirming}
+              disabled={busy}
+              onChange={(e) => (e.target.checked ? setConfirming(true) : confirming ? setConfirming(false) : setGate(false))}
+            />{' '}
+            Show the title library to everyone
+          </label>
+          {confirming && (
+            <div className="admin-confirm-box" role="group" aria-label="Confirm">
+              <p>Guests will browse by title from their next app load. Hidden discs stay hidden.</p>
+              <button type="button" data-testid="nas-gate-confirm" disabled={busy} onClick={() => setGate(true)}>
+                Show to everyone
+              </button>{' '}
+              <button type="button" data-testid="nas-gate-cancel" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </div>
+          )}
+        </>
+      )}
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
+      <p className="admin-tmdb" data-testid="nas-tmdb">
+        <img src={`${import.meta.env.BASE_URL}tmdb-logo.svg`} alt="TMDB" width={92} height={12} />
+        <span data-testid="nas-tmdb-text">{TMDB_ATTRIBUTION}</span>
+      </p>
+    </section>
+  );
+}
 
 /** NAS settings, for owners: a new pairing code with its QR and countdown, the paired devices with Revoke, and Rescan. */
 export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now }: AdminScreenProps): ReactElement {
@@ -214,6 +316,7 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now }: Admi
           Rescan
         </button>
       </div>
+      <TitleLibrarySettings nas={nas} now={now} />
       {status && (
         <p className="status" role="status" data-testid="nas-admin-status">
           {status}

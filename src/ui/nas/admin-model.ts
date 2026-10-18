@@ -1,4 +1,4 @@
-import { NasHttpError, type NasClient, type NasDevice } from './nas-client';
+import { NasHttpError, type NasClient, type NasDevice, type NasTitleStatus } from './nas-client';
 
 export const ADMIN_MESSAGES = {
   lastOwner: "You can't remove the last owner.",
@@ -59,4 +59,23 @@ export async function revoke(api: AdminApi, id: string): Promise<string | null> 
     if (err instanceof NasHttpError && err.status === 409 && err.code === 'last-owner') return ADMIN_MESSAGES.lastOwner;
     return err instanceof Error ? err.message : String(err);
   }
+}
+
+/** TMDB's required notice (global constraints), shown with its logo in NAS settings. */
+export const TMDB_ATTRIBUTION = 'This product uses the TMDB API but is not endorsed or certified by TMDB';
+
+const discs = (n: number): string => `${n} ${n === 1 ? 'disc' : 'discs'}`;
+
+/** The title library's matching status in NAS settings: the run's progress, the counts, and a note without TMDB. */
+export function matchingStatus(s: NasTitleStatus, now: number): { progress: string; counts: string; tmdb: string | null } {
+  const progress = s.running
+    ? `Matching… ${s.groupsDone} of ${s.groupsTotal} folders`
+    : s.lastRunAt === null
+      ? 'Not matched yet'
+      : `Last matched ${lastSeen(s.lastRunAt, now)}`;
+  return {
+    progress,
+    counts: `${discs(s.filed)} filed · ${s.unsorted} unsorted · ${s.music} music`,
+    tmdb: s.tmdb ? null : 'No TMDB key: discs that aren’t anime go to Unsorted.',
+  };
 }

@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
+import { HiddenScreen } from './HiddenScreen';
+import { MusicScreen } from './MusicScreen';
 import { NasHttpError, type NasClient } from './nas-client';
 import { Poster } from './Poster';
 import { Preflight, type PreflightDisc } from './Preflight';
 import { SeasonScreen } from './SeasonScreen';
 import { SeriesScreen } from './SeriesScreen';
 import { displayName, recentlyAdded, searchTitles, seasonLabel, secondaryName, shelf } from './title-model';
+import { UnsortedScreen } from './UnsortedScreen';
 
 interface TitleLibraryProps {
   readonly nas: NasClient;
@@ -56,6 +59,12 @@ const loadTitles = (nas: NasClient): Promise<TitleSummary[]> => {
 const loadTitle = (nas: NasClient, id: string): Promise<TitleDetail> => {
   const { details } = cacheOf(nas);
   return cached(() => details.get(id), (p) => (p ? details.set(id, p) : details.delete(id)), () => nas.title(id));
+};
+/** After an owner change: the titles and their details are fetched again. */
+const forgetTitles = (nas: NasClient): void => {
+  const c = cacheOf(nas);
+  c.titles = undefined;
+  c.details.clear();
 };
 
 /** Title routes answer 404 to a guest once the gate is closed (ruling T9c). */
@@ -115,8 +124,14 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
   const [titles, setTitles] = useState<TitleSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [picked, setPicked] = useState<Shelf | null>(null);
+  const [picked, setPicked] = useState<TitleKind | null>(null);
   const [unsorted, setUnsorted] = useState<number | null>(null);
+  /** Whether the NAS has a TMDB key (owners' searches skip TMDB without one). */
+  const [tmdb, setTmdb] = useState(false);
+  /** The owner screens: Unsorted, and Hidden from it. */
+  const [ownerScreen, setOwnerScreen] = useState<'unsorted' | 'hidden' | null>(null);
+  /** Bumped after an owner change, so the titles and the Unsorted count are fetched again. */
+  const [version, setVersion] = useState(0);
   /** The titles opened, innermost last (a series, then a movie related to it). */
   const [stack, setStack] = useState<string[]>([]);
   const [detail, setDetail] = useState<TitleDetail | null>(null);
@@ -131,7 +146,10 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     let live = true;
     loadTitles(nas).then(
       (list) => {
-        if (live) setTitles(list);
+        if (live) {
+          setTitles(list);
+          setError(null);
+        }
       },
       (err: unknown) => {
         if (!live) return;
@@ -143,14 +161,16 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     return () => {
       live = false;
     };
-  }, [nas, onFolders]);
+  }, [nas, onFolders, version]);
 
   useEffect(() => {
     if (!owner) return;
     let live = true;
     nas.admin.titleStatus().then(
       (s) => {
-        if (live) setUnsorted(s.unsorted);
+        if (!live) return;
+        setUnsorted(s.unsorted);
+        setTmdb(s.tmdb);
       },
       () => {},
     );
@@ -163,7 +183,13 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     return () => {
       live = false;
     };
-  }, [nas, owner]);
+  }, [nas, owner, version]);
+
+  const changed = useCallback(() => {
+    forgetTitles(nas);
+    setVersion((v) => v + 1);
+  }, [nas]);
+  const loadDetail = useCallback((id: string) => loadTitle(nas, id), [nas]);
 
   const openId = stack.at(-1) ?? null;
   useEffect(() => {
@@ -185,7 +211,7 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
     return () => {
       live = false;
     };
-  }, [nas, openId, onFolders]);
+  }, [nas, openId, onFolders, version]);
 
   /**
    * Focus follows the screens: an opened title or season focuses its heading, and going back focuses the item that
@@ -230,6 +256,25 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
 
   if (settings) return <AdminScreen nas={nas} thisDeviceId={deviceId} onClose={() => setSettings(false)} />;
+
+  if (ownerScreen === 'hidden') {
+    const toUnsorted = (): void => {
+      backward();
+      setOwnerScreen('unsorted');
+    };
+    return <HiddenScreen nas={nas} tmdb={tmdb} onBack={toUnsorted} onChanged={changed} />;
+  }
+  if (ownerScreen === 'unsorted') {
+    const toLibrary = (): void => {
+      backward();
+      setOwnerScreen(null);
+    };
+    const toHidden = (): void => {
+      forward('[data-testid="open-hidden"]');
+      setOwnerScreen('hidden');
+    };
+    return <UnsortedScreen nas={nas} tmdb={tmdb} onBack={toLibrary} onHidden={toHidden} onChanged={changed} />;
+  }
 
   if (selected) {
     return (
@@ -305,7 +350,13 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
             aria-pressed={picked === s.id}
             data-testid="title-shelf"
             data-shelf={s.id}
-            onClick={() => setPicked((p) => (p === s.id ? null : s.id))}
+            onClick={() => {
+              const id = s.id;
+              if (id === 'unsorted') {
+                forward('[data-shelf="unsorted"]');
+                setOwnerScreen('unsorted');
+              } else setPicked((p) => (p === id ? null : id));
+            }}
           >
             {s.label}
             {counts[s.id] !== null && <span className="title-chip-count">{counts[s.id]}</span>}
@@ -329,10 +380,11 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
             ))}
           </ul>
         )
-      ) : picked === 'unsorted' ? (
-        <p className="status" data-testid="title-unsorted">
-          {unsorted === 1 ? '1 disc isn’t filed under a title yet.' : `${unsorted ?? 0} discs aren’t filed under a title yet.`}
-        </p>
+      ) : picked === 'music' ? (
+        <>
+          <h3 className="title-section">Music</h3>
+          <MusicScreen nas={nas} titles={shelf(titles, 'music')} owner={owner} onOpen={openTitle} loadDetail={loadDetail} onChanged={changed} />
+        </>
       ) : picked !== null ? (
         <>
           <h3 className="title-section">{SHELVES.find((s) => s.id === picked)!.label}</h3>

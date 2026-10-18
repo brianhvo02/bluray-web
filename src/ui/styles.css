@@ -170,6 +170,53 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .disc-copy-drive { font-size: 0.85em; color: var(--t-accent); }
 .disc-copy-folder { font-size: 0.9em; color: var(--t-muted); overflow-wrap: anywhere; }
 
+/* The owner screens (spec §9, mockups 4 and 5): Unsorted, Hidden and the Music shelf's renames. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.owner-cards { display: flex; flex-direction: column; gap: 16px; }
+.owner-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 12px; min-width: 0; }
+.owner-why { margin: 0; color: var(--t-accent); font-size: 0.9em; }
+.owner-disc { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.owner-disc-name { overflow-wrap: anywhere; }
+.owner-subhead { margin: 0; font-size: 0.85em; font-weight: 600; color: var(--t-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.owner-options { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.titles .owner-option { width: 100%; display: flex; align-items: center; gap: 12px; padding: 6px 10px; text-align: left; border-radius: 10px; background: var(--t-ground); }
+.titles .owner-option.selected { border-color: var(--t-accent); box-shadow: inset 0 0 0 1px var(--t-accent); }
+.owner-option-poster { flex: none; display: block; width: 32px; height: 48px; object-fit: cover; border-radius: 4px; background: var(--t-surface); }
+.titles .owner-option-poster.poster-placeholder { font-size: 0.7em; }
+.owner-search { display: flex; gap: 8px; }
+.owner-search .title-search { flex: 1; min-width: 0; height: 44px; }
+.owner-numbers { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.owner-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; color: var(--t-muted); min-width: 0; }
+.owner-field input { box-sizing: border-box; width: 100%; min-height: 44px; padding: 0 12px; font: inherit; font-size: 1.1em; color: var(--t-text); background: var(--t-ground); border: 1px solid var(--t-border); border-radius: 8px; }
+.owner-field input:disabled { opacity: 0.45; }
+.owner-field input:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; }
+.titles .owner-primary { background: var(--t-accent); border-color: var(--t-accent); color: var(--t-on-accent); font-weight: 600; }
+.owner-links { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.titles .owner-links .title-link { align-self: auto; padding: 0 4px; }
+.owner-catalogue { margin: 0; }
+.owner-catalogue a { color: var(--t-muted); text-underline-offset: 3px; display: inline-block; min-height: 44px; line-height: 44px; }
+.owner-message { margin: 0; color: var(--t-muted); font-size: 0.9em; }
+.owner-notice { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--t-accent); border-radius: 10px; background: var(--t-ground); }
+.owner-notice p { margin: 0; }
+.owner-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.owner-skipped { margin: 0; padding-left: 20px; }
+.owner-form { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--t-border); border-radius: 10px; background: var(--t-ground); }
+.owner-kinds { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; border: none; }
+.owner-kinds legend { padding: 0; margin-bottom: 4px; font-size: 0.9em; color: var(--t-muted); }
+.owner-radio { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; }
+.owner-radio input { width: 20px; height: 20px; accent-color: var(--t-accent); }
+.owner-number input { max-width: 8em; }
+.owner-row { display: flex; flex-direction: column; gap: 8px; }
+.owner-row-main { display: flex; align-items: center; gap: 8px; }
+.owner-row-main .title-row-text { padding: 0 4px; }
+.owner-row-main > .title-row { flex: 1; min-width: 0; }
+.admin-titles { display: flex; flex-direction: column; gap: 8px; }
+.admin-titles p { margin: 0; }
+.admin-switch { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; }
+.admin-switch input { width: 24px; height: 24px; }
+.admin-confirm-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.admin-tmdb { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 0.85em; opacity: 0.85; }
+
 /* Phones and tablets: 44 px hit targets, wrapping controls, safe areas, menus as bottom sheets. */
 @media (max-width: 600px), (pointer: coarse) {
   .control-bar { padding: 12px max(16px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }

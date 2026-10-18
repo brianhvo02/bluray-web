@@ -1,4 +1,4 @@
-import type { CodeLookup, DiscEntry, DiscManifest, FolderEntry, TitleDetail, TitleSummary } from '../../engine/disc/nas-api';
+import type { CodeLookup, DiscEntry, DiscManifest, DiscRef, FolderEntry, OwnerChoice, OwnTitle, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 
@@ -19,6 +19,8 @@ export class NasHttpError extends Error {
     readonly status: number,
     /** The `error` field of the JSON body, e.g. 'disc-changed'. */
     readonly code: string | null,
+    /** `Retry-After` in seconds on a 429, and the body's `source` (a disc id) on 409 copy-follows-source. */
+    readonly detail: { readonly retryAfter?: number; readonly source?: string } = {},
   ) {
     super(`The NAS answered ${status}${code ? ` (${code})` : ''}.`);
   }
@@ -87,19 +89,39 @@ function base64url(bytes: Uint8Array): string {
 /** A disc's routes, relative to the NAS base. */
 const discPath = (discId: string): string => `discs/${encodeURIComponent(discId)}/`;
 
-const jsonPost = (body: unknown): RequestInit => ({
-  method: 'POST',
+const jsonBody = (method: string, body: unknown): RequestInit => ({
+  method,
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
+const jsonPost = (body: unknown): RequestInit => jsonBody('POST', body);
 
 async function errorCode(res: Response): Promise<string | null> {
+  return (await httpError(res)).code;
+}
+
+/** The error a refused request throws, with its `error` code, `Retry-After` and `source` when present. */
+async function httpError(res: Response): Promise<NasHttpError> {
+  let body: { error?: unknown; source?: unknown } = {};
   try {
-    const body = (await res.json()) as { error?: unknown };
-    return typeof body.error === 'string' ? body.error : null;
+    body = (await res.json()) as typeof body;
   } catch {
-    return null;
+    // no JSON body
   }
+  const retry = Number(res.headers.get('Retry-After') ?? NaN);
+  return new NasHttpError(res.status, typeof body.error === 'string' ? body.error : null, {
+    ...(Number.isFinite(retry) && retry >= 0 ? { retryAfter: retry } : {}),
+    ...(typeof body.source === 'string' ? { source: body.source } : {}),
+  });
+}
+
+/** A disc's owner-choice route. */
+const choicePath = (discId: string): string => `admin/discs/${encodeURIComponent(discId)}/choice`;
+
+/** Why "apply to the group" left a disc as it was: its own choice, or a copy following its source (rulings T9f, T9i). */
+export interface SkippedDisc {
+  readonly discId: string;
+  readonly reason: 'direct' | 'copy';
 }
 
 /** A stored record usable as a pairing: a missing or damaged key pair (say, after storage was tampered with) is not. */
@@ -143,6 +165,36 @@ export class NasClient {
       await this.ok('admin/rescan', { method: 'POST' });
     },
     titleStatus: async (): Promise<NasTitleStatus> => (await this.json('admin/metadata/status')) as NasTitleStatus,
+    unsorted: async (offset: number, limit: number): Promise<{ items: UnsortedItem[]; total: number }> =>
+      (await this.json(`admin/unsorted?offset=${offset}&limit=${limit}`)) as { items: UnsortedItem[]; total: number },
+    hidden: async (): Promise<DiscRef[]> => ((await this.json('admin/hidden')) as { discs: DiscRef[] }).discs,
+    /** AniList, TMDB or own titles through the NAS; refusals come as NasHttpError 429 (with `retryAfter`) or 503. */
+    lookup: async (q: string, source: 'anilist' | 'tmdb' | 'own'): Promise<TitleSummary[]> =>
+      ((await this.json(`admin/lookup?q=${encodeURIComponent(q)}&source=${source}`)) as { titles: TitleSummary[] }).titles,
+    /** Files a disc; with `applyToGroup`, the other discs of its folder too, resolving to those left as they were. */
+    setChoice: async (discId: string, choice: OwnerChoice, applyToGroup = false): Promise<SkippedDisc[]> => {
+      const res = await this.ok(choicePath(discId), jsonBody('PUT', applyToGroup ? { choice, applyToGroup } : { choice }));
+      return applyToGroup ? ((await res.json()) as { skipped: SkippedDisc[] }).skipped : [];
+    },
+    /** Clears a disc's choice; a copy following its source is refused with 409 `copy-follows-source` (ruling T9b). */
+    clearChoice: async (discId: string): Promise<void> => {
+      await this.ok(choicePath(discId), { method: 'DELETE' });
+    },
+    /** A music title's or disc's display name; null brings the folder name back. */
+    setName: async (id: string, name: string | null): Promise<void> => {
+      await this.ok(`admin/names/${encodeURIComponent(id)}`, jsonBody('PUT', { name }));
+    },
+    createTitle: async (kind: TitleKind, name: string, seasons: number | null): Promise<OwnTitle> =>
+      (await this.json('admin/titles', jsonBody('POST', kind === 'series' ? { kind, name, seasons } : { kind, name }))) as OwnTitle,
+    renameTitle: async (id: string, name: string): Promise<OwnTitle> =>
+      (await this.json(`admin/titles/${encodeURIComponent(id)}`, jsonBody('PATCH', { name }))) as OwnTitle,
+    deleteTitle: async (id: string): Promise<void> => {
+      await this.ok(`admin/titles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    },
+    /** The release gate: who may browse by title. */
+    setTitleLibrary: async (gate: 'owners' | 'everyone'): Promise<void> => {
+      await this.ok('admin/settings/title-library', jsonBody('PUT', { gate }));
+    },
   };
 
   constructor(private readonly deps: NasClientDeps) {}
@@ -369,7 +421,7 @@ export class NasClient {
 
   private async ok(path: string, init?: RequestInit): Promise<Response> {
     const res = await this.authed(path, init);
-    if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
+    if (!res.ok) throw await httpError(res);
     return res;
   }
 
