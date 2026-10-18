@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { bdjPlane, clickPlane, goldenSettled, MENU_DISC, planeRegion, regionColour, settlesOn } from './bdj-support';
-import { setFolder } from './support';
+import { setFolder, skipWithoutH264 } from './support';
 import { bdjStartup } from './telemetry';
 
 // BD-J menus on every project: chromium, firefox, webkit and mobile-chromium (playwright.config.ts runs this file there
@@ -13,8 +13,11 @@ const notice = (page: Page, text: RegExp) => page.locator('.notice', { hasText: 
 /** Screenshot checks poll this long: under a loaded machine (four browsers in parallel) one screenshot can take seconds. */
 const SCREEN_TIMEOUT_MS = 15_000;
 
+// The menu tests play H.264 behind the menu and time it against the player's clock: skipWithoutH264 skips them where
+// the browser can't decode H.264, and in WebKit on Linux, which can't play in real time (bdj.spec.ts skips it there too).
 async function openMenu(page: Page): Promise<void> {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
@@ -92,6 +95,7 @@ test("a BD-J background still reaches the screen beside the video it plays under
   const viewport = page.viewportSize();
   if (viewport && viewport.width < viewport.height) await page.setViewportSize({ width: viewport.height, height: viewport.width }); // phones: landscape, so the 4:3 video leaves the pillarbox to the still
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), 'fixtures/synthetic/disc-bdj-background');
   await expect.poll(async () => (await bdjStartup(page))?.firstFrameMs ?? null, { timeout: 30_000 }).not.toBeNull();
   // the left pillarbox: 0-240 of the plane's 1920 is outside the 4:3 picture (240-1680), inside the still (0-960)
@@ -111,6 +115,7 @@ test("a BD-J background still reaches the screen beside the video it plays under
 
 test('a browser that cannot start workers from workers (?nonestedworkers=1) names it and opens the picker', async ({ page }) => {
   await page.goto('/?telemetry=1&nonestedworkers=1');
+  await skipWithoutH264(page, { realtime: false }); // only checks that the playlist chosen in the picker starts
   await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   await expect(page.getByTestId('playlist-picker')).toBeVisible({ timeout: 30_000 });
   const missing = /BD-J .*which this browser can't run: it lacks workers started from workers\./;

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { expectBarHidden, expectBarShown, isLinuxWebKit, LINUX_WEBKIT_REALTIME, setFolder } from './support';
+import { expectBarHidden, expectBarShown, isLinuxWebKit, LINUX_WEBKIT_REALTIME, setFolder, skipWithoutH264 } from './support';
 import { bdjStartup, telemetry } from './telemetry';
 import { bdjPlane, clickPlane, flushedPast, MENU_DISC } from './bdj-support';
 
@@ -16,6 +16,7 @@ async function reachesState(page: Page, state: string, timeout: number): Promise
 
 async function open(page: Page, query = ''): Promise<void> {
   await page.goto(`/?telemetry=1${query}`);
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), DISC);
 }
 
@@ -64,6 +65,7 @@ test('a BD-J runtime that cannot boot (?bdjfail=1) falls back to the picker with
 
 test('the control bar never covers a BD-J menu: the bottom edge wakes it, a click in its empty space reaches the disc (R9)', async ({ page }) => {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   const player = page.getByTestId('player');
   const bar = page.getByTestId('control-bar');
@@ -112,6 +114,7 @@ test('the control bar never covers a BD-J menu: the bottom edge wakes it, a clic
 
 test('keys that go to a BD-J menu leave the control bar hidden; a player shortcut shows it (R11)', async ({ page }) => {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), MENU_DISC);
   const player = page.getByTestId('player');
   const bar = page.getByTestId('control-bar');

@@ -118,6 +118,7 @@ test('landscape, HDMV menu: a tap on empty picture brings back the controls; a t
 test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignored tap brings the remote and the controls (R13)', async ({ page }) => {
   await page.setViewportSize(LANDSCAPE);
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
@@ -141,6 +142,7 @@ test('landscape, BD-J menu: a tap on a button reaches the disc at once; an ignor
 test('landscape, BD-J menu: a long press shows the controls while held and never reaches Java; a tap still does (R15)', async ({ page }) => {
   await page.setViewportSize(LANDSCAPE);
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
@@ -166,6 +168,7 @@ test('landscape, BD-J menu: a long press shows the controls while held and never
 
 test('portrait, BD-J menu: a tap in the bottom letterbox brings back the controls without reaching the disc; a tap on the picture reaches it (R13, R14)', async ({ page }) => {
   await page.goto('/?telemetry=1');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
@@ -187,6 +190,7 @@ test('portrait, BD-J menu: a tap in the bottom letterbox brings back the control
 
 test('portrait, BD-J menu while buffering: a tap on the middle of the picture, under the spinner, still reaches the disc (task 14c)', async ({ page }) => {
   await page.goto('/?telemetry=1&memory=constrained');
+  await skipWithoutH264(page);
   await setFolder(page.getByTestId('folder-input'), BDJ_MENU_DISC);
   const player = page.getByTestId('player');
   await expect(player).toHaveAttribute('data-bdj-menu', 'true', { timeout: 30_000 });
