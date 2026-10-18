@@ -219,7 +219,8 @@ describe('owner title routes', () => {
     const [d3, d1, d2] = BOX as [DiscEvidence, DiscEvidence, DiscEvidence];
     const choice = { kind: 'title', titleId: title.id, season: 1, disc: 1 };
     const res = await send('PUT', `/api/admin/discs/${encodeURIComponent(d1.discId)}/choice`, t, { choice, applyToGroup: true });
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ skipped: [] });
     const { choices } = owner.snapshot();
     expect(choices.get(d1.discId)).toEqual(choice);
     expect(choices.get(d2.discId)).toEqual({ ...choice, disc: 2 });
@@ -461,6 +462,36 @@ describe('task 9 review', () => {
     expect(await over.json()).toEqual({ error: 'too-many-lookups' });
     expect((await get('/api/admin/lookup?q=Ember&source=anilist', other)).status).toBe(200);
     clock += 30_000;
+    expect((await get('/api/admin/lookup?q=Ember&source=anilist', t)).status).toBe(200);
+  });
+
+  it('skips siblings that are copies of a disc with a choice, and reports what it skipped (ruling T9i)', async () => {
+    await start();
+    const t = await token(true);
+    const [d3, d1, d2] = BOX as [DiscEvidence, DiscEvidence, DiscEvidence];
+    // a copy of A sits in the box's group
+    const copyOfA = ev('drv1/Misc/Quiet Harbor/Quiet Harbor Disc 4', {}, A.fingerprint);
+    evidence = [...evidence, copyOfA];
+    owner.setChoice(A.discId, A.fingerprint, { kind: 'hidden' });
+    owner.reattach(evidence.map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
+    owner.setChoice(d3.discId, d3.fingerprint, { kind: 'hidden' });
+    const title = (await (await send('POST', '/api/admin/titles', t, { kind: 'series', name: 'Quiet Harbor', seasons: 1 })).json()) as OwnTitle;
+    const res = await send('PUT', `/api/admin/discs/${encodeURIComponent(d1.discId)}/choice`, t, {
+      choice: { kind: 'title', titleId: title.id, season: 1, disc: 1 }, applyToGroup: true,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ skipped: [{ discId: d3.discId, reason: 'direct' }, { discId: copyOfA.discId, reason: 'copy' }] });
+    expect(owner.choiceOrigin(copyOfA.discId)).toEqual({ kind: 'copy', source: A.discId });
+    expect(owner.snapshot().choices.get(d2.discId)).toEqual({ kind: 'title', titleId: title.id, season: 1, disc: 2 });
+    // without applyToGroup: 204 as before
+    expect((await send('PUT', `/api/admin/discs/${encodeURIComponent(d2.discId)}/choice`, t, { choice: { kind: 'hidden' } })).status).toBe(204);
+  });
+
+  it('does not count own-title lookups against the per-device limits', async () => {
+    await start();
+    const t = await token(true);
+    owner.createTitle('movie', 'Paper Lanterns', null);
+    for (let i = 0; i < 25; i++) expect((await get('/api/admin/lookup?q=paper&source=own', t)).status, `own ${i}`).toBe(200);
     expect((await get('/api/admin/lookup?q=Ember&source=anilist', t)).status).toBe(200);
   });
 

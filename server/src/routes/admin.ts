@@ -180,7 +180,9 @@ async function lookupRoute(url: URL, device: string, titles: TitleLibrary, limit
   const q = url.searchParams.get('q')?.trim() ?? '';
   const source = url.searchParams.get('source');
   if (q.length < 1 || q.length > MAX_QUERY || (source !== 'anilist' && source !== 'tmdb' && source !== 'own')) throw new HttpError(400, 'bad query');
-  const refused = limiter.start(device);
+  // own titles are searched locally, so they are not limited
+  const limited = source !== 'own';
+  const refused = limited ? limiter.start(device) : null;
   if (refused) return refused;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(new SourceUnavailable(`lookup took over ${timeoutMs} ms`)), timeoutMs);
@@ -192,7 +194,7 @@ async function lookupRoute(url: URL, device: string, titles: TitleLibrary, limit
     throw err;
   } finally {
     clearTimeout(timer);
-    limiter.done(device);
+    if (limited) limiter.done(device);
   }
 }
 
@@ -281,9 +283,11 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
     if (choice.titleId.startsWith('own:') && !owner.snapshot().ownTitles.some((t) => t.id === choice.titleId)) throw new HttpError(400, 'unknown title');
   }
   owner.setChoice(discId, disc.fingerprint, choice);
+  const skipped: { discId: string; reason: 'direct' | 'copy' }[] = [];
   if (applyToGroup) {
-    // the group's discs in parsed order (number, then folder); the others are numbered from this one's place, and a
-    // disc the owner chose for itself keeps its choice, while one filed with a group takes the new one (ruling T9f)
+    // the group's discs in parsed order (number, then folder); the others are numbered from this one's place. A disc
+    // the owner chose for itself keeps its choice, while one filed with a group takes the new one (ruling T9f); a copy
+    // keeps following its source while there is one (ruling T9i)
     const group = groupKey(disc);
     const order = evidence
       .filter((e) => groupKey(e) === group)
@@ -291,7 +295,12 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
     const at = order.indexOf(disc);
     const base = choice.kind === 'title' ? (choice.disc ?? at + 1) : null;
     for (const [i, e] of order.entries()) {
-      if (e === disc || owner.choiceOrigin(e.discId)?.kind === 'direct') continue;
+      if (e === disc) continue;
+      const origin = owner.choiceOrigin(e.discId);
+      if (origin?.kind === 'direct' || (origin?.kind === 'copy' && origin.source !== null)) {
+        skipped.push({ discId: e.discId, reason: origin.kind });
+        continue;
+      }
       let c: OwnerChoice = choice;
       if (choice.kind === 'title' && base !== null) {
         const n = base + i - at;
@@ -301,7 +310,7 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
     }
   }
   rebuildAfter(titles, library, discId, choice);
-  return { status: 204 };
+  return applyToGroup ? json(200, { skipped }) : { status: 204 };
 }
 
 /** The owner's title routes (spec §9, §11), or null for another route. `id` is decoded. */

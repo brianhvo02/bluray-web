@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Pacer, RateLimited } from './pacer';
 import { SourceUnavailable } from './sources';
 
@@ -108,6 +108,58 @@ describe('Pacer', () => {
     await Promise.all([first, last]);
     expect(ran).toEqual(['first', 'last']);
     await expect(pacer.run(async () => null, { signal: abort.signal })).rejects.toThrow('timed out');
+  });
+
+  it('gives urgent calls at most 2/3 of the window, so background calls progress under a flood (ruling T9j)', async () => {
+    let t = 0;
+    const pacer = new Pacer(3, 1_000, () => t, async (ms) => {
+      t += ms;
+    });
+    const order: string[] = [];
+    const call = (name: string, urgent = false): Promise<unknown> => pacer.run(async () => order.push(name), { urgent });
+    const runs = ['x1', 'x2', 'x3'].map((n) => call(n));
+    runs.push(call('b1'), call('b2'));
+    for (let i = 1; i <= 6; i++) runs.push(call(`u${i}`, true));
+    await Promise.all(runs);
+    expect(order).toEqual(['x1', 'x2', 'x3', 'u1', 'u2', 'b1', 'u3', 'u4', 'b2', 'u5', 'u6']);
+  });
+
+  it('cancels its pending sleep when the last waiting call aborts', async () => {
+    let t = 0;
+    const signals: (AbortSignal | undefined)[] = [];
+    const pacer = new Pacer(1, 60_000, () => t, (_ms, signal) => {
+      signals.push(signal);
+      return new Promise((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }));
+    });
+    await pacer.run(async () => null);
+    const abort = new AbortController();
+    const waiting = pacer.run(async () => null, { signal: abort.signal });
+    await flush();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    abort.abort(new Error('gone'));
+    await expect(waiting).rejects.toThrow('gone');
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  describe('with real timers faked', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('leaves no timer behind when the last waiting call aborts', async () => {
+      vi.useFakeTimers();
+      const pacer = new Pacer(1, 60_000);
+      await pacer.run(async () => null);
+      const abort = new AbortController();
+      const waiting = pacer.run(async () => null, { signal: abort.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      abort.abort(new Error('gone'));
+      await expect(waiting).rejects.toThrow('gone');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   it('passes other errors through', async () => {

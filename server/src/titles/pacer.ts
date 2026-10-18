@@ -17,26 +17,49 @@ export interface PacedOptions {
 
 interface Waiting {
   readonly urgent: boolean;
+  /** Arrival order, for urgent calls past their share. */
+  readonly seq: number;
   readonly go: () => void;
 }
 
+/** Sleeps `ms`, or until `signal` aborts, clearing its timer then. */
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 /**
- * Starts at most `perWindow` calls in any `windowMs` (a sliding window), in the order they were made, urgent ones first.
+ * Starts at most `perWindow` calls in any `windowMs` (a sliding window), in the order they were made, urgent ones first
+ * while they have started fewer than 2/3 of `perWindow` in the window; past that share they take their turn in arrival
+ * order, so background calls keep progressing (ruling T9j).
  * A call that throws `RateLimited` holds every call back for its Retry-After (one window without one),
  * is retried once, and a second `RateLimited` becomes `SourceUnavailable`.
  */
 export class Pacer {
-  private readonly starts: number[] = [];
+  private readonly starts: { readonly at: number; readonly urgent: boolean }[] = [];
   private readonly waiting: Waiting[] = [];
+  private readonly urgentShare: number;
+  private seq = 0;
   private pumping = false;
+  /** Cuts the pump's sleep short when nothing is left waiting. */
+  private napping: AbortController | null = null;
   private blockedUntil = 0;
 
   constructor(
     private readonly perWindow: number,
     private readonly windowMs: number,
     private readonly now: () => number = Date.now,
-    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  ) {}
+    private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void> = defaultSleep,
+  ) {
+    this.urgentShare = Math.max(1, Math.floor((perWindow * 2) / 3));
+  }
 
   async run<T>(fn: () => Promise<T>, opts: PacedOptions = {}): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -61,10 +84,12 @@ export class Pacer {
       const onAbort = (): void => {
         const at = this.waiting.indexOf(item);
         if (at >= 0) this.waiting.splice(at, 1);
+        if (this.waiting.length === 0) this.napping?.abort();
         reject(signal!.reason);
       };
       const item: Waiting = {
         urgent,
+        seq: this.seq++,
         go: () => {
           signal?.removeEventListener('abort', onAbort);
           resolve();
@@ -85,14 +110,23 @@ export class Pacer {
     try {
       while (this.waiting.length > 0) {
         const t = this.now();
-        while (this.starts.length > 0 && this.starts[0]! <= t - this.windowMs) this.starts.shift();
-        const wait = Math.max(this.blockedUntil - t, this.starts.length >= this.perWindow ? this.starts[0]! + this.windowMs - t : 0);
+        while (this.starts.length > 0 && this.starts[0]!.at <= t - this.windowMs) this.starts.shift();
+        const wait = Math.max(this.blockedUntil - t, this.starts.length >= this.perWindow ? this.starts[0]!.at + this.windowMs - t : 0);
         if (wait > 0) {
-          await this.sleep(wait);
+          this.napping = new AbortController();
+          try {
+            await this.sleep(wait, this.napping.signal);
+          } finally {
+            this.napping = null;
+          }
           continue;
         }
-        this.starts.push(this.now());
-        this.waiting.shift()!.go();
+        // urgent calls go first within their share; past it, the earliest arrival goes
+        const urgentStarted = this.starts.filter((s) => s.urgent).length;
+        const at = urgentStarted < this.urgentShare ? 0 : this.waiting.reduce((best, w, i) => (w.seq < this.waiting[best]!.seq ? i : best), 0);
+        const [next] = this.waiting.splice(at, 1);
+        this.starts.push({ at: this.now(), urgent: next!.urgent });
+        next!.go();
       }
     } finally {
       this.pumping = false;
