@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { isLinuxWebKit, LINUX_WEBKIT_REALTIME } from './support';
+import { isLinuxWebKit, LINUX_WEBKIT_REALTIME, setFolder } from './support';
 import { bdjStartup, telemetry } from './telemetry';
 
 // fixtures/synthetic/disc-bdj (scripts/make-bdj-disc.ts): First Play is a BD-J object whose xlet starts TitleXlet,
@@ -15,7 +15,7 @@ async function reachesState(page: Page, state: string, timeout: number): Promise
 
 async function open(page: Page, query = ''): Promise<void> {
   await page.goto(`/?telemetry=1${query}`);
-  await page.getByTestId('folder-input').setInputFiles(DISC);
+  await setFolder(page.getByTestId('folder-input'), DISC);
 }
 
 test.beforeEach(({ browserName }) => test.skip(isLinuxWebKit(browserName), LINUX_WEBKIT_REALTIME));
