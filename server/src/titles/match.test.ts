@@ -328,6 +328,14 @@ describe('matchDiscs', () => {
       const r1 = await matchDiscs(both.map((p) => ev(p)), ctx(fake({}), tmdb()));
       expect(r1.matches.map((m) => (m.status === 'filed' ? m.disc : m.status))).toEqual([1, 2, 3]);
 
+      const gap = ['TV/Brasswick BOX 1/DISC1', 'TV/Brasswick BOX 1/DISC3', 'TV/Brasswick BOX 2/DISC1'];
+      const r3 = await matchDiscs(gap.map((p) => ev(p)), ctx(fake({}), tmdb()));
+      expect(byDisc(r3.matches, 'TV/Brasswick BOX 2/DISC1')).toMatchObject({ status: 'unsorted', reason: 'no-disc-number' });
+
+      const lastGap = ['TV/Brasswick BOX 1/DISC1', 'TV/Brasswick BOX 2/DISC1', 'TV/Brasswick BOX 2/DISC3'];
+      const r4 = await matchDiscs(lastGap.map((p) => ev(p)), ctx(fake({}), tmdb()));
+      for (const p of lastGap.slice(1)) expect(byDisc(r4.matches, p)).toMatchObject({ status: 'unsorted', reason: 'no-disc-number' });
+
       const r2 = await matchDiscs([ev('TV/Brasswick BOX 2/DISC1')], ctx(fake({}), tmdb()));
       expect(byDisc(r2.matches, 'TV/Brasswick BOX 2/DISC1')).toMatchObject({ status: 'unsorted', reason: 'no-disc-number' });
     });

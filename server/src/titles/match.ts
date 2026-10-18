@@ -324,9 +324,9 @@ async function decide(e: DiscEvidence, pieces: readonly Piece[], hit: DiscDbHit 
 
 /**
  * Rule 4: each disc's place. Its own number counts. In a box set, discs are numbered across the boxes in (box, disc)
- * order, only when every box from 1 up is present with numbered discs, and every box before the last is complete from
- * disc 1 (ruling T5h); otherwise discs of box 2 and up have no place. Unnumbered discs are numbered in folder order
- * when their group folder gives the release's disc count and they are exactly that many. A bonus disc needs no number,
+ * order, only when every box from 1 up is present and each box's disc numbers run from 1 with no gap (ruling T5h);
+ * otherwise discs of box 2 and up have no place. Unnumbered discs are numbered in folder order when their group folder
+ * gives the release's disc count and they are exactly that many. A bonus disc needs no number,
  * nor does a movie that is the only disc of its entry in its group.
  */
 function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>): DiscMatch[] {
@@ -357,7 +357,7 @@ function placeDiscs(pending: readonly Pending[], entries: Map<string, Entry>): D
   return out;
 }
 
-/** Running disc numbers across boxes 1..max, or null when a box is missing, a disc unnumbered or an earlier box incomplete. */
+/** Running disc numbers across boxes 1..max, or null when a box is missing, a disc unnumbered or a box's numbers have a gap. */
 function boxRunning(boxed: readonly Pending[]): Map<Pending, number> | null {
   const max = Math.max(...boxed.map((q) => q.box!));
   const running = new Map<Pending, number>();
@@ -367,7 +367,7 @@ function boxRunning(boxed: readonly Pending[]): Map<Pending, number> | null {
     if (inBox.length === 0 || inBox.some((q) => q.disc === null)) return null;
     const numbers = new Set(inBox.map((q) => q.disc!));
     const size = Math.max(...numbers);
-    if (b < max && numbers.size !== size) return null;
+    if (numbers.size !== size) return null;
     for (const q of inBox) running.set(q, offset + q.disc!);
     offset += size;
   }
