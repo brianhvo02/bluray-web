@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { CodeRegistry } from './code-registry';
-import { memoryState } from './memory-state';
 import type { MemoryStorage } from './memory-state';
+import { fireAlarm, memoryState } from './memory-state';
 import { SIGNAL_MAX_MESSAGE_BYTES, base64url, signalAuthMessage, signedMessage } from './protocol';
 import { Signalling } from './signalling';
 import type { SignalSocket, SignallingState } from './signalling';
 
 const MINUTE = 60_000;
+const DAY = 24 * 60 * MINUTE;
 
 /** A server-side WebSocket stand-in: records what the Durable Object sends and how it closes the socket. */
 class FakeSocket implements SignalSocket {
@@ -62,18 +63,24 @@ let clock: number;
 let state: FakeState;
 let registry: CodeRegistry;
 let signalling: Signalling;
+let registryStorage: MemoryStorage;
+let env: ConstructorParameters<typeof Signalling>[1];
+let deps: ConstructorParameters<typeof Signalling>[2];
 let keys: CryptoKeyPair;
 let nasId: string;
 
 beforeEach(async () => {
   clock = 1_800_000_000_000;
-  registry = new CodeRegistry(memoryState(), undefined, () => clock);
+  const registryState = memoryState();
+  registryStorage = registryState.storage;
+  registry = new CodeRegistry(registryState, undefined, () => clock);
   state = new FakeState();
-  const env = { CODE_REGISTRY: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) } };
-  signalling = new Signalling(state, env, {
+  env = { CODE_REGISTRY: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) } };
+  deps = {
     now: () => clock,
     upgrade: () => ({ server: new FakeSocket(), response: new Response(null, { status: 200, headers: { 'X-Upgraded': '1' } }) }),
-  });
+  };
+  signalling = new Signalling(state, env, deps);
   keys = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])) as CryptoKeyPair;
   nasId = await registerNas(keys);
 });
@@ -180,6 +187,41 @@ describe('NAS socket', () => {
     expect(first.messages().filter((m) => m.t === 'offer')).toEqual([]);
   });
 
+  it('closes with bad-auth when the key lookup throws', async () => {
+    const { ws } = await open('nas');
+    const nonce = ws!.messages()[0]!.nonce as string;
+    const signature = await sign(keys, signalAuthMessage({ nasId, nonce }));
+    registry.fetch = () => Promise.reject(new Error('registry down'));
+    await signalling.webSocketMessage(ws!, JSON.stringify({ t: 'auth', signature }));
+    expect(ws!.closed).toEqual({ code: 1008, reason: 'bad-auth' });
+  });
+
+  it('keeps a NAS that only signals registered past 90 days', async () => {
+    const nasKeyStatus = async (): Promise<number> =>
+      (await registry.fetch(new Request(`https://registry.internal/internal/nas-key?nasId=${nasId}`))).status;
+    for (let i = 0; i < 3; i++) {
+      clock += 80 * DAY;
+      await nasSocket();
+      await fireAlarm(registryStorage, registry);
+      expect(await nasKeyStatus()).toBe(200);
+    }
+    // Without a signal, it expires 90 days after the last one.
+    clock += 90 * DAY;
+    await fireAlarm(registryStorage, registry);
+    expect(await nasKeyStatus()).toBe(404);
+  });
+
+  it('keeps working after the object is evicted and rebuilt over the same sockets', async () => {
+    const nas = await nasSocket();
+    const device = await deviceSocket();
+    signalling = new Signalling(state, env, deps);
+    await signalling.webSocketMessage(device, JSON.stringify({ t: 'offer', sdp: 'v=0' }));
+    const offer = nas.messages().at(-1)!;
+    expect(offer).toMatchObject({ t: 'offer', sdp: 'v=0' });
+    await signalling.webSocketMessage(nas, JSON.stringify({ t: 'answer', sid: offer.sid, sdp: 'v=0 answer' }));
+    expect(device.messages()).toEqual([{ t: 'answer', sdp: 'v=0 answer' }]);
+  });
+
   it('closes the devices with 4404 when the NAS socket goes', async () => {
     const nas = await nasSocket();
     const device = await deviceSocket();
@@ -279,6 +321,47 @@ describe('device socket', () => {
     expect((await nasSocket()).closed).toBeUndefined();
     clock += MINUTE;
     expect((await open('device')).res.status).toBe(200);
+  });
+
+  it('closes a device socket 60 s after it opens', async () => {
+    await nasSocket();
+    const early = await deviceSocket();
+    clock += 30_000;
+    const late = await deviceSocket();
+    // The NAS's auth deadline (10 s) has passed; the alarm now waits for the first device's lifetime.
+    state.storage.alarm = null;
+    await signalling.alarm();
+    expect(state.storage.alarm).toBe(clock + 30_000);
+    clock += 30_000;
+    state.storage.alarm = null;
+    await signalling.alarm();
+    expect(early.closed).toEqual({ code: 4408, reason: 'expired' });
+    expect(late.closed).toBeUndefined();
+    expect(state.storage.alarm).toBe(clock + 30_000);
+    clock += 30_000;
+    state.storage.alarm = null;
+    await signalling.alarm();
+    expect(late.closed).toEqual({ code: 4408, reason: 'expired' });
+  });
+
+  it('forwards 64 messages from a device and closes it on the 65th', async () => {
+    const nas = await nasSocket();
+    const device = await deviceSocket();
+    for (let i = 0; i < 64; i++) await signalling.webSocketMessage(device, JSON.stringify({ t: 'candidate', candidate: `c${i}` }));
+    expect(device.closed).toBeUndefined();
+    await signalling.webSocketMessage(device, JSON.stringify({ t: 'candidate', candidate: 'c64' }));
+    expect(device.closed).toEqual({ code: 1008, reason: 'too-many-messages' });
+    expect(nas.messages().filter((m) => m.t === 'candidate')).toHaveLength(64);
+  });
+
+  it('refuses a 33rd open device socket with 4429 busy, and takes one again once a place frees', async () => {
+    await nasSocket();
+    const devices: FakeSocket[] = [];
+    for (let i = 0; i < 32; i++) devices.push(await deviceSocket());
+    expect(devices.every((d) => d.closed === undefined)).toBe(true);
+    expect((await deviceSocket()).closed).toEqual({ code: 4429, reason: 'busy' });
+    await peerCloses(devices[0]!);
+    expect((await deviceSocket()).closed).toBeUndefined();
   });
 
   it('deletes the stale attempt log in the alarm', async () => {

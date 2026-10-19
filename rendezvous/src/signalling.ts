@@ -14,6 +14,9 @@ import {
   ECDSA_SIGN,
   NAS_SIGNAL_TYPES,
   SIGNAL_CLOSE,
+  SIGNAL_DEVICES_PER_NAS,
+  SIGNAL_DEVICE_LIFETIME_MS,
+  SIGNAL_DEVICE_MESSAGES,
   SIGNAL_MAX_MESSAGE_BYTES,
   base64url,
   fromBase64url,
@@ -69,6 +72,9 @@ interface NasAttachment {
 interface DeviceAttachment {
   role: 'device';
   sid: string;
+  openedAt: number;
+  /** Messages received so far, against `SIGNAL_DEVICE_MESSAGES`. */
+  messages: number;
   closed: boolean;
 }
 
@@ -146,11 +152,15 @@ export class Signalling {
     }
 
     if (!(await this.allowDevice())) return new Response('too many requests', { status: 429 });
+    const open = this.state.getWebSockets(DEVICE_TAG).filter((ws) => attachmentOf(ws)?.closed === false).length;
     const { server, response } = this.deps.upgrade();
     const sid = randomId(16);
+    const openedAt = this.deps.now();
     this.state.acceptWebSocket(server, [DEVICE_TAG, sidTag(sid)]);
-    server.serializeAttachment({ role: 'device', sid, closed: false } satisfies DeviceAttachment);
-    if (this.liveNas() === undefined) this.shut(server, SIGNAL_CLOSE.nasOffline);
+    server.serializeAttachment({ role: 'device', sid, openedAt, messages: 0, closed: false } satisfies DeviceAttachment);
+    if (open >= SIGNAL_DEVICES_PER_NAS) this.shut(server, SIGNAL_CLOSE.busy);
+    else if (this.liveNas() === undefined) this.shut(server, SIGNAL_CLOSE.nasOffline);
+    else await this.armAlarm(openedAt + SIGNAL_DEVICE_LIFETIME_MS);
     return response;
   }
 
@@ -170,7 +180,10 @@ export class Signalling {
     this.gone(ws);
   }
 
-  /** Closes NAS sockets that missed the auth deadline and drops the stale attempt log, then wakes for what's left. */
+  /**
+   * Closes NAS sockets that missed the auth deadline and device sockets past their lifetime, and drops the stale
+   * attempt log, then wakes for what's left.
+   */
   async alarm(): Promise<void> {
     const now = this.deps.now();
     let next = Infinity;
@@ -181,6 +194,13 @@ export class Signalling {
       if (deadline <= now) this.shut(ws, SIGNAL_CLOSE.authTimeout);
       else next = Math.min(next, deadline);
     }
+    for (const ws of this.state.getWebSockets(DEVICE_TAG)) {
+      const attachment = attachmentOf(ws);
+      if (attachment?.role !== 'device' || attachment.closed) continue;
+      const deadline = attachment.openedAt + SIGNAL_DEVICE_LIFETIME_MS;
+      if (deadline <= now) this.shut(ws, SIGNAL_CLOSE.expired);
+      else next = Math.min(next, deadline);
+    }
     const hits = await this.recentAttempts(now);
     if (hits.length === 0) await this.state.storage.delete(ATTEMPTS_KEY);
     else next = Math.min(next, Math.max(...hits) + DEVICE_ATTEMPTS.windowMs);
@@ -188,6 +208,8 @@ export class Signalling {
   }
 
   private fromDevice(ws: SignalSocket, attachment: DeviceAttachment, message: string | ArrayBuffer): void {
+    if (attachment.messages >= SIGNAL_DEVICE_MESSAGES) return this.shut(ws, SIGNAL_CLOSE.tooManyMessages);
+    ws.serializeAttachment({ ...attachment, messages: attachment.messages + 1 } satisfies DeviceAttachment);
     const { value, tooBig } = parse(message);
     if (tooBig) return this.shut(ws, SIGNAL_CLOSE.tooBig);
     if (value === null || typeof value.t !== 'string' || !deviceTypes.has(value.t)) return this.shut(ws, SIGNAL_CLOSE.badMessage);
@@ -211,7 +233,13 @@ export class Signalling {
   private async authenticate(ws: SignalSocket, attachment: NasAttachment, message: string | ArrayBuffer): Promise<void> {
     const { value } = parse(message);
     if (value === null || value.t !== 'auth' || typeof value.signature !== 'string') return this.shut(ws, SIGNAL_CLOSE.badMessage);
-    if (!(await this.verify(attachment, value.signature))) {
+    let verified: boolean;
+    try {
+      verified = await this.verify(attachment, value.signature);
+    } catch {
+      verified = false;
+    }
+    if (!verified) {
       if (attachmentOf(ws)?.closed === false) this.shut(ws, SIGNAL_CLOSE.badAuth);
       return;
     }
@@ -222,6 +250,8 @@ export class Signalling {
       const theirs = attachmentOf(other);
       if (theirs?.role === 'nas' && theirs.conn !== attachment.conn && theirs.authed && !theirs.closed) this.shut(other, SIGNAL_CLOSE.replaced);
     }
+    // After the replacement, with no await between marking this socket authed and closing the others.
+    await this.touch(attachment.nasId);
   }
 
   private async verify(attachment: NasAttachment, signature: string): Promise<boolean> {
@@ -237,6 +267,19 @@ export class Signalling {
     const { publicKeyJwk } = (await res.json()) as { publicKeyJwk: EcPublicJwk };
     const key = await crypto.subtle.importKey('jwk', publicKeyJwk, ECDSA_KEY, false, ['verify']);
     return crypto.subtle.verify(ECDSA_SIGN, key, sig, signalAuthMessage({ nasId: attachment.nasId, nonce: attachment.nonce }));
+  }
+
+  /** Tells the registry the NAS was seen, so its record doesn't expire while it only signals. */
+  private async touch(nasId: string): Promise<void> {
+    const registry = this.env.CODE_REGISTRY;
+    try {
+      const res = await registry
+        .get(registry.idFromName(REGISTRY_NAME))
+        .fetch(new Request(`https://registry.internal${INTERNAL.nasTouch}?nasId=${encodeURIComponent(nasId)}`, { method: 'POST' }));
+      await res.body?.cancel();
+    } catch {
+      // The record's expiry is 90 days away; the next authentication tries again.
+    }
   }
 
   /** A socket's peer closed it or it failed: marks it closed and, when it was the live NAS, closes the devices. */

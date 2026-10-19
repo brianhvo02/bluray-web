@@ -58,9 +58,10 @@ export const REGISTRY_NAME = 'registry';
 
 /**
  * Paths only the Worker's own objects call (the Worker in `index.ts` never routes them from outside): the
- * Signalling object reads a NAS's key, and the Worker counts a client's signalling attempts.
+ * Signalling object reads a NAS's key and marks a NAS seen when its socket authenticates, and the Worker counts a
+ * client's signalling attempts.
  */
-export const INTERNAL = { nasKey: '/internal/nas-key', signalAttempt: '/internal/signal-attempt' } as const;
+export const INTERNAL = { nasKey: '/internal/nas-key', nasTouch: '/internal/nas-touch', signalAttempt: '/internal/signal-attempt' } as const;
 
 /** Storage keys: NAS public keys, codes by hash (never the code), and the rate-limit logs. */
 const nasKey = (nasId: string): string => `nas:${nasId}`;
@@ -133,6 +134,7 @@ export class CodeRegistry {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === INTERNAL.nasKey) return this.nasKeyOf(url.searchParams.get('nasId'));
+    if (url.pathname === INTERNAL.nasTouch) return this.touchNas(url.searchParams.get('nasId'));
     if (url.pathname === INTERNAL.signalAttempt) {
       const allowed = await this.allow(rateKey('signal', clientBucket(request.headers.get('CF-Connecting-IP'))), LIMITS.signal);
       return allowed ? new Response(null, { status: 204 }) : json(429, { error: 'too many requests' });
@@ -192,6 +194,19 @@ export class CodeRegistry {
     const nas = await this.storage.get<NasRecord>(nasKey(nasId));
     if (!live(nas, this.now())) return json(404, { error: 'unknown nas' });
     return json(200, { publicKeyJwk: nas.publicKeyJwk });
+  }
+
+  /**
+   * Internal `POST /internal/nas-touch?nasId=` → 204: a live NAS's signalling socket authenticated, so the NAS
+   * counts as seen; a NAS that only signals (no new codes) then stays registered. 404 for an unknown or expired NAS.
+   */
+  private async touchNas(nasId: string | null): Promise<Response> {
+    if (!isNasId(nasId)) return json(404, { error: 'unknown nas' });
+    const now = this.now();
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, now)) return json(404, { error: 'unknown nas' });
+    await this.storage.put<NasRecord>(nasKey(nasId), { ...nas, lastSeen: now });
+    return new Response(null, { status: 204 });
   }
 
   /** `POST /nas { publicKeyJwk }` → `{ nasId }`; the id is the key's thumbprint, so this is idempotent. */

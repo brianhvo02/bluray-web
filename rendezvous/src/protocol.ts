@@ -81,7 +81,20 @@ export const SIGNAL_CLOSE = {
   tooBig: { code: 1009, reason: 'too-big' },
   badAuth: { code: 1008, reason: 'bad-auth' },
   authTimeout: { code: 1008, reason: 'auth-timeout' },
+  /** A device socket that sent more than `SIGNAL_DEVICE_MESSAGES` messages. */
+  tooManyMessages: { code: 1008, reason: 'too-many-messages' },
+  /** A device socket `SIGNAL_DEVICE_LIFETIME_MS` after it opened. */
+  expired: { code: 4408, reason: 'expired' },
+  /** A device socket while `SIGNAL_DEVICES_PER_NAS` are already open to that NAS. */
+  busy: { code: 4429, reason: 'busy' },
 } as const;
+
+/** A device socket is closed this long after it opens: signalling is only for setting a connection up. */
+export const SIGNAL_DEVICE_LIFETIME_MS = 60_000;
+/** The messages a device socket may send; the next one closes it. */
+export const SIGNAL_DEVICE_MESSAGES = 64;
+/** Device sockets open to one NAS at once. */
+export const SIGNAL_DEVICES_PER_NAS = 32;
 
 /** The types a device may send; the Worker forwards them to the NAS with the device's `sid` added. */
 export const DEVICE_SIGNAL_TYPES = ['offer', 'candidate', 'turn-request'] as const;
