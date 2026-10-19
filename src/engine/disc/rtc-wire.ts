@@ -29,6 +29,10 @@ export const LOW_WATER = 1 << 20;
 export const HIGH_WATER = 4 << 20;
 /** The largest text frame (a head), in UTF-8 bytes. */
 export const MAX_HEAD_BYTES = 16384;
+/** Requests a server handles at once on one channel; one more is answered `error` "too many requests". */
+export const MAX_REQUESTS = 64;
+/** Request body bytes a server holds unread for one request; more closes the channel. */
+export const MAX_QUEUED_BODY_BYTES = 16 << 20;
 
 const ID_BYTES = 4;
 /** Body bytes per binary message, so that a whole message stays within MAX_CHUNK (Safari's limit). */
@@ -212,6 +216,8 @@ export class WireClient {
   private readonly open = new Map<number, ClientPending>();
   /** Requests cancelled here whose closing frame (`end` or `error`) has not come back yet. */
   private readonly cancelled = new Set<number>();
+  /** Requests whose body is still going out; this can outlast the response (an early `error`, say). */
+  private readonly uploads = new Map<number, ClientPending>();
   private nextId = 1;
   private failure: unknown = null;
 
@@ -249,7 +255,10 @@ export class WireClient {
     if (headBytes(head) > MAX_HEAD_BYTES) throw new TypeError('The request head is too large.');
 
     return new Promise<Response>((resolve, reject) => {
-      const onAbort = (): void => this.cancel(id, signal!.reason);
+      const onAbort = (): void => {
+        if (this.open.has(id)) this.cancel(id, signal!.reason);
+        else this.stopUpload(id);
+      };
       const pending: ClientPending = {
         resolve,
         reject,
@@ -275,37 +284,67 @@ export class WireClient {
     if (this.failure !== null) return;
     this.failure = reason;
     const all = [...this.open.values()];
+    const uploading = [...this.uploads.values()];
     this.open.clear();
+    this.uploads.clear();
     this.cancelled.clear();
-    for (const p of all) this.settle(p, reason);
+    for (const p of all) {
+      this.settle(p, reason);
+      p.done();
+    }
+    for (const p of uploading) {
+      p.stopped = true;
+      p.done();
+    }
   }
 
   private takeId(): number {
     let id = this.nextId;
-    while (this.open.has(id) || this.cancelled.has(id)) id = id >= MAX_ID ? 1 : id + 1;
+    while (this.open.has(id) || this.cancelled.has(id) || this.uploads.has(id)) id = id >= MAX_ID ? 1 : id + 1;
     this.nextId = id >= MAX_ID ? 1 : id + 1;
     return id;
   }
 
   private async upload(id: number, p: ClientPending, body: ReadableStream<Uint8Array> | null): Promise<void> {
     const wanted = (): boolean => !p.stopped && !this.link.closed;
-    if (body) {
-      const reader = body.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!(await sendChunk(this.link, id, value, wanted))) {
-            void reader.cancel().catch(() => {});
-            return;
+    this.uploads.set(id, p);
+    try {
+      if (body) {
+        const reader = body.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!(await sendChunk(this.link, id, value, wanted))) {
+              void reader.cancel().catch(() => {});
+              return;
+            }
           }
+        } catch (err) {
+          const reason = new TypeError(`The request body failed: ${messageOf(err)}`);
+          if (this.open.has(id)) this.cancel(id, reason);
+          else this.stopUpload(id);
+          return;
         }
-      } catch (err) {
-        this.cancel(id, new TypeError(`The request body failed: ${messageOf(err)}`));
-        return;
       }
+      if (wanted()) this.link.sendHead({ t: 'body-end', id });
+    } finally {
+      if (this.uploads.get(id) === p) this.uploads.delete(id);
+      this.release(id, p);
     }
-    if (wanted()) this.link.sendHead({ t: 'body-end', id });
+  }
+
+  /** Stops the body of a request whose response already closed; the server then forgets it (no closing frame comes back). */
+  private stopUpload(id: number): void {
+    const p = this.uploads.get(id);
+    if (!p || p.stopped) return;
+    p.stopped = true;
+    this.link.sendHead({ t: 'cancel', id });
+  }
+
+  /** Drops the abort listener once neither the response nor the upload needs it. */
+  private release(id: number, p: ClientPending): void {
+    if (this.open.get(id) !== p && this.uploads.get(id) !== p) p.done();
   }
 
   /** Gives up on `id`: tells the server, and rejects or errors with `reason`. */
@@ -317,10 +356,10 @@ export class WireClient {
     this.cancelled.add(id);
     this.link.sendHead({ t: 'cancel', id });
     this.settle(p, reason);
+    this.release(id, p);
   }
 
   private settle(p: ClientPending, reason: unknown): void {
-    p.done();
     if (p.resolve) p.reject(reason);
     else
       try {
@@ -360,12 +399,13 @@ export class WireClient {
       case 'end':
         if (p.resolve) throw new Garbage('an end before the response head');
         this.open.delete(id);
-        p.done();
+        this.release(id, p);
         p.controller?.close();
         return;
       case 'error':
         this.open.delete(id);
         this.settle(p, new TypeError(frame.message)); // the upload goes on: the server takes the body up to body-end
+        this.release(id, p);
         return;
     }
   }
@@ -380,6 +420,8 @@ export class WireClient {
 
 /** A request body the handler reads while its frames arrive. */
 class BodyQueue implements AsyncIterable<Uint8Array> {
+  /** Bytes pushed and not yet read. */
+  queuedBytes = 0;
   private chunks: Uint8Array[] = [];
   private ended = false;
   private error: unknown = null;
@@ -387,6 +429,7 @@ class BodyQueue implements AsyncIterable<Uint8Array> {
 
   push(chunk: Uint8Array): void {
     this.chunks.push(chunk);
+    this.queuedBytes += chunk.byteLength;
     this.notify();
   }
 
@@ -400,6 +443,7 @@ class BodyQueue implements AsyncIterable<Uint8Array> {
     this.error = err;
     this.ended = true;
     this.chunks = [];
+    this.queuedBytes = 0;
     this.notify();
   }
 
@@ -407,6 +451,7 @@ class BodyQueue implements AsyncIterable<Uint8Array> {
     for (;;) {
       const next = this.chunks.shift();
       if (next) {
+        this.queuedBytes -= next.byteLength;
         yield next;
         continue;
       }
@@ -436,6 +481,8 @@ interface ServerActive {
 export class WireServer {
   private readonly link: Link;
   private readonly active = new Map<number, ServerActive>();
+  /** Requests whose handler has not finished. */
+  private running = 0;
 
   constructor(
     channel: WireChannel,
@@ -466,8 +513,14 @@ export class WireServer {
     switch (frame.t) {
       case 'req': {
         if (this.active.has(frame.id)) throw new Garbage('a request id in use');
+        // requests turned away still wait here for their body-end; a peer that never sends it is a broken one
+        if (this.active.size >= 2 * MAX_REQUESTS) throw new Garbage('too many open requests');
         const a: ServerActive = { abort: new AbortController(), body: new BodyQueue(), bodyDone: false, responded: false };
         this.active.set(frame.id, a);
+        if (this.running >= MAX_REQUESTS) {
+          this.finish(frame.id, a, { t: 'error', id: frame.id, message: 'too many requests' });
+          return;
+        }
         const req: WireRequest = { method: frame.method, path: frame.path, headers: lowerCase(frame.headers), body: a.body, signal: a.abort.signal };
         void this.run(frame.id, a, req);
         return;
@@ -499,7 +552,9 @@ export class WireServer {
   private onBody(id: number, payload: Uint8Array): void {
     const a = this.active.get(id);
     if (!a || a.bodyDone) throw new Garbage('a body frame for an unknown request');
-    if (!a.responded) a.body.push(payload); // nobody reads it once the response is out
+    if (a.responded) return; // nobody reads it once the response is out
+    if (a.body.queuedBytes + payload.byteLength > MAX_QUEUED_BODY_BYTES) throw new Garbage('too much unread request body');
+    a.body.push(payload);
   }
 
   /** Sends the closing frame for `id` once. */
@@ -516,8 +571,11 @@ export class WireServer {
 
   private async run(id: number, a: ServerActive, req: WireRequest): Promise<void> {
     const wanted = (): boolean => !a.responded && !this.link.closed;
+    let res: WireResponse | null = null;
+    let iterated = false;
+    this.running++;
     try {
-      const res = await this.handle(req);
+      res = await this.handle(req);
       if (!wanted()) return;
       const head = JSON.stringify({ t: 'res', id, status: res.status, headers: res.headers } satisfies Frame);
       if (!Number.isInteger(res.status) || res.status < 200 || res.status > 599 || !isHeaders(res.headers) || headBytes(head) > MAX_HEAD_BYTES) {
@@ -526,6 +584,7 @@ export class WireServer {
       this.link.send(head);
       if (res.body !== null && req.method !== 'HEAD' && !isNullBodyStatus(res.status)) {
         const chunks = typeof res.body === 'string' ? [encoder.encode(res.body)] : res.body instanceof Uint8Array ? [res.body] : res.body;
+        iterated = true; // for await closes the iterator when it stops early
         for await (const chunk of chunks) {
           if (!(await sendChunk(this.link, id, chunk, wanted))) break;
         }
@@ -533,7 +592,20 @@ export class WireServer {
       if (wanted()) this.finish(id, a, { t: 'end', id });
     } catch (err) {
       if (wanted()) this.finish(id, a, { t: 'error', id, message: messageOf(err) });
+    } finally {
+      this.running--;
+      if (res && !iterated) discard(res.body);
     }
+  }
+}
+
+/** Closes a body that will not be read (a file stream on the NAS), ignoring how that goes. */
+function discard(body: WireResponse['body']): void {
+  if (body === null || typeof body === 'string' || body instanceof Uint8Array) return;
+  try {
+    void Promise.resolve(body[Symbol.asyncIterator]().return?.()).catch(() => {});
+  } catch {
+    // a broken iterable: nothing more to do
   }
 }
 

@@ -21,6 +21,33 @@ type ToClient =
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
+const isId = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0;
+const isPairs = (v: unknown): v is Array<[string, string]> =>
+  Array.isArray(v) && v.every((p) => Array.isArray(p) && p.length === 2 && typeof p[0] === 'string' && typeof p[1] === 'string');
+
+function isToServer(v: unknown): v is ToServer {
+  if (!isRecord(v) || !isId(v.id)) return false;
+  if (v.t === 'abort') return true;
+  return v.t === 'req' && typeof v.url === 'string' && typeof v.method === 'string' && isPairs(v.headers) && (v.body === null || v.body instanceof ArrayBuffer);
+}
+
+function isToClient(v: unknown): v is ToClient {
+  if (!isRecord(v) || !isId(v.id)) return false;
+  switch (v.t) {
+    case 'res':
+      return typeof v.status === 'number' && typeof v.statusText === 'string' && isPairs(v.headers) && typeof v.hasBody === 'boolean';
+    case 'chunk':
+      return v.chunk instanceof ArrayBuffer;
+    case 'end':
+      return true;
+    case 'error':
+      return typeof v.message === 'string';
+    default:
+      return false;
+  }
+}
+
 /** The bytes of `chunk` as an ArrayBuffer that can be transferred without detaching anything else. */
 function ownBuffer(chunk: Uint8Array): ArrayBuffer {
   const { buffer } = chunk;
@@ -75,8 +102,9 @@ export function serveFetch(port: MessagePort, fetchFn: typeof fetch): () => void
     }
   };
 
-  const onMessage = (event: MessageEvent<ToServer>): void => {
+  const onMessage = (event: MessageEvent<unknown>): void => {
     const msg = event.data;
+    if (!isToServer(msg)) return;
     if (msg.t === 'req') void run(msg);
     else if (msg.t === 'abort') abort(msg.id, new DOMException('The request was aborted.', 'AbortError'));
   };
@@ -84,7 +112,10 @@ export function serveFetch(port: MessagePort, fetchFn: typeof fetch): () => void
   port.start();
   return () => {
     port.removeEventListener('message', onMessage);
-    for (const id of [...served.keys()]) abort(id, new DOMException('The fetch server stopped.', 'AbortError'));
+    for (const id of [...served.keys()]) {
+      post({ t: 'error', id, message: 'The fetch server stopped.' });
+      abort(id, new DOMException('The fetch server stopped.', 'AbortError'));
+    }
   };
 }
 
@@ -119,8 +150,9 @@ export function portFetch(port: MessagePort): typeof fetch {
     fail(w, reason);
   };
 
-  port.addEventListener('message', (event: MessageEvent<ToClient>) => {
+  port.addEventListener('message', (event: MessageEvent<unknown>) => {
     const msg = event.data;
+    if (!isToClient(msg)) return;
     const w = waiting.get(msg.id);
     if (!w) return; // aborted here; the server's messages for it were already on their way
     switch (msg.t) {
@@ -137,7 +169,17 @@ export function portFetch(port: MessagePort): typeof fetch {
                 cancel: (reason) => giveUp(msg.id, reason),
               })
             : null;
-        resolve(new Response(stream, { status: msg.status, statusText: msg.statusText, headers: msg.headers }));
+        let res: Response;
+        try {
+          res = new Response(stream, { status: msg.status, statusText: msg.statusText, headers: msg.headers });
+        } catch (err) {
+          waiting.delete(msg.id);
+          port.postMessage({ t: 'abort', id: msg.id } satisfies ToServer);
+          w.done();
+          w.reject(new TypeError(`An unusable response: ${messageOf(err)}`));
+          return;
+        }
+        resolve(res);
         return;
       }
       case 'chunk':

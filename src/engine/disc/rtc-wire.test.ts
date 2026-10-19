@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HIGH_WATER, LOW_WATER, MAX_CHUNK, WireClient, WireServer, type WireChannel, type WireRequest, type WireResponse } from './rtc-wire';
+import { HIGH_WATER, LOW_WATER, MAX_CHUNK, MAX_QUEUED_BODY_BYTES, MAX_REQUESTS, WireClient, WireServer, type WireChannel, type WireRequest, type WireResponse } from './rtc-wire';
 
 /** One end of an in-memory ordered channel. With `manual`, sent bytes stay buffered until `drain()`. */
 class MemChannel implements WireChannel {
@@ -220,6 +220,135 @@ describe('WireClient and WireServer', () => {
     expect(chunksAfterAbort).toBeLessThanOrEqual(1);
     expect(channels.client.closed).toBe(false);
     expect(await (await client.fetch('/ok')).text()).toBe('fine');
+  });
+
+  it('absorbs chunks still in flight after a cancel, and the next request reads exact', async () => {
+    const big = pattern(40 * MAX_CHUNK, 3);
+    const next = pattern(3 * MAX_CHUNK, 9);
+    const { channels, client } = setup(async (req) => ({ status: 200, headers: {}, body: req.path === '/big' ? big : next }));
+    const controller = new AbortController();
+    const res = await client.fetch('/big', { signal: controller.signal });
+    const reader = res.body!.getReader();
+    await reader.read();
+    controller.abort();
+    const following = client.fetch('/next'); // at once, while /big's chunks are still arriving
+    await expect(reader.read()).rejects.toThrow();
+    expect(Buffer.from(await (await following).arrayBuffer()).equals(next)).toBe(true);
+    await tick(10);
+    expect(channels.client.closed).toBe(false);
+    // the server really had chunks of /big on the way after the cancel
+    const cancelAt = channels.client.sent.findIndex((f) => typeof f === 'string' && JSON.parse(f).t === 'cancel');
+    expect(cancelAt).toBeGreaterThanOrEqual(0);
+    expect(binaryFrames(channels.server.sent).filter((f) => idOf(f) === 1).length).toBeGreaterThan(2);
+  });
+
+  it('closes a response body it will not read when the request was cancelled while the handler ran', async () => {
+    let returned = 0;
+    let answer: ((res: WireResponse) => void) | null = null;
+    const body: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]: () => ({
+        next: async () => ({ done: false, value: pattern(10) }),
+        return: async () => {
+          returned++;
+          return { done: true, value: undefined };
+        },
+      }),
+    };
+    const { client } = setup(() => new Promise((resolve) => (answer = resolve)));
+    const controller = new AbortController();
+    const pending = client.fetch('/x', { signal: controller.signal });
+    await tick();
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    await tick();
+    answer!({ status: 200, headers: {}, body });
+    await tick();
+    expect(returned).toBe(1);
+  });
+
+  it('closes a response body it will not read for HEAD, a null-body status or an invalid head', async () => {
+    let returned = 0;
+    const body = (): AsyncIterable<Uint8Array> => ({
+      [Symbol.asyncIterator]: () => ({
+        next: async () => ({ done: false, value: pattern(10) }),
+        return: async () => {
+          returned++;
+          return { done: true, value: undefined };
+        },
+      }),
+    });
+    const { client } = setup(async (req) =>
+      req.path === '/head' ? { status: 200, headers: {}, body: body() } : req.path === '/204' ? { status: 204, headers: {}, body: body() } : { status: 42, headers: {}, body: body() },
+    );
+    expect((await client.fetch('/head', { method: 'HEAD' })).body).toBeNull();
+    expect((await client.fetch('/204')).status).toBe(204);
+    await expect(client.fetch('/bad')).rejects.toBeInstanceOf(TypeError);
+    await tick();
+    expect(returned).toBe(3);
+  });
+
+  it(`answers a request beyond ${MAX_REQUESTS} at once with "too many requests"`, async () => {
+    let answers: Array<() => void> = [];
+    const { channels, client } = setup(
+      () => new Promise((resolve) => answers.push(() => resolve({ status: 200, headers: {}, body: 'ok' }))),
+    );
+    const held = Array.from({ length: MAX_REQUESTS }, (_, i) => client.fetch(`/r${i}`));
+    await tick();
+    const over = await client.fetch('/over').catch((e: unknown) => e);
+    expect(over).toBeInstanceOf(TypeError);
+    expect((over as Error).message).toBe('too many requests');
+    expect(channels.server.closed).toBe(false);
+    for (const a of answers) a();
+    answers = [];
+    expect((await Promise.all(held)).every((r) => r.status === 200)).toBe(true);
+    await tick();
+    const after = client.fetch('/after');
+    await tick();
+    answers[0]!();
+    expect((await after).status).toBe(200);
+  });
+
+  it('closes the channel when one request holds more than 16 MB of unread body', async () => {
+    const { channels, client } = setup(() => new Promise(() => {})); // never reads the body
+    const sent = client.fetch('/put', { method: 'PUT', body: new Uint8Array(MAX_QUEUED_BODY_BYTES + MAX_CHUNK) });
+    await expect(sent).rejects.toBeInstanceOf(TypeError);
+    expect(channels.server.closed).toBe(true);
+  });
+
+  it('stops an upload that outlived its error response when the request is aborted later', async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const upload = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        pulls++;
+        await tick(5);
+        controller.enqueue(pattern(1000));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { channels, client } = setup(async () => {
+      throw new Error('no');
+    });
+    const controller = new AbortController();
+    const err = await client
+      .fetch('/put', { method: 'PUT', body: upload, signal: controller.signal, duplex: 'half' } as RequestInit)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TypeError);
+    await tick(20);
+    expect(pulls).toBeGreaterThan(1); // still uploading after the error
+    controller.abort();
+    await tick(20);
+    const pullsAfter = pulls;
+    await tick(30);
+    expect(pulls).toBe(pullsAfter);
+    expect(cancelled).toBe(true);
+    const heads = textFrames(channels.client.sent);
+    expect(heads.some((f) => f.t === 'cancel' && f.id === 1)).toBe(true);
+    expect(heads.some((f) => f.t === 'body-end')).toBe(false);
+    expect(channels.server.closed).toBe(false);
+    expect((await client.fetch('/next').catch((e: unknown) => e)) as Error).toBeInstanceOf(TypeError); // the handler still says no, the channel works
   });
 
   it('rejects at once when the signal is already aborted, sending nothing', async () => {

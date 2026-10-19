@@ -138,9 +138,37 @@ describe('fetch over a MessagePort', () => {
       served = init?.signal ?? undefined;
       return new Promise<Response>(() => {});
     }) as typeof fetch);
-    void portFetch(port2 as unknown as MessagePort)('/x').catch(() => {});
+    const f = portFetch(port2 as unknown as MessagePort);
+    const pending = f('/x');
     await tick(10);
     stop();
     expect(served?.aborted).toBe(true);
+    const err = await pending.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TypeError);
+    expect((err as Error).message).toBe('The fetch server stopped.');
+  });
+
+  it('errors an open body when stopped', async () => {
+    const { port1, port2 } = new MessageChannel();
+    opened.push(port1, port2);
+    const stop = serveFetch(port1 as unknown as MessagePort, (async () =>
+      new Response(new ReadableStream<Uint8Array>({ start: (c) => c.enqueue(new Uint8Array([1])) }))) as typeof fetch);
+    const res = await portFetch(port2 as unknown as MessagePort)('/x');
+    const reader = res.body!.getReader();
+    expect((await reader.read()).value).toEqual(new Uint8Array([1]));
+    stop();
+    await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it('ignores malformed messages on both ends', async () => {
+    const { port1, port2 } = new MessageChannel();
+    opened.push(port1, port2);
+    stops.push(serveFetch(port1 as unknown as MessagePort, (async () => new Response('ok')) as typeof fetch));
+    const f = portFetch(port2 as unknown as MessagePort);
+    port2.postMessage({ t: 'req', id: 'x' });
+    port2.postMessage(null);
+    port1.postMessage({ t: 'res', id: 1, status: 'nope' });
+    port1.postMessage(42);
+    expect(await (await f('/x')).text()).toBe('ok');
   });
 });
