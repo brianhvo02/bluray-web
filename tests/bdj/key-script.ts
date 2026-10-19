@@ -2,12 +2,13 @@ import type { MenuKey } from '../../src/engine/protocol';
 
 /**
  * A step of a bdj-trace key script (tools/bdj-trace/README.md, Key scripts): the `.keys` syntax of tests/vm-trace, with
- * `wait flush`, `wait still`, `wait playlist`, `key`, `mouse` and `click`.
+ * `wait flush`, `wait still`, `wait playlist` (a number or `any`), `key`, `mouse` and `click`.
  */
 export type KeyStep =
   | { readonly kind: 'waitFlush'; readonly text: string; readonly n: number }
   | { readonly kind: 'waitStill'; readonly text: string; readonly ms: number }
-  | { readonly kind: 'waitPlaylist'; readonly text: string; readonly playlist: number }
+  /** `wait playlist <n>`, or `wait playlist any` (playlist null): any playlist starting. */
+  | { readonly kind: 'waitPlaylist'; readonly text: string; readonly playlist: number | null }
   | { readonly kind: 'key'; readonly text: string; readonly key: MenuKey }
   | { readonly kind: 'pointer'; readonly text: string; readonly click: boolean; readonly x: number; readonly y: number };
 
@@ -33,7 +34,7 @@ export function parseKeyScript(source: string): KeyStep[] {
     const [verb, a, b, c] = text.split(/\s+/);
     if (verb === 'wait' && a === 'flush') steps.push({ kind: 'waitFlush', text, n: int(b, text) });
     else if (verb === 'wait' && a === 'still') steps.push({ kind: 'waitStill', text, ms: int(b, text) });
-    else if (verb === 'wait' && a === 'playlist') steps.push({ kind: 'waitPlaylist', text, playlist: int(b, text) });
+    else if (verb === 'wait' && a === 'playlist') steps.push({ kind: 'waitPlaylist', text, playlist: b === 'any' ? null : int(b, text) });
     else if (verb === 'key' && a !== undefined && KEYS[a]) steps.push({ kind: 'key', text, key: KEYS[a] });
     else if ((verb === 'mouse' || verb === 'click') && c === undefined) steps.push({ kind: 'pointer', text, click: verb === 'click', x: int(a, text), y: int(b, text) });
     else throw new Error(`key script: unsupported step "${text}"`);

@@ -25,6 +25,8 @@
     "bdj-trace:text-golden": "tools/bdj-trace/text-golden.sh",
     "vm-trace": "tsx tests/vm-trace/run.ts",
     "bdj-trace": "tsx tests/bdj/run.ts",
+    "bdj-library:sync": "tsx tools/bdj-library/sync.ts",
+    "bdj-library:check": "tsx tools/bdj-library/check.ts",
     "ass-trace:build": "tools/ass-trace/build.sh",
     "ass-trace:golden": "tools/ass-trace/golden.sh",
     "ass-trace": "tsx tests/ass-trace/run.ts",

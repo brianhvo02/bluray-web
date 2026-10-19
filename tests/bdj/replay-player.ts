@@ -42,6 +42,8 @@ export interface PlayerBdjReplay {
   readonly flushes: readonly string[];
   /** With a script: each step as it ran, a `wait still` step with the hash of the plane it settled on. */
   readonly steps: readonly SettledStep[];
+  /** With a script: how many calls had been traced when each step ran (steps[i] ran after trace[0..stepCalls[i]]). */
+  readonly stepCalls: readonly number[];
 }
 
 /** Records the plane's hash at every flush of every GraphicsPlaneWriter (the BD-J worker runs in process) until undone. */
@@ -173,6 +175,7 @@ export async function replayPlayerBdj(
   const stepTimeoutMs = opts.stepTimeoutMs ?? 60_000;
   const flushes: string[] = [];
   const steps: SettledStep[] = [];
+  const stepCalls: number[] = [];
   let lastFlushAt = 0;
   let stepIdx = 0;
   let stepFrom = { events: 0, flushes: 0, at: 0 };
@@ -219,6 +222,7 @@ export async function replayPlayerBdj(
     Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), {
       trace: [...trace],
       steps: [...steps],
+      stepCalls: [...stepCalls],
       flushes: [...flushes],
       events: [...events],
       threadDump: (lastWorker as BdjWorkerHandle | null)?.runtime?.threadDump() ?? [],
@@ -239,7 +243,7 @@ export async function replayPlayerBdj(
           held = flushes.length > stepFrom.flushes && performance.now() - lastFlushAt >= s.ms;
           break;
         case 'waitPlaylist':
-          held = events.slice(stepFrom.events).some((e) => e.type === 'chapters' && Number(e.playlistId) === s.playlist);
+          held = events.slice(stepFrom.events).some((e) => e.type === 'chapters' && (s.playlist === null || Number(e.playlistId) === s.playlist));
           break;
         case 'key':
           await player.handle({ type: 'menuKey', key: s.key });
@@ -252,6 +256,7 @@ export async function replayPlayerBdj(
         if (performance.now() - stepFrom.at > stepTimeoutMs) throw fail(`script step ${stepIdx} "${s.text}" did not hold within ${stepTimeoutMs} ms`);
         return;
       }
+      stepCalls.push(trace.length);
       steps.push({ script: 'step', n: stepIdx, step: s.text, ...(s.kind === 'waitStill' ? { hash: flushes.at(-1) ?? null } : {}) });
       stepIdx++;
       stepFrom = s.kind === 'key' || s.kind === 'pointer' ? mark : { events: events.length, flushes: flushes.length, at: performance.now() };
@@ -307,6 +312,7 @@ export async function replayPlayerBdj(
       plane,
       flushes: [...flushes],
       steps: [...steps],
+      stepCalls: [...stepCalls],
     };
   } finally {
     await player.handle({ type: 'close' });

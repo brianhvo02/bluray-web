@@ -843,7 +843,14 @@ class DiscRun {
       const rec: StepRecord = { n: ps.n, step: s.text, ms: 0, ok: true };
       switch (s.kind) {
         case 'waitPlaylist':
-          await this.page.until(`document.querySelector('[data-testid=player]')?.getAttribute('data-playlist') === ${JSON.stringify(pad5(s.playlist))}`, s.text, 180_000);
+          // `wait playlist any`: some playlist is playing (the device page shows only the current one)
+          await this.page.until(
+            s.playlist === null
+              ? `(document.querySelector('[data-testid=player]')?.getAttribute('data-playlist') ?? '') !== ''`
+              : `document.querySelector('[data-testid=player]')?.getAttribute('data-playlist') === ${JSON.stringify(pad5(s.playlist))}`,
+            s.text,
+            180_000,
+          );
           break;
         case 'waitFlush':
           await this.page.until(`(window.__blurayTelemetry?.bdjPlane?.flushes ?? 0) >= ${s.n}`, s.text, 90_000);

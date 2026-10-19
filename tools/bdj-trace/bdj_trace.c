@@ -219,7 +219,9 @@ static int parse_script(const char *path, step_t **out)
       else if (!strcmp(w[1], "playlist")) s.kind = S_WAIT_PLAYLIST;
       else if (!strcmp(w[1], "title")) s.kind = S_WAIT_TITLE;
       else goto bad;
-      if (!parse_int(w[2], &s.a)) goto bad;
+      /* `wait playlist any` / `wait title any`: any such event (s.a = -1) */
+      if ((s.kind == S_WAIT_PLAYLIST || s.kind == S_WAIT_TITLE) && !strcmp(w[2], "any")) s.a = -1;
+      else if (!parse_int(w[2], &s.a)) goto bad;
     } else if (!strcmp(w[0], "key") && cnt == 2) {
       uint32_t vk;
       if (!parse_key(w[1], &vk)) goto bad;
@@ -277,7 +279,7 @@ static void note_event(int playlist, unsigned param)
 static int seen_since_step(int playlist, int param)
 {
   for (int i = 0; i < nseen; i++) {
-    if (seen[i].playlist == playlist && seen[i].param == (unsigned)param) {
+    if (seen[i].playlist == playlist && (param < 0 || seen[i].param == (unsigned)param)) {
       return 1;
     }
   }
