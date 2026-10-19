@@ -262,7 +262,7 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await webrtcOnlyLookup(page);
   await countChannelBytes(page);
   const code = serverOwnerCode();
-  await page.goto(`/?pair=${code}&telemetry=1`);
+  await page.goto(`/?pair=${code}&telemetry=1&rtcrelayed=1`);
   await expect(page.getByTestId('pair-code')).toHaveValue(code);
   await page.getByTestId('pair-button').click();
   await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 30_000 });
@@ -279,6 +279,7 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await page.getByTestId('playlist-00000').click();
   await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 20_000 });
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 20_000 }).toBeGreaterThanOrEqual(3_000_000);
+  await expect(page.getByTestId('relay-badge')).toContainText('Relayed'); // ?rtcrelayed=1 makes the connection count as relayed
   expect(await channelBytes(page)).toBeGreaterThan(1_000_000); // most of disc1's first 1.3 MB clip, over the channel
 
   // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once.

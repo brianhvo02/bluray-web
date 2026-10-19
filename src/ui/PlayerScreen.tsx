@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
+import type { NasClient } from './nas/nas-client';
+import { RelayBadge } from './nas/RelayBadge';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { collectDroppedFiles, splitPick } from '../player/drop-files';
 import { checkCapabilities } from './capabilities';
@@ -34,6 +36,8 @@ interface PlayerScreenProps {
   readonly snapshot: PlayerSnapshot;
   readonly shaderModel: ShaderModel;
   readonly shaderState: ShaderModelState;
+  /** For the "Relayed" badge of a NAS disc; absent where there is no NAS. */
+  readonly nas?: NasClient;
 }
 
 /**
@@ -56,7 +60,7 @@ function Notice({ message, onDismiss, testId }: { message: string; onDismiss(): 
   );
 }
 
-export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }: PlayerScreenProps): ReactElement {
+export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, nas }: PlayerScreenProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -493,6 +497,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState }:
         onClick={onCanvasClick}
       />
       <div className="notices">
+        {nas && snapshot.remoteDisc && <RelayBadge nas={nas} />}
         {snapshot.error && (
           <div className="error-banner" role="alert" data-testid="error">
             {snapshot.error.message}

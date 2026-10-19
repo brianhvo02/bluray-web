@@ -51,6 +51,26 @@ export interface NasPersonDevice {
   readonly name: string;
   readonly pairedAt: number;
   readonly lastSeen: number;
+  /** How the device last reached the NAS; absent before it first connects. */
+  readonly lastRoute?: NasRoute;
+}
+
+/** How a device reaches the NAS: HTTPS (home or Tailscale), WebRTC, or WebRTC through the relay. */
+export type NasRoute = 'https' | 'webrtc' | 'relay';
+
+/** The relay's usage this month, as `GET admin/relay` and `GET me` give it. */
+export interface NasRelayUsage {
+  readonly usedBytes: number;
+  readonly freeBytes: number;
+  /** `YYYY-MM-DD` (UTC): when the month's allowance resets. */
+  readonly resetsOn: string;
+}
+
+/** `GET admin/relay`. */
+export interface NasRelaySettings {
+  readonly enabled: boolean;
+  readonly allowPaid: boolean;
+  readonly usage: NasRelayUsage;
 }
 
 /** A person on the NAS: their devices, and the size of their BD-J saved data. */
@@ -83,6 +103,8 @@ export interface NasMe {
   readonly titleLibrary: boolean;
   readonly personId: string;
   readonly personName: string;
+  /** The relay's usage while the relay is on, else null. */
+  readonly relay?: NasRelayUsage | null;
 }
 
 /** `GET admin/metadata/status`: the title matcher's progress and counts. */
@@ -239,6 +261,9 @@ export class NasClient {
     moveDevice: async (id: string, personId: string): Promise<void> => {
       await this.ok(`admin/devices/${encodeURIComponent(id)}`, jsonBody('PATCH', { personId }));
     },
+    relay: async (): Promise<NasRelaySettings> => (await this.json('admin/relay')) as NasRelaySettings,
+    setRelay: async (change: { readonly enabled?: boolean; readonly allowPaid?: boolean }): Promise<NasRelaySettings> =>
+      (await this.json('admin/relay', jsonBody('PUT', change))) as NasRelaySettings,
     codes: async (): Promise<NasCode[]> => ((await this.json('admin/codes')) as { codes: NasCode[] }).codes,
     /** A pairing code for a person, or for a new one; an invite lasts 3 days, a plain code 10 minutes. */
     createCode: async (target: NasCodeTarget, invite: boolean): Promise<NasMintedCode> =>
@@ -479,6 +504,15 @@ export class NasClient {
     const stale = new URL(failedUrl).searchParams.get('t');
     if (stale !== null) await this.freshSession(stale);
     return this.artUrl(artId, size);
+  }
+
+  /** How this device reaches the NAS now: over a live WebRTC connection (relayed or not), else HTTPS; null when unpaired. */
+  currentRoute(): NasRoute | null {
+    const pairing = this.current;
+    if (!pairing) return null;
+    const link = pairing.nasId === undefined ? undefined : this.links.get(pairing.nasId);
+    if (link && !link.closed) return link.relayed ? 'relay' : 'webrtc';
+    return pairing.base !== '' ? 'https' : null;
   }
 
   /** The disc's API base for the engine (`RemoteDiscSpec.base`): `<NAS base>discs/<id>/`. */

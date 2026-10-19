@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactEle
 import type { TitleSummary } from '../../engine/disc/nas-api';
 import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, gateSwitchOn, matchingStatus, newCode, ownTitleKind, ownTitles, withGate } from './admin-model';
 import { NasHttpError, type NasClient, type NasPerson, type NasTitleStatus } from './nas-client';
+import { RelaySettings } from './RelaySettings';
 import { PeopleSection } from './PeopleSection';
 import { MAX_PERSON_NAME, NEW_PERSON, codeSummary, rendezvousNotice } from './people-model';
 import { displayName } from './title-model';
@@ -543,6 +544,7 @@ export function AdminScreen({ nas, thisDeviceId, onClose, onAccessLost, now = Da
           Rescan
         </button>
       </div>
+      <RelaySettings nas={nas} />
       <TitleLibrarySettings nas={nas} now={now} onTitlesChanged={onTitlesChanged ?? (() => {})} />
       {status && (
         <p className="status" role="status" data-testid="nas-admin-status">

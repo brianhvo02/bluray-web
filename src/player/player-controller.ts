@@ -34,6 +34,8 @@ export interface PlayerSnapshot {
   readonly bdjRemoteRequests: number;
   /** The current BD-J menu has already opened the remote for an ignored tap. */
   readonly bdjRemoteOpenedInMenu: boolean;
+  /** The open disc is on the NAS (opened with openRemote). */
+  readonly remoteDisc: boolean;
   /** Clicks on an HDMV menu that hit no button, counted since the page loaded (a touch that missed shows the controls). */
   readonly menuTapMisses: number;
   readonly warnings: readonly string[];
@@ -103,6 +105,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   bdjTapsIgnored: 0,
   bdjRemoteRequests: 0,
   bdjRemoteOpenedInMenu: false,
+  remoteDisc: false,
   menuTapMisses: 0,
   warnings: [],
   currentPlaylistId: null,
@@ -396,7 +399,7 @@ export class PlayerController {
     if (spec.fetchPort) this.servings.push({ release: release ?? null, timer: null });
     else release?.(); // nothing crosses to the engine to serve
     this.startAudio();
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading', remoteDisc: true });
     this.post({ type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
   }
 

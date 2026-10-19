@@ -165,7 +165,15 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                   const targets = moveTargets(people, row.id);
                   return (
                     <li key={d.id} className="admin-device" data-testid="nas-device" data-device-id={d.id}>
-                      <span className="library-name">{d.text}</span>
+                      <span className="library-name">
+                        {d.text}
+                        {d.route && (
+                          <span className="status" data-testid="nas-device-route">
+                            {' '}
+                            · {d.route}
+                          </span>
+                        )}
+                      </span>
                       {deviceEdit === 'move' ? (
                         <span className="admin-confirm">
                           <label>

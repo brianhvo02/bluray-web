@@ -38,8 +38,8 @@ describe('personRows', () => {
     owner: true,
     savedBytes: 1.2 * MB,
     devices: [
-      { id: 'd1', name: 'Mac Safari', pairedAt: NOW - DAY, lastSeen: NOW - 5 * MINUTE },
-      { id: 'd2', name: 'iPad', pairedAt: NOW - DAY, lastSeen: NOW - 2 * HOUR },
+      { id: 'd1', name: 'Mac Safari', pairedAt: NOW - DAY, lastSeen: NOW - 5 * MINUTE, lastRoute: 'relay' },
+      { id: 'd2', name: 'iPad', pairedAt: NOW - DAY, lastSeen: NOW - 2 * HOUR, lastRoute: 'https' },
     ],
   });
 
@@ -51,8 +51,8 @@ describe('personRows', () => {
         owner: true,
         badge: 'Owner',
         devices: [
-          { id: 'd1', text: 'Mac Safari (this device) · last seen 5 minutes ago', thisDevice: true },
-          { id: 'd2', text: 'iPad · last seen 2 hours ago', thisDevice: false },
+          { id: 'd1', text: 'Mac Safari (this device) · last seen 5 minutes ago', route: 'WebRTC (relayed)', thisDevice: true },
+          { id: 'd2', text: 'iPad · last seen 2 hours ago', route: 'Home or Tailscale', thisDevice: false },
         ],
         noDevices: null,
         saved: 'Saved data: 1.2 MB',

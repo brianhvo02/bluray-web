@@ -153,7 +153,8 @@ export class RtcConnection implements RtcLink {
   }
 
   get relayed(): boolean {
-    return this.isRelayed;
+    // ?rtcrelayed=1 is test-only (E2E): the connection counts as relayed, so the badge can be seen without a relay.
+    return this.isRelayed || globalThis.location?.search.includes('rtcrelayed=1') === true;
   }
 
   /**

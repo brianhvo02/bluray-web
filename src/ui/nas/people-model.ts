@@ -1,5 +1,6 @@
 import { NasHttpError, type NasCodeTarget, type NasPerson } from './nas-client';
 import type { NasPairing } from './nas-store';
+import { routeLabel } from './relay-model';
 
 /** What the admin screen says when the NAS refuses an action with 409 `last-owner`. */
 export const lastOwnerMessage = 'At least one owner device has to stay. Make someone else an owner first.';
@@ -31,6 +32,8 @@ export const NEW_PERSON = 'new';
 export interface PersonDeviceRow {
   readonly id: string;
   readonly text: string;
+  /** How it last reached the NAS (`Home or Tailscale`, `WebRTC`, `WebRTC (relayed)`); null before it first connects. */
+  readonly route: string | null;
   /** This device's own row: revoking it asks first. */
   readonly thisDevice: boolean;
 }
@@ -93,7 +96,7 @@ export function personRows(people: readonly NasPerson[], now: number, thisDevice
       badge: p.owner ? 'Owner' : null,
       devices: p.devices.map((d) => {
         const thisDevice = d.id === thisDeviceId;
-        return { id: d.id, text: `${d.name}${thisDevice ? ' (this device)' : ''} · last seen ${lastSeen(d.lastSeen, now)}`, thisDevice };
+        return { id: d.id, text: `${d.name}${thisDevice ? ' (this device)' : ''} · last seen ${lastSeen(d.lastSeen, now)}`, route: routeLabel(d.lastRoute), thisDevice };
       }),
       noDevices: p.devices.length === 0 ? 'No devices yet' : null,
       saved: `Saved data: ${formatSize(p.savedBytes)}`,
