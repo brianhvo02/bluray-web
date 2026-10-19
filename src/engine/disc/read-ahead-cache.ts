@@ -149,7 +149,7 @@ export class ReadAheadCache {
   /** Stores `bytes` at `offset` of `path`. */
   async write(path: string, offset: number, bytes: Uint8Array): Promise<void> {
     if (bytes.length === 0) return;
-    if (this.closed) throw new DOMException('the read-ahead cache is closed', 'InvalidStateError');
+    if (this.closed) throw closedError();
     const size = this.deps.fileSize(path);
     if (size === undefined) throw new Error(`${path} is not on the disc`);
     if (this.created === null) {
@@ -163,10 +163,13 @@ export class ReadAheadCache {
     }
     const held = this.heldOf(path);
     for (let at = offset; at < offset + bytes.length; ) {
+      // the disc may have closed while this write waited (on meta.json or the last segment's open)
+      if (this.closed) throw closedError();
       const seg = Math.floor(at / this.segmentBytes);
       const segStart = seg * this.segmentBytes;
       const end = Math.min(offset + bytes.length, segStart + this.segmentBytes);
       const segment = await this.segment(path, size, seg);
+      if (this.closed) throw closedError();
       segment.data.write(bytes.subarray(at - offset, end - offset), { at: at - segStart });
       segment.data.flush();
       held.segments.add(seg);
@@ -185,10 +188,15 @@ export class ReadAheadCache {
     if (this.closed || size === undefined || !this.has(path, offset, length)) return null;
     const out = new Uint8Array(length);
     for (let at = offset; at < offset + length; ) {
+      if (this.closed) return null;
       const seg = Math.floor(at / this.segmentBytes);
       const segStart = seg * this.segmentBytes;
       const end = Math.min(offset + length, segStart + this.segmentBytes);
-      const segment = await this.segment(path, size, seg);
+      const segment = await this.segment(path, size, seg).catch((err: unknown) => {
+        if (this.closed) return null;
+        throw err;
+      });
+      if (segment === null || this.closed) return null;
       const part = out.subarray(at - offset, end - offset);
       if (segment.data.read(part, { at: at - segStart }) !== part.length) return null;
       at = end;
@@ -324,16 +332,31 @@ export class ReadAheadCache {
     return opening;
   }
 
+  /**
+   * Opens a segment's two files. When the disc closed meanwhile, `close()` has already let go of the segments it knew,
+   * so the new handles are closed here (else they would hold the files until the worker ends) and the open fails.
+   */
   private async openSegment(base: string): Promise<Segment> {
+    if (this.closed) throw closedError();
     const data = await (await this.dir.getFileHandle(`${base}.bin`, { create: true })).createSyncAccessHandle();
+    let index: SyncHandle;
     try {
-      const index = await (await this.dir.getFileHandle(`${base}.json`, { create: true })).createSyncAccessHandle();
-      return { data, index };
+      index = await (await this.dir.getFileHandle(`${base}.json`, { create: true })).createSyncAccessHandle();
     } catch (err) {
       data.close();
       throw err;
     }
+    if (this.closed) {
+      data.close();
+      index.close();
+      throw closedError();
+    }
+    return { data, index };
   }
+}
+
+function closedError(): DOMException {
+  return new DOMException('the read-ahead cache is closed', 'InvalidStateError');
 }
 
 /** A file name for any id or path: letters, digits and '-' stay, every other UTF-8 byte becomes '_xx' (so '_' too). */

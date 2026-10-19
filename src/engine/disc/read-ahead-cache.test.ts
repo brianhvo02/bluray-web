@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryDirectory } from '../../../tests/helpers/memory-fs';
+import { MemoryDirectory, MemoryFile } from '../../../tests/helpers/memory-fs';
 import { CACHE_DIR, CACHE_MAX_AGE_MS, ReadAheadCache, safeName, segmentName, unsafeName } from './read-ahead-cache';
 
 const PATH = 'BDMV/STREAM/00001.M2TS';
@@ -47,6 +47,57 @@ describe('ReadAheadCache', () => {
     expect(cache.has(PATH, 50, 100)).toBe(false);
     expect(cache.coveredEnd(PATH, 150)).toBeNull();
     cache.close();
+  });
+
+  it('closes the handles of a segment that opens after the disc closed, so the next open can write', async () => {
+    const { deps, discDir } = setup();
+    const cache = await ReadAheadCache.open('disc-a', deps);
+    await cache.write(OTHER, 0, bytes(10)); // meta.json is written; the next write goes straight to its segments
+    const dir = await discDir();
+    const real = dir.getFileHandle.bind(dir);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    dir.getFileHandle = async (name, opts) => {
+      if (name === `${segmentName(PATH, 10_000, 0)}.bin`) await held;
+      return real(name, opts);
+    };
+    const writing = cache.write(PATH, 500, bytes(1000)); // segments 0 and 1
+    await Promise.resolve();
+    cache.close();
+    release();
+    await expect(writing).rejects.toThrow(/closed/);
+    await new Promise((r) => setTimeout(r, 0));
+    const files = [...dir.entries.values()].filter((e): e is MemoryFile => e instanceof MemoryFile);
+    expect(files.filter((f) => f.locked).map((f) => f.name)).toEqual([]);
+    dir.getFileHandle = real;
+
+    const again = await ReadAheadCache.open('disc-a', deps);
+    await again.write(PATH, 500, bytes(1000));
+    expect(await again.read(PATH, 500, 1000)).toEqual(bytes(1000));
+    again.close();
+  });
+
+  it('stops a read that spans segments when the disc closes', async () => {
+    const { deps, discDir } = setup();
+    const cache = await ReadAheadCache.open('disc-a', deps);
+    await cache.write(PATH, 0, bytes(2000));
+    cache.close();
+    const again = await ReadAheadCache.open('disc-a', deps);
+    const dir = await discDir();
+    const real = dir.getFileHandle.bind(dir);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    dir.getFileHandle = async (name, opts) => {
+      if (name === `${segmentName(PATH, 10_000, 0)}.bin`) await held;
+      return real(name, opts);
+    };
+    const reading = again.read(PATH, 500, 1000);
+    await Promise.resolve();
+    again.close();
+    release();
+    expect(await reading).toBeNull();
+    await new Promise((r) => setTimeout(r, 0));
+    expect([...dir.entries.values()].filter((e) => e instanceof MemoryFile && e.locked)).toEqual([]);
   });
 
   it('keeps what it held for the same disc across opens', async () => {
