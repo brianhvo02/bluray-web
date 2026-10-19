@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
-import { ECDSA_KEY, ECDSA_SIGN, fromBase64url, nasIdOf, signalAuthMessage } from '../../../rendezvous/src/protocol';
+import { ECDSA_KEY, ECDSA_SIGN, SIGNAL_PING_MESSAGE, SIGNAL_PONG_MESSAGE, fromBase64url, nasIdOf, signalAuthMessage } from '../../../rendezvous/src/protocol';
 import type { EcPublicJwk } from '../../../src/engine/disc/nas-api';
 import { RendezvousClient } from '../rendezvous-client';
 import { backoffDelay, SignallingClient } from './signalling-client';
@@ -27,8 +27,10 @@ class FakeSocket implements WebSocketLike {
   send(data: string): void {
     const message = JSON.parse(data) as { t: string };
     if (message.t === 'ping') {
+      // the Worker's auto-response matches the bytes exactly; a ping in other bytes would wake it and get no pong
+      expect(data).toBe(SIGNAL_PING_MESSAGE);
       this.pings++;
-      if (this.autoPong) queueMicrotask(() => this.deliver({ t: 'pong' }));
+      if (this.autoPong) queueMicrotask(() => this.deliver(SIGNAL_PONG_MESSAGE));
     }
     this.sent.push(message);
   }

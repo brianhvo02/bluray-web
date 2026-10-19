@@ -119,7 +119,7 @@ Question: does a data channel carry a Blu-ray's rate (about 20–40 Mbps, UHD 60
 
 ### 6.2 Signalling
 
-- The NAS keeps one outbound WebSocket to its Durable Object on the rendezvous Worker (hibernatable WebSockets, so an idle NAS costs nothing), signed with its rendezvous key as now. It reconnects with backoff.
+- The NAS keeps one outbound WebSocket to its Durable Object on the rendezvous Worker (hibernatable WebSockets), signed with its rendezvous key as now. It reconnects with backoff. Its heartbeat, exactly `{"t":"ping"}` every 25 s, is answered `{"t":"pong"}` by the runtime's WebSocket auto-response, so an idle NAS never wakes the object; only signalling messages and socket opens and closes do. Any socket gets that pong, authenticated or not, which is harmless because a pong carries nothing.
 - A device opens a WebSocket to the Worker with the NAS id and, if paired, its device id. The Worker forwards SDP offers and answers and ICE candidates between device and NAS, and nothing else. It limits connection attempts to 10 per minute per IP and 100 per minute per NAS.
 - `POST /codes/lookup` answers `routes: { https?, webrtc: { nasId } }`. An unpaired friend gets `webrtc` and redeems over it.
 - STUN: Cloudflare's public STUN server. TURN: §6.4.

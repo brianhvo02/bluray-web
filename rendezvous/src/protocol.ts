@@ -116,8 +116,11 @@ export interface SignalAuth {
 }
 
 /**
- * NAS → Worker on its authenticated socket, every `SIGNAL_PING_INTERVAL_MS`: the Worker answers `SignalPong` on that
- * socket and forwards nothing. A NAS that gets no pong within `SIGNAL_PONG_TIMEOUT_MS` reconnects.
+ * NAS → Worker on its authenticated socket, every `SIGNAL_PING_INTERVAL_MS`, sent as exactly `SIGNAL_PING_MESSAGE`:
+ * the runtime answers `SIGNAL_PONG_MESSAGE` on that socket itself (the Durable Object's WebSocket auto-response), so a
+ * heartbeat never wakes the hibernating object, and nothing is forwarded. Any socket that sends those exact bytes gets
+ * the pong, authenticated or not; a pong carries nothing. A NAS that gets no pong within `SIGNAL_PONG_TIMEOUT_MS`
+ * reconnects.
  */
 export interface SignalPing {
   readonly t: 'ping';
@@ -126,6 +129,10 @@ export interface SignalPing {
 export interface SignalPong {
   readonly t: 'pong';
 }
+
+/** The heartbeat's bytes, matched byte for byte by the auto-response: never re-serialize them. */
+export const SIGNAL_PING_MESSAGE = '{"t":"ping"}';
+export const SIGNAL_PONG_MESSAGE = '{"t":"pong"}';
 
 export const SIGNAL_PING_INTERVAL_MS = 25_000;
 export const SIGNAL_PONG_TIMEOUT_MS = 10_000;

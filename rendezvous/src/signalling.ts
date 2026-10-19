@@ -3,8 +3,10 @@
  * devices open theirs to send it SDP offers, ICE candidates and TURN requests (each device first hears its socket's
  * id, `SignalHello`, which it signs into a TURN request). The object forwards those
  * types and nothing else, and limits device connection attempts per NAS; the Worker in `index.ts` limits
- * attempts per client address. Hibernatable WebSockets, so an idle NAS socket costs nothing: every socket's
- * state lives in its attachment.
+ * attempts per client address. Hibernatable WebSockets, with every socket's state in its attachment, so the object
+ * can sleep between messages; the NAS's heartbeat (`SIGNAL_PING_MESSAGE` every 25 s) is answered by the runtime's
+ * WebSocket auto-response, set up in the constructor, so an idle NAS keeps its socket without waking the object.
+ * Only offers, answers, candidates, TURN requests and socket opens and closes wake it.
  */
 import { INTERNAL, REGISTRY_NAME } from './code-registry';
 import type { RegistryStorage } from './code-registry';
@@ -19,12 +21,14 @@ import {
   SIGNAL_DEVICE_LIFETIME_MS,
   SIGNAL_DEVICE_MESSAGES,
   SIGNAL_MAX_MESSAGE_BYTES,
+  SIGNAL_PING_MESSAGE,
+  SIGNAL_PONG_MESSAGE,
   base64url,
   fromBase64url,
   isNasId,
   signalAuthMessage,
 } from './protocol';
-import type { DeviceSignalForNas, NasSignalForDevice, SignalChallenge, SignalHello, SignalPong } from './protocol';
+import type { DeviceSignalForNas, NasSignalForDevice, SignalChallenge, SignalHello } from './protocol';
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
 
 /** The part of a server-side `WebSocket` the object uses. */
@@ -35,11 +39,18 @@ export interface SignalSocket {
   deserializeAttachment(): unknown;
 }
 
+/** A WebSocket auto-response: a message of exactly `request` is answered with `response` without waking the object. */
+export interface AutoResponse {
+  readonly request: string;
+  readonly response: string;
+}
+
 /** The part of `DurableObjectState` the object uses: storage for the attempt log and the hibernation API. */
 export interface SignallingState {
   readonly storage: Pick<RegistryStorage, 'get' | 'put' | 'delete' | 'getAlarm' | 'setAlarm'>;
   acceptWebSocket(ws: SignalSocket, tags?: string[]): void;
   getWebSockets(tag?: string): SignalSocket[];
+  setWebSocketAutoResponse(pair: AutoResponse): void;
 }
 
 export interface SignallingEnv {
@@ -55,6 +66,8 @@ export interface Upgrade {
 export interface SignallingDeps {
   now(): number;
   upgrade(): Upgrade;
+  /** The heartbeat's auto-response pair: the runtime's `WebSocketRequestResponsePair`, or a plain one in Node. */
+  pingAutoResponse(): AutoResponse;
 }
 
 type Close = (typeof SIGNAL_CLOSE)[keyof typeof SIGNAL_CLOSE];
@@ -102,6 +115,13 @@ function randomId(bytes: number): string {
 /** The Workers runtime's socket pair, declared here because Node's typechecks of this file's importers lack it. */
 declare const WebSocketPair: new () => { 0: SignalSocket; 1: SignalSocket };
 
+/** The Workers runtime's auto-response pair (a global there, absent in Node, where tests pass their own). */
+declare const WebSocketRequestResponsePair: new (request: string, response: string) => AutoResponse;
+
+function workersPingAutoResponse(): AutoResponse {
+  return new WebSocketRequestResponsePair(SIGNAL_PING_MESSAGE, SIGNAL_PONG_MESSAGE);
+}
+
 function workersUpgrade(): Upgrade {
   const pair = new WebSocketPair();
   return { server: pair[1], response: new Response(null, { status: 101, webSocket: pair[0] } as ResponseInit) };
@@ -129,7 +149,9 @@ export class Signalling {
     private readonly env: SignallingEnv,
     deps?: Partial<SignallingDeps>,
   ) {
-    this.deps = { now: deps?.now ?? Date.now, upgrade: deps?.upgrade ?? workersUpgrade };
+    this.deps = { now: deps?.now ?? Date.now, upgrade: deps?.upgrade ?? workersUpgrade, pingAutoResponse: deps?.pingAutoResponse ?? workersPingAutoResponse };
+    // the heartbeat never reaches webSocketMessage, so it never wakes a hibernating object
+    state.setWebSocketAutoResponse(this.deps.pingAutoResponse());
   }
 
   /** `GET /signal/nas?nasId=` or `GET /signal/device?nasId=` with `Upgrade: websocket`. */
@@ -173,7 +195,7 @@ export class Signalling {
     const attachment = attachmentOf(ws);
     if (attachment === null || attachment.closed) return;
     if (attachment.role === 'device') this.fromDevice(ws, attachment, message);
-    else if (attachment.authed) this.fromNas(ws, message);
+    else if (attachment.authed) this.fromNas(message);
     else await this.authenticate(ws, attachment, message);
   }
 
@@ -224,13 +246,12 @@ export class Signalling {
     trySend(nas, JSON.stringify(forward));
   }
 
-  /** What an authenticated NAS sends: a ping answered on its own socket, else forwarded to the device it names, or dropped. */
-  private fromNas(nas: SignalSocket, message: string | ArrayBuffer): void {
+  /**
+   * What an authenticated NAS sends: forwarded to the device it names, or dropped. Its heartbeat never gets here (the
+   * auto-response answers it).
+   */
+  private fromNas(message: string | ArrayBuffer): void {
     const { value } = parse(message);
-    if (value?.t === 'ping') {
-      const pong: SignalPong = { t: 'pong' };
-      return trySend(nas, JSON.stringify(pong));
-    }
     if (value === null || typeof value.t !== 'string' || !nasTypes.has(value.t) || typeof value.sid !== 'string' || !SID.test(value.sid)) return;
     const device = this.state.getWebSockets(sidTag(value.sid)).find((ws) => attachmentOf(ws)?.closed === false);
     if (device === undefined) return;

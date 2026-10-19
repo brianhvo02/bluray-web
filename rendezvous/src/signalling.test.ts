@@ -1,10 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CodeRegistry } from './code-registry';
 import type { MemoryStorage } from './memory-state';
 import { fireAlarm, memoryState } from './memory-state';
-import { SIGNAL_MAX_MESSAGE_BYTES, base64url, signalAuthMessage, signedMessage } from './protocol';
+import { SIGNAL_MAX_MESSAGE_BYTES, SIGNAL_PING_MESSAGE, SIGNAL_PONG_MESSAGE, base64url, signalAuthMessage, signedMessage } from './protocol';
 import { Signalling } from './signalling';
-import type { SignalSocket, SignallingState } from './signalling';
+import type { AutoResponse, SignalSocket, SignallingState } from './signalling';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -42,6 +42,12 @@ class FakeSocket implements SignalSocket {
 class FakeState implements SignallingState {
   readonly storage: MemoryStorage = memoryState().storage;
   readonly accepted: { ws: FakeSocket; tags: string[] }[] = [];
+  /** The auto-response the object set: the runtime answers it without calling the object. */
+  autoResponse: AutoResponse | undefined;
+
+  setWebSocketAutoResponse(pair: AutoResponse): void {
+    this.autoResponse = { request: pair.request, response: pair.response };
+  }
 
   acceptWebSocket(ws: SignalSocket, tags: string[] = []): void {
     this.accepted.push({ ws: ws as FakeSocket, tags });
@@ -79,6 +85,7 @@ beforeEach(async () => {
   deps = {
     now: () => clock,
     upgrade: () => ({ server: new FakeSocket(), response: new Response(null, { status: 200, headers: { 'X-Upgraded': '1' } }) }),
+    pingAutoResponse: () => ({ request: SIGNAL_PING_MESSAGE, response: SIGNAL_PONG_MESSAGE }),
   };
   signalling = new Signalling(state, env, deps);
   keys = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])) as CryptoKeyPair;
@@ -122,6 +129,15 @@ async function deviceSocket(): Promise<FakeSocket> {
     ws!.sent.length = 0;
   }
   return ws!;
+}
+
+/**
+ * A message arrives as the runtime delivers it: one that matches the auto-response byte for byte is answered by the
+ * runtime and never reaches the object; anything else goes to `webSocketMessage`.
+ */
+async function receive(ws: FakeSocket, message: string): Promise<void> {
+  if (state.autoResponse !== undefined && message === state.autoResponse.request) ws.send(state.autoResponse.response);
+  else await signalling.webSocketMessage(ws, message);
 }
 
 /** The peer's close frame arrives: the runtime calls the handler, then forgets the socket. */
@@ -311,26 +327,44 @@ describe('device socket', () => {
     expect(nas.messages().filter((m) => m.t === 'offer')).toHaveLength(1);
   });
 
-  it('answers a ping from the authenticated NAS with a pong on its own socket, forwarding nothing', async () => {
+  it("answers the NAS's ping with the runtime's auto-response, so a heartbeat never wakes the object", async () => {
+    expect(state.autoResponse).toEqual({ request: '{"t":"ping"}', response: '{"t":"pong"}' });
     const nas = await nasSocket();
     const device = await deviceSocket();
     nas.sent.length = 0;
-    for (let i = 0; i < 100; i++) await signalling.webSocketMessage(nas, JSON.stringify({ t: 'ping' }));
+    const woken = vi.spyOn(signalling, 'webSocketMessage');
+    for (let i = 0; i < 100; i++) await receive(nas, SIGNAL_PING_MESSAGE);
+    expect(woken).not.toHaveBeenCalled();
     expect(nas.messages()).toEqual(Array.from({ length: 100 }, () => ({ t: 'pong' })));
     expect(nas.closed).toBeUndefined();
     expect(device.sent).toEqual([]);
   });
 
-  it('answers no ping before the NAS authenticates, nor from a device', async () => {
-    const { ws } = await open('nas');
-    await signalling.webSocketMessage(ws!, JSON.stringify({ t: 'ping' }));
-    expect(ws!.messages().map((m) => m.t)).toEqual(['challenge']);
-    expect(ws!.closed).toMatchObject({ code: 1008, reason: 'bad-message' });
-    await nasSocket();
+  it('handles a ping in other bytes as any other message: dropped from the NAS, a bad message from a device', async () => {
+    const nas = await nasSocket();
     const device = await deviceSocket();
-    await signalling.webSocketMessage(device, JSON.stringify({ t: 'ping' }));
+    nas.sent.length = 0;
+    await receive(nas, '{ "t": "ping" }');
+    expect(nas.sent).toEqual([]);
+    expect(nas.closed).toBeUndefined();
+    await receive(device, '{ "t": "ping" }');
     expect(device.sent).toEqual([]);
     expect(device.closed).toMatchObject({ code: 1008, reason: 'bad-message' });
+    expect(nas.sent).toEqual([]);
+  });
+
+  it('gives any socket a pong for the exact ping (it carries nothing), without counting or forwarding it', async () => {
+    const { ws } = await open('nas');
+    await receive(ws!, SIGNAL_PING_MESSAGE);
+    expect(ws!.messages().map((m) => m.t)).toEqual(['challenge', 'pong']);
+    expect(ws!.closed).toBeUndefined();
+    const nas = await nasSocket();
+    nas.sent.length = 0;
+    const device = await deviceSocket();
+    await receive(device, SIGNAL_PING_MESSAGE);
+    expect(device.messages()).toEqual([{ t: 'pong' }]);
+    expect(device.closed).toBeUndefined();
+    expect(nas.sent).toEqual([]);
   });
 
   it('drops what the NAS sends of an unknown type, too big, to an unknown sid or without one', async () => {

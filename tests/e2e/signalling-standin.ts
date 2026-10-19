@@ -9,7 +9,8 @@ import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { MemoryStorage } from '../../rendezvous/src/memory-state';
-import { Signalling, type SignalSocket, type SignallingEnv, type SignallingState, type Upgrade } from '../../rendezvous/src/signalling';
+import { SIGNAL_PING_MESSAGE, SIGNAL_PONG_MESSAGE } from '../../rendezvous/src/protocol';
+import { Signalling, type AutoResponse, type SignalSocket, type SignallingEnv, type SignallingState, type Upgrade } from '../../rendezvous/src/signalling';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -178,6 +179,7 @@ class StandInState implements SignallingState {
   readonly storage: MemoryStorage;
   private readonly accepted: Array<{ ws: SignalSocket; tags: string[] }> = [];
   object: Signalling | null = null;
+  private autoResponse: AutoResponse | undefined;
 
   constructor() {
     const state = this;
@@ -198,7 +200,11 @@ class StandInState implements SignallingState {
   acceptWebSocket(ws: SignalSocket, tags: string[] = []): void {
     this.accepted.push({ ws, tags });
     const socket = ws as NodeSignalSocket;
-    socket.onMessage = (message) => void this.object?.webSocketMessage(ws, message);
+    socket.onMessage = (message) => {
+      // as the runtime does: the auto-response answers its exact request without calling the object
+      if (this.autoResponse !== undefined && message === this.autoResponse.request) ws.send(this.autoResponse.response);
+      else void this.object?.webSocketMessage(ws, message);
+    };
     socket.onClose = (code, reason) => {
       void this.object?.webSocketClose(ws, code, reason, code !== 1006).finally(() => {
         const at = this.accepted.findIndex((a) => a.ws === ws);
@@ -209,6 +215,10 @@ class StandInState implements SignallingState {
 
   getWebSockets(tag?: string): SignalSocket[] {
     return this.accepted.filter((a) => tag === undefined || a.tags.includes(tag)).map((a) => a.ws);
+  }
+
+  setWebSocketAutoResponse(pair: AutoResponse): void {
+    this.autoResponse = { request: pair.request, response: pair.response };
   }
 }
 
@@ -243,7 +253,7 @@ export function signallingNamespace(env: SignallingEnv): { idFromName(name: stri
       let object = objects.get(name);
       if (!object) {
         const state = new StandInState();
-        object = new Signalling(state, env, { upgrade: standInUpgrade });
+        object = new Signalling(state, env, { upgrade: standInUpgrade, pingAutoResponse: () => ({ request: SIGNAL_PING_MESSAGE, response: SIGNAL_PONG_MESSAGE }) });
         state.object = object;
         objects.set(name, object);
       }

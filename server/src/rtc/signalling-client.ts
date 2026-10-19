@@ -1,4 +1,4 @@
-import { SIGNAL_PING_INTERVAL_MS, SIGNAL_PONG_TIMEOUT_MS, signalAuthMessage } from '../../../rendezvous/src/protocol';
+import { SIGNAL_PING_INTERVAL_MS, SIGNAL_PING_MESSAGE, SIGNAL_PONG_TIMEOUT_MS, signalAuthMessage } from '../../../rendezvous/src/protocol';
 import { RtcRefused } from './peer';
 
 /** The part of a WebSocket the client uses; Node's global `WebSocket` by default. */
@@ -73,7 +73,8 @@ function socketUrl(base: string, nasId: string): string {
  * Worker's challenge with the NAS key's signature, hands `offer` and `candidate` messages to the peers and sends
  * their answers back to the device's `sid`, and reconnects with backoff (1 s doubling to 60 s, with jitter). After a
  * `bad-auth` close it registers the NAS's key again first, as the Worker may have lost it. Once authenticated it
- * pings the Worker every 25 s and reconnects when a pong is 10 s late, so a socket that died silently (a NAT
+ * pings the Worker every 25 s (exactly `SIGNAL_PING_MESSAGE`, which the Worker's auto-response answers without waking
+ * its Durable Object) and reconnects when a pong is 10 s late, so a socket that died silently (a NAT
  * mapping gone, a changed public address) doesn't leave the NAS unreachable; `reconnect()` forces one.
  */
 export class SignallingClient {
@@ -127,7 +128,7 @@ export class SignallingClient {
     this.stopHeartbeat();
     this.pingTimer = setInterval(() => {
       if (this.socket !== socket) return;
-      this.send(socket, { t: 'ping' });
+      this.sendRaw(socket, SIGNAL_PING_MESSAGE); // exactly these bytes, which the Worker's auto-response answers
       if (this.pongTimer !== undefined) return; // the earlier ping's deadline still runs
       this.pongTimer = setTimeout(() => {
         if (this.socket !== socket) return;
@@ -197,9 +198,13 @@ export class SignallingClient {
   }
 
   private send(socket: WebSocketLike, message: Record<string, unknown>): void {
+    this.sendRaw(socket, JSON.stringify(message));
+  }
+
+  private sendRaw(socket: WebSocketLike, data: string): void {
     if (this.socket !== socket) return;
     try {
-      socket.send(JSON.stringify(message));
+      socket.send(data);
     } catch {
       // closing; its close handler reconnects
     }
