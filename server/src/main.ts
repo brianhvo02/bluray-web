@@ -50,8 +50,8 @@ function rendezvousRegistrar(config: Config): RendezvousClient | undefined {
  * `RTC_LAN_ADDRESS`, and the signalling socket to the rendezvous Worker. Gives the function that stops it all.
  */
 function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousClient, handlers: readonly Handler[], auth: Auth): () => Promise<void> {
-  const advertiser = new AddressAdvertiser({ stun: STUN_URL, lan: config.rtc.lanAddress, fixed: config.rtc.advertise });
-  void advertiser.start();
+  // A changed public address likely means the signalling socket's path died with the old one.
+  const advertiser = new AddressAdvertiser({ stun: STUN_URL, lan: config.rtc.lanAddress, fixed: config.rtc.advertise, onChange: () => signalling.reconnect() });
   const peers = new RtcPeers({ handlers, auth, port: config.rtc.port, advertise: () => advertiser.advertise(), iceServers: async () => [{ urls: STUN_URL }], now: Date.now });
   peers.listen().then(
     () => console.log(`WebRTC on UDP ${config.rtc.port}`),
@@ -59,6 +59,7 @@ function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousC
   );
   const signalling = new SignallingClient({ url: rendezvousUrl, signer: rendezvous, peers });
   signalling.start();
+  void advertiser.start();
   return async () => {
     signalling.stop();
     advertiser.stop();

@@ -1,12 +1,12 @@
 import { createSocket } from 'node:dgram';
 import type { Socket } from 'node:dgram';
 import { afterEach, describe, expect, it } from 'vitest';
-import { advertisable, AddressAdvertiser, discoverPublicIpv4 } from './public-address';
+import { advertisable, AddressAdvertiser, discoverPublicIpv4, neverDockerOrTailscale } from './public-address';
 
 const MAGIC = 0x2112a442;
 
 /** A STUN server on loopback that answers each Binding request with XOR-MAPPED-ADDRESS `mapped()`, or not at all. */
-async function fakeStun(mapped: () => string | null): Promise<{ url: string; socket: Socket; requests: number }> {
+async function fakeStun(mapped: () => string | null, opts: { wrongTxid?: boolean } = {}): Promise<{ url: string; socket: Socket; requests: number }> {
   const socket = createSocket('udp4');
   const state = { url: '', socket, requests: 0 };
   socket.on('message', (msg, rinfo) => {
@@ -17,6 +17,7 @@ async function fakeStun(mapped: () => string | null): Promise<{ url: string; soc
     res.writeUInt16BE(0x0101, 0);
     res.writeUInt16BE(12, 2);
     msg.copy(res, 4, 4, 20); // magic cookie and transaction id
+    if (opts.wrongTxid) res[19] ^= 0xff;
     res.writeUInt16BE(0x0020, 20);
     res.writeUInt16BE(8, 22);
     res.writeUInt8(0, 24);
@@ -52,16 +53,27 @@ describe('discoverPublicIpv4', () => {
     expect(stun.requests).toBeGreaterThan(0);
   });
 
+  it('ignores an answer to another transaction', async () => {
+    const stun = await fakeStun(() => '198.51.100.23', { wrongTxid: true });
+    sockets.push(stun.socket);
+    expect(await discoverPublicIpv4(stun.url, 300)).toBeNull();
+    expect(stun.requests).toBeGreaterThan(0);
+  });
+
   it('gives null for a URL that is not stun:host:port', async () => {
     expect(await discoverPublicIpv4('turn:127.0.0.1:3478', 100)).toBeNull();
   });
 });
 
 describe('advertisable', () => {
-  it('refuses Docker and Tailscale ranges and anything not IPv4', () => {
+  it('takes public and 10/8 or 192.168/16 addresses only, never Docker, Tailscale, loopback or link-local', () => {
     expect(advertisable('203.0.113.9')).toBe(true);
     expect(advertisable('192.168.1.98')).toBe(true);
-    expect(advertisable('127.0.0.1')).toBe(true);
+    expect(advertisable('10.1.2.3')).toBe(true);
+    expect(advertisable('127.0.0.1')).toBe(false);
+    expect(advertisable('169.254.1.1')).toBe(false);
+    expect(advertisable('0.0.0.0')).toBe(false);
+    expect(advertisable('224.0.0.1')).toBe(false);
     expect(advertisable('172.16.0.1')).toBe(false);
     expect(advertisable('172.31.255.254')).toBe(false);
     expect(advertisable('172.32.0.1')).toBe(true);
@@ -70,6 +82,13 @@ describe('advertisable', () => {
     expect(advertisable('100.128.0.1')).toBe(true);
     expect(advertisable('fe80::1')).toBe(false);
     expect(advertisable('1.2.3')).toBe(false);
+  });
+
+  it('lets the test list (RTC_ADVERTISE) through with loopback, but never Docker or Tailscale', () => {
+    expect(neverDockerOrTailscale('127.0.0.1')).toBe(true);
+    expect(neverDockerOrTailscale('172.20.0.1')).toBe(false);
+    expect(neverDockerOrTailscale('100.100.100.100')).toBe(false);
+    expect(neverDockerOrTailscale('::1')).toBe(false);
   });
 });
 
@@ -116,6 +135,47 @@ describe('AddressAdvertiser', () => {
     answer = '203.0.113.40';
     await expect.poll(() => advertiser.advertise(), { timeout: 2000 }).toEqual(['203.0.113.40']);
     advertiser.stop();
+  });
+
+  it('tells onChange when the public address changes, not when it is first found', async () => {
+    let answer = '198.51.100.23';
+    const stun = await fakeStun(() => answer);
+    sockets.push(stun.socket);
+    let changes = 0;
+    const advertiser = new AddressAdvertiser({ log: () => {}, stun: stun.url, timeoutMs: 1000, onChange: () => changes++ });
+    await advertiser.refresh();
+    await advertiser.refresh();
+    expect(changes).toBe(0);
+    answer = '203.0.113.40';
+    await advertiser.refresh();
+    expect(changes).toBe(1);
+  });
+
+  it('retries on the shorter interval while no public address is known', async () => {
+    let answer: string | null = null;
+    const stun = await fakeStun(() => answer);
+    sockets.push(stun.socket);
+    const advertiser = new AddressAdvertiser({ log: () => {}, stun: stun.url, timeoutMs: 100, intervalMs: 3_600_000, retryMs: 50 });
+    await advertiser.start();
+    expect(advertiser.advertise()).toEqual([]);
+    answer = '198.51.100.23';
+    await expect.poll(() => advertiser.advertise(), { timeout: 2000 }).toEqual(['198.51.100.23']);
+    const requests = stun.requests;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(stun.requests).toBe(requests); // back on the hourly interval
+    advertiser.stop();
+  });
+
+  it('stays stopped when stopped during its first refresh', async () => {
+    const stun = await fakeStun(() => '198.51.100.23');
+    sockets.push(stun.socket);
+    const advertiser = new AddressAdvertiser({ log: () => {}, stun: stun.url, timeoutMs: 1000, intervalMs: 20, retryMs: 20 });
+    const started = advertiser.start();
+    advertiser.stop();
+    await started;
+    const requests = stun.requests;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(stun.requests).toBe(requests);
   });
 
   it('advertises a fixed list instead of discovering', async () => {

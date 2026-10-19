@@ -23,7 +23,7 @@ import {
   isNasId,
   signalAuthMessage,
 } from './protocol';
-import type { DeviceSignalForNas, NasSignalForDevice, SignalChallenge } from './protocol';
+import type { DeviceSignalForNas, NasSignalForDevice, SignalChallenge, SignalPong } from './protocol';
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
 
 /** The part of a server-side `WebSocket` the object uses. */
@@ -168,7 +168,7 @@ export class Signalling {
     const attachment = attachmentOf(ws);
     if (attachment === null || attachment.closed) return;
     if (attachment.role === 'device') this.fromDevice(ws, attachment, message);
-    else if (attachment.authed) this.fromNas(message);
+    else if (attachment.authed) this.fromNas(ws, message);
     else await this.authenticate(ws, attachment, message);
   }
 
@@ -219,9 +219,13 @@ export class Signalling {
     trySend(nas, JSON.stringify(forward));
   }
 
-  /** What an authenticated NAS sends: forwarded to the device it names, or dropped. */
-  private fromNas(message: string | ArrayBuffer): void {
+  /** What an authenticated NAS sends: a ping answered on its own socket, else forwarded to the device it names, or dropped. */
+  private fromNas(nas: SignalSocket, message: string | ArrayBuffer): void {
     const { value } = parse(message);
+    if (value?.t === 'ping') {
+      const pong: SignalPong = { t: 'pong' };
+      return trySend(nas, JSON.stringify(pong));
+    }
     if (value === null || typeof value.t !== 'string' || !nasTypes.has(value.t) || typeof value.sid !== 'string' || !SID.test(value.sid)) return;
     const device = this.state.getWebSockets(sidTag(value.sid)).find((ws) => attachmentOf(ws)?.closed === false);
     if (device === undefined) return;

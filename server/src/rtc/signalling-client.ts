@@ -1,4 +1,4 @@
-import { signalAuthMessage } from '../../../rendezvous/src/protocol';
+import { SIGNAL_PING_INTERVAL_MS, SIGNAL_PONG_TIMEOUT_MS, signalAuthMessage } from '../../../rendezvous/src/protocol';
 import { RtcRefused } from './peer';
 
 /** The part of a WebSocket the client uses; Node's global `WebSocket` by default. */
@@ -38,6 +38,9 @@ export interface SignallingOptions {
   onTurnRequest?: (sid: string, request: Record<string, unknown>) => Promise<Record<string, unknown>>;
   openSocket?: (url: string) => WebSocketLike;
   backoff?: Backoff;
+  /** The heartbeat: a ping this often once authenticated, and a reconnect when its pong is this late. */
+  pingIntervalMs?: number;
+  pongTimeoutMs?: number;
   random?: () => number;
   now?: () => number;
   log?: (message: string, err?: unknown) => void;
@@ -69,11 +72,15 @@ function socketUrl(base: string, nasId: string): string {
  * The NAS's end of WebRTC signalling: one WebSocket to its Durable Object on the rendezvous Worker. It answers the
  * Worker's challenge with the NAS key's signature, hands `offer` and `candidate` messages to the peers and sends
  * their answers back to the device's `sid`, and reconnects with backoff (1 s doubling to 60 s, with jitter). After a
- * `bad-auth` close it registers the NAS's key again first, as the Worker may have lost it.
+ * `bad-auth` close it registers the NAS's key again first, as the Worker may have lost it. Once authenticated it
+ * pings the Worker every 25 s and reconnects when a pong is 10 s late, so a socket that died silently (a NAT
+ * mapping gone, a changed public address) doesn't leave the NAS unreachable; `reconnect()` forces one.
  */
 export class SignallingClient {
   private socket: WebSocketLike | null = null;
   private timer: NodeJS.Timeout | undefined;
+  private pingTimer: NodeJS.Timeout | undefined;
+  private pongTimer: NodeJS.Timeout | undefined;
   private stopped = true;
   private attempt = 0;
   private reregisterNext = false;
@@ -94,13 +101,50 @@ export class SignallingClient {
   stop(): void {
     this.stopped = true;
     clearTimeout(this.timer);
+    this.drop(1000, 'stopping');
+  }
+
+  /** Drops the socket now and connects again (after the backoff), as when the public address changed. */
+  reconnect(): void {
+    if (this.stopped || this.socket === null) return;
+    this.drop(4000, 'reconnecting');
+    this.retry();
+  }
+
+  /** Forgets the current socket, so its late events are ignored, and closes it. */
+  private drop(code: number, reason: string): void {
+    this.stopHeartbeat();
     const socket = this.socket;
     this.socket = null;
     try {
-      socket?.close(1000, 'stopping');
+      socket?.close(code, reason);
     } catch {
       // already closed
     }
+  }
+
+  private startHeartbeat(socket: WebSocketLike): void {
+    this.stopHeartbeat();
+    this.pingTimer = setInterval(() => {
+      if (this.socket !== socket) return;
+      this.send(socket, { t: 'ping' });
+      if (this.pongTimer !== undefined) return; // the earlier ping's deadline still runs
+      this.pongTimer = setTimeout(() => {
+        if (this.socket !== socket) return;
+        this.log('signalling: no pong from the rendezvous; reconnecting');
+        this.drop(4000, 'no-pong');
+        this.retry();
+      }, this.opts.pongTimeoutMs ?? SIGNAL_PONG_TIMEOUT_MS);
+      this.pongTimer.unref();
+    }, this.opts.pingIntervalMs ?? SIGNAL_PING_INTERVAL_MS);
+    this.pingTimer.unref();
+  }
+
+  private stopHeartbeat(): void {
+    clearInterval(this.pingTimer);
+    clearTimeout(this.pongTimer);
+    this.pingTimer = undefined;
+    this.pongTimer = undefined;
   }
 
   private log(message: string, err?: unknown): void {
@@ -134,6 +178,7 @@ export class SignallingClient {
     socket.onclose = ({ code, reason }) => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.stopHeartbeat();
       // A socket that stayed up a while was a good connection: the next drop starts the backoff over.
       if (this.now() - openedAt >= this.backoff.maxMs) this.attempt = 0;
       if (reason === 'bad-auth') this.reregisterNext = true;
@@ -175,9 +220,17 @@ export class SignallingClient {
       try {
         const signature = await this.opts.signer.sign(signalAuthMessage({ nasId, nonce: m.nonce }));
         this.send(socket, { t: 'auth', signature });
+        if (this.socket === socket) this.startHeartbeat(socket);
       } catch (err) {
         this.log('signalling: signing the challenge failed', err);
         socket.close();
+      }
+      return;
+    }
+    if (m.t === 'pong') {
+      if (this.socket === socket) {
+        clearTimeout(this.pongTimer);
+        this.pongTimer = undefined;
       }
       return;
     }

@@ -115,6 +115,21 @@ export interface SignalAuth {
   readonly signature: string;
 }
 
+/**
+ * NAS → Worker on its authenticated socket, every `SIGNAL_PING_INTERVAL_MS`: the Worker answers `SignalPong` on that
+ * socket and forwards nothing. A NAS that gets no pong within `SIGNAL_PONG_TIMEOUT_MS` reconnects.
+ */
+export interface SignalPing {
+  readonly t: 'ping';
+}
+
+export interface SignalPong {
+  readonly t: 'pong';
+}
+
+export const SIGNAL_PING_INTERVAL_MS = 25_000;
+export const SIGNAL_PONG_TIMEOUT_MS = 10_000;
+
 /** Device → Worker. */
 export interface DeviceSignal {
   readonly t: DeviceSignalType;

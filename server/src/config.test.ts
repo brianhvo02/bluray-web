@@ -116,5 +116,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ RTC_LAN_ADDRESS: '172.18.0.2' })).toThrow('RTC_LAN_ADDRESS');
     expect(() => loadConfig({ RTC_ADVERTISE: '100.100.1.1' })).toThrow('RTC_ADVERTISE');
     expect(() => loadConfig({ RTC_LAN_ADDRESS: 'nas.local' })).toThrow('RTC_LAN_ADDRESS');
+    expect(() => loadConfig({ RTC_LAN_ADDRESS: '127.0.0.1' })).toThrow('RTC_LAN_ADDRESS');
+    expect(loadConfig({ RTC_LAN_ADDRESS: '10.0.0.8' }).rtc.lanAddress).toBe('10.0.0.8');
   });
 });

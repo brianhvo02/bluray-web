@@ -10,16 +10,33 @@ const XOR_MAPPED_ADDRESS = 0x0020;
 /** Resends of the Binding request while waiting, in ms after the first (RFC 5389's doubling, cut short). */
 const RESENDS_MS = [500, 1500, 3500];
 const HOUR = 60 * 60_000;
+/** While no public address is known, STUN is tried this often. */
+const RETRY_MS = 60_000;
+
+const octets = (ip: string): number[] => ip.split('.').map(Number);
+const isDocker = ([a, b]: number[]): boolean => a === 172 && b! >= 16 && b! <= 31;
+const isTailscale = ([a, b]: number[]): boolean => a === 100 && b! >= 64 && b! <= 127;
 
 /**
- * Whether the NAS may advertise `ip` as a candidate: an IPv4 address outside Docker's 172.16.0.0/12 and
- * Tailscale's 100.64.0.0/10, which no device elsewhere can reach.
+ * The one rule every advertised candidate keeps: an IPv4 address outside Docker's 172.16.0.0/12 and Tailscale's
+ * 100.64.0.0/10. It is all `RTC_ADVERTISE` (tests, loopback included) must pass.
+ */
+export function neverDockerOrTailscale(ip: string): boolean {
+  if (!isIPv4(ip)) return false;
+  const o = octets(ip);
+  return !isDocker(o) && !isTailscale(o);
+}
+
+/**
+ * Whether a STUN result or `RTC_LAN_ADDRESS` may be advertised: a public IPv4 address, or a private one in
+ * 10.0.0.0/8 or 192.168.0.0/16. Never Docker's 172.16.0.0/12 or Tailscale's 100.64.0.0/10, and never loopback,
+ * link-local, `0.0.0.0/8`, multicast or reserved.
  */
 export function advertisable(ip: string): boolean {
-  if (!isIPv4(ip)) return false;
-  const [a, b] = ip.split('.').map(Number) as [number, number];
-  if (a === 172 && b >= 16 && b <= 31) return false;
-  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (!neverDockerOrTailscale(ip)) return false;
+  const [a, b] = octets(ip) as [number, number];
+  if (a === 0 || a === 127 || a >= 224) return false;
+  if (a === 169 && b === 254) return false;
   return true;
 }
 
@@ -109,18 +126,23 @@ export interface AdvertiserOptions {
   timeoutMs?: number;
   /** Between refreshes; an hour by default. */
   intervalMs?: number;
+  /** Between tries while no public address is known; a minute by default. */
+  retryMs?: number;
+  /** Called when a refresh finds a public address other than the last one known. */
+  onChange?: () => void;
   /** Where a refresh that got no answer, or a changed address, is reported; `console.warn` by default. */
   log?: (message: string) => void;
 }
 
 /**
  * The addresses the NAS advertises as its ICE candidates: its public IPv4 (found by STUN at start and then hourly,
- * so a changed address is picked up without a restart) and its LAN address. A refresh that gets no answer keeps the
- * last public address. Docker and Tailscale addresses are never advertised.
+ * so a changed address is picked up without a restart; every minute while none is known) and its LAN address. A
+ * refresh that gets no answer keeps the last public address. Docker and Tailscale addresses are never advertised.
  */
 export class AddressAdvertiser {
   private publicIp: string | null = null;
   private timer: NodeJS.Timeout | undefined;
+  private running = false;
 
   constructor(private readonly opts: AdvertiserOptions) {}
 
@@ -129,7 +151,7 @@ export class AddressAdvertiser {
   }
 
   advertise(): string[] {
-    if (this.opts.fixed) return this.opts.fixed.filter(advertisable);
+    if (this.opts.fixed) return this.opts.fixed.filter(neverDockerOrTailscale);
     const list = [this.publicIp, this.opts.lan].filter((ip): ip is string => ip != null && advertisable(ip));
     return [...new Set(list)];
   }
@@ -137,32 +159,36 @@ export class AddressAdvertiser {
   async refresh(): Promise<void> {
     if (this.opts.fixed) return;
     const ip = await discoverPublicIpv4(this.opts.stun, this.opts.timeoutMs ?? 5000);
-    if (ip === null) {
-      this.log(`STUN ${this.opts.stun} did not answer; keeping ${this.publicIp === null ? 'no public address' : 'the last public address'}`);
+    if (ip === null || !advertisable(ip)) {
+      this.log(`STUN ${this.opts.stun} gave no usable address; keeping ${this.publicIp === null ? 'no public address' : 'the last public address'}`);
       return;
     }
-    if (ip !== this.publicIp && this.publicIp !== null) this.log('the public IPv4 address changed; advertising the new one');
+    const changed = this.publicIp !== null && ip !== this.publicIp;
     this.publicIp = ip;
+    if (changed) {
+      this.log('the public IPv4 address changed; advertising the new one');
+      this.opts.onChange?.();
+    }
   }
 
-  /** Refreshes now, then every interval until `stop`. */
+  /** Refreshes now, then every interval (every minute while no public address is known) until `stop`. */
   async start(): Promise<void> {
-    if (this.opts.fixed) return;
+    if (this.opts.fixed || this.running) return;
+    this.running = true;
     await this.refresh();
-    this.stop();
-    const tick = (): void => {
-      this.timer = setTimeout(() => {
-        void this.refresh().finally(() => {
-          if (this.timer !== undefined) tick();
-        });
-      }, this.opts.intervalMs ?? HOUR);
-      this.timer.unref();
-    };
-    tick();
+    this.schedule();
   }
 
   stop(): void {
+    this.running = false;
     clearTimeout(this.timer);
     this.timer = undefined;
+  }
+
+  private schedule(): void {
+    if (!this.running) return;
+    const delay = this.publicIp === null ? (this.opts.retryMs ?? RETRY_MS) : (this.opts.intervalMs ?? HOUR);
+    this.timer = setTimeout(() => void this.refresh().finally(() => this.schedule()), delay);
+    this.timer.unref();
   }
 }

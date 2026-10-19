@@ -5,7 +5,7 @@ import type { WireChannel } from '../../../src/engine/disc/rtc-wire';
 import type { Auth, DeviceRoute } from '../auth';
 import type { Handler } from '../http';
 import { serveChannel } from './dispatch';
-import { advertisable } from './public-address';
+import { neverDockerOrTailscale } from './public-address';
 import { UdpMux } from './udp-mux';
 import type { MuxOwner } from './udp-mux';
 
@@ -72,7 +72,7 @@ export function routeOf(pair: { localCandidate: CandidateLike; remoteCandidate: 
  * dropped), followed by end-of-candidates, and its connection lines pointing at the first address.
  */
 export function answerWithCandidates(sdp: string, addresses: readonly string[], port: number): string {
-  const ips = [...new Set(addresses.filter(advertisable))];
+  const ips = [...new Set(addresses.filter(neverDockerOrTailscale))];
   const lines = sdp.split(/\r?\n/).filter((l) => l !== '' && !l.startsWith('a=candidate:') && l !== 'a=end-of-candidates');
   const candidates = [...ips.map((ip, i) => `a=candidate:${i + 1} 1 udp ${2130706431 - i * 256} ${ip} ${port} typ host generation 0`), 'a=end-of-candidates'];
   const out: string[] = [];
@@ -86,6 +86,11 @@ export function answerWithCandidates(sdp: string, addresses: readonly string[], 
   }
   if (inMedia) out.push(...candidates);
   return `${out.join('\r\n')}\r\n`;
+}
+
+/** An SDP's first `a=ice-<name>` value. */
+function iceAttribute(sdp: string, name: 'ufrag' | 'pwd'): string | undefined {
+  return new RegExp(`^a=ice-${name}:(\\S+)`, 'm').exec(sdp)?.[1];
 }
 
 /**
@@ -212,9 +217,12 @@ export class RtcPeers {
         await pc.setLocalDescription(await pc.createAnswer());
       });
       const local = pc.localDescription?.sdp;
-      const ufrag = local === undefined ? undefined : /^a=ice-ufrag:(\S+)/m.exec(local)?.[1];
-      if (local === undefined || ufrag === undefined) throw new Error('werift made no answer');
-      peer.owner.ufrag = ufrag;
+      const ufrag = local === undefined ? undefined : iceAttribute(local, 'ufrag');
+      const password = local === undefined ? undefined : iceAttribute(local, 'pwd');
+      const remoteUfrag = iceAttribute(offer, 'ufrag');
+      if (ufrag === undefined || password === undefined) throw new Error('werift made no answer');
+      if (remoteUfrag === undefined) throw new Error('the offer has no ICE ufrag');
+      peer.owner.claim(ufrag, remoteUfrag, password); // a MuxConflict drops the peer below
       await gathered;
       if (peer.closed) throw new Error('the peer closed while answering');
       return { answer: answerWithCandidates(pc.localDescription!.sdp, this.opts.advertise(), port) };
@@ -290,7 +298,8 @@ export class RtcPeers {
       const channel = wireChannelOf(dc, () => this.drop(peer));
       peer.served = serveChannel(channel, this.opts.handlers, {
         auth: this.opts.auth,
-        remoteAddress: pair?.remoteCandidate.host ?? 'webrtc',
+        // The device's address as packets arrive from it; unknown, a bucket of its own for the pairing limits.
+        remoteAddress: pair?.remoteAddr[0] ?? `webrtc:${peer.sid}`,
         now: this.opts.now,
         onSession: (deviceId) => this.opts.auth.noteRoute(deviceId, routeOf(peer.pc.iceTransports[0]?.connection.nominated)),
       });

@@ -18,11 +18,19 @@ class FakeSocket implements WebSocketLike {
   onerror: (() => void) | null = null;
   sent: unknown[] = [];
   closed = false;
+  /** Answer each ping with a pong, as the Worker does. */
+  autoPong = false;
+  pings = 0;
 
   constructor(readonly url: string) {}
 
   send(data: string): void {
-    this.sent.push(JSON.parse(data));
+    const message = JSON.parse(data) as { t: string };
+    if (message.t === 'ping') {
+      this.pings++;
+      if (this.autoPong) queueMicrotask(() => this.deliver({ t: 'pong' }));
+    }
+    this.sent.push(message);
   }
 
   close(): void {
@@ -92,9 +100,9 @@ function start(extra: Partial<ConstructorParameters<typeof SignallingClient>[0]>
 /** Sends a challenge on `socket` and checks the NAS's signature over it. */
 async function authenticate(socket: FakeSocket): Promise<void> {
   socket.deliver({ t: 'challenge', nonce: 'nonce-1' });
-  await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
-  const auth = socket.sent[0] as { t: string; signature: string };
-  expect(auth.t).toBe('auth');
+  await vi.waitFor(() => expect(socket.sent.some((m) => (m as { t: string }).t === 'auth')).toBe(true));
+  const auth = socket.sent.find((m) => (m as { t: string }).t === 'auth') as { t: string; signature: string };
+  expect(socket.sent.filter((m) => (m as { t: string }).t !== 'ping')).toEqual([auth]);
   const jwk = registrations.at(-1)!;
   const key = await crypto.subtle.importKey('jwk', jwk, ECDSA_KEY, false, ['verify']);
   const nasId = await nasIdOf(jwk);
@@ -197,6 +205,46 @@ describe('SignallingClient', () => {
     rendezvous = new RendezvousClient('https://rv.example', join(tmp, 'rendezvous-key.json'), flaky);
     start({ signer: rendezvous });
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
+  });
+
+  it('pings once authenticated and stays while pongs come back', async () => {
+    start({ pingIntervalMs: 20, pongTimeoutMs: 30 });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = sockets[0]!;
+    socket.autoPong = true;
+    await authenticate(socket);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(socket.pings).toBeGreaterThan(4);
+    expect(socket.closed).toBe(false);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('sends no ping before it has answered the challenge', async () => {
+    start({ pingIntervalMs: 10, pongTimeoutMs: 10 });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(sockets[0]!.sent).toEqual([]);
+    expect(sockets).toHaveLength(1);
+  });
+
+  it('reconnects when a pong is late', async () => {
+    start({ pingIntervalMs: 20, pongTimeoutMs: 30 });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await authenticate(sockets[0]!);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    expect(sockets[0]!.pings).toBeGreaterThan(0);
+    expect(sockets[0]!.closed).toBe(true);
+    await authenticate(sockets[1]!);
+  });
+
+  it('reconnects on demand, as when the public address changed', async () => {
+    start();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await authenticate(sockets[0]!);
+    client.reconnect();
+    expect(sockets[0]!.closed).toBe(true);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    await authenticate(sockets[1]!);
   });
 
   it('stops for good', async () => {

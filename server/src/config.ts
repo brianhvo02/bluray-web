@@ -1,4 +1,4 @@
-import { advertisable } from './rtc/public-address';
+import { advertisable, neverDockerOrTailscale } from './rtc/public-address';
 
 export interface LibraryRoot {
   name: string;
@@ -74,16 +74,19 @@ function parseRtc(env: Record<string, string | undefined>): RtcConfig {
     if (!/^\d+$/.test(env.RTC_PORT) || port === 0 || port >= 65535) throw new Error(`RTC_PORT "${env.RTC_PORT}" is not a UDP port below 65535`);
     rtc.port = port;
   }
-  if (env.RTC_LAN_ADDRESS !== undefined && env.RTC_LAN_ADDRESS !== '') rtc.lanAddress = advertisedAddress('RTC_LAN_ADDRESS', env.RTC_LAN_ADDRESS.trim());
+  if (env.RTC_LAN_ADDRESS !== undefined && env.RTC_LAN_ADDRESS !== '') {
+    const ip = env.RTC_LAN_ADDRESS.trim();
+    if (!advertisable(ip)) throw new Error(`RTC_LAN_ADDRESS "${ip}" is not a public IPv4 address or one in 10.0.0.0/8 or 192.168.0.0/16`);
+    rtc.lanAddress = ip;
+  }
   if (env.RTC_ADVERTISE !== undefined && env.RTC_ADVERTISE !== '') {
-    rtc.advertise = env.RTC_ADVERTISE.split(',').map((ip) => advertisedAddress('RTC_ADVERTISE', ip.trim()));
+    rtc.advertise = env.RTC_ADVERTISE.split(',').map((entry) => {
+      const ip = entry.trim();
+      if (!neverDockerOrTailscale(ip)) throw new Error(`RTC_ADVERTISE "${ip}" is not an IPv4 address outside 172.16.0.0/12 and 100.64.0.0/10`);
+      return ip;
+    });
   }
   return rtc;
-}
-
-function advertisedAddress(name: string, ip: string): string {
-  if (!advertisable(ip)) throw new Error(`${name} "${ip}" is not an IPv4 address outside 172.16.0.0/12 and 100.64.0.0/10`);
-  return ip;
 }
 
 function parsePort(value: string | undefined): number {

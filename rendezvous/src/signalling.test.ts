@@ -293,6 +293,28 @@ describe('device socket', () => {
     expect(nas.messages().filter((m) => m.t === 'offer')).toHaveLength(1);
   });
 
+  it('answers a ping from the authenticated NAS with a pong on its own socket, forwarding nothing', async () => {
+    const nas = await nasSocket();
+    const device = await deviceSocket();
+    nas.sent.length = 0;
+    for (let i = 0; i < 100; i++) await signalling.webSocketMessage(nas, JSON.stringify({ t: 'ping' }));
+    expect(nas.messages()).toEqual(Array.from({ length: 100 }, () => ({ t: 'pong' })));
+    expect(nas.closed).toBeUndefined();
+    expect(device.sent).toEqual([]);
+  });
+
+  it('answers no ping before the NAS authenticates, nor from a device', async () => {
+    const { ws } = await open('nas');
+    await signalling.webSocketMessage(ws!, JSON.stringify({ t: 'ping' }));
+    expect(ws!.messages().map((m) => m.t)).toEqual(['challenge']);
+    expect(ws!.closed).toMatchObject({ code: 1008, reason: 'bad-message' });
+    await nasSocket();
+    const device = await deviceSocket();
+    await signalling.webSocketMessage(device, JSON.stringify({ t: 'ping' }));
+    expect(device.sent).toEqual([]);
+    expect(device.closed).toMatchObject({ code: 1008, reason: 'bad-message' });
+  });
+
   it('drops what the NAS sends of an unknown type, too big, to an unknown sid or without one', async () => {
     const nas = await nasSocket();
     const device = await deviceSocket();
