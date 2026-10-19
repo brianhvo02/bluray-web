@@ -70,6 +70,15 @@ describe('RendezvousClient', () => {
     expect((await lookup('K7QM4XP2R9TD')).status).toBe(200);
   });
 
+  it('unregisters a code, signed, so lookups stop finding it', async () => {
+    const client = new RendezvousClient(BASE, keyFile, workerFetch);
+    await client.registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 10 * 60_000);
+    await client.unregisterCode(codeHash('K7QM4XP2R9TD'));
+    expect(requests.at(-1)).toBe('DELETE /codes');
+    expect((await lookup('K7QM4XP2R9TD')).status).toBe(404);
+    await client.unregisterCode(codeHash('K7QM4XP2R9TD'));
+  });
+
   it('throws when the service refuses the code', async () => {
     const client = new RendezvousClient(BASE, keyFile, workerFetch);
     await expect(client.registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 4 * 24 * 60 * 60_000)).rejects.toThrow(/400/); // past the 3 days and 1 hour allowed

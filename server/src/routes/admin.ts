@@ -2,7 +2,7 @@ import type { OwnerChoice, TitleKind } from '../../../src/engine/disc/nas-api';
 import { AuthConflict, AuthNotFound } from '../auth';
 import type { Auth, Device, Person, PersonRef } from '../auth';
 import type { BdjStore } from '../bdj-store';
-import { formatCode, pairingLink } from '../codes';
+import { formatCode, pairingLink, unregisterCodes } from '../codes';
 import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
 import type { Handler, Response } from '../http';
@@ -151,9 +151,11 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       }
       case 'DELETE people/:id': {
         const target = decode(id!);
+        const codes = auth.codes().filter((c) => c.personId === target).map((c) => c.hash);
         const removed = attempt(() => auth.removePerson(target));
         if ('failed' in removed) return removed.failed;
         opts.bdjStore.clear(target);
+        unregisterCodes(opts.registrar, codes);
         return { status: 204 };
       }
       case 'PATCH devices/:id': {
@@ -200,8 +202,10 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       }
       case 'DELETE codes/:id': {
         const target = decode(id!);
-        if (!auth.codes().some((c) => c.id === target)) return json(404, { error: 'unknown code' });
+        const found = auth.codes().find((c) => c.id === target);
+        if (!found) return json(404, { error: 'unknown code' });
         auth.deleteCode(target);
+        unregisterCodes(opts.registrar, [found.hash]);
         return { status: 204 };
       }
       case 'POST rescan':

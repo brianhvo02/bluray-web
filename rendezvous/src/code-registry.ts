@@ -1,5 +1,5 @@
 import type { CodeLookup, CodeRoutes, EcPublicJwk } from '../../src/engine/disc/nas-api';
-import { ECDSA_KEY, ECDSA_SIGN, MAX_CODE_AHEAD_MS, codeHashOf, fromBase64url, nasIdOf, signedMessage } from './protocol';
+import { ECDSA_KEY, ECDSA_SIGN, MAX_CODE_AHEAD_MS, codeHashOf, fromBase64url, nasIdOf, signedMessage, unregisterMessage } from './protocol';
 
 /** The part of a Durable Object's storage API the registry uses (the KV-style API, on SQLite-backed storage). */
 export interface RegistryStorage {
@@ -38,13 +38,15 @@ const LIMITS = {
   lookup: { max: 10, windowMs: MINUTE },
   nas: { max: 5, windowMs: HOUR },
   codes: { max: 30, windowMs: HOUR },
+  unregister: { max: 60, windowMs: HOUR },
 } as const;
 type Route = keyof typeof LIMITS;
-const ROUTES: Readonly<Record<string, Route>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
+const ROUTES: Readonly<Record<string, Exclude<Route, 'unregister'>>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
 
 /** Failed lookups allowed per hour across all clients; successful ones need a valid 60-bit code and don't count. */
 const FAILED_LOOKUPS_PER_HOUR = 1_000;
-const CODES_PER_NAS = 5;
+/** Room for a few 3-day invites beside the 10-minute codes; codes the NAS unregisters free their place at once. */
+const CODES_PER_NAS = 20;
 const NAS_TTL_MS = 90 * DAY;
 const MAX_ROUTE_LENGTH = 512;
 const ALARM_PAGE = 500;
@@ -118,13 +120,16 @@ export class CodeRegistry {
   }
 
   async fetch(request: Request): Promise<Response> {
-    const route = ROUTES[new URL(request.url).pathname];
-    if (route === undefined) return json(404, { error: 'not found' });
-    if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
+    const path = ROUTES[new URL(request.url).pathname];
+    if (path === undefined) return json(404, { error: 'not found' });
+    const route: Route = path === 'codes' && request.method === 'DELETE' ? 'unregister' : path;
+    if (request.method !== 'POST' && route !== 'unregister') return json(405, { error: 'method not allowed' });
     const client = clientBucket(request.headers.get('CF-Connecting-IP'));
     if (!(await this.allow(rateKey(route, client), LIMITS[route]))) return json(429, { error: 'too many requests' });
     const body = await readJson(request);
     switch (route) {
+      case 'unregister':
+        return this.unregisterCode(body);
       case 'nas':
         return this.registerNas(body);
       case 'codes':
@@ -227,6 +232,36 @@ export class CodeRegistry {
     });
     await this.storage.put<CodeRecord>(codeKey(codeHash), { nasId, routes: signed.routes, expiresAt });
     await this.armAlarm(expiresAt);
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * `DELETE /codes { nasId, codeHash, signature }` → 204, signed by the NAS's key over `unregisterMessage`. Idempotent;
+   * it removes the code only when that NAS registered it, and answers the same either way.
+   */
+  private async unregisterCode(body: unknown): Promise<Response> {
+    if (!isObject(body)) return json(400, { error: 'bad request' });
+    const { nasId, codeHash, signature } = body;
+    if (typeof nasId !== 'string' || !BASE64URL_32_BYTES.test(nasId) || typeof codeHash !== 'string' || !/^[0-9a-f]{64}$/.test(codeHash) || typeof signature !== 'string') {
+      return json(400, { error: 'bad request' });
+    }
+    const known = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(known, this.now())) return json(401, { error: 'unknown nas' });
+    const key = await crypto.subtle.importKey('jwk', known.publicKeyJwk, ECDSA_KEY, false, ['verify']);
+    const sig = fromBase64url(signature);
+    if (sig === null || sig.length !== 64 || !(await crypto.subtle.verify(ECDSA_SIGN, key, sig, unregisterMessage({ nasId, codeHash })))) {
+      return json(401, { error: 'bad signature' });
+    }
+
+    // Storage operations only from here on, so no other request interleaves with this update.
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, this.now())) return json(401, { error: 'unknown nas' });
+    const existing = await this.storage.get<CodeRecord>(codeKey(codeHash));
+    if (existing?.nasId === nasId) await this.storage.delete(codeKey(codeHash));
+    if (codeHash in nas.codes) {
+      const { [codeHash]: _gone, ...codes } = nas.codes;
+      await this.storage.put<NasRecord>(nasKey(nasId), { ...nas, codes });
+    }
     return new Response(null, { status: 204 });
   }
 

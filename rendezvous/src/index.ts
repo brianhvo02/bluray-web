@@ -1,6 +1,7 @@
 /**
  * bluray-rendezvous: turns a pairing code into "this NAS and how to reach it".
- * The NAS registers its key (`POST /nas`) and signed code hashes (`POST /codes`, server to server);
+ * The NAS registers its key (`POST /nas`) and signed code hashes (`POST /codes`, server to server), and unregisters
+ * a code it no longer needs (`DELETE /codes`, signed);
  * the app looks a typed code up (`POST /codes/lookup`, CORS for the app's origins).
  */
 import { PREFLIGHT_MAX_AGE, corsHeaders } from '../../src/engine/disc/cors-policy';
@@ -31,9 +32,11 @@ const PREFLIGHT_HEADERS: Readonly<Record<string, string>> = {
 async function route(request: Request, env: Env): Promise<Response> {
   if (!ROUTES.has(new URL(request.url).pathname)) return json(404, { error: 'not found' });
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: PREFLIGHT_HEADERS });
-  if (request.method !== 'POST') {
+  const path = new URL(request.url).pathname;
+  // DELETE /codes is the NAS unregistering a code, server to server (no CORS preflight allows it)
+  if (request.method !== 'POST' && !(request.method === 'DELETE' && path === '/codes')) {
     const response = json(405, { error: 'method not allowed' });
-    response.headers.set('Allow', 'POST, OPTIONS');
+    response.headers.set('Allow', path === '/codes' ? 'POST, DELETE, OPTIONS' : 'POST, OPTIONS');
     return response;
   }
   const body = await boundedBody(request);
@@ -41,7 +44,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   const headers = new Headers(request.headers);
   headers.delete('Content-Length');
   const registry = env.CODE_REGISTRY;
-  return registry.get(registry.idFromName('registry')).fetch(new Request(request.url, { method: 'POST', headers, body }));
+  return registry.get(registry.idFromName('registry')).fetch(new Request(request.url, { method: request.method, headers, body }));
 }
 
 /** The body's bytes, counted as they stream in; null once they pass `MAX_BODY_BYTES`. */

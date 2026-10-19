@@ -3,10 +3,13 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { appHandlers } from '../app';
 import { Auth, INVITE_TTL_MS } from '../auth';
 import type { PersonRef } from '../auth';
 import { BdjStore } from '../bdj-store';
+import { codeHash } from '../codes';
+import type { CodeRegistrar } from '../codes';
 import { createServer } from '../http';
 import { Library } from '../library';
 import { Store } from '../store';
@@ -23,6 +26,7 @@ let base = '';
 let close: (() => void) | undefined;
 let auth: Auth;
 let store: BdjStore;
+let registrar: { registerCode: Mock<CodeRegistrar['registerCode']>; unregisterCode: Mock<CodeRegistrar['unregisterCode']> };
 
 beforeEach(async () => {
   tmp = mkdtempSync(join(tmpdir(), 'admin-routes-'));
@@ -30,8 +34,9 @@ beforeEach(async () => {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
   store = new BdjStore(data);
+  registrar = { registerCode: vi.fn(async () => {}), unregisterCode: vi.fn(async () => {}) };
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
-  const server = createServer(appHandlers({ auth, library, bdjStore: store, now: () => clock, publicBase: 'https://nas.example/bluray/api/' }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: store, registrar, now: () => clock, publicBase: 'https://nas.example/bluray/api/' }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -211,17 +216,6 @@ describe('admin people', () => {
 
 describe('admin codes', () => {
   it('mints a code for an existing person, and one that makes a new person', async () => {
-    const registrar = { registerCode: vi.fn(async () => {}) };
-    close!();
-    const library = new Library([], join(tmp, 'data', 'library.json'), { scanPauseMs: 0 });
-    const server = createServer(appHandlers({ auth, library, bdjStore: store, now: () => clock, publicBase: 'https://nas.example/bluray/api/', registrar }));
-    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    close = () => {
-      server.close();
-      server.closeAllConnections();
-    };
-
     const owner = await ownerToken();
     const ownerPerson = auth.firstOwnerPerson();
     const res = await send('POST', '/api/admin/codes', owner, { personId: ownerPerson.id });
@@ -245,6 +239,38 @@ describe('admin codes', () => {
       { id: expect.any(String), personId: ownerPerson.id, personName: 'Owner', invite: false, expiresAt: clock + 10 * MINUTE },
       { id: expect.any(String), personId: mika.id, personName: 'Mika', invite: true, expiresAt: clock + INVITE_TTL_MS },
     ]);
+  });
+
+  it('unregisters a code from the rendezvous when it is spent, deleted, or goes with its person', async () => {
+    const owner = await ownerToken();
+    // the owner's own pairing spent a code
+    expect(registrar.unregisterCode).toHaveBeenCalledTimes(1);
+
+    const mint = async (body: unknown): Promise<{ code: string }> => (await (await send('POST', '/api/admin/codes', owner, body)).json()) as { code: string };
+    const spent = await mint({ newPerson: { name: 'Mika', owner: false } });
+    await redeem(spent.code, 'Phone');
+    expect(registrar.unregisterCode).toHaveBeenLastCalledWith(codeHash(spent.code));
+
+    const withdrawn = await mint({ newPerson: { name: 'Den', owner: false }, invite: true });
+    const { codes } = (await (await send('GET', '/api/admin/codes', owner)).json()) as { codes: { id: string }[] };
+    expect((await send('DELETE', `/api/admin/codes/${codes[0]!.id}`, owner)).status).toBe(204);
+    expect(registrar.unregisterCode).toHaveBeenLastCalledWith(codeHash(withdrawn.code));
+
+    const sora = await mint({ newPerson: { name: 'Sora', owner: false }, invite: true });
+    const soraId = auth.people().find((p) => p.name === 'Sora')!.id;
+    expect((await send('DELETE', `/api/admin/people/${soraId}`, owner)).status).toBe(204);
+    expect(registrar.unregisterCode).toHaveBeenLastCalledWith(codeHash(sora.code));
+    expect(registrar.unregisterCode).toHaveBeenCalledTimes(4);
+  });
+
+  it('logs a failed unregistration and still answers', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    registrar.unregisterCode.mockRejectedValue(new Error('down'));
+    const owner = await ownerToken();
+    const { code } = (await (await send('POST', '/api/admin/codes', owner, { newPerson: { name: 'Mika', owner: false } })).json()) as { code: string };
+    await redeem(code, 'Phone');
+    await vi.waitFor(() => expect(errors).toHaveBeenCalledWith('rendezvous unregistration failed', expect.objectContaining({ message: 'down' })));
+    errors.mockRestore();
   });
 
   it('refuses a bad body or an unknown person', async () => {

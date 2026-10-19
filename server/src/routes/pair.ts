@@ -4,6 +4,8 @@ import type { IncomingMessage } from 'node:http';
 import { isIP } from 'node:net';
 import { p256PublicJwk } from '../auth';
 import type { Auth } from '../auth';
+import { codeHash, unregisterCodes } from '../codes';
+import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
 import type { Handler } from '../http';
 
@@ -119,7 +121,7 @@ async function readObject(req: IncomingMessage): Promise<Record<string, unknown>
 const unauthorized = () => json(401, { error: 'unauthorized' });
 
 /** `POST /api/pair/redeem`, `POST /api/session/challenge` and `POST /api/session`: the only routes open to unpaired devices. */
-export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (address: string) => boolean }): Handler {
+export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (address: string) => boolean; registrar?: CodeRegistrar }): Handler {
   const limiter = new FailureLimiter(opts.now);
   return async (req, url) => {
     if (req.method !== 'POST') return null;
@@ -142,6 +144,8 @@ export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (a
             attempt.fail();
             return json(401, { error: 'invalid code' });
           }
+          // the code is spent: free its place with the rendezvous service
+          unregisterCodes(opts.registrar, [codeHash(code)]);
           return json(200, { deviceId: device.id, owner: device.owner, personId: device.personId, personName: device.personName });
         } finally {
           attempt.release();

@@ -1,4 +1,5 @@
 import type { IncomingMessage } from 'node:http';
+import { LockHeldError } from '../atomic-json';
 import type { Auth } from '../auth';
 import { parseScope, StoreError } from '../bdj-store';
 import type { BdjStore } from '../bdj-store';
@@ -22,48 +23,60 @@ function ifMatch(req: IncomingMessage): string | null | undefined {
   return m ? m[1]! : undefined;
 }
 
-/** The body, or null once it passes `limit` bytes (declared or streamed); the rest is left unread. A 400 if the client goes. */
+/** After refusing a body, how far past the limit it is read and dropped, and for how long, so the client sees the 507. */
+const DRAIN_BYTES = 8 * 1024 * 1024;
+const DRAIN_MS = 2_000;
+
+/**
+ * The body, or null once it passes `limit` bytes (declared or streamed). A refused body is never kept: it is read
+ * and dropped until it ends, passes the limit by 8 MB or 2 s go by, whichever comes first, because closing the
+ * connection on unread bytes would reset it before the client reads the answer. A 400 if the client goes.
+ */
 function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
-  if (Number(req.headers['content-length'] ?? 0) > limit) return Promise.resolve(null);
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let refused = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const done = (): void => {
+      clearTimeout(timer);
       req.off('data', onData);
       req.off('end', onEnd);
-      req.off('error', onError);
-      req.off('close', onClose);
+      req.off('error', gone);
+      req.off('close', gone);
+    };
+    const refuse = (): void => {
+      refused = true;
+      chunks.length = 0;
+      timer = setTimeout(stopDraining, DRAIN_MS);
+    };
+    const stopDraining = (): void => {
+      done();
+      req.pause();
+      resolve(null);
     };
     const onData = (chunk: Buffer): void => {
       size += chunk.length;
-      if (size > limit) {
-        done();
-        req.pause();
-        resolve(null);
-        return;
-      }
-      chunks.push(chunk);
+      if (!refused && size > limit) refuse();
+      if (!refused) chunks.push(chunk);
+      else if (size > limit + DRAIN_BYTES) stopDraining();
     };
     const onEnd = (): void => {
       done();
-      resolve(Buffer.concat(chunks));
+      resolve(refused ? null : Buffer.concat(chunks));
     };
     // a client gone mid-upload (a page closing) is not a server fault: no answer reaches it, and nothing is logged
     const gone = (): void => {
       done();
       reject(new HttpError(400, 'request ended early'));
     };
-    const onError = gone;
-    const onClose = gone;
     req.on('data', onData);
     req.on('end', onEnd);
-    req.on('error', onError);
-    req.on('close', onClose);
+    req.on('error', gone);
+    req.on('close', gone);
+    if (Number(req.headers['content-length'] ?? 0) > limit) refuse();
   });
 }
-
-/** `lockFile` gave up waiting for another writer of the scope. */
-const isLockHeld = (err: unknown): boolean => err instanceof Error && !(err instanceof StoreError) && / is held$/.test(err.message);
 
 /** A StoreError as its answer (spec §5); anything else is rethrown. */
 function storeFailure(err: unknown): Response {
@@ -79,7 +92,8 @@ function storeFailure(err: unknown): Response {
         return json(400, { error: 'bad-archive' });
     }
   }
-  if (isLockHeld(err)) return json(503, { error: 'busy' }, { 'Retry-After': '1' });
+  // another writer of the scope held its lock for the whole wait
+  if (err instanceof LockHeldError) return json(503, { error: 'busy' }, { 'Retry-After': '1' });
   throw err;
 }
 
@@ -92,7 +106,7 @@ export function bdjStoreRoutes(auth: Auth, store: BdjStore): Handler {
     const path = url.pathname;
     if (path !== PREFIX.slice(0, -1) && !path.startsWith(PREFIX)) return null;
     const method = req.method;
-    if (method !== 'GET' && method !== 'PUT' && method !== 'DELETE') return null;
+    if (method !== 'GET' && method !== 'PUT' && method !== 'DELETE') return json(405, { error: 'method not allowed' }, { Allow: 'GET, PUT, DELETE' });
     const device = requestDevice(auth, req.headers.authorization, url);
     if (!device) return json(401, { error: 'unauthorized' });
     const scope = parseScope(path.slice(PREFIX.length));

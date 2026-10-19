@@ -43,6 +43,14 @@ export async function nasIdOf(jwk: EcPublicJwk): Promise<string> {
   return base64url(await sha256(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })));
 }
 
+/**
+ * The bytes a NAS signs for `DELETE /codes`. The leading type tag (which the `POST /codes` message lacks) keeps a
+ * registration's signature from verifying as an unregistration, and the reverse.
+ */
+export function unregisterMessage(fields: { nasId: string; codeHash: string }): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(new TextEncoder().encode(JSON.stringify({ type: 'unregister-code', codeHash: fields.codeHash, nasId: fields.nasId })));
+}
+
 /** The bytes a NAS signs for `POST /codes`: every field but `signature`, in a fixed order. */
 export function signedMessage(fields: Omit<CodeRegistration, 'signature'>): Uint8Array<ArrayBuffer> {
   const routes = fields.routes.https === undefined ? {} : { https: fields.routes.https };

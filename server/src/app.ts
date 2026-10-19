@@ -41,7 +41,7 @@ export function requireToken(auth: Auth): Handler {
 export function appHandlers(opts: AppOptions): Handler[] {
   const { auth } = opts;
   return [
-    pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false) }),
+    pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false), registrar: opts.registrar }),
     requireToken(auth),
     bdjStoreRoutes(auth, opts.bdjStore),
     adminRoutes(auth, {

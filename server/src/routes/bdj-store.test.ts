@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -145,43 +145,68 @@ describe('bdj-store routes', () => {
     expect(await read(sora)).toEqual(tar('sora'));
   });
 
-  it('refuses a declared Content-Length over the scope limit with 507 before reading', async () => {
-    const token = await tokenFor('Mika');
-    const status = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = request(`${base}/api/bdj-store/${SCOPE}`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${token}`, 'If-None-Match': '*', 'Content-Length': String(SCOPE_LIMIT_BYTES + 1) },
-      });
+  /** Sends a PUT of `parts` (then ends it unless `hang`) and answers the response, failing on a reset connection. */
+  function put(token: string, parts: Buffer[], opts: { length?: number; hang?: boolean } = {}): Promise<{ status: number; body: string; ms: number }> {
+    const started = Date.now();
+    return new Promise((resolve, reject) => {
+      const headers: Record<string, string> = { Authorization: `Bearer ${token}`, 'If-None-Match': '*' };
+      if (opts.length !== undefined) headers['Content-Length'] = String(opts.length);
+      const req = request(`${base}/api/bdj-store/${SCOPE}`, { method: 'PUT', headers });
       req.on('response', (res) => {
         let body = '';
         res.on('data', (c: Buffer) => (body += c.toString()));
-        res.on('end', () => resolve({ status: res.statusCode!, body }));
+        res.on('end', () => resolve({ status: res.statusCode!, body, ms: Date.now() - started }));
       });
       req.on('error', reject);
-      req.write(Buffer.alloc(1024));
+      for (const part of parts) req.write(part);
+      if (!opts.hang) req.end();
     });
-    expect(status).toEqual({ status: 507, body: '{"error":"quota","limit":"scope"}' });
-  });
+  }
+
+  const QUOTA = '{"error":"quota","limit":"scope"}';
+  const BIG = (): Buffer[] => [...Array.from({ length: SCOPE_LIMIT_BYTES / (64 * 1024) }, () => Buffer.alloc(64 * 1024)), Buffer.alloc(1)];
+
+  it('refuses a declared Content-Length over the scope limit with 507, keeping none of the body', async () => {
+    const token = await tokenFor('Mika');
+    const res = await put(token, BIG(), { length: SCOPE_LIMIT_BYTES + 1 });
+    expect(res).toMatchObject({ status: 507, body: QUOTA });
+    expect(tempFiles(tmp)).toEqual([]);
+  }, 20_000);
+
+  it('answers 507 within the drain time when an oversized upload stalls', async () => {
+    const token = await tokenFor('Mika');
+    const res = await put(token, [Buffer.alloc(1024)], { length: 100 * 1024 * 1024, hang: true });
+    expect(res).toMatchObject({ status: 507, body: QUOTA });
+    expect(res.ms).toBeLessThan(4_000);
+  }, 10_000);
 
   it('refuses a chunked body once it passes the scope limit, with 507 and no temp file left', async () => {
     const token = await tokenFor('Mika');
-    const outcome = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const req = request(`${base}/api/bdj-store/${SCOPE}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'If-None-Match': '*' } });
-      req.on('response', (res) => {
-        let body = '';
-        res.on('data', (c: Buffer) => (body += c.toString()));
-        res.on('end', () => resolve({ status: res.statusCode!, body }));
-      });
-      // the server may close the connection while the rest is still going out
-      req.on('error', (err) => setTimeout(() => reject(err), 1_000));
-      const chunk = Buffer.alloc(64 * 1024);
-      for (let sent = 0; sent < SCOPE_LIMIT_BYTES; sent += chunk.length) req.write(chunk);
-      req.end(Buffer.alloc(1));
-    });
-    expect(outcome).toEqual({ status: 507, body: '{"error":"quota","limit":"scope"}' });
+    // the rest of the body is drained, so the answer arrives whole instead of a reset connection
+    expect(await put(token, BIG())).toMatchObject({ status: 507, body: QUOTA });
     expect(tempFiles(tmp)).toEqual([]);
     expect((await call('GET', SCOPE, token)).headers.get('etag')).toBeNull();
   }, 20_000);
+
+  it('answers 503 with Retry-After: 1 while another writer holds the scope', async () => {
+    const token = await tokenFor('Mika');
+    const person = auth.devices()[0]!.personId;
+    const folder = join(tmp, 'data', 'users', person, 'bdj', 'persistent');
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, `${ORG}.tar.lock`), '');
+    const res = await call('PUT', SCOPE, token, { 'If-None-Match': '*' }, tar('a'));
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('1');
+  }, 15_000);
+
+  it('answers 405 with Allow to another method', async () => {
+    const token = await tokenFor('Mika');
+    for (const method of ['POST', 'PATCH']) {
+      const res = await call(method, SCOPE, token);
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get('allow')).toBe('GET, PUT, DELETE');
+    }
+  });
 
   it('answers 507 naming the person quota when a person is over theirs', async () => {
     close!();

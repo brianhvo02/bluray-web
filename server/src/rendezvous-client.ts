@@ -1,7 +1,7 @@
 import type { webcrypto } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ECDSA_KEY, ECDSA_SIGN, base64url, nasIdOf, signedMessage } from '../../rendezvous/src/protocol';
+import { ECDSA_KEY, ECDSA_SIGN, base64url, nasIdOf, signedMessage, unregisterMessage } from '../../rendezvous/src/protocol';
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
 import type { CodeRegistrar } from './codes';
 import { createOnce } from './store';
@@ -50,6 +50,16 @@ export class RendezvousClient implements CodeRegistrar {
     if (status !== 204) throw new Error(`rendezvous POST /codes answered ${status}`);
   }
 
+  /** Signs and sends `DELETE /codes`; the service answers 204 whether or not it still held the code. */
+  async unregisterCode(codeHash: string): Promise<void> {
+    const nasId = await this.ensureRegistered();
+    const { privateKey } = await this.loadKey();
+    const signature = await crypto.subtle.sign(ECDSA_SIGN, privateKey, unregisterMessage({ nasId, codeHash }));
+    const res = await this.send('DELETE', 'codes', { nasId, codeHash, signature: base64url(new Uint8Array(signature)) });
+    await res.body?.cancel();
+    if (res.status !== 204) throw new Error(`rendezvous DELETE /codes answered ${res.status}`);
+  }
+
   private async register(): Promise<string> {
     const { publicKeyJwk } = await this.loadKey();
     const res = await this.post('nas', { publicKeyJwk });
@@ -73,8 +83,12 @@ export class RendezvousClient implements CodeRegistrar {
   }
 
   private post(path: string, body: unknown): Promise<Response> {
+    return this.send('POST', path, body);
+  }
+
+  private send(method: 'POST' | 'DELETE', path: string, body: unknown): Promise<Response> {
     return this.fetchFn(new URL(path, this.base), {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TIMEOUT_MS),

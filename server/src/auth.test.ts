@@ -512,7 +512,7 @@ describe('HTTP', () => {
   });
 
   it('lets an owner list, mint, delete and revoke', async () => {
-    const registrar = { registerCode: vi.fn(async () => {}) };
+    const registrar = { registerCode: vi.fn(async () => {}), unregisterCode: vi.fn(async () => {}) };
     await start({ registrar });
     const token = await pairedToken(true);
     const headers = { Authorization: `Bearer ${token}` };
@@ -565,7 +565,7 @@ describe('HTTP', () => {
 
   it('still returns the code when the rendezvous registration fails, or with no registrar', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await start({ registrar: { registerCode: async () => Promise.reject(new Error('down')) } });
+    await start({ registrar: { registerCode: async () => Promise.reject(new Error('down')), unregisterCode: async () => {} } });
     const headers = { Authorization: `Bearer ${await pairedToken(true)}` };
     const res = await post('/api/admin/codes', { personId: auth.firstOwnerPerson().id }, headers);
     expect(res.status).toBe(200);
@@ -580,7 +580,7 @@ describe('HTTP', () => {
 
   it('returns the code with rendezvous: false when the registration misses its deadline', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await start({ registrar: { registerCode: () => new Promise<void>(() => {}) }, registrarDeadlineMs: 50 });
+    await start({ registrar: { registerCode: () => new Promise<void>(() => {}), unregisterCode: async () => {} }, registrarDeadlineMs: 50 });
     const started = Date.now();
     const res = await post('/api/admin/codes', { newPerson: { name: 'Mika', owner: false } }, { Authorization: `Bearer ${await pairedToken(true)}` });
     expect(res.status).toBe(200);
@@ -724,14 +724,14 @@ describe('owner-code', () => {
 
   it('registers the code with the rendezvous service, and still prints it when that fails', async () => {
     const lines: string[] = [];
-    const registrar = { registerCode: vi.fn(async () => {}) };
+    const registrar = { registerCode: vi.fn(async () => {}), unregisterCode: vi.fn(async () => {}) };
     await ownerCode(tmp, now, (line) => lines.push(line), { registrar, publicBase: 'https://nas.example/bluray/api/' });
     const code = /([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)![1]!;
     expect(registrar.registerCode).toHaveBeenCalledWith(codeHash(code), { https: 'https://nas.example/bluray/api/' }, clock + 10 * MINUTE);
     expect(lines.at(-1)).toBe('Rendezvous: registered');
 
     lines.length = 0;
-    const down = { registerCode: async () => Promise.reject(new Error('fetch failed')) };
+    const down = { registerCode: async () => Promise.reject(new Error('fetch failed')), unregisterCode: async () => {} };
     await ownerCode(tmp, now, (line) => lines.push(line), { registrar: down, publicBase: 'https://nas.example/bluray/api/' });
     expect(lines[0]).toMatch(/^Owner pairing code: /);
     expect(lines.at(-1)).toBe('Rendezvous: not registered (fetch failed)');
