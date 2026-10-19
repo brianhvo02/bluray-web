@@ -31,6 +31,7 @@ export class SignallingClient {
   private readonly queue: NasSignalForDevice[] = [];
   private readonly waiters = new Set<Waiter>();
   private closeCode: number | null = null;
+  private readonly skips = new Map<NasSignalType, number>();
 
   private constructor(
     private readonly socket: WebSocket,
@@ -92,29 +93,53 @@ export class SignallingClient {
     }
   }
 
-  /** The next message of `type` (one already received counts); rejects when the socket closes or after `timeoutMs`. */
-  next(type: NasSignalType, timeoutMs: number): Promise<NasSignalForDevice> {
+  /**
+   * The next message of `type` (one already received counts); rejects when the socket closes, after `timeoutMs`, or
+   * when `signal` aborts (the waiter is then gone, so a later message goes to the next caller).
+   */
+  next(type: NasSignalType, timeoutMs: number, signal?: AbortSignal): Promise<NasSignalForDevice> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const index = this.queue.findIndex((m) => m.t === type);
     if (index >= 0) return Promise.resolve(this.queue.splice(index, 1)[0]);
     if (this.closeCode !== null) return Promise.reject(new SignallingClosed(this.closeCode));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const done = (): void => {
+        clearTimeout(timer);
         this.waiters.delete(waiter);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = (): void => {
+        done();
+        reject(signal!.reason);
+      };
+      const timer = setTimeout(() => {
+        done();
         reject(new SignallingTimeout(type));
       }, timeoutMs);
       const waiter: Waiter = {
         type,
         resolve: (m) => {
-          clearTimeout(timer);
+          done();
           resolve(m);
         },
         reject: (err) => {
-          clearTimeout(timer);
+          done();
           reject(err);
         },
       };
       this.waiters.add(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
+  }
+
+  /**
+   * Drops the next message of `type`, queued or still to come: the answer to an offer given up on, so it can't be
+   * taken as the answer to the next one (the NAS answers offers in order).
+   */
+  skipNext(type: NasSignalType): void {
+    const index = this.queue.findIndex((m) => m.t === type);
+    if (index >= 0) this.queue.splice(index, 1);
+    else this.skips.set(type, (this.skips.get(type) ?? 0) + 1);
   }
 
   close(): void {
@@ -127,6 +152,11 @@ export class SignallingClient {
   }
 
   private receive(m: NasSignalForDevice): void {
+    const skip = this.skips.get(m.t) ?? 0;
+    if (skip > 0) {
+      this.skips.set(m.t, skip - 1);
+      return;
+    }
     for (const waiter of this.waiters) {
       if (waiter.type !== m.t) continue;
       this.waiters.delete(waiter);
@@ -140,7 +170,7 @@ export class SignallingClient {
     if (this.closeCode !== null) return;
     this.closeCode = code;
     const err = new SignallingClosed(code);
-    for (const waiter of this.waiters) waiter.reject(err);
+    for (const waiter of [...this.waiters]) waiter.reject(err);
     this.waiters.clear();
   }
 }

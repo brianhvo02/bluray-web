@@ -3,7 +3,7 @@ import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/dis
 import type { NasPairing, NasStore } from './nas-store';
 import { codeHashOf, turnProofMessage } from '../../../rendezvous/src/protocol';
 import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
-import { RTC_BASE, RtcConnection } from './rtc/rtc-connection';
+import { RTC_BASE, RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { DeviceProof, RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
 import { chooseRoute, routeKey } from './route-choice';
 import type { Route } from './route-choice';
@@ -116,7 +116,16 @@ export interface NasClientDeps {
   readonly rendezvousUrl: string | undefined;
   /** Opens a WebRTC connection to the NAS; `RtcConnection.open` by default. */
   readonly openRtc?: (opts: RtcOpenOptions) => Promise<RtcLink>;
+  /** Object URLs for art fetched over WebRTC; `URL.createObjectURL`/`revokeObjectURL` by default. */
+  readonly objectUrls?: { create(blob: Blob): string; revoke(url: string): void };
 }
+
+/** `rtc://<nasId>/…`: a URL that goes through the WebRTC connection to that NAS. */
+const RTC_URL = /^rtc:\/\/([^/]+)\//;
+/** Art fetched over WebRTC is kept as this many object URLs; older ones are revoked. */
+const ART_URLS = 64;
+/** `authed` gives up (as nas-lost) after this many tries when the connection keeps changing under it. */
+const AUTHED_TRIES = 4;
 
 const MINUTE = 60_000;
 /** Sessions last an hour; a token is replaced once it has less than this left. */
@@ -209,6 +218,10 @@ export class NasClient {
   private readonly routes = new Map<string, Promise<Route>>();
   /** Open WebRTC connections by NAS id; `rtc://<nasId>/` URLs go through them. */
   private readonly links = new Map<string, RtcLink>();
+  /** The connection each session was started on: the NAS lets a channel's requests through only after a session on it. */
+  private readonly sessionLinks = new WeakMap<NasSession, RtcLink>();
+  /** Object URLs of art fetched over WebRTC, least recently used first. */
+  private readonly artUrls = new Map<string, string>();
 
   readonly admin = {
     people: async (): Promise<NasPerson[]> => ((await this.json('admin/people')) as { people: NasPerson[] }).people,
@@ -415,15 +428,54 @@ export class NasClient {
     return (await this.json(`titles/${encodeURIComponent(id)}`)) as TitleDetail;
   }
 
-  /** An `<img src>` for a poster or banner: the session token goes in `t=`, as images can't send headers. */
+  /**
+   * An `<img src>` for a poster or banner. Over HTTPS the session token goes in `t=`, as images can't send headers;
+   * over WebRTC the art is fetched through the connection and given as an object URL (the last 64 are kept).
+   */
   async artUrl(artId: string, size: 'small' | 'large'): Promise<string> {
-    const [session, pairing] = await Promise.all([this.session(), this.pairing()]);
+    const pairing = await this.pairing();
     if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
-    return `${await this.apiBase(pairing)}art/${encodeURIComponent(artId)}?size=${size}&t=${encodeURIComponent(session.token)}`;
+    const base = await this.apiBase(pairing);
+    const path = `art/${encodeURIComponent(artId)}?size=${size}`;
+    if (!RTC_URL.test(base)) return `${base}${path}&t=${encodeURIComponent((await this.session()).token)}`;
+    const hit = this.artUrls.get(path);
+    if (hit !== undefined) {
+      this.artUrls.delete(path);
+      this.artUrls.set(path, hit);
+      return hit;
+    }
+    const generation = this.generation;
+    const blob = await (await this.ok(path)).blob();
+    const urls = this.objectUrls;
+    const raced = this.artUrls.get(path);
+    if (raced !== undefined) return raced; // another call fetched it meanwhile
+    const url = urls.create(blob);
+    if (generation !== this.generation) {
+      urls.revoke(url);
+      throw new Error(NAS_MESSAGES.unpaired);
+    }
+    this.artUrls.set(path, url);
+    for (const [key, old] of this.artUrls) {
+      if (this.artUrls.size <= ART_URLS) break;
+      this.artUrls.delete(key);
+      urls.revoke(old);
+    }
+    return url;
   }
 
-  /** `failedUrl` (an artUrl) again with a fresh token: the one it carried may have lapsed since it was made. */
+  /**
+   * `failedUrl` (an artUrl) again: with a fresh token, as the one it carried may have lapsed since it was made, or,
+   * for an object URL, fetched again.
+   */
   async freshArtUrl(artId: string, size: 'small' | 'large', failedUrl: string): Promise<string> {
+    if (failedUrl.startsWith('blob:')) {
+      for (const [key, url] of this.artUrls) {
+        if (url !== failedUrl) continue;
+        this.artUrls.delete(key);
+        this.objectUrls.revoke(url);
+      }
+      return this.artUrl(artId, size);
+    }
     const stale = new URL(failedUrl).searchParams.get('t');
     if (stale !== null) await this.freshSession(stale);
     return this.artUrl(artId, size);
@@ -435,6 +487,36 @@ export class NasClient {
     if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
     return `${await this.apiBase(pairing)}${discPath(discId)}`;
   }
+
+  /**
+   * The engine's fetch for disc reads: plain fetch on HTTPS, and for `rtc://` URLs the NAS's current connection,
+   * looked up on every call. When there is none it connects again through the route choice; while it can't, and
+   * when the connection closes under a request, it fails as nas-lost.
+   */
+  readonly discFetch: typeof fetch = async (input, init) => {
+    const url = typeof Request !== 'undefined' && input instanceof Request ? input.url : String(input);
+    const rtc = RTC_URL.exec(url);
+    if (!rtc) return this.deps.fetch(input, init);
+    const nasId = rtc[1];
+    let link = this.links.get(nasId);
+    if (!link) {
+      const pairing = await this.pairing();
+      if (pairing?.nasId === nasId) {
+        try {
+          await this.apiBase(pairing);
+        } catch {
+          throw new NasLostError();
+        }
+        link = this.links.get(nasId);
+      }
+    }
+    if (!link) throw new NasLostError();
+    try {
+      return await link.fetch(input, init);
+    } catch (err) {
+      throw link.closed ? new NasLostError() : err;
+    }
+  };
 
   async manifest(discId: string): Promise<DiscManifest> {
     return (await this.json(`${discPath(discId)}manifest`)) as DiscManifest;
@@ -469,6 +551,18 @@ export class NasClient {
     this.routes.clear();
     for (const link of [...this.links.values()]) link.close();
     this.links.clear();
+    for (const url of this.artUrls.values()) this.objectUrls.revoke(url);
+    this.artUrls.clear();
+  }
+
+  private get objectUrls(): { create(blob: Blob): string; revoke(url: string): void } {
+    return this.deps.objectUrls ?? { create: (blob) => URL.createObjectURL(blob), revoke: (url) => URL.revokeObjectURL(url) };
+  }
+
+  /** The connection `base` goes through now, if it is an `rtc://` base. */
+  private linkFor(base: string): RtcLink | undefined {
+    const rtc = RTC_URL.exec(base);
+    return rtc ? this.links.get(rtc[1]) : undefined;
   }
 
   /** The API base to use for `pairing` now: its HTTPS base, or `rtc://<nasId>/api/` over a WebRTC connection. */
@@ -481,13 +575,24 @@ export class NasClient {
     return route.kind === 'https' ? route.base : RTC_BASE(pairing.nasId!);
   }
 
-  /** Opens a WebRTC connection to `nasId` and routes its `rtc://` URLs through it until it closes. */
+  /**
+   * Opens a WebRTC connection to `nasId` and routes its `rtc://` URLs through it until it closes. The session is
+   * dropped, as the NAS lets a new channel's requests through only after a session on it.
+   */
   private async connect(nasId: string, auth: Pick<RtcOpenOptions, 'deviceProof' | 'inviteHash'>): Promise<RtcLink> {
     const service = this.deps.rendezvousUrl?.trim();
     if (!service) throw new Error(NAS_MESSAGES.noRoute);
+    const generation = this.generation;
     const open = this.deps.openRtc ?? ((opts: RtcOpenOptions) => RtcConnection.open(opts));
     const link = await open({ nasId, signallingUrl: service, ...auth });
+    if (generation !== this.generation) {
+      link.close(); // the pairing changed while it opened
+      throw new NasLostError();
+    }
+    const replaced = this.links.get(nasId);
+    if (replaced && replaced !== link) replaced.close();
     this.links.set(nasId, link);
+    this.cached = null;
     link.onClose(() => {
       if (this.links.get(nasId) === link) this.links.delete(nasId);
     });
@@ -517,6 +622,7 @@ export class NasClient {
       // The stored key can't sign (damaged storage): the pairing is unusable.
       return this.unpaired(generation);
     }
+    const link = this.linkFor(base);
     const res = await this.request(
       `${base}session`,
       jsonPost({ deviceId: pairing.deviceId, challenge, signature: base64url(new Uint8Array(signature)) }),
@@ -524,6 +630,7 @@ export class NasClient {
     if (res.status === 401) return this.unpaired(generation);
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
     const session = (await res.json()) as NasSession;
+    if (link) this.sessionLinks.set(session, link);
     if (generation === this.generation) this.cached = session;
     return session;
   }
@@ -541,14 +648,23 @@ export class NasClient {
   /**
    * `path` under the NAS base with the session token (as `Authorization: Bearer`, or `t=` for disc reads).
    * A 401 gets one retry with a fresh session (the token may have lapsed); a second 401 means the device was revoked.
+   * Over WebRTC the session must have been started on the connection in use: when the connection changes under a
+   * request (a drop and a reconnect), it starts again, and a 401 from the new connection isn't counted.
    */
   private async authed(path: string, init: RequestInit = {}, viaQuery = false): Promise<Response> {
-    for (let attempt = 0; ; attempt++) {
+    let refused = 0;
+    for (let attempt = 0; attempt < AUTHED_TRIES; attempt++) {
       const generation = this.generation;
-      const session = await this.session();
       const pairing = await this.pairing();
       if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
       const base = await this.apiBase(pairing);
+      const session = await this.session();
+      const link = this.linkFor(base);
+      if (this.sessionLinks.get(session) !== link) {
+        // started on another connection (or over HTTPS): this one hasn't seen it
+        if (this.cached === session) this.cached = null;
+        continue;
+      }
       const { token } = session;
       const url = viaQuery ? `${base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${base}${path}`;
       const headers = new Headers(init.headers);
@@ -556,8 +672,10 @@ export class NasClient {
       const res = await this.request(url, { ...init, headers });
       if (res.status !== 401) return res;
       if (this.cached?.token === token) this.cached = null;
-      if (attempt > 0) return this.unpaired(generation);
+      if (this.linkFor(base) !== link || link?.closed) continue; // the connection changed: not a revocation
+      if (++refused > 1) return this.unpaired(generation);
     }
+    throw new NasLostError();
   }
 
   private async ok(path: string, init?: RequestInit): Promise<Response> {
@@ -567,7 +685,13 @@ export class NasClient {
   }
 
   private async json(path: string, init?: RequestInit): Promise<unknown> {
-    return (await this.ok(path, init)).json();
+    const res = await this.ok(path, init);
+    try {
+      return await res.json();
+    } catch (err) {
+      // the connection closed while the body was coming
+      throw (err as { reason?: unknown } | null)?.reason === 'nas-lost' ? new NasLostError() : err;
+    }
   }
 
   /**
@@ -585,7 +709,7 @@ export class NasClient {
     try {
       return await doFetch(url, { ...init, signal: controller.signal });
     } catch (err) {
-      if (link) throw link.closed ? new NasLostError() : new Error(NAS_MESSAGES.unreachable);
+      if (link) throw link.closed ? new NasLostError() : new Error(RTC_UNREACHABLE);
       if (err instanceof TypeError || controller.signal.aborted) {
         if (this.current) this.routes.delete(routeKey(this.current));
         throw new Error(NAS_MESSAGES.unreachable);

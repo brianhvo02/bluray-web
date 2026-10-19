@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeRtcWorld, bodyText } from '../../../../tests/helpers/rtc-fakes';
 import type { FakeRtcOptions } from '../../../../tests/helpers/rtc-fakes';
+import { NAS_LOST_MESSAGE } from '../../../engine/disc/http-transport';
 import type { WireRequest, WireResponse } from '../../../engine/disc/rtc-wire';
 import { RTC_BASE, RTC_UNREACHABLE, RtcConnection, RtcUnreachable, STUN_URL, relayLimitMessage, signallingUrlOf } from './rtc-connection';
 
@@ -110,9 +111,51 @@ describe('RtcConnection', () => {
     expect(w.sent.some((m) => m.t === 'turn-request')).toBe(false);
   });
 
-  it('gives the copy when the NAS is offline or refuses the offer', async () => {
-    await expect(open(world({ refuseSocket: 4404 }))).rejects.toThrow(RTC_UNREACHABLE);
+  it('gives the copy when the NAS is offline, the Worker refuses the socket, or the NAS refuses the offer', async () => {
+    for (const code of [4404, 4429, 1008]) await expect(open(world({ refuseSocket: code }))).rejects.toThrow(RTC_UNREACHABLE);
     await expect(open(world({ answerError: 'busy' }))).rejects.toThrow(RTC_UNREACHABLE);
+  });
+
+  it('gives the copy with the reason when the NAS refuses the relay as unauthorized or unavailable', async () => {
+    for (const reason of ['unauthorized', 'unavailable'] as const) {
+      const err = (await open(world({ direct: false, relay: true, turn: () => ({ iceServers: [], reason }) })).catch((e: unknown) => e)) as RtcUnreachable;
+      expect(err).toBeInstanceOf(RtcUnreachable);
+      expect(err.reason).toBe(reason);
+      expect(err.message).toBe(RTC_UNREACHABLE);
+    }
+  });
+
+  it("doesn't take a late answer to the first offer as the answer to the relayed one", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const w = world({ direct: false, relay: true, turn: () => ({ iceServers: TURN }), answerDelaysMs: [9_000] });
+    const opening = open(w);
+    await vi.advanceTimersByTimeAsync(9_000);
+    const conn = await opening;
+    expect(conn.relayed).toBe(true);
+    expect(w.peers[0].remoteSdp).toBeUndefined();
+    expect(w.peers[1].remoteSdp).toBe('answer-to:offer2');
+  });
+
+  it('fails a response body being read as nas-lost when the path is lost', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const w = world({
+      handle: async () => ({
+        status: 200,
+        headers: {},
+        body: (async function* () {
+          yield new Uint8Array([1, 2, 3]);
+          await held;
+        })(),
+      }),
+    });
+    const conn = await open(w);
+    const res = await conn.fetch(`${RTC_BASE(NAS_ID)}discs/x/files/a`);
+    const reading = res.arrayBuffer();
+    await new Promise((r) => setTimeout(r, 0));
+    w.peers[0].fail();
+    await expect(reading).rejects.toMatchObject({ name: 'TypeError', reason: 'nas-lost', message: NAS_LOST_MESSAGE });
+    release();
   });
 
   it('gives up on the direct path after 8 s, then asks for TURN on a new socket when the old one expired', async () => {

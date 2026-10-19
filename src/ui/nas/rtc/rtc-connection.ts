@@ -1,3 +1,4 @@
+import { NAS_LOST_MESSAGE } from '../../../engine/disc/http-transport';
 import { WireClient } from '../../../engine/disc/rtc-wire';
 import type { WireChannel } from '../../../engine/disc/rtc-wire';
 import { iceServersOf } from '../../../../rendezvous/src/protocol';
@@ -30,6 +31,11 @@ export const RTC_BASE = (nasId: string): string => `rtc://${nasId}/api/`;
 /** The device's signalling socket on the rendezvous service at `service` (http(s) or ws(s)). */
 export function signallingUrlOf(service: string, nasId: string): string {
   return `${service.trim().replace(/\/+$/, '').replace(/^http/i, 'ws')}/signal/device?nasId=${encodeURIComponent(nasId)}`;
+}
+
+/** What requests in flight (and response bodies being read) fail with when the connection closes: a fetch-like TypeError. */
+export function nasLostError(): TypeError & { readonly reason: 'nas-lost' } {
+  return Object.assign(new TypeError(NAS_LOST_MESSAGE), { reason: 'nas-lost' as const });
 }
 
 /** No connection to the NAS could be made. The message is the copy to show. */
@@ -102,8 +108,8 @@ function wireChannelOf(dc: RTCDataChannel, onClosed: () => void): WireChannel {
   };
   dc.onbufferedamountlow = () => channel.onbufferedamountlow?.();
   dc.onclose = () => {
+    onClosed(); // first, so requests in flight fail as nas-lost rather than with the wire's own error
     channel.onclose?.();
-    onClosed();
   };
   return channel;
 }
@@ -131,17 +137,23 @@ export class RtcConnection implements RtcLink {
   private readonly wire: WireClient;
   private readonly listeners: Array<() => void> = [];
   private shutDown = false;
+  private isRelayed = false;
 
   private constructor(
     private readonly pc: RTCPeerConnection,
     channel: RTCDataChannel,
-    readonly relayed: boolean,
   ) {
     this.wire = new WireClient(wireChannelOf(channel, () => this.shut()));
     this.fetch = this.wire.fetch;
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'failed' || pc.connectionState === 'closed') this.shut();
     };
+    // It may have gone between the attempt seeing it open and these handlers.
+    if (channel.readyState !== 'open' || pc.connectionState === 'failed' || pc.connectionState === 'closed') this.shut();
+  }
+
+  get relayed(): boolean {
+    return this.isRelayed;
   }
 
   /**
@@ -152,7 +164,9 @@ export class RtcConnection implements RtcLink {
     const setup = new Setup(opts);
     try {
       const { pc, channel } = await setup.run();
-      return new RtcConnection(pc, channel, await isRelayed(pc));
+      const connection = new RtcConnection(pc, channel);
+      connection.isRelayed = await isRelayed(pc);
+      return connection;
     } catch (err) {
       throw err instanceof RtcUnreachable ? err : new RtcUnreachable();
     } finally {
@@ -176,7 +190,7 @@ export class RtcConnection implements RtcLink {
   private shut(): void {
     if (this.shutDown) return;
     this.shutDown = true;
-    this.wire.close(new TypeError('The connection to the NAS closed.'));
+    this.wire.close(nasLostError());
     try {
       this.pc.close();
     } catch {
@@ -250,16 +264,21 @@ class Setup {
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), timeoutMs)));
+    const givenUp = new AbortController();
+    let offered = false;
+    let answerSeen = false;
     const connect = async (): Promise<boolean> => {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      if (!sig.send({ t: 'offer', sdp: offer.sdp })) return false;
+      if (givenUp.signal.aborted || !sig.send({ t: 'offer', sdp: offer.sdp })) return false;
+      offered = true;
       let answer;
       try {
-        answer = await sig.next('answer', timeoutMs);
+        answer = await sig.next('answer', timeoutMs, givenUp.signal);
       } catch {
         return false;
       }
+      answerSeen = true;
       if (typeof answer.error === 'string') throw new RtcUnreachable(); // busy, too many offers, or the NAS failed
       if (typeof answer.sdp !== 'string') return false;
       await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
@@ -275,6 +294,9 @@ class Setup {
     } finally {
       clearTimeout(timer);
       if (!ok) {
+        // A late answer to this offer must not be taken as the answer to the next one.
+        givenUp.abort();
+        if (offered && !answerSeen) sig.skipNext('answer');
         pc.onicecandidate = null;
         pc.onconnectionstatechange = null;
         channel.onopen = channel.onclose = null;
@@ -286,6 +308,7 @@ class Setup {
       }
     }
     if (!ok) return null;
+    pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
     channel.onopen = channel.onclose = null;
     return { pc, channel };

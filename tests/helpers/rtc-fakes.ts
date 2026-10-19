@@ -92,6 +92,8 @@ export interface FakeRtcOptions {
   refuseSocket?: number;
   /** A peer that can't connect hangs instead of failing. */
   hang?: boolean;
+  /** Per offer (in order), how long its answer takes; answers still go out in order, as the NAS sends them. */
+  answerDelaysMs?: number[];
   /** Answers the channel's requests with a WireServer… */
   handle?: (req: WireRequest) => Promise<WireResponse>;
   /** …or takes the NAS's end of the channel itself (the server's `serveChannel`). */
@@ -128,6 +130,8 @@ export class FakeSocket {
   onclose: ((ev: CloseEvent) => void) | null = null;
   onerror: (() => void) | null = null;
   closedWith: number | null = null;
+  private offers = 0;
+  private answers: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly world: FakeRtcWorld,
@@ -149,7 +153,9 @@ export class FakeSocket {
     this.world.sent.push({ ...m, sid: this.sid });
     const { opts } = this.world;
     if (m.t === 'offer') {
-      this.deliver(opts.answerError ? { t: 'answer', error: opts.answerError } : { t: 'answer', sdp: `answer-to:${String(m.sdp)}` });
+      const answer = opts.answerError ? { t: 'answer', error: opts.answerError } : { t: 'answer', sdp: `answer-to:${String(m.sdp)}` };
+      const delay = opts.answerDelaysMs?.[this.offers++] ?? 0;
+      this.answers = this.answers.then(() => (delay > 0 ? new Promise((r) => setTimeout(r, delay)) : undefined)).then(() => this.deliver(answer));
     } else if (m.t === 'turn-request') {
       this.deliver({ ...(opts.turn ? opts.turn(m) : { iceServers: [], reason: 'off' }), t: 'turn-response' });
     }
@@ -177,6 +183,7 @@ export class FakePeer {
   readonly channels: FakeDataChannel[] = [];
   closed = false;
   relayed = false;
+  remoteSdp: string | undefined;
 
   constructor(
     private readonly world: FakeRtcWorld,
@@ -206,7 +213,8 @@ export class FakePeer {
     });
   }
 
-  async setRemoteDescription(): Promise<void> {
+  async setRemoteDescription(desc: RTCSessionDescriptionInit): Promise<void> {
+    this.remoteSdp = desc.sdp;
     const { opts } = this.world;
     const connects = this.hasTurn ? (opts.relay ?? false) : opts.direct;
     queueMicrotask(() => {
