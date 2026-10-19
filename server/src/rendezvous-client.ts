@@ -1,7 +1,8 @@
 import type { webcrypto } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ECDSA_KEY, ECDSA_SIGN, base64url, nasIdOf, signedMessage, unregisterMessage } from '../../rendezvous/src/protocol';
+import { ECDSA_KEY, ECDSA_SIGN, base64url, iceServersOf, nasIdOf, signedMessage, turnRequestMessage, unregisterMessage } from '../../rendezvous/src/protocol';
+import type { IceServerInfo } from '../../rendezvous/src/protocol';
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
 import type { CodeRegistrar } from './codes';
 import { createOnce } from './store';
@@ -27,6 +28,7 @@ export class RendezvousClient implements CodeRegistrar {
     base: string,
     private readonly keyFile: string,
     private readonly fetchFn: typeof fetch = fetch,
+    private readonly now: () => number = Date.now,
   ) {
     this.base = base.endsWith('/') ? base : `${base}/`;
   }
@@ -70,6 +72,30 @@ export class RendezvousClient implements CodeRegistrar {
     const res = await this.send('DELETE', 'codes', { nasId, codeHash, signature: base64url(new Uint8Array(signature)) });
     await res.body?.cancel();
     if (res.status !== 204) throw new Error(`rendezvous DELETE /codes answered ${res.status}`);
+  }
+
+  /**
+   * Fresh TURN credentials (an hour) from the Worker's `POST /turn`, signed with this NAS's key. A 401 may mean the
+   * service lost its registry, so the key is registered again, once. Throws when the Worker can't give any.
+   */
+  async turnServers(): Promise<IceServerInfo[]> {
+    let res = await this.postTurn(await this.ensureRegistered());
+    if (res.status === 401) {
+      await res.body?.cancel();
+      res = await this.postTurn(await this.reregister());
+    }
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      throw new Error(`rendezvous POST /turn answered ${res.status}`);
+    }
+    const servers = iceServersOf(((await res.json()) as { iceServers?: unknown }).iceServers);
+    if (servers === null) throw new Error('rendezvous POST /turn answered no usable servers');
+    return servers;
+  }
+
+  private async postTurn(nasId: string): Promise<Response> {
+    const ts = this.now();
+    return this.post('turn', { nasId, ts, signature: await this.sign(turnRequestMessage({ nasId, ts })) });
   }
 
   private async register(): Promise<string> {

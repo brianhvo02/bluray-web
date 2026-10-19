@@ -9,6 +9,7 @@ import { bdjStoreRoutes } from './routes/bdj-store';
 import { discRoutes } from './routes/discs';
 import { libraryRoute } from './routes/library';
 import { pairRoutes } from './routes/pair';
+import type { RelayState } from './rtc/relay';
 import { titleRoutes } from './routes/titles';
 import type { TitleLibrary } from './routes/titles';
 
@@ -25,6 +26,8 @@ export interface AppOptions {
   trustProxy?: (address: string) => boolean;
   /** The title library: without it, its routes answer 404. */
   titles?: TitleLibrary;
+  /** The Cloudflare relay's settings and usage (admin, and `me`). */
+  relay?: RelayState;
   /** How long an owner's lookup may take. Default 10 s. */
   lookupTimeoutMs?: number;
 }
@@ -46,10 +49,10 @@ export function appHandlers(opts: AppOptions): Handler[] {
     bdjStoreRoutes(auth, opts.bdjStore),
     adminRoutes(auth, {
       library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
-      titles: opts.titles, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
+      titles: opts.titles, relay: opts.relay, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
     }),
     libraryRoute(opts.library),
-    ...(opts.titles ? [titleRoutes(auth, opts.titles)] : []),
+    ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay)] : []),
     discRoutes(opts.library),
   ];
 }

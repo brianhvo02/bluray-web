@@ -10,6 +10,7 @@ import { Auth } from '../auth';
 import { BdjStore } from '../bdj-store';
 import { createServer } from '../http';
 import { Library } from '../library';
+import { RelayState } from '../rtc/relay';
 import { Store } from '../store';
 import { ArtCache } from '../titles/art';
 import { artIdOf } from '../titles/catalogue';
@@ -79,6 +80,7 @@ let clock: number;
 let base = '';
 let close: (() => void) | undefined;
 let auth: Auth;
+let relay: RelayState;
 let owner: OwnerStore;
 let service: TitleService;
 let anilist: ReturnType<typeof fakeSource>;
@@ -98,6 +100,7 @@ afterEach(() => {
 async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number } = {}): Promise<void> {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
+  relay = new RelayState(data, () => clock);
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
   evidence = [A, ...BOX, COPY];
   vi.spyOn(library, 'evidence').mockImplementation(() => evidence);
@@ -110,7 +113,7 @@ async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: num
     now: () => clock, setTimer: () => () => {},
   });
   await service.runNow();
-  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, lookupTimeoutMs: opts.lookupTimeoutMs }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, relay, lookupTimeoutMs: opts.lookupTimeoutMs }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -196,11 +199,19 @@ describe('title routes', () => {
   it('reports both flags and the person on GET /api/me', async () => {
     await start();
     const person = expect.any(String);
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest' });
-    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner' });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest', relay: null });
+    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner', relay: null });
     owner.setGate('everyone');
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest' });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest', relay: null });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
+  });
+
+  it("adds the relay's usage to GET /api/me while the relay is on", async () => {
+    await start();
+    relay.set({ enabled: true });
+    relay.addBytes(412e9);
+    const me = (await (await get('/api/me', await token(false))).json()) as { relay: unknown };
+    expect(me.relay).toEqual({ usedBytes: 412e9, freeBytes: 1e12, resetsOn: expect.stringMatching(/^\d{4}-\d{2}-01$/) });
   });
 });
 

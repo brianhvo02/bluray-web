@@ -112,9 +112,15 @@ async function nasSocket(pair = keys): Promise<FakeSocket> {
   return ws!;
 }
 
+/** An accepted device socket, its `hello` (which names its sid) checked and cleared; a refused one as it is. */
 async function deviceSocket(): Promise<FakeSocket> {
   const { res, ws } = await open('device');
   expect(res.headers.get('X-Upgraded')).toBe('1');
+  if (ws!.closed === undefined) {
+    const [hello] = ws!.messages();
+    expect(hello).toEqual({ t: 'hello', sid: expect.stringMatching(/^[A-Za-z0-9_-]{22}$/) });
+    ws!.sent.length = 0;
+  }
   return ws!;
 }
 
@@ -254,6 +260,18 @@ describe('device socket', () => {
     await signalling.webSocketMessage(nas, JSON.stringify({ t: 'candidate', sid: offerB!.sid, candidate: 'c' }));
     expect(a.messages()).toEqual([{ t: 'answer', sdp: 'v=0 answer' }]);
     expect(b.messages()).toEqual([{ t: 'candidate', candidate: 'c' }]);
+  });
+
+  it('tells an accepted device its sid, the one its messages reach the NAS with; a refused one hears nothing', async () => {
+    const nas = await nasSocket();
+    const { ws } = await open('device');
+    const [hello] = ws!.messages();
+    expect(hello!.t).toBe('hello');
+    await signalling.webSocketMessage(ws!, JSON.stringify({ t: 'turn-request', inviteHash: 'h' }));
+    expect(nas.messages().at(-1)).toEqual({ t: 'turn-request', inviteHash: 'h', sid: hello!.sid });
+    await peerCloses(nas);
+    const refused = await open('device');
+    expect(refused.ws!.sent).toEqual([]);
   });
 
   it('forwards candidates and TURN requests both ways', async () => {

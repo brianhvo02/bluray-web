@@ -1,6 +1,7 @@
 /**
  * WebRTC signalling for one NAS (`idFromName(nasId)`): the NAS keeps one authenticated WebSocket here, and
- * devices open theirs to send it SDP offers, ICE candidates and TURN requests. The object forwards those
+ * devices open theirs to send it SDP offers, ICE candidates and TURN requests (each device first hears its socket's
+ * id, `SignalHello`, which it signs into a TURN request). The object forwards those
  * types and nothing else, and limits device connection attempts per NAS; the Worker in `index.ts` limits
  * attempts per client address. Hibernatable WebSockets, so an idle NAS socket costs nothing: every socket's
  * state lives in its attachment.
@@ -23,7 +24,7 @@ import {
   isNasId,
   signalAuthMessage,
 } from './protocol';
-import type { DeviceSignalForNas, NasSignalForDevice, SignalChallenge, SignalPong } from './protocol';
+import type { DeviceSignalForNas, NasSignalForDevice, SignalChallenge, SignalHello, SignalPong } from './protocol';
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
 
 /** The part of a server-side `WebSocket` the object uses. */
@@ -160,7 +161,11 @@ export class Signalling {
     server.serializeAttachment({ role: 'device', sid, openedAt, messages: 0, closed: false } satisfies DeviceAttachment);
     if (open >= SIGNAL_DEVICES_PER_NAS) this.shut(server, SIGNAL_CLOSE.busy);
     else if (this.liveNas() === undefined) this.shut(server, SIGNAL_CLOSE.nasOffline);
-    else await this.armAlarm(openedAt + SIGNAL_DEVICE_LIFETIME_MS);
+    else {
+      const hello: SignalHello = { t: 'hello', sid };
+      server.send(JSON.stringify(hello));
+      await this.armAlarm(openedAt + SIGNAL_DEVICE_LIFETIME_MS);
+    }
     return response;
   }
 

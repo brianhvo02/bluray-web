@@ -187,18 +187,7 @@ export class Auth {
     const entry = this.challenges.get(challenge);
     this.challenges.delete(challenge);
     if (!entry || entry.deviceId !== deviceId || this.now() >= entry.expiresAt) return null;
-    const device = this.device(deviceId);
-    if (!device || !BASE64URL.test(signatureB64)) return null;
-    const signature = Buffer.from(signatureB64, 'base64url');
-    if (signature.length !== SIGNATURE_BYTES) return null;
-    let ok = false;
-    try {
-      const key = createPublicKey({ key: device.publicKeyJwk, format: 'jwk' });
-      ok = verifySignature('sha256', Buffer.from(challenge, 'utf8'), { key, dsaEncoding: 'ieee-p1363' }, signature);
-    } catch {
-      ok = false;
-    }
-    if (!ok) return null;
+    if (!this.signedBy(deviceId, Buffer.from(challenge, 'utf8'), signatureB64)) return null;
     const now = this.now();
     const expiresAt = now + SESSION_TTL_MS;
     this.store.update((data) => {
@@ -207,6 +196,23 @@ export class Auth {
     });
     const payload = Buffer.from(`${deviceId}.${expiresAt}`, 'utf8').toString('base64url');
     return { token: `${payload}.${this.mac(payload)}`, expiresAt };
+  }
+
+  /**
+   * The paired device whose stored P-256 key made `signatureB64` (base64url of the raw r || s, ECDSA SHA-256) over
+   * `data`, or null for an unknown device or a signature that doesn't verify.
+   */
+  signedBy(deviceId: string, data: Uint8Array, signatureB64: string): Device | null {
+    const device = this.device(deviceId);
+    if (!device || !BASE64URL.test(signatureB64)) return null;
+    const signature = Buffer.from(signatureB64, 'base64url');
+    if (signature.length !== SIGNATURE_BYTES) return null;
+    try {
+      const key = createPublicKey({ key: device.publicKeyJwk, format: 'jwk' });
+      return verifySignature('sha256', data, { key, dsaEncoding: 'ieee-p1363' }, signature) ? device : null;
+    } catch {
+      return null;
+    }
   }
 
   /** The token's device, or null when the token is malformed, forged, expired or its device revoked. */

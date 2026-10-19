@@ -161,3 +161,83 @@ export interface NasSignalForDevice {
 export function signalAuthMessage(fields: { nasId: string; nonce: string }): Uint8Array<ArrayBuffer> {
   return new Uint8Array(new TextEncoder().encode(JSON.stringify({ type: 'signal-nas', nasId: fields.nasId, nonce: fields.nonce })));
 }
+
+/**
+ * Worker → device, first on an accepted device socket: the socket's id, which a paired device signs into its
+ * `turn-request` proof (`turnProofMessage`) so the proof can't be replayed from another socket.
+ */
+export interface SignalHello {
+  readonly t: 'hello';
+  readonly sid: string;
+}
+
+/*
+ * The relay (spec §6.4). A device that can't connect directly asks the NAS for TURN servers over signalling
+ * (`TurnRequest`); the NAS checks the device, the relay's switch and its allowance, asks the Worker for
+ * credentials (`POST /turn`, signed with the NAS key) and answers `TurnResponse`.
+ */
+
+/** An ICE server as `RTCPeerConnection` takes it. */
+export interface IceServerInfo {
+  readonly urls: string | readonly string[];
+  readonly username?: string;
+  readonly credential?: string;
+}
+
+/** A device proof's `ts` and a NAS's `POST /turn` `ts` must be within this of the checker's clock. */
+export const TURN_MAX_SKEW_MS = 60_000;
+/** TURN credentials last this long (seconds). */
+export const TURN_TTL_SECONDS = 3_600;
+
+/**
+ * Device → NAS (through the Worker, which adds `sid`). A paired device proves itself with `signature`: base64url of
+ * its P-256 key's raw r || s ECDSA SHA-256 signature over `turnProofMessage({ sid, ts })`, `ts` its clock in ms. An
+ * unpaired device redeeming an invite sends the invite code's hash (`codeHashOf`) instead.
+ */
+export type TurnRequest =
+  | { readonly t: 'turn-request'; readonly deviceId: string; readonly ts: number; readonly signature: string }
+  | { readonly t: 'turn-request'; readonly inviteHash: string };
+
+/**
+ * Why a device gets no TURN servers: the relay is switched off, its free allowance for the month is used up
+ * (`resetsOn` then names the UTC date it resets), the device or invite didn't check out, or the credentials
+ * couldn't be had (the Worker has no TURN key, or Cloudflare failed).
+ */
+export type TurnRefusal = 'off' | 'limit' | 'unauthorized' | 'unavailable';
+
+/** NAS → device (the NAS adds `sid`, which the Worker strips). */
+export type TurnResponse =
+  | { readonly t: 'turn-response'; readonly iceServers: readonly IceServerInfo[] }
+  | { readonly t: 'turn-response'; readonly iceServers: readonly []; readonly reason: TurnRefusal; readonly resetsOn?: string };
+
+/** The bytes a paired device signs for a `turn-request` on the socket `sid`. */
+export function turnProofMessage(fields: { sid: string; ts: number }): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(new TextEncoder().encode(JSON.stringify({ type: 'turn', sid: fields.sid, ts: fields.ts })));
+}
+
+/** NAS → Worker, `POST /turn`: `signature` is over `turnRequestMessage({ nasId, ts })`. */
+export interface TurnCredentialsRequest {
+  readonly nasId: string;
+  readonly ts: number;
+  readonly signature: string;
+}
+
+/** The bytes a NAS signs for `POST /turn`; the type tag keeps any other signed message from verifying here. */
+export function turnRequestMessage(fields: { nasId: string; ts: number }): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(new TextEncoder().encode(JSON.stringify({ type: 'turn-credentials', nasId: fields.nasId, ts: fields.ts })));
+}
+
+/** The ICE servers in an untrusted JSON value: at most 8, each with string urls (and string credentials if any); null otherwise. */
+export function iceServersOf(value: unknown): IceServerInfo[] | null {
+  if (!Array.isArray(value) || value.length > 8) return null;
+  const out: IceServerInfo[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return null;
+    const { urls, username, credential } = entry as Record<string, unknown>;
+    const list = typeof urls === 'string' ? [urls] : urls;
+    if (!Array.isArray(list) || list.length === 0 || list.length > 8 || !list.every((u) => typeof u === 'string' && u.length <= 512)) return null;
+    if ((username !== undefined && typeof username !== 'string') || (credential !== undefined && typeof credential !== 'string')) return null;
+    out.push({ urls: list as string[], ...(username === undefined ? {} : { username }), ...(credential === undefined ? {} : { credential }) });
+  }
+  return out;
+}

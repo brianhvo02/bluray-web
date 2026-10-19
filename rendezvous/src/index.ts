@@ -5,10 +5,12 @@
  * the app looks a typed code up (`POST /codes/lookup`, CORS for the app's origins).
  * WebRTC signalling: the NAS (`GET /signal/nas?nasId=`) and devices (`GET /signal/device?nasId=`) open WebSockets
  * to that NAS's `Signalling` object, after a per-client attempt limit the registry keeps.
+ * The relay: the NAS asks for TURN credentials (`POST /turn`, signed, server to server; `turn.ts`).
  */
 import { PREFLIGHT_MAX_AGE, corsHeaders } from '../../src/engine/disc/cors-policy';
 import { INTERNAL, REGISTRY_NAME, json } from './code-registry';
 import { isNasId } from './protocol';
+import { turnRoute } from './turn';
 
 export { CodeRegistry } from './code-registry';
 export { Signalling } from './signalling';
@@ -22,6 +24,9 @@ export interface RegistryNamespace {
 export interface Env {
   CODE_REGISTRY: RegistryNamespace;
   SIGNALLING: RegistryNamespace;
+  /** Worker secrets for the Cloudflare relay; `POST /turn` answers 503 without them. */
+  TURN_KEY_ID?: string;
+  TURN_KEY_API_TOKEN?: string;
 }
 
 const MAX_BODY_BYTES = 4_096;
@@ -107,7 +112,9 @@ async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | 
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (SIGNAL_ROUTES.has(new URL(request.url).pathname)) return signal(request, env);
+    const path = new URL(request.url).pathname;
+    if (SIGNAL_ROUTES.has(path)) return signal(request, env);
+    if (path === '/turn') return turnRoute(request, env, { fetch: (input, init) => fetch(input, init), now: Date.now });
     const answer = await route(request, env);
     // A Durable Object's response has immutable headers; copy it to add CORS.
     const response = new Response(answer.body, answer);

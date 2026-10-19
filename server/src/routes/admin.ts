@@ -7,6 +7,7 @@ import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
 import type { Handler, Response } from '../http';
 import type { Library } from '../library';
+import type { RelayState } from '../rtc/relay';
 import type { DiscEvidence } from '../titles/evidence';
 import { groupKey } from '../titles/match';
 import { parseName } from '../titles/parse-name';
@@ -25,6 +26,8 @@ export interface AdminOptions {
   registrarDeadlineMs?: number;
   /** The title library; its owner routes answer 404 without it. */
   titles?: TitleLibrary;
+  /** The Cloudflare relay's settings and usage; `admin/relay` answers 404 without it. */
+  relay?: RelayState;
   now?: () => number;
   /** How long an owner's lookup may take before it answers 503. Default 10 s. */
   lookupTimeoutMs?: number;
@@ -94,6 +97,19 @@ function parseCodeRequest(body: unknown): { ref: PersonRef; invite: boolean } | 
   return { ref: { newPerson: { name: p.name, owner: p.owner } }, invite };
 }
 
+/** `GET admin/relay` → `{enabled, allowPaid, usage}`; `PUT admin/relay {enabled?, allowPaid?}` changes the settings and answers the same. */
+async function relayRoute(req: Parameters<Handler>[0], relay: RelayState): Promise<Response> {
+  if (req.method === 'PUT') {
+    const body = await readJson(req);
+    if (!isObject(body) || Object.keys(body).length === 0 || !hasKeys(body, [], ['enabled', 'allowPaid'])) throw new HttpError(400, 'bad relay settings');
+    if ((body.enabled !== undefined && typeof body.enabled !== 'boolean') || (body.allowPaid !== undefined && typeof body.allowPaid !== 'boolean')) {
+      throw new HttpError(400, 'bad relay settings');
+    }
+    relay.set({ ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(body.allowPaid !== undefined ? { allowPaid: body.allowPaid as boolean } : {}) });
+  }
+  return json(200, { ...relay.settings(), usage: relay.usage() });
+}
+
 /** `/api/admin/*`, for owner devices only; the token must come as `Authorization: Bearer`. */
 export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
   const lookups = new LookupLimiter(opts.now ?? Date.now);
@@ -123,6 +139,7 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       const answer = await titleAdminRoute(route, id === undefined ? undefined : decode(id), req, url, opts.library, opts.titles);
       if (answer) return answer;
     }
+    if (opts.relay && (route === 'GET relay' || route === 'PUT relay')) return relayRoute(req, opts.relay);
     switch (route) {
       case 'GET devices':
         return json(200, {

@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises';
 import type { Auth, Device } from '../auth';
 import { HttpError, json } from '../http';
 import type { Handler, Response } from '../http';
+import type { RelayState } from '../rtc/relay';
 import type { OwnerStore } from '../titles/owner-store';
 import type { TitleService } from '../titles/service';
 import { bearerToken } from './admin';
@@ -36,9 +37,9 @@ function decodeSegment(segment: string): string {
 /**
  * `GET /api/me`, `GET /api/titles`, `GET /api/titles/<id>` and `GET /api/art/<artId>?size=small|large`, behind the
  * token guard. While the gate is `owners`, a guest gets 404 from every title route, so the library's existence isn't
- * revealed (ruling T9c); `me` answers every paired device.
+ * revealed (ruling T9c); `me` answers every paired device, with the relay's usage while the relay is on (else null).
  */
-export function titleRoutes(auth: Auth, library: TitleLibrary): Handler {
+export function titleRoutes(auth: Auth, library: TitleLibrary, relay?: RelayState): Handler {
   const { service } = library;
   return async (req, url) => {
     if (req.method !== 'GET') return null;
@@ -50,7 +51,10 @@ export function titleRoutes(auth: Auth, library: TitleLibrary): Handler {
     const device = requestDevice(auth, req.headers.authorization, url);
     if (!device) return json(401, { error: 'unauthorized' });
     const open = device.owner || service.gate() === 'everyone';
-    if (isMe) return json(200, { owner: device.owner, titleLibrary: open, personId: device.personId, personName: device.personName });
+    if (isMe) {
+      const usage = relay?.settings().enabled ? relay.usage() : null;
+      return json(200, { owner: device.owner, titleLibrary: open, personId: device.personId, personName: device.personName, relay: usage });
+    }
     if (!open) return notFound();
 
     const segments = path.split('/').slice(3);

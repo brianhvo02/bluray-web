@@ -12,6 +12,7 @@ import { codeHash } from '../codes';
 import type { CodeRegistrar } from '../codes';
 import { createServer } from '../http';
 import { Library } from '../library';
+import { RelayState } from '../rtc/relay';
 import { Store } from '../store';
 import { writeTar } from '../tar';
 
@@ -26,6 +27,7 @@ let base = '';
 let close: (() => void) | undefined;
 let auth: Auth;
 let store: BdjStore;
+let relay: RelayState;
 let registrar: { registerCode: Mock<CodeRegistrar['registerCode']>; unregisterCode: Mock<CodeRegistrar['unregisterCode']> };
 
 beforeEach(async () => {
@@ -34,9 +36,10 @@ beforeEach(async () => {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
   store = new BdjStore(data);
+  relay = new RelayState(data, () => clock);
   registrar = { registerCode: vi.fn(async () => {}), unregisterCode: vi.fn(async () => {}) };
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
-  const server = createServer(appHandlers({ auth, library, bdjStore: store, registrar, now: () => clock, publicBase: 'https://nas.example/bluray/api/' }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: store, registrar, relay, now: () => clock, publicBase: 'https://nas.example/bluray/api/' }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -314,5 +317,37 @@ describe('admin codes', () => {
     expect(codes).toEqual([]);
     expect(auth.people().map((p) => p.name)).toEqual(['Owner', 'Sora']);
     expect(kept.id).toBe(auth.people()[1]!.id);
+  });
+});
+
+describe('admin relay', () => {
+  it('shows the switch, paid use and usage, and changes them', async () => {
+    const owner = await ownerToken();
+    const shown = await send('GET', '/api/admin/relay', owner);
+    expect(shown.status).toBe(200);
+    expect(await shown.json()).toEqual({ enabled: false, allowPaid: false, usage: { usedBytes: 0, freeBytes: 1e12, resetsOn: '2027-02-01' } });
+
+    const on = await send('PUT', '/api/admin/relay', owner, { enabled: true });
+    expect(on.status).toBe(200);
+    expect(await on.json()).toMatchObject({ enabled: true, allowPaid: false });
+    relay.addBytes(1234);
+    const paid = await send('PUT', '/api/admin/relay', owner, { allowPaid: true });
+    expect(await paid.json()).toEqual({ enabled: true, allowPaid: true, usage: { usedBytes: 1234, freeBytes: 1e12, resetsOn: '2027-02-01' } });
+    expect(relay.settings()).toEqual({ enabled: true, allowPaid: true });
+  });
+
+  it('refuses bad bodies with 400', async () => {
+    const owner = await ownerToken();
+    for (const body of [{}, { enabled: 'yes' }, { allowPaid: 1 }, { enabled: true, extra: 1 }, []]) {
+      expect((await send('PUT', '/api/admin/relay', owner, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect(relay.settings()).toEqual({ enabled: false, allowPaid: false });
+  });
+
+  it('answers 403 to a guest', async () => {
+    const guest = await paired({ newPerson: { name: 'Mika', owner: false } }, 'Phone');
+    expect((await send('GET', '/api/admin/relay', guest)).status).toBe(403);
+    expect((await send('PUT', '/api/admin/relay', guest, { enabled: true })).status).toBe(403);
+    expect(relay.settings().enabled).toBe(false);
   });
 });

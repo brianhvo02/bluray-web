@@ -91,3 +91,40 @@ describe('RendezvousClient', () => {
     await expect(new RendezvousClient(BASE, keyFile, down).ensureRegistered()).rejects.toThrow('fetch failed');
   });
 });
+
+describe('RendezvousClient.turnServers', () => {
+  // A made-up key id and token; real ones live only in Worker secrets.
+  const ICE = [{ urls: ['turn:turn.example:3478?transport=udp'], username: 'u', credential: 'c' }];
+  let cloudflare: ReturnType<typeof vi.fn<typeof fetch>>;
+  const withTurn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input, init);
+    requests.push(`${request.method} ${new URL(request.url).pathname}`);
+    return worker.fetch(request, {
+      CODE_REGISTRY: { idFromName: () => ({}), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) },
+      SIGNALLING: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response(null, { status: 501 }) }) },
+      TURN_KEY_ID: 'test-key-id',
+      TURN_KEY_API_TOKEN: 'test-api-token',
+    });
+  }) as typeof fetch;
+
+  beforeEach(() => {
+    cloudflare = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ iceServers: ICE }), { status: 201 }));
+    vi.stubGlobal('fetch', cloudflare);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("gets the Worker's servers with a signed request, registering again once after a lost registry", async () => {
+    const client = new RendezvousClient(BASE, keyFile, withTurn);
+    expect(await client.turnServers()).toEqual(ICE);
+    expect(requests).toEqual(['POST /nas', 'POST /turn']);
+    registry = new CodeRegistry(memoryState());
+    expect(await client.turnServers()).toEqual(ICE);
+    expect(requests).toEqual(['POST /nas', 'POST /turn', 'POST /turn', 'POST /nas', 'POST /turn']);
+    expect(cloudflare).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws when the Worker has no TURN key', async () => {
+    const client = new RendezvousClient(BASE, keyFile, workerFetch);
+    await expect(client.turnServers()).rejects.toThrow('rendezvous POST /turn answered 503');
+  });
+});

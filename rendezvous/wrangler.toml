@@ -4,6 +4,9 @@ name = "bluray-rendezvous"
 main = "src/index.ts"
 compatibility_date = "2026-10-17"
 
+# The Cloudflare relay (POST /turn) needs two secrets, set with `wrangler secret put TURN_KEY_ID` and
+# `wrangler secret put TURN_KEY_API_TOKEN`; never here. Without them, /turn answers 503 turn-not-configured.
+
 [[durable_objects.bindings]]
 name = "CODE_REGISTRY"
 class_name = "CodeRegistry"

@@ -11,6 +11,7 @@ import type { Handler } from './http';
 import { Library, nextNightly } from './library';
 import { RendezvousClient } from './rendezvous-client';
 import { RtcPeers } from './rtc/peer';
+import { RelayState, turnResponder } from './rtc/relay';
 import { AddressAdvertiser } from './rtc/public-address';
 import { SignallingClient } from './rtc/signalling-client';
 import { trustedProxy } from './routes/pair';
@@ -49,15 +50,20 @@ function rendezvousRegistrar(config: Config): RendezvousClient | undefined {
  * The WebRTC route: peers on UDP `RTC_PORT` advertising the public IPv4 (STUN at start, then hourly) and
  * `RTC_LAN_ADDRESS`, and the signalling socket to the rendezvous Worker. Gives the function that stops it all.
  */
-function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousClient, handlers: readonly Handler[], auth: Auth): () => Promise<void> {
+function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousClient, handlers: readonly Handler[], auth: Auth, relay: RelayState): () => Promise<void> {
   // A changed public address likely means the signalling socket's path died with the old one.
   const advertiser = new AddressAdvertiser({ stun: STUN_URL, lan: config.rtc.lanAddress, fixed: config.rtc.advertise, onChange: () => signalling.reconnect() });
-  const peers = new RtcPeers({ handlers, auth, port: config.rtc.port, advertise: () => advertiser.advertise(), iceServers: async () => [{ urls: STUN_URL }], now: Date.now });
+  // STUN only: the NAS's own peer never uses the relay (see `stunOnly`); devices get TURN through `turn-request`.
+  const peers = new RtcPeers({
+    handlers, auth, port: config.rtc.port, advertise: () => advertiser.advertise(), iceServers: async () => [{ urls: STUN_URL }], now: Date.now,
+    onRelayedBytes: (bytes) => relay.addBytes(bytes),
+  });
   peers.listen().then(
     () => console.log(`WebRTC on UDP ${config.rtc.port}`),
     (err: unknown) => console.error(`WebRTC: UDP ${config.rtc.port} could not be bound`, err),
   );
-  const signalling = new SignallingClient({ url: rendezvousUrl, signer: rendezvous, peers });
+  const onTurnRequest = turnResponder({ relay, auth, credentials: () => rendezvous.turnServers(), now: Date.now });
+  const signalling = new SignallingClient({ url: rendezvousUrl, signer: rendezvous, peers, onTurnRequest });
   signalling.start();
   void advertiser.start();
   return async () => {
@@ -84,9 +90,10 @@ async function serve(config: Config): Promise<void> {
   });
   library.onScanned(() => void titles.runNow());
   const rendezvous = rendezvousRegistrar(config);
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner } });
+  const relay = new RelayState(config.dataDir, Date.now);
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay });
   const server = createServer(handlers);
-  const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth) : async () => {};
+  const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 
   const scheduleScans = (): void => {
     const run = (): void => {
