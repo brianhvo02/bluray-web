@@ -288,6 +288,10 @@ test('plays the playlist the Java of disc-bdj selects, from the NAS', async ({ p
 });
 
 test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable: disc1 for 3 s, then disc-bdj', async ({ page, browserName }) => {
+  // Measured 2026-10-19 in Playwright's Firefox on Linux (CI and the Playwright image): the peer connection gathers no
+  // ICE candidates at all, whatever the media.peerconnection.ice.* prefs, and fails before the answer arrives.
+  // Firefox on macOS runs this test, and the device run covers real browsers.
+  test.skip(browserName === 'firefox' && process.platform === 'linux', 'Playwright Firefox on Linux gathers no ICE candidates');
   test.setTimeout(180_000);
   await libraryReady();
   await allowLocalNetwork(page, browserName);
