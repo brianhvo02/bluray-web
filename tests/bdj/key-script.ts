@@ -2,13 +2,15 @@ import type { MenuKey } from '../../src/engine/protocol';
 
 /**
  * A step of a bdj-trace key script (tools/bdj-trace/README.md, Key scripts): the `.keys` syntax of tests/vm-trace, with
- * `wait flush`, `wait still`, `wait menu`, `wait playlist` (a number or `any`), `key`, `mouse` and `click`.
+ * `wait flush`, `wait still`, `wait menu`, `wait quiet`, `wait playlist` (a number or `any`), `key`, `mouse` and `click`.
  */
 export type KeyStep =
   | { readonly kind: 'waitFlush'; readonly text: string; readonly n: number }
   | { readonly kind: 'waitStill'; readonly text: string; readonly ms: number }
   /** `wait menu <ms>`: the plane is visible and has not flushed for ms (or stayed visible, flushing, for 30 s). */
   | { readonly kind: 'waitMenu'; readonly text: string; readonly ms: number }
+  /** `wait quiet <ms>`: no flush for ms since the step began; unlike `wait still`, no flush is needed (Ruling R5). */
+  | { readonly kind: 'waitQuiet'; readonly text: string; readonly ms: number }
   /** `wait playlist <n>`, or `wait playlist any` (playlist null): any playlist starting. */
   | { readonly kind: 'waitPlaylist'; readonly text: string; readonly playlist: number | null }
   | { readonly kind: 'key'; readonly text: string; readonly key: MenuKey }
@@ -37,6 +39,7 @@ export function parseKeyScript(source: string): KeyStep[] {
     if (verb === 'wait' && a === 'flush') steps.push({ kind: 'waitFlush', text, n: int(b, text) });
     else if (verb === 'wait' && a === 'still') steps.push({ kind: 'waitStill', text, ms: int(b, text) });
     else if (verb === 'wait' && a === 'menu') steps.push({ kind: 'waitMenu', text, ms: int(b, text) });
+    else if (verb === 'wait' && a === 'quiet') steps.push({ kind: 'waitQuiet', text, ms: int(b, text) });
     else if (verb === 'wait' && a === 'playlist') steps.push({ kind: 'waitPlaylist', text, playlist: b === 'any' ? null : int(b, text) });
     else if (verb === 'key' && a !== undefined && KEYS[a]) steps.push({ kind: 'key', text, key: KEYS[a] });
     else if ((verb === 'mouse' || verb === 'click') && c === undefined) steps.push({ kind: 'pointer', text, click: verb === 'click', x: int(a, text), y: int(b, text) });

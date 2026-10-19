@@ -76,7 +76,7 @@ def main():
             s = {'script': 'step', 'n': o['n'], 'step': o['step']}
             if o.get('animated'):  # a `wait menu` step on an animated menu: no settled plane
                 s['animated'] = True
-            elif o['step'].startswith('wait still') or o['step'].startswith('wait menu'):
+            elif o['step'].startswith(('wait still', 'wait menu', 'wait quiet')):
                 s['hash'] = last
             steps.append(s)
         elif o.get('script') == 'end':

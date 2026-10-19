@@ -39,14 +39,16 @@ Stub streams end every playlist at once, so some discs never show their menu in 
 ```
 wait menu 1500
 key right
-wait still 1000
+wait quiet 1000
 key down
-wait still 1000
+wait quiet 1000
 key ok
 wait playlist any
 ```
 
 `wait menu 1500` (Ruling R2) holds once the flushed plane is visible (a pixel with non-zero alpha: `GraphicsPlaneReader.visible()` in ours, the same test over the harness's plane at each flush) and has not flushed for 1500 ms, so a blank start-up frame never satisfies it. A menu that stays visible but keeps flushing for 30 s (an animation) satisfies it too: the step is marked `animated` and its hash is not compared, only that it was visible. An init or close, which clears the plane, makes it invisible at once.
+
+`wait quiet 1000` (Ruling R5) holds once the plane has not flushed for 1000 ms since the later of its last flush and the key, so a key that changes nothing settles too: the script always goes on to the next key. Its hash is the settled plane, as for `wait still` (which still needs a flush and is unchanged for other scripts).
 
 `wait playlist any` holds once any playlist starts after the previous step: a `BD_EVENT_PLAYLIST` in the harness (`bdj_trace.c`), a `chapters` event in our replay (`tests/bdj/key-script.ts`, `replay-player.ts`). `wait title any` works the same in the harness.
 
@@ -84,13 +86,13 @@ One run of the script on one disc by one side (`classify.ts`):
 
 `classify(ours, lib)` gives the first verdict that applies:
 
-1. **works**: ours achieved menu, arrows and ok, and libbluray agrees: the runs are equal (`same as libbluray`), or libbluray stopped at an earlier step (stub streams) and its run is a prefix of ours (`libbluray stopped early (stub): ...`). Without a libbluray run, ours alone decides (`not compared`).
-2. **missing-class**: ours fell short with a class-library gap (the first one named), whatever libbluray did: libbluray never lacks a JDK class. When libbluray failed too, the detail adds `libbluray (stub) also: ...`.
-3. **unsupported-video**: ours fell short and refused a playlist with MPEG-2 or VC-1 video (the same).
-4. **error**: our run failed hard (`bdj-failed`, `error`, `killed`, `no-output`), with the reason. Before libbluray-fails-too, so libbluray failing never hides it.
-5. **libbluray-fails-too**: libbluray failed on its own (`libFailed`: its run ended in an error, a crash or no output, or it never selected a playlist, or never showed a visible plane), and ours fell short too.
-6. **stall**: ours never reached a menu, stopped at an earlier step than libbluray, or stopped where libbluray did with the same run (`same as libbluray: ...`).
-7. **diverges**: otherwise, with the first difference. This includes ours passing every step while libbluray disagrees on a step both ran, or runs every step without ever selecting a playlist: a contradiction, not libbluray failing on stub streams.
+1. **error**: our run failed hard (`bdj-failed`, `error`, `killed`, `no-output`), with the reason, so nothing hides it.
+2. **works** (Rulings R3, R5): ours showed a visible menu and agrees with libbluray on every step both ran (settled planes and starting calls): the runs are equal (`same as libbluray`), or libbluray stopped at an earlier step (stub streams) and its run is a prefix of ours (`libbluray stopped early (stub): ...`). A key that changed nothing on both sides is a valid outcome, noted `no reaction to <key> (libbluray neither)` (`noReaction`); arrows and ok are required only as far as libbluray's run shows them, because a reaction on one side only is a difference. Without a libbluray run, ours alone decides: menu, arrows and ok (`not compared`).
+3. **missing-class**: a class-library gap (the first one named), whatever libbluray did: libbluray never lacks a JDK class. When libbluray failed too, the detail adds `libbluray (stub) also: ...`.
+4. **unsupported-video**: ours refused a playlist with MPEG-2 or VC-1 video (the same).
+5. **libbluray-fails-too**: libbluray failed on its own (`libFailed`: its run ended in an error, a crash or no output, or it never selected a playlist, or never showed a visible plane), and ours showed no menu either.
+6. **stall**: ours never showed a menu, or stopped at an earlier step than libbluray.
+7. **diverges**: otherwise, with the first difference: a key one side reacted to and the other did not, another settled plane, other starting calls, or a libbluray run that never selects a playlist where ours does.
 
 The settled-point rule is 5d's R3: settled hashes and calls, not flush counts. Stub streams make libbluray do less than it does with real video (RENTAL_FAMILY selects its menu playlist and draws nothing), which is why libbluray falling short is reported as such and never as ours.
 

@@ -248,6 +248,10 @@ export async function replayPlayerBdj(
         case 'waitStill':
           held = flushes.length > stepFrom.flushes && performance.now() - lastFlushAt >= s.ms;
           break;
+        case 'waitQuiet':
+          // bdj_trace.c's plane_quiet: no flush for ms since the later of the last flush and the step's start
+          held = performance.now() - Math.max(lastFlushAt, stepFrom.at) >= s.ms;
+          break;
         case 'waitMenu': {
           // bdj_trace.c's plane_menu: visible and still for ms, or visible for 30 s while flushing on (animated)
           if (!plane?.visible()) visibleSince = null; // an init or close clears the plane without a flush
@@ -277,7 +281,7 @@ export async function replayPlayerBdj(
         n: stepIdx,
         step: s.text,
         // an animated menu has no settled plane: only that it was visible counts (tools/bdj-library/README.md)
-        ...(animated ? { animated: true as const } : s.kind === 'waitStill' || s.kind === 'waitMenu' ? { hash: flushes.at(-1) ?? null } : {}),
+        ...(animated ? { animated: true as const } : s.kind === 'waitStill' || s.kind === 'waitMenu' || s.kind === 'waitQuiet' ? { hash: flushes.at(-1) ?? null } : {}),
       });
       stepIdx++;
       stepFrom = s.kind === 'key' || s.kind === 'pointer' ? mark : { events: events.length, flushes: flushes.length, at: performance.now() };

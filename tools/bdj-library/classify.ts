@@ -145,7 +145,7 @@ export function parseLibblurayRun(stdout: string, stderr: string, wallMs: number
       }
     } else if (o.script === 'step') {
       const text = String(o.step);
-      const settled = text.startsWith('wait still') || text.startsWith('wait menu');
+      const settled = text.startsWith('wait still') || text.startsWith('wait menu') || text.startsWith('wait quiet');
       steps.push({ n: Number(o.n), step: text, ...(o.animated ? { animated: true } : settled ? { hash: last } : {}), calls: calls.length });
     } else if (o.script === 'end') {
       end = o as { why?: string };
@@ -301,46 +301,66 @@ export function libFailed(lib: RunRecord): boolean {
 }
 
 /**
- * The verdict for a disc from our run and libbluray's (null: libbluray was not run). In order:
- *  - works: ours reached a visible menu, an arrow changed it and ok started something, and libbluray agrees: the runs
- *    are equal, or libbluray stopped earlier (stub streams) and agrees on every step both ran ("libbluray stopped early
- *    (stub)"). Without a libbluray run, ours alone decides ("not compared").
- *  - missing-class: ours fell short and Java lacked a platform class, native (`native: ...`) or platform method
- *    (`method: ...`), the first one named, whatever libbluray did (with stub streams it often gets no further, which
- *    the detail says).
- *  - unsupported-video: ours fell short and a playlist with MPEG-2 or VC-1 video was refused (the same).
+ * The keys of the script that changed nothing in either run (Ruling R5: a valid settled outcome when libbluray did the
+ * same): `right` and `down` when the settled plane after the key equals the one before on both sides, `ok` when
+ * neither run started anything after it. Only keys both runs pressed, with a settled plane on both sides around them.
+ */
+export function noReaction(ours: RunRecord, lib: RunRecord): string[] {
+  const out: string[] = [];
+  const same = (r: RunRecord, a: number, b: number): boolean | null => {
+    const ha = r.steps[a]?.hash;
+    const hb = r.steps[b]?.hash;
+    return typeof ha === 'string' && typeof hb === 'string' ? ha === hb : null;
+  };
+  if (same(ours, STEP.menu, STEP.afterRight) === true && same(lib, STEP.menu, STEP.afterRight) === true) out.push('right');
+  if (same(ours, STEP.afterRight, STEP.afterDown) === true && same(lib, STEP.afterRight, STEP.afterDown) === true) out.push('down');
+  const okRan = (r: RunRecord): boolean => r.steps.length > STEP.ok;
+  if (okRan(ours) && okRan(lib) && !progress(ours).ok && !progress(lib).ok) out.push('ok');
+  return out;
+}
+
+const HARD = new Set<RunEnd>(['error', 'bdj-failed', 'killed', 'no-output']);
+
+/**
+ * The verdict for a disc from our run and libbluray's (null: libbluray was not run). In order (Rulings R3, R5):
  *  - error: our run failed hard (error, BD-J failure, killed, no record), with the reason.
- *  - libbluray-fails-too: libbluray failed on its own (libFailed) and ours fell short too.
- *  - stall: ours never reached a menu, stopped at an earlier step than libbluray, or stopped where libbluray did with
- *    the same run ("same as libbluray").
- *  - diverges: otherwise, with the first difference: among others, ours passing every step where libbluray disagrees on
- *    a step both ran, or ran every step and never selected a playlist.
+ *  - works: ours showed a visible menu and agrees with libbluray on every step both ran (settled planes and starting
+ *    calls): the runs are equal, or libbluray stopped earlier (stub streams) and its run is a prefix of ours. A key
+ *    that changed nothing on both sides is a valid outcome, noted "no reaction to <key>"; arrows and ok are required
+ *    only as far as libbluray shows them (a reaction on one side only is a difference). Without a libbluray run, ours
+ *    alone decides: menu, arrows and ok ("not compared").
+ *  - missing-class: Java lacked a platform class, native (`native: ...`) or platform method (`method: ...`), the first
+ *    one named, whatever libbluray did (with stub streams it often gets no further, which the detail says).
+ *  - unsupported-video: a playlist with MPEG-2 or VC-1 video was refused (the same).
+ *  - libbluray-fails-too: libbluray failed on its own (libFailed) and ours showed no menu either.
+ *  - stall: ours never showed a menu, or stopped at an earlier step than libbluray.
+ *  - diverges: otherwise, with the first difference (a reaction to a key on one side only, another settled plane, other
+ *    starting calls, or a libbluray run that never selects a playlist where ours does).
  */
 export function classify(ours: RunRecord, lib: RunRecord | null): { verdict: DiscVerdict; detail: string } {
   const p = progress(ours);
-  const oursOk = p.menu && p.arrows && p.ok;
+  if (HARD.has(ours.end)) return { verdict: 'error', detail: `${ours.end}${ours.endDetail ? `: ${ours.endDetail}` : ''}` };
   const cmp = lib ? compareRuns(ours, lib) : null;
-  if (oursOk && !lib) return { verdict: 'works', detail: 'not compared: no libbluray run' };
-  if (oursOk && cmp?.equal) return { verdict: 'works', detail: 'same as libbluray' };
-  if (oursOk && lib && cmp?.libPrefix) return { verdict: 'works', detail: `libbluray stopped early (stub): ${shortfall(lib)}` };
+  if (!lib && p.menu && p.arrows && p.ok) return { verdict: 'works', detail: 'not compared: no libbluray run' };
+  if (lib && p.menu && (cmp?.equal || cmp?.libPrefix)) {
+    const quiet = noReaction(ours, lib);
+    const note = quiet.length ? `; no reaction to ${quiet.join(', ')} (libbluray neither)` : '';
+    return { verdict: 'works', detail: `${cmp.equal ? 'same as libbluray' : `libbluray stopped early (stub): ${shortfall(lib)}`}${note}` };
+  }
   // a class ours lacks or a video codec ours refuses is ours to fix whatever libbluray does with stub streams
   const libToo = lib && libFailed(lib) ? `; libbluray (stub) also: ${shortfall(lib)}` : '';
-  if (!oursOk && ours.missingClasses.length) {
+  if (ours.missingClasses.length) {
     const more = ours.missingClasses.length > 1 ? ` (+${ours.missingClasses.length - 1} more)` : '';
     return { verdict: 'missing-class', detail: `${ours.missingClasses[0]}${more}${libToo}` };
   }
   const refused = ours.rejectedPlaylists.find((r) => r.video !== null && UNSUPPORTED_VIDEO.test(r.video));
-  if (!oursOk && refused) return { verdict: 'unsupported-video', detail: `playlist ${refused.playlist} (${refused.video}) refused${libToo}` };
-  if (ours.end === 'error' || ours.end === 'bdj-failed' || ours.end === 'killed' || ours.end === 'no-output') {
-    return { verdict: 'error', detail: `${ours.end}${ours.endDetail ? `: ${ours.endDetail}` : ''}` };
-  }
-  if (!oursOk && lib && libFailed(lib)) {
+  if (refused) return { verdict: 'unsupported-video', detail: `playlist ${refused.playlist} (${refused.video}) refused${libToo}` };
+  if (!p.menu && lib && libFailed(lib)) {
     const noPlaylist = lib.calls.some((c) => c.call === 'selectPlaylistN' && c.ret === 1) ? '' : ', selects no playlist';
     return { verdict: 'libbluray-fails-too', detail: `libbluray: ${shortfall(lib)}${noPlaylist}; ours: ${shortfall(ours)}` };
   }
-  if (!oursOk && lib && cmp?.equal) return { verdict: 'stall', detail: `same as libbluray: ${shortfall(ours)}` };
   const libSteps = lib?.steps.length ?? Infinity;
-  if (!oursOk && (!p.menu || (ours.end !== 'done' && ours.steps.length < libSteps))) {
+  if (!p.menu || (ours.end !== 'done' && ours.steps.length < libSteps)) {
     const theirs = lib ? `; libbluray reaches step ${lib.steps.length}${lib.end === 'done' ? ' (done)' : ''}` : '';
     return { verdict: 'stall', detail: `ours: ${shortfall(ours)}${theirs}` };
   }

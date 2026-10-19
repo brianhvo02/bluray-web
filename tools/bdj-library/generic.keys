@@ -1,8 +1,8 @@
 # The library check's generic script (tools/bdj-library/README.md): reach the menu, try two arrows, press ok.
 wait menu 1500
 key right
-wait still 1000
+wait quiet 1000
 key down
-wait still 1000
+wait quiet 1000
 key ok
 wait playlist any

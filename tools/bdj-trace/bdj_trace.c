@@ -159,7 +159,7 @@ static int flush_count(void)
 
 /* ---- key scripts (the .keys syntax of tests/vm-trace/scripts, extended) ---- */
 
-typedef enum { S_WAIT_FLUSH, S_WAIT_STILL, S_WAIT_MENU, S_WAIT_PLAYLIST, S_WAIT_TITLE, S_KEY, S_MOUSE, S_CLICK } step_kind;
+typedef enum { S_WAIT_FLUSH, S_WAIT_STILL, S_WAIT_MENU, S_WAIT_QUIET, S_WAIT_PLAYLIST, S_WAIT_TITLE, S_KEY, S_MOUSE, S_CLICK } step_kind;
 typedef struct {
   step_kind kind;
   int a, b;
@@ -238,6 +238,7 @@ static int parse_script(const char *path, step_t **out)
       if (!strcmp(w[1], "flush")) s.kind = S_WAIT_FLUSH;
       else if (!strcmp(w[1], "still")) s.kind = S_WAIT_STILL;
       else if (!strcmp(w[1], "menu")) s.kind = S_WAIT_MENU;
+      else if (!strcmp(w[1], "quiet")) s.kind = S_WAIT_QUIET;
       else if (!strcmp(w[1], "playlist")) s.kind = S_WAIT_PLAYLIST;
       else if (!strcmp(w[1], "title")) s.kind = S_WAIT_TITLE;
       else goto bad;
@@ -332,12 +333,25 @@ static int plane_menu(int ms)
   return still || animated;
 }
 
+/* `wait quiet MS`: no flush for MS milliseconds since the step became current (a flush is not required: a key that
+ * changes nothing settles too) */
+static double step_start;
+static int plane_quiet(int ms)
+{
+  pthread_mutex_lock(&plane_mutex);
+  double from = last_flush_s > step_start ? last_flush_s : step_start;
+  int met = (now_s() - from) * 1000 >= ms;
+  pthread_mutex_unlock(&plane_mutex);
+  return met;
+}
+
 static int wait_met(const step_t *s)
 {
   switch (s->kind) {
     case S_WAIT_FLUSH: return flush_count() >= s->a;
     case S_WAIT_STILL: return plane_still(s->a);
     case S_WAIT_MENU: return plane_menu(s->a);
+    case S_WAIT_QUIET: return plane_quiet(s->a);
     case S_WAIT_PLAYLIST: return seen_since_step(1, s->a);
     case S_WAIT_TITLE: return seen_since_step(0, s->a);
     default: return 1;
@@ -422,7 +436,8 @@ int main(int argc, char **argv)
   }
 
   static unsigned char buf[6144 * 32];
-  double playlist_wall = 0, script_done = -1, step_start = 0, resume_at = 0; /* step_start: when the current step became current */
+  double playlist_wall = 0, script_done = -1, resume_at = 0; /* step_start (above): when the current step became current */
+  step_start = 0;
   const char *why = "limit";
   while (now_s() < limit) {
     /* the script: each step runs once its wait holds; key and mouse steps run at once */

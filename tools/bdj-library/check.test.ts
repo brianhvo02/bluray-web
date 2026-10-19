@@ -7,12 +7,12 @@ import { classify, discId, EMPTY_PLANE_HASH, gapOf, missingClassesFromLog, parse
 // Made-up runs of the generic script: playlist 7 behind the menu, ok starts playlist 8.
 const sel = (pl: number, ret = 1): TraceEntry => ({ call: 'selectPlaylistN', args: [pl, -1, -1, '-1'], ret });
 const reg = (n: number, v: number): TraceEntry => ({ call: 'writeRegN', args: [0, n, v, -1], ret: 0 });
-const STEPS = ['wait menu 1500', 'key right', 'wait still 1000', 'key down', 'wait still 1000', 'key ok', 'wait playlist any'];
+const STEPS = ['wait menu 1500', 'key right', 'wait quiet 1000', 'key down', 'wait quiet 1000', 'key ok', 'wait playlist any'];
 const CALLS = [sel(7), reg(1, 0), reg(1, 1), sel(8)];
 /** The steps up to `count`, with the given settled hashes and the control-call count before each. */
 function steps(hashes: readonly string[], callsBefore: readonly number[], count = STEPS.length): RunStep[] {
   let w = 0;
-  return STEPS.slice(0, count).map((step, n) => ({ n, step, ...(step.startsWith('wait still') || step.startsWith('wait menu') ? { hash: hashes[w++] ?? null } : {}), calls: callsBefore[n]! }));
+  return STEPS.slice(0, count).map((step, n) => ({ n, step, ...(step.startsWith('wait quiet') || step.startsWith('wait menu') ? { hash: hashes[w++] ?? null } : {}), calls: callsBefore[n]! }));
 }
 const BEFORE = [1, 1, 2, 2, 3, 3, 3];
 function run(over: Partial<RunRecord> = {}): RunRecord {
@@ -75,9 +75,23 @@ describe('classify', () => {
   it('libbluray-fails-too only when libbluray fails on its own (error, no playlist, nothing drawn) and ours too', () => {
     expect(classify(noMenu(), lib({ end: 'error', steps: [], calls: [], endHash: null })).verdict).toBe('libbluray-fails-too');
     expect(classify(noMenu(), lib({ calls: [reg(1, 0)] })).detail).toMatch(/selects no playlist/);
-    // libbluray did as well as ours, and both fall short: not libbluray's failure
+  });
+
+  it('works when a key changes nothing on either side (Ruling R5), with a no-reaction note', () => {
     const still = steps(['aaaaaaaa', 'aaaaaaaa', 'aaaaaaaa'], BEFORE);
-    expect(classify(run({ steps: still }), lib({ steps: still }))).toEqual({ verdict: 'stall', detail: expect.stringMatching(/^same as libbluray: arrows change nothing/) });
+    expect(classify(run({ steps: still }), lib({ steps: still }))).toEqual({ verdict: 'works', detail: 'same as libbluray; no reaction to right, down (libbluray neither)' });
+    const loop = [sel(7), reg(1, 0), reg(1, 1), sel(7)]; // ok re-selects the menu's own playlist: nothing started
+    expect(classify(run({ calls: loop }), lib({ calls: loop }))).toEqual({ verdict: 'works', detail: 'same as libbluray; no reaction to ok (libbluray neither)' });
+  });
+
+  it('diverges when only one side reacts to a key', () => {
+    const still = steps(['aaaaaaaa', 'aaaaaaaa', 'cccccccc'], BEFORE);
+    // libbluray reacts to right, ours does not
+    expect(classify(run({ steps: still }), lib())).toEqual({ verdict: 'diverges', detail: 'step 2 (wait quiet 1000): settled plane libbluray bbbbbbbb, ours aaaaaaaa' });
+    // ours reacts to right, libbluray does not
+    expect(classify(run(), lib({ steps: still }))).toEqual({ verdict: 'diverges', detail: 'step 2 (wait quiet 1000): settled plane libbluray aaaaaaaa, ours bbbbbbbb' });
+    // ok: libbluray starts playlist 8, ours starts nothing
+    expect(classify(run({ calls: [sel(7), reg(1, 0), reg(1, 1), sel(7)] }), lib()).detail).toMatch(/^after key ok: libbluray starts selectPlaylistN\(8/);
   });
 
   it('works when ours passes every step and libbluray, on stub streams, stops early or fails, agreeing as far as it went', () => {
@@ -150,9 +164,9 @@ describe('classify', () => {
 
   it('diverges with the first differing step otherwise', () => {
     const other = steps(['aaaaaaaa', 'dddddddd', 'cccccccc'], BEFORE);
-    expect(classify(run(), lib({ steps: other }))).toEqual({ verdict: 'diverges', detail: 'step 2 (wait still 1000): settled plane libbluray dddddddd, ours bbbbbbbb' });
+    expect(classify(run(), lib({ steps: other }))).toEqual({ verdict: 'diverges', detail: 'step 2 (wait quiet 1000): settled plane libbluray dddddddd, ours bbbbbbbb' });
     const calls = [sel(7), reg(1, 0), sel(9), sel(8)];
-    expect(classify(run(), lib({ calls })).detail).toBe('step 4 (wait still 1000): libbluray calls selectPlaylistN(9,-1,-1,-1)=1, ours does not');
+    expect(classify(run(), lib({ calls })).detail).toBe('step 4 (wait quiet 1000): libbluray calls selectPlaylistN(9,-1,-1,-1)=1, ours does not');
     // registers move with the stub streams' timing: only starting calls are compared (Ruling R3)
     expect(classify(run(), lib({ calls: [sel(7), reg(1, 0), reg(1, 2), sel(8)] })).verdict).toBe('works');
     const other8 = [sel(7), reg(1, 0), reg(1, 1), sel(9)];
@@ -203,6 +217,7 @@ describe('generic.keys', () => {
     const steps = parseKeyScript(readFileSync(new URL('./generic.keys', import.meta.url), 'utf8'));
     expect(steps.map((s) => s.text)).toEqual(STEPS);
     expect(steps[0]).toEqual({ kind: 'waitMenu', text: 'wait menu 1500', ms: 1500 });
+    expect(steps[2]).toEqual({ kind: 'waitQuiet', text: 'wait quiet 1000', ms: 1000 });
     expect(steps.at(-1)).toEqual({ kind: 'waitPlaylist', text: 'wait playlist any', playlist: null });
   });
 });
