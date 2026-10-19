@@ -81,7 +81,11 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     }
     setNasView({ kind: 'checking' });
     nas.me().then(
-      (me) => setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' })),
+      (me) => {
+        setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' }));
+        // `me` may have brought this device's person name up to date.
+        loadPairing();
+      },
       // an older NAS without `me`, or any failure: the folder browser shows what is wrong, if anything
       () => setNasView((v) => (v.kind === 'checking' ? { kind: 'folders' } : v)),
     );

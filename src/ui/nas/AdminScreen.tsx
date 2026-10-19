@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import type { TitleSummary } from '../../engine/disc/nas-api';
-import { TMDB_ATTRIBUTION, countdown, deleteTitleQuestion, gateSwitchOn, matchingStatus, newCode, ownTitleKind, ownTitles, withGate } from './admin-model';
+import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, gateSwitchOn, matchingStatus, newCode, ownTitleKind, ownTitles, withGate } from './admin-model';
 import { NasHttpError, type NasClient, type NasPerson, type NasTitleStatus } from './nas-client';
 import { PeopleSection } from './PeopleSection';
 import { MAX_PERSON_NAME, NEW_PERSON, codeSummary } from './people-model';
@@ -28,6 +28,8 @@ interface ShownCode {
   readonly code: string;
   readonly link: string;
   readonly expiresAt: number;
+  readonly mintedAt: number;
+  readonly personId: string;
   readonly personName: string;
   readonly invite: boolean;
   readonly qr: { size: number; path: string };
@@ -338,21 +340,41 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
   }, [loadPeople]);
   const reloadPeople = useCallback(() => void loadPeople(false), [loadPeople]);
 
-  // A person picked who has since gone (removed here) falls back to "New person…".
+  // A person picked who was listed and has since gone (removed here) falls back to "New person…".
+  const listedBefore = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
-    if (people !== null && picked !== NEW_PERSON && !people.some((p) => p.id === picked)) setPicked(NEW_PERSON);
+    if (people === null) return;
+    const ids = new Set(people.map((p) => p.id));
+    if (picked !== NEW_PERSON && listedBefore.current.has(picked) && !ids.has(picked)) setPicked(NEW_PERSON);
+    listedBefore.current = ids;
   }, [people, picked]);
 
   const live = code !== null && now() < code.expiresAt;
+  const tickMs = code === null ? 1_000 : countdownTickMs(code.expiresAt, now());
   useEffect(() => {
     if (!live) return;
-    const tick = window.setInterval(() => setTick((t) => t + 1), 1_000);
-    const poll = window.setInterval(() => void loadPeople(true), PEOPLE_POLL_MS);
-    return () => {
-      window.clearInterval(tick);
-      window.clearInterval(poll);
-    };
-  }, [live, loadPeople]);
+    const tick = window.setInterval(() => setTick((t) => t + 1), tickMs);
+    return () => window.clearInterval(tick);
+  }, [live, tickMs]);
+
+  // The people list is polled so the device that redeems the code turns up: until the NAS no longer lists the code,
+  // for at most 10 minutes (an invite may wait 3 days).
+  const [codeGone, setCodeGone] = useState(false);
+  const polling = code !== null && !codeGone && now() < codePollEnd(code.expiresAt, code.mintedAt);
+  useEffect(() => {
+    if (!polling || code === null) return;
+    const shown = code;
+    const poll = window.setInterval(() => {
+      nas.admin.codes().then(
+        (codes) => {
+          if (!codeListed(codes, shown)) setCodeGone(true);
+          void loadPeople(true);
+        },
+        () => void loadPeople(true),
+      );
+    }, PEOPLE_POLL_MS);
+    return () => window.clearInterval(poll);
+  }, [polling, code, nas, loadPeople]);
 
   const onNewCode = (e: FormEvent): void => {
     e.preventDefault();
@@ -360,10 +382,16 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
     setMinting(true);
     newCode(nas.admin, picked, newName, newOwner, invite).then(
       (minted) => {
-        setCode({ ...minted, qr: qrSvg(minted.link) });
+        setCode({ ...minted, mintedAt: now(), qr: qrSvg(minted.link) });
+        setCodeGone(false);
         setCopied(false);
         setMinting(false);
-        // A new person is on the NAS now: the next code goes to them unless another is picked.
+        // A new person is on the NAS now, listed at once: the next code goes to them unless another is picked.
+        setPeople((list) =>
+          list === null || list.some((p) => p.id === minted.personId)
+            ? list
+            : [...list, { id: minted.personId, name: minted.personName, owner: newOwner, createdAt: now(), savedBytes: 0, devices: [] }],
+        );
         setPicked(minted.personId);
         setNewName('');
         setNewOwner(false);

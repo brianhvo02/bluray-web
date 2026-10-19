@@ -4,6 +4,23 @@ import type { NasPairing } from './nas-store';
 /** What the admin screen says when the NAS refuses an action with 409 `last-owner`. */
 export const lastOwnerMessage = 'At least one owner device has to stay. Make someone else an owner first.';
 
+/** The confirm step before an action that takes this device's owner rights away. */
+export const loseSettingsMessage = 'This device will lose NAS settings. Only another owner can give them back.';
+
+/** An admin action that can take owner rights away: removing a person's owner status, or moving a device. */
+export type OwnerRightsAction = { readonly kind: 'remove-owner'; readonly personId: string } | { readonly kind: 'move'; readonly deviceId: string; readonly toPersonId: string };
+
+/** Whether `action` would leave this device without owner rights, and so without NAS settings. */
+export function losesNasSettings(people: readonly NasPerson[], thisDeviceId: string | null, action: OwnerRightsAction): boolean {
+  if (thisDeviceId === null) return false;
+  const own = people.find((p) => p.devices.some((d) => d.id === thisDeviceId));
+  if (!own?.owner) return false;
+  if (action.kind === 'remove-owner') return action.personId === own.id;
+  if (action.deviceId !== thisDeviceId) return false;
+  const to = people.find((p) => p.id === action.toPersonId);
+  return to !== undefined && !to.owner;
+}
+
 /** The longest person name the NAS takes. */
 export const MAX_PERSON_NAME = 100;
 

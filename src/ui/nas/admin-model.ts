@@ -1,6 +1,6 @@
 import type { TitleSummary } from '../../engine/disc/nas-api';
 import { displayName } from './title-model';
-import type { NasClient, NasTitleStatus } from './nas-client';
+import type { NasClient, NasCode, NasTitleStatus } from './nas-client';
 import { codeTarget, lastSeen } from './people-model';
 
 export { lastSeen };
@@ -28,6 +28,21 @@ export function countdown(expiresAt: number, now: number): string {
   }
   const seconds = Math.ceil(left / 1000);
   return `Expires in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/** While a code is shown, the people list is polled until this time: the code's expiry, or 10 minutes after minting. */
+export function codePollEnd(expiresAt: number, mintedAt: number): number {
+  return Math.min(expiresAt, mintedAt + 10 * MINUTE);
+}
+
+/** Whether `GET admin/codes` still lists the code shown (its person and expiry): a redeemed code is gone. */
+export function codeListed(codes: readonly NasCode[], shown: { readonly personId: string; readonly expiresAt: number }): boolean {
+  return codes.some((c) => c.personId === shown.personId && c.expiresAt === shown.expiresAt);
+}
+
+/** How often the countdown redraws: once a minute while more than an hour is left, else every second. */
+export function countdownTickMs(expiresAt: number, now: number): number {
+  return expiresAt - now > HOUR ? MINUTE : 1_000;
 }
 
 /**

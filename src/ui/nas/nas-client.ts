@@ -317,8 +317,9 @@ export class NasClient {
     if (res.status === 401) throw new Error(NAS_MESSAGES.invalidCode);
     if (res.status === 429) throw new Error(NAS_MESSAGES.tooMany);
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
-    const { deviceId, owner, personName } = (await res.json()) as { deviceId: string; owner: boolean; personName: string };
-    const pairing: NasPairing = { base, deviceId, deviceName: name, personName, owner, key };
+    // An older NAS answers without a person.
+    const { deviceId, owner, personName } = (await res.json()) as { deviceId: string; owner: boolean; personName?: string };
+    const pairing: NasPairing = { base, deviceId, deviceName: name, ...(typeof personName === 'string' ? { personName } : {}), owner, key };
     await this.deps.store.put(pairing);
     this.reset(pairing);
   }
@@ -349,8 +350,20 @@ export class NasClient {
   }
 
   /** Whether this device is an owner, whether it may browse by title (the release gate), and whose device it is. */
+  /**
+   * When the person's name differs from the stored pairing's (renamed by an owner, or a pairing stored before people),
+   * the stored pairing takes the new name, so `pairing()` gives it from then on.
+   */
   async me(): Promise<NasMe> {
-    return (await this.json('me')) as NasMe;
+    const generation = this.generation;
+    const me = (await this.json('me')) as NasMe;
+    const pairing = this.current;
+    if (typeof me.personName === 'string' && pairing && generation === this.generation && pairing.personName !== me.personName) {
+      const renamed: NasPairing = { ...pairing, personName: me.personName };
+      this.current = renamed;
+      await this.deps.store.put(renamed);
+    }
+    return me;
   }
 
   /** Every title, with its names in all languages (searched locally). */

@@ -330,6 +330,12 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
     await expect(ownRow).toContainText('Revoke this device?');
     await ownRow.getByTestId('nas-revoke-cancel').click();
     await expect(ownRow.getByTestId('nas-revoke')).toBeVisible();
+    // So does taking owner rights from this device's own person.
+    const ownPersonRow = page.locator('[data-person-id]').filter({ has: ownRow });
+    await ownPersonRow.getByTestId('nas-person-owner').click();
+    await expect(ownPersonRow).toContainText('This device will lose NAS settings. Only another owner can give them back.');
+    await ownPersonRow.getByRole('button', { name: 'Cancel' }).click();
+    await expect(ownPersonRow.getByTestId('nas-person-owner')).toHaveText('Remove owner');
     // Removing Mika says what goes first.
     await mikaRow.getByTestId('nas-person-remove').click();
     await expect(mikaRow).toContainText('Remove Mika? Their device iPad is unpaired.');

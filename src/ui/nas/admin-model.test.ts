@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TMDB_ATTRIBUTION, countdown, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
+import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
 import type { TitleSummary } from '../../engine/disc/nas-api';
 
 const MINUTE = 60_000;
@@ -58,6 +58,27 @@ describe('countdown', () => {
   it('says Expired once the time is up', () => {
     expect(countdown(NOW, NOW)).toBe('Expired');
     expect(countdown(NOW, NOW + 5_000)).toBe('Expired');
+  });
+});
+
+describe('while a code is shown', () => {
+  it('polls until the code expires, or 10 minutes after minting for an invite', () => {
+    expect(codePollEnd(NOW + 10 * MINUTE, NOW)).toBe(NOW + 10 * MINUTE);
+    expect(codePollEnd(NOW + 3 * DAY, NOW)).toBe(NOW + 10 * MINUTE);
+    expect(codePollEnd(NOW + 5 * MINUTE, NOW)).toBe(NOW + 5 * MINUTE);
+  });
+
+  it('knows the code is gone once the NAS no longer lists it', () => {
+    const codes = [{ id: 'c1', personId: 'p1', personName: 'Mika', invite: true, expiresAt: NOW + DAY }];
+    expect(codeListed(codes, { personId: 'p1', expiresAt: NOW + DAY })).toBe(true);
+    expect(codeListed(codes, { personId: 'p1', expiresAt: NOW + 2 * DAY })).toBe(false);
+    expect(codeListed([], { personId: 'p1', expiresAt: NOW + DAY })).toBe(false);
+  });
+
+  it('redraws the countdown once a minute while over an hour is left', () => {
+    expect(countdownTickMs(NOW + 3 * DAY, NOW)).toBe(MINUTE);
+    expect(countdownTickMs(NOW + HOUR + 1, NOW)).toBe(MINUTE);
+    expect(countdownTickMs(NOW + HOUR, NOW)).toBe(1_000);
   });
 });
 

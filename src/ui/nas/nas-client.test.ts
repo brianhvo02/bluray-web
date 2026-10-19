@@ -349,6 +349,37 @@ describe('NasClient', () => {
     expect(store.value).not.toBeNull();
   });
 
+  it("takes the person's name from `me` into the stored pairing when it differs", async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad');
+    const stored = store.value!;
+    expect(stored.personName).toBe('Owner');
+    const real = server.fetch;
+    let personName = 'Sora';
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      if (route === 'me') return Response.json({ owner: true, titleLibrary: true, personId: 'p0', personName });
+      server.nas = undefined;
+      try {
+        return await real(url, init);
+      } finally {
+        server.nas = answer;
+      }
+    };
+    server.nas = answer;
+    const put = vi.spyOn(store, 'put');
+    expect(await nas.me()).toMatchObject({ personName: 'Sora' });
+    expect(store.value).toEqual({ ...stored, personName: 'Sora' });
+    expect((await nas.pairing())?.personName).toBe('Sora');
+    await nas.me();
+    expect(put).toHaveBeenCalledOnce();
+    personName = 'Mika';
+    await nas.me();
+    expect(store.value?.personName).toBe('Mika');
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();

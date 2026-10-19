@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NasHttpError, type NasPerson } from './nas-client';
-import { adminFailure, codeSummary, codeTarget, formatSize, lastOwnerMessage, moveTargets, pairedAs, personRows, removePersonQuestion } from './people-model';
+import { adminFailure, loseSettingsMessage, losesNasSettings, codeSummary, codeTarget, formatSize, lastOwnerMessage, moveTargets, pairedAs, personRows, removePersonQuestion } from './people-model';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -137,5 +137,30 @@ describe('pairedAs', () => {
   it("names the device's person, or the device for a pairing stored before people", () => {
     expect(pairedAs({ personName: 'Mika', deviceName: 'iPad' })).toBe('Paired as Mika.');
     expect(pairedAs({ deviceName: 'iPad' })).toBe('Paired with the NAS as iPad.');
+  });
+});
+
+describe('losesNasSettings', () => {
+  const people = [
+    person({ id: 'p0', name: 'Owner', owner: true, devices: [{ id: 'me', name: 'Mac', pairedAt: 0, lastSeen: 0 }, { id: 'd2', name: 'iPad', pairedAt: 0, lastSeen: 0 }] }),
+    person({ id: 'p2', name: 'Ren', owner: true }),
+    person({ devices: [{ id: 'd3', name: 'iPhone', pairedAt: 0, lastSeen: 0 }] }),
+  ];
+
+  it("is true for removing owner from this device's person, or moving this device to someone who isn't an owner", () => {
+    expect(losesNasSettings(people, 'me', { kind: 'remove-owner', personId: 'p0' })).toBe(true);
+    expect(losesNasSettings(people, 'me', { kind: 'move', deviceId: 'me', toPersonId: 'p1' })).toBe(true);
+  });
+
+  it('is false for other people, other devices, a move to another owner, or an unknown device', () => {
+    expect(losesNasSettings(people, 'me', { kind: 'remove-owner', personId: 'p2' })).toBe(false);
+    expect(losesNasSettings(people, 'me', { kind: 'move', deviceId: 'd2', toPersonId: 'p1' })).toBe(false);
+    expect(losesNasSettings(people, 'me', { kind: 'move', deviceId: 'me', toPersonId: 'p2' })).toBe(false);
+    expect(losesNasSettings(people, null, { kind: 'remove-owner', personId: 'p0' })).toBe(false);
+    expect(losesNasSettings(people, 'd3', { kind: 'move', deviceId: 'd3', toPersonId: 'p0' })).toBe(false);
+  });
+
+  it('asks in words', () => {
+    expect(loseSettingsMessage).toBe('This device will lose NAS settings. Only another owner can give them back.');
   });
 });

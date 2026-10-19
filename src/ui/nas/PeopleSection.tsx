@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactElement } from 'react';
 import type { NasClient, NasPerson } from './nas-client';
-import { MAX_PERSON_NAME, adminFailure, clearSavedQuestion, moveTargets, personRows, removePersonQuestion } from './people-model';
+import { MAX_PERSON_NAME, adminFailure, clearSavedQuestion, loseSettingsMessage, losesNasSettings, moveTargets, personRows, removePersonQuestion } from './people-model';
 
 interface PeopleSectionProps {
   readonly nas: NasClient;
@@ -17,18 +17,21 @@ interface PeopleSectionProps {
 
 /** What is open: an inline editor or confirm step on a person, or on a device. */
 type Edit =
-  | { readonly personId: string; readonly what: 'rename' | 'remove' | 'clear' }
+  | { readonly personId: string; readonly what: 'rename' | 'remove' | 'clear' | 'remove-owner' }
   | { readonly deviceId: string; readonly what: 'move' | 'revoke' }
   | null;
 
 /**
  * The People list of NAS settings (spec §4.3): each person with an owner badge, their devices and their saved data;
  * Rename, Make owner/Remove owner, Clear saved data and Remove (both after a confirm step), and per device Move to…
- * and Revoke (this device's own row asks first).
+ * and Revoke (this device's own row asks first). Removing owner from this device's person, or moving this device to
+ * someone who isn't an owner, asks first too: this device would lose NAS settings.
  */
 export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onError }: PeopleSectionProps): ReactElement {
   const [edit, setEdit] = useState<Edit>(null);
   const [name, setName] = useState('');
+  /** The person picked in an open "Move to…". */
+  const [moveTo, setMoveTo] = useState('');
   const [busy, setBusy] = useState(false);
 
   const run = (work: () => Promise<unknown>): void => {
@@ -83,6 +86,7 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                 <button
                   type="button"
                   data-testid="nas-person-rename"
+                  disabled={busy}
                   onClick={() => {
                     onError(null);
                     setName(row.name);
@@ -91,15 +95,24 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                 >
                   Rename
                 </button>
-                <button type="button" data-testid="nas-person-owner" disabled={busy} onClick={() => run(() => nas.admin.updatePerson(row.id, { owner: !row.owner }))}>
+                <button
+                  type="button"
+                  data-testid="nas-person-owner"
+                  disabled={busy}
+                  onClick={() =>
+                    row.owner && losesNasSettings(people, thisDeviceId, { kind: 'remove-owner', personId: row.id })
+                      ? setEdit({ personId: row.id, what: 'remove-owner' })
+                      : run(() => nas.admin.updatePerson(row.id, { owner: !row.owner }))
+                  }
+                >
                   {row.owner ? 'Remove owner' : 'Make owner'}
                 </button>
                 {row.canClearSaved && (
-                  <button type="button" data-testid="nas-person-clear" onClick={() => setEdit({ personId: row.id, what: 'clear' })}>
+                  <button type="button" data-testid="nas-person-clear" disabled={busy} onClick={() => setEdit({ personId: row.id, what: 'clear' })}>
                     Clear saved data
                   </button>
                 )}
-                <button type="button" data-testid="nas-person-remove" onClick={() => setEdit({ personId: row.id, what: 'remove' })}>
+                <button type="button" data-testid="nas-person-remove" disabled={busy} onClick={() => setEdit({ personId: row.id, what: 'remove' })}>
                   Remove
                 </button>
               </span>
@@ -116,6 +129,17 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                   {cancel}
                 </span>
               </form>
+            )}
+            {editing === 'remove-owner' && (
+              <div className="admin-confirm-box" role="group" aria-label="Confirm">
+                <p>{loseSettingsMessage}</p>
+                <span className="admin-confirm">
+                  <button type="button" data-testid="nas-person-owner-confirm" disabled={busy} onClick={() => run(() => nas.admin.updatePerson(row.id, { owner: false }))}>
+                    Remove owner
+                  </button>
+                  {cancel}
+                </span>
+              </div>
             )}
             {(editing === 'remove' || editing === 'clear') && (
               <div className="admin-confirm-box" role="group" aria-label="Confirm">
@@ -146,15 +170,7 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                         <span className="admin-confirm">
                           <label>
                             Move to{' '}
-                            <select
-                              data-testid="nas-device-move-to"
-                              defaultValue=""
-                              disabled={busy}
-                              onChange={(e) => {
-                                const to = e.target.value;
-                                if (to) run(() => nas.admin.moveDevice(d.id, to));
-                              }}
-                            >
+                            <select data-testid="nas-device-move-to" value={moveTo} disabled={busy} onChange={(e) => setMoveTo(e.target.value)}>
                               <option value="" disabled>
                                 Choose…
                               </option>
@@ -165,6 +181,14 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                               ))}
                             </select>
                           </label>
+                          {moveTo !== '' && losesNasSettings(people, thisDeviceId, { kind: 'move', deviceId: d.id, toPersonId: moveTo }) && (
+                            <span role="alert" data-testid="nas-device-move-warning">
+                              {loseSettingsMessage}
+                            </span>
+                          )}
+                          <button type="button" data-testid="nas-device-move-confirm" disabled={busy || moveTo === ''} onClick={() => run(() => nas.admin.moveDevice(d.id, moveTo))}>
+                            Move
+                          </button>
                           {cancel}
                         </span>
                       ) : deviceEdit === 'revoke' ? (
@@ -180,7 +204,15 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
                       ) : (
                         <span className="admin-confirm">
                           {targets.length > 0 && (
-                            <button type="button" data-testid="nas-device-move" onClick={() => setEdit({ deviceId: d.id, what: 'move' })}>
+                            <button
+                              type="button"
+                              data-testid="nas-device-move"
+                              disabled={busy}
+                              onClick={() => {
+                                setMoveTo('');
+                                setEdit({ deviceId: d.id, what: 'move' });
+                              }}
+                            >
                               Move to…
                             </button>
                           )}
