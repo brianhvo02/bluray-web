@@ -90,8 +90,25 @@ describe('classify', () => {
     expect(classify(run({ steps: still }), lib())).toEqual({ verdict: 'diverges', detail: 'step 2 (wait quiet 1000): settled plane libbluray bbbbbbbb, ours aaaaaaaa' });
     // ours reacts to right, libbluray does not
     expect(classify(run(), lib({ steps: still }))).toEqual({ verdict: 'diverges', detail: 'step 2 (wait quiet 1000): settled plane libbluray aaaaaaaa, ours bbbbbbbb' });
-    // ok: libbluray starts playlist 8, ours starts nothing
-    expect(classify(run({ calls: [sel(7), reg(1, 0), reg(1, 1), sel(7)] }), lib()).detail).toMatch(/^after key ok: libbluray starts selectPlaylistN\(8/);
+    // ok: libbluray starts playlist 8; ours starts nothing, so its `wait playlist any` times out after 6 steps
+    const noOk = run({ end: 'timeout', steps: steps(['aaaaaaaa', 'bbbbbbbb', 'cccccccc'], BEFORE, 6), calls: [sel(7), reg(1, 0), reg(1, 1)] });
+    expect(classify(noOk, lib())).toEqual({ verdict: 'diverges', detail: 'after key ok: libbluray starts selectPlaylistN(8,-1,-1,-1)=1, ours (none)' });
+  });
+
+  it('unconfirmed when libbluray stopped early and ours did not react where only ours ran (Ruling R6)', () => {
+    const libShort = lib({ end: 'timeout', steps: [], calls: [sel(7)], endHash: null, flushes: 0 });
+    const still = steps(['aaaaaaaa', 'aaaaaaaa', 'aaaaaaaa'], BEFORE);
+    expect(classify(run({ steps: still }), libShort)).toEqual({
+      verdict: 'unconfirmed',
+      detail: expect.stringMatching(/^right: no reaction, libbluray never got there; down: no reaction, libbluray never got there \(libbluray stopped early/),
+    });
+    // ours reacted to every key libbluray never reached: confirmed
+    expect(classify(run(), libShort).verdict).toBe('works');
+  });
+
+  it('unconfirmed when both time out at step 2 on a menu that keeps repainting: no key was compared', () => {
+    const two = (side: 'ours' | 'libbluray'): RunRecord => run({ side, end: 'timeout', steps: steps(['aaaaaaaa'], BEFORE, 2), calls: [sel(7)], endHash: 'aaaaaaaa' });
+    expect(classify(two('ours'), two('libbluray'))).toEqual({ verdict: 'unconfirmed', detail: 'right not tried; down not tried; ok not tried (same as libbluray)' });
   });
 
   it('works when ours passes every step and libbluray, on stub streams, stops early or fails, agreeing as far as it went', () => {

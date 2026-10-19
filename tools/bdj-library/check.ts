@@ -278,6 +278,16 @@ function writeSummary(lib: string, results: readonly DiscResult[], runtime: stri
     `|---|---|`,
     ...VERDICTS.map((v) => `| ${v} | ${counts[v]} |`),
     ``,
+    `## Unconfirmed: for a check by hand (Ruling R6)`,
+    ``,
+    `The menu was reached and ours agrees with libbluray on every step both ran, but a key was never compared and ours showed no reaction there, or a key was never tried.`,
+    ``,
+    `| id | reason | video |`,
+    `|---|---|---|`,
+    ...by('unconfirmed')
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map((r) => `| ${r.id} | ${r.detail.replace(/\|/g, '\\|')} | ${r.video ?? 'stub'} |`),
+    ``,
     `## Missing classes (first blocker, missing-class discs)`,
     ``,
     `| class | discs |`,

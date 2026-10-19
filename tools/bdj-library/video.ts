@@ -5,6 +5,9 @@
 import type { Mpls } from '../../src/engine/bdmv/mpls-parser';
 import type { RunRecord } from './classify';
 
+/** A clip id as it names STREAM/<id>.m2ts: five digits, nothing that could make a path. */
+export const isClipId = (c: string): boolean => /^\d{5}$/.test(c);
+
 /** At most this much real video per disc. */
 export const VIDEO_CAP_BYTES = 2 * 1024 ** 3;
 
@@ -12,8 +15,8 @@ const isSelect = (c: { call: string; args: readonly unknown[]; ret: unknown }): 
 
 /**
  * The playlists Java selected up to and including the menu, over both runs, in order: the distinct playlists selected
- * before the `wait menu` step held (every one, when it never held). When that is a single playlist (one that played
- * before the menu existed), the next playlist selected is taken too.
+ * before the `wait menu` step held, and the first one selected after it (the menu's own, when it starts on the menu);
+ * when the step never held, only the first playlist selected.
  */
 export function menuPlaylists(runs: readonly (RunRecord | null)[]): number[] {
   const out: number[] = [];
@@ -22,12 +25,15 @@ export function menuPlaylists(runs: readonly (RunRecord | null)[]): number[] {
   };
   for (const r of runs) {
     if (!r) continue;
-    const selected = r.calls.filter(isSelect).map((c) => Number(c.args[0]));
-    const distinct = [...new Set(selected)];
-    const limit = r.steps[0]?.calls ?? r.calls.length;
-    const before = [...new Set(r.calls.slice(0, limit).filter(isSelect).map((c) => Number(c.args[0])))];
-    const take = before.length >= 2 ? before : distinct.slice(0, Math.max(2, before.length));
-    take.forEach(add);
+    const held = r.steps[0];
+    if (!held) {
+      const first = r.calls.find(isSelect);
+      if (first) add(Number(first.args[0]));
+      continue;
+    }
+    r.calls.slice(0, held.calls).filter(isSelect).forEach((c) => add(Number(c.args[0])));
+    const next = r.calls.slice(held.calls).find(isSelect);
+    if (next) add(Number(next.args[0]));
   }
   return out;
 }
@@ -40,7 +46,7 @@ export function playlistClips(mpls: Mpls): string[] {
     for (const a of item.angleClipIds) out.add(a);
   }
   for (const sub of mpls.subPaths) for (const item of sub.items) out.add(item.clipId);
-  return [...out];
+  return [...out].filter(isClipId);
 }
 
 export interface ClipSize {

@@ -23,18 +23,18 @@ function run(calls: TraceEntry[], menuAt: number | null): RunRecord {
 }
 
 describe('menuPlaylists', () => {
-  it('takes the playlists selected before the menu step held, over both runs', () => {
+  it('takes the playlists selected before the menu step held and the first one after, over both runs', () => {
     const ours = run([sel(1), reg, sel(5), sel(5), sel(9)], 4);
     const lib = run([sel(1), sel(6), sel(9)], 2);
-    expect(menuPlaylists([ours, lib])).toEqual([1, 5, 6]);
+    expect(menuPlaylists([ours, lib])).toEqual([1, 5, 9, 6]);
   });
 
-  it('takes the next playlist too when only one played before the menu, and skips refused or stop selections', () => {
+  it('stops at the first successful selection after the menu, skipping refused or stop selections', () => {
     expect(menuPlaylists([run([sel(3), sel(-1), sel(4, 0), reg, sel(7), sel(8)], 3), null])).toEqual([3, 7]);
   });
 
-  it('takes every playlist selected when the menu never came', () => {
-    expect(menuPlaylists([run([sel(2), sel(2), sel(4), sel(6)], null)])).toEqual([2, 4, 6]);
+  it('takes only the first playlist selected when the menu never came', () => {
+    expect(menuPlaylists([run([sel(2), sel(2), sel(4), sel(6)], null)])).toEqual([2]);
     expect(menuPlaylists([run([], null), null])).toEqual([]);
   });
 });
@@ -45,6 +45,9 @@ describe('playlistClips', () => {
     const sub = (...clips: string[]): SubPath => ({ type: 3, isRepeat: false, items: clips.map((clipId) => ({ clipId })) } as unknown as SubPath);
     const mpls = { playItems: [item('00010'), item('00011', ['00011', '00012']), item('00010')], subPaths: [sub('00020'), sub('00021', '00010')] } as unknown as Mpls;
     expect(playlistClips(mpls)).toEqual(['00010', '00011', '00012', '00020', '00021']);
+    // a clip id that is not five digits is dropped: it could name another path
+    const odd = { playItems: [item('../01'), item('00001'), item('1234')], subPaths: [sub('0000a')] } as unknown as Mpls;
+    expect(playlistClips(odd)).toEqual(['00001']);
   });
 });
 

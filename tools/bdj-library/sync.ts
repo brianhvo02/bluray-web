@@ -21,7 +21,7 @@ import { join, relative } from 'node:path';
 import { indexUsesBdj, parseIndex } from '../../src/engine/bdmv/index-parser';
 import { parseMpls } from '../../src/engine/bdmv/mpls-parser';
 import { discId, libraryDir, type DiscVerdict, type RunRecord } from './classify';
-import { markReal, menuPlaylists, parseVideoManifest, planVideo, playlistClips, type ClipSize } from './video';
+import { isClipId, markReal, menuPlaylists, parseVideoManifest, planVideo, playlistClips, type ClipSize } from './video';
 
 const NICE = 'ionice -c3 nice -n19';
 /** How long one remote listing or one disc's copy may take before it is killed and reported. */
@@ -208,6 +208,11 @@ function catRemote(host: string, path: string, dest: string): Promise<number> {
       ssh.kill('SIGKILL');
     }, CLIP_TIMEOUT_MS);
     // written by hand rather than piped, so the file is ended exactly once, when ssh is done
+    ssh.on('error', (e) => {
+      clearTimeout(timer);
+      file.destroy();
+      reject(e);
+    });
     ssh.stdout.on('data', (d: Buffer) => {
       bytes += d.length;
       if (!file.write(d)) {
@@ -271,7 +276,7 @@ async function syncVideo(host: string, lib: string, only: readonly string[]): Pr
         // a playlist Java selected that the disc lacks or that does not parse: nothing to read for it
       }
     }
-    const names = [...clips];
+    const names = [...clips].filter(isClipId); // never anything that could make another path
     const nas = map.get(id)!;
     const stats = await statRemote(host, names.map((c) => `${nas}/BDMV/STREAM/${c}.m2ts`));
     const sized: ClipSize[] = names.flatMap((clip, i) => (stats[i] ? [{ clip, ...stats[i]! }] : []));
@@ -288,8 +293,14 @@ async function syncVideo(host: string, lib: string, only: readonly string[]): Pr
       for (const c of plan.copy) {
         const dest = join(dir, 'BDMV', 'STREAM', `${c.clip}.m2ts`);
         const tmp = `${dest}.part`;
-        const bytes = await catRemote(host, `${nas}/BDMV/STREAM/${c.clip}.m2ts`, tmp);
-        if (bytes !== c.size) throw new Error(`clip ${c.clip}: ${bytes} bytes, the NAS says ${c.size}`);
+        let bytes: number;
+        try {
+          bytes = await catRemote(host, `${nas}/BDMV/STREAM/${c.clip}.m2ts`, tmp);
+          if (bytes !== c.size) throw new Error(`clip ${c.clip}: ${bytes} bytes, the NAS says ${c.size}`);
+        } catch (e) {
+          rmSync(tmp, { force: true }); // no partial clip is left behind
+          throw e;
+        }
         renameSync(tmp, dest);
         read += bytes;
         text = markReal(text, [c]);

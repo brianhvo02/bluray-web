@@ -8,9 +8,9 @@ import { join } from 'node:path';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import { CONTROL_CALLS } from '../../tests/bdj/format';
 
-export type DiscVerdict = 'works' | 'libbluray-fails-too' | 'missing-class' | 'unsupported-video' | 'stall' | 'diverges' | 'error';
+export type DiscVerdict = 'works' | 'unconfirmed' | 'libbluray-fails-too' | 'missing-class' | 'unsupported-video' | 'stall' | 'diverges' | 'error';
 
-export const VERDICTS: readonly DiscVerdict[] = ['works', 'libbluray-fails-too', 'missing-class', 'unsupported-video', 'stall', 'diverges', 'error'];
+export const VERDICTS: readonly DiscVerdict[] = ['works', 'unconfirmed', 'libbluray-fails-too', 'missing-class', 'unsupported-video', 'stall', 'diverges', 'error'];
 
 /** A script step as it ran: `calls` is how many control calls the run had made before it ran. */
 export interface RunStep {
@@ -231,6 +231,8 @@ export interface Comparison {
   readonly libPrefix: boolean;
   /** The first difference (null when equal). */
   readonly first: string | null;
+  /** Ours stopped at an earlier step, agreeing with libbluray on every step both ran. */
+  readonly oursShort?: boolean;
 }
 
 /**
@@ -255,7 +257,7 @@ export function compareRuns(ours: RunRecord, lib: RunRecord): Comparison {
     const navL = after(lib);
     if ((navO ? key(navO) : null) !== (navL ? key(navL) : null)) return { equal: false, libPrefix: false, first: `after key ok: libbluray starts ${show(navL)}, ours ${show(navO)}` };
     if (ours.steps.length > lib.steps.length) return { equal: false, libPrefix: true, first: `libbluray stops before step ${n} (${ours.steps[n]!.step}), ours goes on` };
-    if (ours.steps.length < lib.steps.length) return { equal: false, libPrefix: false, first: `ours stops before step ${n} (${lib.steps[n]!.step}), libbluray goes on` };
+    if (ours.steps.length < lib.steps.length) return { equal: false, libPrefix: false, oursShort: true, first: `ours stops before step ${n} (${lib.steps[n]!.step}), libbluray goes on` };
     return { equal: true, libPrefix: false, first: null };
   }
   const tail = (r: RunRecord): readonly TraceEntry[] => r.calls.slice(n === 0 ? 0 : r.steps[n - 1]!.calls);
@@ -266,7 +268,7 @@ export function compareRuns(ours: RunRecord, lib: RunRecord): Comparison {
       ? { equal: false, libPrefix: false, first: `step ${n} (${ours.steps[n]!.step}): libbluray calls ${show(missing)}, ours does not` }
       : { equal: false, libPrefix: true, first: `libbluray stops before step ${n} (${ours.steps[n]!.step}), ours goes on` };
   }
-  if (lib.steps.length > ours.steps.length) return { equal: false, libPrefix: false, first: `ours stops before step ${n} (${lib.steps[n]!.step}), libbluray goes on` };
+  if (lib.steps.length > ours.steps.length) return { equal: false, libPrefix: false, oursShort: true, first: `ours stops before step ${n} (${lib.steps[n]!.step}), libbluray goes on` };
   const d = setDiff(tail(ours), tail(lib));
   if (d) return { equal: false, libPrefix: false, first: `after step ${n - 1}: ${d}` };
   if (ours.endHash !== lib.endHash) return { equal: false, libPrefix: false, first: `end plane: libbluray ${lib.endHash ?? 'none'}, ours ${ours.endHash ?? 'none'}` };
@@ -322,8 +324,32 @@ export function noReaction(ours: RunRecord, lib: RunRecord): string[] {
 const HARD = new Set<RunEnd>(['error', 'bdj-failed', 'killed', 'no-output']);
 
 /**
+ * Ruling R6: the script's key steps that are not confirmed, in words (none: every key confirmed). A key is confirmed
+ * when both runs got past it (its settled step, or for ok its press) and so were compared, or when only ours did and
+ * ours reacted to it (the arrow changed the settled plane; ok started something). A key ours never got past was not
+ * tried.
+ */
+export function unconfirmedKeys(ours: RunRecord, lib: RunRecord): string[] {
+  const out: string[] = [];
+  const h = (i: number): string | null | undefined => ours.steps[i]?.hash;
+  const reacted = (a: number, b: number): boolean => typeof h(a) === 'string' && typeof h(b) === 'string' && h(a) !== h(b);
+  const keys = [
+    { name: 'right', past: STEP.afterRight + 1, reacted: () => reacted(STEP.menu, STEP.afterRight) },
+    { name: 'down', past: STEP.afterDown + 1, reacted: () => reacted(STEP.afterRight, STEP.afterDown) },
+    { name: 'ok', past: STEP.ok + 1, reacted: () => progress(ours).ok },
+  ];
+  for (const k of keys) {
+    if (ours.steps.length < k.past) out.push(`${k.name} not tried`);
+    else if (lib.steps.length < k.past && !k.reacted()) out.push(`${k.name}: no reaction, libbluray never got there`);
+  }
+  return out;
+}
+
+/**
  * The verdict for a disc from our run and libbluray's (null: libbluray was not run). In order (Rulings R3, R5):
  *  - error: our run failed hard (error, BD-J failure, killed, no record), with the reason.
+ *  - unconfirmed (Ruling R6): as works, but a key step was never compared and ours showed no reaction there, or a
+ *    key was never tried (unconfirmedKeys); listed for a check by hand.
  *  - works: ours showed a visible menu and agrees with libbluray on every step both ran (settled planes and starting
  *    calls): the runs are equal, or libbluray stopped earlier (stub streams) and its run is a prefix of ours. A key
  *    that changed nothing on both sides is a valid outcome, noted "no reaction to <key>"; arrows and ok are required
@@ -345,7 +371,10 @@ export function classify(ours: RunRecord, lib: RunRecord | null): { verdict: Dis
   if (lib && p.menu && (cmp?.equal || cmp?.libPrefix)) {
     const quiet = noReaction(ours, lib);
     const note = quiet.length ? `; no reaction to ${quiet.join(', ')} (libbluray neither)` : '';
-    return { verdict: 'works', detail: `${cmp.equal ? 'same as libbluray' : `libbluray stopped early (stub): ${shortfall(lib)}`}${note}` };
+    const how = cmp.equal ? 'same as libbluray' : `libbluray stopped early (stub): ${shortfall(lib)}`;
+    const open = unconfirmedKeys(ours, lib);
+    if (open.length) return { verdict: 'unconfirmed', detail: `${open.join('; ')} (${how})` };
+    return { verdict: 'works', detail: `${how}${note}` };
   }
   // a class ours lacks or a video codec ours refuses is ours to fix whatever libbluray does with stub streams
   const libToo = lib && libFailed(lib) ? `; libbluray (stub) also: ${shortfall(lib)}` : '';
@@ -360,7 +389,8 @@ export function classify(ours: RunRecord, lib: RunRecord | null): { verdict: Dis
     return { verdict: 'libbluray-fails-too', detail: `libbluray: ${shortfall(lib)}${noPlaylist}; ours: ${shortfall(ours)}` };
   }
   const libSteps = lib?.steps.length ?? Infinity;
-  if (!p.menu || (ours.end !== 'done' && ours.steps.length < libSteps)) {
+  // ours stopped first, agreeing as far as both went (a difference at a common step is diverges)
+  if (!p.menu || (ours.end !== 'done' && ours.steps.length < libSteps && (!cmp || cmp.oursShort))) {
     const theirs = lib ? `; libbluray reaches step ${lib.steps.length}${lib.end === 'done' ? ' (done)' : ''}` : '';
     return { verdict: 'stall', detail: `ours: ${shortfall(ours)}${theirs}` };
   }
