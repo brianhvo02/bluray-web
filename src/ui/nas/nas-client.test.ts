@@ -8,7 +8,14 @@ import { appHandlers } from '../../../server/src/app';
 import { Auth } from '../../../server/src/auth';
 import { codeHash } from '../../../server/src/codes';
 import { HttpError, json } from '../../../server/src/http';
-import type { Response as ServerResponse } from '../../../server/src/http';
+import type { Handler, Response as ServerResponse } from '../../../server/src/http';
+import { serveChannel } from '../../../server/src/rtc/dispatch';
+import { codeHashOf, fromBase64url, turnProofMessage } from '../../../rendezvous/src/protocol';
+import { FakeRtcWorld } from '../../../tests/helpers/rtc-fakes';
+import type { FakeRtcOptions } from '../../../tests/helpers/rtc-fakes';
+import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
+import { RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
+import type { RtcOpenOptions } from './rtc/rtc-connection';
 import type { Library } from '../../../server/src/library';
 import { BdjStore } from '../../../server/src/bdj-store';
 import { Store } from '../../../server/src/store';
@@ -62,6 +69,9 @@ interface FakeServer {
   lookupRateLimited: boolean;
   /** Overrides for NAS requests (not rendezvous). */
   nas?: (url: URL, init?: RequestInit) => Promise<Response>;
+  /** The same handlers as HTTPS, for a data channel (`serveChannel`); `GET /api/library` waits while `holdLibrary` is set. */
+  readonly handlers: readonly Handler[];
+  holdLibrary: Promise<void> | null;
 }
 
 /**
@@ -81,6 +91,12 @@ function fakeServer(): FakeServer {
     },
   } as unknown as Library;
   const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), publicBase: BASE, now });
+  /** `GET /api/me` (the title routes need a title service), behind the token like the rest. */
+  const me: Handler = async (_req, url) => (url.pathname === '/api/me' ? json(200, { owner: true, titleLibrary: true, personName: 'Owner' }) : null);
+  const held: Handler = async (_req, url) => {
+    if (url.pathname === '/api/library' && server.holdLibrary) await server.holdLibrary;
+    return null;
+  };
 
   const serve = async (url: URL, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === 'string' ? Buffer.from(init.body, 'utf8') : null;
@@ -88,6 +104,7 @@ function fakeServer(): FakeServer {
     new Headers(init?.headers).forEach((value, name) => (headers[name] = value));
     if (body) headers['content-length'] = String(body.length);
     const path = url.pathname.replace(/^\/bluray/, '') + url.search;
+    if (path === '/api/health') return Response.json({ ok: true }); // the server answers it before the handlers
     const req = Object.assign(Readable.from(body ? [body] : []), {
       method: init?.method ?? 'GET',
       url: path,
@@ -107,6 +124,8 @@ function fakeServer(): FakeServer {
 
   const server: FakeServer = {
     auth,
+    handlers: [held, ...handlers, me],
+    holdLibrary: null,
     hits,
     listed,
     lookupRateLimited: false,
@@ -577,11 +596,11 @@ describe('NasClient', () => {
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.tooMany);
   });
 
-  it('answers a lookup without an https route', async () => {
+  it('answers a lookup without any route', async () => {
     expect(NAS_MESSAGES.noRoute).toBe("This NAS isn't reachable from here yet.");
     const server = fakeServer();
     const nas = client(server);
-    const code = await server.code({ webrtc: { nasId: 'N'.repeat(43) } });
+    const code = await server.code({});
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.noRoute);
   });
 
@@ -623,6 +642,126 @@ describe('NasClient', () => {
       throw new TypeError('Failed to fetch');
     };
     await expect(client(server).pair(await server.code(), 'iPad')).rejects.toThrow(NAS_MESSAGES.unreachable);
+  });
+});
+
+const NAS_ID = 'n'.repeat(43);
+
+/** A NAS reachable over WebRTC (fake peers and sockets) serving the fake server's handlers through `serveChannel`. */
+function rtcWorld(server: FakeServer, opts: Partial<FakeRtcOptions> = {}): FakeRtcWorld & { opened: RtcOpenOptions[]; openRtc: (o: RtcOpenOptions) => Promise<RtcConnection> } {
+  const world = new FakeRtcWorld({
+    direct: true,
+    serve: (channel) => serveChannel(channel, server.handlers, { auth: server.auth, remoteAddress: '198.51.100.9', now }),
+    ...opts,
+  });
+  const opened: RtcOpenOptions[] = [];
+  return Object.assign(world, {
+    opened,
+    openRtc: (o: RtcOpenOptions) => {
+      opened.push(o);
+      return RtcConnection.open({ ...o, createPeer: world.createPeer, openSocket: world.openSocket });
+    },
+  });
+}
+
+function rtcClient(server: FakeServer, world: { openRtc: (o: RtcOpenOptions) => Promise<RtcConnection> }, store: NasStore = memoryStore()): NasClient {
+  return new NasClient({ fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: RENDEZVOUS, openRtc: world.openRtc });
+}
+
+describe('NasClient over WebRTC', () => {
+  it('pairs over WebRTC when the lookup has no HTTPS route, then reads me and the library on a new connection', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const nas = rtcClient(server, world, store);
+    const code = await server.code({ webrtc: { nasId: NAS_ID } });
+    await nas.pair(code, 'iPhone');
+    expect(store.value).toMatchObject({ base: '', nasId: NAS_ID, deviceName: 'iPhone', owner: true });
+    expect(server.auth.devices().map((d) => d.name)).toEqual(['iPhone']);
+    expect(world.opened[0]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS, inviteHash: await codeHashOf(code) });
+    expect(world.opened[0].deviceProof).toBeUndefined();
+    expect(world.peers[0].closed).toBe(true); // the redeem connection is only for the redeem
+
+    expect(await nas.me()).toMatchObject({ owner: true, titleLibrary: true });
+    expect(await nas.library('drv5')).toEqual({ folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [], scanning: false });
+    expect(world.peers).toHaveLength(2);
+    expect(world.opened[1].inviteHash).toBeUndefined();
+    expect(world.opened[1].deviceProof).toBeTypeOf('function');
+    expect(await nas.discBase('d/1')).toBe(`rtc://${NAS_ID}/api/discs/d%2F1/`);
+    expect(Object.keys(server.hits)).toEqual([]); // nothing went over HTTPS
+  });
+
+  it('pairs over WebRTC when HTTPS fails its check, and keeps the HTTPS base', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const nas = rtcClient(server, world, store);
+    const tried: string[] = [];
+    server.nas = async (url) => {
+      tried.push(url.href);
+      throw new TypeError('Failed to fetch');
+    };
+    await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(store.value).toMatchObject({ base: BASE, nasId: NAS_ID });
+    expect(tried).toEqual([`${BASE}health`]);
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect(tried).toEqual([`${BASE}health`, `${BASE}health`]);
+  });
+
+  it('pairs over HTTPS when it answers its check', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const nas = rtcClient(server, world, store);
+    await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(store.value).toMatchObject({ base: BASE, nasId: NAS_ID });
+    expect(server.hits).toMatchObject({ health: 1, 'pair/redeem': 1 });
+    expect(world.peers).toHaveLength(0);
+  });
+
+  it('fails requests in flight as nas-lost when the connection closes, and reconnects on the next one', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const nas = rtcClient(server, world);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    await nas.me();
+    let release!: () => void;
+    server.holdLibrary = new Promise<void>((resolve) => (release = resolve));
+    const listing = nas.library('drv5');
+    const outcome = expect(listing).rejects.toMatchObject({ reason: 'nas-lost', message: NAS_LOST_MESSAGE });
+    await new Promise((r) => setTimeout(r, 0));
+    world.peers[1].fail(); // Wi-Fi to cellular
+    await outcome;
+    server.holdLibrary = null;
+    release();
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect(world.peers).toHaveLength(3);
+  });
+
+  it("proves the device with its key for TURN, and passes on the copy when there's no relay", async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const proofs: Array<Record<string, unknown>> = [];
+    const world = rtcWorld(server, {
+      turn: (m) => {
+        proofs.push(m);
+        return { iceServers: [], reason: 'off' };
+      },
+    });
+    const nas = rtcClient(server, world, store);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    world.opts.direct = false;
+    await expect(nas.me()).rejects.toThrow(RTC_UNREACHABLE);
+    const proof = proofs.at(-1)!;
+    expect(proof.deviceId).toBe(store.value!.deviceId);
+    const sid = world.sent.find((m) => m.t === 'turn-request')!.sid;
+    const ok = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      store.value!.key.publicKey,
+      fromBase64url(String(proof.signature))!,
+      turnProofMessage({ sid, ts: Number(proof.ts) }),
+    );
+    expect(ok).toBe(true);
   });
 });
 

@@ -2,8 +2,10 @@ import { STORES, withStore } from '../db';
 
 /** This device's pairing with a NAS. `key` is stored as the CryptoKeyPair itself; its private key is non-extractable. */
 export interface NasPairing {
-  /** The NAS API base, ending in '/', e.g. 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/'. */
+  /** The NAS's HTTPS API base, ending in '/', e.g. 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/'; '' when unknown (paired over WebRTC). */
   readonly base: string;
+  /** The NAS's signalling id for WebRTC; absent on a pairing stored before WebRTC. */
+  readonly nasId?: string;
   readonly deviceId: string;
   readonly deviceName: string;
   /** The person this device belongs to; absent on a pairing stored before people. */

@@ -1,6 +1,12 @@
 import type { CodeLookup, DiscEntry, DiscManifest, DiscRef, FolderEntry, OwnerChoice, OwnTitle, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
+import { codeHashOf, turnProofMessage } from '../../../rendezvous/src/protocol';
+import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
+import { RTC_BASE, RtcConnection } from './rtc/rtc-connection';
+import type { DeviceProof, RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
+import { chooseRoute, routeKey } from './route-choice';
+import type { Route } from './route-choice';
 
 export const NAS_MESSAGES = {
   invalidCode: "That code didn't work. Codes last 10 minutes; ask for a new one.",
@@ -12,6 +18,14 @@ export const NAS_MESSAGES = {
   allowLocalNetwork: 'Allow local network access if your browser asks.',
   unreachable: "Couldn't reach the NAS. If your browser asked about local network access, allow it, and check that this device is on your tailnet.",
 } as const;
+
+/** The WebRTC connection to the NAS closed while the request was in flight; the next request connects again. */
+export class NasLostError extends Error {
+  readonly reason = 'nas-lost';
+  constructor() {
+    super(NAS_LOST_MESSAGE);
+  }
+}
 
 /** The NAS answered with an error status other than the ones the client handles itself. */
 export class NasHttpError extends Error {
@@ -100,6 +114,8 @@ export interface NasClientDeps {
   readonly now: () => number;
   /** The rendezvous service; unset or empty means pairing by code is unavailable. */
   readonly rendezvousUrl: string | undefined;
+  /** Opens a WebRTC connection to the NAS; `RtcConnection.open` by default. */
+  readonly openRtc?: (opts: RtcOpenOptions) => Promise<RtcLink>;
 }
 
 const MINUTE = 60_000;
@@ -164,10 +180,12 @@ export interface SkippedDisc {
  */
 function isPairing(value: unknown): value is NasPairing {
   if (typeof value !== 'object' || value === null) return false;
-  const { base, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
+  const { base, nasId, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
   const k = key as Partial<CryptoKeyPair> | null | undefined;
   return (
     typeof base === 'string' &&
+    (nasId === undefined || typeof nasId === 'string') &&
+    (base !== '' || typeof nasId === 'string') &&
     typeof deviceId === 'string' &&
     typeof deviceName === 'string' &&
     (personName === undefined || typeof personName === 'string') &&
@@ -187,6 +205,10 @@ export class NasClient {
   /** Bumped whenever the pairing changes, so work begun for an older pairing can't touch the new one. */
   private generation = 0;
   private readonly unpairedListeners = new Set<() => void>();
+  /** The route chosen per NAS (`chooseRoute`), for the page's life. */
+  private readonly routes = new Map<string, Promise<Route>>();
+  /** Open WebRTC connections by NAS id; `rtc://<nasId>/` URLs go through them. */
+  private readonly links = new Map<string, RtcLink>();
 
   readonly admin = {
     people: async (): Promise<NasPerson[]> => ((await this.json('admin/people')) as { people: NasPerson[] }).people,
@@ -300,26 +322,40 @@ export class NasClient {
     return (await res.json()) as CodeLookup;
   }
 
-  /** Looks the code up, makes this device's non-extractable P-256 key pair and redeems the code with the NAS. */
+  /**
+   * Looks the code up, makes this device's non-extractable P-256 key pair and redeems the code with the NAS: over HTTPS
+   * when it answers its check, else over a WebRTC connection opened with the code's hash (so an invite may use the
+   * relay), which is closed once the code is redeemed.
+   */
   async pair(code: string, deviceName: string): Promise<void> {
     const found = await this.lookup(code);
     const https = found.routes.https;
-    if (!https) throw new Error(NAS_MESSAGES.noRoute);
-    const base = https.endsWith('/') ? https : `${https}/`;
-    const key = await this.deps.subtle.generateKey(ECDSA_KEY, false, ['sign', 'verify']);
-    const { kty, crv, x, y } = await this.deps.subtle.exportKey('jwk', key.publicKey);
-    const name = deviceName.trim();
-    const res = await this.request(
-      `${base}pair/redeem`,
-      jsonPost({ code: normalizeCode(code), deviceName: name, publicKeyJwk: { kty, crv, x, y } }),
-      FIRST_REQUEST_TIMEOUT_MS,
-    );
-    if (res.status === 401) throw new Error(NAS_MESSAGES.invalidCode);
-    if (res.status === 429) throw new Error(NAS_MESSAGES.tooMany);
-    if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
-    // An older NAS answers without a person.
-    const { deviceId, owner, personName } = (await res.json()) as { deviceId: string; owner: boolean; personName?: string };
-    const pairing: NasPairing = { base, deviceId, deviceName: name, ...(typeof personName === 'string' ? { personName } : {}), owner, key };
+    const nasId = found.routes.webrtc?.nasId;
+    if (!https && nasId === undefined) throw new Error(NAS_MESSAGES.noRoute);
+    const base = !https ? '' : https.endsWith('/') ? https : `${https}/`;
+    const target = { base, ...(nasId === undefined ? {} : { nasId }) };
+    const inviteHash = (await codeHashOf(code)) ?? undefined;
+    const route = await chooseRoute(target, { fetch: this.deps.fetch, connect: (id) => this.connect(id, { inviteHash }) });
+    let pairing: NasPairing;
+    try {
+      const apiBase = route.kind === 'https' ? route.base : RTC_BASE(nasId!);
+      const key = await this.deps.subtle.generateKey(ECDSA_KEY, false, ['sign', 'verify']);
+      const { kty, crv, x, y } = await this.deps.subtle.exportKey('jwk', key.publicKey);
+      const name = deviceName.trim();
+      const res = await this.request(
+        `${apiBase}pair/redeem`,
+        jsonPost({ code: normalizeCode(code), deviceName: name, publicKeyJwk: { kty, crv, x, y } }),
+        FIRST_REQUEST_TIMEOUT_MS,
+      );
+      if (res.status === 401) throw new Error(NAS_MESSAGES.invalidCode);
+      if (res.status === 429) throw new Error(NAS_MESSAGES.tooMany);
+      if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
+      // An older NAS answers without a person.
+      const { deviceId, owner, personName } = (await res.json()) as { deviceId: string; owner: boolean; personName?: string };
+      pairing = { ...target, deviceId, deviceName: name, ...(typeof personName === 'string' ? { personName } : {}), owner, key };
+    } finally {
+      if (route.kind === 'webrtc') route.connection.close();
+    }
     await this.deps.store.put(pairing);
     this.reset(pairing);
   }
@@ -383,7 +419,7 @@ export class NasClient {
   async artUrl(artId: string, size: 'small' | 'large'): Promise<string> {
     const [session, pairing] = await Promise.all([this.session(), this.pairing()]);
     if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
-    return `${pairing.base}art/${encodeURIComponent(artId)}?size=${size}&t=${encodeURIComponent(session.token)}`;
+    return `${await this.apiBase(pairing)}art/${encodeURIComponent(artId)}?size=${size}&t=${encodeURIComponent(session.token)}`;
   }
 
   /** `failedUrl` (an artUrl) again with a fresh token: the one it carried may have lapsed since it was made. */
@@ -397,7 +433,7 @@ export class NasClient {
   async discBase(discId: string): Promise<string> {
     const pairing = await this.pairing();
     if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
-    return `${pairing.base}${discPath(discId)}`;
+    return `${await this.apiBase(pairing)}${discPath(discId)}`;
   }
 
   async manifest(discId: string): Promise<DiscManifest> {
@@ -430,13 +466,47 @@ export class NasClient {
     this.current = pairing;
     this.cached = null;
     this.pending = null;
+    this.routes.clear();
+    for (const link of [...this.links.values()]) link.close();
+    this.links.clear();
+  }
+
+  /** The API base to use for `pairing` now: its HTTPS base, or `rtc://<nasId>/api/` over a WebRTC connection. */
+  private async apiBase(pairing: NasPairing): Promise<string> {
+    const route = await chooseRoute(pairing, {
+      fetch: this.deps.fetch,
+      connect: (nasId) => this.connect(nasId, { deviceProof: (sid) => this.deviceProof(pairing, sid) }),
+      cache: this.routes,
+    });
+    return route.kind === 'https' ? route.base : RTC_BASE(pairing.nasId!);
+  }
+
+  /** Opens a WebRTC connection to `nasId` and routes its `rtc://` URLs through it until it closes. */
+  private async connect(nasId: string, auth: Pick<RtcOpenOptions, 'deviceProof' | 'inviteHash'>): Promise<RtcLink> {
+    const service = this.deps.rendezvousUrl?.trim();
+    if (!service) throw new Error(NAS_MESSAGES.noRoute);
+    const open = this.deps.openRtc ?? ((opts: RtcOpenOptions) => RtcConnection.open(opts));
+    const link = await open({ nasId, signallingUrl: service, ...auth });
+    this.links.set(nasId, link);
+    link.onClose(() => {
+      if (this.links.get(nasId) === link) this.links.delete(nasId);
+    });
+    return link;
+  }
+
+  /** A paired device's proof for a TURN request on the signalling socket `sid`. */
+  private async deviceProof(pairing: NasPairing, sid: string): Promise<DeviceProof> {
+    const ts = this.deps.now();
+    const signature = await this.deps.subtle.sign(ECDSA_SIGN, pairing.key.privateKey, turnProofMessage({ sid, ts }));
+    return { deviceId: pairing.deviceId, ts, signature: base64url(new Uint8Array(signature)) };
   }
 
   private async startSession(): Promise<NasSession> {
     const generation = this.generation;
     const pairing = await this.pairing();
     if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
-    const challengeRes = await this.request(`${pairing.base}session/challenge`, jsonPost({ deviceId: pairing.deviceId }));
+    const base = await this.apiBase(pairing);
+    const challengeRes = await this.request(`${base}session/challenge`, jsonPost({ deviceId: pairing.deviceId }));
     if (challengeRes.status === 401) return this.unpaired(generation);
     if (!challengeRes.ok) throw new NasHttpError(challengeRes.status, await errorCode(challengeRes));
     const { challenge } = (await challengeRes.json()) as { challenge: string };
@@ -448,7 +518,7 @@ export class NasClient {
       return this.unpaired(generation);
     }
     const res = await this.request(
-      `${pairing.base}session`,
+      `${base}session`,
       jsonPost({ deviceId: pairing.deviceId, challenge, signature: base64url(new Uint8Array(signature)) }),
     );
     if (res.status === 401) return this.unpaired(generation);
@@ -478,8 +548,9 @@ export class NasClient {
       const session = await this.session();
       const pairing = await this.pairing();
       if (!pairing) throw new Error(NAS_MESSAGES.unpaired);
+      const base = await this.apiBase(pairing);
       const { token } = session;
-      const url = viaQuery ? `${pairing.base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${pairing.base}${path}`;
+      const url = viaQuery ? `${base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${base}${path}`;
       const headers = new Headers(init.headers);
       if (!viaQuery) headers.set('Authorization', `Bearer ${token}`);
       const res = await this.request(url, { ...init, headers });
@@ -499,15 +570,26 @@ export class NasClient {
     return (await this.ok(path, init)).json();
   }
 
-  /** fetch, with a network failure (or the timeout, when given) reported as the NAS being unreachable. */
+  /**
+   * fetch, with a network failure (or the timeout, when given) reported as the NAS being unreachable. `rtc://` URLs go
+   * through their NAS's WebRTC connection, and fail as NasLostError when it has closed. A failed HTTPS request makes
+   * the next one choose its route again.
+   */
   private async request(url: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
-    const { fetch: doFetch } = this.deps;
+    const rtc = /^rtc:\/\/([^/]+)\//.exec(url);
+    const link = rtc ? this.links.get(rtc[1]) : undefined;
+    if (rtc && !link) throw new NasLostError();
+    const doFetch = link ? link.fetch : this.deps.fetch;
     const controller = new AbortController();
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await doFetch(url, { ...init, signal: controller.signal });
     } catch (err) {
-      if (err instanceof TypeError || controller.signal.aborted) throw new Error(NAS_MESSAGES.unreachable);
+      if (link) throw link.closed ? new NasLostError() : new Error(NAS_MESSAGES.unreachable);
+      if (err instanceof TypeError || controller.signal.aborted) {
+        if (this.current) this.routes.delete(routeKey(this.current));
+        throw new Error(NAS_MESSAGES.unreachable);
+      }
       throw err;
     } finally {
       clearTimeout(timer);
