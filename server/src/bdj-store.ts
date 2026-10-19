@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync,
+  utimesSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isCode, lockFile, syncDir, writeSynced } from './atomic-json.js';
 import { EMPTY_TAR, listTar, TarError } from './tar.js';
 
@@ -10,6 +11,7 @@ export const SCOPE_LIMIT_BYTES = 16 * 1024 * 1024;
 export const PERSON_LIMIT_BYTES = 256 * 1024 * 1024;
 
 const SCOPE_RE = /^(?:persistent\/[0-9a-f]{8}|buda\/[0-9a-f]{8}\/[0-9a-f]{32})$/;
+const STALE_TEMP_MS = 60 * 60_000;
 const PERSON_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type StoreErrorCode = 'precondition' | 'quota-scope' | 'quota-person' | 'bad-archive';
@@ -106,13 +108,21 @@ export class BdjStore {
         throw new StoreError('precondition');
       }
       let currentSize = 0;
+      let currentMtimeMs = 0;
       try {
-        currentSize = statSync(file).size;
+        const stat = statSync(file);
+        currentSize = stat.size;
+        currentMtimeMs = stat.mtimeMs;
       } catch (err) {
         if (!isCode(err, 'ENOENT')) throw err;
       }
       if (this.usage(personId) - currentSize + body.length > this.personLimit) throw new StoreError('quota-person');
+      this.sweepTemps(file);
       writeSynced(temp, body);
+      // The etag is built from inode, mtime and size. Inode numbers get reused and mtime ticks coarsely, so
+      // force the new mtime above the old one: an etag that was once handed out never comes back.
+      const when = Math.max(Date.now(), currentMtimeMs + 1) / 1000;
+      utimesSync(temp, when, when);
       renameSync(temp, file);
       syncDir(dirname(file));
       return { etag: etagOf(statSync(file)) };
@@ -122,9 +132,25 @@ export class BdjStore {
     }
   }
 
+  /** Removes temp files that a crashed write left beside the scope file. */
+  private sweepTemps(file: string): void {
+    const folder = dirname(file);
+    const prefix = `${basename(file)}.`;
+    for (const name of readdirSync(folder)) {
+      if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+      try {
+        if (Date.now() - statSync(join(folder, name)).mtimeMs > STALE_TEMP_MS) unlinkSync(join(folder, name));
+      } catch (err) {
+        if (!isCode(err, 'ENOENT')) throw err;
+      }
+    }
+  }
+
   delete(personId: string, scope: string, ifMatch: string): void {
     const file = this.fileFor(personId, scope);
     try {
+      // Look before locking: lockFile would create the lock beside a scope that doesn't exist, in a
+      // folder that may not exist either.
       statSync(file);
     } catch (err) {
       if (isCode(err, 'ENOENT')) throw new StoreError('precondition');

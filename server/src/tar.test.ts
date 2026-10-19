@@ -71,4 +71,49 @@ describe('tar', () => {
     expect(() => listTar(withEnd(rawEntry({ name: 'n'.repeat(100), prefix })))).toThrow(TarError);
     expect(() => writeTar([{ path: 'x'.repeat(300), data: Buffer.alloc(0), mtime: 0 }])).toThrow(TarError);
   });
+
+  it.each([['x'], ['g'], ['L']])('rejects typeflag %s', (type) => {
+    expect(() => listTar(withEnd(rawEntry({ type })))).toThrow(TarError);
+  });
+
+  it('rejects a base-256 size and an all-NUL mtime', () => {
+    const big = rawEntry({});
+    big[124] = 0x80;
+    expect(() => listTar(withEnd(big))).toThrow(TarError);
+    const noTime = rawEntry({});
+    noTime.fill(0, 136, 148);
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : noTime[i]!;
+    noTime.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+    expect(() => listTar(withEnd(noTime))).toThrow(TarError);
+  });
+
+  it('requires the ustar magic', () => {
+    const h = rawEntry({});
+    h.fill(0, 257, 263);
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : h[i]!;
+    h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+    expect(() => listTar(withEnd(h))).toThrow(TarError);
+  });
+
+  it.each([['a//b'], ['./a'], ['a/./b'], ['a/']])('rejects the path %s', (name) => {
+    expect(() => listTar(withEnd(rawEntry({ name })))).toThrow(TarError);
+  });
+
+  it('rejects duplicate paths and invalid UTF-8', () => {
+    expect(() => listTar(withEnd(rawEntry({}), rawEntry({})))).toThrow(TarError);
+    const h = rawEntry({});
+    h[0] = 0xff;
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : h[i]!;
+    h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+    expect(() => listTar(withEnd(h))).toThrow(TarError);
+  });
+
+  it('refuses to write a value that does not fit a header field', () => {
+    expect(() => writeTar([{ path: 'a', data: Buffer.alloc(0), mtime: -1 }])).toThrow(TarError);
+    expect(() => writeTar([{ path: 'a', data: Buffer.alloc(0), mtime: 1.5 }])).toThrow(TarError);
+    expect(() => writeTar([{ path: 'a', data: Buffer.alloc(0), mtime: 8 ** 11 }])).toThrow(TarError);
+  });
 });

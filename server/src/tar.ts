@@ -40,7 +40,20 @@ function checkPath(path: string): void {
   if (path.length === 0) throw new TarError('empty path');
   if (Buffer.byteLength(path) > MAX_PATH_BYTES) throw new TarError('path too long');
   if (path.startsWith('/')) throw new TarError('absolute path');
-  if (path.split('/').includes('..')) throw new TarError('path escapes the archive');
+  for (const segment of path.split('/')) {
+    if (segment === '..') throw new TarError('path escapes the archive');
+    if (segment === '' || segment === '.') throw new TarError('empty or dot path segment');
+  }
+}
+
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+function decodePath(bytes: Buffer): string {
+  try {
+    return utf8.decode(bytes);
+  } catch {
+    throw new TarError('path is not valid UTF-8');
+  }
 }
 
 function isZero(block: Buffer): boolean {
@@ -50,6 +63,7 @@ function isZero(block: Buffer): boolean {
 /** Lists the entries of a ustar archive, throwing `TarError` on anything that is not a plain, well-formed file. */
 export function listTar(archive: Buffer): TarEntry[] {
   const entries: TarEntry[] = [];
+  const seen = new Set<string>();
   let at = 0;
   for (;;) {
     if (at + BLOCK > archive.length) throw new TarError('archive has no end marker');
@@ -61,12 +75,16 @@ export function listTar(archive: Buffer): TarEntry[] {
       return entries;
     }
     if (parseOctal(header, 148, 8, 'checksum') !== checksum(header)) throw new TarError('bad header checksum');
+    const magic = header.toString('latin1', 257, 263);
+    if (magic !== 'ustar\0' && magic !== 'ustar ') throw new TarError('not a ustar header');
     const type = header[156]!;
     if (type !== 0x30 && type !== 0) throw new TarError('entry is not a regular file');
-    const name = cString(header, 0, 100).toString('utf8');
-    const prefix = cString(header, 345, 155).toString('utf8');
+    const name = decodePath(cString(header, 0, 100));
+    const prefix = decodePath(cString(header, 345, 155));
     const path = prefix ? `${prefix}/${name}` : name;
     checkPath(path);
+    if (seen.has(path)) throw new TarError('duplicate path');
+    seen.add(path);
     const size = parseOctal(header, 124, 12, 'size');
     const mtime = parseOctal(header, 136, 12, 'mtime');
     const padded = Math.ceil(size / BLOCK) * BLOCK;
@@ -77,6 +95,7 @@ export function listTar(archive: Buffer): TarEntry[] {
 }
 
 function putOctal(block: Buffer, start: number, length: number, value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value >= 8 ** (length - 1)) throw new TarError('number does not fit a header field');
   block.write(value.toString(8).padStart(length - 1, '0'), start, 'latin1');
 }
 

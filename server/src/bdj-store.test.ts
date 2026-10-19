@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -69,6 +69,36 @@ describe('BdjStore', () => {
     expect(code(() => store.put(P, scope, archive('three'), { ifMatch: first.etag }))).toBe('precondition');
     expect(code(() => store.put(P, scope, archive('three'), {}))).toBe('precondition');
     expect(code(() => store.put(P, `persistent/11111111`, archive('x'), { ifMatch: first.etag }))).toBe('precondition');
+  });
+
+  it('never repeats an etag across quick same-size replaces', () => {
+    const store = new BdjStore(dir);
+    const a = store.put(P, scope, archive('aaa'), { ifNoneMatch: true }).etag;
+    const b = store.put(P, scope, archive('bbb'), { ifMatch: a }).etag;
+    const c = store.put(P, scope, archive('ccc'), { ifMatch: b }).etag;
+    expect(new Set([a, b, c]).size).toBe(3);
+  });
+
+  it('fails a put when the scope lock stays held', () => {
+    const store = new BdjStore(dir);
+    store.put(P, scope, archive('one'), { ifNoneMatch: true });
+    writeFileSync(join(dir, 'users', P, 'bdj', 'persistent', `${ORG}.tar.lock`), '');
+    expect(code(() => store.put(P, scope, archive('two'), { ifNoneMatch: true }))).toMatch(/^other:.*is held/);
+  }, 15_000);
+
+  it('sweeps old temp files beside the scope on put, and keeps fresh ones', () => {
+    const store = new BdjStore(dir);
+    const { etag } = store.put(P, scope, archive('one'), { ifNoneMatch: true });
+    const folder = join(dir, 'users', P, 'bdj', 'persistent');
+    const old = join(folder, `${ORG}.tar.1.old.tmp`);
+    const fresh = join(folder, `${ORG}.tar.2.new.tmp`);
+    writeFileSync(old, 'x');
+    writeFileSync(fresh, 'x');
+    const longAgo = (Date.now() - 2 * 60 * 60_000) / 1000;
+    utimesSync(old, longAgo, longAgo);
+    store.put(P, scope, archive('two'), { ifMatch: etag });
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
   });
 
   it('lets exactly one of two writers with the same If-Match win', async () => {
