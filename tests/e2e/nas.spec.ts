@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
 import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, OWNER_SERIES, PROJECTS, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
@@ -355,7 +355,7 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
   await expect(page.getByTestId('nas-admin-status')).toHaveText('Rescanning…');
 
   // A plain code for an existing person: this device's. The answer is stubbed: another code per browser registered
-  // with the rendezvous service would pass its 5-live-codes cap on this server's key (redeeming one is tested in server/).
+  // with the rendezvous service would pass its 20-live-codes cap on this server's key (redeeming one is tested in server/).
   const ownPerson = page.locator('[data-person-id]').filter({ has: page.getByTestId('nas-device').filter({ hasText: '(this device)' }) });
   const ownPersonId = (await ownPerson.getAttribute('data-person-id'))!;
   await expect(page.getByTestId('nas-code-person')).toHaveValue('new');
@@ -381,6 +381,22 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
   await expect(codeText).toHaveText('K7QM-4XP2-R9TD');
   await expect(page.getByTestId('nas-code-for')).toHaveText('For Owner · valid 10 minutes');
   expect(body).toEqual({ personId: ownPersonId, invite: false });
+  // The stub's code wasn't registered with the rendezvous service: it says where the code still works.
+  await expect(page.getByTestId('nas-code-rendezvous')).toHaveText(
+    "The pairing service didn't take this code, so it only works on your home network or over Tailscale. Try again later for a friend away from home.",
+  );
+
+  // Another owner takes this device's owner status away (stubbed, as the Owner person is every browser's): the next
+  // people reload is refused, the settings close, and the library no longer offers them.
+  const stub = (status: number, json: unknown) => (route: Route) =>
+    route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': origin }, body: JSON.stringify(json) });
+  await page.route('**/api/admin/people', stub(403, { error: 'forbidden' }));
+  await page.route('**/api/me', stub(200, { owner: false, titleLibrary: false, personId: ownPersonId, personName: 'Owner' }));
+  await page.getByTestId('nas-new-code').click();
+  await expect(page.getByTestId('nas-admin')).toHaveCount(0);
+  await expect(page.getByTestId('nas-admin-error')).toHaveCount(0);
+  await expect(page.getByTestId('nas-crumbs')).toBeVisible();
+  await expect(page.getByTestId('nas-settings')).toHaveCount(0);
 });
 
 test('an owner browses the NAS by title: shelves, search, a series and its season', async ({ page, browserName }) => {

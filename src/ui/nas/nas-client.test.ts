@@ -349,7 +349,7 @@ describe('NasClient', () => {
     expect(store.value).not.toBeNull();
   });
 
-  it("takes the person's name from `me` into the stored pairing when it differs", async () => {
+  it("takes the person's name and owner status from `me` into the stored pairing when they differ", async () => {
     const server = fakeServer();
     const store = memoryStore();
     const nas = client(server, store);
@@ -358,9 +358,10 @@ describe('NasClient', () => {
     expect(stored.personName).toBe('Owner');
     const real = server.fetch;
     let personName = 'Sora';
+    let owner = true;
     const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
       const route = url.pathname.slice(new URL(BASE).pathname.length);
-      if (route === 'me') return Response.json({ owner: true, titleLibrary: true, personId: 'p0', personName });
+      if (route === 'me') return Response.json({ owner, titleLibrary: true, personId: 'p0', personName });
       server.nas = undefined;
       try {
         return await real(url, init);
@@ -378,6 +379,11 @@ describe('NasClient', () => {
     personName = 'Mika';
     await nas.me();
     expect(store.value?.personName).toBe('Mika');
+    // An owner took this device's owner status away: the stored pairing follows, so the settings button goes.
+    owner = false;
+    await nas.me();
+    expect(store.value).toMatchObject({ owner: false, personName: 'Mika' });
+    expect((await nas.pairing())?.owner).toBe(false);
   });
 
   it('keeps the private key non-extractable', async () => {

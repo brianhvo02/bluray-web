@@ -35,6 +35,10 @@ docker save "bluray-server:$TAG" bluray-server:latest | gzip | ssh "$HOST" 'gunz
 
 echo "==> Writing $REMOTE_DIR/compose.yaml and starting the service"
 ssh "$HOST" "mkdir -p $REMOTE_DIR && cat > $REMOTE_DIR/compose.yaml" < server/deploy/compose.yaml
+# Keep the step-2 auth.json (before people) beside the migrated one, so the step-2 image can be rolled back to. Run in
+# the old container, which holds the data volume; when it isn't running there is nothing to copy from, so carry on.
+ssh "$HOST" "docker exec bluray-server sh -c 'test -f /data/auth.step2.json || ! test -f /data/auth.json || cp /data/auth.json /data/auth.step2.json'" \
+  || echo "    (no running bluray-server: no rollback copy of auth.json made)"
 ssh "$HOST" "cd $REMOTE_DIR && docker compose up -d"
 
 echo "==> Routing /bluray/* in Caddy"

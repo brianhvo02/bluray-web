@@ -143,7 +143,7 @@ export function PeopleSection({ nas, people, thisDeviceId, now, onChanged, onErr
             )}
             {(editing === 'remove' || editing === 'clear') && (
               <div className="admin-confirm-box" role="group" aria-label="Confirm">
-                <p>{editing === 'remove' ? removePersonQuestion(person) : clearSavedQuestion(person)}</p>
+                <p>{editing === 'remove' ? removePersonQuestion(person, thisDeviceId) : clearSavedQuestion(person)}</p>
                 <span className="admin-confirm">
                   <button
                     type="button"

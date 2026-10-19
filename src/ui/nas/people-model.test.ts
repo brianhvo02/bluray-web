@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NasHttpError, type NasPerson } from './nas-client';
-import { adminFailure, loseSettingsMessage, losesNasSettings, codeSummary, codeTarget, formatSize, lastOwnerMessage, moveTargets, pairedAs, personRows, removePersonQuestion } from './people-model';
+import { adminFailure, rendezvousNotice, loseSettingsMessage, losesNasSettings, codeSummary, codeTarget, formatSize, lastOwnerMessage, moveTargets, pairedAs, personRows, removePersonQuestion } from './people-model';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -80,6 +80,12 @@ describe('removePersonQuestion', () => {
     expect(removePersonQuestion(p)).toBe('Remove Mika? Their 2 devices (iPad, iPhone) are unpaired, and 1.2 MB of saved data is deleted.');
   });
 
+  it('marks this device among them', () => {
+    const p = person({ devices: [{ id: 'me', name: 'iPad', pairedAt: 0, lastSeen: 0 }] });
+    expect(removePersonQuestion(p, 'me')).toBe('Remove Mika? Their device iPad (this device) is unpaired.');
+    expect(removePersonQuestion(p, 'other')).toBe('Remove Mika? Their device iPad is unpaired.');
+  });
+
   it('names one device, or none, and leaves out saved data there is none of', () => {
     const one = person({ devices: [{ id: 'd1', name: 'iPad', pairedAt: 0, lastSeen: 0 }] });
     expect(removePersonQuestion(one)).toBe('Remove Mika? Their device iPad is unpaired.');
@@ -120,6 +126,15 @@ describe('the code view', () => {
   it('says who the code is for and how long it lasts', () => {
     expect(codeSummary('Mika', false)).toBe('For Mika · valid 10 minutes');
     expect(codeSummary('Mika', true)).toBe('For Mika · an invite, valid 3 days');
+  });
+});
+
+describe('rendezvousNotice', () => {
+  it("says a code the pairing service didn't take only works at home or over Tailscale", () => {
+    expect(rendezvousNotice(true)).toBeNull();
+    expect(rendezvousNotice(false)).toBe(
+      "The pairing service didn't take this code, so it only works on your home network or over Tailscale. Try again later for a friend away from home.",
+    );
   });
 });
 

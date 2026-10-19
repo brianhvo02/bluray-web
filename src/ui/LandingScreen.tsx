@@ -328,7 +328,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
           </p>
         ))}
       {paired && nasView.kind === 'checking' && <p className="status">Loading…</p>}
-      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onFolders={showFolders} onClose={closeNas} />}
+      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onOwnerLost={() => setBrowsing(true)} onFolders={showFolders} onClose={closeNas} />}
       {paired && nasView.kind === 'folders' && <LibraryScreen nas={nas} controller={controller} onClose={closeNas} />}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">

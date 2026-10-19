@@ -3,7 +3,7 @@ import type { TitleSummary } from '../../engine/disc/nas-api';
 import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, gateSwitchOn, matchingStatus, newCode, ownTitleKind, ownTitles, withGate } from './admin-model';
 import { NasHttpError, type NasClient, type NasPerson, type NasTitleStatus } from './nas-client';
 import { PeopleSection } from './PeopleSection';
-import { MAX_PERSON_NAME, NEW_PERSON, codeSummary } from './people-model';
+import { MAX_PERSON_NAME, NEW_PERSON, codeSummary, rendezvousNotice } from './people-model';
 import { displayName } from './title-model';
 import { parseNumber } from './unsorted-model';
 import { qrSvg } from './qr';
@@ -15,6 +15,11 @@ interface AdminScreenProps {
   readonly onClose: () => void;
   /** An own title was renamed or deleted: the library fetches its titles again. */
   readonly onTitlesChanged?: () => void;
+  /**
+   * The NAS refused this device's admin call with 403: it is no longer an owner (another owner, or this screen, took
+   * that away). The caller leaves the settings and checks `me` again. Defaults to `onClose`.
+   */
+  readonly onAccessLost?: () => void;
   /** The clock for the countdown and the last-seen times. */
   readonly now?: () => number;
 }
@@ -32,6 +37,8 @@ interface ShownCode {
   readonly personId: string;
   readonly personName: string;
   readonly invite: boolean;
+  /** Whether the rendezvous service registered the code: without it, a code is found only on the home network. */
+  readonly rendezvous: boolean;
   readonly qr: { size: number; path: string };
 }
 
@@ -314,7 +321,7 @@ function TitleLibrarySettings({ nas, now, onTitlesChanged }: { nas: NasClient; n
  * NAS settings, for owners: a new pairing code for a person (or a new one, optionally as a 3-day invite) with its QR and
  * countdown, the People list (spec §4.3), and Rescan.
  */
-export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitlesChanged }: AdminScreenProps): ReactElement {
+export function AdminScreen({ nas, thisDeviceId, onClose, onAccessLost, now = Date.now, onTitlesChanged }: AdminScreenProps): ReactElement {
   const [people, setPeople] = useState<NasPerson[] | null>(null);
   /** The person picker: a person's id, or NEW_PERSON. */
   const [picked, setPicked] = useState(NEW_PERSON);
@@ -329,10 +336,19 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
   const codeRef = useRef<HTMLElement>(null);
   const [, setTick] = useState(0);
 
-  /** Loads the people. A failing poll only shows its error when no other is showing, so it can't hide a refusal unread. */
+  // Kept in a ref: callers pass a new function each render, and loadPeople must stay the same one.
+  const accessLost = useRef(onAccessLost ?? onClose);
+  accessLost.current = onAccessLost ?? onClose;
+  /**
+   * Loads the people. A failing poll only shows its error when no other is showing, so it can't hide a refusal unread.
+   * A 403 means this device is no longer an owner: the settings close.
+   */
   const loadPeople = useCallback(
     (poll: boolean): Promise<void> =>
-      nas.admin.people().then(setPeople, (err: unknown) => setError((shown) => (poll && shown !== null ? shown : message(err)))),
+      nas.admin.people().then(setPeople, (err: unknown) => {
+        if (err instanceof NasHttpError && err.status === 403) accessLost.current();
+        else setError((shown) => (poll && shown !== null ? shown : message(err)));
+      }),
     [nas],
   );
   useEffect(() => {
@@ -513,6 +529,11 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
           <p className="status" data-testid="nas-code-expiry">
             {countdown(code.expiresAt, at)}
           </p>
+          {rendezvousNotice(code.rendezvous) && (
+            <p className="status" role="note" data-testid="nas-code-rendezvous">
+              {rendezvousNotice(code.rendezvous)}
+            </p>
+          )}
         </div>
       )}
       <h3>People</h3>

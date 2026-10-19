@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EMPTY_TAR, listTar, TarError, writeTar } from './tar.js';
+import { EMPTY_TAR, listTar, TarError, writeTar } from './tar';
 
 /** Builds one raw ustar header with a valid checksum, for entries `writeTar` refuses to write. */
 function rawEntry(opts: { name?: string; prefix?: string; type?: string; size?: number; body?: Buffer }): Buffer {

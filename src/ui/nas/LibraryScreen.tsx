@@ -40,7 +40,8 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
 
   useEffect(() => {
     let live = true;
-    nas.pairing().then(
+    // Back from the settings, `me` first: an owner may have changed this device's owner status meanwhile.
+    (reload === 0 ? Promise.resolve() : nas.me().then(() => {}, () => {})).then(() => nas.pairing()).then(
       (p) => {
         if (live) setPairing(p);
       },
@@ -49,7 +50,7 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
     return () => {
       live = false;
     };
-  }, [nas]);
+  }, [nas, reload]);
 
   useEffect(() => {
     let live = true;

@@ -2,8 +2,8 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BdjStore, parseScope, StoreError } from './bdj-store.js';
-import { EMPTY_TAR, writeTar } from './tar.js';
+import { BdjStore, parseScope, StoreError } from './bdj-store';
+import { EMPTY_TAR, writeTar } from './tar';
 
 const ORG = '0a1b2c3d';
 const DISC = 'f'.repeat(32);

@@ -101,10 +101,13 @@ export function personRows(people: readonly NasPerson[], now: number, thisDevice
     }));
 }
 
-/** The confirm step before removing a person: the devices that are unpaired and the saved data that is deleted. */
-export function removePersonQuestion(person: NasPerson): string {
+/**
+ * The confirm step before removing a person: the devices that are unpaired (this device marked) and the saved data
+ * that is deleted.
+ */
+export function removePersonQuestion(person: NasPerson, thisDeviceId: string | null = null): string {
   const parts: string[] = [];
-  const names = person.devices.map((d) => d.name);
+  const names = person.devices.map((d) => (d.id === thisDeviceId ? `${d.name} (this device)` : d.name));
   if (names.length === 1) parts.push(`Their device ${names[0]} is unpaired`);
   else if (names.length > 1) parts.push(`Their ${names.length} devices (${names.join(', ')}) are unpaired`);
   if (person.savedBytes > 0) parts.push(`${formatSize(person.savedBytes)} of saved data is deleted`);
@@ -130,6 +133,13 @@ export function codeTarget(picked: string, name: string, owner: boolean): { targ
   if (trimmed === '') return { error: 'Give the new person a name.' };
   if (trimmed.length > MAX_PERSON_NAME) return { error: `A name is at most ${MAX_PERSON_NAME} characters.` };
   return { target: { newPerson: { name: trimmed, owner } } };
+}
+
+/** The notice beside a code the rendezvous service didn't register (`rendezvous: false`); null when it did. */
+export function rendezvousNotice(rendezvous: boolean): string | null {
+  return rendezvous
+    ? null
+    : "The pairing service didn't take this code, so it only works on your home network or over Tailscale. Try again later for a friend away from home.";
 }
 
 /** The line under a code: whom it pairs as, and how long it lasts. */

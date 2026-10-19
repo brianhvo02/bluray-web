@@ -349,19 +349,22 @@ export class NasClient {
     return (await this.json(`library?path=${encodeURIComponent(path)}`)) as { folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean };
   }
 
-  /** Whether this device is an owner, whether it may browse by title (the release gate), and whose device it is. */
   /**
-   * When the person's name differs from the stored pairing's (renamed by an owner, or a pairing stored before people),
-   * the stored pairing takes the new name, so `pairing()` gives it from then on.
+   * Whether this device is an owner, whether it may browse by title (the release gate), and whose device it is. When
+   * the owner status or person name differs from the stored pairing's (changed by an owner, or a pairing stored before
+   * people), the stored pairing takes the NAS's, so `pairing()` gives it from then on.
    */
   async me(): Promise<NasMe> {
     const generation = this.generation;
     const me = (await this.json('me')) as NasMe;
     const pairing = this.current;
-    if (typeof me.personName === 'string' && pairing && generation === this.generation && pairing.personName !== me.personName) {
-      const renamed: NasPairing = { ...pairing, personName: me.personName };
-      this.current = renamed;
-      await this.deps.store.put(renamed);
+    if (!pairing || generation !== this.generation) return me;
+    const personName = typeof me.personName === 'string' ? me.personName : pairing.personName;
+    const owner = typeof me.owner === 'boolean' ? me.owner : pairing.owner;
+    if (personName !== pairing.personName || owner !== pairing.owner) {
+      const updated: NasPairing = { ...pairing, owner, ...(personName === undefined ? {} : { personName }) };
+      this.current = updated;
+      await this.deps.store.put(updated);
     }
     return me;
   }
