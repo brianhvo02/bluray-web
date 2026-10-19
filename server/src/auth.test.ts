@@ -230,7 +230,7 @@ describe('Auth', () => {
     ['[]', /auth\.json is corrupt: not a JSON object/],
     ['{"devices":{},"codes":[]}', /auth\.json is corrupt: "devices" is not an array/],
     ['{"devices":[],"codes":null}', /auth\.json is corrupt: "codes" is not an array/],
-    ['{"devices":[{"id":1}],"codes":[]}', /auth\.json is corrupt: devices\[0\]\.id is not a string/],
+    ['{"devices":[{"id":1,"owner":false}],"codes":[]}', /auth\.json is corrupt: devices\[0\]\.id is not a string/],
     ['{"devices":[],"codes":[{"id":"a","hash":"h","owner":true,"expiresAt":"soon"}]}', /auth\.json is corrupt: codes\[0\]\.expiresAt is not a number/],
   ])('names the file and the fault of a corrupt auth.json (%s)', (content, message) => {
     writeFileSync(join(tmp, 'auth.json'), content);

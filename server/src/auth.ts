@@ -1,6 +1,7 @@
 import { createHmac, createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from 'node:crypto';
 import type { webcrypto } from 'node:crypto';
 import { codeHash, newCode, normalizeCode } from './codes';
+import { randomId } from './store';
 import type { AuthData, Store } from './store';
 
 type JsonWebKey = webcrypto.JsonWebKey;
@@ -64,7 +65,6 @@ const SESSION_TTL_MS = 60 * 60_000;
 const SIGNATURE_BYTES = 64;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
-const randomId = (): string => randomBytes(16).toString('base64url');
 
 /** A person's name, trimmed; a RangeError (routes answer 400) unless it is 1 to 100 characters. */
 function personName(raw: string): string {

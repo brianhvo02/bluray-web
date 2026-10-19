@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { linkSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isCode, lockFile, replaceAtomically, syncDir, writeSynced } from './atomic-json';
@@ -29,11 +29,17 @@ export function createOnce(path: string, data: string | Buffer): void {
   }
 }
 
+/** The file's content is damaged (as opposed to a lock or I/O failure). */
+class CorruptAuthFile extends Error {}
+
 function fail(file: string, what: string): never {
-  throw new Error(`${file} is corrupt: ${what}`);
+  throw new CorruptAuthFile(`${file} is corrupt: ${what}`);
 }
 
-const randomId = (): string => randomBytes(16).toString('base64url');
+export const randomId = (): string => randomBytes(16).toString('base64url');
+
+/** A migrated person's id: the same on every migration of the same file, so concurrent or repeated ones agree with the persisted one. */
+const migrationId = (secret: Buffer, label: string): string => createHmac('sha256', secret).update(label).digest('base64url').slice(0, randomId().length);
 
 /** Whether `parsed` is a step-2 file: devices and codes, no people. */
 function isStep2(parsed: unknown): boolean {
@@ -44,7 +50,7 @@ function isStep2(parsed: unknown): boolean {
  * Step 2 kept `owner` on devices and codes. All owner devices go to one person named Owner, each other device to a
  * person named after it, live owner codes to Owner, and live non-owner codes are dropped. The input is validated first.
  */
-function migrate(file: string, parsed: unknown, now: number): unknown {
+function migrate(file: string, parsed: unknown, now: number, secret: Buffer): unknown {
   const { devices, codes } = parsed as { devices: unknown; codes: unknown };
   if (!Array.isArray(devices)) fail(file, '"devices" is not an array');
   if (!Array.isArray(codes)) fail(file, '"codes" is not an array');
@@ -52,19 +58,24 @@ function migrate(file: string, parsed: unknown, now: number): unknown {
     if (typeof value !== 'object' || value === null) fail(file, `${where} is not an object`);
     return value as Record<string, unknown>;
   };
-  const oldDevices = devices.map((d, i) => record(`devices[${i}]`, d));
+  const oldDevices = devices.map((d, i) => {
+    const device = record(`devices[${i}]`, d);
+    if (typeof device.owner !== 'boolean') fail(file, `devices[${i}].owner is not a boolean`);
+    return device;
+  });
   const oldCodes = codes.map((c, i) => {
     const code = record(`codes[${i}]`, c);
     if (typeof code.expiresAt !== 'number') fail(file, `codes[${i}].expiresAt is not a number`);
+    if (typeof code.owner !== 'boolean') fail(file, `codes[${i}].owner is not a boolean`);
     return code;
   });
   const people: Person[] = [];
   let owner: Person | undefined;
-  const ownerPerson = (): Person => (owner ??= { id: randomId(), name: 'Owner', owner: true, createdAt: now });
+  const ownerPerson = (): Person => (owner ??= { id: migrationId(secret, 'migrate:owner'), name: 'Owner', owner: true, createdAt: now });
   const migratedDevices = oldDevices.map((d) => {
     const { owner: wasOwner, ...rest } = d;
     if (wasOwner === true) return { ...rest, personId: ownerPerson().id };
-    const person: Person = { id: randomId(), name: typeof d.name === 'string' && d.name.trim() ? d.name.trim().slice(0, 100) : 'Device', owner: false, createdAt: now };
+    const person: Person = { id: migrationId(secret, `migrate:device:${String(d.id)}`), name: typeof d.name === 'string' && d.name.trim() ? d.name.trim().slice(0, 100) : 'Device', owner: false, createdAt: now };
     people.push(person);
     return { ...rest, personId: person.id };
   });
@@ -120,8 +131,9 @@ export class Store {
     if (this.isStep2File()) {
       try {
         this.update(() => undefined);
-      } catch {
-        // A step-2 file that fails to migrate is reported by the first read, naming the fault.
+      } catch (err) {
+        // A damaged file is reported by the first read, naming the fault; a lock or I/O failure stops the start.
+        if (!(err instanceof CorruptAuthFile)) throw err;
       }
     }
   }
@@ -193,6 +205,6 @@ export class Store {
     } catch {
       fail(this.file, 'not valid JSON');
     }
-    return validate(this.file, isStep2(parsed) ? migrate(this.file, parsed, Date.now()) : parsed);
+    return validate(this.file, isStep2(parsed) ? migrate(this.file, parsed, Date.now(), this.secret()) : parsed);
   }
 }

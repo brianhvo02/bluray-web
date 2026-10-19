@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Auth } from './auth';
 import { Store } from './store';
 
 let tmp: string;
@@ -51,4 +52,40 @@ describe('Store migration', () => {
     );
     expect(() => new Store(tmp).read()).toThrow(/is corrupt/);
   });
+
+  it('rejects a code whose person is unknown', () => {
+    const owner = { id: 'p1', name: 'Owner', owner: true, createdAt: 1 };
+    writeFileSync(join(tmp, 'auth.json'), JSON.stringify({ people: [owner], devices: [], codes: [{ id: 'c', hash: 'h', personId: 'nobody', invite: false, expiresAt: LIVE }] }));
+    expect(() => new Store(tmp).read()).toThrow(/codes\[0\]\.personId names an unknown person/);
+  });
+
+  it('makes Owner for a live owner code when no owner device exists', () => {
+    writeFileSync(join(tmp, 'auth.json'), JSON.stringify({ devices: [device('d3', 'Den TV', false)], codes: [code('c1', true, LIVE)] }));
+    const data = new Store(tmp).read();
+    expect(data.people.map((p) => p.name)).toEqual(['Owner', 'Den TV']);
+    expect(data.codes[0]!.personId).toBe(data.people[0]!.id);
+  });
+
+  it('rejects a step-2 device whose owner is not a boolean', () => {
+    writeFileSync(join(tmp, 'auth.json'), JSON.stringify({ devices: [{ ...device('d1', 'Mac', true), owner: 'yes' }], codes: [] }));
+    expect(() => new Store(tmp).read()).toThrow(/devices\[0\]\.owner is not a boolean/);
+  });
+
+  it('migrates to the same ids every time', () => {
+    const text = JSON.stringify({ devices: [device('d1', 'Mac', true), device('d3', 'Den TV', false)], codes: [] });
+    writeFileSync(join(tmp, 'auth.json'), text);
+    const first = new Store(tmp).read().people.map((p) => p.id);
+    writeFileSync(join(tmp, 'auth.json'), text);
+    expect(new Store(tmp).read().people.map((p) => p.id)).toEqual(first);
+  });
+
+  // Not swallowed: a lock held during construction stops the start, instead of leaving read() and update() to migrate separately.
+  it('throws from the constructor when the lock is held, rather than half-migrating', () => {
+    writeFileSync(join(tmp, 'auth.json'), JSON.stringify({ devices: [device('d1', 'Mac', true)], codes: [] }));
+    closeSync(openSync(join(tmp, 'auth.json.lock'), 'wx'));
+    expect(() => new Store(tmp)).toThrow(/is held/);
+    rmSync(join(tmp, 'auth.json.lock'));
+    const auth = new Auth(new Store(tmp), () => Date.now());
+    expect(() => auth.createCode({ personId: auth.firstOwnerPerson().id })).not.toThrow();
+  }, 15_000);
 });

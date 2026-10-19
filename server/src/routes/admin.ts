@@ -78,8 +78,7 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
         return json(200, {
           devices: auth.devices().map(({ id, name, owner, pairedAt, lastSeen }) => ({ id, name, owner, pairedAt, lastSeen })),
         });
-      case 'GET codes':
-        {
+      case 'GET codes': {
         const owners = new Set(auth.people().filter((p) => p.owner).map((p) => p.id));
         return json(200, { codes: auth.codes().map(({ id, personId, expiresAt }) => ({ id, owner: owners.has(personId), expiresAt })) });
       }
