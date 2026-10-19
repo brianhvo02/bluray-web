@@ -241,9 +241,9 @@ export class CacheFill {
   private failed(err: unknown): void {
     if ((err as { name?: unknown } | null)?.name === 'QuotaExceededError') {
       // a full disk is no flap: hold a segment under the lead held now, and go on once playback has freed room; with
-      // no lead to hold, the device can't buffer
+      // no lead to hold, or not following (no playback frees room), it stops as failed
       const segment = this.deps.segmentBytes ?? this.deps.remote.chunkBytes;
-      if (this.lead < segment) this.failure = true;
+      if (!this.deps.follow || this.lead < segment) this.failure = true;
       else this.quotaCap = Math.min(this.quotaCap, this.lead - segment);
       return;
     }

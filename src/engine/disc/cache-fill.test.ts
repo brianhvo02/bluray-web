@@ -18,7 +18,7 @@ const SIZE = 8 * CHUNK;
  */
 async function setup(
   failing: (from: number, attempt: number) => 'lost' | 'changed' | null,
-  opts: { gated?: boolean; before?: (remote: RemoteSource) => void; segmentBytes?: number; quotaFull?: (offset: number) => boolean } = {},
+  opts: { gated?: boolean; before?: (remote: RemoteSource) => void; segmentBytes?: number; quotaFull?: (offset: number) => boolean; follow?: boolean } = {},
 ) {
   const gate = { on: opts.gated === true, waiting: [] as Array<() => void> };
   const stream = Uint8Array.from({ length: SIZE }, (_, i) => i & 0xff);
@@ -61,7 +61,7 @@ async function setup(
     remote,
     cache,
     ranges: () => [{ path: PATH, start: position.start, end: SIZE }],
-    follow: true,
+    follow: opts.follow ?? true,
     targetBytes: SIZE,
     ...(opts.segmentBytes ? { segmentBytes: opts.segmentBytes } : {}),
     progress: (p) => progress.push(p),
@@ -189,5 +189,19 @@ describe('CacheFill', () => {
     await t.settle();
     await t.settle();
     expect(t.progress.at(-1)).toMatchObject({ stopped: 'failed' });
+  });
+});
+
+describe('CacheFill without following (bufferAhead)', () => {
+  it('stops as failed after one attempt on a full disk, since no playback frees room', async () => {
+    const t = await setup(() => null, { follow: false, segmentBytes: 2 * CHUNK, quotaFull: (offset) => offset === 3 * CHUNK });
+    for (let i = 0; i < 5; i++) await t.settle();
+    expect(t.progress.at(-1)).toMatchObject({ stopped: 'failed' });
+    expect(t.reads.filter((r) => r === 3 * CHUNK)).toHaveLength(1);
+    const reads = t.reads.length;
+    t.fill.kick();
+    await t.settle();
+    expect(t.reads.length).toBe(reads);
+    expect(t.timers).toEqual([]);
   });
 });
