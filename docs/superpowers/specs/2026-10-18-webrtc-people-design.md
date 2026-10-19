@@ -1,7 +1,7 @@
 # People, Saved Data and the WebRTC Route (Step 3) — Design Spec
 
 Date: 2026-10-18
-Status: Approved by the user 2026-10-18. Release 1 (people, §4, and the BD-J store, §5) built on `feat/people-store`; the WebRTC route, relay and buffering (§6–§7) follow the spike.
+Status: Approved by the user 2026-10-18. Release 1 (people, §4, and the BD-J store, §5) deployed 2026-10-18 (main c0be0f6). Spike done 2026-10-19 (§6.1 results below); release 2 (§6–§7) planned in `docs/superpowers/plans/2026-10-19-webrtc-route.md`.
 Parent spec: `2026-10-16-cross-browser-and-remote-design.md` §5 (step 3). Builds on `2026-10-17-nas-server-design.md` (pairing, rendezvous) and `2026-10-17-nas-library-titles-design.md` (the title library). Where this document and the parent disagree, this one wins for step 3.
 
 ## 1. Intent
@@ -109,6 +109,13 @@ Question: does a data channel carry a Blu-ray's rate (about 20–40 Mbps, UHD 60
 - **Bar:** a sustained 40 Mbps at 250 ms in Chrome and iOS Safari. Below that, parallel channels are the first remedy and the buffer-first path (§7) carries the rest; step 4's lower quality comes later. If neither library reaches the bar, the faster one is used and work continues (my call; the user called the stakes low).
 - **Who runs it:** Claude deploys the spike container over ssh and drives the iPhone through `tools/devices/` over USB. The user only switches the iPhone's Wi-Fi off and plugs it in, so WebRTC transport work waits for one short session with the user.
 - Results go into this document's status line and pick the library and the channel layout for §6.3.
+
+**Spike results (2026-10-19):**
+- **Library: werift.** It sustains 54–94 Mbps at an emulated 250 ms RTT with no loss (Chrome 54, Firefox 90, WebKit and Safari 94). It is CPU-bound at about 100–160 Mbps on the N150. node-datachannel collapses as RTT grows (under 1 Mbps at 250 ms; its sender idles), whatever the congestion settings.
+- **Layout: one ordered channel with 64 KB messages.** More channels and 16 KB messages slow werift sharply, and 256 KB is only better outside Chrome. Every browser tested advertises a limit of at least 256 KB; the iPhone's werift session used 64 KB.
+- **Loss is the risk.** With 1% random loss emulated, everything falls to 1–3 Mbps.
+- **The iPhone on cellular** (a real remote network, through the router forward to UDP 47998) got 10–22 Mbps with werift, with stalls. The phone's own download from Cloudflare was 25–65 Mbps in the same minutes. Buffer-first (§7) will come up often, not rarely.
+- **Not measured:** an intercontinental network. The first friend's watch is the real test.
 
 ### 6.2 Signalling
 
