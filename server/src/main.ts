@@ -62,7 +62,10 @@ function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousC
     () => console.log(`WebRTC on UDP ${config.rtc.port}`),
     (err: unknown) => console.error(`WebRTC: UDP ${config.rtc.port} could not be bound`, err),
   );
-  const onTurnRequest = turnResponder({ relay, auth, credentials: () => rendezvous.turnServers(), now: Date.now });
+  const onTurnRequest = turnResponder({
+    relay, auth, credentials: () => rendezvous.turnServers(), now: Date.now,
+    onServers: (sid, ips) => peers.noteTurnServers(sid, ips),
+  });
   const signalling = new SignallingClient({ url: rendezvousUrl, signer: rendezvous, peers, onTurnRequest });
   signalling.start();
   void advertiser.start();

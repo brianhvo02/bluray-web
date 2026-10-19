@@ -116,6 +116,7 @@ export interface PairLike {
  */
 export class RelayTracker {
   private readonly addresses = new Set<string>();
+  private readonly servers = new Set<string>();
   private readonly counted = new WeakMap<PairLike, number>();
 
   /** Remembers the relay candidates in an SDP or a trickled candidate. */
@@ -123,10 +124,19 @@ export class RelayTracker {
     for (const address of relayAddresses(text)) this.addresses.add(address);
   }
 
+  /**
+   * Remembers the addresses of the TURN servers handed to this device: a pair from one of them is relayed on any
+   * port, which catches a device that hides its relay candidates.
+   */
+  noteServers(ips: Iterable<string>): void {
+    for (const ip of ips) this.servers.add(ip.toLowerCase());
+  }
+
   route(pair: PairLike | undefined): RtcRoute {
     if (pair === undefined) return 'webrtc';
-    const [ip, port] = pair.remoteAddr;
-    return pair.remoteCandidate.type === 'relay' || this.addresses.has(`${ip.toLowerCase()}:${port}`) ? 'relay' : 'webrtc';
+    const ip = pair.remoteAddr[0].toLowerCase();
+    const port = pair.remoteAddr[1];
+    return pair.remoteCandidate.type === 'relay' || this.addresses.has(`${ip}:${port}`) || this.servers.has(ip) ? 'relay' : 'webrtc';
   }
 
   /** The bytes both ways on `pair` since its last sample, when it is relayed; 0 otherwise. */
@@ -235,6 +245,8 @@ export function wireChannelOf(dc: RTCDataChannel, onClosed?: () => void): WireCh
 export class RtcPeers {
   private readonly peers = new Map<string, Peer>();
   private readonly offers = new Map<string, { count: number; since: number }>();
+  /** TURN server addresses handed to each device socket, kept for its lifetime so a later offer's peer gets them. */
+  private readonly turnServers = new Map<string, { ips: string[]; since: number }>();
   private readonly limits: PeerLimits;
   private muxing: Promise<UdpMux> | undefined;
 
@@ -268,6 +280,8 @@ export class RtcPeers {
     pc.config.icePortRange = [port, port];
     const peer: Peer = { sid, pc, owner: mux.owner(), timer: undefined, sampler: undefined, served: null, closed: false, relay: new RelayTracker(), deviceId: null, route: 'webrtc' };
     peer.relay.note(offer);
+    this.pruneTurnServers();
+    peer.relay.noteServers(this.turnServers.get(sid)?.ips ?? []);
     this.peers.set(sid, peer);
     peer.timer = setTimeout(() => this.drop(peer), this.limits.unopenedMs);
     peer.timer.unref();
@@ -310,6 +324,23 @@ export class RtcPeers {
   /** Binds the UDP port now rather than at the first offer, so a port in use shows at start. */
   async listen(): Promise<void> {
     await this.mux();
+  }
+
+  /** The addresses of the TURN servers just handed to the device socket `sid` (`turnResponder`'s `onServers`). */
+  noteTurnServers(sid: string, ips: readonly string[]): void {
+    this.pruneTurnServers();
+    const known = this.turnServers.get(sid)?.ips ?? [];
+    this.turnServers.set(sid, { ips: [...new Set([...known, ...ips])], since: this.opts.now() });
+    const peer = this.peers.get(sid);
+    if (peer !== undefined) {
+      peer.relay.noteServers(ips);
+      this.reclassify(peer);
+    }
+  }
+
+  private pruneTurnServers(): void {
+    const now = this.opts.now();
+    for (const [sid, entry] of this.turnServers) if (entry.since <= now - SIGNAL_DEVICE_LIFETIME_MS) this.turnServers.delete(sid);
   }
 
   /** A device's trickled ICE candidate; ignored without a peer for `sid` or when malformed. */

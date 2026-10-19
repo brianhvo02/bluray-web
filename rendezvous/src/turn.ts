@@ -10,6 +10,7 @@
  * `Authorization: Bearer <API token>` and `{"ttl": <seconds>}`, answering 201 with `{"iceServers": [...]}`.
  */
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
+import { boundedBody } from './body';
 import { INTERNAL, REGISTRY_NAME, json } from './code-registry';
 import type { RegistryNamespace } from './index';
 import { ECDSA_KEY, ECDSA_SIGN, TURN_MAX_SKEW_MS, TURN_TTL_SECONDS, fromBase64url, iceServersOf, isNasId, turnRequestMessage } from './protocol';
@@ -27,7 +28,6 @@ export interface TurnDeps {
   now: () => number;
 }
 
-const MAX_BODY_BYTES = 4_096;
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
 /** `POST /turn {nasId, ts, signature}` → 200 `{iceServers}`; 401 for a stale `ts`, an unknown NAS or a bad signature. */
@@ -71,12 +71,12 @@ export async function turnRoute(request: Request, env: TurnEnv, deps: TurnDeps):
   return json(200, { iceServers: servers });
 }
 
-/** The body as a JSON object of at most `MAX_BODY_BYTES`, or null. */
+/** The body as a JSON object of at most `MAX_BODY_BYTES` (`boundedBody`), or null. */
 async function jsonBody(request: Request): Promise<Record<string, unknown> | null> {
-  const text = await request.text().catch(() => null);
-  if (text === null || new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) return null;
+  const bytes = await boundedBody(request).catch(() => null);
+  if (bytes === null) return null;
   try {
-    const value = JSON.parse(text) as unknown;
+    const value = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
   } catch {
     return null;

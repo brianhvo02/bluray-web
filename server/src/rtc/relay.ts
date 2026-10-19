@@ -1,3 +1,4 @@
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TURN_MAX_SKEW_MS, turnProofMessage } from '../../../rendezvous/src/protocol';
@@ -86,26 +87,29 @@ export class RelayState {
     return enabled && (allowPaid || usedBytes < FREE_BYTES);
   }
 
-  /** The state with a past month's bytes forgotten. */
+  /** The state with a past month's bytes forgotten (`YYYY-MM` strings compare in date order). */
   private current(): RelayFile {
+    // Only a later month resets: a clock stepped back across the boundary keeps the count.
     const month = monthOf(this.now());
-    return this.state.month === month ? this.state : { ...this.state, month, usedBytes: 0 };
+    return month > this.state.month ? { ...this.state, month, usedBytes: 0 } : this.state;
   }
 
   private load(): RelayFile {
     const fresh: RelayFile = { enabled: false, allowPaid: false, month: monthOf(this.now()), usedBytes: 0 };
-    let text: string;
+    let raw: Partial<RelayFile>;
     try {
-      text = readFileSync(this.file, 'utf8');
+      const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as unknown;
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('not a JSON object');
+      raw = parsed as Partial<RelayFile>;
     } catch (err) {
-      if (isCode(err, 'ENOENT')) return fresh;
-      throw err;
+      // An unreadable or corrupt file starts fresh, the relay off, rather than stopping the server.
+      if (!isCode(err, 'ENOENT')) console.error(`relay: ${this.file} could not be read; starting with the relay off`, err);
+      return fresh;
     }
-    const raw = JSON.parse(text) as Partial<RelayFile>;
     return {
       enabled: raw.enabled === true,
       allowPaid: raw.allowPaid === true,
-      month: typeof raw.month === 'string' ? raw.month : fresh.month,
+      month: typeof raw.month === 'string' && /^\d{4}-\d{2}$/.test(raw.month) ? raw.month : fresh.month,
       usedBytes: typeof raw.usedBytes === 'number' && Number.isFinite(raw.usedBytes) && raw.usedBytes >= 0 ? raw.usedBytes : 0,
     };
   }
@@ -125,35 +129,93 @@ export interface TurnResponderOptions {
   /** Fresh TURN credentials from the rendezvous Worker (`RendezvousClient.turnServers`). */
   credentials: () => Promise<IceServerInfo[]>;
   now: () => number;
+  /**
+   * Called with the addresses the handed-out TURN urls' hosts resolve to, for the socket `sid` (`RtcPeers.noteTurnServers`),
+   * so a connection from one of them counts as relayed even when the device hides its relay candidates.
+   */
+  onServers?: (sid: string, addresses: string[]) => void;
+  /** Resolves a host name to all its addresses; `dns.promises.lookup(host, { all: true })` by default. */
+  lookup?: (host: string) => Promise<string[]>;
+}
+
+/** Authenticated `turn-request`s one device, or one invite hash, may make in `TURN_REQUEST_WINDOW_MS`. */
+export const TURN_REQUESTS_PER_HOUR = 10;
+const TURN_REQUEST_WINDOW_MS = 60 * 60_000;
+
+/** The host of each `turn:` or `turns:` url (RFC 7065), IPv6 brackets dropped. */
+export function turnHosts(servers: readonly IceServerInfo[]): string[] {
+  const hosts = new Set<string>();
+  for (const server of servers) {
+    for (const url of typeof server.urls === 'string' ? [server.urls] : server.urls) {
+      const m = /^turns?:(\[[^\]]+\]|[^:?\s]+)/i.exec(url);
+      if (m) hosts.add(m[1]!.replace(/^\[|\]$/g, ''));
+    }
+  }
+  return [...hosts];
+}
+
+async function lookupAll(host: string): Promise<string[]> {
+  return (await dnsLookup(host, { all: true })).map((a) => a.address);
 }
 
 /**
  * Answers a device's `turn-request` on the signalling socket `sid` (spec §6.4). The device must check out first, so
  * a stranger learns nothing about the relay: a paired device by its signature over `turnProofMessage({ sid, ts })`
- * with `ts` within 60 s, or an unpaired one by the hash of a live invite code. Then the relay must be on and,
- * unless paid use is allowed, under its free allowance.
+ * with `ts` within 60 s, or an unpaired one by the hash of a live invite code. Each device and each invite gets at
+ * most 10 checked requests an hour; past that it is answered `unauthorized` too (no new reason). Then the relay must
+ * be on and, unless paid use is allowed, under its free allowance.
  */
 export function turnResponder(opts: TurnResponderOptions): (sid: string, request: Record<string, unknown>) => Promise<TurnAnswer> {
+  const lookup = opts.lookup ?? lookupAll;
+  const recent = new Map<string, number[]>();
   const refuse = (reason: TurnRefusal, resetsOn?: string): TurnAnswer => ({ iceServers: [], reason, ...(resetsOn === undefined ? {} : { resetsOn }) });
-  const checksOut = (sid: string, request: Record<string, unknown>): boolean => {
+  /** The rate-limit key of a request that checks out, or null. */
+  const checkedKey = (sid: string, request: Record<string, unknown>): string | null => {
     const { deviceId, ts, signature, inviteHash } = request;
     if (typeof deviceId === 'string' && typeof ts === 'number' && typeof signature === 'string') {
-      if (!Number.isSafeInteger(ts) || Math.abs(opts.now() - ts) > TURN_MAX_SKEW_MS) return false;
-      return opts.auth.signedBy(deviceId, turnProofMessage({ sid, ts }), signature) !== null;
+      if (!Number.isSafeInteger(ts) || Math.abs(opts.now() - ts) > TURN_MAX_SKEW_MS) return null;
+      return opts.auth.signedBy(deviceId, turnProofMessage({ sid, ts }), signature) === null ? null : `device:${deviceId}`;
     }
-    if (typeof inviteHash === 'string') return opts.auth.codes().some((c) => c.invite && c.hash === inviteHash);
-    return false;
+    if (typeof inviteHash === 'string' && opts.auth.codes().some((c) => c.invite && c.hash === inviteHash)) return `invite:${inviteHash}`;
+    return null;
+  };
+  /** Counts a request for `key`; false once it has had its 10 this hour. Only checked requests count, so a forger can't use up a device's. */
+  const allowed = (key: string): boolean => {
+    const now = opts.now();
+    for (const [k, times] of recent) {
+      const kept = times.filter((t) => t > now - TURN_REQUEST_WINDOW_MS);
+      if (kept.length === 0) recent.delete(k);
+      else recent.set(k, kept);
+    }
+    const times = recent.get(key) ?? [];
+    if (times.length >= TURN_REQUESTS_PER_HOUR) return false;
+    recent.set(key, [...times, now]);
+    return true;
   };
   return async (sid, request) => {
-    if (!checksOut(sid, request)) return refuse('unauthorized');
+    const key = checkedKey(sid, request);
+    if (key === null || !allowed(key)) return refuse('unauthorized');
     const { relay } = opts;
     if (!relay.settings().enabled) return refuse('off');
     if (!relay.mayRelay()) return refuse('limit', relay.usage().resetsOn);
+    let iceServers: IceServerInfo[];
     try {
-      return { iceServers: await opts.credentials() };
+      iceServers = await opts.credentials();
     } catch (err) {
       console.error('relay: TURN credentials could not be had', err);
       return refuse('unavailable');
     }
+    if (opts.onServers) {
+      const resolved = await Promise.all(
+        turnHosts(iceServers).map((host) =>
+          lookup(host).catch((err: unknown) => {
+            console.error(`relay: ${host} could not be resolved`, err);
+            return [];
+          }),
+        ),
+      );
+      opts.onServers(sid, [...new Set(resolved.flat())]);
+    }
+    return { iceServers };
   };
 }

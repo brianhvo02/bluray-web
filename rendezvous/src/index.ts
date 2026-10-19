@@ -8,6 +8,7 @@
  * The relay: the NAS asks for TURN credentials (`POST /turn`, signed, server to server; `turn.ts`).
  */
 import { PREFLIGHT_MAX_AGE, corsHeaders } from '../../src/engine/disc/cors-policy';
+import { boundedBody } from './body';
 import { INTERNAL, REGISTRY_NAME, json } from './code-registry';
 import { isNasId } from './protocol';
 import { turnRoute } from './turn';
@@ -28,8 +29,6 @@ export interface Env {
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
 }
-
-const MAX_BODY_BYTES = 4_096;
 
 const ROUTES = new Set(['/nas', '/codes', '/codes/lookup']);
 const SIGNAL_ROUTES = new Set(['/signal/nas', '/signal/device']);
@@ -82,32 +81,6 @@ async function signal(request: Request, env: Env): Promise<Response> {
   if (attempt.status !== 204) return json(429, { error: 'too many requests' });
   const signalling = env.SIGNALLING;
   return signalling.get(signalling.idFromName(nasId)).fetch(request);
-}
-
-/** The body's bytes, counted as they stream in; null once they pass `MAX_BODY_BYTES`. */
-async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  if (request.body) {
-    const reader = request.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
-        await reader.cancel();
-        return null;
-      }
-      chunks.push(value);
-    }
-  }
-  const body = new Uint8Array(size);
-  let at = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return body;
 }
 
 export default {

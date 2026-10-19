@@ -227,7 +227,7 @@ export function turnRequestMessage(fields: { nasId: string; ts: number }): Uint8
   return new Uint8Array(new TextEncoder().encode(JSON.stringify({ type: 'turn-credentials', nasId: fields.nasId, ts: fields.ts })));
 }
 
-/** The ICE servers in an untrusted JSON value: at most 8, each with string urls (and string credentials if any); null otherwise. */
+/** The ICE servers in an untrusted JSON value: at most 8, each with 1 to 16 string urls (and string credentials if any); null otherwise. */
 export function iceServersOf(value: unknown): IceServerInfo[] | null {
   if (!Array.isArray(value) || value.length > 8) return null;
   const out: IceServerInfo[] = [];
@@ -235,7 +235,7 @@ export function iceServersOf(value: unknown): IceServerInfo[] | null {
     if (typeof entry !== 'object' || entry === null) return null;
     const { urls, username, credential } = entry as Record<string, unknown>;
     const list = typeof urls === 'string' ? [urls] : urls;
-    if (!Array.isArray(list) || list.length === 0 || list.length > 8 || !list.every((u) => typeof u === 'string' && u.length <= 512)) return null;
+    if (!Array.isArray(list) || list.length === 0 || list.length > 16 || !list.every((u) => typeof u === 'string' && u.length <= 512)) return null;
     if ((username !== undefined && typeof username !== 'string') || (credential !== undefined && typeof credential !== 'string')) return null;
     out.push({ urls: list as string[], ...(username === undefined ? {} : { username }), ...(credential === undefined ? {} : { credential }) });
   }

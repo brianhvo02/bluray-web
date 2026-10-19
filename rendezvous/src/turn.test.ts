@@ -3,7 +3,7 @@ import { CodeRegistry } from './code-registry';
 import worker from './index';
 import type { Env } from './index';
 import { memoryState } from './memory-state';
-import { base64url, signedMessage, turnRequestMessage } from './protocol';
+import { base64url, iceServersOf, signedMessage, turnRequestMessage } from './protocol';
 import { CLOUDFLARE_TURN_BASE, turnRoute } from './turn';
 
 // The key id and token are made up; real ones live only in Worker secrets.
@@ -100,6 +100,7 @@ describe('POST /turn', () => {
       expect((await turn(body)).status, JSON.stringify(body)).toBe(400);
     }
     expect((await turn(undefined, 'GET')).status).toBe(405);
+    expect((await turn({ nasId: 'A'.repeat(43), ts: clock, signature: 'x'.repeat(4_096) })).status).toBe(400);
 
     const { keys, nasId } = await registeredNas();
     const signed = { nasId, ts: clock, signature: await sign(keys, turnRequestMessage({ nasId, ts: clock })) };
@@ -125,5 +126,16 @@ describe('POST /turn', () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { iceServers: unknown[] }).iceServers).toHaveLength(2);
     vi.restoreAllMocks();
+  });
+});
+
+describe('iceServersOf', () => {
+  it('takes up to 16 urls a server and 8 servers', () => {
+    const urls = (n: number) => Array.from({ length: n }, (_, i) => `turn:t${i}.example`);
+    expect(iceServersOf([{ urls: urls(16) }])).toEqual([{ urls: urls(16) }]);
+    expect(iceServersOf([{ urls: urls(17) }])).toBeNull();
+    expect(iceServersOf(Array.from({ length: 9 }, () => ({ urls: 'stun:s.example' })))).toBeNull();
+    expect(iceServersOf([{ urls: [] }])).toBeNull();
+    expect(iceServersOf([{ urls: 'turn:t.example', username: 1 }])).toBeNull();
   });
 });

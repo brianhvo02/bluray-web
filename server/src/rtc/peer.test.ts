@@ -135,6 +135,17 @@ describe('RtcPeers', () => {
     await expect.poll(() => relayed, { timeout: 5000 }).toBeGreaterThan(100_000);
   });
 
+  it('classes a session relayed when the device comes from a TURN server it was handed, relay candidates hidden', { timeout: 30_000 }, async () => {
+    const peers = new RtcPeers({ handlers, auth, port: 47996, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now });
+    open.push({ close: () => peers.closeAll() });
+    const sid = 'sid-lllllllllllllllllll';
+    const { pc, client } = await connect(peers, sid);
+    const { deviceId } = await sessionOver(client);
+    expect(auth.devices().find((d) => d.id === deviceId)?.lastRoute).toBe('webrtc');
+    peers.noteTurnServers(sid, [pc.iceTransports[0]!.connection.nominated!.localCandidate.host]);
+    expect(auth.devices().find((d) => d.id === deviceId)?.lastRoute).toBe('relay');
+  });
+
   it('answers with only the advertised host candidates on its port', { timeout: 30_000 }, async () => {
     const peers = peersOn(47992);
     const { answer } = await connect(peers, 'sid-bbbbbbbbbbbbbbbbbbb');
@@ -276,6 +287,14 @@ describe('relay classification', () => {
     expect(tracker.route(pair('203.0.113.4', 6000, 'srflx'))).toBe('webrtc');
     expect(tracker.route(pair('192.0.2.1', 1, 'relay'))).toBe('relay');
     expect(tracker.route(undefined)).toBe('webrtc');
+  });
+
+  it("calls a pair relayed on any port of a TURN server's address the device was handed", () => {
+    const tracker = new RelayTracker();
+    tracker.noteServers(['198.51.100.1', '2001:DB8::1']);
+    expect(tracker.route(pair('198.51.100.1', 61000))).toBe('relay');
+    expect(tracker.route(pair('2001:db8::1', 3478))).toBe('relay');
+    expect(tracker.route(pair('198.51.100.2', 61000))).toBe('webrtc');
   });
 
   it("counts a relayed pair's bytes both ways, including those sent before a late reclassification", () => {

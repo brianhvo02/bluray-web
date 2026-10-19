@@ -1,5 +1,5 @@
 import type { webcrypto } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -8,7 +8,7 @@ import type { IceServerInfo } from '../../../rendezvous/src/protocol';
 import { Auth } from '../auth';
 import { codeHash } from '../codes';
 import { Store } from '../store';
-import { FREE_BYTES, RelayState, turnResponder } from './relay';
+import { FREE_BYTES, RelayState, TURN_REQUESTS_PER_HOUR, turnHosts, turnResponder } from './relay';
 
 // Every name here is made up.
 
@@ -72,6 +72,38 @@ describe('RelayState', () => {
     expect(later.usage().usedBytes).toBe(0);
     later.addBytes(7);
     expect(later.usage().usedBytes).toBe(7);
+  });
+
+  it('keeps the count when the clock steps back across a month boundary', () => {
+    clock = Date.UTC(2026, 10, 1, 0, 0, 5);
+    const relay = new RelayState(tmp, () => clock);
+    relay.addBytes(900);
+    clock = Date.UTC(2026, 9, 31, 23, 59, 58);
+    expect(relay.usage().usedBytes).toBe(900);
+    relay.addBytes(100);
+    expect(new RelayState(tmp, () => clock).usage().usedBytes).toBe(1_000);
+    clock = Date.UTC(2026, 10, 1, 0, 0, 6);
+    expect(relay.usage().usedBytes).toBe(1_000);
+    clock = Date.UTC(2026, 11, 1);
+    expect(relay.usage().usedBytes).toBe(0);
+  });
+
+  it('starts fresh, relay off, from a corrupt or unreadable relay.json, and logs it', () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    for (const text of ['{', '[]', 'null']) {
+      writeFileSync(join(tmp, 'relay.json'), text);
+      const relay = new RelayState(tmp, () => clock);
+      expect(relay.settings()).toEqual({ enabled: false, allowPaid: false });
+      expect(relay.usage().usedBytes).toBe(0);
+    }
+    const dir = join(tmp, 'as-dir');
+    rmSync(dir, { recursive: true, force: true });
+    const unreadable = join(dir, 'relay.json');
+    // a directory where the file should be cannot be read as one
+    mkdirSync(unreadable, { recursive: true });
+    expect(new RelayState(dir, () => clock).mayRelay()).toBe(false);
+    expect(log).toHaveBeenCalledTimes(4);
+    log.mockRestore();
   });
 
   it('ignores negative, fractional and non-finite byte counts', () => {
@@ -153,6 +185,42 @@ describe('turnResponder', () => {
     expect(await respond(SID, { t: 'turn-request', inviteHash: codeHash(plain.code) })).toEqual({ iceServers: [], reason: 'unauthorized' });
     clock = invite.record.expiresAt;
     expect(await respond(SID, { t: 'turn-request', inviteHash: codeHash(invite.code) })).toEqual({ iceServers: [], reason: 'unauthorized' });
+  });
+
+  it('allows 10 checked requests an hour per device and per invite, then answers unauthorized; forgeries use none up', async () => {
+    const { deviceId, proof } = await pairedDevice();
+    const forged = await pairedDevice();
+    for (let i = 0; i < 20; i++) await respond(SID, { t: 'turn-request', deviceId, ts: clock, signature: await forged.proof(SID, clock) });
+    const good = async () => respond(SID, { t: 'turn-request', deviceId, ts: clock, signature: await proof(SID, clock) });
+    for (let i = 0; i < TURN_REQUESTS_PER_HOUR; i++) expect(await good()).toEqual({ iceServers: SERVERS });
+    expect(await good()).toEqual({ iceServers: [], reason: 'unauthorized' });
+    const invite = auth.createCode({ personId: auth.firstOwnerPerson().id }, { invite: true });
+    const byInvite = () => respond(SID, { t: 'turn-request', inviteHash: codeHash(invite.code) });
+    for (let i = 0; i < TURN_REQUESTS_PER_HOUR; i++) expect(await byInvite()).toEqual({ iceServers: SERVERS });
+    expect(await byInvite()).toEqual({ iceServers: [], reason: 'unauthorized' });
+    // another device is unaffected, and the window slides
+    const other = await pairedDevice();
+    expect(await respond(SID, { t: 'turn-request', deviceId: other.deviceId, ts: clock, signature: await other.proof(SID, clock) })).toEqual({ iceServers: SERVERS });
+    clock += 60 * 60_000;
+    expect(await good()).toEqual({ iceServers: SERVERS });
+  });
+
+  it("resolves the handed-out TURN urls' hosts and reports their addresses for the sid", async () => {
+    credentials.mockResolvedValue([
+      { urls: ['stun:stun.example:3478'] },
+      { urls: ['turn:turn.example:3478?transport=udp', 'turns:turn.example:443?transport=tcp', 'turn:[2001:db8::7]:3478', 'turn:198.51.100.9'], username: 'u', credential: 'c' },
+    ]);
+    const lookup = vi.fn(async (host: string) => (host === 'turn.example' ? ['198.51.100.1', '2001:db8::1'] : [host]));
+    const seen: [string, string[]][] = [];
+    respond = turnResponder({ relay, auth, credentials, now: () => clock, lookup, onServers: (sid, ips) => seen.push([sid, ips]) });
+    const { deviceId, proof } = await pairedDevice();
+    await respond(SID, { t: 'turn-request', deviceId, ts: clock, signature: await proof(SID, clock) });
+    expect(lookup.mock.calls.map((c) => c[0])).toEqual(['turn.example', '2001:db8::7', '198.51.100.9']);
+    expect(seen).toEqual([[SID, ['198.51.100.1', '2001:db8::1', '2001:db8::7', '198.51.100.9']]]);
+  });
+
+  it('turnHosts reads turn and turns urls only', () => {
+    expect(turnHosts([{ urls: 'stun:s.example' }, { urls: ['TURN:t.example:3478', 'turns:t.example', 'turn:[::1]:3478?transport=tcp'] }])).toEqual(['t.example', '::1']);
   });
 
   it('answers unavailable when the credentials cannot be had', async () => {
