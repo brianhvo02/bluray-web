@@ -4,12 +4,15 @@ import { appHandlers } from './app';
 import { Auth } from './auth';
 import { BdjStore } from './bdj-store';
 import { ownerCode } from './cli';
-import type { CodeRegistrar } from './codes';
 import { loadConfig } from './config';
 import type { Config } from './config';
 import { createServer } from './http';
+import type { Handler } from './http';
 import { Library, nextNightly } from './library';
 import { RendezvousClient } from './rendezvous-client';
+import { RtcPeers } from './rtc/peer';
+import { AddressAdvertiser } from './rtc/public-address';
+import { SignallingClient } from './rtc/signalling-client';
 import { trustedProxy } from './routes/pair';
 import { Store } from './store';
 import { createAniList } from './titles/anilist';
@@ -21,6 +24,7 @@ import type { Entry, MetadataSource } from './titles/sources';
 import { createTmdb } from './titles/tmdb';
 
 const SHUTDOWN_GRACE_MS = 3_000;
+const STUN_URL = 'stun:stun.cloudflare.com:3478';
 const DEFAULT_DISCDB_INDEX = '/app/data/discdb-index.json';
 
 /** AniList and TMDB, or the recorded entries of `METADATA_FIXTURE` in E2E tests (ruling R3). */
@@ -36,9 +40,30 @@ function metadataSources(config: Config): { anilist: MetadataSource; tmdb: Metad
 }
 
 /** The rendezvous client when `RENDEZVOUS_URL` is set; its key lives next to the auth data. */
-function rendezvousRegistrar(config: Config): CodeRegistrar | undefined {
+function rendezvousRegistrar(config: Config): RendezvousClient | undefined {
   if (config.rendezvousUrl === undefined) return undefined;
   return new RendezvousClient(config.rendezvousUrl, join(config.dataDir, 'rendezvous-key.json'));
+}
+
+/**
+ * The WebRTC route: peers on UDP `RTC_PORT` advertising the public IPv4 (STUN at start, then hourly) and
+ * `RTC_LAN_ADDRESS`, and the signalling socket to the rendezvous Worker. Gives the function that stops it all.
+ */
+function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousClient, handlers: readonly Handler[], auth: Auth): () => Promise<void> {
+  const advertiser = new AddressAdvertiser({ stun: STUN_URL, lan: config.rtc.lanAddress, fixed: config.rtc.advertise });
+  void advertiser.start();
+  const peers = new RtcPeers({ handlers, auth, port: config.rtc.port, advertise: () => advertiser.advertise(), iceServers: async () => [{ urls: STUN_URL }], now: Date.now });
+  peers.listen().then(
+    () => console.log(`WebRTC on UDP ${config.rtc.port}`),
+    (err: unknown) => console.error(`WebRTC: UDP ${config.rtc.port} could not be bound`, err),
+  );
+  const signalling = new SignallingClient({ url: rendezvousUrl, signer: rendezvous, peers });
+  signalling.start();
+  return async () => {
+    signalling.stop();
+    advertiser.stop();
+    await peers.closeAll();
+  };
 }
 
 async function serve(config: Config): Promise<void> {
@@ -57,7 +82,10 @@ async function serve(config: Config): Promise<void> {
     titleLibrary: config.titleLibrary,
   });
   library.onScanned(() => void titles.runNow());
-  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy, titles: { service: titles, owner } }));
+  const rendezvous = rendezvousRegistrar(config);
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner } });
+  const server = createServer(handlers);
+  const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth) : async () => {};
 
   const scheduleScans = (): void => {
     const run = (): void => {
@@ -81,6 +109,7 @@ async function serve(config: Config): Promise<void> {
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => {
       titles.close();
+      void stopRtc();
       server.close(() => process.exit(0));
       // Long disc streams would otherwise hold shutdown until Docker's SIGKILL.
       setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS).unref();

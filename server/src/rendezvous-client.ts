@@ -40,6 +40,18 @@ export class RendezvousClient implements CodeRegistrar {
     return this.nasId;
   }
 
+  /** Registers the public key again (as after the service lost its registry), giving this NAS's id. */
+  reregister(): Promise<string> {
+    this.nasId = undefined;
+    return this.ensureRegistered();
+  }
+
+  /** The base64url ECDSA P-256 signature of `message` by this NAS's key (as for the signalling socket's challenge). */
+  async sign(message: Uint8Array<ArrayBuffer>): Promise<string> {
+    const { privateKey } = await this.loadKey();
+    return base64url(new Uint8Array(await crypto.subtle.sign(ECDSA_SIGN, privateKey, message)));
+  }
+
   async registerCode(codeHash: string, routes: { https: string }, expiresAt: number): Promise<void> {
     let status = await this.postCode(await this.ensureRegistered(), codeHash, routes, expiresAt);
     if (status === 401) {

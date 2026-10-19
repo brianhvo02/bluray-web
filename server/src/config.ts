@@ -1,3 +1,5 @@
+import { advertisable } from './rtc/public-address';
+
 export interface LibraryRoot {
   name: string;
   dir: string;
@@ -23,11 +25,22 @@ export interface Config {
   tmdbApiKey: string | null;
   /** `TITLE_LIBRARY`: who gets the title routes until the owner sets it. */
   titleLibrary: 'owners' | 'everyone';
+  /** The WebRTC route, served while `rendezvousUrl` is set. */
+  rtc: RtcConfig;
+}
+
+export interface RtcConfig {
+  /** `RTC_PORT`: the one UDP port ICE uses, 47998 by default. */
+  port: number;
+  /** `RTC_LAN_ADDRESS`: the NAS's LAN IPv4, advertised next to its public address. */
+  lanAddress?: string;
+  /** `RTC_ADVERTISE` (tests): advertised instead of the public and LAN addresses, with no STUN discovery. */
+  advertise?: string[];
 }
 
 const DEFAULT_PUBLIC_BASE = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
 
-/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY`, `RENDEZVOUS_URL`, `TMDB_API_KEY` and `TITLE_LIBRARY`. */
+/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY`, `RENDEZVOUS_URL`, `TMDB_API_KEY`, `TITLE_LIBRARY`, `RTC_PORT`, `RTC_LAN_ADDRESS` and `RTC_ADVERTISE`. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const roots = (env.LIBRARY_ROOTS ?? '')
     .split(',')
@@ -51,7 +64,26 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   for (const { group } of roots) {
     if (group !== undefined && seen.has(group)) throw new Error(`LIBRARY_ROOTS group "${group}" is also a root name`);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env) };
+}
+
+function parseRtc(env: Record<string, string | undefined>): RtcConfig {
+  const rtc: RtcConfig = { port: 47998 };
+  if (env.RTC_PORT !== undefined && env.RTC_PORT !== '') {
+    const port = Number(env.RTC_PORT);
+    if (!/^\d+$/.test(env.RTC_PORT) || port === 0 || port >= 65535) throw new Error(`RTC_PORT "${env.RTC_PORT}" is not a UDP port below 65535`);
+    rtc.port = port;
+  }
+  if (env.RTC_LAN_ADDRESS !== undefined && env.RTC_LAN_ADDRESS !== '') rtc.lanAddress = advertisedAddress('RTC_LAN_ADDRESS', env.RTC_LAN_ADDRESS.trim());
+  if (env.RTC_ADVERTISE !== undefined && env.RTC_ADVERTISE !== '') {
+    rtc.advertise = env.RTC_ADVERTISE.split(',').map((ip) => advertisedAddress('RTC_ADVERTISE', ip.trim()));
+  }
+  return rtc;
+}
+
+function advertisedAddress(name: string, ip: string): string {
+  if (!advertisable(ip)) throw new Error(`${name} "${ip}" is not an IPv4 address outside 172.16.0.0/12 and 100.64.0.0/10`);
+  return ip;
 }
 
 function parsePort(value: string | undefined): number {
