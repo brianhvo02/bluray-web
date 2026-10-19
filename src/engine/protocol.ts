@@ -139,8 +139,23 @@ export interface AudioTrack {
 /** Remote-control keys for disc menus (BD_VK_*); topMenu is a menu call. */
 export type MenuKey = 'up' | 'down' | 'left' | 'right' | 'ok' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'topMenu' | 'popup';
 
+/** What to hold in a NAS disc's read-ahead cache: its main playlist from `fromSeconds` on, `targetBytes` of it. */
+export interface BufferRequest {
+  readonly fromSeconds: number;
+  readonly targetBytes: number;
+}
+
 export type EngineCommand =
-  | { readonly type: 'open'; readonly disc: DiscSpec }
+  /**
+   * `bufferFirst` (a NAS disc, buffer first): the disc's playlists are read, then its main playlist is fetched into the
+   * read-ahead cache as bufferAhead does, and only then is the disc opened ('titles', First Play). cancelBuffer opens it
+   * at once; a close or another open drops it unopened.
+   */
+  | { readonly type: 'open'; readonly disc: DiscSpec; readonly bufferFirst?: BufferRequest }
+  /** Fetch the open NAS disc's main playlist from `fromSeconds` on into its read-ahead cache, `targetBytes` of it, reporting bufferProgress. */
+  | ({ readonly type: 'bufferAhead' } & BufferRequest)
+  /** Stops filling the read-ahead cache (what it holds stays). Handled at once, not queued. */
+  | { readonly type: 'cancelBuffer' }
   /** A fresh session token for the open NAS disc (a scheduled refresh, or the answer to remoteTokenNeeded). Handled at once, not queued. */
   | { readonly type: 'remoteToken'; readonly token: string }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
@@ -220,6 +235,12 @@ export type EngineEvent =
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
   /** The condition behind a notice is over (nas-waiting: the read landed). */
   | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
+  /**
+   * The read-ahead cache's fill: bytes held from the start position on, out of `targetBytes` (the request's, or all
+   * there is when that is less), and the connection's rate over the fill so far (Mbps). It is over when bytes reach
+   * targetBytes, or with the open of a bufferFirst disc.
+   */
+  | { readonly type: 'bufferProgress'; readonly bytes: number; readonly targetBytes: number; readonly mbps: number }
   /** The NAS answered 401: send remoteToken with a fresh token within 10 s, or the disc fails as unpaired. */
   | { readonly type: 'remoteTokenNeeded' }
   /**

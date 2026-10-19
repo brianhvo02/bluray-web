@@ -78,6 +78,8 @@ const player = new Player({
     const [rt, libbluray, libblurayAwt] = await Promise.all([fetchBytes(rtJarUrl), fetchBytes(libblurayJarUrl), fetchBytes(libblurayAwtJarUrl)]);
     return { rt, libbluray: brokenClassLibrary ? new Uint8Array(0) : libbluray, libblurayAwt };
   },
+  // buffer first: a NAS disc's on-disk read-ahead cache, written through sync access handles (dedicated workers only)
+  ...(typeof navigator.storage?.getDirectory === 'function' ? { readAheadCacheRoot: () => navigator.storage.getDirectory() } : {}),
   // bd_set_player_setting_str as a player application sets it: the browser's language and region
   playerSettings: playerSettingsForLocale(navigator.language),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),

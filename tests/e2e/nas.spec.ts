@@ -235,6 +235,43 @@ test("plays disc1 from the NAS after a pre-flight showing this connection's thro
   await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 });
 
+test('buffers first on a slow connection: the pre-flight asks, and Wait fills the cache, then the disc plays', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'one browser is enough for the pre-flight flow; the cache is unit-tested');
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  // ?bufferask=1: disc1 plays for 8 s, so its wait is seconds long; the flag makes the pre-flight ask before any wait.
+  const code = ownerCode();
+  await page.goto(`/?pair=${code}&telemetry=1&bufferask=1`);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+  await skipWithoutH264(page, { realtime: false });
+  // The probe throttled to about 1 Mbps (125 kB in a second), below disc1's rate (about 2.9 Mbps with the margin).
+  await page.route('**/discs/*/probe?*', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: { 'Access-Control-Allow-Origin': new URL(page.url()).origin }, body: Buffer.alloc(125_000) });
+  });
+  await page.getByTestId('nas-open').click();
+  await page.getByTestId('browse-folders').click();
+  await discRow(page, 'disc1').click();
+  await expect(page.getByTestId('nas-buffer-wait')).toHaveText('About 1 minutes before it can play straight through', { timeout: 15_000 });
+  await expect(page.getByTestId('nas-play')).toHaveText('Play now with pauses');
+  await expect(page.getByRole('button', { name: 'Lower quality (coming later)' })).toBeDisabled();
+  await page.getByTestId('nas-wait').click();
+  // disc1 opens to its playlists once the cache holds the wait's bytes
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  const cached = await page.evaluate(async () => {
+    const top = await (await navigator.storage.getDirectory()).getDirectoryHandle('read-ahead');
+    const names: string[] = [];
+    for await (const disc of (top as unknown as { values(): AsyncIterable<FileSystemDirectoryHandle> }).values()) {
+      for await (const name of (disc as unknown as { keys(): AsyncIterable<string> }).keys()) names.push(name);
+    }
+    return names;
+  });
+  expect(cached).toContain('BDMV_2fSTREAM_2f00001_2eM2TS.bin');
+  await page.getByTestId('playlist-00000').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
+});
+
 test('opens disc-menu from the NAS into its menu', async ({ page, browserName }) => {
   await openLibrary(page, browserName);
   await skipWithoutH264(page, { realtime: false });

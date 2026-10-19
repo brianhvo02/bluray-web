@@ -104,6 +104,22 @@ describe('playlist lifecycle', () => {
     expect([c.getSnapshot().remoteDisc, c.getSnapshot().rtcDisc]).toEqual([false, false]);
   });
 
+  it('opens a NAS disc buffering first, reports the fill and cancels it', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const spec = { kind: 'remote', base: 'https://nas.example/discs/a/', token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } } as const;
+    c.openRemote(spec, undefined, undefined, { fromSeconds: 0, targetBytes: 1000 });
+    expect(worker.posted[0]).toEqual({ type: 'open', disc: spec, bufferFirst: { fromSeconds: 0, targetBytes: 1000 } });
+    expect(c.getSnapshot().buffer).toBeNull();
+    worker.emit({ type: 'bufferProgress', bytes: 250, targetBytes: 1000, mbps: 12 });
+    expect(c.getSnapshot().buffer).toEqual({ bytes: 250, targetBytes: 1000, mbps: 12 });
+    c.cancelBuffer();
+    c.bufferAhead(30, 500);
+    expect(worker.posted.slice(1)).toEqual([{ type: 'cancelBuffer' }, { type: 'bufferAhead', fromSeconds: 30, targetBytes: 500 }]);
+    c.openRemote(spec);
+    expect(c.getSnapshot().buffer).toBeNull(); // a new disc starts without one
+  });
+
   it('counts every open and close, so a wait begun for one open can tell another from it', () => {
     const c = new PlayerController(new FakeWorker(), new FakeAudio());
     expect(c.discOpens).toBe(0);

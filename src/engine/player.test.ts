@@ -6,10 +6,13 @@ import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
 import { clearSegments, subtitleSegments } from '../../tests/helpers/pg-builders';
 import { fakeNas, type FakeNas } from '../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
+import { MemoryDirectory } from '../../tests/helpers/memory-fs';
 import { CLIP_START_PTS, buildSyntheticDisc, discEntries, dummyAudioStream, lpcmStream, syntheticClip, type SyntheticAudioStream, type SyntheticDiscSpec, type SyntheticPgStream, type SyntheticPlaylistSpec, type SyntheticSubPathIg } from '../../tests/helpers/synthetic-disc';
 import { readFontFile } from './ass/font-tables';
 import { createFixedMeasurer } from './ass/measure';
 import { Control, createRing, renderQuantum, ringViews, type RingViews } from './audio/ring';
+import { findEpBefore, parseClpi, stcSpnRange } from './bdmv/clpi-parser';
+import { parseMpls, type PlayItem } from './bdmv/mpls-parser';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory, type AudioDecoderFactory } from './decode/audio-decoder';
 import type { VideoCodecApi, VideoDecoderLike } from './decode/video-decoder';
@@ -110,7 +113,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
@@ -144,6 +147,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
     ...(remote ? { fetch: remote.fetch } : {}),
     ...(opts.remoteLimits ? { remoteLimits: opts.remoteLimits } : {}),
+    ...(opts.cacheRoot ? { readAheadCacheRoot: async () => opts.cacheRoot!.asHandle() } : {}),
     createCompositor: () => ({
       resize: () => undefined,
       drawVideo: (f) => {
@@ -2071,5 +2075,164 @@ describe('Player with a disc on the NAS', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('Player buffering a NAS disc ahead (buffer first)', () => {
+  const CHUNK = 64 * 1024;
+
+  /**
+   * A fake NAS that logs each range read (path and first byte). While gated, reads past each clip's first chunk wait
+   * (so the open, which reads the main clip's first unit, gets through).
+   */
+  function loggedNas(files: Map<string, Uint8Array<ArrayBuffer>>) {
+    const nas = fakeNas(files);
+    const reads: Array<{ path: string; from: number }> = [];
+    let gated = false;
+    let waiting: Array<() => void> = [];
+    const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const path = /files\/(.+?)(\?|$)/.exec(String(input))?.[1]?.split('/').map(decodeURIComponent).join('/') ?? '';
+      const from = Number(/^bytes=(\d+)-/.exec(new Headers(init?.headers).get('Range') ?? '')?.[1] ?? 0);
+      reads.push({ path, from });
+      while (gated && from >= CHUNK) await new Promise<void>((r) => waiting.push(r));
+      init?.signal?.throwIfAborted();
+      return nas.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    return {
+      nas: { ...nas, fetch },
+      reads,
+      gate: (on: boolean) => {
+        gated = on;
+        if (on) return;
+        const woken = waiting;
+        waiting = [];
+        for (const wake of woken) wake();
+      },
+    };
+  }
+
+  const progress = (h: Harness) => h.events.filter((e): e is Extract<EngineEvent, { type: 'bufferProgress' }> => e.type === 'bufferProgress');
+  /** The fill reached its target. */
+  const filled = (h: Harness) =>
+    vi.waitFor(
+      () => {
+        const last = progress(h).at(-1);
+        expect(last).toBeDefined();
+        expect(last!.bytes).toBeGreaterThanOrEqual(last!.targetBytes);
+      },
+      { timeout: 10_000 },
+    );
+
+  async function setup(extra: { noOpen?: boolean } = {}) {
+    let log!: ReturnType<typeof loggedNas>;
+    let files!: Map<string, Uint8Array<ArrayBuffer>>;
+    const cacheRoot = new MemoryDirectory();
+    const h = await harness(undefined, {
+      frameBytes: 20_000, // clips of about 2 MB: many chunks, and several keyframes in each EP map
+      remoteLimits: { chunkBytes: CHUNK, readAheadBytes: 2 * CHUNK }, // the open's own read-ahead stops at once
+      cacheRoot,
+      remote: (f) => ((files = f), (log = loggedNas(f)).nas),
+      ...extra,
+    });
+    if (!extra.noOpen) await h.play(50); // the open's reads (the first clip's first unit, and read-ahead) land
+    const streamSize = (id: string) => files.get(`BDMV/STREAM/${id}.m2ts`)!.length;
+    return { h, log, files, cacheRoot, streamSize };
+  }
+
+  it('fills the cache from the EP map entry for fromSeconds, reporting progress', async () => {
+    const { h, log, files, streamSize } = await setup();
+    log.reads.length = 0;
+    // 5 s is 1 s into the second play item (clips of 4 s)
+    await h.player.handle({ type: 'bufferAhead', fromSeconds: 5, targetBytes: Number.MAX_SAFE_INTEGER });
+    await filled(h);
+    const [first, item] = parseMpls(files.get('BDMV/PLAYLIST/00000.mpls')!).playItems as [PlayItem, PlayItem];
+    const clipTime45 = item.inTime + 5 * 45_000 - (first.outTime - first.inTime);
+    const clpi = parseClpi(files.get('BDMV/CLIPINF/00002.clpi')!);
+    const spn = findEpBefore(clpi.epMaps[0]!, clipTime45, stcSpnRange(clpi, item.stcId))!.spn;
+    expect(spn).toBeGreaterThan(0);
+    const start = Math.floor((spn * SOURCE_PACKET_SIZE) / CHUNK) * CHUNK;
+    const streamReads = log.reads.filter((r) => r.path.includes('/STREAM/'));
+    expect(streamReads.every((r) => r.path === 'BDMV/STREAM/00002.M2TS')).toBe(true);
+    expect(Math.min(...streamReads.map((r) => r.from))).toBe(start); // two are in flight at once, so they may log out of order
+    const last = progress(h).at(-1)!;
+    expect(last.targetBytes).toBe(streamSize('00002') - start); // all there is from there on
+    expect(progress(h).length).toBeGreaterThan(5);
+    expect(progress(h).map((p) => p.bytes)).toEqual([...progress(h).map((p) => p.bytes)].sort((a, b) => a - b));
+  });
+
+  it('then plays from the cache without reading the network', async () => {
+    const { h, log } = await setup();
+    await h.player.handle({ type: 'bufferAhead', fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER });
+    await filled(h);
+    log.reads.length = 0;
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(500);
+    expect(h.drawn.length).toBeGreaterThan(5);
+    expect(log.reads).toEqual([]);
+  });
+
+  it('stops at targetBytes', async () => {
+    const { h, log } = await setup();
+    log.reads.length = 0;
+    await h.player.handle({ type: 'bufferAhead', fromSeconds: 0, targetBytes: 3 * CHUNK });
+    await filled(h);
+    await h.play(100);
+    expect(log.reads.length).toBeLessThanOrEqual(3 + 2); // the target, and what was in flight
+    expect(progress(h).at(-1)?.targetBytes).toBe(3 * CHUNK);
+  });
+
+  it('cancelBuffer stops it', async () => {
+    const { h, log } = await setup();
+    log.reads.length = 0;
+    log.gate(true);
+    await h.player.handle({ type: 'bufferAhead', fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER });
+    await vi.waitFor(() => expect(log.reads.length).toBeGreaterThan(0));
+    await h.player.handle({ type: 'cancelBuffer' });
+    const readsAtCancel = log.reads.length;
+    const progressAtCancel = progress(h).length;
+    log.gate(false);
+    await h.play(200);
+    expect(log.reads.length).toBe(readsAtCancel);
+    expect(progress(h).length).toBe(progressAtCancel);
+  });
+
+  it('opened with bufferFirst, starts the disc only once the cache holds the target', async () => {
+    const { h, log } = await setup({ noOpen: true });
+    log.gate(true);
+    const opening = h.player.handle({ type: 'open', disc: (log.nas as FakeNas).spec, bufferFirst: { fromSeconds: 0, targetBytes: 4 * CHUNK } });
+    await vi.waitFor(() => expect(progress(h).length).toBeGreaterThan(0)); // the fill began
+    expect(h.events.some((e) => e.type === 'titles')).toBe(false);
+    log.gate(false);
+    await opening;
+    const firstTitles = h.events.findIndex((e) => e.type === 'titles');
+    const lastProgress = h.events.findLastIndex((e) => e.type === 'bufferProgress');
+    expect(firstTitles).toBeGreaterThan(lastProgress);
+    expect(progress(h).at(-1)!.bytes).toBeGreaterThanOrEqual(4 * CHUNK);
+  });
+
+  it('opened with bufferFirst, opens at once on cancelBuffer (play now with pauses)', async () => {
+    const { h, log } = await setup({ noOpen: true });
+    log.gate(true);
+    const opening = h.player.handle({ type: 'open', disc: (log.nas as FakeNas).spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });
+    await vi.waitFor(() => expect(progress(h).length).toBeGreaterThan(0)); // the fill began
+    await h.player.handle({ type: 'cancelBuffer' }); // not queued behind the open
+    await opening;
+    expect(h.events.some((e) => e.type === 'titles')).toBe(true);
+    log.gate(false);
+  });
+
+  it('opened with bufferFirst, a close while it fills drops the disc without opening it', async () => {
+    const { h, log } = await setup({ noOpen: true });
+    log.gate(true);
+    const opening = h.player.handle({ type: 'open', disc: (log.nas as FakeNas).spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });
+    await vi.waitFor(() => expect(progress(h).length).toBeGreaterThan(0)); // the fill began
+    const closing = h.player.handle({ type: 'close' });
+    log.gate(false);
+    await opening;
+    await closing;
+    expect(h.events.some((e) => e.type === 'titles')).toBe(false);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    expect(lastState(h)).toBe('idle');
   });
 });

@@ -28,6 +28,15 @@ export interface RemoteSourceOptions {
 
 /** A read pending this long shows "Waiting for the NAS drive…" (spun-down disks take seconds to start). */
 export const WAITING_AFTER_MS = 3_000;
+/** Range requests in flight at most while filling the on-disk cache (buffer first). */
+export const FILL_IN_FLIGHT = 2;
+
+/** Where chunks are looked for before the network: the disc's on-disk read-ahead cache (ReadAheadCache). */
+export interface ChunkCache {
+  read(path: string, offset: number, length: number): Promise<Uint8Array | null>;
+  write(path: string, offset: number, bytes: Uint8Array): Promise<void>;
+  has(path: string, offset: number, length: number): Promise<boolean>;
+}
 
 interface Chunk {
   readonly key: string;
@@ -60,6 +69,7 @@ export class RemoteSource implements ByteSource {
   private cursor: { readonly path: string; readonly index: number } | null = null;
   private waitingReads = 0;
   private closed = false;
+  private cache: ChunkCache | null = null;
 
   constructor(
     manifest: DiscManifest,
@@ -68,6 +78,11 @@ export class RemoteSource implements ByteSource {
   ) {
     for (const f of manifest.files) this.sizes.set(f.path.toUpperCase(), f.size);
     for (const [path, base64] of Object.entries(manifest.inline)) this.inline.set(path.toUpperCase(), decodeBase64(base64));
+  }
+
+  /** Size of one range request; chunks are aligned to it in each file. */
+  get chunkBytes(): number {
+    return this.opts.chunkBytes;
   }
 
   /** Bytes held by the read-ahead cache, fetched or in flight. */
@@ -125,6 +140,53 @@ export class RemoteSource implements ByteSource {
 
   setToken(token: string): void {
     this.transport.setToken(token);
+  }
+
+  /** Chunks are read from `cache` when it holds them, before the network. */
+  setCache(cache: ChunkCache | null): void {
+    this.cache = cache;
+  }
+
+  /**
+   * Fetches `path`'s chunks covering `start`..`end` (aligned out to whole chunks) into the cache, in order, and
+   * FILL_IN_FLIGHT at a time; chunks the cache holds already are not fetched again. After each chunk, `onChunk` gets
+   * its size and whether it came over the network, and answers whether to go on. Resolves false when it was stopped
+   * that way, true at the end of the range; rejects when `signal` aborts or a read fails.
+   */
+  async fill(path: string, start: number, end: number, signal: AbortSignal, onChunk: (bytes: number, fromNetwork: boolean) => boolean): Promise<boolean> {
+    const cache = this.cache;
+    if (!cache) throw new Error('this disc has no read-ahead cache');
+    const key = path.toUpperCase();
+    const size = this.get(path);
+    const chunkBytes = this.opts.chunkBytes;
+    const last = Math.ceil(Math.min(end, size) / chunkBytes) - 1;
+    let next = Math.floor(start / chunkBytes);
+    const stop = new AbortController();
+    const onAbort = (): void => stop.abort(signal.reason);
+    signal.throwIfAborted();
+    signal.addEventListener('abort', onAbort, { once: true });
+    const queue: Array<{ readonly offset: number; readonly length: number; readonly bytes: Promise<Uint8Array | null> }> = [];
+    const startOne = (): void => {
+      const offset = next++ * chunkBytes;
+      const length = Math.min(chunkBytes, size - offset);
+      const bytes = (async () => ((await cache.has(key, offset, length)) ? null : this.transport.read(key, offset, length, stop.signal)))();
+      bytes.catch(() => undefined); // awaited in order below; one abandoned on a stop must not go unhandled
+      queue.push({ offset, length, bytes });
+    };
+    try {
+      while (next <= last && queue.length < FILL_IN_FLIGHT) startOne();
+      for (let head = queue.shift(); head; head = queue.shift()) {
+        const bytes = await abortable(head.bytes, stop.signal); // a stop doesn't wait for a read the network holds up
+        stop.signal.throwIfAborted();
+        if (bytes) await cache.write(key, head.offset, bytes);
+        if (!onChunk(head.length, bytes !== null)) return false;
+        if (next <= last) startOne();
+      }
+      return true;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      stop.abort(new DOMException('the fill is over', 'AbortError'));
+    }
   }
 
   /** Aborts every fetch and drops the cache (the disc was closed). */
@@ -217,7 +279,7 @@ export class RemoteSource implements ByteSource {
     const size = Math.min(this.opts.chunkBytes, fileSize - start);
     const controller = new AbortController();
     this.fetching++;
-    const promise = this.transport.read(path, start, size, controller.signal);
+    const promise = this.readThrough(path, start, size, controller.signal);
     const chunk: Chunk = { key, path, index, size, controller, promise, bytes: null, pending: true, waiters: 0 };
     this.chunks.set(key, chunk);
     this.held += size;
@@ -234,6 +296,17 @@ export class RemoteSource implements ByteSource {
       },
     );
     return chunk;
+  }
+
+  /** A chunk from the cache when it holds it, else from the network. */
+  private async readThrough(path: string, start: number, size: number, signal: AbortSignal): Promise<Uint8Array> {
+    const cache = this.cache;
+    if (cache) {
+      const cached = await cache.read(path, start, size).catch(() => null);
+      signal.throwIfAborted();
+      if (cached) return cached;
+    }
+    return this.transport.read(path, start, size, signal);
   }
 
   /** Starts read-ahead after the cursor while requests and the budget allow. */

@@ -39,7 +39,12 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .badge { border: 1px solid #4a4a55; border-radius: 4px; padding: 0 6px; font-size: 0.8em; }
 .preflight { display: flex; flex-direction: column; gap: 8px; }
 .preflight h3, .preflight p { margin: 0; }
-.preflight-actions { display: flex; gap: 8px; }
+.preflight-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.buffer-progress { display: flex; align-items: center; gap: 12px; }
+.buffer-ring { width: 40px; height: 40px; transform: rotate(-90deg); }
+.buffer-ring circle { fill: none; stroke-width: 3; }
+.buffer-ring-track { stroke: #3a3a42; }
+.buffer-ring-fill { stroke: #6ea8ff; stroke-linecap: round; transition: stroke-dasharray 0.3s; }
 
 .player { position: relative; height: 100%; background: #000; overflow: hidden; }
 .player.idle { cursor: auto; }

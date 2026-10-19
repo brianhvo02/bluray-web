@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
+import type { BufferRequest } from '../../engine/protocol';
 import type { PlayerController } from '../../player/player-controller';
-import { discBadges, discFacts, formatSize, openFailed, preflightLines, type DiscFacts } from './library-model';
+import { bufferPlan, playlistFacts, storageRoom, tooBigCopy, waitCopy, type BufferPlan } from './buffer-model';
+import { discBadges, discFacts, formatSize, mainPlaylist, openFailed, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
 import { NasHttpError, type NasClient } from './nas-client';
 import { playOnceOpen } from './play-once-open';
@@ -25,22 +27,34 @@ interface PreflightProps {
 const message = (err: unknown): string =>
   err instanceof NasHttpError && err.code === 'disc-changed' ? DISC_CHANGED_MESSAGE : err instanceof Error ? err.message : String(err);
 
-/** Before a NAS disc plays: its manifest, this connection's throughput against the disc's peak rate, and Play. */
+/** ?bufferask=1 is test-only (E2E): every wait asks first (no silent buffering), so `ask` shows with a short synthetic disc. */
+const askEveryWait = (): boolean => new URLSearchParams(globalThis.location?.search ?? '').get('bufferask') === '1';
+
+/**
+ * Before a NAS disc plays: its manifest, this connection's throughput against the disc's peak rate, and Play. When the
+ * connection is slower than the main title (buffer first), Play buffers ahead first: silently for a short wait, else
+ * after asking (Wait, or Play now with pauses); a device that can't hold the wait offers pauses.
+ */
 export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel }: PreflightProps): ReactElement {
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
   const [facts, setFacts] = useState<DiscFacts | null>(null);
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
   const [mbps, setMbps] = useState<number | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  /** 'launched' once the engine opens the disc: an open that fails there (shown as the player's error) ends it. */
-  const [opening, setOpening] = useState<'idle' | 'starting' | 'launched'>('idle');
+  /** The storage the read-ahead cache can use, asked for only when the connection is slower than the title. */
+  const [quota, setQuota] = useState<number | undefined>(undefined);
+  /**
+   * 'launched' once the engine opens the disc ('buffering' while it buffers first): an open that fails there (shown as
+   * the player's error) ends it.
+   */
+  const [opening, setOpening] = useState<'idle' | 'starting' | 'buffering' | 'launched'>('idle');
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const engineFailed = openFailed(snapshot);
   /** Releases the wait for this open's playlists (playOnceOpen); this pre-flight going away ends it too. */
   const releaseWait = useRef<(() => void) | null>(null);
   useEffect(() => () => releaseWait.current?.(), []);
   useEffect(() => {
-    if (opening === 'launched' && engineFailed) setOpening('idle');
+    if ((opening === 'launched' || opening === 'buffering') && engineFailed) setOpening('idle');
   }, [opening, engineFailed]);
 
   useEffect(() => {
@@ -72,7 +86,30 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
     // The probe runs once per disc opened here; onFacts is left out on purpose (a new callback is no new disc).
   }, [nas, disc.id]);
 
-  const play = (): void => {
+  /** The main title's length and bytes against this connection; null until both are known (or with no title). */
+  const need = useMemo(() => {
+    const main = manifest && mainPlaylist(manifest);
+    if (!main || typeof mbps !== 'number') return null;
+    const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
+    return { ...playlistFacts(main.playItems, sizes), connectionMbps: mbps };
+  }, [manifest, mbps]);
+  /** Whether the connection keeps up, before the storage is asked for (persist() can prompt). */
+  const keepsUp = need !== null && bufferPlan({ ...need, quotaBytes: Infinity }).kind === 'play';
+  useEffect(() => {
+    if (need === null || keepsUp) return;
+    let live = true;
+    void storageRoom(globalThis.navigator?.storage).then((room) => {
+      if (live) setQuota(room);
+    });
+    return () => {
+      live = false;
+    };
+  }, [need, keepsUp]);
+  /** null while unknown: Play then plays at once, as without a measurement. */
+  const plan: BufferPlan | null =
+    need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(askEveryWait() ? { silentBelowS: 0 } : {}) });
+
+  const play = (bufferFirst?: BufferRequest): void => {
     if (!manifest) return;
     controller.startAudio(); // inside the click gesture
     setOpening('starting');
@@ -82,16 +119,25 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
         const { spec, release } = nasDiscSpec(base, token, manifest, nas.discFetch);
-        controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release);
+        controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst);
         releaseWait.current?.();
         releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
-        setOpening('launched');
+        setOpening(bufferFirst ? 'buffering' : 'launched');
       },
     ).catch((err: unknown) => {
       setOpening('idle');
       setError(message(err));
     });
   };
+
+  /** Buffer first: the bytes the plan holds ahead, from the start of the main title. */
+  const waitFor = (bytes: number): void => play({ fromSeconds: 0, targetBytes: Math.ceil(bytes) });
+  const stopWaiting = (): void => {
+    controller.closeDisc(); // the engine drops the disc unopened
+    setOpening('idle');
+  };
+  const buffer = snapshot.buffer;
+  const percent = buffer && buffer.targetBytes > 0 ? Math.min(100, Math.floor((buffer.bytes / buffer.targetBytes) * 100)) : 0;
 
   const lines = preflightLines(mbps ?? null, facts?.peakMbps ?? null);
   const badges = discBadges(disc, facts?.uhd);
@@ -119,14 +165,61 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
           {error}
         </div>
       )}
-      <div className="preflight-actions">
-        <button type="button" data-testid="nas-play" disabled={!manifest || opening !== 'idle'} onClick={play}>
-          Play
-        </button>
-        <button type="button" onClick={onCancel}>
-          Back
-        </button>
-      </div>
+      {opening === 'buffering' ? (
+        <>
+          <div className="buffer-progress" data-testid="nas-buffering" role="progressbar" aria-label="Buffering" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+            <svg viewBox="0 0 36 36" className="buffer-ring" aria-hidden="true">
+              <circle cx="18" cy="18" r="15.5" className="buffer-ring-track" />
+              <circle cx="18" cy="18" r="15.5" className="buffer-ring-fill" pathLength={100} strokeDasharray={`${percent} 100`} />
+            </svg>
+            <span>Buffering… {percent}%</span>
+          </div>
+          <div className="preflight-actions">
+            <button type="button" data-testid="nas-play-now" onClick={() => controller.cancelBuffer()}>
+              Play now with pauses
+            </button>
+            <button type="button" onClick={stopWaiting}>
+              Back
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          {plan?.kind === 'ask' && (
+            <p className="status" data-testid="nas-buffer-wait">
+              {waitCopy(plan.waitS)}
+            </p>
+          )}
+          {plan?.kind === 'too-big' && (
+            <p className="status" data-testid="nas-buffer-too-big">
+              {tooBigCopy(plan.canHoldBytes, plan.bytes)}
+            </p>
+          )}
+          <div className="preflight-actions">
+            {plan?.kind === 'ask' && (
+              <button type="button" data-testid="nas-wait" disabled={!manifest || opening !== 'idle'} onClick={() => waitFor(plan.bytes)}>
+                Wait
+              </button>
+            )}
+            <button
+              type="button"
+              data-testid="nas-play"
+              disabled={!manifest || opening !== 'idle'}
+              onClick={() => (plan?.kind === 'silent' ? waitFor(plan.bytes) : play())}
+            >
+              {plan?.kind === 'ask' || plan?.kind === 'too-big' ? 'Play now with pauses' : 'Play'}
+            </button>
+            {plan?.kind === 'ask' && (
+              <button type="button" disabled>
+                Lower quality (coming later)
+              </button>
+            )}
+            <button type="button" onClick={onCancel}>
+              Back
+            </button>
+          </div>
+        </>
+      )}
     </section>
   );
 }

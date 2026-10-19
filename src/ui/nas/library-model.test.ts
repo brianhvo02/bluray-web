@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DiscEntry, DiscManifest, FolderEntry } from '../../engine/disc/nas-api';
 import { fakeNas } from '../../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
-import { breadcrumbs, discBadges, discFacts, folderMemory, formatSize, openFailed, preflightLines, sortRows } from './library-model';
+import { breadcrumbs, discBadges, discFacts, folderMemory, formatSize, mainPlaylist, openFailed, preflightLines, sortRows } from './library-model';
 
 const folder = (name: string, path = `drv5/${name}`): FolderEntry => ({ name, path, discs: 1 });
 const disc = (name: string, kind: DiscEntry['kind'] = 'folder', sizeBytes = 1): DiscEntry => ({ id: name, name, path: `drv5/${name}`, kind, sizeBytes });
@@ -93,6 +93,14 @@ describe('discFacts', () => {
     const files = [{ path: 'BDMV/PLAYLIST/00000.MPLS', size: 3 }];
     const manifest: DiscManifest = { discId: 'x', name: 'x', files, inline: { 'BDMV/PLAYLIST/00000.MPLS': 'AAAA' } };
     expect(discFacts(manifest)).toEqual({ peakMbps: null, uhd: false });
+  });
+});
+
+describe('mainPlaylist', () => {
+  it("is the main title's playlist, or null when no playlist can be read", () => {
+    expect(mainPlaylist(disc1Manifest())?.playItems.map((p) => p.clipId)).toEqual(['00001', '00002']);
+    const manifest: DiscManifest = { discId: 'x', name: 'x', files: [{ path: 'BDMV/PLAYLIST/00000.MPLS', size: 3 }], inline: { 'BDMV/PLAYLIST/00000.MPLS': 'AAAA' } };
+    expect(mainPlaylist(manifest)).toBeNull();
   });
 });
 
