@@ -938,6 +938,9 @@ export class Player {
         if (this.filling === fill) this.deps.emit({ type: 'bufferProgress', ...p });
       },
       nowMs: () => this.deps.nowMs(),
+      setTimer: this.deps.setTimer ?? defaultSetTimer,
+      // a flap (nas-lost, a 5xx, a full disk that eviction may free) is retried; these are not
+      permanent: (err) => err instanceof RemoteDiscError && (err.reason === 'disc-changed' || err.reason === 'nas-unpaired'),
     });
     this.filling = fill;
     remote.setWriteThrough(follow);

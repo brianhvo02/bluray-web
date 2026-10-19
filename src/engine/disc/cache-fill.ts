@@ -11,6 +11,14 @@ import type { ByteRange } from './read-ahead-cache';
 /** Range requests the fill keeps in flight. */
 export const FILL_IN_FLIGHT = 2;
 
+/**
+ * A failed fill read is tried again after these delays (then every 10 s) for as long as the disc is open: on WebRTC
+ * over cellular the link flaps, and a read that succeeds after a reconnect resumes the fill where it stopped.
+ */
+export const FILL_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000, 10_000];
+/** A fill whose reads have failed without a break for this long stops ('failed'). */
+export const FILL_GIVE_UP_MS = 120_000;
+
 /** Why a fill ended early: a read or a cache write failed, or there is no cache on this device. */
 export type FillStop = 'failed' | 'no-cache';
 
@@ -46,12 +54,18 @@ export interface CacheFillDeps {
   readonly targetBytes: number;
   progress(p: FillProgress): void;
   nowMs(): number;
+  /** One-shot timer for the retries, cancelled by the returned function. */
+  setTimer(ms: number, fn: () => void): () => void;
+  /** A failure no retry can mend (the disc changed on the NAS, this device is no longer paired): the fill stops at once. */
+  permanent(err: unknown): boolean;
 }
 
 interface Fetch {
   readonly path: string;
   readonly offset: number;
   readonly controller: AbortController;
+  /** Order of starting, so a fetch started before a failure doesn't count as the link coming back. */
+  readonly seq: number;
 }
 
 /**
@@ -69,6 +83,14 @@ export class CacheFill {
   private stopped = false;
   private readonly inFlight = new Map<string, Fetch>();
   private failure = false;
+  /** Failed rounds in a row (a round: from a failure to its retry), and when the first of them failed. */
+  private failures = 0;
+  private failingSinceMs: number | null = null;
+  /** Waiting to try again: no fetch starts until the timer ends it. */
+  private cancelRetry: (() => void) | null = null;
+  private seq = 0;
+  /** The last fetch started when a read last failed. */
+  private failedAtSeq = -1;
   private networkBytes = 0;
   private last = '';
 
@@ -89,6 +111,8 @@ export class CacheFill {
   /** Ends the fill; what the cache holds stays. */
   stop(): void {
     this.stopped = true;
+    this.cancelRetry?.();
+    this.cancelRetry = null;
     for (const f of this.inFlight.values()) f.controller.abort(new DOMException('the fill stopped', 'AbortError'));
     this.inFlight.clear();
     this.poke();
@@ -122,12 +146,12 @@ export class CacheFill {
           this.resolveReached();
           if (!this.deps.follow) return;
         }
-        while (this.inFlight.size < FILL_IN_FLIGHT) {
+        while (this.inFlight.size < FILL_IN_FLIGHT && !this.cancelRetry) {
           const next = this.nextMissing(ranges, cb);
           if (!next) break;
           this.start(next.path, next.offset);
         }
-        if (this.inFlight.size === 0) {
+        if (this.inFlight.size === 0 && !this.cancelRetry) {
           this.resolveReached(); // all there is ahead is held
           if (!this.deps.follow) return;
         }
@@ -141,17 +165,43 @@ export class CacheFill {
 
   private start(path: string, offset: number): void {
     const key = `${path}\n${offset}`;
-    const f: Fetch = { path, offset, controller: new AbortController() };
+    const f: Fetch = { path, offset, controller: new AbortController(), seq: this.seq++ };
     this.inFlight.set(key, f);
     this.deps.remote.fillChunk(path, offset, f.controller.signal).then(
       (n) => {
         this.networkBytes += n;
+        if (f.seq > this.failedAtSeq) {
+          // a read started after the last failure came through: the link is back
+          this.failures = 0;
+          this.failingSinceMs = null;
+        }
       },
-      () => {
-        if (!f.controller.signal.aborted) this.failure = true; // a read or a cache write failed (a full disk)
+      (err: unknown) => {
+        if (!f.controller.signal.aborted && !this.stopped) this.failed(err);
       },
     ).finally(() => {
       if (this.inFlight.get(key) === f) this.inFlight.delete(key);
+      this.poke();
+    });
+  }
+
+  /**
+   * A read (or a cache write) failed: a failure no retry mends, or two minutes of them, stops the fill; otherwise it
+   * waits FILL_RETRY_MS and fetches the same chunk again (the first one missing ahead).
+   */
+  private failed(err: unknown): void {
+    const now = this.deps.nowMs();
+    this.failingSinceMs ??= now;
+    this.failedAtSeq = this.seq - 1;
+    if (this.deps.permanent(err) || now - this.failingSinceMs >= FILL_GIVE_UP_MS) {
+      this.failure = true;
+      return;
+    }
+    if (this.cancelRetry) return; // this round is already waiting
+    const delay = FILL_RETRY_MS[Math.min(this.failures, FILL_RETRY_MS.length - 1)]!;
+    this.failures++;
+    this.cancelRetry = this.deps.setTimer(delay, () => {
+      this.cancelRetry = null;
       this.poke();
     });
   }

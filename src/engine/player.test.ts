@@ -2088,7 +2088,7 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
   /**
    * A fake NAS that logs each range read (path, first byte, and whether it was aborted). Reads of a clip at or past its
    * limit wait until the limit is raised; gate(true) limits every clip to its first chunk (so the open, which reads the
-   * main clip's first unit, gets through). `failFrom` makes reads at or past it fail with 500.
+   * main clip's first unit, gets through). `failFrom` makes stream reads at or past it answer that the disc changed.
    */
   function loggedNas(files: Map<string, Uint8Array<ArrayBuffer>>) {
     const nas = fakeNas(files);
@@ -2109,7 +2109,7 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
       init?.signal?.addEventListener('abort', () => (read.aborted = true));
       while (from >= (limits.get(path) ?? limits.get('*') ?? Infinity) && !init?.signal?.aborted) await new Promise<void>((r) => waiting.push(r));
       init?.signal?.throwIfAborted();
-      if (path.includes('/STREAM/') && from >= failFrom) return new Response('boom', { status: 500 });
+      if (path.includes('/STREAM/') && from >= failFrom) return Response.json({ error: 'disc-changed' }, { status: 404 });
       return nas.fetch(input, init);
     }) as typeof globalThis.fetch;
     return {
@@ -2254,7 +2254,7 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     expect(progress(h).filter((p) => p.stopped === 'no-cache')).toHaveLength(2);
   });
 
-  it('says so when a read fails, and a bufferFirst open then opens', async () => {
+  it('says so when a read fails for good (the disc changed), and a bufferFirst open then opens', async () => {
     const { h, log, spec } = await setup({ noOpen: true });
     log.failFrom(2 * CHUNK);
     await h.player.handle({ type: 'open', disc: spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });
