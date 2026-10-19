@@ -1,7 +1,7 @@
 import type { CodeLookup, DiscEntry, DiscManifest, DiscRef, FolderEntry, OwnerChoice, OwnTitle, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
-import { codeHashOf, turnProofMessage } from '../../../rendezvous/src/protocol';
+import { codeHashOf, isNasId, turnProofMessage } from '../../../rendezvous/src/protocol';
 import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
 import { RTC_BASE, RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { DeviceProof, RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
@@ -105,6 +105,8 @@ export interface NasMe {
   readonly personName: string;
   /** The relay's usage while the relay is on, else null. */
   readonly relay?: NasRelayUsage | null;
+  /** The NAS's rendezvous id, null when it has no rendezvous (older servers leave it out). */
+  readonly nasId?: string | null;
 }
 
 /** `GET admin/metadata/status`: the title matcher's progress and counts. */
@@ -426,7 +428,8 @@ export class NasClient {
   /**
    * Whether this device is an owner, whether it may browse by title (the release gate), and whose device it is. When
    * the owner status or person name differs from the stored pairing's (changed by an owner, or a pairing stored before
-   * people), the stored pairing takes the NAS's, so `pairing()` gives it from then on.
+   * people), the stored pairing takes the NAS's, so `pairing()` gives it from then on; so does the NAS's rendezvous id
+   * when the pairing lacks it (made before the WebRTC route) or holds another.
    */
   async me(): Promise<NasMe> {
     const generation = this.generation;
@@ -435,8 +438,15 @@ export class NasClient {
     if (!pairing || generation !== this.generation) return me;
     const personName = typeof me.personName === 'string' ? me.personName : pairing.personName;
     const owner = typeof me.owner === 'boolean' ? me.owner : pairing.owner;
-    if (personName !== pairing.personName || owner !== pairing.owner) {
-      const updated: NasPairing = { ...pairing, owner, ...(personName === undefined ? {} : { personName }) };
+    // a pairing made before the WebRTC route has no NAS id, so route choice could only ever pick HTTPS
+    const nasId = isNasId(me.nasId) ? me.nasId : pairing.nasId;
+    if (personName !== pairing.personName || owner !== pairing.owner || nasId !== pairing.nasId) {
+      const updated: NasPairing = {
+        ...pairing,
+        owner,
+        ...(personName === undefined ? {} : { personName }),
+        ...(nasId === undefined ? {} : { nasId }),
+      };
       this.current = updated;
       await this.deps.store.put(updated);
     }

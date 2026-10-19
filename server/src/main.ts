@@ -99,7 +99,9 @@ async function serve(config: Config): Promise<void> {
   library.onScanned(() => void titles.runNow());
   const rendezvous = rendezvousRegistrar(config);
   const relay = new RelayState(config.dataDir, Date.now);
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay });
+  // the key's thumbprint, read (or made) locally: `me` gives it to pairings made before the WebRTC route
+  const nasId = rendezvous ? await rendezvous.localNasId() : null;
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId });
   const server = createServer(handlers);
   const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 

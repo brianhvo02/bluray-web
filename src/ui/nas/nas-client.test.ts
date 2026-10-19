@@ -415,6 +415,46 @@ describe('NasClient', () => {
     expect((await nas.pairing())?.owner).toBe(false);
   });
 
+  it("stores the NAS's id from `me` on a pairing made before WebRTC, so route choice can use it", async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad');
+    const { nasId: _none, ...old } = store.value!;
+    store.value = old;
+    const fresh = client(server, store);
+    expect((await fresh.pairing())?.nasId).toBeUndefined();
+    const real = server.fetch;
+    let nasId: unknown = 'N'.repeat(43);
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      if (route === 'me') return Response.json({ owner: true, titleLibrary: true, personId: 'p0', personName: old.personName, nasId });
+      server.nas = undefined;
+      try {
+        return await real(url, init);
+      } finally {
+        server.nas = answer;
+      }
+    };
+    server.nas = answer;
+    const put = vi.spyOn(store, 'put');
+    await fresh.me();
+    expect(store.value).toEqual({ ...old, nasId: 'N'.repeat(43) });
+    expect((await fresh.pairing())?.nasId).toBe('N'.repeat(43));
+    await fresh.me();
+    expect(put).toHaveBeenCalledOnce();
+    // a different id (the NAS made a new key) replaces it; null or junk (no rendezvous) keeps what is stored
+    nasId = 'M'.repeat(43);
+    await fresh.me();
+    expect(store.value?.nasId).toBe('M'.repeat(43));
+    for (const value of [null, 'not an id', 42]) {
+      nasId = value;
+      await fresh.me();
+      expect(store.value?.nasId).toBe('M'.repeat(43));
+    }
+    expect(put).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();

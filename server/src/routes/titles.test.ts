@@ -97,7 +97,7 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number } = {}): Promise<void> {
+async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number; nasId?: string | null } = {}): Promise<void> {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
   relay = new RelayState(data, () => clock);
@@ -113,7 +113,7 @@ async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: num
     now: () => clock, setTimer: () => () => {},
   });
   await service.runNow();
-  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, relay, lookupTimeoutMs: opts.lookupTimeoutMs }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, relay, lookupTimeoutMs: opts.lookupTimeoutMs, nasId: opts.nasId }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -199,11 +199,17 @@ describe('title routes', () => {
   it('reports both flags and the person on GET /api/me', async () => {
     await start();
     const person = expect.any(String);
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest', relay: null });
-    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner', relay: null });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest', relay: null, nasId: null });
+    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner', relay: null, nasId: null });
     owner.setGate('everyone');
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest', relay: null });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest', relay: null, nasId: null });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
+  });
+
+  it("gives the NAS's rendezvous id in GET /api/me, so a pairing made before WebRTC can learn it", async () => {
+    await start({ nasId: 'N'.repeat(43) });
+    const me = (await (await get('/api/me', await token(false))).json()) as { nasId: unknown };
+    expect(me.nasId).toBe('N'.repeat(43));
   });
 
   it("adds the relay's usage to GET /api/me while the relay is on", async () => {

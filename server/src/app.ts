@@ -28,6 +28,8 @@ export interface AppOptions {
   titles?: TitleLibrary;
   /** The Cloudflare relay's settings and usage (admin, and `me`). */
   relay?: RelayState;
+  /** This NAS's rendezvous id, given in `me`; null (the default) without a rendezvous. */
+  nasId?: string | null;
   /** How long an owner's lookup may take. Default 10 s. */
   lookupTimeoutMs?: number;
 }
@@ -52,7 +54,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
       titles: opts.titles, relay: opts.relay, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
     }),
     libraryRoute(opts.library),
-    ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay)] : []),
+    ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay, opts.nasId ?? null)] : []),
     discRoutes(opts.library),
   ];
 }
