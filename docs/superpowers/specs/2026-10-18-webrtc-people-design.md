@@ -1,7 +1,7 @@
 # People, Saved Data and the WebRTC Route (Step 3) — Design Spec
 
 Date: 2026-10-18
-Status: Approved by the user 2026-10-18.
+Status: Approved by the user 2026-10-18. Release 1 (people, §4, and the BD-J store, §5) built on `feat/people-store`; the WebRTC route, relay and buffering (§6–§7) follow the spike.
 Parent spec: `2026-10-16-cross-browser-and-remote-design.md` §5 (step 3). Builds on `2026-10-17-nas-server-design.md` (pairing, rendezvous) and `2026-10-17-nas-library-titles-design.md` (the title library). Where this document and the parent disagree, this one wins for step 3.
 
 ## 1. Intent
