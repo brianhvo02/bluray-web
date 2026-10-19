@@ -1,4 +1,5 @@
 import type { OwnerChoice, TitleKind } from '../../../src/engine/disc/nas-api';
+import { AuthConflict } from '../auth';
 import type { Auth } from '../auth';
 import { formatCode, pairingLink } from '../codes';
 import type { CodeRegistrar } from '../codes';
@@ -78,12 +79,15 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
           devices: auth.devices().map(({ id, name, owner, pairedAt, lastSeen }) => ({ id, name, owner, pairedAt, lastSeen })),
         });
       case 'GET codes':
-        return json(200, { codes: auth.codes().map(({ id, owner, expiresAt }) => ({ id, owner, expiresAt })) });
+        {
+        const owners = new Set(auth.people().filter((p) => p.owner).map((p) => p.id));
+        return json(200, { codes: auth.codes().map(({ id, personId, expiresAt }) => ({ id, owner: owners.has(personId), expiresAt })) });
+      }
       case 'POST codes': {
         const body = await readJson(req);
         const owner = (body as { owner?: unknown } | null)?.owner;
         if (typeof owner !== 'boolean') throw new HttpError(400, 'bad request');
-        const { record, code } = auth.createCode({ owner });
+        const { record, code } = auth.createCode(owner ? { personId: auth.firstOwnerPerson().id } : { newPerson: { name: 'Guest', owner: false } });
         let rendezvous = false;
         if (opts.registrar) {
           try {
@@ -101,12 +105,13 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       }
       case 'DELETE devices/:id': {
         const target = decode(id!);
-        const devices = auth.devices();
-        const found = devices.find((d) => d.id === target);
-        if (!found) return json(404, { error: 'unknown device' });
-        // Synchronous from here to the revoke, so two owners can't remove each other at once. `owner-code` recovers anyway.
-        if (found.owner && devices.filter((d) => d.owner).length === 1) return json(409, { error: 'last-owner' });
-        auth.revokeDevice(target);
+        if (!auth.devices().some((d) => d.id === target)) return json(404, { error: 'unknown device' });
+        try {
+          auth.revokeDevice(target);
+        } catch (err) {
+          if (err instanceof AuthConflict) return json(409, { error: err.reason });
+          throw err;
+        }
         return { status: 204 };
       }
       case 'DELETE codes/:id': {

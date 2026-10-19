@@ -110,7 +110,7 @@ function fakeServer(): FakeServer {
     listed,
     lookupRateLimited: false,
     async code(routes = { https: BASE }) {
-      const { record, code } = auth.createCode({ owner: true });
+      const { record, code } = auth.createCode({ personId: auth.firstOwnerPerson().id });
       codes.set(record.hash, { nasId: 'nas1', routes });
       return code;
     },
@@ -301,6 +301,8 @@ describe('NasClient', () => {
     const nas = client(server, store);
     await nas.pair(await server.code(), 'iPad');
     await nas.library('');
+    // The server refuses to revoke the last owner device, so another owner device is paired first.
+    await client(server, memoryStore()).pair(await server.code(), 'Mac');
     server.auth.revokeDevice(store.value!.deviceId);
     await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
     expect(NAS_MESSAGES.unpaired).toBe('This device is no longer paired with the NAS.');
@@ -340,6 +342,8 @@ describe('NasClient', () => {
     await nas.pair(await server.code(), 'iPad');
     const unpaired = vi.fn();
     const unsubscribe = nas.onUnpaired(unpaired);
+    // The server refuses to revoke the last owner device, so another owner device is paired first.
+    await client(server, memoryStore()).pair(await server.code(), 'Mac');
     server.auth.revokeDevice(store.value!.deviceId);
     await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
     expect(unpaired).toHaveBeenCalledTimes(1);

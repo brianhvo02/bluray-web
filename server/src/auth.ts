@@ -1,28 +1,62 @@
 import { createHmac, createPublicKey, randomBytes, timingSafeEqual, verify as verifySignature } from 'node:crypto';
 import type { webcrypto } from 'node:crypto';
 import { codeHash, newCode, normalizeCode } from './codes';
-import type { Store } from './store';
+import type { AuthData, Store } from './store';
 
 type JsonWebKey = webcrypto.JsonWebKey;
 
-export interface Device {
+export interface Person {
   readonly id: string;
-  readonly name: string;
-  readonly owner: boolean;
+  name: string;
+  owner: boolean;
+  readonly createdAt: number;
+}
+
+/** A device as stored: its owner status comes from its person. */
+export interface StoredDevice {
+  readonly id: string;
+  name: string;
+  personId: string;
   readonly publicKeyJwk: JsonWebKey;
   readonly pairedAt: number;
   lastSeen: number;
+}
+
+/** What `verify`, `devices` and `redeem` return: the stored device with its person's name and owner status. */
+export interface Device extends StoredDevice {
+  readonly owner: boolean;
+  readonly personName: string;
 }
 
 export interface PairingCode {
   readonly id: string;
   /** codeHash() of the code; the code itself is never stored. */
   readonly hash: string;
-  readonly owner: boolean;
+  readonly personId: string;
+  readonly invite: boolean;
   readonly expiresAt: number;
 }
 
+export type PersonRef = { personId: string } | { newPerson: { name: string; owner: boolean } };
+
+/** An admin action would leave no device belonging to an owner. */
+export class AuthConflict extends Error {
+  constructor(readonly reason: 'last-owner') {
+    super(reason);
+    this.name = 'AuthConflict';
+  }
+}
+
+export class AuthNotFound extends Error {
+  constructor(what = 'not found') {
+    super(what);
+    this.name = 'AuthNotFound';
+  }
+}
+
 const CODE_TTL_MS = 10 * 60_000;
+export const INVITE_TTL_MS = 3 * 24 * 60 * 60_000;
+const MAX_PERSON_NAME = 100;
 const CHALLENGE_TTL_MS = 60_000;
 const MAX_CHALLENGES_PER_DEVICE = 5;
 const SESSION_TTL_MS = 60 * 60_000;
@@ -31,6 +65,24 @@ const SIGNATURE_BYTES = 64;
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
 const randomId = (): string => randomBytes(16).toString('base64url');
+
+/** A person's name, trimmed; a RangeError (routes answer 400) unless it is 1 to 100 characters. */
+function personName(raw: string): string {
+  const name = raw.trim();
+  if (name.length < 1 || name.length > MAX_PERSON_NAME) throw new RangeError(`a person's name is 1 to ${MAX_PERSON_NAME} characters`);
+  return name;
+}
+
+/** Devices that belong to an owner person. */
+function ownerDeviceCount(data: AuthData): number {
+  const owners = new Set(data.people.filter((p) => p.owner).map((p) => p.id));
+  return data.devices.filter((d) => owners.has(d.personId)).length;
+}
+
+/** Runs after a change to `data`: throws when it took the last owner device away. */
+function keepOwner(before: number, data: AuthData): void {
+  if (before > 0 && ownerDeviceCount(data) === 0) throw new AuthConflict('last-owner');
+}
 
 /** The public P-256 key as `{kty, crv, x, y}`, or null for anything else (private keys included). */
 export function p256PublicJwk(jwk: unknown): JsonWebKey | null {
@@ -62,14 +114,25 @@ export class Auth {
     store.secret();
   }
 
-  /** A single-use code valid 10 minutes; only its hash is kept. */
-  createCode(opts: { owner: boolean }): { record: PairingCode; code: string } {
+  /** A single-use code for a person, valid 10 minutes (3 days for an invite); only its hash is kept. A new person is made with the code. */
+  createCode(person: PersonRef, opts: { invite?: boolean } = {}): { record: PairingCode; code: string; person: Person } {
     const code = newCode((n) => randomBytes(n));
-    const record: PairingCode = { id: randomId(), hash: codeHash(code), owner: opts.owner, expiresAt: this.now() + CODE_TTL_MS };
-    this.store.update((data) => {
+    const invite = opts.invite === true;
+    const now = this.now();
+    const newName = 'newPerson' in person ? personName(person.newPerson.name) : null;
+    return this.store.update((data) => {
+      let owner: Person | undefined;
+      if ('newPerson' in person) {
+        owner = { id: randomId(), name: newName!, owner: person.newPerson.owner, createdAt: now };
+        data.people.push(owner);
+      } else {
+        owner = data.people.find((p) => p.id === person.personId);
+        if (!owner) throw new AuthNotFound('unknown person');
+      }
+      const record: PairingCode = { id: randomId(), hash: codeHash(code), personId: owner.id, invite, expiresAt: now + (invite ? INVITE_TTL_MS : CODE_TTL_MS) };
       data.codes = [...this.live(data.codes), record];
+      return { record, code, person: { ...owner } };
     });
-    return { record, code };
   }
 
   /** Spends the code and pairs the device, or null for an unknown, used or expired code or an unusable key. */
@@ -85,10 +148,12 @@ export class Auth {
       const found = codes.find((c) => c.hash === hash);
       data.codes = codes.filter((c) => c !== found);
       if (!found) return null;
+      const person = data.people.find((p) => p.id === found.personId);
+      if (!person) return null;
       const now = this.now();
-      const device: Device = { id: randomId(), name: deviceName.trim(), owner: found.owner, publicKeyJwk: key, pairedAt: now, lastSeen: now };
+      const device: StoredDevice = { id: randomId(), name: deviceName.trim(), personId: person.id, publicKeyJwk: key, pairedAt: now, lastSeen: now };
       data.devices.push(device);
-      return device;
+      return { ...device, owner: person.owner, personName: person.name };
     });
   }
 
@@ -150,11 +215,78 @@ export class Auth {
     return this.device(text.slice(0, dot));
   }
 
+  /** Throws AuthConflict('last-owner') when this is the last device of an owner. */
   revokeDevice(id: string): void {
     this.store.update((data) => {
+      const before = ownerDeviceCount(data);
       data.devices = data.devices.filter((d) => d.id !== id);
+      keepOwner(before, data);
     });
-    for (const [c, entry] of this.challenges) if (entry.deviceId === id) this.challenges.delete(c);
+    this.dropChallenges((deviceId) => deviceId === id);
+  }
+
+  people(): Person[] {
+    return this.store.read().people.map((p) => ({ ...p }));
+  }
+
+  createPerson(name: string, owner: boolean): Person {
+    const person: Person = { id: randomId(), name: personName(name), owner, createdAt: this.now() };
+    this.store.update((data) => {
+      data.people.push(person);
+    });
+    return { ...person };
+  }
+
+  updatePerson(id: string, change: { name?: string; owner?: boolean }): Person {
+    const name = change.name === undefined ? undefined : personName(change.name);
+    return this.store.update((data) => {
+      const person = data.people.find((p) => p.id === id);
+      if (!person) throw new AuthNotFound('unknown person');
+      const before = ownerDeviceCount(data);
+      if (name !== undefined) person.name = name;
+      if (change.owner !== undefined) person.owner = change.owner;
+      keepOwner(before, data);
+      return { ...person };
+    });
+  }
+
+  /** Removes the person and revokes their devices; their saved data is the caller's to clear. */
+  removePerson(id: string): void {
+    const gone = new Set<string>();
+    this.store.update((data) => {
+      if (!data.people.some((p) => p.id === id)) throw new AuthNotFound('unknown person');
+      const before = ownerDeviceCount(data);
+      for (const d of data.devices) if (d.personId === id) gone.add(d.id);
+      data.devices = data.devices.filter((d) => d.personId !== id);
+      data.codes = data.codes.filter((c) => c.personId !== id);
+      data.people = data.people.filter((p) => p.id !== id);
+      keepOwner(before, data);
+    });
+    this.dropChallenges((deviceId) => gone.has(deviceId));
+  }
+
+  moveDevice(deviceId: string, personId: string): void {
+    this.store.update((data) => {
+      const device = data.devices.find((d) => d.id === deviceId);
+      if (!device) throw new AuthNotFound('unknown device');
+      if (!data.people.some((p) => p.id === personId)) throw new AuthNotFound('unknown person');
+      const before = ownerDeviceCount(data);
+      device.personId = personId;
+      keepOwner(before, data);
+    });
+  }
+
+  /** The first owner person; made, named Owner, when there is none. */
+  firstOwnerPerson(): Person {
+    const existing = this.store.read().people.find((p) => p.owner);
+    if (existing) return { ...existing };
+    return this.store.update((data) => {
+      const found = data.people.find((p) => p.owner);
+      if (found) return { ...found };
+      const person: Person = { id: randomId(), name: 'Owner', owner: true, createdAt: this.now() };
+      data.people.push(person);
+      return { ...person };
+    });
   }
 
   deleteCode(id: string): void {
@@ -164,7 +296,8 @@ export class Auth {
   }
 
   devices(): Device[] {
-    return this.store.read().devices.map((d) => ({ ...d }));
+    const data = this.store.read();
+    return data.devices.flatMap((d) => this.derive(data, d) ?? []);
   }
 
   /** Codes not yet used or expired. */
@@ -173,8 +306,18 @@ export class Auth {
   }
 
   private device(id: string): Device | null {
-    const found = this.store.read().devices.find((d) => d.id === id);
-    return found ? { ...found } : null;
+    const data = this.store.read();
+    const found = data.devices.find((d) => d.id === id);
+    return found ? this.derive(data, found) : null;
+  }
+
+  private derive(data: AuthData, stored: StoredDevice): Device | null {
+    const person = data.people.find((p) => p.id === stored.personId);
+    return person ? { ...stored, owner: person.owner, personName: person.name } : null;
+  }
+
+  private dropChallenges(gone: (deviceId: string) => boolean): void {
+    for (const [c, entry] of this.challenges) if (gone(entry.deviceId)) this.challenges.delete(c);
   }
 
   private live(codes: readonly PairingCode[]): PairingCode[] {

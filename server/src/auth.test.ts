@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appHandlers } from './app';
-import { Auth } from './auth';
+import { Auth, AuthConflict, AuthNotFound } from './auth';
 import { ownerCode } from './cli';
 import { codeHash } from './codes';
 import type { CodeRegistrar } from './codes';
@@ -29,6 +29,11 @@ afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 const MINUTE = 60_000;
 
+/** A code for a new guest, or for the first owner person. */
+function mint(auth: Auth, owner: boolean) {
+  return auth.createCode(owner ? { personId: auth.firstOwnerPerson().id } : { newPerson: { name: 'Guest', owner: false } });
+}
+
 async function deviceKey(): Promise<{ jwk: JsonWebKey; sign: (text: string) => Promise<string> }> {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
@@ -47,7 +52,7 @@ async function session(auth: Auth, deviceId: string, sign: (text: string) => Pro
 describe('Auth', () => {
   it('redeems a code once', async () => {
     const auth = new Auth(new Store(tmp), now);
-    const { code } = auth.createCode({ owner: false });
+    const { code } = mint(auth, false);
     const { jwk } = await deviceKey();
     expect(auth.redeem(code, 'iPad', jwk)).not.toBeNull();
     expect(auth.redeem(code, 'iPad', jwk)).toBeNull();
@@ -55,14 +60,14 @@ describe('Auth', () => {
 
   it('accepts the code typed loosely', async () => {
     const auth = new Auth(new Store(tmp), now);
-    const { code } = auth.createCode({ owner: false });
+    const { code } = mint(auth, false);
     const typed = `${code.slice(0, 4).toLowerCase()}-${code.slice(4, 8)} ${code.slice(8)}`;
     expect(auth.redeem(typed, 'iPad', (await deviceKey()).jwk)).not.toBeNull();
   });
 
   it('refuses a code 10 minutes old', async () => {
     const auth = new Auth(new Store(tmp), now);
-    const { code, record } = auth.createCode({ owner: false });
+    const { code, record } = mint(auth, false);
     expect(record.expiresAt).toBe(clock + 10 * MINUTE);
     clock += 10 * MINUTE;
     expect(auth.redeem(code, 'iPad', (await deviceKey()).jwk)).toBeNull();
@@ -71,8 +76,8 @@ describe('Auth', () => {
   it('makes owner devices from owner codes only', async () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk } = await deviceKey();
-    const owner = auth.redeem(auth.createCode({ owner: true }).code, 'Mac', jwk)!;
-    const plain = auth.redeem(auth.createCode({ owner: false }).code, 'Phone', jwk)!;
+    const owner = auth.redeem(auth.createCode({ personId: auth.firstOwnerPerson().id }).code, 'Mac', jwk)!;
+    const plain = auth.redeem(mint(auth, false).code, 'Phone', jwk)!;
     expect(owner.owner).toBe(true);
     expect(plain.owner).toBe(false);
     expect(owner.name).toBe('Mac');
@@ -81,7 +86,7 @@ describe('Auth', () => {
 
   it('refuses a private or non-P-256 key without spending the code', async () => {
     const auth = new Auth(new Store(tmp), now);
-    const { code } = auth.createCode({ owner: false });
+    const { code } = mint(auth, false);
     const priv = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
     const p384 = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-384' }, true, ['sign', 'verify']);
     expect(auth.redeem(code, 'x', await crypto.subtle.exportKey('jwk', priv.privateKey))).toBeNull();
@@ -93,7 +98,7 @@ describe('Auth', () => {
   it('starts a session from a signed challenge', async () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk, sign } = await deviceKey();
-    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
+    const device = auth.redeem(mint(auth, false).code, 'iPad', jwk)!;
     const started = await session(auth, device.id, sign);
     expect(started).not.toBeNull();
     expect(started!.expiresAt).toBe(clock + 60 * MINUTE);
@@ -104,7 +109,7 @@ describe('Auth', () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk, sign } = await deviceKey();
     const other = await deviceKey();
-    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
+    const device = auth.redeem(mint(auth, false).code, 'iPad', jwk)!;
 
     const c1 = auth.challenge(device.id)!;
     expect(auth.startSession(device.id, c1, await other.sign(c1))).toBeNull();
@@ -128,7 +133,7 @@ describe('Auth', () => {
   it('verifies a token until it expires', async () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk, sign } = await deviceKey();
-    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
+    const device = auth.redeem(mint(auth, false).code, 'iPad', jwk)!;
     const { token, expiresAt } = (await session(auth, device.id, sign))!;
     clock = expiresAt - 1;
     expect(auth.verify(token)).not.toBeNull();
@@ -139,7 +144,7 @@ describe('Auth', () => {
   it('refuses forged and malformed tokens', async () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk, sign } = await deviceKey();
-    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
+    const device = auth.redeem(mint(auth, false).code, 'iPad', jwk)!;
     const { token } = (await session(auth, device.id, sign))!;
     const [, mac] = token.split('.');
     const longer = Buffer.from(`${device.id}.${clock + 1e9}`).toString('base64url');
@@ -153,7 +158,7 @@ describe('Auth', () => {
   it('rejects tokens of a revoked device at once', async () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk, sign } = await deviceKey();
-    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
+    const device = auth.redeem(mint(auth, false).code, 'iPad', jwk)!;
     const { token } = (await session(auth, device.id, sign))!;
     auth.revokeDevice(device.id);
     expect(auth.verify(token)).toBeNull();
@@ -162,8 +167,8 @@ describe('Auth', () => {
 
   it('keeps only code hashes on disk, with private file modes, and survives a restart', async () => {
     const auth = new Auth(new Store(tmp), now);
-    const { code, record } = auth.createCode({ owner: true });
-    const unused = auth.createCode({ owner: false });
+    const { code, record } = auth.createCode({ personId: auth.firstOwnerPerson().id });
+    const unused = mint(auth, false);
     const { jwk, sign } = await deviceKey();
     const device = auth.redeem(code, 'Mac', jwk)!;
     const { token } = (await session(auth, device.id, sign))!;
@@ -180,21 +185,21 @@ describe('Auth', () => {
     expect(again.devices().map((d) => d.id)).toEqual([device.id]);
     expect(again.codes().map((c) => c.id)).toEqual([unused.record.id]);
     expect(again.redeem(code, 'Mac', jwk)).toBeNull();
-    expect(record.owner).toBe(true);
+    expect(record.personId).toBe(again.people()[0]!.id);
   });
 
   it('sees codes made by another process on the same data dir', async () => {
     const server = new Auth(new Store(tmp), now);
     server.devices();
     const cli = new Auth(new Store(tmp), now);
-    const { code } = cli.createCode({ owner: true });
+    const { code } = cli.createCode({ personId: cli.firstOwnerPerson().id });
     expect(server.redeem(code, 'Mac', (await deviceKey()).jwk)?.owner).toBe(true);
   });
 
   it('deletes codes and drops expired ones from the list', () => {
     const auth = new Auth(new Store(tmp), now);
-    const a = auth.createCode({ owner: false });
-    const b = auth.createCode({ owner: false });
+    const a = mint(auth, false);
+    const b = mint(auth, false);
     auth.deleteCode(a.record.id);
     expect(auth.codes().map((c) => c.id)).toEqual([b.record.id]);
     clock += 10 * MINUTE;
@@ -204,8 +209,8 @@ describe('Auth', () => {
   it('keeps at most 5 challenges per device, dropping the oldest', async () => {
     const auth = new Auth(new Store(tmp), now);
     const { jwk, sign } = await deviceKey();
-    const device = auth.redeem(auth.createCode({ owner: false }).code, 'iPad', jwk)!;
-    const other = auth.redeem(auth.createCode({ owner: false }).code, 'Phone', jwk)!;
+    const device = auth.redeem(mint(auth, false).code, 'iPad', jwk)!;
+    const other = auth.redeem(mint(auth, false).code, 'Phone', jwk)!;
     const otherChallenge = auth.challenge(other.id)!;
     const challenges = Array.from({ length: 6 }, () => auth.challenge(device.id)!);
     expect(auth.startSession(device.id, challenges[0]!, await sign(challenges[0]!))).toBeNull();
@@ -232,7 +237,103 @@ describe('Auth', () => {
     const auth = new Auth(new Store(tmp), now);
     expect(() => auth.devices()).toThrow(message);
     expect(() => auth.verify('a.b')).not.toThrow();
-    expect(() => auth.createCode({ owner: true })).toThrow(message);
+    expect(() => auth.createCode({ personId: auth.firstOwnerPerson().id })).toThrow(message);
+  });
+});
+
+describe('People', () => {
+  const pair = async (auth: Auth, ref: Parameters<Auth['createCode']>[0], name: string) => {
+    const { jwk, sign } = await deviceKey();
+    const { code } = auth.createCode(ref);
+    const device = auth.redeem(code, name, jwk)!;
+    return { device, token: (await session(auth, device.id, sign))!.token };
+  };
+
+  it('codes name their person', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const { code, person } = auth.createCode({ newPerson: { name: 'Mika', owner: false } });
+    expect(person.name).toBe('Mika');
+    const device = auth.redeem(code, 'Phone', (await deviceKey()).jwk)!;
+    expect(device.personName).toBe('Mika');
+    expect(device.personId).toBe(person.id);
+    expect(device.owner).toBe(false);
+  });
+
+  it('invite codes last 3 days', () => {
+    const auth = new Auth(new Store(tmp), now);
+    const { record } = auth.createCode({ newPerson: { name: 'Mika', owner: false } }, { invite: true });
+    expect(record.invite).toBe(true);
+    expect(record.expiresAt).toBe(clock + 3 * 24 * 60 * 60_000);
+    expect(auth.createCode({ personId: record.personId }).record.expiresAt).toBe(clock + 10 * MINUTE);
+  });
+
+  it('owner is derived from the person', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const { device, token } = await pair(auth, { newPerson: { name: 'Mika', owner: false } }, 'Phone');
+    expect(auth.verify(token)!.owner).toBe(false);
+    auth.updatePerson(device.personId, { owner: true });
+    expect(auth.verify(token)!.owner).toBe(true);
+    expect(auth.devices()[0]!.owner).toBe(true);
+  });
+
+  it('refuses to leave no owner device', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const owner = await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');
+    const mika = auth.createPerson('Mika', false);
+    const conflict = (fn: () => void): void => {
+      try {
+        fn();
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(AuthConflict);
+        expect((err as AuthConflict).reason).toBe('last-owner');
+      }
+    };
+    conflict(() => auth.revokeDevice(owner.device.id));
+    conflict(() => auth.moveDevice(owner.device.id, mika.id));
+    conflict(() => auth.updatePerson(owner.device.personId, { owner: false }));
+    conflict(() => auth.removePerson(owner.device.personId));
+    expect(auth.verify(owner.token)?.owner).toBe(true);
+    expect(auth.people().find((p) => p.id === owner.device.personId)?.owner).toBe(true);
+  });
+
+  it('lets an owner device go when another remains', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const a = await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');
+    const b = await pair(auth, { personId: a.device.personId }, 'Laptop');
+    auth.revokeDevice(a.device.id);
+    expect(auth.verify(a.token)).toBeNull();
+    expect(auth.verify(b.token)).not.toBeNull();
+  });
+
+  it('removing a person revokes their devices and codes', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');
+    const mika = await pair(auth, { newPerson: { name: 'Mika', owner: false } }, 'Phone');
+    const pending = auth.createCode({ personId: mika.device.personId });
+    auth.removePerson(mika.device.personId);
+    expect(auth.verify(mika.token)).toBeNull();
+    expect(auth.people().map((p) => p.name)).toEqual(['Owner']);
+    expect(auth.codes().map((c) => c.id)).not.toContain(pending.record.id);
+  });
+
+  it('names unknown people and devices, and bad names', () => {
+    const auth = new Auth(new Store(tmp), now);
+    expect(() => auth.updatePerson('nobody', { name: 'X' })).toThrow(AuthNotFound);
+    expect(() => auth.removePerson('nobody')).toThrow(AuthNotFound);
+    expect(() => auth.moveDevice('nobody', 'nobody')).toThrow(AuthNotFound);
+    expect(() => auth.createCode({ personId: 'nobody' })).toThrow(AuthNotFound);
+    expect(() => auth.createPerson('   ', false)).toThrow(RangeError);
+    expect(() => auth.createPerson('x'.repeat(101), false)).toThrow(RangeError);
+    expect(auth.createPerson('  Mika  ', false).name).toBe('Mika');
+  });
+
+  it('firstOwnerPerson makes Owner once', () => {
+    const auth = new Auth(new Store(tmp), now);
+    const first = auth.firstOwnerPerson();
+    expect(first).toMatchObject({ name: 'Owner', owner: true });
+    expect(auth.firstOwnerPerson().id).toBe(first.id);
+    expect(auth.people()).toHaveLength(1);
   });
 });
 
@@ -319,7 +420,7 @@ describe('HTTP', () => {
 
   async function pairedToken(owner: boolean): Promise<string> {
     const { jwk, sign } = await deviceKey();
-    const { code } = auth.createCode({ owner });
+    const { code } = mint(auth, owner);
     const redeemed = await post('/api/pair/redeem', { code, deviceName: owner ? 'Mac' : 'Phone', publicKeyJwk: jwk });
     expect(redeemed.status).toBe(200);
     const { deviceId, owner: isOwner } = (await redeemed.json()) as { deviceId: string; owner: boolean };
@@ -476,7 +577,7 @@ describe('HTTP', () => {
     const { jwk } = await deviceKey();
     const bad = { code: 'K7QM-4XP2-R9TD', deviceName: 'x', publicKeyJwk: jwk };
     for (let i = 0; i < 10; i++) expect((await post('/api/pair/redeem', bad)).status).toBe(401);
-    const { code } = auth.createCode({ owner: false });
+    const { code } = mint(auth, false);
     const blocked = await post('/api/pair/redeem', { ...bad, code });
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get('retry-after')).toBe('60');

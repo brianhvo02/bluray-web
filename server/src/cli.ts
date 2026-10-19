@@ -24,7 +24,7 @@ export async function ownerCode(
   rendezvous?: { registrar: CodeRegistrar; publicBase: string },
 ): Promise<void> {
   const auth = new Auth(new Store(dataDir), now);
-  const { code, record } = auth.createCode({ owner: true });
+  const { code, record } = auth.createCode({ personId: auth.firstOwnerPerson().id });
   const link = pairingLink(code);
   print(`Owner pairing code: ${formatCode(code)}`);
   print(`Pairing link: ${link}`);

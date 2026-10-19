@@ -68,6 +68,11 @@ function fakeSource(results: Record<string, Entry[]>): MetadataSource & { down: 
   return src;
 }
 
+/** A code for a new guest, or for the first owner person. */
+function mint(auth: Auth, owner: boolean) {
+  return auth.createCode(owner ? { personId: auth.firstOwnerPerson().id } : { newPerson: { name: 'Guest', owner: false } });
+}
+
 let tmp: string;
 let clock: number;
 let base = '';
@@ -116,7 +121,7 @@ async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: num
 async function token(isOwner: boolean): Promise<string> {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
-  const { code } = auth.createCode({ owner: isOwner });
+  const { code } = mint(auth, isOwner);
   const device = auth.redeem(code, isOwner ? 'Mac' : 'Phone', jwk)!;
   const challenge = auth.challenge(device.id)!;
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new TextEncoder().encode(challenge));
