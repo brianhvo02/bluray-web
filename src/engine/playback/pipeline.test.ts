@@ -183,6 +183,17 @@ describe('PlaybackPipeline IG', () => {
 });
 
 describe('PlaybackPipeline', () => {
+  it('drops the video PID when nothing decodes it, still reading the audio from the EP map position', async () => {
+    const config = { ...(await setup()), readVideo: false };
+    const { got, done } = run(config, 3_000_000);
+    await done;
+    expect(got.video).toEqual([]);
+    expect(got.audio.length).toBeGreaterThan(0);
+    expect(got.audio[0]!.ptsUs).toBeLessThanOrEqual(3_000_000);
+    expect(got.audio[0]!.ptsUs).toBeGreaterThan(2_000_000);
+    expect(got.ended).toBe(1);
+  });
+
   it('reads both play items in order on one continuous timeline', async () => {
     const { got, done } = run(await setup(), 0);
     await done;

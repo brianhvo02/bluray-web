@@ -262,6 +262,10 @@ export type EngineEvent =
    * the order the discs were opened: what serves that port on the main thread can stop now without failing its reads.
    */
   | { readonly type: 'fetchPortClosed' }
+  /**
+   * A stream the browser can't decode. kind 'video' with NO_PICTURE_MESSAGE: the playlist plays without a picture (once per
+   * disc, however many such playlists play).
+   */
   | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }
@@ -269,3 +273,6 @@ export type EngineEvent =
   | { readonly type: 'playlistCleared' }
   /** On every shader set change and compile result; `error` explains 'error' and 'unavailable'. */
   | { readonly type: 'shaderStatus'; readonly state: ShaderState; readonly set: string | null; readonly error: string | null };
+
+/** The once-per-disc notice of a playlist whose video (MPEG-2, VC-1) the browser can't decode: it plays without a picture. */
+export const NO_PICTURE_MESSAGE = "This disc's video can't be played here yet, so it will play without a picture.";

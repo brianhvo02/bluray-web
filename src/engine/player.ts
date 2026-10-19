@@ -52,7 +52,7 @@ import { AssRenderer } from './ass/renderer';
 import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import type { AudioTrack, BufferRequest, BdjMemoryTelemetry, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
+import { NO_PICTURE_MESSAGE, type AudioTrack, type BufferRequest, type BdjMemoryTelemetry, type EngineCommand, type EngineEvent, type FileData, type MenuKey, type NoticeCode, type PlaybackState, type ShaderSetData, type SubtitleChoice } from './protocol';
 import type { FromBdj } from './bdj/worker-protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
@@ -298,7 +298,8 @@ interface Session {
   readonly chapters: readonly Chapter[];
   readonly tracks: readonly AudioTrack[];
   readonly videoCodingType: number;
-  readonly decoder: WebCodecsVideoDecoder;
+  /** Null when the browser can't decode the video (MPEG-2, VC-1): the playlist plays without a picture, as in libbluray. */
+  readonly decoder: WebCodecsVideoDecoder | null;
   readonly pipeline: PlaybackPipeline;
   readonly playItems: readonly PlayItem[];
   /** 1-based STN audio stream number; null when the playlist has no playable audio. */
@@ -315,6 +316,8 @@ interface Session {
   videoState: 'unconfigured' | 'configuring' | 'configured' | 'failed';
   pendingVideo: VideoUnit[];
   dropBeforeUs: number;
+  /** Without a picture: the latest PTS the reader delivered since the last start (read-ahead is paced on it). */
+  readUs: number;
   eof: boolean;
   flushed: boolean;
   /** Decoder flush issued at end of input (only after the compressed backlog drains). */
@@ -412,6 +415,8 @@ export class Player {
   private bdj: BdjTitle | null = null;
   /** Taps on a BD-J menu that brought no reaction (telemetry). */
   private bdjTapsIgnored = 0;
+  /** The no-picture notice was sent for the disc that is open (once per disc). */
+  private noPictureNoticed = false;
   /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
   private planeSeen: { plane: GraphicsPlaneReader; version: number; hash: string | null } | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
@@ -654,7 +659,9 @@ export class Player {
     this.paint(frame, now);
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
-    if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= (last?.timestamp ?? 0) + 100_000) {
+    // without a picture the playlist ends when the reader has reached its end and the clock the playlist's
+    const endUs = s.decoder ? (last?.timestamp ?? 0) + 100_000 : s.timeline.durationUs;
+    if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= endUs) {
       this.wantPlaying = false;
       this.ring?.setPlaying(false);
       this.clock.setRunning(false);
@@ -779,6 +786,7 @@ export class Player {
     this.bdjStartup = null;
     this.bdjLatency = new InputLatency();
     this.bdjTapsIgnored = 0;
+    this.noPictureNoticed = false;
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
@@ -1837,8 +1845,12 @@ export class Player {
       const codec = [...new Set(choice.unsupportedAudio.map((a) => codingName(a.codingType)))].join(', ');
       this.deps.emit({ type: 'unsupported', kind: 'audio', codec, message: `This playlist's audio (${codec}) can't be played yet, so video will play without sound.` });
     }
-    if (!isSupportedVideoCoding(choice.video.codingType)) {
-      throw new UnsupportedCodecError(choice.video.codingType, `${codingName(choice.video.codingType)} video is not supported.`);
+    // libbluray opens a playlist whatever its video: one the browser can't decode plays without a picture (audio,
+    // subtitles, menus and the clock run), with a notice once per disc
+    const picture = isSupportedVideoCoding(choice.video.codingType);
+    if (!picture && !this.noPictureNoticed) {
+      this.noPictureNoticed = true;
+      this.deps.emit({ type: 'unsupported', kind: 'video', codec: codingName(choice.video.codingType), message: NO_PICTURE_MESSAGE });
     }
     // With a disc program (HDMV or BD-J) the audio stream register (PSR1) decides, when it names a playable stream
     let audioIndex = choice.audioIndex;
@@ -1852,22 +1864,28 @@ export class Player {
     const audioActive = audioEntry !== null && this.ring !== null;
     if (audioEntry && !this.ring) this.notice('audio-disabled', 'Audio output is not available, so video will play without sound.');
 
-    const decoder = new WebCodecsVideoDecoder(this.deps.videoCodecApi);
+    const decoder = picture ? new WebCodecsVideoDecoder(this.deps.videoCodecApi) : null;
     const ref: { current: Session | null } = { current: null };
+    const read = (ptsUs: number): void => {
+      if (ref.current && ptsUs > ref.current.readUs) ref.current.readUs = ptsUs;
+    };
     const pipeline = new PlaybackPipeline(
-      { source, timeline, clips, videoPid: choice.video.pid, playItems: mpls.playItems, audioStream: audioActive ? audioIndex : null, igStream: this.igStreamNumber() },
+      { source, timeline, clips, videoPid: choice.video.pid, readVideo: picture, playItems: mpls.playItems, audioStream: audioActive ? audioIndex : null, igStream: this.igStreamNumber() },
       {
         video: (u) => {
           if (ref.current) this.onVideoUnit(ref.current, u);
         },
         audio: (u) => {
+          read(u.ptsUs);
           if (ref.current) this.onAudioUnit(ref.current, u);
         },
         ig: (u) => {
+          read(u.ptsUs);
           // units of a superseded session or a torn-down navigator are dropped
           if (ref.current && ref.current === this.session) this.navigator?.pushIg(u);
         },
         pg: (u) => {
+          read(u.ptsUs);
           // outside the play item's IN/OUT time PG is filtered out, as libbluray's m2ts_filter does
           if (ref.current && ref.current === this.session && u.inRange) this.pg?.push(u);
         },
@@ -1904,6 +1922,7 @@ export class Player {
       videoState: 'unconfigured',
       pendingVideo: [],
       dropBeforeUs: 0,
+      readUs: -Infinity,
       eof: false,
       flushed: false,
       flushStarted: false,
@@ -1911,14 +1930,16 @@ export class Player {
       audioRecoveryQueued: false,
     };
     ref.current = session;
-    decoder.onOutput = (frame) => {
-      if (this.session === session) {
-        this.codedWidth = frame.codedWidth;
-        this.presenter.push(frame);
-      }
-      else frame.close();
-    };
-    decoder.onError = (err) => this.onDecoderError(session, err);
+    if (decoder) {
+      decoder.onOutput = (frame) => {
+        if (this.session === session) {
+          this.codedWidth = frame.codedWidth;
+          this.presenter.push(frame);
+        }
+        else frame.close();
+      };
+      decoder.onError = (err) => this.onDecoderError(session, err);
+    }
     this.session = session;
     this.audioDecodeErrors = 0;
     this.audioCodec = null;
@@ -2204,7 +2225,7 @@ export class Player {
     this.seekGeneration++;
     s.pipeline.stop();
     this.pg?.seek();
-    s.decoder.close();
+    s.decoder?.close();
     for (const d of s.audioDecoders.values()) d.close();
     s.audioDecoders.clear();
     this.presenter.clear();
@@ -2263,8 +2284,9 @@ export class Player {
     s.pipeline.stop();
     this.navigator?.seekGraphics(); // queued units from the old read position are dropped; the menu stays
     this.pg?.seek(); // GC_CTRL_PG_RESET in _seek_internal: the subtitle on screen goes
-    if (s.videoState === 'configured') s.decoder.reset();
+    if (s.videoState === 'configured') s.decoder?.reset();
     s.pendingVideo = [];
+    s.readUs = -Infinity;
     s.decimator?.reset();
     s.eof = false;
     s.flushed = false;
@@ -2382,6 +2404,8 @@ export class Player {
   }
 
   private onVideoUnit(s: Session, u: PipelineUnit): void {
+    const decoder = s.decoder;
+    if (!decoder) return; // no picture: the pipeline does not read the video PID
     const unit: VideoUnit = { data: u.data, ptsUs: u.ptsUs, discard: !u.inRange || u.ptsUs < s.dropBeforeUs };
     switch (s.videoState) {
       case 'configured':
@@ -2397,10 +2421,10 @@ export class Player {
         if (!hasSps(s.videoCodingType, u.data)) return;
         s.videoState = 'configuring';
         s.pendingVideo.push(unit);
-        s.decoder.configure({ codingType: s.videoCodingType, firstUnit: u.data }).then(
+        decoder.configure({ codingType: s.videoCodingType, firstUnit: u.data }).then(
           () => {
             if (this.session !== s) {
-              s.decoder.close(); // configure() finished after teardown and opened a fresh decoder
+              decoder.close(); // configure() finished after teardown and opened a fresh decoder
               return;
             }
             s.videoState = 'configured';
@@ -2513,10 +2537,11 @@ export class Player {
 
   /** Moves compressed video into the decoder while the decoded-frame and decode-queue caps allow. */
   private feedDecoder(s: Session): void {
-    if (s.videoState !== 'configured') return;
+    const decoder = s.decoder;
+    if (s.videoState !== 'configured' || !decoder) return;
     let fed = 0;
-    while (fed < s.pendingVideo.length && this.presenter.size < this.memory.maxQueuedFrames(this.codedWidth) && s.decoder.queueSize < MAX_DECODE_QUEUE) {
-      s.decoder.decode(s.pendingVideo[fed]);
+    while (fed < s.pendingVideo.length && this.presenter.size < this.memory.maxQueuedFrames(this.codedWidth) && decoder.queueSize < MAX_DECODE_QUEUE) {
+      decoder.decode(s.pendingVideo[fed]);
       fed++;
     }
     if (fed > 0) s.pendingVideo = s.pendingVideo.slice(fed);
@@ -2525,6 +2550,8 @@ export class Player {
 
   /** True when the compressed-video backlog has used its read-ahead budget, so reading must wait. */
   private readerBlocked(s: Session): boolean {
+    // without a picture, reading keeps the same lead over the clock from the PTS of what else it reads
+    if (!s.decoder) return s.readUs - this.clock.nowUs() >= MAX_ENCODED_VIDEO_US;
     const pending = s.pendingVideo;
     if (pending.length === 0) return false;
     let min = Infinity;
@@ -2550,6 +2577,7 @@ export class Player {
   private flushDecoder(s: Session): void {
     s.flushStarted = true;
     const gen = this.seekGeneration;
+    if (!s.decoder) return;
     void s.decoder.flush().then(() => {
       if (this.session === s && this.seekGeneration === gen) s.flushed = true;
     });
@@ -2585,7 +2613,7 @@ export class Player {
         this.readerBlocked(s) ||
         (this.audioWriter?.queuedChunks ?? 0) > 0 ||
         (ring.buffered() * 1e6) / ring.sampleRate >= AUDIO_PREBUFFER_US;
-      const videoReady = this.presenter.size > 0 || this.presenter.current !== null || s.eof || s.videoState === 'failed';
+      const videoReady = s.decoder === null || this.presenter.size > 0 || this.presenter.current !== null || s.eof || s.videoState === 'failed';
       if (!audioReady || !videoReady || !this.remoteReadAhead(s)) return;
       if (ring) {
         ring.setPlaying(true);
@@ -2677,8 +2705,8 @@ export class Player {
         audioDecodeErrors: this.audioDecodeErrors,
         continuityErrors: stats.continuityErrors,
         decoderErrors: this.decoderErrors,
-        openGopStarts: s?.decoder.openGop.starts ?? 0,
-        leadingPicturesSkipped: s?.decoder.openGop.leadingSkipped ?? 0,
+        openGopStarts: s?.decoder?.openGop.starts ?? 0,
+        leadingPicturesSkipped: s?.decoder?.openGop.leadingSkipped ?? 0,
         menu: this.menuActive && this.navRegs ? { page: this.navRegs.psrRead(PSR.MENU_PAGE_ID), selectedButton: this.navRegs.psrRead(PSR.SELECTED_BUTTON_ID), buttonsDrawn: this.igDraws } : null,
         igErrors: this.navigator?.igErrors ?? 0,
         soundsPlayed: this.soundsPlayed,

@@ -24,7 +24,7 @@ import { Player } from './player';
 import { MEMORY_PROFILES, type MemoryProfileName } from './memory-profile';
 import type { CompositorLike } from './render/compositor';
 import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
-import type { EngineEvent, PlaybackState, Telemetry } from './protocol';
+import { NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const CLASSES: ClassLibrarySource = {
@@ -574,6 +574,39 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
     return { h, w };
   }
+
+  it.each([
+    ['MPEG-2 video', CodingType.MPEG2_VIDEO],
+    ['VC-1', CodingType.VC1],
+  ])("selects a playlist of %s, which plays without a picture: selectPlaylist returns 1 and Java gets the playlist's events", async (codec, videoCodingType) => {
+    const w = handWorker();
+    const files = bdjDisc({
+      playlists: [
+        { id: '00000', clipIds: ['00000'], chapterEverySeconds: 1, uoMask: PLAYBACK_MASKED },
+        { id: '00001', clipIds: ['00001'], chapterEverySeconds: 1, videoCodingType },
+      ],
+    });
+    const h = await harness(files, { worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    const events = (ev: number): number[] => w.sent.flatMap((m) => (m.type === 'event' && m.ev === ev ? [m.param] : []));
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [1, -1, -1, '-1'] });
+    await until(h, () => w.sent.some((m) => m.type === 'reply' && m.id === 1));
+    expect(w.sent.find((m) => m.type === 'reply' && m.id === 1)).toEqual({ type: 'reply', id: 1, value: 1 });
+    expect(events(BdjEvent.PLAYLIST)).toContain(1);
+    w.emit({ type: 'call', id: 2, name: 'selectRate', args: [1, START] });
+    await until(h, () => lastState(h) === 'playing');
+    expect(h.events.filter((e) => e.type === 'unsupported')).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE }]);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    await until(h, () => events(BdjEvent.END_OF_PLAYLIST).length > 0);
+    expect(events(BdjEvent.END_OF_PLAYLIST)).toEqual([1]);
+    // Java selecting it again: no second notice
+    w.emit({ type: 'call', id: 3, name: 'selectPlaylist', args: [1, -1, -1, '-1'] });
+    await until(h, () => w.sent.some((m) => m.type === 'reply' && m.id === 3));
+    expect(w.sent.find((m) => m.type === 'reply' && m.id === 3)).toEqual({ type: 'reply', id: 3, value: 1 });
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
+  }, 30_000);
 
   /** A compositor that records its calls by name; drawBdj also notes the plane's buffer and copies it, as the real one does. */
   function recordingCompositor(): { readonly compositor: CompositorLike; readonly calls: string[]; readonly planes: SharedArrayBuffer[] } {

@@ -6,7 +6,7 @@ function write(outDir: string, files: ReadonlyMap<string, Uint8Array>, skip: (pa
   writeFixture(outDir, files, skip);
 }
 
-// A disc whose playlist declares VC-1 video (fake AVC payload; it is rejected before decoding).
+// A disc whose playlist declares VC-1 video (fake AVC payload; nothing decodes it, so it plays without a picture).
 write(
   'fixtures/synthetic/vc1-disc',
   buildSyntheticDisc({

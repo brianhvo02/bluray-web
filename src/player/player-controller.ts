@@ -4,7 +4,7 @@ import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { MemoryProfileName } from '../engine/memory-profile';
-import type { AudioTrack, BufferRequest, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
+import { NO_PICTURE_MESSAGE, type AudioTrack, type BufferRequest, type EngineCommand, type EngineEvent, type ErrorCode, type MenuKey, type PlaybackState, type ShaderSetData, type ShaderState, type SubtitleChoice, type Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 import { DROP_WARN_RATE, DropMeter } from './drop-meter';
 
@@ -456,11 +456,14 @@ export class PlayerController {
   playPlaylist(playlistId: string): void {
     this.startAudio();
     // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
-    // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay;
-    // the picked playlist stops a BD-J title, so its ignored-tap notice goes.
-    const playlistScoped = (code: string): boolean =>
-      code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-tap-ignored';
-    this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
+    // it emits for the new playlist arrives after this. Disc-level (bdj, the no-picture notice the engine sends once per
+    // disc) and device-level (audio-output) notices stay; the picked playlist stops a BD-J title, so its ignored-tap
+    // notice goes. Opening a disc clears them all.
+    const playlistScoped = (n: Notice): boolean =>
+      n.code === 'unsupported-video'
+        ? n.message !== NO_PICTURE_MESSAGE
+        : n.code.startsWith('unsupported-') || n.code === 'audio-disabled' || n.code === 'decoder-recovered' || n.code === 'audio-track' || n.code === 'bdj-tap-ignored';
+    this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n)) });
     this.post({ type: 'playPlaylist', playlistId });
   }
 

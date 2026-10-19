@@ -45,6 +45,8 @@ export interface PipelineConfig {
   readonly timeline: Timeline;
   readonly clips: ReadonlyMap<string, Clpi>;
   readonly videoPid: number;
+  /** False when nothing decodes the video: its PID is dropped by the demuxer (its EP map still places reads). */
+  readonly readVideo?: boolean;
   /** Same order as the timeline items; each has its own STN, so a stream's PID can change per item. */
   readonly playItems: readonly PlayItem[];
   /** 1-based audio stream number, or null for no audio. */
@@ -124,6 +126,7 @@ export class PlaybackPipeline {
 
   private async run(gen: number, fromUs: number): Promise<void> {
     const { source, timeline, clips, videoPid, playItems } = this.config;
+    const readVideo = this.config.readVideo ?? true;
     const audioStream = this.audioStream;
     const igStream = this.sinks.ig ? this.igStream : null;
     const startPos = timeline.locate(fromUs);
@@ -137,7 +140,7 @@ export class PlaybackPipeline {
       if (gen !== this.generation) return;
       const pgPid = this.sinks.pg ? this.pgPid : null;
       const audioEntry = audioEntryFor(playItems[i], audioStream);
-      const pids = new Set([videoPid]);
+      const pids = new Set<number>(readVideo ? [videoPid] : []);
       if (audioEntry) pids.add(audioEntry.pid);
       const igEntry = igEntryFor(playItems[i], igStream);
       if (igEntry) pids.add(igEntry.pid);
@@ -172,7 +175,7 @@ export class PlaybackPipeline {
           if (gen !== this.generation) return;
           if (pes.pts === undefined) continue;
           const { us, inRange } = timeline.toPlaylistUs(i, pes.pts);
-          if (pes.pid === videoPid) this.sinks.video({ data: pes.payload, ptsUs: us, inRange });
+          if (readVideo && pes.pid === videoPid) this.sinks.video({ data: pes.payload, ptsUs: us, inRange });
           else if (igEntry && pes.pid === igEntry.pid) this.sinks.ig?.({ data: pes.payload, ptsUs: us, dtsUs: pes.dts === undefined ? undefined : timeline.toPlaylistUs(i, pes.dts).us, inRange });
           else if (pgPid !== null && pes.pid === pgPid) this.sinks.pg?.({ data: pes.payload, ptsUs: us, dtsUs: pes.dts === undefined ? undefined : timeline.toPlaylistUs(i, pes.dts).us, inRange });
           else if (audioEntry && pes.pid === audioEntry.pid) {

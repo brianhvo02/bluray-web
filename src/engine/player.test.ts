@@ -24,7 +24,7 @@ import { DEFAULT_CHUNK_PACKETS } from './demux/m2ts-reader';
 import { SOURCE_PACKET_SIZE } from './demux/constants';
 import { serveFetch } from './disc/port-fetch';
 import { Player, type PlayerDeps } from './player';
-import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
+import { NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type ShaderSetData, type Telemetry } from './protocol';
 import { ShaderStage } from './shaders/stage';
 import { UNAVAILABLE, type CompiledSet, type ShaderBackend } from './shaders/webgl-backend';
 
@@ -335,8 +335,9 @@ describe('Player', () => {
     const h = await harness(CodingType.LPCM, {
       playlists: [
         { id: '00000', clipIds: ['00001'] },
-        { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
+        { id: '00001', clipIds: ['00002'] },
       ],
+      dropFiles: ['BDMV/STREAM/00002.m2ts'],
     });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
@@ -344,8 +345,8 @@ describe('Player', () => {
     await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
     const after = h.events.slice(n);
     expect(after).toContainEqual({ type: 'playlistCleared' });
-    expect(after).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
-    expect(after.findIndex((e) => e.type === 'playlistCleared')).toBeLessThan(after.findIndex((e) => e.type === 'unsupported'));
+    expect(after).toContainEqual(expect.objectContaining({ type: 'error', code: 'missing-file' }));
+    expect(after.findIndex((e) => e.type === 'playlistCleared')).toBeLessThan(after.findIndex((e) => e.type === 'error'));
     expect(lastState(h)).toBe('error');
   });
 
@@ -536,11 +537,105 @@ describe('Player', () => {
     expect(lastTelemetry(h)?.audioUnderruns).toBe(0);
   });
 
-  it('reports unsupported video instead of hanging in buffering', async () => {
-    const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.VC1 });
-    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
-    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video', codec: 'VC-1' }));
-    expect(lastState(h)).toBe('error');
+  describe('video the browser cannot decode', () => {
+    const noPicture = (h: Harness) => h.events.filter((e) => e.type === 'unsupported' && e.kind === 'video');
+    const times = (h: Harness) => h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : []));
+
+    it.each([
+      ['MPEG-2 video', CodingType.MPEG2_VIDEO],
+      ['VC-1', CodingType.VC1],
+    ])('plays %s without a picture, on the audio clock, with one notice', async (codec, videoCodingType) => {
+      const h = await harness(CodingType.LPCM, { videoCodingType });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      const at = times(h).at(-1)!;
+      await h.play(1000);
+      expect(times(h).at(-1)! - at).toBeGreaterThan(500_000);
+      expect(decoders).toHaveLength(0); // no VideoDecoder for that stream
+      expect(h.drawn).toEqual([]);
+      expect(noPicture(h)).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE }]);
+      expect(lastTelemetry(h)?.clockMode).toBe('audio');
+      expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    });
+
+    it('runs on the wall clock when there is no audio either, and ends at the end of the playlist', async () => {
+      const h = await harness(undefined, { videoCodingType: CodingType.MPEG2_VIDEO });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.play(1000);
+      expect(lastTelemetry(h)?.clockMode).toBe('wall');
+      expect(times(h).at(-1)).toBeGreaterThan(500_000);
+      expect(lastState(h)).toBe('playing');
+      await vi.waitFor(async () => {
+        await h.play(500);
+        expect(lastState(h)).toBe('ended');
+      }, { timeout: 10_000 });
+      expect(times(h).at(-1)).toBeGreaterThan(7_500_000);
+    });
+
+    it('seeks and skips chapters from the clip info', async () => {
+      const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.VC1 });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'seek', timeUs: 5_000_000 });
+      await untilPlaying(h);
+      await h.play(300);
+      expect(times(h).at(-1)).toBeGreaterThanOrEqual(5_000_000);
+      await h.player.handle({ type: 'prevChapter' });
+      await untilPlaying(h);
+      expect(times(h).at(-1)).toBeLessThan(5_000_000);
+      expect(lastTelemetry(h)?.clockMode).toBe('audio');
+    });
+
+    it('notifies once per disc: not again for its next playlist, again for another disc (Review Focus 4)', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
+        ],
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(1);
+      await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(2);
+      expect(noPicture(h)[1]).toMatchObject({ codec: 'VC-1', message: NO_PICTURE_MESSAGE });
+    });
+
+    it('decodes the picture again for a playlist the browser can decode', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'] },
+        ],
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      await h.play(500);
+      expect(decoders).toHaveLength(1);
+      expect(h.drawn.length).toBeGreaterThan(0);
+    });
+
+    it('draws PG subtitles over black', async () => {
+      const subs = subtitleSegments({ x: 10 }).map((payload) => ({ pts: CLIP_START_PTS + 0.5 * 90_000, payload }));
+      const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.MPEG2_VIDEO, pgStreams: [{ pid: 0x1200, lang: 'eng', units: subs }] });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+      await vi.waitFor(async () => {
+        await h.play(100);
+        expect(h.pgDraws.some((p) => p.hash() !== EMPTY)).toBe(true);
+      }, { timeout: 5000 });
+      expect(h.order.every((o) => !o.startsWith('video:') || o === 'video:null')).toBe(true);
+    });
   });
 
   it('serializes commands so a double playPlaylist leaves one live session', async () => {
@@ -1057,6 +1152,28 @@ describe('Player with HDMV navigation', () => {
       expect(h.igDraws).toEqual([]);
     });
 
+    it('shows the IG menu over no picture when the menu playlist is MPEG-2 video, and its buttons work', async () => {
+      const segments = simpleMenuSegments({ cmds: [asm.jumpTitle(imm(1))] }).map((payload) => ({ pts: CLIP_START_PTS + 0.2 * 90_000, payload }));
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.playPl(imm(1))] }], {
+        igUnits: segments,
+        playlists: [{ ...shortPlaylists[0]!, videoCodingType: CodingType.MPEG2_VIDEO }, shortPlaylists[1]!],
+      });
+      await untilPlaying(h);
+      await vi.waitFor(async () => {
+        await h.play(100);
+        expect(lastTelemetry(h)?.menu).not.toBeNull();
+      }, { timeout: 5000 });
+      expect(decoders).toHaveLength(0);
+      const plane = h.igDraws.at(-1)!;
+      expect(plane.hash()).not.toBe(new OverlayPlane(plane.width, plane.height).hash());
+      expect(h.order.every((o) => !o.startsWith('video:') || o === 'video:null')).toBe(true);
+      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE });
+      await h.player.handle({ type: 'menuKey', key: 'ok' });
+      await untilPlaylist(h, '00001');
+      await untilPlaying(h);
+      expect(decoders).toHaveLength(1); // 00001 is H.264
+    });
+
     it('reports no menu for a disc without IG', async () => {
       const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
       await untilPlaying(h);
@@ -1341,16 +1458,17 @@ describe('Player with HDMV navigation', () => {
       expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
     });
 
-    it('reports an unsupported codec of a program-started playlist as for a picked one', async () => {
+    it('plays a program-started playlist of undecodable video without a picture, as a picked one', async () => {
       const h = await nav([{ cmds: [asm.playPl(imm(1))] }, idle, idle], {
         playlists: [
           { id: '00000', clipIds: ['00001'] },
           { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
         ],
       });
-      await h.play(300);
-      expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
-      expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
+      await untilPlaying(h);
+      expect(chapterIds(h)).toEqual(['00001']);
+      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'VC-1', message: NO_PICTURE_MESSAGE });
+      expect(h.events.some((e) => e.type === 'error')).toBe(false);
     });
   });
 });

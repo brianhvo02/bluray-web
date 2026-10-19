@@ -109,7 +109,10 @@ describe('Compositor.drawText', () => {
     const renderer = { render: (...args: unknown[]) => { calls.push(args); return 1; }, changed: () => false, visible: () => false };
     const opts = { offsetUs: 0, scale: 1 };
     compositor.drawText(renderer, 5, opts);
-    expect(calls).toEqual([]); // no frame yet: no video rectangle
+    // no frame yet (or no picture at all): the 1920×1080 screen
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.slice(1)).toEqual([5, { x: 0, y: 218, width: 1000, height: 563 }, { ...opts, storage: null }]);
+    calls.length = 0;
     compositor.drawVideo({ displayWidth: 1920, displayHeight: 1080, codedWidth: 1440, codedHeight: 1088, visibleRect: { width: 1440, height: 1080 } } as unknown as VideoFrame);
     compositor.drawText(renderer, 5, opts);
     expect(calls).toHaveLength(1);

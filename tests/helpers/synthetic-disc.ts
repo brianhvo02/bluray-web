@@ -37,6 +37,8 @@ export interface SyntheticClipSpec {
   keyIndices: number[];
   /** 90 kHz PTS of the first displayed frame (even). */
   startPts: number;
+  /** Video coding type in the clip info (default AVC); a playlist declares its own in the STN table. */
+  videoCodingType?: number;
   /** Per-unit 90 kHz PTS in decode order, for streams with B-frames. Default: startPts + i * frame duration. */
   pts?: number[];
   /** Per-unit 90 kHz DTS in decode order. Default: equal to the PTS. */
@@ -181,7 +183,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
     );
     const audioSpecs = audioStreams.map((s) => ({ pid: s.pid, codingType: s.codingType, format: s.format, lang: s.lang }));
     const streams: Array<{ pid: number; codingType: number }> = [
-      { pid: VIDEO_PID, codingType: CodingType.AVC },
+      { pid: VIDEO_PID, codingType: clip.videoCodingType ?? CodingType.AVC },
       ...audioSpecs.map(({ pid, codingType }) => ({ pid, codingType })),
       ...igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })),
       ...pgStreams.map((g) => ({ pid: g.pid, codingType: CodingType.PG })),

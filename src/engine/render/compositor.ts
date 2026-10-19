@@ -172,8 +172,8 @@ export class Compositor implements CompositorLike {
   }
 
   drawText(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void {
-    const f = this.frameSize;
-    if (!f) return;
+    // no frame yet, or none at all (a playlist without a picture): the 1920×1080 screen
+    const f = this.frameSize ?? { width: PLANE_WIDTH, height: PLANE_HEIGHT };
     renderer.render(this.ctx, timeUs, fitRect(f.width, f.height, this.canvas.width, this.canvas.height), { ...opts, storage: opts.storage ?? this.storageSize });
   }
 

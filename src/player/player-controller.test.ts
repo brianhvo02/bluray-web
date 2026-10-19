@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AudioTrack, EngineEvent, Telemetry } from '../engine/protocol';
+import { NO_PICTURE_MESSAGE, type AudioTrack, type EngineEvent, type Telemetry } from '../engine/protocol';
 import { FETCH_PORT_RELEASE_MS, INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
 
 class FakeWorker implements WorkerLike {
@@ -182,6 +182,47 @@ describe('notices across playlists', () => {
     startPlaylist(worker, c, '00001', []);
     await new Promise((r) => setTimeout(r, 0));
     expect(c.getSnapshot().notices.map((n) => n.code).sort()).toEqual(['audio-output', 'bdj']);
+  });
+});
+
+describe('the no-picture notice', () => {
+  const noPicture: EngineEvent = { type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE };
+  const codes = (c: PlayerController): string[] => c.getSnapshot().notices.map((n) => n.code);
+
+  it('stays for the disc when another playlist is picked, and goes when another disc opens (Review Focus 4)', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    c.playPlaylist('00000');
+    worker.emit(noPicture);
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    c.playPlaylist('00001'); // the engine sends it once per disc: nothing comes for this one
+    worker.emit({ type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
+    expect(c.getSnapshot().notices).toEqual([{ code: 'unsupported-video', message: NO_PICTURE_MESSAGE }]);
+    c.open([]);
+    expect(codes(c)).toEqual([]);
+    c.playPlaylist('00000');
+    worker.emit(noPicture); // the next disc's own notice
+    expect(codes(c)).toEqual(['unsupported-video']);
+  });
+
+  it('is dismissed like any notice and does not come back for the next playlist', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.playPlaylist('00000');
+    worker.emit(noPicture);
+    c.dismissNotice('unsupported-video');
+    c.playPlaylist('00001');
+    expect(codes(c)).toEqual([]);
+  });
+
+  it('drops a playlist-specific unsupported-video error notice when another playlist is picked', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.playPlaylist('00000');
+    worker.emit({ type: 'unsupported', kind: 'video', codec: 'HEVC', message: 'HEVC video is not supported by this browser.' });
+    c.playPlaylist('00001');
+    expect(codes(c)).toEqual([]);
   });
 });
 
