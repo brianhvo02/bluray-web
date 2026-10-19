@@ -1,4 +1,5 @@
-import { findEpAfter, findEpBefore, stcSpnRange, type Clpi } from '../bdmv/clpi-parser';
+import { findEpAfter, findEpBefore, stcSpnRange, type Clpi, type EpEntry } from '../bdmv/clpi-parser';
+import { TS_PACKET_SIZE } from '../demux/constants';
 import { DiscError, type ByteSource } from '../disc/byte-source';
 import { clipInfoPath, streamPath } from '../disc/open-disc';
 import { M2tsReader, type DemuxStats } from '../demux/m2ts-reader';
@@ -64,6 +65,8 @@ export class PlaybackPipeline {
   private current: M2tsReader | null = null;
   /** The stream file `current` reads and its clip's TS_recording_rate. */
   private currentClip: { readonly path: string; readonly recordingRate: number } | null = null;
+  /** How `current` maps a source packet to playlist time (readUs). */
+  private currentPlace: { readonly item: number; readonly entries: readonly EpEntry[]; readonly startSpn: number; readonly startUs: number; readonly recordingRate: number } | null = null;
   private audioStream: number | null;
   private igStream: number | null;
   private pgPid: number | null = null;
@@ -97,6 +100,36 @@ export class PlaybackPipeline {
     return this.currentClip;
   }
 
+  /**
+   * Playlist time up to which the source has been asked for data (read or prefetched), so reading can be paced on the
+   * clock without decoding anything: the EP-map entry at or after that packet (the data before it is earlier), else the
+   * clip's TS_recording_rate from where the read started; never past the play item's end. Null between reads.
+   */
+  get readUs(): number | null {
+    const reader = this.current;
+    const place = this.currentPlace;
+    if (!reader || !place) return null;
+    const { timeline } = this.config;
+    const item = timeline.items[place.item]!;
+    const endUs = timeline.itemStartUs(place.item) + ((item.outTime - item.inTime) * 1000) / 45;
+    const spn = reader.requestedSpn;
+    let us: number | null = null;
+    const entries = place.entries;
+    if (entries.length > 0) {
+      let lo = 0;
+      let hi = entries.length; // the first entry at or after spn (entries ascend in spn)
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (entries[mid]!.spn < spn) lo = mid + 1;
+        else hi = mid;
+      }
+      us = lo < entries.length ? timeline.toPlaylistUs(place.item, entries[lo]!.pts * 2).us : endUs;
+    } else if (place.recordingRate > 0) {
+      us = place.startUs + (((spn - place.startSpn) * TS_PACKET_SIZE) / place.recordingRate) * 1e6;
+    }
+    return us === null ? endUs : Math.min(us, endUs);
+  }
+
   get stats(): DemuxStats {
     const live = this.current?.stats;
     return { corruptPackets: this.corruptPackets + (live?.corruptPackets ?? 0), continuityErrors: this.continuityErrors + (live?.continuityErrors ?? 0) };
@@ -109,6 +142,7 @@ export class PlaybackPipeline {
     if (this.current === reader) {
       this.current = null;
       this.currentClip = null;
+      this.currentPlace = null;
     }
   }
 
@@ -161,6 +195,8 @@ export class PlaybackPipeline {
       this.retire(this.current); // a stopped earlier read keeps its counts
       this.current = reader;
       this.currentClip = { path: streamPath(item.clipId), recordingRate: clip.recordingRate };
+      const entries = ep?.entries.filter((e) => e.spn >= range.startSpn && e.spn < range.endSpn) ?? [];
+      this.currentPlace = { item: i, entries, startSpn, startUs: i === startPos.item.index ? fromUs : timeline.itemStartUs(i), recordingRate: clip.recordingRate };
 
       for (;;) {
         while (this.sinks.isFull()) {

@@ -624,6 +624,35 @@ describe('Player', () => {
       expect(h.drawn.length).toBeGreaterThan(0);
     });
 
+    it('clears the notice when a playlist with a picture starts, and does not show it again for that disc (R9)', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'] },
+        ],
+      });
+      const cleared = () => h.events.filter((e) => e.type === 'noticeCleared' && e.code === 'unsupported-video');
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      expect(cleared()).toHaveLength(0);
+      const n = h.events.length;
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      expect(cleared()).toHaveLength(1);
+      // sent with the playlist's own notices, before its chapters
+      expect(h.events.slice(n).findIndex((e) => e.type === 'noticeCleared')).toBeLessThan(h.events.slice(n).findIndex((e) => e.type === 'chapters'));
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(1);
+      expect(cleared()).toHaveLength(1);
+      // another disc starts afresh
+      await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      expect(noPicture(h)).toHaveLength(2);
+    });
+
     it('draws PG subtitles over black', async () => {
       const subs = subtitleSegments({ x: 10 }).map((payload) => ({ pts: CLIP_START_PTS + 0.5 * 90_000, payload }));
       const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.MPEG2_VIDEO, pgStreams: [{ pid: 0x1200, lang: 'eng', units: subs }] });
@@ -2526,5 +2555,59 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     await vi.waitFor(() => expect(log.reads.some((r) => r.path === P2 && r.from >= start + 8 * CHUNK)).toBe(true), { timeout: 10_000 });
     expect(log.reads.filter((r) => r.path === P2).every((r) => r.from >= start)).toBe(true);
     expect(log.reads.some((r) => r.path === P2 && r.from + CHUNK >= streamSize('00002'))).toBe(true);
+  }, 30_000);
+});
+
+describe("Player without a picture: reading at the clock's pace (R8)", () => {
+  /** A NAS that records the byte ranges asked of the feature clip (00001), with that clip's size. */
+  function rangeNas(files: Map<string, Uint8Array<ArrayBuffer>>) {
+    const nas = fakeNas(files);
+    const ranges: Array<{ start: number; end: number }> = [];
+    const size = files.get('BDMV/STREAM/00001.m2ts')!.length;
+    const recording: typeof globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const range = /^bytes=(\d+)-(\d+)$/.exec(new Headers(init?.headers).get('Range') ?? '');
+      if (range && decodeURIComponent(String(input)).toUpperCase().includes('/FILES/BDMV/STREAM/00001.M2TS')) ranges.push({ start: Number(range[1]), end: Number(range[2]) + 1 });
+      return nas.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    return { nas: { ...nas, fetch: recording }, ranges, size };
+  }
+  const furthest = (ranges: ReadonlyArray<{ end: number }>) => Math.max(0, ...ranges.map((r) => r.end));
+  const opts = { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 50_000, clipSeconds: 20, remoteLimits: { chunkBytes: 64 * 1024, readAheadBytes: 256 * 1024 } };
+
+  it('reads a playlist with no audio and no graphics only the read-ahead window ahead of the clock, through the NAS read-ahead too', async () => {
+    let rec!: ReturnType<typeof rangeNas>;
+    const h = await harness(undefined, { ...opts, remote: (files) => (rec = rangeNas(files)).nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    // about 1.2 MB a second: the clock at ~1 s, 2 s of read-ahead, one reader chunk (~2 MB) and the NAS budget, of 20 s
+    expect(furthest(rec.ranges)).toBeLessThan(rec.size * 0.4);
+    await h.play(6000);
+    expect(furthest(rec.ranges)).toBeGreaterThan(rec.size * 0.3); // it goes on, at the clock's pace
+    expect(furthest(rec.ranges)).toBeLessThan(rec.size * 0.65);
+  }, 30_000);
+
+  it('paces the re-read of a menu loop the same way', async () => {
+    let rec!: ReturnType<typeof rangeNas>;
+    const h = await harness(undefined, {
+      ...opts,
+      clipSeconds: 6,
+      frameBytes: 150_000, // about 3.6 MB a second
+      playlists: [{ id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO }],
+      movieObjects: buildMovieObjects([{ cmds: [asm.playPl(imm(0)), asm.goto(0)] }, { cmds: [] }, { cmds: [] }]),
+      remote: (files) => (rec = rangeNas(files)).nas,
+    });
+    const starts = () => h.events.filter((e) => e.type === 'chapters').length;
+    await vi.waitFor(async () => {
+      await h.play(200);
+      expect(starts()).toBe(2); // the program played the loop again
+    }, { timeout: 20_000 });
+    await h.play(500);
+    // the loop's second read, from the clip's start
+    const again = rec.ranges.slice(rec.ranges.map((r) => r.start).lastIndexOf(0));
+    expect(again.length).toBeLessThan(rec.ranges.length);
+    // under a second in: 2 s of read-ahead, a reader chunk and the NAS budget, of 6 s; unpaced it would be the whole clip
+    expect(furthest(again)).toBeLessThan(rec.size * 0.8);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
   }, 30_000);
 });

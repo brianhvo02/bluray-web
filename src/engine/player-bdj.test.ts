@@ -599,6 +599,11 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await until(h, () => lastState(h) === 'playing');
     expect(h.events.filter((e) => e.type === 'unsupported')).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE }]);
     expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    // the first frame is the black one with the planes over it, composited once the playlist plays
+    await until(h, () => (lastTelemetry(h)?.bdj?.firstFrameMs ?? null) !== null);
+    const bdj = lastTelemetry(h)!.bdj!;
+    expect(bdj.firstFrameMs).toBeGreaterThanOrEqual(bdj.firstPlaylistMs!);
+    expect(lastTelemetry(h)!.framesPresented).toBe(0);
     await until(h, () => events(BdjEvent.END_OF_PLAYLIST).length > 0);
     expect(events(BdjEvent.END_OF_PLAYLIST)).toEqual([1]);
     // Java selecting it again: no second notice

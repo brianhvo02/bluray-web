@@ -318,6 +318,8 @@ interface Session {
   dropBeforeUs: number;
   /** Without a picture: the latest PTS the reader delivered since the last start (read-ahead is paced on it). */
   readUs: number;
+  /** Without a picture: its first frame (black, with the planes over it) has been composited. */
+  blankComposited: boolean;
   eof: boolean;
   flushed: boolean;
   /** Decoder flush issued at end of input (only after the compressed backlog drains). */
@@ -415,8 +417,8 @@ export class Player {
   private bdj: BdjTitle | null = null;
   /** Taps on a BD-J menu that brought no reaction (telemetry). */
   private bdjTapsIgnored = 0;
-  /** The no-picture notice was sent for the disc that is open (once per disc). */
-  private noPictureNoticed = false;
+  /** The open disc's no-picture notice: not sent yet, shown, or cleared by a playlist with a picture (never sent again). */
+  private noPictureNotice: 'unsent' | 'shown' | 'cleared' = 'unsent';
   /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
   private planeSeen: { plane: GraphicsPlaneReader; version: number; hash: string | null } | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
@@ -653,8 +655,14 @@ export class Player {
     const now = this.clock.nowUs();
     const frame = this.presenter.select(now);
     if (frame && this.state === 'playing') this.offsets.push(now - frame.timestamp);
+    // without a picture the first frame is the black one with the planes over it, composited once the playlist plays
+    const blank = s.decoder === null && this.state === 'playing' && !s.blankComposited;
+    if (blank) {
+      s.blankComposited = true;
+      this.bdjDirty = true; // paint composites it now, whether or not a plane changed
+    }
     const startup = this.bdjStartup;
-    if (frame && s.owner === 'bdj' && startup && startup.firstPlaylistMs !== null && startup.firstFrameMs === null) startup.firstFrameMs = this.sinceOpenMs();
+    if ((frame || blank) && s.owner === 'bdj' && startup && startup.firstPlaylistMs !== null && startup.firstFrameMs === null) startup.firstFrameMs = this.sinceOpenMs();
     this.pg?.tick(now);
     this.paint(frame, now);
     this.feedDecoder(s); // presenting freed decoded-frame slots
@@ -786,7 +794,7 @@ export class Player {
     this.bdjStartup = null;
     this.bdjLatency = new InputLatency();
     this.bdjTapsIgnored = 0;
-    this.noPictureNoticed = false;
+    this.noPictureNotice = 'unsent';
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
@@ -1848,9 +1856,12 @@ export class Player {
     // libbluray opens a playlist whatever its video: one the browser can't decode plays without a picture (audio,
     // subtitles, menus and the clock run), with a notice once per disc
     const picture = isSupportedVideoCoding(choice.video.codingType);
-    if (!picture && !this.noPictureNoticed) {
-      this.noPictureNoticed = true;
+    if (!picture && this.noPictureNotice === 'unsent') {
+      this.noPictureNotice = 'shown';
       this.deps.emit({ type: 'unsupported', kind: 'video', codec: codingName(choice.video.codingType), message: NO_PICTURE_MESSAGE });
+    } else if (picture && this.noPictureNotice === 'shown') {
+      this.noPictureNotice = 'cleared'; // the picture is back: the notice goes, and this disc does not show it again
+      this.deps.emit({ type: 'noticeCleared', code: 'unsupported-video' });
     }
     // With a disc program (HDMV or BD-J) the audio stream register (PSR1) decides, when it names a playable stream
     let audioIndex = choice.audioIndex;
@@ -1923,6 +1934,7 @@ export class Player {
       pendingVideo: [],
       dropBeforeUs: 0,
       readUs: -Infinity,
+      blankComposited: false,
       eof: false,
       flushed: false,
       flushStarted: false,
@@ -2550,8 +2562,9 @@ export class Player {
 
   /** True when the compressed-video backlog has used its read-ahead budget, so reading must wait. */
   private readerBlocked(s: Session): boolean {
-    // without a picture, reading keeps the same lead over the clock from the PTS of what else it reads
-    if (!s.decoder) return s.readUs - this.clock.nowUs() >= MAX_ENCODED_VIDEO_US;
+    // without a picture, reading keeps the same lead over the clock as with one: from where the source has been read to
+    // (the clip's EP map or byte rate) and the PTS of what else it delivered, so it never runs faster than real time
+    if (!s.decoder) return Math.max(s.readUs, s.pipeline.readUs ?? -Infinity) - this.clock.nowUs() >= MAX_ENCODED_VIDEO_US;
     const pending = s.pendingVideo;
     if (pending.length === 0) return false;
     let min = Infinity;

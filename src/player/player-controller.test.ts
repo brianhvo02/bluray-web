@@ -206,6 +206,29 @@ describe('the no-picture notice', () => {
     expect(codes(c)).toEqual(['unsupported-video']);
   });
 
+  it('goes when a playlist with a picture starts, and is not shown again for the disc (R9)', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    c.playPlaylist('00000');
+    worker.emit(noPicture);
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual(['unsupported-video']);
+    c.playPlaylist('00001'); // H.264: the engine clears the notice before the playlist's chapters
+    worker.emit({ type: 'noticeCleared', code: 'unsupported-video' });
+    worker.emit({ type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual([]);
+    c.playPlaylist('00000'); // MPEG-2 again: the engine sends nothing more for this disc
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual([]);
+  });
+
+  it('reduces noticeCleared for the no-picture notice', () => {
+    const shown = reduceEvent(INITIAL_SNAPSHOT, noPicture);
+    expect(shown.notices).toEqual([{ code: 'unsupported-video', message: NO_PICTURE_MESSAGE }]);
+    expect(reduceEvent(shown, { type: 'noticeCleared', code: 'unsupported-video' }).notices).toEqual([]);
+  });
+
   it('is dismissed like any notice and does not come back for the next playlist', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());

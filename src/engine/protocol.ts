@@ -245,7 +245,8 @@ export type EngineEvent =
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
   /** The condition behind a notice is over (nas-waiting: the read landed). */
-  | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
+  /** The notice of that code is no longer true ('unsupported-video': this disc's no-picture notice, once a playlist with a picture starts). */
+  | { readonly type: 'noticeCleared'; readonly code: NoticeCode | 'unsupported-video' }
   /**
    * The read-ahead cache's fill: bytes held from the start position on, out of `targetBytes` (the request's, or all
    * there is when that is less), and the connection's rate over the fill so far (Mbps). It is over when bytes reach
@@ -274,5 +275,8 @@ export type EngineEvent =
   /** On every shader set change and compile result; `error` explains 'error' and 'unavailable'. */
   | { readonly type: 'shaderStatus'; readonly state: ShaderState; readonly set: string | null; readonly error: string | null };
 
-/** The once-per-disc notice of a playlist whose video (MPEG-2, VC-1) the browser can't decode: it plays without a picture. */
+/**
+ * The notice of a playlist whose video (MPEG-2, VC-1) the browser can't decode: it plays without a picture. Sent once per
+ * disc, and cleared (noticeCleared 'unsupported-video') when a playlist with a picture starts; that disc never sends it again.
+ */
 export const NO_PICTURE_MESSAGE = "This disc's video can't be played here yet, so it will play without a picture.";

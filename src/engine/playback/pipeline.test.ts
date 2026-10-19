@@ -183,6 +183,59 @@ describe('PlaybackPipeline IG', () => {
 });
 
 describe('PlaybackPipeline', () => {
+  it('reports how far into the playlist the source has been read, from the EP map, so reading can be paced on a clock', async () => {
+    // 10 s of 100 kB frames (~2.4 MB a second, an EP entry every second), no audio: nothing but the video PID, dropped
+    const files = buildSyntheticDisc({ clips: [syntheticClip('00001', 10, { frameBytes: 100_000 })], playlists: [{ id: '00000', clipIds: ['00001'] }] });
+    const inner = syntheticSource(files);
+    let furthest = 0;
+    const source = {
+      exists: (p: string) => inner.exists(p),
+      size: (p: string) => inner.size(p),
+      list: (d: string) => inner.list(d),
+      read: (p: string, offset: number, length: number, signal?: AbortSignal) => {
+        if (p.toUpperCase().endsWith('00001.M2TS')) furthest = Math.max(furthest, offset + length);
+        return inner.read(p, offset, length, signal);
+      },
+    };
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const clips = await loadClips(source, ['00001']);
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips, videoPid: VIDEO_PID, readVideo: false, playItems: mpls.playItems, audioStream: null };
+    const clock = { us: 0 };
+    let pipeline!: PlaybackPipeline;
+    const readUs: number[] = [];
+    let ended = false;
+    pipeline = new PlaybackPipeline(config, {
+      video: () => undefined,
+      audio: () => undefined,
+      isFull: () => {
+        const at = pipeline.readUs;
+        if (at !== null) readUs.push(at);
+        return at !== null && at - clock.us >= 2_000_000;
+      },
+      ended: () => (ended = true),
+      failed: (err) => {
+        throw err;
+      },
+    });
+    pipeline.start(0);
+    await turns(20);
+    const size = inner.size('BDMV/STREAM/00001.m2ts');
+    expect(ended).toBe(false);
+    expect(pipeline.readUs).toBeGreaterThanOrEqual(2_000_000);
+    // 2 s ahead of a stopped clock, one ~2 MB chunk past the keyframe that told it so, and the reader's prefetch
+    expect(furthest).toBeLessThan(size * 0.55);
+    const held = furthest;
+    clock.us = 4_000_000;
+    await turns(20);
+    expect(furthest).toBeGreaterThan(held);
+    expect(furthest).toBeLessThan(size * 0.8);
+    clock.us = 20_000_000;
+    await turns(40);
+    expect(ended).toBe(true);
+    expect(readUs.every((us, i) => i === 0 || us >= readUs[i - 1]!)).toBe(true); // it only moves forward
+    expect(Math.max(...readUs)).toBeLessThanOrEqual(10_000_000);
+  });
+
   it('drops the video PID when nothing decodes it, still reading the audio from the EP map position', async () => {
     const config = { ...(await setup()), readVideo: false };
     const { got, done } = run(config, 3_000_000);
