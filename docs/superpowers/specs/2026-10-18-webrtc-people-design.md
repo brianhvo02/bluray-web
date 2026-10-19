@@ -1,7 +1,7 @@
 # People, Saved Data and the WebRTC Route (Step 3) — Design Spec
 
 Date: 2026-10-18
-Status: Approved by the user 2026-10-18. Release 1 (people, §4, and the BD-J store, §5) deployed 2026-10-18 (main c0be0f6). Spike done 2026-10-19 (§6.1 results below); release 2 (§6–§7) planned in `docs/superpowers/plans/2026-10-19-webrtc-route.md`.
+Status: Approved by the user 2026-10-18. Release 1 (people, §4, and the BD-J store, §5) deployed 2026-10-18 (main c0be0f6). Spike done 2026-10-19 (§6.1 results below); release 2 (§6–§7, plan `docs/superpowers/plans/2026-10-19-webrtc-route.md`) is built on feat/webrtc, with the device run (iPhone on cellular, Tailscale off) pending.
 Parent spec: `2026-10-16-cross-browser-and-remote-design.md` §5 (step 3). Builds on `2026-10-17-nas-server-design.md` (pairing, rendezvous) and `2026-10-17-nas-library-titles-design.md` (the title library). Where this document and the parent disagree, this one wins for step 3.
 
 ## 1. Intent
