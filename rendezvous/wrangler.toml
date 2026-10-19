@@ -4,8 +4,10 @@ name = "bluray-rendezvous"
 main = "src/index.ts"
 compatibility_date = "2026-10-17"
 
-# The Cloudflare relay (POST /turn) needs two secrets, set with `wrangler secret put TURN_KEY_ID` and
-# `wrangler secret put TURN_KEY_API_TOKEN`; never here. Without them, /turn answers 503 turn-not-configured.
+# The Cloudflare relay (POST /turn) needs three secrets, set with `wrangler secret put TURN_KEY_ID`,
+# `wrangler secret put TURN_KEY_API_TOKEN` and `wrangler secret put TURN_NAS_IDS` (the comma-separated NAS ids it
+# mints for; `server/deploy/deploy.sh --nas-id` prints the NAS's); never here. Without them, /turn answers 503
+# turn-not-configured.
 
 [[durable_objects.bindings]]
 name = "CODE_REGISTRY"

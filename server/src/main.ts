@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { appHandlers } from './app';
 import { Auth } from './auth';
 import { BdjStore } from './bdj-store';
-import { ownerCode } from './cli';
+import { ownerCode, printNasId } from './cli';
 import { loadConfig } from './config';
 import type { Config } from './config';
 import { createServer } from './http';
@@ -43,7 +43,12 @@ function metadataSources(config: Config): { anilist: MetadataSource; tmdb: Metad
 /** The rendezvous client when `RENDEZVOUS_URL` is set; its key lives next to the auth data. */
 function rendezvousRegistrar(config: Config): RendezvousClient | undefined {
   if (config.rendezvousUrl === undefined) return undefined;
-  return new RendezvousClient(config.rendezvousUrl, join(config.dataDir, 'rendezvous-key.json'));
+  return new RendezvousClient(config.rendezvousUrl, rendezvousKeyFile(config));
+}
+
+/** The NAS's rendezvous key, next to the auth data. */
+function rendezvousKeyFile(config: Config): string {
+  return join(config.dataDir, 'rendezvous-key.json');
 }
 
 /**
@@ -143,7 +148,9 @@ if (command === undefined) {
 } else if (ownerArgs !== null) {
   const registrar = rendezvousRegistrar(config);
   await ownerCode(config.dataDir, Date.now, console.log, registrar && { registrar, publicBase: config.publicBase }, ownerArgs.person);
+} else if (command === 'nas-id' && process.argv.length === 3) {
+  await printNasId(rendezvousKeyFile(config));
 } else {
-  console.error(`unknown command "${process.argv.slice(2).join(' ')}"; usage: node server.mjs [owner-code [--person <name>]]`);
+  console.error(`unknown command "${process.argv.slice(2).join(' ')}"; usage: node server.mjs [owner-code [--person <name>] | nas-id]`);
   process.exit(2);
 }

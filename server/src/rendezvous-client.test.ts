@@ -92,10 +92,21 @@ describe('RendezvousClient', () => {
   });
 });
 
+describe('RendezvousClient.localNasId', () => {
+  it('is the id the Worker registers this NAS under, read from the key without the network', async () => {
+    const offline = vi.fn(async () => Promise.reject(new TypeError('fetch failed'))) as unknown as typeof fetch;
+    const local = await new RendezvousClient(BASE, keyFile, offline).localNasId();
+    expect(offline).not.toHaveBeenCalled();
+    expect(await new RendezvousClient(BASE, keyFile, workerFetch).ensureRegistered()).toBe(local);
+  });
+});
+
 describe('RendezvousClient.turnServers', () => {
   // A made-up key id and token; real ones live only in Worker secrets.
   const ICE = [{ urls: ['turn:turn.example:3478?transport=udp'], username: 'u', credential: 'c' }];
   let cloudflare: ReturnType<typeof vi.fn<typeof fetch>>;
+  /** The Worker's TURN_NAS_IDS allowlist. */
+  let allowed = '';
   const withTurn = (async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init);
     requests.push(`${request.method} ${new URL(request.url).pathname}`);
@@ -104,6 +115,7 @@ describe('RendezvousClient.turnServers', () => {
       SIGNALLING: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response(null, { status: 501 }) }) },
       TURN_KEY_ID: 'test-key-id',
       TURN_KEY_API_TOKEN: 'test-api-token',
+      TURN_NAS_IDS: allowed,
     });
   }) as typeof fetch;
 
@@ -115,12 +127,19 @@ describe('RendezvousClient.turnServers', () => {
 
   it("gets the Worker's servers with a signed request, registering again once after a lost registry", async () => {
     const client = new RendezvousClient(BASE, keyFile, withTurn);
+    allowed = await client.ensureRegistered();
     expect(await client.turnServers()).toEqual(ICE);
     expect(requests).toEqual(['POST /nas', 'POST /turn']);
     registry = new CodeRegistry(memoryState());
     expect(await client.turnServers()).toEqual(ICE);
     expect(requests).toEqual(['POST /nas', 'POST /turn', 'POST /turn', 'POST /nas', 'POST /turn']);
     expect(cloudflare).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws when the Worker does not list this NAS', async () => {
+    allowed = 'B'.repeat(43);
+    const client = new RendezvousClient(BASE, keyFile, withTurn);
+    await expect(client.turnServers()).rejects.toThrow('rendezvous POST /turn answered 403');
   });
 
   it('throws when the Worker has no TURN key', async () => {

@@ -28,6 +28,8 @@ export interface Env {
   /** Worker secrets for the Cloudflare relay; `POST /turn` answers 503 without them. */
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
+  /** The NAS ids `POST /turn` mints for, comma-separated (a Worker secret); unset or empty, it mints for none. */
+  TURN_NAS_IDS?: string;
 }
 
 const ROUTES = new Set(['/nas', '/codes', '/codes/lookup']);

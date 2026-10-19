@@ -4,6 +4,11 @@
  * Cloudflare TURN key id and API token are Worker secrets (`wrangler secret put TURN_KEY_ID` and
  * `TURN_KEY_API_TOKEN`), never in the repo, and never in a response or a log line.
  *
+ * Anyone can register a key (`POST /nas`), so a signature alone proves nothing about who pays: the Worker mints only
+ * for the NAS ids in the secret `TURN_NAS_IDS` (comma-separated; `node server.mjs nas-id` on the NAS prints its id),
+ * and for nobody while it is unset or empty. Each NAS may mint 30 times an hour and all of them 500 times a day
+ * (counted by the registry, `INTERNAL.turnAttempt`).
+ *
  * Cloudflare's endpoint, as its docs describe it (checked 2026-10-19,
  * developers.cloudflare.com/realtime/turn/generate-credentials/): `POST
  * https://rtc.live.cloudflare.com/v1/turn/keys/<key id>/credentials/generate-ice-servers` with
@@ -21,6 +26,8 @@ export interface TurnEnv {
   CODE_REGISTRY: RegistryNamespace;
   TURN_KEY_ID?: string;
   TURN_KEY_API_TOKEN?: string;
+  /** The NAS ids allowed to mint, comma-separated. */
+  TURN_NAS_IDS?: string;
 }
 
 export interface TurnDeps {
@@ -30,7 +37,15 @@ export interface TurnDeps {
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
-/** `POST /turn {nasId, ts, signature}` → 200 `{iceServers}`; 401 for a stale `ts`, an unknown NAS or a bad signature. */
+/** The NAS ids on the `TURN_NAS_IDS` allowlist. */
+export function turnNasIds(value: string | undefined): Set<string> {
+  return new Set((value ?? '').split(',').map((id) => id.trim()).filter((id) => id !== ''));
+}
+
+/**
+ * `POST /turn {nasId, ts, signature}` → 200 `{iceServers}`; 503 without the secrets or the allowlist, 403 for a NAS
+ * not on the allowlist, 401 for a stale `ts`, an unknown NAS or a bad signature, 429 past the limits.
+ */
 export async function turnRoute(request: Request, env: TurnEnv, deps: TurnDeps): Promise<Response> {
   if (request.method !== 'POST') {
     const response = json(405, { error: 'method not allowed' });
@@ -39,7 +54,8 @@ export async function turnRoute(request: Request, env: TurnEnv, deps: TurnDeps):
   }
   const keyId = env.TURN_KEY_ID;
   const token = env.TURN_KEY_API_TOKEN;
-  if (!keyId || !token) {
+  const allowed = turnNasIds(env.TURN_NAS_IDS);
+  if (!keyId || !token || allowed.size === 0) {
     await request.body?.cancel();
     return json(503, { error: 'turn-not-configured' });
   }
@@ -48,7 +64,10 @@ export async function turnRoute(request: Request, env: TurnEnv, deps: TurnDeps):
   const { nasId, ts, signature } = body;
   if (!isNasId(nasId) || typeof ts !== 'number' || !Number.isSafeInteger(ts) || typeof signature !== 'string') return json(400, { error: 'bad request' });
   if (Math.abs(deps.now() - ts) > TURN_MAX_SKEW_MS) return json(401, { error: 'unauthorized' });
+  if (!allowed.has(nasId)) return json(403, { error: 'turn-not-allowed' });
   if (!(await verifiedByNas(env.CODE_REGISTRY, nasId, ts, signature))) return json(401, { error: 'unauthorized' });
+  const attempt = await counted(env.CODE_REGISTRY, nasId);
+  if (attempt !== null) return attempt;
 
   let iceServers: unknown;
   try {
@@ -81,6 +100,16 @@ async function jsonBody(request: Request): Promise<Record<string, unknown> | nul
   } catch {
     return null;
   }
+}
+
+/** Counts one minting for `nasId` with the registry: null when it may go ahead, else the registry's 429. */
+async function counted(registry: RegistryNamespace, nasId: string): Promise<Response | null> {
+  const res = await registry
+    .get(registry.idFromName(REGISTRY_NAME))
+    .fetch(new Request(`https://registry.internal${INTERNAL.turnAttempt}?nasId=${encodeURIComponent(nasId)}`, { method: 'POST' }));
+  if (res.status === 204) return null;
+  const body = res.status === 429 ? ((await res.json()) as unknown) : (await res.body?.cancel(), { error: 'turn-rate-limited' });
+  return json(429, body);
 }
 
 /** Whether a live NAS's registered key made `signature` over `turnRequestMessage({ nasId, ts })`. */

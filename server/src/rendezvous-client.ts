@@ -42,6 +42,14 @@ export class RendezvousClient implements CodeRegistrar {
     return this.nasId;
   }
 
+  /**
+   * This NAS's id, the thumbprint of its public key, without asking the service (the key is made when there is none).
+   * It is the id `POST /nas` answers and the one the Worker's `TURN_NAS_IDS` lists.
+   */
+  async localNasId(): Promise<string> {
+    return nasIdOf((await this.loadKey()).publicKeyJwk);
+  }
+
   /** Registers the public key again (as after the service lost its registry), giving this NAS's id. */
   reregister(): Promise<string> {
     this.nasId = undefined;

@@ -17,6 +17,7 @@ const ICE = [
 let clock: number;
 let registry: CodeRegistry;
 let env: Env;
+let registrations = 0;
 let upstream: ReturnType<typeof vi.fn<typeof fetch>>;
 
 beforeEach(() => {
@@ -27,6 +28,7 @@ beforeEach(() => {
     SIGNALLING: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: async () => new Response(null, { status: 500 }) }) },
     TURN_KEY_ID: KEY_ID,
     TURN_KEY_API_TOKEN: TOKEN,
+    TURN_NAS_IDS: '',
   };
   upstream = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ iceServers: ICE }), { status: 201, headers: { 'Content-Type': 'application/json' } }));
 });
@@ -34,11 +36,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function registeredNas(): Promise<{ keys: CryptoKeyPair; nasId: string }> {
+/** Puts a NAS id on the Worker's `TURN_NAS_IDS` allowlist. */
+function list(nasId: string): void {
+  env.TURN_NAS_IDS = env.TURN_NAS_IDS ? `${env.TURN_NAS_IDS}, ${nasId}` : nasId;
+}
+
+/** A NAS registered with the registry, and (unless `listed` is false) on the allowlist. */
+async function registeredNas(listed = true): Promise<{ keys: CryptoKeyPair; nasId: string }> {
   const keys = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])) as CryptoKeyPair;
   const { kty, crv, x, y } = (await crypto.subtle.exportKey('jwk', keys.publicKey)) as JsonWebKey;
-  const res = await registry.fetch(new Request('https://rendezvous.example/nas', { method: 'POST', body: JSON.stringify({ publicKeyJwk: { kty, crv, x, y } }) }));
-  return { keys, nasId: ((await res.json()) as { nasId: string }).nasId };
+  // each from its own address, past the registry's per-client registration limit
+  const headers = { 'CF-Connecting-IP': `192.0.2.${++registrations}` };
+  const res = await registry.fetch(new Request('https://rendezvous.example/nas', { method: 'POST', headers, body: JSON.stringify({ publicKeyJwk: { kty, crv, x, y } }) }));
+  const nasId = ((await res.json()) as { nasId: string }).nasId;
+  if (listed) list(nasId);
+  return { keys, nasId };
+}
+
+async function signedBody(keys: CryptoKeyPair, nasId: string, ts = clock): Promise<{ nasId: string; ts: number; signature: string }> {
+  return { nasId, ts, signature: await sign(keys, turnRequestMessage({ nasId, ts })) };
 }
 
 async function sign(keys: CryptoKeyPair, bytes: Uint8Array<ArrayBuffer>): Promise<string> {
@@ -77,6 +93,7 @@ describe('POST /turn', () => {
       { nasId, ts: clock, signature: await sign(keys, signedMessage({ nasId, codeHash: '0'.repeat(64), routes: {}, expiresAt: clock })) },
       { nasId: 'A'.repeat(43), ts: clock, signature: await sign(keys, turnRequestMessage({ nasId: 'A'.repeat(43), ts: clock })) },
     ];
+    list('A'.repeat(43));
     for (const body of bodies) {
       const res = await turn(body);
       expect(res.status, JSON.stringify(body)).toBe(401);
@@ -95,7 +112,62 @@ describe('POST /turn', () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
+  it('answers 503 turn-not-configured while TURN_NAS_IDS is unset or empty', async () => {
+    const { keys, nasId } = await registeredNas(false);
+    for (const ids of [undefined, '', ' , ']) {
+      if (ids === undefined) delete env.TURN_NAS_IDS;
+      else env.TURN_NAS_IDS = ids;
+      const res = await turn(await signedBody(keys, nasId));
+      expect(res.status, String(ids)).toBe(503);
+      expect(await res.json()).toEqual({ error: 'turn-not-configured' });
+    }
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('answers 403 to a freshly registered NAS that is not on TURN_NAS_IDS, and mints for a listed one', async () => {
+    const listed = await registeredNas();
+    const stranger = await registeredNas(false);
+    const refused = await turn(await signedBody(stranger.keys, stranger.nasId));
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: 'turn-not-allowed' });
+    expect(upstream).not.toHaveBeenCalled();
+    expect((await turn(await signedBody(listed.keys, listed.nasId))).status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 429 after 30 mintings in an hour for one NAS, without counting refusals, and again an hour later', async () => {
+    const { keys, nasId } = await registeredNas();
+    const other = await registeredNas();
+    for (let i = 0; i < 30; i++) expect((await turn(await signedBody(keys, nasId))).status, `try ${i}`).toBe(200);
+    const limited = await turn(await signedBody(keys, nasId));
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: 'turn-rate-limited', scope: 'nas' });
+    expect(upstream).toHaveBeenCalledTimes(30);
+    // a bad signature never counts, and another NAS has its own allowance
+    expect((await turn({ ...(await signedBody(keys, nasId)), signature: await sign(other.keys, turnRequestMessage({ nasId, ts: clock })) })).status).toBe(401);
+    expect((await turn(await signedBody(other.keys, other.nasId))).status).toBe(200);
+    clock += 60 * 60_000 + 1;
+    expect((await turn(await signedBody(keys, nasId))).status).toBe(200);
+  });
+
+  it('answers 429 once every NAS together has had 500 mintings in a day', async () => {
+    const nases = [];
+    for (let i = 0; i < 17; i++) nases.push(await registeredNas());
+    let minted = 0;
+    for (const { keys, nasId } of nases) {
+      for (let i = 0; i < 30 && minted < 500; i++, minted++) expect((await turn(await signedBody(keys, nasId))).status).toBe(200);
+    }
+    const last = nases[16]!;
+    const limited = await turn(await signedBody(last.keys, last.nasId));
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: 'turn-rate-limited', scope: 'global' });
+    expect(upstream).toHaveBeenCalledTimes(500);
+    clock += 24 * 60 * 60_000 + 1;
+    expect((await turn(await signedBody(last.keys, last.nasId))).status).toBe(200);
+  });
+
   it('answers 400 to a malformed body, 405 to another method, and 502 when Cloudflare fails', async () => {
+    list('A'.repeat(43));
     for (const body of [null, [], { nasId: 'x', ts: clock, signature: 's' }, { nasId: 'A'.repeat(43), ts: 'now', signature: 's' }]) {
       expect((await turn(body)).status, JSON.stringify(body)).toBe(400);
     }

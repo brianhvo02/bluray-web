@@ -41,9 +41,13 @@ const LIMITS = {
   unregister: { max: 60, windowMs: HOUR },
   /** Signalling WebSocket attempts, NAS and device sockets alike, counted here for every NAS id at once. */
   signal: { max: 10, windowMs: MINUTE },
+  /** TURN credentials minted for one NAS (`POST /turn`), after its signature checked. */
+  turn: { max: 30, windowMs: HOUR },
+  /** TURN credentials minted for every NAS at once, a cap on what the Worker's key can cost. */
+  turnDay: { max: 500, windowMs: DAY },
 } as const;
 type Route = keyof typeof LIMITS;
-const ROUTES: Readonly<Record<string, Exclude<Route, 'unregister' | 'signal'>>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
+const ROUTES: Readonly<Record<string, Exclude<Route, 'unregister' | 'signal' | 'turn' | 'turnDay'>>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
 
 /** Failed lookups allowed per hour across all clients; successful ones need a valid 60-bit code and don't count. */
 const FAILED_LOOKUPS_PER_HOUR = 1_000;
@@ -59,14 +63,20 @@ export const REGISTRY_NAME = 'registry';
 /**
  * Paths only the Worker's own objects call (the Worker in `index.ts` never routes them from outside): the
  * Signalling object reads a NAS's key and marks a NAS seen when its socket authenticates, and the Worker counts a
- * client's signalling attempts.
+ * client's signalling attempts and a NAS's TURN credentials.
  */
-export const INTERNAL = { nasKey: '/internal/nas-key', nasTouch: '/internal/nas-touch', signalAttempt: '/internal/signal-attempt' } as const;
+export const INTERNAL = {
+  nasKey: '/internal/nas-key',
+  nasTouch: '/internal/nas-touch',
+  signalAttempt: '/internal/signal-attempt',
+  turnAttempt: '/internal/turn-attempt',
+} as const;
 
 /** Storage keys: NAS public keys, codes by hash (never the code), and the rate-limit logs. */
 const nasKey = (nasId: string): string => `nas:${nasId}`;
 const codeKey = (codeHash: string): string => `code:${codeHash}`;
 const rateKey = (route: Route, client: string): string => `rate:${route}:${client}`;
+const TURN_DAY_KEY = rateKey('turnDay', 'all');
 const FAILED_KEY = 'global:failed-lookups';
 
 export function json(status: number, body: unknown): Response {
@@ -139,6 +149,7 @@ export class CodeRegistry {
       const allowed = await this.allow(rateKey('signal', clientBucket(request.headers.get('CF-Connecting-IP'))), LIMITS.signal);
       return allowed ? new Response(null, { status: 204 }) : json(429, { error: 'too many requests' });
     }
+    if (url.pathname === INTERNAL.turnAttempt) return this.turnAttempt(url.searchParams.get('nasId'));
     const path = ROUTES[url.pathname];
     if (path === undefined) return json(404, { error: 'not found' });
     const route: Route = path === 'codes' && request.method === 'DELETE' ? 'unregister' : path;
@@ -206,6 +217,27 @@ export class CodeRegistry {
     const nas = await this.storage.get<NasRecord>(nasKey(nasId));
     if (!live(nas, now)) return json(404, { error: 'unknown nas' });
     await this.storage.put<NasRecord>(nasKey(nasId), { ...nas, lastSeen: now });
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Internal `POST /internal/turn-attempt?nasId=` → 204 and counts one minting, or 429 `{ error, scope }` when the
+   * NAS's hourly limit (`scope: 'nas'`) or every NAS's daily cap (`scope: 'global'`) is reached; a refused try
+   * counts against neither.
+   */
+  private async turnAttempt(nasId: string | null): Promise<Response> {
+    if (!isNasId(nasId)) return json(400, { error: 'bad request' });
+    const now = this.now();
+    const recent = async (key: string, limit: { windowMs: number }): Promise<number[]> =>
+      ((await this.storage.get<number[]>(key)) ?? []).filter((t) => t > now - limit.windowMs);
+    const nasKeyName = rateKey('turn', nasId);
+    const mine = await recent(nasKeyName, LIMITS.turn);
+    if (mine.length >= LIMITS.turn.max) return json(429, { error: 'turn-rate-limited', scope: 'nas' });
+    const all = await recent(TURN_DAY_KEY, LIMITS.turnDay);
+    if (all.length >= LIMITS.turnDay.max) return json(429, { error: 'turn-rate-limited', scope: 'global' });
+    await this.storage.put(nasKeyName, [...mine, now]);
+    await this.storage.put(TURN_DAY_KEY, [...all, now]);
+    await this.armAlarm(now + LIMITS.turn.windowMs);
     return new Response(null, { status: 204 });
   }
 

@@ -4,6 +4,8 @@
 # With --owner-code it deploys nothing: it mints one owner pairing code on the
 # running server and prints it with its link and a terminal QR. Extra args go to
 # the command: --owner-code --person <name> mints for that owner person.
+# With --nas-id it deploys nothing: it prints the running server's rendezvous
+# NAS id, for the Worker's TURN_NAS_IDS secret.
 set -euo pipefail
 
 HOST="${BLURAY_NAS_HOST:-mediaserver}"
@@ -14,6 +16,10 @@ if [ "${1:-}" = "--owner-code" ]; then
   ARGS=""
   if [ $# -gt 0 ]; then ARGS="$(printf ' %q' "$@")"; fi
   exec ssh "$HOST" "docker exec bluray-server node server.mjs owner-code$ARGS"
+fi
+
+if [ "${1:-}" = "--nas-id" ]; then
+  exec ssh "$HOST" "docker exec bluray-server node server.mjs nas-id"
 fi
 
 REMOTE_DIR='~/bluray-server'
