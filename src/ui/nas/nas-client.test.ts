@@ -581,7 +581,7 @@ describe('NasClient', () => {
     expect(NAS_MESSAGES.noRoute).toBe("This NAS isn't reachable from here yet.");
     const server = fakeServer();
     const nas = client(server);
-    const code = await server.code({ webrtc: true });
+    const code = await server.code({ webrtc: { nasId: 'N'.repeat(43) } });
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.noRoute);
   });
 

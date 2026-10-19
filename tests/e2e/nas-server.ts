@@ -126,7 +126,11 @@ async function startRendezvous(): Promise<void> {
   const { default: worker } = await import('../../rendezvous/src/index');
   const { memoryState } = await import('../../rendezvous/src/memory-state');
   const registry = new CodeRegistry(memoryState());
-  const env = { CODE_REGISTRY: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) } };
+  const env = {
+    CODE_REGISTRY: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) },
+    // No WebSockets in this stand-in: signalling is unit-tested in rendezvous/.
+    SIGNALLING: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: async () => new Response(null, { status: 501 }) }) },
+  };
   let client = 0;
   createServer((req, res) => {
     const chunks: Buffer[] = [];

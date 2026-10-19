@@ -22,6 +22,7 @@ const workerFetch = (async (input: string | URL | Request, init?: RequestInit) =
   requests.push(`${request.method} ${new URL(request.url).pathname}`);
   return worker.fetch(request, {
     CODE_REGISTRY: { idFromName: () => ({}), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) },
+    SIGNALLING: { idFromName: () => ({}), get: () => ({ fetch: async () => new Response(null, { status: 501 }) }) },
   });
 }) as typeof fetch;
 
@@ -58,7 +59,8 @@ describe('RendezvousClient', () => {
     expect(requests).toEqual(['POST /nas', 'POST /codes']);
     const res = await lookup('k7qm-4xp2-r9td');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ nasId: await client.ensureRegistered(), routes: ROUTES });
+    const nasId = await client.ensureRegistered();
+    expect(await res.json()).toEqual({ nasId, routes: { ...ROUTES, webrtc: { nasId } } });
   });
 
   it('re-registers the NAS when the service has forgotten it', async () => {

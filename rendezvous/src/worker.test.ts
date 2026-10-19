@@ -18,6 +18,8 @@ let clock: number;
 let storage: MemoryStorage;
 let registry: CodeRegistry;
 let env: Env;
+/** The requests the Worker passed to the Signalling Durable Object, with the name of the instance. */
+let signalled: { name: string; request: Request }[];
 
 beforeEach(() => {
   clock = 1_800_000_000_000;
@@ -29,7 +31,17 @@ beforeEach(() => {
       idFromName: (name: string) => ({ name }),
       get: () => ({ fetch: (request: Request) => registry.fetch(request) }),
     },
+    SIGNALLING: {
+      idFromName: (name: string) => ({ name }),
+      get: (id: object) => ({
+        fetch: async (request: Request) => {
+          signalled.push({ name: (id as { name: string }).name, request });
+          return new Response(null, { status: 200, headers: { 'X-Signalling': '1' } });
+        },
+      }),
+    },
   };
+  signalled = [];
 });
 
 /** A distinct code hash per number. */
@@ -104,7 +116,7 @@ describe('rendezvous', () => {
 
     const res = await lookup('k7qm-4xp2-r9td');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ nasId, routes: ROUTES });
+    expect(await res.json()).toEqual({ nasId, routes: { ...ROUTES, webrtc: { nasId } } });
     // A lookup doesn't consume the code; the NAS's redeem does.
     expect((await lookup(CODE)).status).toBe(200);
   });
@@ -147,7 +159,7 @@ describe('rendezvous', () => {
     const nasB = await registerNas(b);
     expect((await registerCode(a, nasA)).status).toBe(204);
     expect((await registerCode(b, nasB)).status).toBe(409);
-    expect(await (await lookup(CODE)).json()).toEqual({ nasId: nasA, routes: ROUTES });
+    expect(await (await lookup(CODE)).json()).toEqual({ nasId: nasA, routes: { ...ROUTES, webrtc: { nasId: nasA } } });
   });
 
   it('answers 404 for an unknown code or an expired one, and the alarm deletes expired codes', async () => {
@@ -362,6 +374,55 @@ describe('rendezvous', () => {
     const deleteLookup = await worker.fetch(new Request('https://rendezvous.example/codes/lookup', { method: 'DELETE' }), env);
     expect(deleteLookup.status).toBe(405);
     expect((await worker.fetch(new Request('https://rendezvous.example/codes', { method: 'PUT' }), env)).headers.get('Allow')).toBe('POST, DELETE, OPTIONS');
+  });
+});
+
+describe('signalling routes', () => {
+  const NAS_ID = 'N'.repeat(43);
+
+  function upgrade(path: string, ip = '203.0.113.7', headers: Record<string, string> = { Upgrade: 'websocket' }): Promise<Response> {
+    return worker.fetch(new Request(`https://rendezvous.example${path}`, { headers: { ...headers, 'CF-Connecting-IP': ip } }), env);
+  }
+
+  it('routes WebSocket upgrades on /signal/nas and /signal/device to the Signalling object of that NAS', async () => {
+    const nas = await upgrade(`/signal/nas?nasId=${NAS_ID}`);
+    expect(nas.headers.get('X-Signalling')).toBe('1');
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`, '203.0.113.8', { upgrade: 'WebSocket' })).headers.get('X-Signalling')).toBe('1');
+    expect(signalled.map((s) => [s.name, new URL(s.request.url).pathname])).toEqual([
+      [NAS_ID, '/signal/nas'],
+      [NAS_ID, '/signal/device'],
+    ]);
+  });
+
+  it('refuses a request that is not an upgrade with 426, and a malformed NAS id with 400', async () => {
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`, '203.0.113.7', {})).status).toBe(426);
+    expect((await upgrade('/signal/device?nasId=short')).status).toBe(400);
+    expect((await upgrade('/signal/device')).status).toBe(400);
+    expect((await upgrade(`/signal/device?nasId=${'*'.repeat(43)}`)).status).toBe(400);
+    const post = await worker.fetch(new Request(`https://rendezvous.example/signal/nas?nasId=${NAS_ID}`, { method: 'POST', headers: { Upgrade: 'websocket' } }), env);
+    expect(post.status).toBe(405);
+    expect(signalled).toEqual([]);
+  });
+
+  it('allows 10 connection attempts per minute per IP, across NAS ids and both roles', async () => {
+    for (let i = 0; i < 10; i++) expect((await upgrade(`/signal/${i % 2 ? 'nas' : 'device'}?nasId=${String(i).repeat(43)}`)).status).toBe(200);
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`)).status).toBe(429);
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`, '198.51.100.3')).status).toBe(200);
+    expect(signalled).toHaveLength(11);
+    clock += MINUTE;
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`)).status).toBe(200);
+  });
+
+  it('never routes the registry\'s internal paths from outside', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    expect((await worker.fetch(new Request(`https://rendezvous.example/internal/nas-key?nasId=${nasId}`), env)).status).toBe(404);
+    expect((await call('/internal/signal-attempt', {})).status).toBe(404);
+    // The registry itself answers the key to the Signalling object.
+    const res = await registry.fetch(new Request(`https://registry.internal/internal/nas-key?nasId=${nasId}`));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { publicKeyJwk: { kty: string } }).publicKeyJwk.kty).toBe('EC');
+    expect((await registry.fetch(new Request(`https://registry.internal/internal/nas-key?nasId=${'Z'.repeat(43)}`))).status).toBe(404);
   });
 });
 

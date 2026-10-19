@@ -1,5 +1,5 @@
 import type { CodeLookup, CodeRoutes, EcPublicJwk } from '../../src/engine/disc/nas-api';
-import { ECDSA_KEY, ECDSA_SIGN, MAX_CODE_AHEAD_MS, codeHashOf, fromBase64url, nasIdOf, signedMessage, unregisterMessage } from './protocol';
+import { ECDSA_KEY, ECDSA_SIGN, MAX_CODE_AHEAD_MS, codeHashOf, fromBase64url, isNasId, nasIdOf, signedMessage, unregisterMessage } from './protocol';
 
 /** The part of a Durable Object's storage API the registry uses (the KV-style API, on SQLite-backed storage). */
 export interface RegistryStorage {
@@ -39,9 +39,11 @@ const LIMITS = {
   nas: { max: 5, windowMs: HOUR },
   codes: { max: 30, windowMs: HOUR },
   unregister: { max: 60, windowMs: HOUR },
+  /** Signalling WebSocket attempts, NAS and device sockets alike, counted here for every NAS id at once. */
+  signal: { max: 10, windowMs: MINUTE },
 } as const;
 type Route = keyof typeof LIMITS;
-const ROUTES: Readonly<Record<string, Exclude<Route, 'unregister'>>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
+const ROUTES: Readonly<Record<string, Exclude<Route, 'unregister' | 'signal'>>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
 
 /** Failed lookups allowed per hour across all clients; successful ones need a valid 60-bit code and don't count. */
 const FAILED_LOOKUPS_PER_HOUR = 1_000;
@@ -50,6 +52,15 @@ const CODES_PER_NAS = 20;
 const NAS_TTL_MS = 90 * DAY;
 const MAX_ROUTE_LENGTH = 512;
 const ALARM_PAGE = 500;
+
+/** The one registry instance's name (`idFromName`). */
+export const REGISTRY_NAME = 'registry';
+
+/**
+ * Paths only the Worker's own objects call (the Worker in `index.ts` never routes them from outside): the
+ * Signalling object reads a NAS's key, and the Worker counts a client's signalling attempts.
+ */
+export const INTERNAL = { nasKey: '/internal/nas-key', signalAttempt: '/internal/signal-attempt' } as const;
 
 /** Storage keys: NAS public keys, codes by hash (never the code), and the rate-limit logs. */
 const nasKey = (nasId: string): string => `nas:${nasId}`;
@@ -120,7 +131,13 @@ export class CodeRegistry {
   }
 
   async fetch(request: Request): Promise<Response> {
-    const path = ROUTES[new URL(request.url).pathname];
+    const url = new URL(request.url);
+    if (url.pathname === INTERNAL.nasKey) return this.nasKeyOf(url.searchParams.get('nasId'));
+    if (url.pathname === INTERNAL.signalAttempt) {
+      const allowed = await this.allow(rateKey('signal', clientBucket(request.headers.get('CF-Connecting-IP'))), LIMITS.signal);
+      return allowed ? new Response(null, { status: 204 }) : json(429, { error: 'too many requests' });
+    }
+    const path = ROUTES[url.pathname];
     if (path === undefined) return json(404, { error: 'not found' });
     const route: Route = path === 'codes' && request.method === 'DELETE' ? 'unregister' : path;
     if (request.method !== 'POST' && route !== 'unregister') return json(405, { error: 'method not allowed' });
@@ -167,6 +184,14 @@ export class CodeRegistry {
       }
       if (page.size < ALARM_PAGE) return next;
     }
+  }
+
+  /** Internal `GET /internal/nas-key?nasId=` → `{ publicKeyJwk }` of a live NAS, or 404. */
+  private async nasKeyOf(nasId: string | null): Promise<Response> {
+    if (!isNasId(nasId)) return json(404, { error: 'unknown nas' });
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, this.now())) return json(404, { error: 'unknown nas' });
+    return json(200, { publicKeyJwk: nas.publicKeyJwk });
   }
 
   /** `POST /nas { publicKeyJwk }` → `{ nasId }`; the id is the key's thumbprint, so this is idempotent. */
@@ -275,7 +300,8 @@ export class CodeRegistry {
     const hash = await codeHashOf(body.code);
     const record = hash === null ? undefined : await this.storage.get<CodeRecord>(codeKey(hash));
     if (record && record.expiresAt > now) {
-      const answer: CodeLookup = { nasId: record.nasId, routes: record.routes };
+      // Every registered NAS keeps a signalling socket, so every code can be reached over WebRTC.
+      const answer: CodeLookup = { nasId: record.nasId, routes: { ...record.routes, webrtc: { nasId: record.nasId } } };
       return json(200, answer);
     }
     if (!(await this.allow(FAILED_KEY, { max: FAILED_LOOKUPS_PER_HOUR, windowMs: HOUR }))) return json(429, { error: 'too many lookups' });

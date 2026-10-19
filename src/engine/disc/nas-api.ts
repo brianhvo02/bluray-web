@@ -22,10 +22,11 @@ export interface LibraryListing {
   readonly scanning: boolean;
 }
 
-/** The routes a pairing code leads to: the NAS's HTTPS API base (and, later, WebRTC). */
+/** The routes a pairing code leads to: the NAS's HTTPS API base and its WebRTC signalling id. */
 export interface CodeRoutes {
   readonly https?: string;
-  readonly webrtc?: true;
+  /** The NAS's signalling id on the rendezvous Worker (`/signal/device?nasId=`); the Worker adds it to every lookup. */
+  readonly webrtc?: { readonly nasId: string };
 }
 
 /** The rendezvous service's answer to `POST /codes/lookup { code }`. */

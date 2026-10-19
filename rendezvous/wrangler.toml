@@ -8,7 +8,16 @@ compatibility_date = "2026-10-17"
 name = "CODE_REGISTRY"
 class_name = "CodeRegistry"
 
+# WebRTC signalling, one object per NAS (`idFromName(nasId)`).
+[[durable_objects.bindings]]
+name = "SIGNALLING"
+class_name = "Signalling"
+
 # SQLite-backed storage, available on the Workers free plan.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CodeRegistry"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Signalling"]
