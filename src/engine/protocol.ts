@@ -222,6 +222,11 @@ export type EngineEvent =
   | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
   /** The NAS answered 401: send remoteToken with a fresh token within 10 s, or the disc fails as unpaired. */
   | { readonly type: 'remoteTokenNeeded' }
+  /**
+   * The engine closed a NAS disc's fetch port (the disc was replaced, closed or failed to open), one event per port, in
+   * the order the discs were opened: what serves that port on the main thread can stop now without failing its reads.
+   */
+  | { readonly type: 'fetchPortClosed' }
   | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }

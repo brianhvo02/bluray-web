@@ -149,7 +149,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'noticeCleared':
       return { ...s, notices: s.notices.filter((n) => n.code !== e.code) };
     case 'remoteTokenNeeded':
-      return s; // answered by the controller
+    case 'fetchPortClosed':
+      return s; // handled by the controller
     case 'unsupported':
       return withNotice(s, { code: `unsupported-${e.kind}`, message: e.message });
     case 'error':
@@ -188,6 +189,17 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'shaderStatus':
       return { ...s, shaders: { state: e.state, set: e.set, error: e.error }, shaderDropWarning: e.state === 'active' ? s.shaderDropWarning : null };
   }
+}
+
+/** The backstop for releasing a replaced NAS disc's fetch port serving, should the engine never report the port closed. */
+export const FETCH_PORT_RELEASE_MS = 5_000;
+
+function releaseServing(entry: { release: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }): void {
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = null;
+  const release = entry.release;
+  entry.release = null;
+  release?.();
 }
 
 export interface WorkerLike {
@@ -241,8 +253,13 @@ export class PlayerController {
   private backgroundPaused = false;
   /** The open NAS disc's token source, asked when the engine's reads get a 401. */
   private refreshToken: (() => Promise<string>) | null = null;
-  /** Ends what the open NAS disc's fetch port is served by, once another disc opens or it closes. */
-  private releaseRemote: (() => void) | null = null;
+  /**
+   * What serves the fetch port of each NAS disc the engine may still read, oldest first. One is released when the
+   * engine reports that port closed (fetchPortClosed, after it dropped the disc and aborted its reads), or, as a
+   * backstop, FETCH_PORT_RELEASE_MS after its disc was replaced or closed. A released entry stays until its event, so
+   * the events and the entries stay in step.
+   */
+  private readonly servings: Array<{ release: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }> = [];
   private opens = 0;
 
   constructor(
@@ -260,6 +277,7 @@ export class PlayerController {
       if (e.type === 'soundEffects') audio.loadEffects(e.clips);
       else if (e.type === 'soundEffect') audio.playEffect(e.id);
       else if (e.type === 'remoteTokenNeeded') this.answerTokenRequest();
+      else if (e.type === 'fetchPortClosed') this.fetchPortClosed();
       else this.update(this.withDropWarning(reduceEvent(this.snapshot, e), e));
     };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
@@ -359,7 +377,7 @@ export class PlayerController {
   open(entries: ReadonlyArray<readonly [string, File]>): void {
     this.opens++;
     this.refreshToken = null;
-    this.release();
+    this.supersedeServings();
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
     this.post({ type: 'open', disc: { kind: 'files', entries } });
@@ -368,22 +386,31 @@ export class PlayerController {
   /**
    * A disc on the NAS. `refreshToken` gives a fresh session token when the NAS refuses the current one; a token
    * refreshed on schedule goes to the engine through setRemoteToken. A spec's fetch port (the WebRTC route) is
-   * transferred to the engine, and `release` (what serves it) runs once another disc opens or this one closes.
+   * transferred to the engine, and `release` (what serves it) runs once the engine has closed that port, after another disc
+   * opened or this one closed (or failed to open), so no read of it fails early.
    */
   openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>, release?: () => void): void {
     this.opens++;
-    this.release();
+    this.supersedeServings();
     this.refreshToken = refreshToken ?? null;
-    this.releaseRemote = release ?? null;
+    if (spec.fetchPort) this.servings.push({ release: release ?? null, timer: null });
+    else release?.(); // nothing crosses to the engine to serve
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
     this.post({ type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
   }
 
-  private release(): void {
-    const release = this.releaseRemote;
-    this.releaseRemote = null;
-    release?.();
+  /** The open disc is being replaced or closed: its serving goes once the engine has closed its port, or after the backstop. */
+  private supersedeServings(): void {
+    for (const entry of this.servings) {
+      if (entry.release && !entry.timer) entry.timer = setTimeout(() => releaseServing(entry), FETCH_PORT_RELEASE_MS);
+    }
+  }
+
+  /** The engine closed the oldest fetch port it held. */
+  private fetchPortClosed(): void {
+    const entry = this.servings.shift();
+    if (entry) releaseServing(entry);
   }
 
   /** A fresh session token for the open NAS disc. */
@@ -660,7 +687,7 @@ export class PlayerController {
   closeDisc(): void {
     this.opens++;
     this.refreshToken = null;
-    this.release();
+    this.supersedeServings();
     this.post({ type: 'close' });
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });
   }

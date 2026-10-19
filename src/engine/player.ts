@@ -761,8 +761,11 @@ export class Player {
     this.remote = null;
     this.tokens = null;
     this.discSpec = { kind: 'files', entries: [] };
-    this.discPort?.port.close();
-    this.discPort = null;
+    if (this.discPort) {
+      this.discPort.port.close();
+      this.discPort = null;
+      this.deps.emit({ type: 'fetchPortClosed' });
+    }
   }
 
   /** How a new BD-J worker reads the disc: on the port route, through a fetch port relayed to the engine's own. */

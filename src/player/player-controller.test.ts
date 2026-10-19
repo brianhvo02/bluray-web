@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AudioTrack, EngineEvent, Telemetry } from '../engine/protocol';
-import { INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
+import { FETCH_PORT_RELEASE_MS, INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
 
 class FakeWorker implements WorkerLike {
   readonly posted: unknown[] = [];
@@ -201,23 +201,54 @@ describe('PlayerController', () => {
     expect(worker.posted.at(-1)).toEqual({ type: 'remoteToken', token: 't9' });
   });
 
-  it("transfers a NAS disc's fetch port with the open, and releases what serves it when another disc opens or it closes", () => {
+  it("transfers a NAS disc's fetch port, and releases what serves it only once the engine has closed that port", () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());
     const { port1, port2 } = new MessageChannel();
     const spec = { kind: 'remote', base: 'rtc://n/api/discs/d1/', token: 't1', manifest: { discId: 'd1', name: 'Disc', files: [], inline: {} }, fetchPort: port2 } as const;
-    let released = 0;
-    c.openRemote(spec, undefined, () => released++);
+    const released: string[] = [];
+    c.openRemote(spec, undefined, () => released.push('first'));
     expect(worker.posted[0]).toEqual({ type: 'open', disc: spec });
     expect(worker.transfers[0]).toEqual([port2]);
-    expect(released).toBe(0);
-    c.openRemote({ ...spec, fetchPort: port1 }, undefined, () => (released += 10));
-    expect(released).toBe(1);
+    c.openRemote({ ...spec, fetchPort: port1 }, undefined, () => released.push('second'));
+    expect(released).toEqual([]); // the engine may still be reading the first disc
+    worker.emit({ type: 'fetchPortClosed' });
+    expect(released).toEqual(['first']);
     c.closeDisc();
-    expect(released).toBe(11);
-    c.closeDisc();
-    expect(released).toBe(11);
-    port1.close();
+    expect(released).toEqual(['first']);
+    worker.emit({ type: 'fetchPortClosed' });
+    expect(released).toEqual(['first', 'second']);
+    worker.emit({ type: 'fetchPortClosed' }); // nothing left: no harm
+    expect(released).toEqual(['first', 'second']);
+    expect(c.getSnapshot().error).toBeNull();
+  });
+
+  it('releases a replaced serving after 5 s when the engine never reports its port closed, keeping later ones in step', () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      const { port1, port2 } = new MessageChannel();
+      const spec = { kind: 'remote', base: 'rtc://n/api/discs/d1/', token: 't1', manifest: { discId: 'd1', name: 'Disc', files: [], inline: {} } } as const;
+      const released: string[] = [];
+      c.openRemote({ ...spec, fetchPort: port1 }, undefined, () => released.push('first'));
+      vi.advanceTimersByTime(60_000);
+      expect(released).toEqual([]); // still the open disc
+      c.openRemote({ ...spec, fetchPort: port2 }, undefined, () => released.push('second'));
+      vi.advanceTimersByTime(FETCH_PORT_RELEASE_MS - 1);
+      expect(released).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(released).toEqual(['first']);
+      worker.emit({ type: 'fetchPortClosed' }); // the first port's, late
+      expect(released).toEqual(['first']);
+      worker.emit({ type: 'fetchPortClosed' }); // the second disc failed to open
+      expect(released).toEqual(['first', 'second']);
+      // an HTTPS disc has no port: its release runs as it opens
+      c.openRemote(spec, undefined, () => released.push('https'));
+      expect(released).toEqual(['first', 'second', 'https']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows the NAS waiting notice until the engine clears it', () => {

@@ -70,6 +70,13 @@ class NodeSignalSocket implements SignalSocket {
     return structuredClone(this.attachment);
   }
 
+  /** A socket whose HTTP side never completed the handshake: closed, as the runtime reports a lost peer. */
+  abandon(): void {
+    this.closeSent = true;
+    this.early.length = 0;
+    this.ended(1006, '');
+  }
+
   /** Takes over `socket` once the handshake is written. */
   bind(socket: Duplex, head: Buffer): void {
     this.socket = socket;
@@ -205,14 +212,24 @@ class StandInState implements SignallingState {
   }
 }
 
-/** Sockets made by upgrades whose response hasn't reached the HTTP side yet. */
+/**
+ * Sockets made by upgrades whose response hasn't reached the HTTP side yet; one whose response never does (the
+ * Worker failed after upgrading) is abandoned after UPGRADE_WAIT_MS.
+ */
 const upgrading = new Map<string, NodeSignalSocket>();
 let nextUpgrade = 0;
+const UPGRADE_WAIT_MS = 10_000;
 
 function standInUpgrade(): Upgrade {
   const id = String(++nextUpgrade);
   const server = new NodeSignalSocket();
   upgrading.set(id, server);
+  setTimeout(() => {
+    if (upgrading.get(id) === server) {
+      upgrading.delete(id);
+      server.abandon();
+    }
+  }, UPGRADE_WAIT_MS).unref();
   return { server, response: new Response(null, { status: 200, headers: { [UPGRADE_HEADER]: id } }) };
 }
 
@@ -245,7 +262,9 @@ export async function completeUpgrade(req: IncomingMessage, socket: Duplex, head
   const ws = id === null ? undefined : upgrading.get(id);
   if (id !== null) upgrading.delete(id);
   const key = req.headers['sec-websocket-key'];
-  if (!ws || typeof key !== 'string') {
+  if (ws && (typeof key !== 'string' || socket.destroyed)) ws.abandon(); // the browser went, or the request was no upgrade
+  if (!ws || typeof key !== 'string' || socket.destroyed) {
+    if (socket.destroyed) return;
     const body = Buffer.from(await answer.arrayBuffer());
     socket.end(`HTTP/1.1 ${answer.status} ${answer.statusText || 'Error'}\r\nConnection: close\r\nContent-Length: ${body.length}\r\n\r\n${body.toString('utf8')}`);
     return;

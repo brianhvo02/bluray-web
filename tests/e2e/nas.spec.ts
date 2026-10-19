@@ -134,6 +134,28 @@ function mintOwnerCode(prepareKey: () => void): string {
   return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
 }
 
+/**
+ * Counts the bytes the page's WebRTC data channels receive (`window.__rtcBytes`), in every page load: the positive proof
+ * that the disc's reads came over the channel.
+ */
+async function countChannelBytes(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __rtcBytes: number };
+    w.__rtcBytes = 0;
+    const create = RTCPeerConnection.prototype.createDataChannel;
+    RTCPeerConnection.prototype.createDataChannel = function (this: RTCPeerConnection, ...args: Parameters<typeof create>) {
+      const channel = create.apply(this, args);
+      channel.addEventListener('message', (e: MessageEvent<unknown>) => {
+        const data = e.data;
+        w.__rtcBytes += data instanceof ArrayBuffer ? data.byteLength : data instanceof Blob ? data.size : String(data).length;
+      });
+      return channel;
+    };
+  });
+}
+
+const channelBytes = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __rtcBytes: number }).__rtcBytes);
+
 /** The rendezvous lookup as for a NAS whose HTTPS route this network can't use: its WebRTC route only. */
 async function webrtcOnlyLookup(page: Page): Promise<void> {
   await page.route(`${RENDEZVOUS_URL}/codes/lookup`, async (route) => {
@@ -238,6 +260,7 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
     return route.abort('connectionrefused');
   });
   await webrtcOnlyLookup(page);
+  await countChannelBytes(page);
   const code = serverOwnerCode();
   await page.goto(`/?pair=${code}&telemetry=1`);
   await expect(page.getByTestId('pair-code')).toHaveValue(code);
@@ -256,6 +279,7 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await page.getByTestId('playlist-00000').click();
   await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 20_000 });
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 20_000 }).toBeGreaterThanOrEqual(3_000_000);
+  expect(await channelBytes(page)).toBeGreaterThan(1_000_000); // most of disc1's first 1.3 MB clip, over the channel
 
   // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once.
   await page.reload();
@@ -263,6 +287,7 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await playFromNas(page, 'disc-bdj');
   await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 45_000 });
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  await expect.poll(() => channelBytes(page)).toBeGreaterThan(500_000); // disc-bdj's 0.66 MB clip, over the channel
   expect(httpsTried).toEqual([]);
 });
 

@@ -1859,6 +1859,51 @@ describe('Player with a disc on the NAS', () => {
     }
   });
 
+  it('drops a port disc whose read is held when another disc opens: its port closes first, and no error follows', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'));
+    const { port1, port2 } = new MessageChannel();
+    const held: AbortSignal[] = [];
+    // the main thread's serving: stream reads past the first chunk hang until the engine aborts them
+    const stop = serveFetch(port1, (async (input: string | URL | Request, init?: RequestInit) => {
+      const from = Number(/^bytes=(\d+)-/.exec(new Headers(init?.headers).get('Range') ?? '')?.[1] ?? 0);
+      if (!String(input).includes('/STREAM/') || from === 0) return nas.fetch(input, init);
+      held.push(init!.signal!);
+      return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason), { once: true }));
+    }) as typeof fetch);
+    const remote: FakeNas = { ...nas, spec: { ...nas.spec, fetchPort: port2 } };
+    const h = await harness(undefined, { remote, remoteLimits: { chunkBytes: 64 * 1024 } });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await vi.waitFor(() => expect(held.length).toBeGreaterThan(0));
+    const before = h.events.length;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
+    const after = h.events.slice(before);
+    expect(after.filter((e) => e.type === 'fetchPortClosed')).toHaveLength(1);
+    // as the controller does: what serves the port stops only once the engine has closed it
+    stop();
+    port1.close();
+    await h.play(200);
+    expect(h.events.slice(before).filter((e) => e.type === 'error')).toEqual([]);
+    expect(held.every((s) => s.aborted)).toBe(true);
+    expect(h.events.slice(before)).toContainEqual(expect.objectContaining({ type: 'titles' }));
+  });
+
+  it('closes the fetch port of a disc that fails to open', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'));
+    const { port1, port2 } = new MessageChannel();
+    const stop = serveFetch(port1, nas.fetch);
+    const manifest = { ...nas.spec.manifest, inline: {} }; // index.bdmv must be read, and the NAS has none at that path
+    const broken: FakeNas = { ...nas, spec: { ...nas.spec, manifest: { ...manifest, files: manifest.files.filter((f) => !f.path.endsWith('INDEX.BDMV')) }, fetchPort: port2 } };
+    try {
+      const h = await harness(undefined, { remote: broken, noOpen: true });
+      await h.player.handle({ type: 'open', disc: broken.spec });
+      expect(h.events.some((e) => e.type === 'error')).toBe(true);
+      expect(h.events.filter((e) => e.type === 'fetchPortClosed')).toHaveLength(1);
+    } finally {
+      stop();
+      port1.close();
+    }
+  });
+
   it('asks for a fresh token on a 401 while a command waits on the read, and carries on with it', async () => {
     const nas = fakeNas(fixtureDiscFiles('disc1'), 'fresh');
     const remote = { ...nas, spec: { ...nas.spec, token: 'expired' } };
