@@ -282,7 +282,7 @@ function shortfall(r: RunRecord): string {
   if (r.steps.length === 0) return `${!r.flushes ? 'draws nothing' : visible(r.endHash) ? 'never settles' : 'flushes, nothing visible'}${stop}`;
   if (!p.menu) return `no menu${stop}`;
   if (!p.arrows) return `arrows change nothing${stop}`;
-  if (!p.ok) return `ok starts nothing${stop}`;
+  if (!p.ok) return `${r.steps.length <= STEP.ok ? 'ok never pressed' : 'ok starts nothing'}${stop}`;
   return `script ran${stop}`;
 }
 

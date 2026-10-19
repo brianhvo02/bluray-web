@@ -49,6 +49,8 @@ export interface DiscResult {
   readonly verdict: DiscVerdict;
   readonly detail: string;
   readonly checkedAt: string;
+  /** Whether the menu's clips were real (sync.ts --video) or stubs; the same for both sides. */
+  readonly video: 'real' | 'stub';
 }
 
 /** The video codec of a playlist's first video stream, or null (none, or unreadable). */
@@ -230,6 +232,7 @@ interface Disc {
   readonly id: string;
   readonly dir: string;
   readonly fingerprint: string;
+  readonly video: 'real' | 'stub';
 }
 
 function discs(lib: string): Disc[] {
@@ -241,7 +244,12 @@ function discs(lib: string): Disc[] {
     .filter(Boolean)
     .map((l) => l.split('\t'))
     .filter(([, bdj]) => bdj === '1')
-    .map(([id, , fingerprint]) => ({ id: id!, dir: join(lib, 'discs', id!), fingerprint: fingerprint! }));
+    .map(([id, , fingerprint]) => {
+      // real menu clips (sync.ts --video) change what both sides play, so they are part of the fingerprint
+      const video = join(lib, 'manifests', `${id}.video.tsv`);
+      const real = existsSync(video) ? readFileSync(video, 'utf8').trim() : '';
+      return { id: id!, dir: join(lib, 'discs', id!), fingerprint: real ? `${fingerprint!}+v${sha(real)}` : fingerprint!, video: real ? ('real' as const) : ('stub' as const) };
+    });
 }
 
 const readJson = <T>(p: string): T | null => {
@@ -296,11 +304,11 @@ function writeSummary(lib: string, results: readonly DiscResult[], runtime: stri
     ``,
     `## Discs`,
     ``,
-    `| id | verdict | detail | ours steps/end | libbluray steps/end |`,
-    `|---|---|---|---|---|`,
+    `| id | verdict | detail | ours steps/end | libbluray steps/end | video |`,
+    `|---|---|---|---|---|---|`,
     ...[...results]
       .sort((a, b) => VERDICTS.indexOf(a.verdict) - VERDICTS.indexOf(b.verdict) || a.id.localeCompare(b.id))
-      .map((r) => `| ${r.id} | ${r.verdict} | ${r.detail.replace(/\|/g, '\\|')} | ${r.ours.steps.length} ${r.ours.end} | ${r.lib ? `${r.lib.steps.length} ${r.lib.end}` : '-'} |`),
+      .map((r) => `| ${r.id} | ${r.verdict} | ${r.detail.replace(/\|/g, '\\|')} | ${r.ours.steps.length} ${r.ours.end} | ${r.lib ? `${r.lib.steps.length} ${r.lib.end}` : '-'} | ${r.video ?? 'stub'} |`),
     ``,
   ];
   writeFileSync(join(lib, 'summary.md'), lines.join('\n'));
@@ -403,6 +411,7 @@ async function main(argv: readonly string[]): Promise<void> {
     const result: DiscResult = {
       id: d.id,
       fingerprint: d.fingerprint,
+      video: d.video,
       oursStamp: stampOf(d, 'ours')?.stamp ?? '-',
       libStamp: stampOf(d, 'lib')?.stamp ?? null,
       ours,

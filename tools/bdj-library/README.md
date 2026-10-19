@@ -13,12 +13,24 @@ Measures how many of the BD-J discs in the developer's NAS library work in our p
   - Writes a stub `BDMV/STREAM/<clip>.m2ts` per `CLIPINF/<clip>.clpi`: one aligned unit (32 source packets) of null TS packets. The player's readability check passes and every playlist ends at once.
   - Incremental: the NAS file list of each disc (path, size, mtime; `manifests/<id>.tsv`) is compared with the one recorded at its last copy, and an unchanged disc is skipped. A copy with no recorded list (one seeded from elsewhere) is adopted when its file sizes match. A remote listing or a disc copy that takes over 10 minutes is killed and reported (`no answer within 10 min` / `copy not done within 10 min`).
   - Writes `map.tsv`: `id`, `bdj` (1 when `index.bdmv` names a BD-J object), `fingerprint` (hash of the NAS file list) and `path`.
+- `npm run bdj-library:sync -- --video [--only <id>...] [--host H]` (`sync.ts`, Ruling R4): real menu video where the stub streams cannot decide. See [Real menu video](#real-menu-video).
 - `npm run bdj-library:check -- [--only <id>...] [--ours-only] [--force] [--jobs N] [--lib-jobs N] [--no-run]` (`check.ts`)
   - Runs `generic.keys` on every disc of `map.tsv` with `bdj` 1. Our side runs `tests/bdj/replay-player.ts` (the real `Player`, BD-J in process) in one child process per disc (`check.ts --run-ours <dir> <out>`), killed at 150 s, `--jobs` at a time (default 6). libbluray's side runs `tools/bdj-trace/run.sh <dir> --keys generic.keys --seconds 140 --wait-timeout 60 --tail 5`, killed at 150 s, `--lib-jobs` at a time (default 3). Ours runs first, then libbluray, so the two phases don't slow each other (both wait in wall time).
   - Both sides use the same limits: each step may wait 60 s, a run ends at 140 s, and it goes on 5 s past the script's end.
   - Incremental: each phase writes `raw/<id>.ours.stamp` or `raw/<id>.lib.stamp` (`{ stamp, fingerprint }`) as soon as that disc's run is in, so an interrupted check resumes where it stopped. Our run is reused while the disc's fingerprint and the contents of `src/`, `tests/bdj/`, `tools/bdj-library/` and the script are unchanged, and libbluray's while the fingerprint, the `bluray-web-bdj-trace` image and the script are. `--only` re-runs the given discs, `--force` re-runs everything, `--ours-only` reuses libbluray's runs where present and runs none, and `--no-run` only reclassifies. `--jobs` and `--lib-jobs` take a whole number from 1 to 64.
   - Each libbluray run names its container `bdjlib-<id>-<attempt>` (`run.sh --name`), and the 150 s kill `docker kill`s it before killing the process group (the docker CLI dying would leave the container running). A crashed run, one with no script end line (HotSpot under amd64 emulation sometimes dies at once with a SIGSEGV in `libzip.so`, or the run was killed), is run once more. On SIGINT or SIGTERM every running child is killed the same way.
   - Writes `raw/<id>.ours.json` (the RunRecord), `raw/<id>.ours.json.tmp.log` (the Java log), `raw/<id>.lib.jsonl`, `.lib.err` and `.lib.meta.json`, then `results/<id>.json` and `summary.md`.
+
+## Real menu video
+
+Stub streams end every playlist at once, so some discs never show their menu in either player. For those, `--video` copies the real clips of the menu's playlists.
+
+- **Which discs**: by default those whose current verdict is `libbluray-fails-too` or `stall`; with `--only`, the discs named.
+- **Which clips** (`video.ts`): `menuPlaylists` takes, over both run records, the distinct playlists Java selected (successfully, playlist ≥ 0) before the `wait menu` step held, or all of them when it never held. When that is a single playlist (one that played before the menu existed), the next playlist selected is taken too. `playlistClips` maps each playlist to its clips through its `.mpls`: the main path's play items and angles, then the sub-paths' (IG, sounds). No other clip is ever read.
+- **The cap**: the NAS sizes are read with `stat` (no read). A disc whose clips come to over 2 GB is skipped and reported by id (`planVideo`).
+- **The copy**: each clip is read with `ionice -c3 nice -n19 cat` over ssh (the path on stdin), one at a time, killed after 30 minutes. It goes to `<clip>.m2ts.part`, is checked against the NAS size, and then replaces that clip's stub in `discs/<id>/BDMV/STREAM/`.
+- **The record**: `manifests/<id>.video.tsv` (`<clip>\t<size>\t<mtime>`) lists the real clips. It is written after each clip, so a re-run copies only clips that are new or changed. A fresh copy of the disc's start-up files (stubs only) deletes it.
+- **The check**: `check.ts` runs both sides on whatever is in `STREAM`, real clips where present and stubs elsewhere. It adds the video record to the disc's fingerprint, so both sides re-run once real clips arrive, and it records `video: real|stub` in `results/<id>.json` and the summary.
 
 ## The generic script
 
@@ -54,7 +66,7 @@ One run of the script on one disc by one side (`classify.ts`):
 | `rejectedPlaylists` | `selectPlaylistN` calls that returned 0, with the playlist's first video codec from its `.mpls` |
 | `wallMs` | the run's wall time |
 
-`results/<id>.json` holds `{ id, fingerprint, oursStamp, libStamp, ours, lib, verdict, detail, checkedAt }`.
+`results/<id>.json` holds `{ id, fingerprint, oursStamp, libStamp, ours, lib, verdict, detail, checkedAt, video }` (`video`: `real` when the menu's clips were copied, otherwise `stub`).
 
 ## How a disc is judged
 
@@ -86,5 +98,6 @@ The settled-point rule is 5d's R3: settled hashes and calls, not flush counts. S
 
 - `sync.ts`, `check.ts`: the commands above.
 - `classify.ts`: `RunRecord`, `discId`, `gapOf`, `parseLibblurayRun`, `missingClassesFromLog`, `progress`, `compareRuns`, `libFailed`, `classify`. No disc, file or process access.
+- `video.ts`: `menuPlaylists`, `playlistClips`, `planVideo`, `parseVideoManifest`, `markReal` (real menu video).
 - `generic.keys`: the script.
-- `check.test.ts`: `classify` on made-up runs, `discId`, `parseLibblurayRun` and the script.
+- `check.test.ts`: `classify` on made-up runs, `discId`, `parseLibblurayRun` and the script. `video.test.ts`: clip selection, the cap and the video record.
