@@ -559,9 +559,9 @@ describe('Player', () => {
       expect(h.events.some((e) => e.type === 'error')).toBe(false);
     });
 
-    it('runs on the wall clock when there is no audio either, and ends once the reader is done, as libbluray on EOF (R11)', async () => {
-      // ~1.2 MB a second of video nobody decodes and nothing else: reading is paced on the clock, and with nothing
-      // delivered to play out the playlist ends at EOF, before its 8 s
+    it('runs on the wall clock when there is no audio either, and ends at its duration, its video read to the end (R11)', async () => {
+      // ~1.2 MB a second of video nobody decodes and nothing else: reading is paced on the clock, and the video read to
+      // its OUT time counts as delivered, so the playlist plays its 8 s (an IG-only menu loop does not end early)
       const h = await harness(undefined, { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 50_000 });
       await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
       await untilPlaying(h);
@@ -573,8 +573,9 @@ describe('Player', () => {
         await h.play(500);
         expect(lastState(h)).toBe('ended');
       }, { timeout: 10_000 });
-      expect(times(h).at(-1)).toBeGreaterThan(1_000_000);
-      expect(times(h).at(-1)).toBeLessThan(7_500_000);
+      // the clock stops on the tick that ends the playlist (time events come only every 250 ms)
+      const endedAt = (h.player as unknown as { clock: { nowUs(): number } }).clock.nowUs();
+      expect(Math.abs(endedAt - 8_000_000)).toBeLessThanOrEqual(100_000);
     });
 
     it('ends a truncated clip at its end of data plus the play-out of what was delivered, not at its duration (R11)', async () => {

@@ -320,6 +320,8 @@ interface Session {
   audioReadUs: number;
   /** Without a picture: the latest PTS of anything delivered (audio, PG, IG) since the last start; the playlist ends once it has played out. */
   deliveredEndUs: number;
+  /** Without a picture: at EOF, the playlist time the reads delivered up to (PlaybackPipeline.doneUs). */
+  readEndUs: number;
   /** Without a picture: its first frame (black, with the planes over it) has been composited. */
   blankComposited: boolean;
   eof: boolean;
@@ -670,8 +672,8 @@ export class Player {
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
     // without a picture the playlist ends, as libbluray's does on EOF, once the reader is done and what it delivered
-    // (audio, PG, IG) has played out, or at its duration if that comes first
-    const endUs = s.decoder ? (last?.timestamp ?? 0) + 100_000 : Math.min(s.timeline.durationUs, s.deliveredEndUs + 100_000);
+    // (audio, PG, IG, and the video read up to where its data ended) has played out, or at its duration if that is first
+    const endUs = s.decoder ? (last?.timestamp ?? 0) + 100_000 : Math.min(s.timeline.durationUs, Math.max(s.deliveredEndUs + 100_000, s.readEndUs));
     if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= endUs) {
       this.wantPlaying = false;
       this.ring?.setPlaying(false);
@@ -1933,6 +1935,7 @@ export class Player {
       dropBeforeUs: 0,
       audioReadUs: -Infinity,
       deliveredEndUs: -Infinity,
+      readEndUs: -Infinity,
       blankComposited: false,
       eof: false,
       flushed: false,
@@ -2308,6 +2311,7 @@ export class Player {
     s.pendingVideo = [];
     s.audioReadUs = -Infinity;
     s.deliveredEndUs = -Infinity;
+    s.readEndUs = -Infinity;
     s.decimator?.reset();
     s.eof = false;
     s.flushed = false;
@@ -2593,6 +2597,9 @@ export class Player {
 
   private onPipelineEnded(s: Session): void {
     s.eof = true;
+    // without a picture the video read counts as delivered too: up to the last item's OUT time when its data was all
+    // there (an IG-only menu loop plays to its end), else as far as the reader knows
+    if (!s.decoder) s.readEndUs = s.pipeline.doneUs ?? -Infinity;
     if (s.videoState !== 'configured') {
       s.flushed = true;
       return;

@@ -1,5 +1,5 @@
 import { findEpAfter, findEpBefore, stcSpnRange, type Clpi, type EpEntry } from '../bdmv/clpi-parser';
-import { TS_PACKET_SIZE } from '../demux/constants';
+import { SOURCE_PACKET_SIZE, TS_PACKET_SIZE } from '../demux/constants';
 import { DiscError, type ByteSource } from '../disc/byte-source';
 import { clipInfoPath, streamPath } from '../disc/open-disc';
 import { M2tsReader, type DemuxStats } from '../demux/m2ts-reader';
@@ -66,7 +66,9 @@ export class PlaybackPipeline {
   /** The stream file `current` reads and its clip's TS_recording_rate. */
   private currentClip: { readonly path: string; readonly recordingRate: number } | null = null;
   /** How `current` maps a source packet to playlist time (readUs). */
-  private currentPlace: { readonly item: number; readonly entries: readonly EpEntry[]; readonly startSpn: number; readonly startUs: number; readonly fromItemStart: boolean; readonly recordingRate: number } | null = null;
+  private currentPlace: { readonly item: number; readonly entries: readonly EpEntry[]; readonly startSpn: number; readonly startUs: number; readonly byRate: boolean; readonly recordingRate: number } | null = null;
+  /** Playlist time the reads of this start() delivered up to, as of the last play item finished (doneUs). */
+  private doneAtUs: number | null = null;
   private audioStream: number | null;
   private igStream: number | null;
   private pgPid: number | null = null;
@@ -102,9 +104,11 @@ export class PlaybackPipeline {
 
   /**
    * Playlist time the data delivered so far has surely reached (a lower bound), so reading can be paced on the clock
-   * without decoding anything: the EP-map entry at or before the end of the chunks handed out (not the prefetch), else,
-   * for a read from the play item's start, the clip's TS_recording_rate. Null when that is unknown (no EP map and no rate,
-   * or a seek inside an item without an EP map): then reading is not paced on it. Null between reads too.
+   * without decoding anything: the EP-map entry at or before the end of the chunks handed out (not the prefetch), else
+   * the clip's TS_recording_rate counted from the read's first packet, but only when that packet is where the play
+   * item's IN time is: a read from the item's start whose IN time is its STC sequence's start. Null when that is
+   * unknown (no EP map, no rate, a seek inside an item without an EP map, or an IN time after the sequence's start):
+   * then reading is not paced on it. Null between reads too.
    */
   get readUs(): number | null {
     const reader = this.current;
@@ -126,10 +130,18 @@ export class PlaybackPipeline {
       if (lo === 0) return null; // not yet at the first entry: a little lead-in, not paced
       return Math.min(endUs, timeline.toPlaylistUs(place.item, entries[lo - 1]!.pts * 2).us);
     }
-    if (place.recordingRate > 0 && place.fromItemStart) {
+    if (place.byRate) {
       return Math.min(endUs, place.startUs + (((spn - place.startSpn) * TS_PACKET_SIZE) / place.recordingRate) * 1e6);
     }
     return null;
+  }
+
+  /**
+   * After ended(): the playlist time the reads delivered up to. That is the last item's OUT time when its data was all
+   * there, or as far as known (readUs) when the file ended early. Null when nothing was known.
+   */
+  get doneUs(): number | null {
+    return this.doneAtUs;
   }
 
   get stats(): DemuxStats {
@@ -161,6 +173,7 @@ export class PlaybackPipeline {
   }
 
   private async run(gen: number, fromUs: number): Promise<void> {
+    this.doneAtUs = null;
     const { source, timeline, clips, videoPid, playItems } = this.config;
     const readVideo = this.config.readVideo ?? true;
     const audioStream = this.audioStream;
@@ -199,7 +212,8 @@ export class PlaybackPipeline {
       this.currentClip = { path: streamPath(item.clipId), recordingRate: clip.recordingRate };
       const entries = ep?.entries.filter((e) => e.spn >= range.startSpn && e.spn < range.endSpn) ?? [];
       const placeStartUs = i === startPos.item.index ? fromUs : timeline.itemStartUs(i);
-      this.currentPlace = { item: i, entries, startSpn, startUs: placeStartUs, fromItemStart: placeStartUs <= timeline.itemStartUs(i), recordingRate: clip.recordingRate };
+      const byRate = clip.recordingRate > 0 && placeStartUs <= timeline.itemStartUs(i) && inTimeAtStcStart(clip, item.stcId, item.inTime);
+      this.currentPlace = { item: i, entries, startSpn, startUs: placeStartUs, byRate, recordingRate: clip.recordingRate };
 
       for (;;) {
         while (this.sinks.isFull()) {
@@ -222,8 +236,21 @@ export class PlaybackPipeline {
           }
         }
       }
+      // read to its end (the file not cut short of the range): delivered up to the item's OUT time; else as far as known
+      const fileEnd = Math.floor(source.size(streamPath(item.clipId)) / SOURCE_PACKET_SIZE);
+      const complete = fileEnd >= (endSpn ?? clip.numSourcePackets);
+      this.doneAtUs = complete ? timeline.itemStartUs(i) + ((item.outTime - item.inTime) * 1000) / 45 : (this.readUs ?? this.doneAtUs);
       this.retire(reader);
     }
     if (gen === this.generation) this.sinks.ended();
   }
+}
+
+/** Whether the play item's IN time (45 kHz) is where its STC sequence starts, within a frame (the read's first packet is there). */
+function inTimeAtStcStart(clip: Clpi, stcId: number, inTime: number): boolean {
+  for (const atc of clip.atcSequences) {
+    const stc = atc.stc[stcId - atc.offsetStcId];
+    if (stc) return Math.abs(inTime - stc.presentationStart) <= 45_000 / 24;
+  }
+  return false;
 }

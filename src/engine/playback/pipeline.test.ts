@@ -226,6 +226,60 @@ describe('PlaybackPipeline', () => {
     expect(minLead).toBeGreaterThan(0);
   });
 
+  it.each([
+    ['at the clip start: paced by the recording rate', 0, true],
+    ['2 s into the clip: unknown, so not paced', 2, false],
+  ])('without an EP map, an item whose IN time is %s', async (_what, inSeconds, paced) => {
+    const files = buildSyntheticDisc({ clips: [syntheticClip('00001', 4)], playlists: [{ id: '00000', clipIds: ['00001'] }] });
+    const video = [{ pid: VIDEO_PID, codingType: CodingType.AVC }];
+    const start = CLIP_START_PTS / 2;
+    const end = start + 4 * 45_000;
+    const m2ts = files.get('BDMV/STREAM/00001.m2ts')!;
+    files.set('BDMV/CLIPINF/00001.clpi', buildClpi({ numSourcePackets: m2ts.length / 192, streams: video, presentationStart: start, presentationEnd: end, epMaps: [] }));
+    files.set('BDMV/PLAYLIST/00000.mpls', buildMpls({ playItems: [{ clipId: '00001', inTime: start + inSeconds * 45_000, outTime: end, video }] }));
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001']), videoPid: VIDEO_PID, readVideo: false, playItems: mpls.playItems, audioStream: null };
+    const seen: Array<number | null> = [];
+    let finish!: () => void;
+    const done = new Promise<void>((r) => (finish = r));
+    let pipeline!: PlaybackPipeline;
+    pipeline = new PlaybackPipeline(config, {
+      video: () => undefined,
+      audio: () => undefined,
+      isFull: () => {
+        seen.push(pipeline.readUs);
+        return false;
+      },
+      ended: () => finish(),
+      failed: () => finish(),
+    });
+    pipeline.start(0);
+    await done;
+    expect(seen.length).toBeGreaterThan(0);
+    if (paced) expect(seen.every((us) => us !== null && us >= 0)).toBe(true);
+    else expect(seen.every((us) => us === null)).toBe(true);
+    // the item was read to its end: delivered up to its OUT time
+    expect(pipeline.doneUs).toBe((4 - inSeconds) * 1_000_000);
+  });
+
+  it('counts a clip cut short as delivered only as far as it is known, not to its OUT time', async () => {
+    const files = buildSyntheticDisc({ clips: [syntheticClip('00001', 4, { frameBytes: 20_000 })], playlists: [{ id: '00000', clipIds: ['00001'] }] });
+    const m2ts = files.get('BDMV/STREAM/00001.m2ts')!;
+    files.set('BDMV/STREAM/00001.m2ts', m2ts.slice(0, Math.floor(m2ts.length / 2 / 6144) * 6144));
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001']), videoPid: VIDEO_PID, readVideo: false, playItems: mpls.playItems, audioStream: null };
+    let finish!: () => void;
+    const done = new Promise<void>((r) => (finish = r));
+    const pipeline = new PlaybackPipeline(config, { video: () => undefined, audio: () => undefined, isFull: () => false, ended: () => finish(), failed: () => finish() });
+    pipeline.start(0);
+    await done;
+    // the EP entry at or before where the file ends (about 2 s in), far short of the 4 s OUT time
+    expect(pipeline.doneUs).toBeGreaterThan(900_000);
+    expect(pipeline.doneUs).toBeLessThan(2_500_000);
+  });
+
   it('reports how far into the playlist the source has been read, from the EP map, so reading can be paced on a clock', async () => {
     // 10 s of 100 kB frames (~2.4 MB a second, an EP entry every second), no audio: nothing but the video PID, dropped
     const files = buildSyntheticDisc({ clips: [syntheticClip('00001', 10, { frameBytes: 100_000 })], playlists: [{ id: '00000', clipIds: ['00001'] }] });
