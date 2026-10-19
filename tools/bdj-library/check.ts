@@ -11,7 +11,7 @@
  *
  * Child mode (used by the above): check.ts --run-ours <disc dir> <out.json>
  */
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,7 +24,7 @@ import { codingName } from '../../src/engine/bdmv/stream-types';
 import { CONTROL_CALLS } from '../../tests/bdj/format';
 import { parseKeyScript } from '../../tests/bdj/key-script';
 import { replayPlayerBdj, type PlayerBdjReplay } from '../../tests/bdj/replay-player';
-import { classify, libraryDir, missingClassesFromLog, parseLibblurayRun, platformClass, VERDICTS, type DiscVerdict, type RunEnd, type RunRecord } from './classify';
+import { classify, gapOf, libraryDir, missingClassesFromLog, parseLibblurayRun, platformClass, VERDICTS, type DiscVerdict, type RunEnd, type RunRecord } from './classify';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -73,6 +73,9 @@ const scrub = (s: string): string => s.replace(/(^|\s)\/\S+/g, '$1<path>').slice
 
 // ---------------------------------------------------------------------------------------------------- child: ours
 
+/** Throwables that mean a gap in the class library (Task 2's work): a class, a native or a platform method missing. */
+const GAPS = new Set(['java/lang/NoClassDefFoundError', 'java/lang/ClassNotFoundException', 'java/lang/UnsatisfiedLinkError', 'java/lang/NoSuchMethodError']);
+
 async function runOurs(dir: string, out: string): Promise<void> {
   const t0 = performance.now();
   // Java often catches a missing class and goes on quietly, so the throwables are caught where they are made
@@ -80,7 +83,7 @@ async function runOurs(dir: string, out: string): Promise<void> {
   const fill = Jvm.prototype.fillInStackTrace;
   Jvm.prototype.fillInStackTrace = function (this: Jvm, e, t) {
     fill.call(this, e, t);
-    if (thrown.length < 5000 && (e.cls.name === 'java/lang/NoClassDefFoundError' || e.cls.name === 'java/lang/ClassNotFoundException')) thrown.push({ jvm: this, e });
+    if (thrown.length < 5000 && GAPS.has(e.cls.name)) thrown.push({ jvm: this, e });
   };
   const logs: string[] = [];
   let run: Partial<PlayerBdjReplay> & { stepCalls?: readonly number[] };
@@ -120,10 +123,8 @@ async function runOurs(dir: string, out: string): Promise<void> {
     } catch {
       continue;
     }
-    const m = /^java\.lang\.(NoClassDefFoundError|ClassNotFoundException): ([\w./$]+)/.exec(msg);
-    const c = m ? platformClass(m[2]!) : null;
-    // libbluray's own stack probes for optional org.videolan classes; a ClassNotFoundException there is no failure
-    if (c && !(m![1] === 'ClassNotFoundException' && c.startsWith('org.videolan.'))) missing.add(c);
+    const gap = gapOf(msg);
+    if (gap) missing.add(gap);
   }
   for (const c of missingClassesFromLog(logs)) missing.add(c);
   const flushes = run.flushes ?? [];
@@ -146,11 +147,34 @@ async function runOurs(dir: string, out: string): Promise<void> {
 
 // ---------------------------------------------------------------------------------------------------- orchestration
 
-/** Runs a command with a hard kill (its whole process group); stdout and stderr to the given files. */
-function runKilled(cmd: string, args: readonly string[], stdoutFile: string, stderrFile: string): Promise<{ killed: boolean; code: number | null; ms: number }> {
+/** Children running now (process group leaders, and the Docker container a libbluray run names), for a kill on a signal. */
+const active = new Set<{ pid: number; container: string | null }>();
+
+/** Kills a child's process group, and first its container (the docker CLI dying does not stop a container). */
+function killChild(c: { pid: number; container: string | null }): void {
+  if (c.container) spawnSync('docker', ['kill', c.container], { stdio: 'ignore' });
+  try {
+    process.kill(-c.pid, 'SIGKILL');
+  } catch {
+    // already gone
+  }
+}
+
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    for (const c of active) killChild(c);
+    console.log(`${sig}: stopped ${active.size} runs; finished discs keep their stamps, so a re-run resumes`);
+    process.exit(130);
+  });
+}
+
+/** Runs a command with a hard kill (its container, then its whole process group); stdout and stderr to the given files. */
+function runKilled(cmd: string, args: readonly string[], stdoutFile: string, stderrFile: string, container: string | null = null): Promise<{ killed: boolean; code: number | null; ms: number }> {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const p = spawn(cmd, args, { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = { pid: p.pid!, container };
+    active.add(child);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     p.stdout.on('data', (d: Buffer) => out.push(d));
@@ -158,14 +182,11 @@ function runKilled(cmd: string, args: readonly string[], stdoutFile: string, std
     let killed = false;
     const timer = setTimeout(() => {
       killed = true;
-      try {
-        process.kill(-p.pid!, 'SIGKILL');
-      } catch {
-        p.kill('SIGKILL');
-      }
+      killChild(child);
     }, KILL_MS);
     p.on('close', (code) => {
       clearTimeout(timer);
+      active.delete(child);
       writeFileSync(stdoutFile, Buffer.concat(out));
       writeFileSync(stderrFile, Buffer.concat(err));
       resolve({ killed, code, ms: Date.now() - t0 });
@@ -197,6 +218,12 @@ function oursStamp(): string {
 function libStamp(): string {
   const image = execFileSync('docker', ['image', 'inspect', '--format', '{{.Id}}', 'bluray-web-bdj-trace:latest'], { encoding: 'utf8' }).trim();
   return sha(`${image}\n${readFileSync(SCRIPT, 'utf8')}\n${STEP_TIMEOUT_S} ${RUN_LIMIT_S} ${TAIL_S}`);
+}
+
+/** raw/<id>.<side>.stamp: what the side's run was made with. */
+interface Stamp {
+  readonly stamp: string | null;
+  readonly fingerprint: string;
 }
 
 interface Disc {
@@ -282,6 +309,11 @@ function writeSummary(lib: string, results: readonly DiscResult[], runtime: stri
 
 async function main(argv: readonly string[]): Promise<void> {
   if (argv[0] === '--run-ours') return runOurs(argv[1]!, argv[2]!);
+  const count = (name: string, v: string | undefined): number => {
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 1 || n > 64) throw new Error(`${name} wants a whole number from 1 to 64, got ${v ?? 'nothing'}`);
+    return n;
+  };
   const only: string[] = [];
   let oursOnly = false;
   let force = false;
@@ -294,8 +326,8 @@ async function main(argv: readonly string[]): Promise<void> {
     else if (a === '--ours-only') oursOnly = true;
     else if (a === '--force') force = true;
     else if (a === '--no-run') noRun = true;
-    else if (a === '--jobs') jobs = Number(argv[++i]);
-    else if (a === '--lib-jobs') libJobs = Number(argv[++i]);
+    else if (a === '--jobs') jobs = count(a, argv[++i]);
+    else if (a === '--lib-jobs') libJobs = count(a, argv[++i]);
     else throw new Error(`unknown option ${a}`);
   }
   const lib = libraryDir();
@@ -310,10 +342,15 @@ async function main(argv: readonly string[]): Promise<void> {
   const t0 = Date.now();
   const oStamp = oursStamp();
   const lStamp = oursOnly || noRun ? null : libStamp();
-  const prev = new Map(selected.map((d) => [d.id, readJson<DiscResult>(join(resultsDir, `${d.id}.json`))]));
-  const fresh = (d: Disc): boolean => !force && !only.length && prev.get(d.id)?.fingerprint === d.fingerprint;
-  const oursTodo = noRun ? [] : selected.filter((d) => !(fresh(d) && prev.get(d.id)?.oursStamp === oStamp && existsSync(join(raw, `${d.id}.ours.json`))));
-  const libTodo = noRun || oursOnly ? [] : selected.filter((d) => !(fresh(d) && prev.get(d.id)?.libStamp === lStamp && existsSync(join(raw, `${d.id}.lib.jsonl`))));
+  // each phase writes raw/<id>.<side>.stamp once the disc's run is in, so an interrupted check resumes where it stopped
+  const stampOf = (d: Disc, side: 'ours' | 'lib'): Stamp | null => readJson<Stamp>(join(raw, `${d.id}.${side}.stamp`));
+  const fresh = (d: Disc, side: 'ours' | 'lib', stamp: string | null): boolean => {
+    const s = stampOf(d, side);
+    return !force && !only.length && s?.fingerprint === d.fingerprint && s.stamp === stamp;
+  };
+  const writeStamp = (d: Disc, side: 'ours' | 'lib', stamp: string | null): void => writeFileSync(join(raw, `${d.id}.${side}.stamp`), JSON.stringify({ stamp, fingerprint: d.fingerprint }));
+  const oursTodo = noRun ? [] : selected.filter((d) => !fresh(d, 'ours', oStamp));
+  const libTodo = noRun || oursOnly ? [] : selected.filter((d) => !fresh(d, 'lib', lStamp));
   console.log(`${selected.length} discs: ours ${oursTodo.length} to run, libbluray ${libTodo.length} to run`);
 
   let done = 0;
@@ -323,30 +360,39 @@ async function main(argv: readonly string[]): Promise<void> {
     const rec = readJson<RunRecord>(out + '.tmp');
     const fallback: RunRecord = { side: 'ours', end: r.killed ? 'killed' : 'no-output', endDetail: r.killed ? null : `exit ${r.code}`, steps: [], calls: [], endHash: null, flushes: 0, missingClasses: [], rejectedPlaylists: [], wallMs: r.ms };
     writeFileSync(out, JSON.stringify(rec ?? fallback));
+    writeStamp(d, 'ours', oStamp);
     console.log(`ours ${++done}/${oursTodo.length} ${d.id} ${rec ? `${rec.steps.length} steps, ${rec.end}` : fallback.end} ${Math.round(r.ms / 1000)} s`);
   });
   done = 0;
   await pool(libTodo, libJobs, async (d) => {
     const base = join(raw, `${d.id}.lib`);
     const args = [RUN_SH, d.dir, '--keys', SCRIPT, '--seconds', String(RUN_LIMIT_S), '--wait-timeout', String(STEP_TIMEOUT_S), '--tail', String(TAIL_S)];
-    let r = await runKilled('bash', args, `${base}.jsonl`, `${base}.err`);
+    const run = (attempt: number): ReturnType<typeof runKilled> => {
+      const name = `bdjlib-${d.id}-${attempt}`;
+      return runKilled('bash', [...args, '--name', name], `${base}.jsonl`, `${base}.err`, name);
+    };
+    let r = await run(1);
     // a crashed run (no script end line: HotSpot under amd64 emulation now and then dies with a SIGSEGV in libzip, or the
     // run was killed) is run once more
     let retried = false;
     if (!readFileSync(`${base}.jsonl`, 'utf8').includes('"script":"end"')) {
       retried = true;
-      r = await runKilled('bash', args, `${base}.jsonl`, `${base}.err`);
+      r = await run(2);
     }
     writeFileSync(`${base}.meta.json`, JSON.stringify({ killed: r.killed, code: r.code, ms: r.ms, retried }));
+    writeStamp(d, 'lib', lStamp);
     console.log(`libbluray ${++done}/${libTodo.length} ${d.id} exit ${r.killed ? 'killed' : r.code}${retried ? ' (retried)' : ''} ${Math.round(r.ms / 1000)} s`);
   });
 
+  /** The current gap rules (gapOf) over a record's entries. */
+  const stillAGap = (c: string): boolean =>
+    c.startsWith('native: ') || (c.startsWith('method: ') ? gapOf(`java.lang.NoSuchMethodError: ${c.slice(8)}`) !== null : platformClass(c) !== null);
   const runtime = noRun ? 'Reclassified only.' : `This run: ours ${oursTodo.length}, libbluray ${libTodo.length} discs in ${Math.round((Date.now() - t0) / 60000)} min.`;
   for (const d of selected) {
     const raw0 = readJson<RunRecord>(join(raw, `${d.id}.ours.json`));
     if (!raw0) continue;
     // reapply the current platform-class rule, so a rule change needs no re-run
-    const ours: RunRecord = { ...raw0, missingClasses: raw0.missingClasses.filter((c) => platformClass(c) !== null) };
+    const ours: RunRecord = { ...raw0, missingClasses: raw0.missingClasses.filter(stillAGap) };
     let libRec: RunRecord | null = null;
     const meta = readJson<{ killed: boolean; ms: number }>(join(raw, `${d.id}.lib.meta.json`));
     if (meta && existsSync(join(raw, `${d.id}.lib.jsonl`))) {
@@ -354,12 +400,11 @@ async function main(argv: readonly string[]): Promise<void> {
       libRec = { ...parsed, rejectedPlaylists: rejectedPlaylists(d.dir, parsed.calls) };
     }
     const { verdict, detail } = classify(ours, libRec);
-    const p = prev.get(d.id);
     const result: DiscResult = {
       id: d.id,
       fingerprint: d.fingerprint,
-      oursStamp: oursTodo.includes(d) ? oStamp : (p?.oursStamp ?? oStamp),
-      libStamp: libTodo.includes(d) ? lStamp : (p?.libStamp ?? null),
+      oursStamp: stampOf(d, 'ours')?.stamp ?? '-',
+      libStamp: stampOf(d, 'lib')?.stamp ?? null,
       ours,
       lib: libRec,
       verdict,
@@ -378,4 +423,9 @@ async function main(argv: readonly string[]): Promise<void> {
   console.log(`summary: ${join(lib, 'summary.md')}`);
 }
 
-await main(process.argv.slice(2));
+try {
+  await main(process.argv.slice(2));
+} catch (e) {
+  console.error(`bdj-library:check: ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(2);
+}

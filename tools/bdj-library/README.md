@@ -11,13 +11,13 @@ Measures how many of the BD-J discs in the developer's NAS library work in our p
   - Read-only on the NAS: every `find` and `tar` runs under `ionice -c3 nice -n19`, `BDMV/STREAM` and `BDMV/BACKUP` are pruned from the search and `STREAM` from the copy (no clip is ever read), and discs are copied one at a time.
   - Copies `BDMV` (without `STREAM`) and `CERTIFICATE` with tar over ssh, the path going on stdin, because rsync skipped paths with spaces or non-ASCII characters. A copy goes to `discs/.tmp-<id>/` and replaces `discs/<id>/` only once its files match the NAS list.
   - Writes a stub `BDMV/STREAM/<clip>.m2ts` per `CLIPINF/<clip>.clpi`: one aligned unit (32 source packets) of null TS packets. The player's readability check passes and every playlist ends at once.
-  - Incremental: the NAS file list of each disc (path, size, mtime; `manifests/<id>.tsv`) is compared with the one recorded at its last copy, and an unchanged disc is skipped. A copy with no recorded list (one seeded from elsewhere) is adopted when its file sizes match.
+  - Incremental: the NAS file list of each disc (path, size, mtime; `manifests/<id>.tsv`) is compared with the one recorded at its last copy, and an unchanged disc is skipped. A copy with no recorded list (one seeded from elsewhere) is adopted when its file sizes match. A remote listing or a disc copy that takes over 10 minutes is killed and reported (`no answer within 10 min` / `copy not done within 10 min`).
   - Writes `map.tsv`: `id`, `bdj` (1 when `index.bdmv` names a BD-J object), `fingerprint` (hash of the NAS file list) and `path`.
 - `npm run bdj-library:check -- [--only <id>...] [--ours-only] [--force] [--jobs N] [--lib-jobs N] [--no-run]` (`check.ts`)
   - Runs `generic.keys` on every disc of `map.tsv` with `bdj` 1. Our side runs `tests/bdj/replay-player.ts` (the real `Player`, BD-J in process) in one child process per disc (`check.ts --run-ours <dir> <out>`), killed at 150 s, `--jobs` at a time (default 6). libbluray's side runs `tools/bdj-trace/run.sh <dir> --keys generic.keys --seconds 140 --wait-timeout 60 --tail 5`, killed at 150 s, `--lib-jobs` at a time (default 3). Ours runs first, then libbluray, so the two phases don't slow each other (both wait in wall time).
   - Both sides use the same limits: each step may wait 60 s, a run ends at 140 s, and it goes on 5 s past the script's end.
-  - Incremental: our run is reused while the disc's fingerprint and the contents of `src/`, `tests/bdj/`, `tools/bdj-library/` and the script are unchanged, and libbluray's while the fingerprint, the `bluray-web-bdj-trace` image and the script are. `--only` re-runs the given discs, `--force` re-runs everything, `--ours-only` reuses libbluray's runs where present and runs none, and `--no-run` only reclassifies.
-  - A crashed libbluray run, one with no script end line (HotSpot under amd64 emulation sometimes dies at once with a SIGSEGV in `libzip.so`, or the run was killed), is run once more.
+  - Incremental: each phase writes `raw/<id>.ours.stamp` or `raw/<id>.lib.stamp` (`{ stamp, fingerprint }`) as soon as that disc's run is in, so an interrupted check resumes where it stopped. Our run is reused while the disc's fingerprint and the contents of `src/`, `tests/bdj/`, `tools/bdj-library/` and the script are unchanged, and libbluray's while the fingerprint, the `bluray-web-bdj-trace` image and the script are. `--only` re-runs the given discs, `--force` re-runs everything, `--ours-only` reuses libbluray's runs where present and runs none, and `--no-run` only reclassifies. `--jobs` and `--lib-jobs` take a whole number from 1 to 64.
+  - Each libbluray run names its container `bdjlib-<id>-<attempt>` (`run.sh --name`), and the 150 s kill `docker kill`s it before killing the process group (the docker CLI dying would leave the container running). A crashed run, one with no script end line (HotSpot under amd64 emulation sometimes dies at once with a SIGSEGV in `libzip.so`, or the run was killed), is run once more. On SIGINT or SIGTERM every running child is killed the same way.
   - Writes `raw/<id>.ours.json` (the RunRecord), `raw/<id>.ours.json.tmp.log` (the Java log), `raw/<id>.lib.jsonl`, `.lib.err` and `.lib.meta.json`, then `results/<id>.json` and `summary.md`.
 
 ## The generic script
@@ -50,7 +50,7 @@ One run of the script on one disc by one side (`classify.ts`):
 | `steps` | each step that ran: `n`, `step` (its text), `hash` for `wait menu` and `wait still` steps (the settled plane: the last flush before the step), `animated` for a `wait menu` step that held on an animated menu (no hash), and `calls`: how many control calls the run had made before the step ran |
 | `calls` | the control calls (`tests/bdj/format.ts` `CONTROL_CALLS`) in order, through the run's tail (libbluray: up to the script's end line) |
 | `endHash`, `flushes` | the last flushed plane, and the number of flushes |
-| `missingClasses` | platform classes Java could not load: every `NoClassDefFoundError` and every `ClassNotFoundException` of a platform class (`java.`, `javax.`, `sun.`, `org.dvb.`, ...; ours leaves out `org.videolan.` probes), caught where the throwable is made in ours (Java often swallows them) and from the log on both sides |
+| `missingClasses` | class-library gaps (Task 2's work): platform classes Java could not load (every `NoClassDefFoundError`, and every `ClassNotFoundException` of a platform class: `java.`, `javax.`, `sun.`, `org.dvb.`, ...; not `org.videolan.` probes, nor a disc's own obfuscated classes such as `org.w3c.dom.a`), missing natives (`UnsatisfiedLinkError`, as `native: <name>`) and methods missing from platform classes (`NoSuchMethodError`, as `method: <name>`). Ours catches them where the throwable is made (Java often swallows them); both sides also read them from the log (`gapOf`) |
 | `rejectedPlaylists` | `selectPlaylistN` calls that returned 0, with the playlist's first video codec from its `.mpls` |
 | `wallMs` | the run's wall time |
 
@@ -61,30 +61,30 @@ One run of the script on one disc by one side (`classify.ts`):
 `progress(run)` says what a run achieved:
 
 - **menu**: a settled plane (any `wait menu` or `wait still` step, or the end plane) is not the empty plane (`EMPTY_PLANE_HASH`), or the `wait menu` step held on an animated menu.
-- **arrows**: the settled plane after `key right` differs from the one before, or the one after `key down` from the one after `key right`, with a visible plane on one side.
+- **arrows**: a real change: the settled plane after `key right` differs from the one before, or the one after `key down` from the one after `key right`, both steps with a settled plane and one of the two visible. After an animated `wait menu` step (no settled plane), only the second (step 2 to 4) can count.
 - **ok**: after `key ok`, a `selectTitleN`, a successful `selectPlaylistN` of a playlist other than the last one before it, or a `seekN` (a menu that plays its feature from a chapter of the playlist behind it).
 
 `compareRuns(ours, lib)` compares the runs step by step:
 
-- Up to `key ok`, for each step: the distinct control calls made since the step before, then the step's settled hash (not for an `animated` step, on either side). Distinct calls rather than the sequence, and with `selectRateN` and `selectPlaylistN(-1)` left out, because the stub streams end every playlist at once, at a moment that depends on each side's pacing: Java pauses and stops at different points, and a menu that loops its background playlist loops a different number of times. A different register value, playlist, key interest or UO mask still shows.
+- Up to `key ok`, for each step both ran: the set of distinct starting calls made since the step before (`selectPlaylistN` of a playlist ≥ 0 that succeeded, `selectTitleN`, `seekN`; Ruling R3), then the step's settled hash (not for an `animated` step, on either side). Only starting calls, and as a set, because everything else (register writes, rates, UO masks, key interest) and the number of times a menu loops its background playlist move with the stub streams' timing, which differs between the two sides.
 - After `key ok`, where the disc plays and the two sides loop at their own pace: the first call that starts something (`selectTitleN`, `selectPlaylistN`, `seekN`).
-- When one run stops before the other: before `key ok`, libbluray's remaining calls must be among ours up to our next step for libbluray's run to count as a prefix of ours.
+- When libbluray stopped first: it must agree on every step both ran, and the starting calls it made after its last step must be among ours up to our next step; then its run is a prefix of ours (`libPrefix`).
 
 `classify(ours, lib)` gives the first verdict that applies:
 
-1. **works**: ours achieved menu, arrows and ok, and either the runs are equal (`same as libbluray`), or libbluray stopped at an earlier step or failed on its own (`libbluray stopped early (stub): ...`; libbluray with stub streams gets less far than with real video). Without a libbluray run, ours alone decides (`not compared`).
-2. **missing-class**: ours fell short and Java could not load a platform class (the first one named), whatever libbluray did: libbluray never lacks a JDK class. When libbluray failed too, the detail adds `libbluray (stub) also: ...`.
+1. **works**: ours achieved menu, arrows and ok, and libbluray agrees: the runs are equal (`same as libbluray`), or libbluray stopped at an earlier step (stub streams) and its run is a prefix of ours (`libbluray stopped early (stub): ...`). Without a libbluray run, ours alone decides (`not compared`).
+2. **missing-class**: ours fell short with a class-library gap (the first one named), whatever libbluray did: libbluray never lacks a JDK class. When libbluray failed too, the detail adds `libbluray (stub) also: ...`.
 3. **unsupported-video**: ours fell short and refused a playlist with MPEG-2 or VC-1 video (the same).
-4. **libbluray-fails-too**: libbluray failed on its own (`libFailed`: its run ended in an error, a crash or no output, or it never selected a playlist, or never showed a visible plane), and ours fell short too.
-5. **error**: our run failed (`bdj-failed`, `error`, `killed`, `no-output`).
+4. **error**: our run failed hard (`bdj-failed`, `error`, `killed`, `no-output`), with the reason. Before libbluray-fails-too, so libbluray failing never hides it.
+5. **libbluray-fails-too**: libbluray failed on its own (`libFailed`: its run ended in an error, a crash or no output, or it never selected a playlist, or never showed a visible plane), and ours fell short too.
 6. **stall**: ours never reached a menu, stopped at an earlier step than libbluray, or stopped where libbluray did with the same run (`same as libbluray: ...`).
-7. **diverges**: otherwise, with the first difference.
+7. **diverges**: otherwise, with the first difference. This includes ours passing every step while libbluray disagrees on a step both ran, or runs every step without ever selecting a playlist: a contradiction, not libbluray failing on stub streams.
 
 The settled-point rule is 5d's R3: settled hashes and calls, not flush counts. Stub streams make libbluray do less than it does with real video (RENTAL_FAMILY selects its menu playlist and draws nothing), which is why libbluray falling short is reported as such and never as ours.
 
 ## Files
 
 - `sync.ts`, `check.ts`: the commands above.
-- `classify.ts`: `RunRecord`, `discId`, `parseLibblurayRun`, `missingClassesFromLog`, `progress`, `compareRuns`, `classify`. No disc, file or process access.
+- `classify.ts`: `RunRecord`, `discId`, `gapOf`, `parseLibblurayRun`, `missingClassesFromLog`, `progress`, `compareRuns`, `libFailed`, `classify`. No disc, file or process access.
 - `generic.keys`: the script.
 - `check.test.ts`: `classify` on made-up runs, `discId`, `parseLibblurayRun` and the script.

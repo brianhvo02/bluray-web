@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import { parseKeyScript } from '../../tests/bdj/key-script';
-import { classify, discId, EMPTY_PLANE_HASH, missingClassesFromLog, parseLibblurayRun, type RunRecord, type RunStep } from './classify';
+import { classify, discId, EMPTY_PLANE_HASH, gapOf, missingClassesFromLog, parseLibblurayRun, progress, type RunRecord, type RunStep } from './classify';
 
 // Made-up runs of the generic script: playlist 7 behind the menu, ok starts playlist 8.
 const sel = (pl: number, ret = 1): TraceEntry => ({ call: 'selectPlaylistN', args: [pl, -1, -1, '-1'], ret });
@@ -80,15 +80,47 @@ describe('classify', () => {
     expect(classify(run({ steps: still }), lib({ steps: still }))).toEqual({ verdict: 'stall', detail: expect.stringMatching(/^same as libbluray: arrows change nothing/) });
   });
 
-  it('works when ours passes every step and libbluray, on stub streams, stops early or fails', () => {
-    const differs = lib({ end: 'timeout', steps: steps(['dddddddd'], BEFORE, 2), calls: [sel(9)], endHash: 'dddddddd' });
-    expect(classify(run(), differs)).toEqual({ verdict: 'works', detail: expect.stringMatching(/^libbluray stopped early \(stub\)/) });
+  it('works when ours passes every step and libbluray, on stub streams, stops early or fails, agreeing as far as it went', () => {
     expect(classify(run(), lib({ end: 'killed', steps: [], calls: [], endHash: null })).verdict).toBe('works');
+    expect(classify(run(), lib({ end: 'timeout', steps: [], calls: [sel(7)], endHash: null, flushes: 0 }))).toEqual({ verdict: 'works', detail: expect.stringMatching(/^libbluray stopped early \(stub\)/) });
+  });
+
+  it('diverges when libbluray stopped early but disagrees on a step both ran', () => {
+    const differs = lib({ end: 'timeout', steps: steps(['dddddddd'], BEFORE, 2), calls: [sel(9)], endHash: 'dddddddd' });
+    expect(classify(run(), differs)).toEqual({ verdict: 'diverges', detail: 'step 0 (wait menu 1500): libbluray calls selectPlaylistN(9,-1,-1,-1)=1, ours does not' });
+  });
+
+  it('diverges when libbluray runs every step but never selects a playlist while ours does (libFailed is no excuse)', () => {
+    const noPlaylist = lib({ calls: [reg(1, 0), reg(1, 1)], steps: steps(['aaaaaaaa', 'bbbbbbbb', 'cccccccc'], [0, 0, 1, 1, 2, 2, 2]) });
+    expect(classify(run(), noPlaylist)).toEqual({ verdict: 'diverges', detail: 'step 0 (wait menu 1500): ours calls selectPlaylistN(7,-1,-1,-1)=1, libbluray does not' });
+  });
+
+  it('error before libbluray-fails-too when our run failed hard', () => {
+    const libNone = lib({ end: 'error', steps: [], calls: [], endHash: null, flushes: 0 });
+    expect(classify(noMenu({ end: 'bdj-failed', endDetail: 'BD-J failed (boot)' }), libNone)).toEqual({ verdict: 'error', detail: 'bdj-failed: BD-J failed (boot)' });
   });
 
   it('does not compare the hash of an animated menu step, only that it was visible', () => {
     const animated = (h: readonly string[]): RunStep[] => steps(h, BEFORE).map((x, i) => (i === 0 ? { n: 0, step: x.step, animated: true, calls: x.calls } : x));
     expect(classify(run({ steps: animated(['aaaaaaaa', 'bbbbbbbb', 'cccccccc']) }), lib({ steps: steps(['eeeeeeee', 'bbbbbbbb', 'cccccccc'], BEFORE) }))).toEqual({ verdict: 'works', detail: 'same as libbluray' });
+  });
+
+  it('after an animated menu step only the second arrow (step 2 to 4) can show a change', () => {
+    const animated = (h: readonly string[]): RunStep[] => steps(h, BEFORE).map((x, i) => (i === 0 ? { n: 0, step: x.step, animated: true, calls: x.calls } : x));
+    const same = animated(['aaaaaaaa', 'bbbbbbbb', 'bbbbbbbb']);
+    expect(progress(run({ steps: same })).arrows).toBe(false);
+    expect(progress(run({ steps: animated(['aaaaaaaa', 'bbbbbbbb', 'cccccccc']) })).arrows).toBe(true);
+    // stopped after the first arrow: nothing to compare step 2 with
+    expect(progress(run({ steps: animated(['aaaaaaaa', 'bbbbbbbb']).slice(0, 3) })).arrows).toBe(false);
+  });
+
+  it('missing-class for a missing native or platform method too', () => {
+    expect(gapOf('java.lang.UnsatisfiedLinkError: java/awt/Toolkit.fooN()V')).toBe('native: java/awt/Toolkit.fooN()V');
+    expect(gapOf('java.lang.NoSuchMethodError: java.util.TreeMap.ceilingKey(Ljava/lang/Object;)Ljava/lang/Object;')).toBe('method: java.util.TreeMap.ceilingKey(Ljava/lang/Object;)Ljava/lang/Object;');
+    expect(gapOf('java.lang.NoSuchMethodError: com.example.Menu.draw()V')).toBeNull();
+    expect(gapOf('java.lang.NoSuchMethodError: java.lang.invoke.MethodHandleImpl.array(Ljava/lang/Object;)[Ljava/lang/Object;')).toBeNull(); // a benign probe
+    expect(missingClassesFromLog(['Exception in thread "x" java.lang.UnsatisfiedLinkError: sun/misc/Foo.barN()I'])).toEqual(['native: sun/misc/Foo.barN()I']);
+    expect(classify(noMenu({ missingClasses: ['native: sun/misc/Foo.barN()I'] }), lib()).verdict).toBe('missing-class');
   });
 
   it('missing-class with the class name, from the Java log', () => {
@@ -119,8 +151,10 @@ describe('classify', () => {
   it('diverges with the first differing step otherwise', () => {
     const other = steps(['aaaaaaaa', 'dddddddd', 'cccccccc'], BEFORE);
     expect(classify(run(), lib({ steps: other }))).toEqual({ verdict: 'diverges', detail: 'step 2 (wait still 1000): settled plane libbluray dddddddd, ours bbbbbbbb' });
-    const calls = [sel(7), reg(1, 0), reg(1, 2), sel(8)];
-    expect(classify(run(), lib({ calls })).detail).toBe('step 4 (wait still 1000): libbluray calls writeRegN(0,1,2,-1)=0, ours does not');
+    const calls = [sel(7), reg(1, 0), sel(9), sel(8)];
+    expect(classify(run(), lib({ calls })).detail).toBe('step 4 (wait still 1000): libbluray calls selectPlaylistN(9,-1,-1,-1)=1, ours does not');
+    // registers move with the stub streams' timing: only starting calls are compared (Ruling R3)
+    expect(classify(run(), lib({ calls: [sel(7), reg(1, 0), reg(1, 2), sel(8)] })).verdict).toBe('works');
     const other8 = [sel(7), reg(1, 0), reg(1, 1), sel(9)];
     expect(classify(run(), lib({ calls: other8 })).detail).toMatch(/^after key ok: libbluray starts selectPlaylistN\(9/);
   });

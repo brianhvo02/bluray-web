@@ -16,6 +16,9 @@ import { indexUsesBdj, parseIndex } from '../../src/engine/bdmv/index-parser';
 import { discId, libraryDir } from './classify';
 
 const NICE = 'ionice -c3 nice -n19';
+/** How long one remote listing or one disc's copy may take before it is killed and reported. */
+const REMOTE_TIMEOUT_MS = 10 * 60_000;
+const COPY_TIMEOUT_MS = 10 * 60_000;
 
 /** Single-quotes a string for a POSIX shell. */
 const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -23,13 +26,23 @@ const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 /** Runs `bash -c script` on the host over ssh with `input` on stdin; resolves with stdout (bytes). */
 function remote(host: string, script: string, input = ''): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const p = spawn('ssh', ['-o', 'BatchMode=yes', host, `bash -c ${shq(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const p = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', host, `bash -c ${shq(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
     const out: Buffer[] = [];
     let err = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      p.kill('SIGKILL');
+    }, REMOTE_TIMEOUT_MS);
     p.stdout.on('data', (d: Buffer) => out.push(d));
     p.stderr.on('data', (d: Buffer) => (err += d.toString()));
     p.on('error', reject);
-    p.on('close', (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`ssh ${host}: exit ${code}: ${err.slice(0, 300)}`))));
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`ssh ${host}: no answer within ${REMOTE_TIMEOUT_MS / 60_000} min; killed`));
+      else if (code === 0) resolve(Buffer.concat(out));
+      else reject(new Error(`ssh ${host}: exit ${code}: ${err.slice(0, 300)}`));
+    });
     p.stdin.end(input);
   });
 }
@@ -78,8 +91,14 @@ function copyDisc(host: string, disc: string, dest: string): Promise<void> {
   const script = `IFS= read -r d; cd "$d" || exit 3; set -- BDMV; [ -d CERTIFICATE ] && set -- BDMV CERTIFICATE; ${NICE} tar -cf - --exclude=BDMV/STREAM --exclude=BDMV/BACKUP/STREAM "$@"`;
   return new Promise((resolve, reject) => {
     mkdirSync(dest, { recursive: true });
-    const ssh = spawn('ssh', ['-o', 'BatchMode=yes', host, `bash -c ${shq(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const ssh = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', host, `bash -c ${shq(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
     const tar = spawn('tar', ['-xf', '-', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ssh.kill('SIGKILL');
+      tar.kill('SIGKILL');
+    }, COPY_TIMEOUT_MS);
     ssh.stdout.pipe(tar.stdin);
     let err = '';
     ssh.stderr.on('data', (d: Buffer) => (err += d.toString()));
@@ -88,7 +107,11 @@ function copyDisc(host: string, disc: string, dest: string): Promise<void> {
     let failed = false;
     const done = (code: number | null): void => {
       if (code !== 0) failed = true;
-      if (--left === 0) (failed ? reject(new Error(`copy failed: ${err.slice(0, 300)}`)) : resolve());
+      if (--left > 0) return;
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`copy not done within ${COPY_TIMEOUT_MS / 60_000} min; killed`));
+      else if (failed) reject(new Error(`copy failed: ${err.slice(0, 300)}`));
+      else resolve();
     };
     ssh.on('close', done);
     tar.on('close', done);

@@ -13,6 +13,7 @@
 #                  exit status 3 when a step waits longer than --wait-timeout S (default 30) or --seconds ends the run
 #                  with steps left (raise --seconds for key runs: the default 60 is often too short)
 #   --dump-planes DIR: also write DIR/<k>.png (the whole 1920x1080 plane) at flush k
+#   --name NAME:   the container's name (so a caller can `docker kill` it)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -22,6 +23,7 @@ PLATFORM="${BDJ_TRACE_PLATFORM:-linux/amd64}"
 DISC="${1:?usage: run.sh <disc> [--until <call>[#<n>]] [--seconds N] [--jvm-option OPT]... [--planes] [--keys FILE] [--tail S] [--wait-timeout S] [--dump-planes DIR]}"
 shift
 ENV_ARGS=()
+NAME_ARGS=()
 MOUNTS=()
 HARNESS_ARGS=()
 SECONDS_ARG=60
@@ -33,6 +35,7 @@ while [ $# -gt 0 ]; do
     --jvm-option) JVM_OPTIONS="${JVM_OPTIONS:+$JVM_OPTIONS }$2"; shift 2 ;;
     --planes) HARNESS_ARGS+=(--planes); shift ;;
     --tail) HARNESS_ARGS+=(--tail "$2"); shift 2 ;;
+    --name) NAME_ARGS=(--name "$2"); shift 2 ;;
     --wait-timeout) HARNESS_ARGS+=(--wait-timeout "$2"); shift 2 ;;
     --keys)
       [ -f "$2" ] || { echo "no such script: $2" >&2; exit 2; }
@@ -55,7 +58,7 @@ else
   DISC_DIR="$ROOT/fixtures/synthetic/$DISC"
 fi
 
-exec docker run --rm --platform "$PLATFORM" -e BD_DEBUG_MASK -e BD_DEBUG_FILE \
+exec docker run --rm ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} --platform "$PLATFORM" -e BD_DEBUG_MASK -e BD_DEBUG_FILE \
   ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
   -v "$DISC_DIR:/disc:ro" \
   ${MOUNTS[@]+"${MOUNTS[@]}"} \
