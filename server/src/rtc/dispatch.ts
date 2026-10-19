@@ -26,6 +26,10 @@ export interface ChannelOptions {
  * `POST /api/session` on this channel answers 200, only the open routes run and everything else is answered 401;
  * the channel is closed after 30 s without a session, after a session attempt answers 401, and when the device
  * of its session is revoked.
+ *
+ * A session 401 closes the channel even after an earlier session succeeded on it. The session only opens the gate:
+ * each request is still authenticated by its own token, as over HTTPS. A second successful session switches the
+ * channel's device (the one whose revocation closes it) and calls `onSession` again.
  */
 export function serveChannel(channel: WireChannel, handlers: readonly Handler[], opts: ChannelOptions): { close(): void } {
   const openedAt = opts.now();
@@ -54,8 +58,8 @@ export function serveChannel(channel: WireChannel, handlers: readonly Handler[],
     const route = `${wire.method} ${pathOf(wire.path)}`;
     if (deviceId === null) {
       if (opts.now() - openedAt >= SESSION_DEADLINE_MS) {
-        server.close();
-        throw new Error('no session');
+        closeSoon();
+        return toWire(wire, json(401, { error: 'unauthorized' }));
       }
       if (!OPEN_ROUTES.has(route)) return toWire(wire, json(401, { error: 'unauthorized' }));
     }
@@ -115,10 +119,15 @@ function sessionDevice(response: Response, auth: Auth): string | null {
 function standIn(wire: WireRequest, remoteAddress: string): IncomingMessage {
   const body = Readable.from(buffers(wire.body), { objectMode: false });
   body.on('error', () => {}); // a reader sees the failure; nobody reading must not crash the server
-  const req = Object.assign(body, { method: wire.method, url: wire.path, headers: { ...wire.headers }, socket: { remoteAddress } });
+  const req = Object.assign(body, { method: wire.method, url: wire.path, headers: peerHeaders(wire.headers), socket: { remoteAddress } });
   const stand = req as unknown as IncomingMessage;
   markChannelRequest(stand);
   return stand;
+}
+
+/** The peer's headers without the forwarding ones: only the trusted proxy may name a client, and a channel has none. */
+function peerHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => name !== 'forwarded' && !name.startsWith('x-forwarded-')));
 }
 
 async function* buffers(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Buffer> {
@@ -146,7 +155,15 @@ function streamed(stream: Readable, length: number): AsyncIterable<Uint8Array> {
       let sent = 0;
       return {
         next: async () => {
-          const result = await inner.next();
+          let result: IteratorResult<Buffer>;
+          try {
+            result = await inner.next();
+          } catch (err) {
+            // fs errors name library paths: log them here, and tell the peer only that the read failed
+            console.error(err);
+            stream.destroy();
+            throw new Error('read failed');
+          }
           if (result.done) {
             if (Number.isFinite(length) && sent < length) throw new Error('the file ended early');
             return result;

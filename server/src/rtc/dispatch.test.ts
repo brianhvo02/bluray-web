@@ -200,7 +200,8 @@ describe('serveChannel', () => {
   it('closes a channel whose clock has run past 30 s before its next request', async () => {
     const conn = open();
     clock += 30_000;
-    await expect(conn.client.fetch('/api/health')).rejects.toThrow();
+    expect((await conn.client.fetch('/api/health')).status).toBe(401);
+    await flush();
     expect(conn.channels.server.closed).toBe(true);
   });
 
@@ -272,6 +273,65 @@ describe('serveChannel', () => {
     await expect((await conn.client.fetch('/api/test/short', { headers: auth })).arrayBuffer()).rejects.toThrow(/ended early/);
     // the channel stays usable after both
     expect((await conn.client.fetch('/api/health')).status).toBe(200);
+  });
+});
+
+describe('serveChannel streams', () => {
+  let stream: Readable | undefined;
+  let seen: Record<string, unknown> | undefined;
+  beforeEach(() => {
+    stream = undefined;
+    handlers.unshift(async (req, url): Promise<HttpResponse | null> => {
+      if (url.pathname === '/api/test/broken') {
+        stream = new Readable({ read() {} });
+        stream.push(Buffer.alloc(100));
+        setImmediate(() => stream!.destroy(new Error("ENOENT: no such file or directory, open '/mnt/drv/Starfall Wanderer/BDMV/STREAM/00001.m2ts'")));
+        return { status: 200, headers: {}, body: stream };
+      }
+      if (url.pathname === '/api/test/endless') {
+        stream = new Readable({ read() { this.push(Buffer.alloc(1024)); } });
+        return { status: 200, headers: {}, body: stream };
+      }
+      if (url.pathname === '/api/test/echo') {
+        seen = { ...req.headers, remote: req.socket.remoteAddress };
+        return { status: 204 };
+      }
+      return null;
+    });
+  });
+
+  it('tells the peer only that a read failed, never the error itself', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const conn = open();
+    const { token } = await sessionOver(conn);
+    const res = await conn.client.fetch('/api/test/broken', { headers: { Authorization: `Bearer ${token}` } });
+    const failure = await res.arrayBuffer().then(() => null, (err: unknown) => err as Error);
+    expect(failure?.message).toBe('read failed');
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('/mnt/drv') }));
+    expect(stream!.destroyed).toBe(true);
+    error.mockRestore();
+  });
+
+  it('destroys the stream when the channel closes mid-read', async () => {
+    const conn = open();
+    const { token } = await sessionOver(conn);
+    const res = await conn.client.fetch('/api/test/endless', { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(200);
+    conn.channels.client.close();
+    await flush();
+    await flush();
+    expect(stream!.destroyed).toBe(true);
+  });
+
+  it('drops forwarding headers from the peer', async () => {
+    const conn = open();
+    const { token } = await sessionOver(conn);
+    const res = await conn.client.fetch('/api/test/echo', {
+      headers: { Authorization: `Bearer ${token}`, 'X-Forwarded-For': '10.0.0.1', 'X-Forwarded-Proto': 'https', Forwarded: 'for=10.0.0.1', 'X-Other': 'kept' },
+    });
+    expect(res.status).toBe(204);
+    expect(seen).toMatchObject({ 'x-other': 'kept', remote: '203.0.113.7' });
+    expect(Object.keys(seen!).filter((k) => k === 'forwarded' || k.startsWith('x-forwarded-'))).toEqual([]);
   });
 });
 
