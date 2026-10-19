@@ -11,7 +11,7 @@ import { BdjStore } from '../bdj-store';
 import type { Handler } from '../http';
 import { Library, SETTLE_MS } from '../library';
 import { Store } from '../store';
-import { answerWithCandidates, relayAddresses, RelayTracker, RtcPeers, RtcRefused, stunOnly, wireChannelOf } from './peer';
+import { answerWithCandidates, isMdnsCandidate, relayAddresses, RelayTracker, RtcPeers, RtcRefused, stunOnly, wireChannelOf, withoutMdnsCandidates } from './peer';
 
 // Every name here is made up. Ports 47990–47997 are the tests' own, so a real NAS on 47998 never clashes.
 
@@ -230,6 +230,59 @@ describe('answerWithCandidates', () => {
   it('never advertises a Docker or Tailscale address even when told to', () => {
     const out = answerWithCandidates(sdp, ['172.20.0.2', '100.64.1.1', '192.168.1.98'], 47998);
     expect(candidateLines(out)).toEqual(['a=candidate:1 1 udp 2130706431 192.168.1.98 47998 typ host generation 0']);
+  });
+});
+
+describe('mDNS candidates', () => {
+  const MDNS = 'candidate:1 1 udp 2122260223 3f1c2b4a-0d7e-4c1a-9a8b-2e6f5d4c3b2a.local 54321 typ host generation 0';
+  const HOST = 'candidate:2 1 udp 2122260223 192.168.1.20 54322 typ host generation 0';
+
+  it('tells a .local (mDNS) candidate from an address one, with or without a=', () => {
+    expect(isMdnsCandidate(MDNS)).toBe(true);
+    expect(isMdnsCandidate(`a=${MDNS.toUpperCase()}`)).toBe(true);
+    expect(isMdnsCandidate(HOST)).toBe(false);
+    expect(isMdnsCandidate('candidate:3 1 udp 1 203.0.113.9 3478 typ relay raddr x.local rport 1')).toBe(false);
+  });
+
+  it('strips the .local candidate lines from an offer and keeps the rest', () => {
+    const sdp = ['v=0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel', `a=${MDNS}`, `a=${HOST}`, 'a=end-of-candidates', ''].join('\r\n');
+    expect(withoutMdnsCandidates(sdp)).toBe(['v=0', 'm=application 9 UDP/DTLS/SCTP webrtc-datachannel', `a=${HOST}`, 'a=end-of-candidates', ''].join('\r\n'));
+  });
+
+  it('never hands werift a .local candidate, in the offer or trickled', { timeout: 30_000 }, async () => {
+    const remote: string[] = [];
+    const added: string[] = [];
+    const peers = new RtcPeers({
+      handlers, auth, port: 47995, advertise: () => ['127.0.0.1'], now: Date.now, iceServers: async () => [],
+      createPeerConnection: (config) => {
+        const pc = new RTCPeerConnection(config);
+        const setRemote = pc.setRemoteDescription.bind(pc);
+        pc.setRemoteDescription = (d) => {
+          remote.push(d.sdp ?? '');
+          return setRemote(d);
+        };
+        const add = pc.addIceCandidate.bind(pc);
+        pc.addIceCandidate = (c) => {
+          added.push(c?.candidate ?? '');
+          return add(c);
+        };
+        return pc;
+      },
+    });
+    open.push({ close: () => peers.closeAll() });
+    const device = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
+    open.push({ close: () => device.close() });
+    device.createDataChannel('api');
+    await device.setLocalDescription(await device.createOffer());
+    const offer = device.localDescription!.sdp.replace(/(m=application[^\r\n]*\r?\n)/, `$1a=${MDNS}\r\n`);
+    expect(offer).toContain('.local');
+    const sid = 'sid-mmmmmmmmmmmmmmmmmmm';
+    await peers.answer(sid, offer);
+    expect(remote).toHaveLength(1);
+    expect(remote[0]).not.toContain('.local');
+    peers.candidate(sid, { candidate: MDNS, sdpMid: '0', sdpMLineIndex: 0 });
+    peers.candidate(sid, { candidate: HOST, sdpMid: '0', sdpMLineIndex: 0 });
+    expect(added).toEqual([HOST]);
   });
 });
 

@@ -86,6 +86,26 @@ export function stunOnly(servers: readonly RTCIceServerLike[]): RTCIceServerLike
   });
 }
 
+const CANDIDATE_ADDRESS = /^(?:a=)?candidate:\S+ \d+ \S+ \d+ (\S+) /i;
+
+/**
+ * Whether a candidate (`candidate:…`, with or without `a=`) names an mDNS host (`<uuid>.local`), as browsers hide LAN
+ * addresses. The NAS can't resolve those, and werift would open a multicast socket per peer trying to, so they are
+ * dropped: the device's other candidates (public, relay, or the NAS's own host candidates it checks) still connect.
+ */
+export function isMdnsCandidate(candidate: string): boolean {
+  const m = CANDIDATE_ADDRESS.exec(candidate.trim());
+  return m !== null && m[1]!.toLowerCase().endsWith('.local');
+}
+
+/** `sdp` without its mDNS (`.local`) candidate lines. */
+export function withoutMdnsCandidates(sdp: string): string {
+  return sdp
+    .split('\n')
+    .filter((line) => !(line.startsWith('a=candidate:') && isMdnsCandidate(line)))
+    .join('\n');
+}
+
 /**
  * The `ip:port` of every `typ relay` candidate in an SDP or a trickled candidate string (`candidate:…`, with or
  * without `a=`), lowercased so IPv6 spellings compare.
@@ -302,7 +322,7 @@ export class RtcPeers {
         pc.iceGatheringStateChange.subscribe((state) => state === 'complete' && done());
       });
       await peer.owner.run(async () => {
-        await pc.setRemoteDescription({ type: 'offer', sdp: offer });
+        await pc.setRemoteDescription({ type: 'offer', sdp: withoutMdnsCandidates(offer) });
         await pc.setLocalDescription(await pc.createAnswer());
       });
       const local = pc.localDescription?.sdp;
@@ -343,12 +363,12 @@ export class RtcPeers {
     for (const [sid, entry] of this.turnServers) if (entry.since <= now - SIGNAL_DEVICE_LIFETIME_MS) this.turnServers.delete(sid);
   }
 
-  /** A device's trickled ICE candidate; ignored without a peer for `sid` or when malformed. */
+  /** A device's trickled ICE candidate; ignored without a peer for `sid`, when malformed, or for an mDNS host. */
   candidate(sid: string, c: unknown): void {
     const peer = this.peers.get(sid);
     if (peer === undefined || typeof c !== 'object' || c === null) return;
     const { candidate, sdpMid, sdpMLineIndex } = c as Record<string, unknown>;
-    if (typeof candidate !== 'string' || candidate === '' || candidate.length > 1024) return;
+    if (typeof candidate !== 'string' || candidate === '' || candidate.length > 1024 || isMdnsCandidate(candidate)) return;
     const init = {
       candidate,
       sdpMid: typeof sdpMid === 'string' ? sdpMid : undefined,
