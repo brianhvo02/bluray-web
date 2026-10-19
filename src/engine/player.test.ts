@@ -18,6 +18,7 @@ import { RegisterFile } from './hdmv/registers';
 import { Navigator } from './nav/navigator';
 import { DEFAULT_CHUNK_PACKETS } from './demux/m2ts-reader';
 import { SOURCE_PACKET_SIZE } from './demux/constants';
+import { serveFetch } from './disc/port-fetch';
 import { Player, type PlayerDeps } from './player';
 import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
 import { ShaderStage } from './shaders/stage';
@@ -1829,6 +1830,33 @@ describe('Player with a disc on the NAS', () => {
     await h.play(500);
     expect(h.drawn.length).toBeGreaterThan(5);
     expect(nas.requested).toContain('BDMV/STREAM/00001.M2TS');
+  });
+
+  it('reads a disc through its fetch port (the WebRTC route), not its own fetch: it plays and seeks', async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc1'));
+    const { port1, port2 } = new MessageChannel();
+    const stop = serveFetch(port1, nas.fetch);
+    const ownFetch = vi.fn(async () => {
+      throw new TypeError('the engine fetched directly');
+    });
+    const remote: FakeNas = { ...nas, spec: { ...nas.spec, fetchPort: port2 }, fetch: ownFetch as unknown as typeof fetch };
+    try {
+      const h = await harness(undefined, { remote });
+      expect(titlesOf(h)).toMatchObject({ playlists: [expect.objectContaining({ id: '00000' }), expect.objectContaining({ id: '00001' })] });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.play(300);
+      expect(nas.requested).toContain('BDMV/STREAM/00001.M2TS');
+      await h.player.handle({ type: 'seek', timeUs: 5_000_000 });
+      await untilPlaying(h);
+      await h.play(300);
+      expect(nas.requested).toContain('BDMV/STREAM/00002.M2TS');
+      expect(h.drawn.length).toBeGreaterThan(5);
+      expect(ownFetch).not.toHaveBeenCalled();
+    } finally {
+      stop();
+      port1.close();
+    }
   });
 
   it('asks for a fresh token on a 401 while a command waits on the read, and carries on with it', async () => {

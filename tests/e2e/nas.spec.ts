@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, OWNER_SERIES, PROJECTS, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
+import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, NAS_SERVER_KEY, OWNER_SERIES, PROJECTS, RENDEZVOUS_URL, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
+import { telemetry } from './telemetry';
 
 // The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
 // library's top level lists), and the rendezvous Worker that turns a code into the server's address. Its title
@@ -113,12 +114,35 @@ async function libraryReady(): Promise<void> {
  * code is registered under a new NAS key (the server makes one when its key file is gone).
  */
 function ownerCode(): string {
+  return mintOwnerCode(() => rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true }));
+}
+
+/**
+ * A fresh owner code whose WebRTC route leads to the running server: minted under the server's own rendezvous key
+ * (its NAS id, whose signalling socket is open), put back in place of the last code's.
+ */
+function serverOwnerCode(): string {
+  return mintOwnerCode(() => copyFileSync(NAS_SERVER_KEY, join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json')));
+}
+
+function mintOwnerCode(prepareKey: () => void): string {
   const out = exclusively(() => {
-    rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true });
+    prepareKey();
     return execFileSync(process.execPath, [SERVER, 'owner-code'], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
   });
   expect(out).toContain('Rendezvous: registered');
   return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
+}
+
+/** The rendezvous lookup as for a NAS whose HTTPS route this network can't use: its WebRTC route only. */
+async function webrtcOnlyLookup(page: Page): Promise<void> {
+  await page.route(`${RENDEZVOUS_URL}/codes/lookup`, async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    const body = (await response.json()) as { routes?: { webrtc?: unknown } };
+    expect(body.routes?.webrtc).toBeDefined();
+    await route.fulfill({ response, json: { ...body, routes: { webrtc: body.routes?.webrtc } } });
+  });
 }
 
 /** Chrome asks before a page reaches the local network; the tests answer for the user where the browser supports it. */
@@ -202,6 +226,60 @@ test('plays the playlist the Java of disc-bdj selects, from the NAS', async ({ p
   await playFromNas(page, 'disc-bdj');
   await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 30_000 });
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+});
+
+test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable: disc1 for 3 s, then disc-bdj', async ({ page, browserName }) => {
+  test.setTimeout(180_000);
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  const httpsTried: string[] = [];
+  await page.context().route(`http://localhost:${NAS_PORT}/**`, (route) => {
+    httpsTried.push(route.request().url());
+    return route.abort('connectionrefused');
+  });
+  await webrtcOnlyLookup(page);
+  const code = serverOwnerCode();
+  await page.goto(`/?pair=${code}&telemetry=1`);
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 30_000 });
+  await skipWithoutH264(page);
+  const browse = async (): Promise<void> => {
+    await page.getByTestId('nas-open').click();
+    await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 30_000 });
+    await page.getByTestId('browse-folders').click();
+    await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+  };
+  await browse();
+  await playFromNas(page, 'disc1');
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId('playlist-00000').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 20_000 });
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 20_000 }).toBeGreaterThanOrEqual(3_000_000);
+
+  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once.
+  await page.reload();
+  await browse();
+  await playFromNas(page, 'disc-bdj');
+  await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 45_000 });
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  expect(httpsTried).toEqual([]);
+});
+
+test("a device that connects while the NAS's signalling socket is down is told it can't connect", async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  await webrtcOnlyLookup(page);
+  const code = ownerCode(); // under a NAS key of its own, whose signalling socket never opens
+  const closed: string[] = [];
+  page.on('websocket', (ws) => ws.on('close', () => closed.push(new URL(ws.url()).pathname)));
+  await page.goto(`/?pair=${code}`);
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  const started = Date.now();
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('pair-error')).toHaveText("Can't connect to the NAS from this network. Try another Wi-Fi or mobile data.", { timeout: 15_000 });
+  // The Worker's offline close (4404), not the 10 s wait for its hello.
+  expect(Date.now() - started).toBeLessThan(8_000);
+  expect(closed).toContain('/signal/device');
 });
 
 test('plays disc1.iso from the NAS', async ({ page, browserName }) => {

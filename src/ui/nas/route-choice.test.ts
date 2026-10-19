@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { RtcLink } from './rtc/rtc-connection';
-import { HEALTH_TIMEOUT_MS, chooseRoute } from './route-choice';
+import { HEALTH_TIMEOUT_MS, chooseRoute, chooseWebRtc } from './route-choice';
 import type { Route } from './route-choice';
 
 const BASE = 'https://nas.example/bluray/api/';
@@ -106,5 +106,36 @@ describe('chooseRoute', () => {
     const target = { base: '', nasId: NAS_ID };
     await expect(chooseRoute(target, { fetch: healthFetch('ok'), connect, cache })).rejects.toThrow('unreachable');
     expect(cache.size).toBe(0);
+  });
+});
+
+describe('chooseWebRtc', () => {
+  it('replaces a cached HTTPS choice with WebRTC, with no health check, and later choices share it', async () => {
+    const fetch = healthFetch('ok');
+    const cache = new Map<string, Promise<Route>>();
+    expect(await chooseRoute({ base: BASE, nasId: NAS_ID }, { fetch, connect: async () => fakeLink(), cache })).toEqual({ kind: 'https', base: BASE });
+    const link = fakeLink();
+    const connect = vi.fn(async () => link);
+    const route = await chooseWebRtc({ base: BASE, nasId: NAS_ID }, { fetch, connect, cache });
+    expect(route).toEqual({ kind: 'webrtc', connection: link });
+    expect(fetch.calls).toHaveLength(1); // only the first choice's
+    expect(await chooseRoute({ base: BASE, nasId: NAS_ID }, { fetch, connect, cache })).toBe(route);
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares an open WebRTC choice, connects again once it has closed, and fails without a WebRTC id', async () => {
+    const cache = new Map<string, Promise<Route>>();
+    const first = fakeLink();
+    const second = fakeLink();
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const deps = { fetch: healthFetch('refused'), connect, cache };
+    const [a, b] = await Promise.all([chooseWebRtc({ base: '', nasId: NAS_ID }, deps), chooseWebRtc({ base: '', nasId: NAS_ID }, deps)]);
+    expect(a.connection).toBe(first);
+    expect(b.connection).toBe(first);
+    Object.assign(first, { closed: true });
+    first.fire();
+    expect((await chooseWebRtc({ base: '', nasId: NAS_ID }, deps)).connection).toBe(second);
+    expect(connect).toHaveBeenCalledTimes(2);
+    await expect(chooseWebRtc({ base: BASE }, deps)).rejects.toThrow();
   });
 });

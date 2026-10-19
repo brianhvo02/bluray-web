@@ -5,8 +5,8 @@ import { codeHashOf, turnProofMessage } from '../../../rendezvous/src/protocol';
 import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
 import { RTC_BASE, RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { DeviceProof, RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
-import { chooseRoute, routeKey } from './route-choice';
-import type { Route } from './route-choice';
+import { chooseRoute, chooseWebRtc, routeKey } from './route-choice';
+import type { Route, RouteDeps } from './route-choice';
 
 export const NAS_MESSAGES = {
   invalidCode: "That code didn't work. Codes last 10 minutes; ask for a new one.",
@@ -490,8 +490,9 @@ export class NasClient {
 
   /**
    * The engine's fetch for disc reads: plain fetch on HTTPS, and for `rtc://` URLs the NAS's current connection,
-   * looked up on every call. When there is none it connects again through the route choice; while it can't, and
-   * when the connection closes under a request, it fails as nas-lost.
+   * looked up on every call. When there is none it connects again over WebRTC, never HTTPS (whose base the open disc
+   * doesn't use), and makes that the NAS's route, so the next session starts on it; while it can't connect, and when
+   * the connection closes under a request, it fails as nas-lost.
    */
   readonly discFetch: typeof fetch = async (input, init) => {
     const url = typeof Request !== 'undefined' && input instanceof Request ? input.url : String(input);
@@ -503,7 +504,7 @@ export class NasClient {
       const pairing = await this.pairing();
       if (pairing?.nasId === nasId) {
         try {
-          await this.apiBase(pairing);
+          await chooseWebRtc(pairing, this.routeDeps(pairing));
         } catch {
           throw new NasLostError();
         }
@@ -567,12 +568,17 @@ export class NasClient {
 
   /** The API base to use for `pairing` now: its HTTPS base, or `rtc://<nasId>/api/` over a WebRTC connection. */
   private async apiBase(pairing: NasPairing): Promise<string> {
-    const route = await chooseRoute(pairing, {
+    const route = await chooseRoute(pairing, this.routeDeps(pairing));
+    return route.kind === 'https' ? route.base : RTC_BASE(pairing.nasId!);
+  }
+
+  /** The route choice's dependencies for a paired device: its proof for TURN, and this client's cache. */
+  private routeDeps(pairing: NasPairing): RouteDeps {
+    return {
       fetch: this.deps.fetch,
       connect: (nasId) => this.connect(nasId, { deviceProof: (sid) => this.deviceProof(pairing, sid) }),
       cache: this.routes,
-    });
-    return route.kind === 'https' ? route.base : RTC_BASE(pairing.nasId!);
+    };
   }
 
   /**

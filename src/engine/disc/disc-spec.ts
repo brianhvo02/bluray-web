@@ -12,17 +12,27 @@ import type { DiscManifest } from './nas-api';
 import { normalizeDiscPaths } from './paths';
 import { RemoteSource } from './remote-source';
 
-/** Picked files (paths as the picker reports them), or a disc on the NAS. Structured-cloneable. */
+/** Picked files (paths as the picker reports them), or a disc on the NAS. Structured-cloneable (a fetch port is transferred). */
 export type DiscSpec =
   | { readonly kind: 'files'; readonly entries: ReadonlyArray<readonly [string, Blob]> }
   | RemoteDiscSpec;
 
 export interface RemoteDiscSpec {
   readonly kind: 'remote';
-  /** The disc's API base, ending with '/': `https://…/bluray/api/discs/<id>/`. */
+  /** The disc's API base, ending with '/': `https://…/bluray/api/discs/<id>/`, or `rtc://<nasId>/api/discs/<id>/`. */
   readonly base: string;
   readonly token: string;
   readonly manifest: DiscManifest;
+  /**
+   * Where the disc's requests go when they can't be fetched from this worker (the WebRTC route, whose connection lives
+   * on the main thread): `portFetch` over it. It must be in the message's transfer list.
+   */
+  readonly fetchPort?: MessagePort;
+}
+
+/** What a message carrying `spec` must transfer: its fetch port, if it has one. */
+export function discTransfer(spec: DiscSpec): Transferable[] {
+  return spec.kind === 'remote' && spec.fetchPort ? [spec.fetchPort] : [];
 }
 
 export interface ByteSourceDeps {

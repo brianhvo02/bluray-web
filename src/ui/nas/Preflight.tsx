@@ -3,6 +3,7 @@ import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { discBadges, discFacts, formatSize, openFailed, preflightLines, type DiscFacts } from './library-model';
+import { nasDiscSpec } from './disc-spec';
 import { NasHttpError, type NasClient } from './nas-client';
 import { playOnceOpen } from './play-once-open';
 
@@ -80,7 +81,8 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
       ([base, session]) => {
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
-        controller.openRemote({ kind: 'remote', base, token, manifest }, () => nas.freshSession(token).then((s) => (token = s.token)));
+        const { spec, release } = nasDiscSpec(base, token, manifest, nas.discFetch);
+        controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release);
         releaseWait.current?.();
         releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
         setOpening('launched');

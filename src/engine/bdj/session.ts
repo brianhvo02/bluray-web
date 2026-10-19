@@ -13,12 +13,13 @@ import type { PlayerBdjHost } from './player-host';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
-import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
+import { bootTransfer, type BdjCallName, type BdjFailureCode, type BdjWireValue, type FromBdj, type ToBdj } from './worker-protocol';
 
 export type { BdjFailureCode } from './worker-protocol';
 
 export interface WorkerLike {
-  postMessage(message: ToBdj): void;
+  /** `transfer`: a boot message's fetch port (bootTransfer). */
+  postMessage(message: ToBdj, transfer?: Transferable[]): void;
   onmessage: ((event: MessageEvent<FromBdj>) => void) | null;
   onerror?: ((event: ErrorEvent) => void) | null;
   terminate(): void;
@@ -264,7 +265,7 @@ export class BdjSession {
   }
 
   private post(m: ToBdj): void {
-    this.deps.worker.postMessage(m);
+    this.deps.worker.postMessage(m, bootTransfer(m));
   }
 
   private fail(code: BdjFailureCode, message: string): void {

@@ -853,6 +853,34 @@ describe('NasClient over WebRTC', () => {
     release();
   });
 
+  it('reconnects an rtc:// disc over WebRTC after a drop even when HTTPS answers by then, and starts the next session there', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const nas = rtcClient(server, world);
+    server.nas = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
+    const base = await nas.discBase('d1');
+    expect(base).toBe(`rtc://${NAS_ID}/api/discs/d1/`);
+    const url = `rtc://${NAS_ID}/api/library?path=drv5`;
+    const read = (token: string): Promise<Response> => nas.discFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const { token } = await nas.session();
+    expect((await read(token)).status).toBe(200);
+
+    server.nas = undefined; // HTTPS is reachable from here now
+    world.peers.at(-1)!.fail();
+    await new Promise((r) => setTimeout(r, 0));
+    const peers = world.peers.length;
+    expect((await read(token)).status).toBe(401); // over a new connection, which has seen no session yet
+    expect(world.peers).toHaveLength(peers + 1);
+    const healthChecks = server.hits.health ?? 0;
+    const fresh = await nas.freshSession(token);
+    expect((await read(fresh.token)).status).toBe(200); // the session was started on that connection
+    expect(server.hits.health ?? 0).toBe(healthChecks); // the disc's route stays WebRTC: no check sends it to HTTPS
+    expect(world.peers).toHaveLength(peers + 1);
+  });
+
   it('fails discFetch as nas-lost while no connection can be made, and is plain fetch on HTTPS', async () => {
     const server = fakeServer();
     const world = rtcWorld(server);

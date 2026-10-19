@@ -44,30 +44,54 @@ async function choose(target: RouteTarget, deps: RouteDeps): Promise<Route> {
   return { kind: 'webrtc', connection: await deps.connect(nasId) };
 }
 
+/** Keeps `choice` in the cache, until it fails or, for WebRTC, until its connection closes. */
+function remember(cache: Map<string, Promise<Route>> | undefined, key: string, choice: Promise<Route>): void {
+  if (!cache) return;
+  cache.set(key, choice);
+  choice.then(
+    (route) => {
+      if (route.kind === 'webrtc')
+        route.connection.onClose(() => {
+          if (cache.get(key) === choice) cache.delete(key);
+        });
+    },
+    () => {
+      if (cache.get(key) === choice) cache.delete(key);
+    },
+  );
+}
+
 /**
  * HTTPS first, when its health check answers within 2 s, then WebRTC. With `deps.cache`, concurrent and later calls
  * for the same NAS share the choice; a failed choice is forgotten, and so is a WebRTC one once its connection closes,
  * so the next call chooses again.
  */
 export function chooseRoute(target: RouteTarget, deps: RouteDeps): Promise<Route> {
-  const { cache } = deps;
   const key = routeKey(target);
-  const cached = cache?.get(key);
+  const cached = deps.cache?.get(key);
   if (cached) return cached;
   const choice = choose(target, deps);
-  if (cache) {
-    cache.set(key, choice);
-    choice.then(
-      (route) => {
-        if (route.kind === 'webrtc')
-          route.connection.onClose(() => {
-            if (cache.get(key) === choice) cache.delete(key);
-          });
-      },
-      () => {
-        if (cache.get(key) === choice) cache.delete(key);
-      },
-    );
+  remember(deps.cache, key, choice);
+  return choice;
+}
+
+/**
+ * WebRTC to `target`, whatever HTTPS would answer: how a disc opened over WebRTC reconnects, as its reads (`rtc://`
+ * URLs) can go nowhere else. An open WebRTC choice in the cache is shared; any other is replaced, so the session the
+ * engine asks for next is started on this connection too.
+ */
+export async function chooseWebRtc(target: RouteTarget, deps: RouteDeps): Promise<Extract<Route, { kind: 'webrtc' }>> {
+  const { nasId } = target;
+  if (nasId === undefined) throw new Error('This NAS has no WebRTC route.');
+  const key = routeKey(target);
+  const cached = deps.cache?.get(key);
+  if (cached) {
+    const route = await cached.catch(() => null);
+    if (route?.kind === 'webrtc' && !route.connection.closed) return route;
+    const now = deps.cache?.get(key);
+    if (now && now !== cached) return chooseWebRtc(target, deps); // another caller chose meanwhile
   }
+  const choice = deps.connect(nasId).then((connection) => ({ kind: 'webrtc', connection }) as const);
+  remember(deps.cache, key, choice);
   return choice;
 }

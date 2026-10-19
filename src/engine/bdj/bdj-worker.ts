@@ -8,6 +8,7 @@
 
 import type { Clpi } from '../bdmv/clpi-parser';
 import { BDJ_REMOTE_CHUNK_BYTES, BDJ_REMOTE_IN_FLIGHT, createByteSource } from '../disc/disc-spec';
+import { portFetch } from '../disc/port-fetch';
 import { TokenRelay } from '../disc/http-transport';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
@@ -199,7 +200,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const boot = async (m: BootMessage): Promise<void> => {
     const t0 = performance.now();
     try {
-      const fetchFn = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
+      // on the WebRTC route the engine relays the disc's requests through a port of this worker's own
+      const fetchPort = m.disc.kind === 'remote' ? m.disc.fetchPort : undefined;
+      const fetchFn = fetchPort ? portFetch(fetchPort) : (options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)));
       // the BD-J read-ahead budget (memory profile bdjRemoteReadAheadBytes), in BD-J-sized requests (ruling R20)
       const disc = createByteSource(m.disc, {
         fetch: fetchFn,

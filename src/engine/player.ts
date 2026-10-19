@@ -25,6 +25,7 @@ import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
 import { createByteSource, type DiscSpec } from './disc/disc-spec';
+import { portFetch, serveFetch } from './disc/port-fetch';
 import type { FileSource } from './disc/file-source';
 import { RemoteDiscError, TokenRelay } from './disc/http-transport';
 import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
@@ -220,6 +221,16 @@ interface EarlyBdj {
   readonly regs: RegisterFile;
   readonly status: StatusBlockWriter;
   readonly plane: GraphicsPlaneReader;
+  readonly disc: BdjDisc;
+}
+
+/**
+ * How one BD-J worker reads the disc. On the port route it gets a fetch port of its own in its boot message, which the
+ * engine serves with its own port fetch (a worker can't use the engine's port); `stop` ends that relay.
+ */
+interface BdjDisc {
+  readonly port: MessagePort | null;
+  readonly stop: () => void;
 }
 
 /**
@@ -242,6 +253,8 @@ interface BdjTitle {
   booted: boolean;
   /** The plane's visible() as last reported in a bdjMenu event. */
   menuVisible: boolean;
+  /** How the worker reads the disc: its fetch port and that port's relay, on the port route. */
+  readonly disc: BdjDisc;
   /** Taps forwarded to Java, waiting for a reaction (the ignored-tap rule). */
   readonly taps: TapReactionWatch;
   /** The BD-J worker's last memory report (memoryTelemetry). */
@@ -347,8 +360,10 @@ export class Player {
   private bdjDiscId: string | null = null;
   /** The class library, loading from the first BD-J disc on. */
   private bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
-  /** The open disc as the UI gave it (with the latest NAS token), for the BD-J worker's own disc model. */
+  /** The open disc as the UI gave it (with the latest NAS token, without its fetch port), for the BD-J worker's own disc model. */
   private discSpec: DiscSpec = { kind: 'files', entries: [] };
+  /** The open NAS disc's fetch port (the WebRTC route) and the fetch over it, which BD-J workers' relays use too. */
+  private discPort: { readonly port: MessagePort; readonly fetch: typeof fetch } | null = null;
   /** Fresh NAS tokens for the open (or opening) disc's reads, asked of the controller. */
   private tokens: TokenRelay | null = null;
   /** The opening (then open) disc's NAS source, which takes token refreshes. */
@@ -705,10 +720,15 @@ export class Player {
 
   /** The disc's bytes; a NAS disc's waits show a notice, and its 401s ask the controller for a fresh token. */
   private createSource(spec: DiscSpec): FileSource | RemoteSource {
+    if (spec.kind === 'remote' && spec.fetchPort) {
+      const { fetchPort, ...rest } = spec;
+      this.discPort = { port: fetchPort, fetch: portFetch(fetchPort) };
+      spec = rest;
+    }
     this.discSpec = spec;
     const tokens = new TokenRelay(() => this.deps.emit({ type: 'remoteTokenNeeded' }), this.deps.setTimer ?? defaultSetTimer);
     const source: FileSource | RemoteSource = createByteSource(spec, {
-      fetch: this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
+      fetch: this.discPort?.fetch ?? this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
       readAheadBytes: this.deps.remoteLimits?.readAheadBytes ?? this.memory.remoteReadAheadBytes,
       ...(this.deps.remoteLimits?.chunkBytes ? { chunkBytes: this.deps.remoteLimits.chunkBytes } : {}),
       onWaiting: (waiting) => {
@@ -741,6 +761,29 @@ export class Player {
     this.remote = null;
     this.tokens = null;
     this.discSpec = { kind: 'files', entries: [] };
+    this.discPort?.port.close();
+    this.discPort = null;
+  }
+
+  /** How a new BD-J worker reads the disc: on the port route, through a fetch port relayed to the engine's own. */
+  private bdjDisc(): BdjDisc {
+    const route = this.discPort;
+    if (!route) return { port: null, stop: () => undefined };
+    const { port1, port2 } = new MessageChannel();
+    const stopServing = serveFetch(port1, route.fetch);
+    return {
+      port: port2,
+      stop: () => {
+        stopServing();
+        port1.close();
+      },
+    };
+  }
+
+  /** The disc in a BD-J worker's boot message: the open disc with its latest token, and the worker's fetch port. */
+  private bootDisc(disc: BdjDisc): DiscSpec {
+    const spec = this.discSpec;
+    return spec.kind === 'remote' && disc.port ? { ...spec, fetchPort: disc.port } : spec;
   }
 
   private get bdjSupported(): boolean {
@@ -795,6 +838,7 @@ export class Player {
       regs: this.newProgramRegs(index, true),
       status: new StatusBlockWriter(createStatusBlock()),
       plane: new GraphicsPlaneReader(createGraphicsPlane()),
+      disc: this.bdjDisc(),
     };
     this.applyBdjSettings(early.regs);
     this.earlyBdj = early;
@@ -808,7 +852,7 @@ export class Player {
           registers: early.regs.shared!,
           status: early.status.buffer,
           plane: early.plane.buffer,
-          disc: this.discSpec,
+          disc: this.bootDisc(early.disc),
           readAheadBytes: this.memory.bdjRemoteReadAheadBytes,
           discId: bdid?.discId ?? null,
           classLibrary,
@@ -843,6 +887,7 @@ export class Player {
   /** Terminates an early BD-J worker no title adopted. */
   private dropEarlyBdj(): void {
     this.earlyBdj?.worker.terminate();
+    this.earlyBdj?.disc.stop();
     this.earlyBdj = null;
   }
 
@@ -867,6 +912,8 @@ export class Player {
     if (!early) this.applyBdjSettings(programRegs); // an early worker's registers have them already
     const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
     const plane = early?.plane ?? new GraphicsPlaneReader(createGraphicsPlane());
+    // an early worker's boot (sent or still to come) and the session's carry the same disc: only one reaches the worker
+    const bdjDisc = early?.disc ?? this.bdjDisc();
     let entry: BdjTitle | null = null;
     let ended = false;
     const live = (): boolean => !ended;
@@ -931,7 +978,7 @@ export class Player {
         if (notice) this.notice('bdj-tap-ignored', BDJ_TAP_IGNORED_MESSAGE);
       },
     });
-    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, taps, memory: null };
+    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, disc: bdjDisc, taps, memory: null };
     this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
@@ -950,7 +997,7 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
-    await entry.session.boot(this.discSpec, this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
+    await entry.session.boot(this.bootDisc(entry.disc), this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
     if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();
@@ -1012,6 +1059,7 @@ export class Player {
     this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
+    entry.disc.stop();
     // the menu goes at once (Review Focus 2): nothing of the plane or the background still is drawn again
     this.background.clear();
     this.backgroundDirty = false; // repainted here

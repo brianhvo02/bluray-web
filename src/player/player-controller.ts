@@ -241,6 +241,8 @@ export class PlayerController {
   private backgroundPaused = false;
   /** The open NAS disc's token source, asked when the engine's reads get a 401. */
   private refreshToken: (() => Promise<string>) | null = null;
+  /** Ends what the open NAS disc's fetch port is served by, once another disc opens or it closes. */
+  private releaseRemote: (() => void) | null = null;
   private opens = 0;
 
   constructor(
@@ -357,6 +359,7 @@ export class PlayerController {
   open(entries: ReadonlyArray<readonly [string, File]>): void {
     this.opens++;
     this.refreshToken = null;
+    this.release();
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
     this.post({ type: 'open', disc: { kind: 'files', entries } });
@@ -364,14 +367,23 @@ export class PlayerController {
 
   /**
    * A disc on the NAS. `refreshToken` gives a fresh session token when the NAS refuses the current one; a token
-   * refreshed on schedule goes to the engine through setRemoteToken.
+   * refreshed on schedule goes to the engine through setRemoteToken. A spec's fetch port (the WebRTC route) is
+   * transferred to the engine, and `release` (what serves it) runs once another disc opens or this one closes.
    */
-  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>): void {
+  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>, release?: () => void): void {
     this.opens++;
+    this.release();
     this.refreshToken = refreshToken ?? null;
+    this.releaseRemote = release ?? null;
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
-    this.post({ type: 'open', disc: spec });
+    this.post({ type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
+  }
+
+  private release(): void {
+    const release = this.releaseRemote;
+    this.releaseRemote = null;
+    release?.();
   }
 
   /** A fresh session token for the open NAS disc. */
@@ -648,6 +660,7 @@ export class PlayerController {
   closeDisc(): void {
     this.opens++;
     this.refreshToken = null;
+    this.release();
     this.post({ type: 'close' });
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });
   }

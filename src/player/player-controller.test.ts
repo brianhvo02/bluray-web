@@ -201,6 +201,25 @@ describe('PlayerController', () => {
     expect(worker.posted.at(-1)).toEqual({ type: 'remoteToken', token: 't9' });
   });
 
+  it("transfers a NAS disc's fetch port with the open, and releases what serves it when another disc opens or it closes", () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const { port1, port2 } = new MessageChannel();
+    const spec = { kind: 'remote', base: 'rtc://n/api/discs/d1/', token: 't1', manifest: { discId: 'd1', name: 'Disc', files: [], inline: {} }, fetchPort: port2 } as const;
+    let released = 0;
+    c.openRemote(spec, undefined, () => released++);
+    expect(worker.posted[0]).toEqual({ type: 'open', disc: spec });
+    expect(worker.transfers[0]).toEqual([port2]);
+    expect(released).toBe(0);
+    c.openRemote({ ...spec, fetchPort: port1 }, undefined, () => (released += 10));
+    expect(released).toBe(1);
+    c.closeDisc();
+    expect(released).toBe(11);
+    c.closeDisc();
+    expect(released).toBe(11);
+    port1.close();
+  });
+
   it('shows the NAS waiting notice until the engine clears it', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());

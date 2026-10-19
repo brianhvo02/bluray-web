@@ -8,7 +8,7 @@
  */
 
 import type { WorkerLike } from './session';
-import type { FromBdj, ToBdj } from './worker-protocol';
+import { bootTransfer, type FromBdj, type ToBdj } from './worker-protocol';
 
 type Held = { readonly message: MessageEvent<FromBdj> } | { readonly error: ErrorEvent };
 
@@ -33,7 +33,7 @@ export class EarlyBdjWorker implements WorkerLike {
   boot(message: Extract<ToBdj, { type: 'boot' }>): boolean {
     if (this.bootSent) return false;
     this.bootSent = true;
-    this.inner.postMessage(message);
+    this.inner.postMessage(message, bootTransfer(message));
     return true;
   }
 
@@ -41,7 +41,7 @@ export class EarlyBdjWorker implements WorkerLike {
     if (message.type === 'boot') {
       if (!this.bootSent) {
         this.bootSent = true;
-        this.inner.postMessage(message);
+        this.inner.postMessage(message, bootTransfer(message));
       }
       this.release();
       return;
