@@ -118,7 +118,8 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
   const plan: BufferPlan | null =
     need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : cannotBuffer || quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(askEveryWait() ? { silentBelowS: 0 } : {}) });
 
-  const play = (bufferFirst?: BufferRequest): void => {
+  /** `hold`: the disc opens once the cache holds the target (Wait); otherwise at once, its fill going on behind it. */
+  const play = (bufferFirst?: BufferRequest, hold = true): void => {
     if (!manifest) return;
     controller.startAudio(); // inside the click gesture
     setOpening('starting');
@@ -129,10 +130,11 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
         let token = session.token;
         const { spec, release } = nasDiscSpec(base, token, manifest, nas.discFetch);
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst);
+        if (bufferFirst && !hold) controller.cancelBuffer(); // play now: the queued open doesn't wait for its fill
         releaseWait.current?.();
         releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
         if (bufferFirst) watchBufferFailure(controller); // for as long as this disc is open, past this screen
-        setOpening(bufferFirst ? 'buffering' : 'launched');
+        setOpening(bufferFirst && hold ? 'buffering' : 'launched');
       },
     ).catch((err: unknown) => {
       setOpening('idle');
@@ -141,7 +143,17 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
   };
 
   /** Buffer first: the bytes the plan holds ahead, from the start of what plays. */
-  const waitFor = (bytes: number): void => play({ fromSeconds: 0, targetBytes: Math.ceil(bytes), ...(playlistId !== undefined ? { playlistId } : {}) });
+  const request = (bytes: number): BufferRequest => ({ fromSeconds: 0, targetBytes: Math.ceil(bytes), ...(playlistId !== undefined ? { playlistId } : {}) });
+  const waitFor = (bytes: number): void => play(request(bytes));
+  /**
+   * Play now with pauses: at once, with a fill ahead of playback (capped at the plan's lead, or what the device can
+   * hold) for fewer pauses; without a cache, as before.
+   */
+  const playWithPauses = (): void => {
+    const lead = plan?.kind === 'ask' ? plan.bytes : plan?.kind === 'too-big' ? plan.canHoldBytes : 0;
+    if (lead > 0) play(request(lead), false);
+    else play();
+  };
   const stopWaiting = (): void => {
     controller.closeDisc(); // the engine drops the disc unopened
     setOpening('idle');
@@ -220,7 +232,7 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
               type="button"
               data-testid="nas-play"
               disabled={!manifest || opening !== 'idle' || estimating}
-              onClick={() => (plan?.kind === 'silent' ? waitFor(plan.bytes) : play())}
+              onClick={() => (plan?.kind === 'silent' ? waitFor(plan.bytes) : plan?.kind === 'ask' || plan?.kind === 'too-big' ? playWithPauses() : play())}
             >
               {plan?.kind === 'ask' || plan?.kind === 'too-big' || cannotBuffer ? 'Play now with pauses' : 'Play'}
             </button>

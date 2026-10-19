@@ -31,7 +31,7 @@ import { RemoteDiscError, TokenRelay } from './disc/http-transport';
 import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
 import { CacheFill } from './disc/cache-fill';
 import type { DiscManifest } from './disc/nas-api';
-import { ReadAheadCache } from './disc/read-ahead-cache';
+import { ReadAheadCache, SEGMENT_BYTES } from './disc/read-ahead-cache';
 import { RemoteSource } from './disc/remote-source';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
@@ -922,18 +922,28 @@ export class Player {
       return null;
     }
     if (this.remote !== remote) return null;
-    const fromUs = Math.max(0, req.fromSeconds) * 1e6;
-    // following playback: from the play position while this playlist plays, else from the request's start
-    const position = (): number => {
+    // Following playback: from the play position while this playlist plays; while another one plays the fill idles
+    // (null), and with none playing it keeps the last position (the request's start before playback).
+    let lastUs = Math.max(0, req.fromSeconds) * 1e6;
+    const position = (): number | null => {
       const s = this.session;
-      return follow && s && s.playlistId === playlistId ? this.clock.nowUs() : fromUs;
+      if (!follow || !s) return lastUs;
+      if (s.playlistId !== playlistId) return null;
+      lastUs = this.clock.nowUs();
+      return lastUs;
     };
+    const segmentBytes = this.deps.readAheadSegmentBytes ?? SEGMENT_BYTES;
     const fill = new CacheFill({
       remote,
       cache,
-      ranges: () => bufferRanges(mpls, clips, (path) => remote.size(path), position(), remote.chunkBytes),
+      ranges: () => {
+        const at = position();
+        return at === null ? null : bufferRanges(mpls, clips, (path) => remote.size(path), at, remote.chunkBytes);
+      },
       follow,
       targetBytes: req.targetBytes,
+      leadCapBytes: req.targetBytes + segmentBytes,
+      segmentBytes,
       progress: (p) => {
         if (this.filling === fill) this.deps.emit({ type: 'bufferProgress', ...p });
       },
@@ -943,11 +953,11 @@ export class Player {
       permanent: (err) => err instanceof RemoteDiscError && (err.reason === 'disc-changed' || err.reason === 'nas-unpaired'),
     });
     this.filling = fill;
-    remote.setWriteThrough(follow);
+    remote.setWriteThrough(follow ? (path, offset, bytes) => fill.keep(path, offset, bytes) : null);
     void fill.run().finally(() => {
       if (this.filling !== fill) return;
       this.filling = null;
-      remote.setWriteThrough(false);
+      remote.setWriteThrough(null);
     });
     return fill;
   }
@@ -956,7 +966,7 @@ export class Player {
   private stopFill(): void {
     this.filling?.stop();
     this.filling = null;
-    this.remote?.setWriteThrough(false);
+    this.remote?.setWriteThrough(null);
   }
 
   /** The play position moved: a following fill looks again (now, or at most every FILL_KICK_MS while playing). */

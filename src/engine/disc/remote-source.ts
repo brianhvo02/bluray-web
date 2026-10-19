@@ -68,7 +68,9 @@ export class RemoteSource implements ByteSource {
   private waitingReads = 0;
   private closed = false;
   private cache: ChunkCache | null = null;
-  private writeThrough = false;
+  private writeThrough: ((path: string, offset: number, bytes: Uint8Array) => void) | null = null;
+  /** Reads waiting for a chunk still being fetched. */
+  private readsWaiting = 0;
   /** Chunks the cache fill is fetching (fillChunk), by chunk key. */
   private readonly filling = new Map<string, Promise<Uint8Array>>();
 
@@ -172,6 +174,11 @@ export class RemoteSource implements ByteSource {
     }
   }
 
+  /** A read (playback's) is waiting for a chunk still being fetched: the cache fill steps back to one request. */
+  get playbackWaiting(): boolean {
+    return this.readsWaiting > 0;
+  }
+
   /** The chunk at `offset` of `path` is being fetched (by a read, read-ahead or the fill). */
   isFetching(path: string, offset: number): boolean {
     const ck = chunkKey(path.toUpperCase(), Math.floor(offset / this.opts.chunkBytes));
@@ -179,11 +186,12 @@ export class RemoteSource implements ByteSource {
   }
 
   /**
-   * While a fill follows playback (bufferFirst), chunks read from the network are kept in the cache too, so the fill
-   * doesn't fetch them again; the fill frees them once playback has passed them.
+   * While a fill follows playback (bufferFirst), every chunk read from the network is offered to `keep` (CacheFill.keep),
+   * which stores it in the cache when the fill would have fetched it, so the fill doesn't fetch it again; the fill frees
+   * it once playback has passed it. Null: nothing is kept.
    */
-  setWriteThrough(on: boolean): void {
-    this.writeThrough = on;
+  setWriteThrough(keep: ((path: string, offset: number, bytes: Uint8Array) => void) | null): void {
+    this.writeThrough = keep;
   }
 
   /** Aborts every fetch and drops the cache (the disc was closed). */
@@ -226,6 +234,8 @@ export class RemoteSource implements ByteSource {
     }
     this.pump();
 
+    const waitsOnFetch = needed.some((n) => n.pending);
+    if (waitsOnFetch) this.readsWaiting++;
     let waiting = false;
     const timer = setTimeout(() => {
       waiting = true;
@@ -246,6 +256,7 @@ export class RemoteSource implements ByteSource {
       return filled === out.length ? out : out.subarray(0, filled);
     } finally {
       clearTimeout(timer);
+      if (waitsOnFetch) this.readsWaiting--;
       if (waiting && --this.waitingReads === 0) this.opts.onWaiting?.(false);
       for (const n of needed) n.waiters--;
       this.trim();
@@ -307,7 +318,7 @@ export class RemoteSource implements ByteSource {
       if (filled) return filled;
     }
     const bytes = await this.transport.read(path, start, size, signal);
-    if (cache && this.writeThrough) void cache.write(path, start, bytes).catch(() => undefined);
+    if (cache) this.writeThrough?.(path, start, bytes);
     return bytes;
   }
 

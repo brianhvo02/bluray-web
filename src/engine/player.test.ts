@@ -2349,6 +2349,51 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     expect((await cachedFiles(P2)).length).toBeGreaterThan(0);
   }, 30_000);
 
+  it('after a bufferFirst open, holds at most the target plus a segment ahead of a paused player', async () => {
+    const SEGMENT = 4 * CHUNK;
+    const { h, spec } = await setup({ noOpen: true, segmentBytes: SEGMENT });
+    await h.player.handle({ type: 'open', disc: spec, bufferFirst: { fromSeconds: 0, targetBytes: 4 * CHUNK } });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await h.player.handle({ type: 'pause' });
+    await h.play(2_000); // the fill looks again every second; a fast link would fill the whole disc meanwhile
+    const cap = 4 * CHUNK + SEGMENT;
+    expect(Math.max(...progress(h).map((p) => p.bytes))).toBeLessThanOrEqual(cap + CHUNK);
+  });
+
+  it('after a bufferFirst open on a link faster than the disc, keeps the lead capped as playback uses it', async () => {
+    const SEGMENT = 4 * CHUNK;
+    const { h, log, spec } = await setup({ noOpen: true, segmentBytes: SEGMENT });
+    await h.player.handle({ type: 'open', disc: spec, bufferFirst: { fromSeconds: 0, targetBytes: 4 * CHUNK } });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await playUntil(h, 6_000_000); // into the second clip
+    const cap = 4 * CHUNK + SEGMENT;
+    expect(Math.max(...progress(h).map((p) => p.bytes))).toBeLessThanOrEqual(cap + CHUNK);
+    expect(log.reads.some((r) => r.path === P2)).toBe(true); // it went on fetching as playback went on
+  }, 30_000);
+
+  it('after a bufferFirst open, idles while another playlist plays and follows again when the buffered one plays', async () => {
+    const { h, log, spec } = await setup({
+      noOpen: true,
+      playlists: [
+        { id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2 },
+        { id: '00003', clipIds: ['00002'], chapterEverySeconds: 2 },
+      ],
+    });
+    log.limit(P1, 6 * CHUNK); // the fill sticks at the first clip's seventh chunk
+    const opening = h.player.handle({ type: 'open', disc: spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });
+    await vi.waitFor(() => expect(log.reads.some((r) => r.path === P1 && r.from === 6 * CHUNK)).toBe(true));
+    await h.player.handle({ type: 'cancelBuffer' });
+    await opening;
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00003' });
+    log.limit(P1, Infinity); // its stuck reads land; nothing more of the first clip is fetched while 00003 plays
+    await h.play(1_500);
+    expect(log.reads.some((r) => r.path === P1 && r.from >= 8 * CHUNK)).toBe(false);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    // following again: it runs ahead through the first clip, well past what playback has read
+    await vi.waitFor(() => expect(log.reads.some((r) => r.path === P1 && r.from >= 20 * CHUNK)).toBe(true), { timeout: 10_000 });
+  }, 30_000);
+
   it('after a bufferFirst open, a seek outside what the cache holds restarts the fill at the seek point', async () => {
     const { h, log, spec, startChunkAt, streamSize } = await setup({ noOpen: true });
     log.limit(P1, 6 * CHUNK); // the fill sticks at the first clip's seventh chunk

@@ -10,9 +10,10 @@ export const RATE_MARGIN = 1.1;
 /** A wait shorter than this buffers silently (a progress ring, then play); a longer one asks first. */
 export const SILENT_BELOW_S = 120;
 /**
- * The cache holds the lead plus what it frees a segment at a time: the segment playback is in and the one being
- * written, past the lead itself. The lead is largest at the start (the connection is slower than the disc, so it only
- * shrinks), so the plan's bytes plus this is the most the cache ever holds.
+ * The most the cache holds past the plan's lead. Following playback, the engine holds at most the lead plus one
+ * segment ahead of the play position (its cap; a paused player or a link faster than the probe stops there), and
+ * frees what playback has passed a whole segment at a time, so up to one more segment lies behind the position. The
+ * plan's bytes plus this is therefore the most the cache ever holds.
  */
 export const CACHE_SLACK_BYTES = 2 * SEGMENT_BYTES;
 /** When the fill failed, or this device has no cache. */
@@ -119,9 +120,13 @@ export async function readAheadCacheBytes(root: () => Promise<FileSystemDirector
   }
   const walk = async (dir: DirLike): Promise<number> => {
     let sum = 0;
-    for await (const entry of dir.values()) {
-      if (entry.kind === 'directory') sum += await walk(entry as DirLike);
-      else sum += (await (entry as { getFile(): Promise<{ size: number }> }).getFile()).size;
+    try {
+      for await (const entry of dir.values()) {
+        if (entry.kind === 'directory') sum += await walk(entry as DirLike);
+        else sum += await (entry as { getFile(): Promise<{ size: number }> }).getFile().then((f) => f.size, () => 0); // one it can't read counts 0
+      }
+    } catch {
+      // a folder removed while it was listed: what was counted stands
     }
     return sum;
   };

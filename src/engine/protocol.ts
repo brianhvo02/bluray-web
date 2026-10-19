@@ -156,7 +156,11 @@ export type EngineCommand =
    * unopened, even while it is still queued. Every other command sent after it waits for it, as the queue does.
    */
   | { readonly type: 'open'; readonly disc: DiscSpec; readonly bufferFirst?: BufferRequest }
-  /** Fetch the open NAS disc's main playlist from `fromSeconds` on into its read-ahead cache, `targetBytes` of it, reporting bufferProgress. */
+  /**
+   * Fetch the open NAS disc's playlist (`playlistId`, else its main title) from `fromSeconds` on into its read-ahead
+   * cache until it holds `targetBytes` of it, reporting bufferProgress, then stop; it doesn't follow playback (a
+   * bufferFirst open's fill does). It replaces any fill running.
+   */
   | ({ readonly type: 'bufferAhead' } & BufferRequest)
   /**
    * Handled at once, not queued: a bufferFirst open waiting for its fill opens now (its fill goes on); otherwise the

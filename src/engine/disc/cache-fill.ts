@@ -38,20 +38,33 @@ export interface CacheFillDeps {
     fillChunk(path: string, offset: number, signal: AbortSignal): Promise<number>;
     /** The chunk is being fetched already (by playback's reads or the fill). */
     isFetching(path: string, offset: number): boolean;
+    /** A playback read is waiting on the network: the fill then keeps one request in flight, not two. */
+    readonly playbackWaiting: boolean;
   };
   readonly cache: {
     coveredEnd(path: string, offset: number): number | null;
     heldBytes(path: string, start: number, end: number): number;
     evictOutside(keep: readonly ByteRange[]): Promise<void>;
+    write?(path: string, offset: number, bytes: Uint8Array): Promise<void>;
   };
-  /** The stream ranges still to play, from the play position on, in playback order. */
-  ranges(): readonly ByteRange[];
+  /**
+   * The stream ranges still to play, from the play position on, in playback order; null while the fill should idle
+   * (another playlist plays): no fetches, nothing freed, until a kick finds ranges again.
+   */
+  ranges(): readonly ByteRange[] | null;
   /**
    * Keep going to the end of the playlist, following the play position and freeing what it has passed, until stopped
    * (a bufferFirst open); otherwise stop once the target is held.
    */
   readonly follow: boolean;
   readonly targetBytes: number;
+  /**
+   * Following, the most it holds ahead of the play position (the target plus a segment): fetching pauses there and
+   * goes on as playback uses the lead up (a paused player, a link faster than the probe).
+   */
+  readonly leadCapBytes?: number;
+  /** The cache's segment size: a full disk lowers the lead cap to a segment under the lead it held then. */
+  readonly segmentBytes?: number;
   progress(p: FillProgress): void;
   nowMs(): number;
   /** One-shot timer for the retries, cancelled by the returned function. */
@@ -89,6 +102,12 @@ export class CacheFill {
   /** Waiting to try again: no fetch starts until the timer ends it. */
   private cancelRetry: (() => void) | null = null;
   private seq = 0;
+  /** A full disk (QuotaExceededError) lowered the lead cap to this. */
+  private quotaCap = Infinity;
+  /** The lead at the last pass, for the full-disk cap. */
+  private lead = 0;
+  /** Bytes of playback's reads being written to the cache (keep). */
+  private landing = 0;
   /** The last fetch started when a read last failed. */
   private failedAtSeq = -1;
   private networkBytes = 0;
@@ -96,6 +115,24 @@ export class CacheFill {
 
   constructor(private readonly deps: CacheFillDeps) {
     this.reached = new Promise((resolve) => (this.resolveReached = resolve));
+  }
+
+  /**
+   * A chunk playback read from the network (write-through): stored in the cache when the fill would fetch it now, ahead
+   * of the play position with the lead (counting writes still landing) under its cap; dropped otherwise.
+   */
+  keep(path: string, offset: number, bytes: Uint8Array): void {
+    if (this.stopped || !this.deps.cache.write) return;
+    const ranges = this.deps.ranges();
+    if (ranges === null || !ranges.some((r) => r.path === path && r.start <= offset && offset < r.end)) return;
+    const cap = this.deps.follow ? Math.min(this.deps.leadCapBytes ?? Infinity, this.quotaCap) : Infinity;
+    const lead = ranges.reduce((sum, r) => sum + this.deps.cache.heldBytes(r.path, r.start, r.end), 0);
+    if (lead + this.landing + bytes.length > cap) return;
+    this.landing += bytes.length;
+    this.deps.cache
+      .write(path, offset, bytes)
+      .catch(() => undefined)
+      .finally(() => (this.landing -= bytes.length));
   }
 
   /** The play position moved (a seek, or playback went on): look again. */
@@ -127,6 +164,12 @@ export class CacheFill {
       while (!this.stopped) {
         this.woken = false;
         const ranges = this.deps.ranges();
+        if (ranges === null) {
+          // another playlist plays: wait for this one to play again (a kick)
+          if (!this.woken) await new Promise<void>((resolve) => (this.wake = resolve));
+          this.wake = null;
+          continue;
+        }
         // a fetch no longer ahead (a seek) gives its place to one that is
         for (const [key, f] of this.inFlight) {
           if (ranges.some((r) => r.path === f.path && r.start <= f.offset && f.offset < r.end)) continue;
@@ -137,6 +180,7 @@ export class CacheFill {
         const total = ranges.reduce((sum, r) => sum + r.end - r.start, 0);
         const targetBytes = Math.min(Math.max(0, this.deps.targetBytes), total);
         const bytes = ranges.reduce((sum, r) => sum + cache.heldBytes(r.path, r.start, r.end), 0);
+        this.lead = bytes;
         if (this.failure) {
           this.report({ bytes, targetBytes, mbps: this.mbps(startedMs), stopped: 'failed' });
           return;
@@ -146,12 +190,17 @@ export class CacheFill {
           this.resolveReached();
           if (!this.deps.follow) return;
         }
-        while (this.inFlight.size < FILL_IN_FLIGHT && !this.cancelRetry) {
+        // following, the lead is capped (counting what is in flight); playback reads waiting on the network go first
+        const cap = this.deps.follow ? Math.min(this.deps.leadCapBytes ?? Infinity, this.quotaCap) : Infinity;
+        const capped = (): boolean => bytes + this.landing + this.inFlight.size * cb >= cap;
+        const inFlightMax = remote.playbackWaiting ? 1 : FILL_IN_FLIGHT;
+        while (this.inFlight.size < inFlightMax && !this.cancelRetry && !capped()) {
           const next = this.nextMissing(ranges, cb);
           if (!next) break;
           this.start(next.path, next.offset);
         }
-        if (this.inFlight.size === 0 && !this.cancelRetry) {
+        if (bytes >= this.quotaCap) this.resolveReached(); // a full disk: the open waits no longer for a lead it can't hold
+        if (this.inFlight.size === 0 && !this.cancelRetry && !capped()) {
           this.resolveReached(); // all there is ahead is held
           if (!this.deps.follow) return;
         }
@@ -190,6 +239,14 @@ export class CacheFill {
    * waits FILL_RETRY_MS and fetches the same chunk again (the first one missing ahead).
    */
   private failed(err: unknown): void {
+    if ((err as { name?: unknown } | null)?.name === 'QuotaExceededError') {
+      // a full disk is no flap: hold a segment under the lead held now, and go on once playback has freed room; with
+      // no lead to hold, the device can't buffer
+      const segment = this.deps.segmentBytes ?? this.deps.remote.chunkBytes;
+      if (this.lead < segment) this.failure = true;
+      else this.quotaCap = Math.min(this.quotaCap, this.lead - segment);
+      return;
+    }
     const now = this.deps.nowMs();
     this.failingSinceMs ??= now;
     this.failedAtSeq = this.seq - 1;

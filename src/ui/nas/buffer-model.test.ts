@@ -108,6 +108,20 @@ describe('readAheadCacheBytes', () => {
     expect(total).toBeGreaterThanOrEqual(2500); // the bytes, and the small index and meta files
     expect(total).toBeLessThan(3000);
   });
+
+  it("counts a file it can't read as 0, not the whole total", async () => {
+    const root = new MemoryDirectory();
+    const sizes = new Map([['BDMV/STREAM/00001.M2TS', 10_000]]);
+    const cache = await ReadAheadCache.open('d', { root: async () => root.asHandle(), now: () => 1, fileSize: (p) => sizes.get(p), segmentBytes: 1000 });
+    await cache.write('BDMV/STREAM/00001.M2TS', 0, new Uint8Array(2500));
+    cache.close();
+    const disc = await (await root.getDirectoryHandle('read-ahead')).getDirectoryHandle('d');
+    const broken = [...disc.entries.values()].find((e) => e.name.endsWith('.0.bin'))! as unknown as { getFile(): Promise<never> };
+    broken.getFile = () => Promise.reject(new DOMException('gone', 'NotFoundError'));
+    const total = await readAheadCacheBytes(async () => root.asHandle());
+    expect(total).toBeGreaterThanOrEqual(1500); // segments 1 and 2
+    expect(total).toBeLessThan(2000);
+  });
 });
 
 describe('watchBufferFailure', () => {

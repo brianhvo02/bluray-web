@@ -16,7 +16,11 @@ const SIZE = 8 * CHUNK;
  * with a manual clock and timers. `failing(from)` decides whether a read fails: 'lost' as the network failing (a
  * TypeError, which the transport reports as nas-lost), 'changed' as the NAS saying the disc changed.
  */
-async function setup(failing: (from: number, attempt: number) => 'lost' | 'changed' | null) {
+async function setup(
+  failing: (from: number, attempt: number) => 'lost' | 'changed' | null,
+  opts: { gated?: boolean; before?: (remote: RemoteSource) => void; segmentBytes?: number; quotaFull?: (offset: number) => boolean } = {},
+) {
+  const gate = { on: opts.gated === true, waiting: [] as Array<() => void> };
   const stream = Uint8Array.from({ length: SIZE }, (_, i) => i & 0xff);
   const nas = fakeNas(new Map([[PATH, stream]]));
   const attempts = new Map<number, number>();
@@ -26,6 +30,7 @@ async function setup(failing: (from: number, attempt: number) => 'lost' | 'chang
     const attempt = (attempts.get(from) ?? 0) + 1;
     attempts.set(from, attempt);
     reads.push(from);
+    while (gate.on) await new Promise<void>((r) => gate.waiting.push(r));
     const outcome = failing(from, attempt);
     if (outcome === 'lost') throw new TypeError('Failed to fetch');
     if (outcome === 'changed') return Response.json({ error: 'disc-changed' }, { status: 404 });
@@ -33,17 +38,32 @@ async function setup(failing: (from: number, attempt: number) => 'lost' | 'chang
   }) as typeof globalThis.fetch;
   const remote = createByteSource(nas.spec, { fetch, readAheadBytes: 2 * CHUNK, chunkBytes: CHUNK, onWaiting: () => undefined }) as RemoteSource;
   const root = new MemoryDirectory();
-  const cache = await ReadAheadCache.open('d1', { root: async () => root.asHandle(), now: () => 0, fileSize: (p) => (p === PATH ? SIZE : undefined) });
+  const cache = await ReadAheadCache.open('d1', {
+    root: async () => root.asHandle(),
+    now: () => 0,
+    fileSize: (p) => (p === PATH ? SIZE : undefined),
+    ...(opts.segmentBytes ? { segmentBytes: opts.segmentBytes } : {}),
+  });
+  if (opts.quotaFull) {
+    const write = cache.write.bind(cache);
+    cache.write = async (path, offset, bytes) => {
+      if (opts.quotaFull!(offset)) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      return write(path, offset, bytes);
+    };
+  }
   remote.setCache(cache);
+  opts.before?.(remote);
+  const position = { start: 0 };
   const clock = { ms: 0 };
   const timers: Array<{ at: number; fn: () => void; ms: number }> = [];
   const progress: FillProgress[] = [];
   const fill = new CacheFill({
     remote,
     cache,
-    ranges: () => [{ path: PATH, start: 0, end: SIZE }],
+    ranges: () => [{ path: PATH, start: position.start, end: SIZE }],
     follow: true,
     targetBytes: SIZE,
+    ...(opts.segmentBytes ? { segmentBytes: opts.segmentBytes } : {}),
     progress: (p) => progress.push(p),
     nowMs: () => clock.ms,
     setTimer: (ms, fn) => {
@@ -65,7 +85,11 @@ async function setup(failing: (from: number, attempt: number) => 'lost' | 'chang
     return t.ms;
   };
   void fill.run();
-  return { fill, cache, reads, progress, timers, nextTimer, settle, clock };
+  const open = () => {
+    gate.on = false;
+    for (const wake of gate.waiting.splice(0)) wake();
+  };
+  return { fill, cache, reads, progress, timers, nextTimer, settle, clock, open, position, remote };
 }
 
 describe('CacheFill retries', () => {
@@ -117,5 +141,53 @@ describe('CacheFill retries', () => {
     await t.settle();
     expect(t.progress.at(-1)).toMatchObject({ stopped: 'failed' });
     expect(t.timers).toEqual([]);
+  });
+});
+
+describe('CacheFill', () => {
+  it('keeps one request in flight while a playback read waits on the network, and two otherwise', async () => {
+    let playback!: Promise<Uint8Array>;
+    const t = await setup(() => null, { gated: true, before: (remote) => (playback = remote.read(PATH, 6 * CHUNK, CHUNK)) });
+    await t.settle();
+    expect(t.reads).toContain(6 * CHUNK); // playback's read (and its read-ahead after it)
+    expect(t.reads.filter((r) => r < 6 * CHUNK)).toEqual([0]); // one of the fill's, not two
+    t.open();
+    await playback;
+    await t.settle();
+    await t.settle();
+    expect(t.cache.has(PATH, 0, SIZE)).toBe(true);
+    t.fill.stop();
+  });
+
+  it('on a full disk, holds a segment under the lead it had, reports nothing, and goes on once playback frees room', async () => {
+    let full = true;
+    // the sixth chunk finds the disk full; by then the cache holds five chunks ahead
+    const t = await setup(() => null, { segmentBytes: 2 * CHUNK, quotaFull: (offset) => full && offset === 5 * CHUNK });
+    await t.settle();
+    await t.settle();
+    expect(t.cache.has(PATH, 0, 5 * CHUNK)).toBe(true);
+    expect(t.cache.has(PATH, 5 * CHUNK, CHUNK)).toBe(false);
+    const reads = t.reads.length;
+    t.fill.kick();
+    await t.settle();
+    expect(t.reads.length).toBe(reads); // held: no fetch while the lead is over the lowered cap
+    expect(t.progress.some((p) => p.stopped)).toBe(false);
+    // playback moves on: the segments behind it are freed and the lead drops under the cap
+    full = false;
+    t.position.start = 4 * CHUNK;
+    t.fill.kick();
+    await t.settle();
+    await t.settle();
+    expect(t.cache.has(PATH, 0, 4 * CHUNK)).toBe(false);
+    expect(t.cache.has(PATH, 4 * CHUNK, 2 * CHUNK)).toBe(true);
+    expect(t.progress.some((p) => p.stopped)).toBe(false);
+    t.fill.stop();
+  });
+
+  it('stops as failed when the disk is full before it holds any lead', async () => {
+    const t = await setup(() => null, { segmentBytes: 2 * CHUNK, quotaFull: () => true });
+    await t.settle();
+    await t.settle();
+    expect(t.progress.at(-1)).toMatchObject({ stopped: 'failed' });
   });
 });
