@@ -8,8 +8,8 @@ import type { CodeRegistration, EcPublicJwk } from '../../src/engine/disc/nas-ap
 export const ECDSA_KEY = { name: 'ECDSA', namedCurve: 'P-256' } as const;
 export const ECDSA_SIGN = { name: 'ECDSA', hash: 'SHA-256' } as const;
 
-/** A code's `expiresAt` may be at most this far ahead; codes live 10 minutes, the rest absorbs clock skew. */
-export const MAX_CODE_AHEAD_MS = 15 * 60_000;
+/** A code's `expiresAt` may be at most this far ahead; invites live 3 days, the hour absorbs clock skew. */
+export const MAX_CODE_AHEAD_MS = 3 * 24 * 60 * 60_000 + 60 * 60_000;
 
 export function base64url(bytes: Uint8Array): string {
   let binary = '';

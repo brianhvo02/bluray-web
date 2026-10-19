@@ -7,6 +7,7 @@ import { normalizeTitle } from '../../../src/engine/disc/title-text';
 import type { OwnTitle, TitleDetail, TitleSummary } from '../../../src/engine/disc/nas-api';
 import { appHandlers } from '../app';
 import { Auth } from '../auth';
+import { BdjStore } from '../bdj-store';
 import { createServer } from '../http';
 import { Library } from '../library';
 import { Store } from '../store';
@@ -109,7 +110,7 @@ async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: num
     now: () => clock, setTimer: () => () => {},
   });
   await service.runNow();
-  const server = createServer(appHandlers({ auth, library, now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, lookupTimeoutMs: opts.lookupTimeoutMs }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, lookupTimeoutMs: opts.lookupTimeoutMs }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -192,12 +193,13 @@ describe('title routes', () => {
     expect(artFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('reports both flags on GET /api/me', async () => {
+  it('reports both flags and the person on GET /api/me', async () => {
     await start();
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false });
-    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true });
+    const person = expect.any(String);
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest' });
+    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner' });
     owner.setGate('everyone');
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest' });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
   });
 });

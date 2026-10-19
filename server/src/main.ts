@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appHandlers } from './app';
 import { Auth } from './auth';
+import { BdjStore } from './bdj-store';
 import { ownerCode } from './cli';
 import type { CodeRegistrar } from './codes';
 import { loadConfig } from './config';
@@ -56,7 +57,7 @@ async function serve(config: Config): Promise<void> {
     titleLibrary: config.titleLibrary,
   });
   library.onScanned(() => void titles.runNow());
-  const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy, titles: { service: titles, owner } }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy, titles: { service: titles, owner } }));
 
   const scheduleScans = (): void => {
     const run = (): void => {
@@ -87,14 +88,22 @@ async function serve(config: Config): Promise<void> {
   }
 }
 
+/** `owner-code`'s arguments: nothing, or `--person <name>`; null for anything else. */
+function ownerCodeArgs(args: readonly string[]): { person?: string } | null {
+  if (args.length === 0) return {};
+  if (args.length === 2 && args[0] === '--person' && args[1]!.trim() !== '') return { person: args[1]! };
+  return null;
+}
+
 const config = loadConfig(process.env);
 const command = process.argv[2];
+const ownerArgs = command === 'owner-code' ? ownerCodeArgs(process.argv.slice(3)) : null;
 if (command === undefined) {
   await serve(config);
-} else if (command === 'owner-code') {
+} else if (ownerArgs !== null) {
   const registrar = rendezvousRegistrar(config);
-  await ownerCode(config.dataDir, Date.now, console.log, registrar && { registrar, publicBase: config.publicBase });
+  await ownerCode(config.dataDir, Date.now, console.log, registrar && { registrar, publicBase: config.publicBase }, ownerArgs.person);
 } else {
-  console.error(`unknown command "${command}"; usage: node server.mjs [owner-code]`);
+  console.error(`unknown command "${process.argv.slice(2).join(' ')}"; usage: node server.mjs [owner-code [--person <name>]]`);
   process.exit(2);
 }

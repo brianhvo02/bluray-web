@@ -72,7 +72,7 @@ describe('RendezvousClient', () => {
 
   it('throws when the service refuses the code', async () => {
     const client = new RendezvousClient(BASE, keyFile, workerFetch);
-    await expect(client.registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 60 * 60_000)).rejects.toThrow(/400/);
+    await expect(client.registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 4 * 24 * 60 * 60_000)).rejects.toThrow(/400/); // past the 3 days and 1 hour allowed
   });
 
   it('throws when the service is unreachable', async () => {

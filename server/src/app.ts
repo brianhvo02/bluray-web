@@ -1,9 +1,11 @@
 import type { Auth } from './auth';
+import type { BdjStore } from './bdj-store';
 import type { CodeRegistrar } from './codes';
 import { json } from './http';
 import type { Handler } from './http';
 import type { Library } from './library';
 import { adminRoutes, bearerToken } from './routes/admin';
+import { bdjStoreRoutes } from './routes/bdj-store';
 import { discRoutes } from './routes/discs';
 import { libraryRoute } from './routes/library';
 import { pairRoutes } from './routes/pair';
@@ -13,6 +15,8 @@ import type { TitleLibrary } from './routes/titles';
 export interface AppOptions {
   auth: Auth;
   library: Library;
+  /** Each person's BD-J saved data (spec §5). */
+  bdjStore: BdjStore;
   publicBase: string;
   registrar?: CodeRegistrar;
   registrarDeadlineMs?: number;
@@ -39,8 +43,9 @@ export function appHandlers(opts: AppOptions): Handler[] {
   return [
     pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false) }),
     requireToken(auth),
+    bdjStoreRoutes(auth, opts.bdjStore),
     adminRoutes(auth, {
-      library: opts.library, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
+      library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
       titles: opts.titles, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
     }),
     libraryRoute(opts.library),

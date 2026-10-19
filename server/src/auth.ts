@@ -11,6 +11,8 @@ export interface Person {
   name: string;
   owner: boolean;
   readonly createdAt: number;
+  /** Made with a pairing code and not yet paired: pruned once no device and no live code is left (`pruneOrphans`). */
+  pending?: true;
 }
 
 /** A device as stored: its owner status comes from its person. */
@@ -123,7 +125,7 @@ export class Auth {
     return this.store.update((data) => {
       let owner: Person | undefined;
       if ('newPerson' in person) {
-        owner = { id: randomId(), name: newName!, owner: person.newPerson.owner, createdAt: now };
+        owner = { id: randomId(), name: newName!, owner: person.newPerson.owner, createdAt: now, pending: true };
         data.people.push(owner);
       } else {
         owner = data.people.find((p) => p.id === person.personId);
@@ -151,6 +153,7 @@ export class Auth {
       const person = data.people.find((p) => p.id === found.personId);
       if (!person) return null;
       const now = this.now();
+      delete person.pending;
       const device: StoredDevice = { id: randomId(), name: deviceName.trim(), personId: person.id, publicKeyJwk: key, pairedAt: now, lastSeen: now };
       data.devices.push(device);
       return { ...device, owner: person.owner, personName: person.name };
@@ -269,9 +272,11 @@ export class Auth {
     this.store.update((data) => {
       const device = data.devices.find((d) => d.id === deviceId);
       if (!device) throw new AuthNotFound('unknown device');
-      if (!data.people.some((p) => p.id === personId)) throw new AuthNotFound('unknown person');
+      const person = data.people.find((p) => p.id === personId);
+      if (!person) throw new AuthNotFound('unknown person');
       const before = ownerDeviceCount(data);
       device.personId = personId;
+      delete person.pending;
       keepOwner(before, data);
     });
   }
@@ -286,6 +291,25 @@ export class Auth {
       const person: Person = { id: randomId(), name: 'Owner', owner: true, createdAt: this.now() };
       data.people.push(person);
       return { ...person };
+    });
+  }
+
+  /**
+   * Removes people made with a code that was never used (no device and no live code left), so unredeemed invites
+   * don't pile up. People made on their own, people who once had a device, and owners are kept.
+   */
+  pruneOrphans(): void {
+    const orphan = (data: AuthData): ((p: Person) => boolean) => {
+      const live = new Set(this.live(data.codes).map((c) => c.personId));
+      const withDevices = new Set(data.devices.map((d) => d.personId));
+      return (p) => p.pending === true && !p.owner && !live.has(p.id) && !withDevices.has(p.id);
+    };
+    const current = this.store.read();
+    if (!current.people.some(orphan(current))) return;
+    this.store.update((data) => {
+      const gone = orphan(data);
+      data.codes = this.live(data.codes);
+      data.people = data.people.filter((p) => !gone(p));
     });
   }
 

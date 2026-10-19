@@ -50,7 +50,7 @@ export function titleRoutes(auth: Auth, library: TitleLibrary): Handler {
     const device = requestDevice(auth, req.headers.authorization, url);
     if (!device) return json(401, { error: 'unauthorized' });
     const open = device.owner || service.gate() === 'everyone';
-    if (isMe) return json(200, { owner: device.owner, titleLibrary: open });
+    if (isMe) return json(200, { owner: device.owner, titleLibrary: open, personId: device.personId, personName: device.personName });
     if (!open) return notFound();
 
     const segments = path.split('/').slice(3);

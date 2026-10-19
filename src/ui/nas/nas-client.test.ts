@@ -10,6 +10,7 @@ import { codeHash } from '../../../server/src/codes';
 import { HttpError, json } from '../../../server/src/http';
 import type { Response as ServerResponse } from '../../../server/src/http';
 import type { Library } from '../../../server/src/library';
+import { BdjStore } from '../../../server/src/bdj-store';
 import { Store } from '../../../server/src/store';
 import type { CodeLookup, CodeRoutes } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
@@ -79,7 +80,7 @@ function fakeServer(): FakeServer {
       return { folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [] };
     },
   } as unknown as Library;
-  const handlers = appHandlers({ auth, library, publicBase: BASE, now });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), publicBase: BASE, now });
 
   const serve = async (url: URL, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === 'string' ? Buffer.from(init.body, 'utf8') : null;

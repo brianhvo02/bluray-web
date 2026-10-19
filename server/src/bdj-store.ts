@@ -33,7 +33,8 @@ function etagOf(stat: { ino: number | bigint; mtimeMs: number; size: number }): 
 }
 
 export class BdjStore {
-  private readonly scopeLimit: number;
+  /** Bytes one scope's archive may hold; the route refuses a body past it while it streams. */
+  readonly scopeLimit: number;
   private readonly personLimit: number;
 
   constructor(

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appHandlers } from './app';
 import { Auth, AuthConflict, AuthNotFound } from './auth';
+import { BdjStore } from './bdj-store';
 import { ownerCode } from './cli';
 import { codeHash } from './codes';
 import type { CodeRegistrar } from './codes';
@@ -328,6 +329,39 @@ describe('People', () => {
     expect(auth.createPerson('  Mika  ', false).name).toBe('Mika');
   });
 
+  it('pruneOrphans drops people made for codes never used, once their codes are gone, and never an owner', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    auth.createCode({ newPerson: { name: 'Mika', owner: false } });
+    const deleted = auth.createCode({ newPerson: { name: 'Den', owner: false } });
+    auth.createCode({ newPerson: { name: 'Sora', owner: false } }, { invite: true });
+    auth.createCode({ newPerson: { name: 'Second owner', owner: true } });
+    const paired = await pair(auth, { newPerson: { name: 'Kai', owner: false } }, 'Phone');
+    auth.createPerson('Rin', false);
+    auth.deleteCode(deleted.record.id);
+    auth.pruneOrphans();
+    expect(auth.people().map((p) => p.name)).toEqual(['Mika', 'Sora', 'Second owner', 'Kai', 'Rin']);
+    clock += 10 * MINUTE;
+    auth.pruneOrphans();
+    expect(auth.people().map((p) => p.name)).toEqual(['Sora', 'Second owner', 'Kai', 'Rin']);
+    // a person who once had a device stays when it goes
+    auth.revokeDevice(paired.device.id);
+    clock += 3 * 24 * 60 * MINUTE;
+    auth.pruneOrphans();
+    expect(auth.people().map((p) => p.name)).toEqual(['Second owner', 'Kai', 'Rin']);
+  });
+
+  it('pruneOrphans keeps a person a device was moved to', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const owner = await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');
+    const phone = await pair(auth, { newPerson: { name: 'Kai', owner: false } }, 'Phone');
+    const { person: mika } = auth.createCode({ newPerson: { name: 'Mika', owner: false } });
+    auth.moveDevice(phone.device.id, mika.id);
+    auth.moveDevice(phone.device.id, owner.device.personId);
+    clock += 10 * MINUTE;
+    auth.pruneOrphans();
+    expect(auth.people().map((p) => p.name)).toEqual(['Owner', 'Kai', 'Mika']);
+  });
+
   it('firstOwnerPerson makes Owner once', () => {
     const auth = new Auth(new Store(tmp), now);
     const first = auth.firstOwnerPerson();
@@ -405,7 +439,7 @@ describe('HTTP', () => {
     auth = new Auth(new Store(join(tmp, 'data')), now);
     library = new Library([], join(tmp, 'data', 'library.json'), { scanPauseMs: 0 });
     const server = createServer(
-      appHandlers({ auth, library, now, publicBase: 'https://nas.example/bluray/api/', registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs, trustProxy: opts.trustProxy }),
+      appHandlers({ auth, library, bdjStore: new BdjStore(join(tmp, 'data')), now, publicBase: 'https://nas.example/bluray/api/', registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs, trustProxy: opts.trustProxy }),
     );
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -470,7 +504,7 @@ describe('HTTP', () => {
       const res = await fetch(`${base}${path}`, {
         method,
         headers: { ...auth, 'Content-Type': 'application/json' },
-        body: method === 'POST' ? '{"owner":false}' : undefined,
+        body: method === 'POST' ? '{"newPerson":{"name":"Mika","owner":false}}' : undefined,
       });
       expect(res.status, `${method} ${path}`).toBe(403);
       expect((await fetch(`${base}${path}`, { method })).status, `${method} ${path} without a token`).toBe(401);
@@ -483,7 +517,7 @@ describe('HTTP', () => {
     const token = await pairedToken(true);
     const headers = { Authorization: `Bearer ${token}` };
 
-    const minted = await post('/api/admin/codes', { owner: false }, headers);
+    const minted = await post('/api/admin/codes', { newPerson: { name: 'Mika', owner: false } }, headers);
     expect(minted.status).toBe(200);
     const body = (await minted.json()) as { code: string; link: string; expiresAt: number; rendezvous: boolean };
     expect(body.code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
@@ -495,9 +529,9 @@ describe('HTTP', () => {
     expect(codeHashArg[2]).toBe(body.expiresAt);
     expect(codeHashArg[0]).toMatch(/^[0-9a-f]{64}$/);
 
-    const codes = (await (await fetch(`${base}/api/admin/codes`, { headers })).json()) as { codes: { id: string; owner: boolean; expiresAt: number }[] };
+    const codes = (await (await fetch(`${base}/api/admin/codes`, { headers })).json()) as { codes: { id: string }[] };
     expect(codes.codes).toHaveLength(1);
-    expect(codes.codes[0]).toEqual({ id: expect.any(String), owner: false, expiresAt: body.expiresAt });
+    expect(codes.codes[0]).toEqual({ id: expect.any(String), personId: expect.any(String), personName: 'Mika', invite: false, expiresAt: body.expiresAt });
     expect((await fetch(`${base}/api/admin/codes/${codes.codes[0]!.id}`, { method: 'DELETE', headers })).status).toBe(204);
     expect((await fetch(`${base}/api/admin/codes/${codes.codes[0]!.id}`, { method: 'DELETE', headers })).status).toBe(404);
     expect((await post('/api/pair/redeem', { code: body.code, deviceName: 'x', publicKeyJwk: (await deviceKey()).jwk })).status).toBe(401);
@@ -507,7 +541,7 @@ describe('HTTP', () => {
       devices: { id: string; name: string; owner: boolean; pairedAt: number; lastSeen: number }[];
     };
     expect(devices.devices.map((d) => d.name)).toEqual(['Mac', 'Phone']);
-    expect(Object.keys(devices.devices[0]!).sort()).toEqual(['id', 'lastSeen', 'name', 'owner', 'pairedAt']);
+    expect(Object.keys(devices.devices[0]!).sort()).toEqual(['id', 'lastSeen', 'name', 'owner', 'pairedAt', 'personId', 'personName']);
     const phoneId = devices.devices[1]!.id;
     expect((await fetch(`${base}/api/admin/devices/${phoneId}`, { method: 'DELETE', headers })).status).toBe(204);
     expect((await fetch(`${base}/api/library?t=${encodeURIComponent(phone)}`)).status).toBe(401);
@@ -517,11 +551,12 @@ describe('HTTP', () => {
     expect(scan).toHaveBeenCalledOnce();
   }, 20_000); // about a dozen HTTP round trips plus device key generation: more than vitest's 5 s default under load
 
-  it('pairs an owner with a code minted with owner: true, and a guest with owner: false', async () => {
+  it("pairs an owner with a code for an owner person, and a guest with a code for a new guest", async () => {
     await start();
     const headers = { Authorization: `Bearer ${await pairedToken(true)}` };
     for (const owner of [true, false]) {
-      const { code } = (await (await post('/api/admin/codes', { owner }, headers)).json()) as { code: string };
+      const target = owner ? { personId: auth.firstOwnerPerson().id } : { newPerson: { name: 'Mum', owner: false } };
+      const { code } = (await (await post('/api/admin/codes', target, headers)).json()) as { code: string };
       const redeemed = await post('/api/pair/redeem', { code, deviceName: 'Mum', publicKeyJwk: (await deviceKey()).jwk });
       expect(redeemed.status).toBe(200);
       expect(((await redeemed.json()) as { owner: boolean }).owner).toBe(owner);
@@ -532,14 +567,14 @@ describe('HTTP', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await start({ registrar: { registerCode: async () => Promise.reject(new Error('down')) } });
     const headers = { Authorization: `Bearer ${await pairedToken(true)}` };
-    const res = await post('/api/admin/codes', { owner: true }, headers);
+    const res = await post('/api/admin/codes', { personId: auth.firstOwnerPerson().id }, headers);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { rendezvous: boolean }).rendezvous).toBe(false);
     expect(errors).toHaveBeenCalled();
     close!();
 
     await start();
-    const res2 = await post('/api/admin/codes', { owner: false }, { Authorization: `Bearer ${await pairedToken(true)}` });
+    const res2 = await post('/api/admin/codes', { newPerson: { name: 'Mika', owner: false } }, { Authorization: `Bearer ${await pairedToken(true)}` });
     expect(((await res2.json()) as { rendezvous: boolean }).rendezvous).toBe(false);
   });
 
@@ -547,7 +582,7 @@ describe('HTTP', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     await start({ registrar: { registerCode: () => new Promise<void>(() => {}) }, registrarDeadlineMs: 50 });
     const started = Date.now();
-    const res = await post('/api/admin/codes', { owner: false }, { Authorization: `Bearer ${await pairedToken(true)}` });
+    const res = await post('/api/admin/codes', { newPerson: { name: 'Mika', owner: false } }, { Authorization: `Bearer ${await pairedToken(true)}` });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { rendezvous: boolean }).rendezvous).toBe(false);
     expect(Date.now() - started).toBeLessThan(2_000);
@@ -662,10 +697,29 @@ describe('owner-code', () => {
     expect(code).toBeDefined();
     expect(lines[1]).toBe(`Pairing link: https://bluray-web.pages.dev/?pair=${code!.replaceAll('-', '')}`);
     expect(lines[2]).toMatch(/^Expires: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d /);
-    expect(lines[4]).toMatch(/^[█▀▄ \n]+$/);
+    expect(lines[3]).toBe('Person: Owner');
+    expect(lines[5]).toMatch(/^[█▀▄ \n]+$/);
     const server = new Auth(new Store(tmp), now);
     expect(server.redeem(code!, 'Mac', (await deviceKey()).jwk)?.owner).toBe(true);
     expect(lines.at(-1)).toBe('Rendezvous: not configured (RENDEZVOUS_URL is unset)');
+  });
+
+  it('mints for the owner person named by --person, making it when there is none', async () => {
+    const lines: string[] = [];
+    const auth = new Auth(new Store(tmp), now);
+    auth.firstOwnerPerson();
+    auth.createPerson('Mika', false);
+    await ownerCode(tmp, now, (line) => lines.push(line), undefined, 'Mika');
+    expect(lines[3]).toBe('Person: Mika');
+    const mikas = auth.people().filter((p) => p.name === 'Mika');
+    expect(mikas.map((p) => p.owner)).toEqual([false, true]);
+    const code = /([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)![1]!;
+    expect(auth.redeem(code, 'Laptop', (await deviceKey()).jwk)).toMatchObject({ owner: true, personId: mikas[1]!.id });
+
+    lines.length = 0;
+    await ownerCode(tmp, now, (line) => lines.push(line), undefined, 'Mika');
+    expect(auth.people().filter((p) => p.name === 'Mika')).toHaveLength(2);
+    expect(lines[3]).toBe('Person: Mika');
   });
 
   it('registers the code with the rendezvous service, and still prints it when that fails', async () => {

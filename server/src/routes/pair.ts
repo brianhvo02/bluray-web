@@ -142,7 +142,7 @@ export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (a
             attempt.fail();
             return json(401, { error: 'invalid code' });
           }
-          return json(200, { deviceId: device.id, owner: device.owner });
+          return json(200, { deviceId: device.id, owner: device.owner, personId: device.personId, personName: device.personName });
         } finally {
           attempt.release();
         }

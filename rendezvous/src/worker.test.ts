@@ -117,12 +117,15 @@ describe('rendezvous', () => {
     expect((await registerCode(keys, 'A'.repeat(43))).status).toBe(401);
   });
 
-  it('rejects an expiry in the past or more than 15 minutes ahead, so a captured request cannot be replayed later', async () => {
+  it('rejects an expiry in the past or more than 3 days and 1 hour ahead, so a captured request cannot be replayed later', async () => {
     const keys = await nasKey();
     const nasId = await registerNas(keys);
+    const DAY = 24 * 60 * MINUTE;
     expect((await registerCode(keys, nasId, clock - 1)).status).toBe(400);
-    expect((await registerCode(keys, nasId, clock + 15 * MINUTE + 1)).status).toBe(400);
-    expect((await registerCode(keys, nasId, clock + 15 * MINUTE)).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY + 120 * MINUTE)).status).toBe(400);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY + 60 * MINUTE + 1)).status).toBe(400);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY)).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY + 60 * MINUTE)).status).toBe(204);
   });
 
   it("won't let one NAS take over another NAS's code", async () => {
