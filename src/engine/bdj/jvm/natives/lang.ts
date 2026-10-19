@@ -413,6 +413,8 @@ export function registerLangNatives(table: NativeTable): void {
       return bits.getFloat64(0);
     },
 
+    // System.getenv: the player has no environment variables
+    'java/lang/ProcessEnvironment.environ()[[B': (ctx) => ctx.jvm.newArray(ctx.jvm.loader.arrayOf(ctx.jvm.loader.primitive('B')), []),
     'java/lang/Runtime.availableProcessors()I': () => 1,
     'java/lang/Runtime.freeMemory()J': () => MEMORY,
     'java/lang/Runtime.totalMemory()J': () => MEMORY,

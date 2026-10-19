@@ -34,6 +34,14 @@ export function registerNetNatives(natives: NativeTable): void {
     'java/net/Inet4AddressImpl.isReachable0([BI[BI)Z': () => 0,
     'java/net/PlainSocketImpl.initProto()V': none,
     'java/net/PlainSocketImpl.socketConnect(Ljava/net/InetAddress;II)V': disabled,
+    // a socket can be made, configured and closed; it never connects, so it is never read or written
+    'java/net/PlainSocketImpl.socketCreate(Z)V': none,
+    'java/net/PlainSocketImpl.socketSetOption0(IZLjava/lang/Object;)V': none,
+    'java/net/PlainSocketImpl.socketClose0(Z)V': none,
+    'java/net/SocketInputStream.init()V': none,
+    'java/net/SocketOutputStream.init()V': none,
+    'java/net/SocketInputStream.socketRead0(Ljava/io/FileDescriptor;[BIII)I': (ctx) => ctx.jvm.throwNew('java/net/SocketException', 'Socket is not connected'),
+    'java/net/SocketOutputStream.socketWrite0(Ljava/io/FileDescriptor;[BII)V': (ctx) => ctx.jvm.throwNew('java/net/SocketException', 'Socket is not connected'),
     'java/net/PlainDatagramSocketImpl.init()V': none,
     'java/net/PlainDatagramSocketImpl.connect0(Ljava/net/InetAddress;I)V': disabled,
   });

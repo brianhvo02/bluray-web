@@ -1,0 +1,10 @@
+mkdirs true
+written 22 [volume=7][lang=jpn][x=1]
+appended 38 [volume=7][lang=jpn][x=1][resume=01:02:03]
+printed [entry 0 0.0][entry 1 1.5][entry 2 3.0]
+utf8-bytes 12
+filenamefilter [settings.txt, u.txt]
+filefilter 1 sub
+truncated 5 [short]
+no-dir java.io.FileNotFoundException
+deleted false

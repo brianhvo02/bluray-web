@@ -1,0 +1,11 @@
+size 40 first 0 last 40 add-dup false
+subset [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+subset-incl [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+head [0, 1, 2, 3, 4] tail [36, 37, 38, 39, 40]
+nav 0 0 40 0
+descending [40, 39, 38, 37, 36, 35]
+view-remove false 9
+iter-remove 13 26 1 40
+comparator [sub, menu, play, audio, setup, extras, chapter] sub [play, audio, setup, extras]
+copy true true -340615210
+bad-range fromKey > toKey

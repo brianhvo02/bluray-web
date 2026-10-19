@@ -143,6 +143,18 @@ SNAPSHOT=20261015T000000Z
   echo "- org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain"
   echo "  notice (SAX_NOTICE)."
   echo
+  echo "How classes.txt is collected: from HotSpot's -verbose:class in the libbluray harness (tools/bdj-classlib/collect.sh),"
+  echo "over the synthetic and local BD-J discs and, with the library check's generic key script, the start-up files of"
+  echo "every BD-J disc of the developer's library. HotSpot's own platform font stack (sun/font, the X11 and fontconfig"
+  echo "font managers), which its java.awt.Font loads, is left out: libbluray's java/awt/Font takes its place here. A few"
+  echo "class families are listed whole, because a disc's use of them is open-ended:"
+  echo "- sun/reflect/Unsafe*FieldAccessorImpl: reflection on a field picks one by the field's type and modifiers."
+  echo "- sun/reflect/generics/**: the parser and model of generic signatures, behind java.lang.reflect's generic types."
+  echo "- sun/util/locale/provider/{DateFormat,DateFormatSymbols,DecimalFormatSymbols,NumberFormat}ProviderImpl: the"
+  echo "  JRE providers behind java.text's date and number formats."
+  echo "- java/rmi/registry/Registry with java/rmi/Remote and the exceptions its methods declare (AccessException,"
+  echo "  AlreadyBoundException, NotBoundException, RemoteException): discs name the interface; no RMI runs."
+  echo
   echo "OpenJDK binary package: $(dpkg-query -W openjdk-8-jre-headless)"
   echo "Corresponding source:   Ubuntu source package $SRC_PKG $SRC_VER,"
   echo "  https://snapshot.ubuntu.com/ubuntu/$SNAPSHOT/pool/universe/${SRC_PKG:0:1}/$SRC_PKG/${SRC_PKG}_${SRC_VER#*:}.dsc"

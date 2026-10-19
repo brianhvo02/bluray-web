@@ -1,0 +1,4 @@
+registry java.rmi.registry.Registry interface true port 1099
+extends 1 java.rmi.Remote
+methods 5
+remote-exception gone

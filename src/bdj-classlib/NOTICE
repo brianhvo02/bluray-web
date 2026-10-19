@@ -13,6 +13,18 @@ Third-party code among those classes:
 - org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain
   notice (SAX_NOTICE).
 
+How classes.txt is collected: from HotSpot's -verbose:class in the libbluray harness (tools/bdj-classlib/collect.sh),
+over the synthetic and local BD-J discs and, with the library check's generic key script, the start-up files of
+every BD-J disc of the developer's library. HotSpot's own platform font stack (sun/font, the X11 and fontconfig
+font managers), which its java.awt.Font loads, is left out: libbluray's java/awt/Font takes its place here. A few
+class families are listed whole, because a disc's use of them is open-ended:
+- sun/reflect/Unsafe*FieldAccessorImpl: reflection on a field picks one by the field's type and modifiers.
+- sun/reflect/generics/**: the parser and model of generic signatures, behind java.lang.reflect's generic types.
+- sun/util/locale/provider/{DateFormat,DateFormatSymbols,DecimalFormatSymbols,NumberFormat}ProviderImpl: the
+  JRE providers behind java.text's date and number formats.
+- java/rmi/registry/Registry with java/rmi/Remote and the exceptions its methods declare (AccessException,
+  AlreadyBoundException, NotBoundException, RemoteException): discs name the interface; no RMI runs.
+
 OpenJDK binary package: openjdk-8-jre-headless:amd64	8u504-ga-1ubuntu1~24.04.3
 Corresponding source:   Ubuntu source package openjdk-8 8u504-ga-1ubuntu1~24.04.3,
   https://snapshot.ubuntu.com/ubuntu/20261015T000000Z/pool/universe/o/openjdk-8/openjdk-8_8u504-ga-1ubuntu1~24.04.3.dsc
