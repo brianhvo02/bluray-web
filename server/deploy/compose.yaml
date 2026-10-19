@@ -18,6 +18,10 @@ services:
       # TheMovieDB key for title matching, read from .env next to this file. Empty: no TMDB lookups.
       TMDB_API_KEY: ${TMDB_API_KEY:-}
       TITLE_LIBRARY: everyone
+      # The WebRTC route (with RENDEZVOUS_URL): ICE uses only UDP 47998, published below and forwarded to the NAS on
+      # the home gateway. The NAS advertises its public IPv4 (from STUN) and this LAN address, never Docker's or
+      # Tailscale's.
+      RTC_LAN_ADDRESS: 192.168.1.98
     env_file:
       - path: .env
         required: false
@@ -72,6 +76,8 @@ services:
         read_only: true
         bind: { create_host_path: false, propagation: rslave }
       - bluray-data:/data
+    ports:
+      - "47998:47998/udp"
     networks:
       - caddy_default
 

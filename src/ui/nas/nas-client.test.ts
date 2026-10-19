@@ -8,12 +8,21 @@ import { appHandlers } from '../../../server/src/app';
 import { Auth } from '../../../server/src/auth';
 import { codeHash } from '../../../server/src/codes';
 import { HttpError, json } from '../../../server/src/http';
-import type { Response as ServerResponse } from '../../../server/src/http';
+import type { Handler, Response as ServerResponse } from '../../../server/src/http';
+import { serveChannel } from '../../../server/src/rtc/dispatch';
+import { codeHashOf, fromBase64url, turnProofMessage } from '../../../rendezvous/src/protocol';
+import { FakeRtcWorld } from '../../../tests/helpers/rtc-fakes';
+import type { FakeRtcOptions } from '../../../tests/helpers/rtc-fakes';
+import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
+import { RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
+import type { RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
 import type { Library } from '../../../server/src/library';
+import { BdjStore } from '../../../server/src/bdj-store';
 import { Store } from '../../../server/src/store';
 import type { CodeLookup, CodeRoutes } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
-import { NAS_MESSAGES, NasClient, defaultDeviceName, groupCodeInput } from './nas-client';
+import { NAS_MESSAGES, NasClient, NasLostError, defaultDeviceName, groupCodeInput } from './nas-client';
+import type { NasClientDeps } from './nas-client';
 import type { NasPairing, NasStore } from './nas-store';
 
 const RENDEZVOUS = 'https://rendezvous.example';
@@ -61,6 +70,11 @@ interface FakeServer {
   lookupRateLimited: boolean;
   /** Overrides for NAS requests (not rendezvous). */
   nas?: (url: URL, init?: RequestInit) => Promise<Response>;
+  /** The same handlers as HTTPS, for a data channel (`serveChannel`); `GET /api/library` waits while `holdLibrary` is set. */
+  readonly handlers: readonly Handler[];
+  holdLibrary: Promise<void> | null;
+  /** Art requests that reached the channel's handlers, as `<artId> <size>`. */
+  readonly artFetched: string[];
 }
 
 /**
@@ -79,7 +93,19 @@ function fakeServer(): FakeServer {
       return { folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [] };
     },
   } as unknown as Library;
-  const handlers = appHandlers({ auth, library, publicBase: BASE, now });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), publicBase: BASE, now });
+  /** `GET /api/me` (the title routes need a title service), behind the token like the rest. */
+  const me: Handler = async (_req, url) => {
+    if (url.pathname === '/api/me') return json(200, { owner: true, titleLibrary: true, personName: 'Owner' });
+    const art = /^\/api\/art\/([^/]+)$/.exec(url.pathname);
+    if (!art) return null;
+    server.artFetched.push(`${art[1]} ${url.searchParams.get('size')}`);
+    return { status: 200, headers: { 'Content-Type': 'image/jpeg' }, body: `art ${art[1]}` };
+  };
+  const held: Handler = async (_req, url) => {
+    if (url.pathname === '/api/library' && server.holdLibrary) await server.holdLibrary;
+    return null;
+  };
 
   const serve = async (url: URL, init?: RequestInit): Promise<Response> => {
     const body = typeof init?.body === 'string' ? Buffer.from(init.body, 'utf8') : null;
@@ -87,6 +113,7 @@ function fakeServer(): FakeServer {
     new Headers(init?.headers).forEach((value, name) => (headers[name] = value));
     if (body) headers['content-length'] = String(body.length);
     const path = url.pathname.replace(/^\/bluray/, '') + url.search;
+    if (path === '/api/health') return Response.json({ ok: true }); // the server answers it before the handlers
     const req = Object.assign(Readable.from(body ? [body] : []), {
       method: init?.method ?? 'GET',
       url: path,
@@ -106,11 +133,14 @@ function fakeServer(): FakeServer {
 
   const server: FakeServer = {
     auth,
+    handlers: [held, ...handlers, me],
+    holdLibrary: null,
+    artFetched: [],
     hits,
     listed,
     lookupRateLimited: false,
     async code(routes = { https: BASE }) {
-      const { record, code } = auth.createCode({ owner: true });
+      const { record, code } = auth.createCode({ personId: auth.firstOwnerPerson().id });
       codes.set(record.hash, { nasId: 'nas1', routes });
       return code;
     },
@@ -266,6 +296,165 @@ describe('NasClient', () => {
     ]);
   });
 
+  it("sends the owner's people, device and code routes", async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const real = server.fetch;
+    const sent: string[] = [];
+    const mika = { id: 'p1', name: 'Mika', owner: false, createdAt: 1, savedBytes: 0, devices: [] };
+    const minted = { code: 'K7QM-4XP2-R9TD', link: 'https://example/?pair=K7QM4XP2R9TD', expiresAt: 2, rendezvous: true, personId: 'p1', personName: 'Mika', invite: true };
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length) + url.search;
+      if (route.startsWith('session')) {
+        server.nas = undefined;
+        try {
+          return await real(url, init);
+        } finally {
+          server.nas = answer;
+        }
+      }
+      sent.push(`${init?.method ?? 'GET'} ${route}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`);
+      if (route === 'admin/people' && init?.method === 'POST') return Response.json(mika, { status: 201 });
+      if (route === 'admin/people') return Response.json({ people: [mika] });
+      if (route === 'admin/codes' && init?.method === 'POST') return Response.json(minted);
+      if (route === 'admin/codes') return Response.json({ codes: [{ id: 'c1', personId: 'p1', personName: 'Mika', invite: true, expiresAt: 2 }] });
+      if (route === 'admin/people/p%2F2' && init?.method === 'PATCH') return Response.json({ error: 'last-owner' }, { status: 409 });
+      if (route.startsWith('admin/people/') && init?.method === 'PATCH') return Response.json({ ...mika, name: 'Sora' });
+      return new Response(null, { status: 204 });
+    };
+    server.nas = answer;
+
+    expect(await nas.admin.people()).toEqual([mika]);
+    expect(await nas.admin.createPerson('Mika', false)).toEqual(mika);
+    expect(await nas.admin.updatePerson('p1', { name: 'Sora' })).toEqual({ ...mika, name: 'Sora' });
+    await expect(nas.admin.updatePerson('p/2', { owner: false })).rejects.toMatchObject({ status: 409, code: 'last-owner' });
+    await nas.admin.removePerson('p1');
+    await nas.admin.clearSavedData('p1');
+    await nas.admin.moveDevice('d1', 'p1');
+    await nas.admin.revokeDevice('d1');
+    expect(await nas.admin.createCode({ personId: 'p1' }, false)).toEqual(minted);
+    expect(await nas.admin.createCode({ newPerson: { name: 'Mika', owner: false } }, true)).toEqual(minted);
+    expect(await nas.admin.codes()).toEqual([{ id: 'c1', personId: 'p1', personName: 'Mika', invite: true, expiresAt: 2 }]);
+    expect(sent).toEqual([
+      'GET admin/people',
+      'POST admin/people {"name":"Mika","owner":false}',
+      'PATCH admin/people/p1 {"name":"Sora"}',
+      'PATCH admin/people/p%2F2 {"owner":false}',
+      'DELETE admin/people/p1',
+      'DELETE admin/people/p1/saved-data',
+      'PATCH admin/devices/d1 {"personId":"p1"}',
+      'DELETE admin/devices/d1',
+      'POST admin/codes {"personId":"p1","invite":false}',
+      'POST admin/codes {"newPerson":{"name":"Mika","owner":false},"invite":true}',
+      'GET admin/codes',
+    ]);
+  });
+
+  it("makes a code for a new person on the real server, and the device that redeems it is that person's", async () => {
+    const server = fakeServer();
+    const owner = client(server);
+    await owner.pair(await server.code(), 'Mac Safari');
+    const minted = await owner.admin.createCode({ newPerson: { name: 'Mika', owner: false } }, true);
+    expect(minted).toMatchObject({ personName: 'Mika', invite: true });
+    // The server here has no registrar, so the guest's lookup is answered directly.
+    const store = memoryStore();
+    const guest = client(server, store);
+    const lookup = vi.spyOn(guest, 'lookup').mockResolvedValue({ nasId: 'nas1', routes: { https: BASE } });
+    await guest.pair(minted.code, 'iPad');
+    expect(lookup).toHaveBeenCalledOnce();
+    expect(store.value).toMatchObject({ deviceName: 'iPad', owner: false, personName: 'Mika' });
+    const people = await owner.admin.people();
+    expect(people.find((p) => p.name === 'Mika')).toMatchObject({ owner: false, savedBytes: 0, devices: [{ name: 'iPad' }] });
+  });
+
+  it('loads a pairing stored before people, without a person name', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    store.value = { base: BASE, deviceId: 'd1', deviceName: 'iPad', owner: true, key };
+    const nas = client(server, store);
+    expect(await nas.pairing()).toEqual({ base: BASE, deviceId: 'd1', deviceName: 'iPad', owner: true, key });
+    expect(store.value).not.toBeNull();
+  });
+
+  it("takes the person's name and owner status from `me` into the stored pairing when they differ", async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad');
+    const stored = store.value!;
+    expect(stored.personName).toBe('Owner');
+    const real = server.fetch;
+    let personName = 'Sora';
+    let owner = true;
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      if (route === 'me') return Response.json({ owner, titleLibrary: true, personId: 'p0', personName });
+      server.nas = undefined;
+      try {
+        return await real(url, init);
+      } finally {
+        server.nas = answer;
+      }
+    };
+    server.nas = answer;
+    const put = vi.spyOn(store, 'put');
+    expect(await nas.me()).toMatchObject({ personName: 'Sora' });
+    expect(store.value).toEqual({ ...stored, personName: 'Sora' });
+    expect((await nas.pairing())?.personName).toBe('Sora');
+    await nas.me();
+    expect(put).toHaveBeenCalledOnce();
+    personName = 'Mika';
+    await nas.me();
+    expect(store.value?.personName).toBe('Mika');
+    // An owner took this device's owner status away: the stored pairing follows, so the settings button goes.
+    owner = false;
+    await nas.me();
+    expect(store.value).toMatchObject({ owner: false, personName: 'Mika' });
+    expect((await nas.pairing())?.owner).toBe(false);
+  });
+
+  it("stores the NAS's id from `me` on a pairing made before WebRTC, so route choice can use it", async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad');
+    const { nasId: _none, ...old } = store.value!;
+    store.value = old;
+    const fresh = client(server, store);
+    expect((await fresh.pairing())?.nasId).toBeUndefined();
+    const real = server.fetch;
+    let nasId: unknown = 'N'.repeat(43);
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      if (route === 'me') return Response.json({ owner: true, titleLibrary: true, personId: 'p0', personName: old.personName, nasId });
+      server.nas = undefined;
+      try {
+        return await real(url, init);
+      } finally {
+        server.nas = answer;
+      }
+    };
+    server.nas = answer;
+    const put = vi.spyOn(store, 'put');
+    await fresh.me();
+    expect(store.value).toEqual({ ...old, nasId: 'N'.repeat(43) });
+    expect((await fresh.pairing())?.nasId).toBe('N'.repeat(43));
+    await fresh.me();
+    expect(put).toHaveBeenCalledOnce();
+    // a different id (the NAS made a new key) replaces it; null or junk (no rendezvous) keeps what is stored
+    nasId = 'M'.repeat(43);
+    await fresh.me();
+    expect(store.value?.nasId).toBe('M'.repeat(43));
+    for (const value of [null, 'not an id', 42]) {
+      nasId = value;
+      await fresh.me();
+      expect(store.value?.nasId).toBe('M'.repeat(43));
+    }
+    expect(put).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();
@@ -301,6 +490,8 @@ describe('NasClient', () => {
     const nas = client(server, store);
     await nas.pair(await server.code(), 'iPad');
     await nas.library('');
+    // The server refuses to revoke the last owner device, so another owner device is paired first.
+    await client(server, memoryStore()).pair(await server.code(), 'Mac');
     server.auth.revokeDevice(store.value!.deviceId);
     await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
     expect(NAS_MESSAGES.unpaired).toBe('This device is no longer paired with the NAS.');
@@ -340,6 +531,8 @@ describe('NasClient', () => {
     await nas.pair(await server.code(), 'iPad');
     const unpaired = vi.fn();
     const unsubscribe = nas.onUnpaired(unpaired);
+    // The server refuses to revoke the last owner device, so another owner device is paired first.
+    await client(server, memoryStore()).pair(await server.code(), 'Mac');
     server.auth.revokeDevice(store.value!.deviceId);
     await expect(nas.library('')).rejects.toThrow(NAS_MESSAGES.unpaired);
     expect(unpaired).toHaveBeenCalledTimes(1);
@@ -453,11 +646,11 @@ describe('NasClient', () => {
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.tooMany);
   });
 
-  it('answers a lookup without an https route', async () => {
+  it('answers a lookup without any route', async () => {
     expect(NAS_MESSAGES.noRoute).toBe("This NAS isn't reachable from here yet.");
     const server = fakeServer();
     const nas = client(server);
-    const code = await server.code({ webrtc: true });
+    const code = await server.code({});
     await expect(nas.pair(code, 'iPad')).rejects.toThrow(NAS_MESSAGES.noRoute);
   });
 
@@ -499,6 +692,269 @@ describe('NasClient', () => {
       throw new TypeError('Failed to fetch');
     };
     await expect(client(server).pair(await server.code(), 'iPad')).rejects.toThrow(NAS_MESSAGES.unreachable);
+  });
+});
+
+const NAS_ID = 'n'.repeat(43);
+
+/** A NAS reachable over WebRTC (fake peers and sockets) serving the fake server's handlers through `serveChannel`. */
+function rtcWorld(server: FakeServer, opts: Partial<FakeRtcOptions> = {}): FakeRtcWorld & { opened: RtcOpenOptions[]; openRtc: (o: RtcOpenOptions) => Promise<RtcConnection> } {
+  const world = new FakeRtcWorld({
+    direct: true,
+    serve: (channel) => serveChannel(channel, server.handlers, { auth: server.auth, remoteAddress: '198.51.100.9', now }),
+    ...opts,
+  });
+  const opened: RtcOpenOptions[] = [];
+  return Object.assign(world, {
+    opened,
+    openRtc: (o: RtcOpenOptions) => {
+      opened.push(o);
+      return RtcConnection.open({ ...o, createPeer: world.createPeer, openSocket: world.openSocket });
+    },
+  });
+}
+
+function rtcClient(
+  server: FakeServer,
+  world: { openRtc: (o: RtcOpenOptions) => Promise<RtcLink> },
+  store: NasStore = memoryStore(),
+  objectUrls?: NasClientDeps['objectUrls'],
+): NasClient {
+  return new NasClient({ fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: RENDEZVOUS, openRtc: world.openRtc, ...(objectUrls ? { objectUrls } : {}) });
+}
+
+/** Object URLs as `blob:fake/<n>`, with the ones revoked. */
+function fakeObjectUrls(): NonNullable<NasClientDeps['objectUrls']> & { live: Set<string>; revoked: string[] } {
+  let n = 0;
+  const live = new Set<string>();
+  const revoked: string[] = [];
+  return {
+    live,
+    revoked,
+    create: () => {
+      const url = `blob:fake/${++n}`;
+      live.add(url);
+      return url;
+    },
+    revoke: (url) => {
+      live.delete(url);
+      revoked.push(url);
+    },
+  };
+}
+
+describe('NasClient over WebRTC', () => {
+  it('pairs over WebRTC when the lookup has no HTTPS route, then reads me and the library on a new connection', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const nas = rtcClient(server, world, store);
+    const code = await server.code({ webrtc: { nasId: NAS_ID } });
+    await nas.pair(code, 'iPhone');
+    expect(store.value).toMatchObject({ base: '', nasId: NAS_ID, deviceName: 'iPhone', owner: true });
+    expect(server.auth.devices().map((d) => d.name)).toEqual(['iPhone']);
+    expect(world.opened[0]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS, inviteHash: await codeHashOf(code) });
+    expect(world.opened[0].deviceProof).toBeUndefined();
+    expect(world.peers[0].closed).toBe(true); // the redeem connection is only for the redeem
+
+    expect(await nas.me()).toMatchObject({ owner: true, titleLibrary: true });
+    expect(await nas.library('drv5')).toEqual({ folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [], scanning: false });
+    expect(world.peers).toHaveLength(2);
+    expect(world.opened[1].inviteHash).toBeUndefined();
+    expect(world.opened[1].deviceProof).toBeTypeOf('function');
+    expect(await nas.discBase('d/1')).toBe(`rtc://${NAS_ID}/api/discs/d%2F1/`);
+    expect(Object.keys(server.hits)).toEqual([]); // nothing went over HTTPS
+  });
+
+  it('pairs over WebRTC when HTTPS fails its check, and keeps the HTTPS base', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const nas = rtcClient(server, world, store);
+    const tried: string[] = [];
+    server.nas = async (url) => {
+      tried.push(url.href);
+      throw new TypeError('Failed to fetch');
+    };
+    await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(store.value).toMatchObject({ base: BASE, nasId: NAS_ID });
+    expect(tried).toEqual([`${BASE}health`]);
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect(tried).toEqual([`${BASE}health`, `${BASE}health`]);
+  });
+
+  it('pairs over HTTPS when it answers its check', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const nas = rtcClient(server, world, store);
+    await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(store.value).toMatchObject({ base: BASE, nasId: NAS_ID });
+    expect(server.hits).toMatchObject({ health: 1, 'pair/redeem': 1 });
+    expect(world.peers).toHaveLength(0);
+  });
+
+  it('fails requests in flight as nas-lost when the connection closes, and reconnects on the next one', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const nas = rtcClient(server, world);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    await nas.me();
+    let release!: () => void;
+    server.holdLibrary = new Promise<void>((resolve) => (release = resolve));
+    const listing = nas.library('drv5');
+    const outcome = expect(listing).rejects.toMatchObject({ reason: 'nas-lost', message: NAS_LOST_MESSAGE });
+    await new Promise((r) => setTimeout(r, 0));
+    world.peers[1].fail(); // Wi-Fi to cellular
+    await outcome;
+    server.holdLibrary = null;
+    release();
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect(world.peers).toHaveLength(3);
+  });
+
+  it('keeps the pairing through two drops in a row, one of them right after a session started', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    let dropAfterSession = 0;
+    const openRtc = async (o: RtcOpenOptions): Promise<RtcLink> => {
+      const link = await world.openRtc(o);
+      const inner = link.fetch;
+      const dropping = (async (input: string | URL | Request, init?: RequestInit) => {
+        const res = await inner(input, init);
+        if (!String(input).endsWith('/api/session') || dropAfterSession === 0) return res;
+        dropAfterSession--;
+        const body = await res.text();
+        link.close(); // the path goes just after the session answered
+        return new Response(body, { status: res.status, headers: res.headers });
+      }) as typeof fetch;
+      return Object.assign(Object.create(link) as RtcLink, { fetch: dropping });
+    };
+    const store = memoryStore();
+    const nas = rtcClient(server, { openRtc }, store);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    await nas.me();
+    world.peers.at(-1)!.fail(); // first drop
+    dropAfterSession = 1; // second drop, as the new connection's session answers
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect(store.value).not.toBeNull();
+    expect(server.auth.devices()).toHaveLength(1);
+    world.peers.at(-1)!.fail();
+    world.peers.at(-2)!.fail();
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect(store.value).not.toBeNull();
+  });
+
+  it('fetches art over WebRTC as object URLs, keeps the last 64 and revokes the rest', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const urls = fakeObjectUrls();
+    const nas = rtcClient(server, world, memoryStore(), urls);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    const first = await nas.artUrl('a0', 'small');
+    expect(first).toBe('blob:fake/1');
+    expect(await nas.artUrl('a0', 'small')).toBe(first);
+    expect(server.artFetched).toEqual(['a0 small']);
+    for (let i = 1; i <= 64; i++) await nas.artUrl(`a${i}`, 'small');
+    expect(urls.revoked).toEqual([first]); // the least recently used went
+    expect(urls.live.size).toBe(64);
+    const fresh = await nas.freshArtUrl('a64', 'small', 'blob:fake/65');
+    expect(fresh).toBe('blob:fake/66');
+    expect(urls.revoked).toEqual([first, 'blob:fake/65']);
+    expect(server.artFetched.at(-1)).toBe('a64 small');
+    await nas.forget();
+    expect(urls.live.size).toBe(0);
+  });
+
+  it('reads disc files through discFetch after a drop, once the engine has a fresh token', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const nas = rtcClient(server, world);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    const url = `rtc://${NAS_ID}/api/library?path=drv5`;
+    const read = (token: string): Promise<Response> => nas.discFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const { token } = await nas.session();
+    expect((await read(token)).status).toBe(200);
+    world.peers.at(-1)!.fail();
+    await new Promise((r) => setTimeout(r, 0));
+    expect((await read(token)).status).toBe(401); // a new channel has seen no session yet
+    const fresh = await nas.freshSession(token);
+    expect((await read(fresh.token)).status).toBe(200);
+    expect(world.peers).toHaveLength(3);
+
+    let release!: () => void;
+    server.holdLibrary = new Promise<void>((resolve) => (release = resolve));
+    const inFlight = read(fresh.token);
+    const outcome = expect(inFlight).rejects.toBeInstanceOf(NasLostError);
+    await new Promise((r) => setTimeout(r, 0));
+    world.peers.at(-1)!.fail();
+    await outcome;
+    server.holdLibrary = null;
+    release();
+  });
+
+  it('reconnects an rtc:// disc over WebRTC after a drop even when HTTPS answers by then, and starts the next session there', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const nas = rtcClient(server, world);
+    server.nas = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
+    const base = await nas.discBase('d1');
+    expect(base).toBe(`rtc://${NAS_ID}/api/discs/d1/`);
+    const url = `rtc://${NAS_ID}/api/library?path=drv5`;
+    const read = (token: string): Promise<Response> => nas.discFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    const { token } = await nas.session();
+    expect((await read(token)).status).toBe(200);
+
+    server.nas = undefined; // HTTPS is reachable from here now
+    world.peers.at(-1)!.fail();
+    await new Promise((r) => setTimeout(r, 0));
+    const peers = world.peers.length;
+    expect((await read(token)).status).toBe(401); // over a new connection, which has seen no session yet
+    expect(world.peers).toHaveLength(peers + 1);
+    const healthChecks = server.hits.health ?? 0;
+    const fresh = await nas.freshSession(token);
+    expect((await read(fresh.token)).status).toBe(200); // the session was started on that connection
+    expect(server.hits.health ?? 0).toBe(healthChecks); // the disc's route stays WebRTC: no check sends it to HTTPS
+    expect(world.peers).toHaveLength(peers + 1);
+  });
+
+  it('fails discFetch as nas-lost while no connection can be made, and is plain fetch on HTTPS', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const nas = rtcClient(server, world);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    world.opts.refuseSocket = 4404;
+    await expect(nas.discFetch(`rtc://${NAS_ID}/api/library`)).rejects.toBeInstanceOf(NasLostError);
+    expect((await nas.discFetch(`${BASE}health`)).ok).toBe(true);
+  });
+
+  it("proves the device with its key for TURN, and passes on the copy when there's no relay", async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const proofs: Array<Record<string, unknown>> = [];
+    const world = rtcWorld(server, {
+      turn: (m) => {
+        proofs.push(m);
+        return { iceServers: [], reason: 'off' };
+      },
+    });
+    const nas = rtcClient(server, world, store);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    world.opts.direct = false;
+    await expect(nas.me()).rejects.toThrow(RTC_UNREACHABLE);
+    const proof = proofs.at(-1)!;
+    expect(proof.deviceId).toBe(store.value!.deviceId);
+    const sid = world.sent.find((m) => m.t === 'turn-request')!.sid;
+    const ok = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      store.value!.key.publicKey,
+      fromBase64url(String(proof.signature))!,
+      turnProofMessage({ sid, ts: Number(proof.ts) }),
+    );
+    expect(ok).toBe(true);
   });
 });
 

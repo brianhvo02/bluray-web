@@ -15,7 +15,9 @@ import { DUMP_WAIT_MS, type WorkerLike } from './bdj/session';
 import type { FromBdj, ToBdj } from './bdj/worker-protocol';
 import type { DecodeImage } from './bdj/background';
 import { SharedRegisterView } from './bdj/shared-registers';
+import type { DiscSpec } from './disc/disc-spec';
 import type { PlayerSettings } from './disc/player-settings';
+import { serveFetch } from './disc/port-fetch';
 import { CodingType } from './bdmv/stream-types';
 import { createAudioDecoderFactory } from './decode/audio-decoder';
 import { Player } from './player';
@@ -66,14 +68,19 @@ interface Harness {
   readonly workers: () => number;
   /** Paths read from the fake NAS (remote harness only). */
   readonly requested: readonly string[];
+  /** The workers' own fetch on the port route, which must go unused. */
+  readonly ownFetch: ReturnType<typeof vi.fn>;
   /** Delivers a message to the engine as if the BD-J worker had sent it. */
   inject(m: FromBdj): void;
   play(ms: number): Promise<void>;
 }
 
 const players: Player[] = [];
+/** The fetch ports' serving ends. */
+const servedPorts: MessagePort[] = [];
 afterEach(async () => {
   for (const p of players.splice(0)) await p.handle({ type: 'close' });
+  for (const port of servedPorts.splice(0)) port.close();
 });
 
 interface HarnessOptions {
@@ -88,8 +95,11 @@ interface HarnessOptions {
   readonly planeHashTelemetry?: boolean;
   readonly memoryProfile?: MemoryProfileName;
   readonly memoryTelemetry?: boolean;
-  /** Serve the disc from a fake NAS: the engine and the BD-J worker read it by HTTP range reads. */
-  readonly remote?: boolean;
+  /**
+   * Serve the disc from a fake NAS: the engine and the BD-J worker read it by HTTP range reads. `'port'`: through a
+   * fetch port, as on the WebRTC route; neither worker's own fetch may be used.
+   */
+  readonly remote?: boolean | 'port';
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -101,6 +111,18 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   let toEngine: MessagePort | null = null;
   const clock = { ms: 1000 };
   const nas = opts.remote ? fakeNas(files) : null;
+  /** On the port route, the workers' own fetch: never called. */
+  const ownFetch = vi.fn(async () => {
+    throw new TypeError('fetched directly');
+  });
+  const workerFetch = opts.remote === 'port' ? (ownFetch as unknown as typeof fetch) : nas?.fetch;
+  let spec: DiscSpec | null = nas ? nas.spec : null;
+  if (nas && opts.remote === 'port') {
+    const { port1, port2 } = new MessageChannel();
+    serveFetch(port1, nas.fetch);
+    servedPorts.push(port1);
+    spec = { ...nas.spec, fetchPort: port2 };
+  }
   const player = new Player({
     emit: (e) => events.push(e),
     videoCodecApi: fakeVideoCodecApi,
@@ -113,12 +135,12 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
       workers++;
       if (opts.worker) return opts.worker;
       const { port1, port2 } = new MessageChannel();
-      runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0], nas ? { fetch: nas.fetch } : {});
+      runBdjWorker(port2 as unknown as Parameters<typeof runBdjWorker>[0], workerFetch ? { fetch: workerFetch } : {});
       toEngine = port2;
       const worker: WorkerLike = {
-        postMessage: (m: ToBdj) => {
+        postMessage: (m: ToBdj, transfer: Transferable[] = []) => {
           sent.push(m);
-          port1.postMessage(m);
+          port1.postMessage(m, transfer as never);
         },
         set onmessage(fn: ((e: MessageEvent<FromBdj>) => void) | null) {
           port1.onmessage = fn as ((e: MessageEvent) => void) | null;
@@ -140,7 +162,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     ...(opts.bdjMissing ? { bdjMissing: opts.bdjMissing } : {}),
     ...(opts.planeHashTelemetry ? { planeHashTelemetry: true } : {}),
     ...(opts.memoryTelemetry ? { memoryTelemetry: true } : {}),
-    ...(nas ? { fetch: nas.fetch } : {}),
+    ...(workerFetch ? { fetch: workerFetch } : {}),
   });
   players.push(player);
   const ring = createRing(48_000, 2);
@@ -148,7 +170,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   if (opts.memoryProfile) await player.handle({ type: 'setMemoryProfile', profile: opts.memoryProfile });
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
-  await player.handle({ type: 'open', disc: nas ? nas.spec : { kind: 'files', entries: discEntries(files) } });
+  await player.handle({ type: 'open', disc: spec ?? { kind: 'files', entries: discEntries(files) } });
   const left = new Float32Array(128);
   const right = new Float32Array(128);
   return {
@@ -158,6 +180,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     terminated: () => terminated,
     workers: () => workers,
     requested: nas?.requested ?? [],
+    ownFetch,
     inject: (m) => toEngine!.postMessage(m),
     async play(ms) {
       for (let elapsed = 0; elapsed < ms; elapsed += STEP_MS) {
@@ -224,6 +247,17 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(boot).toMatchObject({ disc: { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/' }, readAheadBytes: 16 * 1024 * 1024 }); // the BD-J worker's own budget (R20)
     expect(h.requested).toContain('BDMV/JAR/00000.JAR'); // only the BD-J worker reads the jar
     expect(h.requested).toContain('BDMV/STREAM/00000.M2TS');
+  }, 90_000);
+
+  it('runs First Play from a disc on the WebRTC route: the BD-J worker reads its jar through the port the engine relays', async () => {
+    const h = await harness(fixtureDiscFiles('disc-bdj'), { remote: 'port' });
+    await until(h, () => lastState(h) === 'playing' && playlistsPlayed(h).length > 0);
+    expect(playlistsPlayed(h)).toEqual(['00000']);
+    const boot = h.sent.find((m) => m.type === 'boot');
+    expect(boot?.type === 'boot' && boot.disc.kind === 'remote' && boot.disc.fetchPort).toBeInstanceOf(MessagePort); // a port of its own, not the engine's
+    expect(h.requested).toContain('BDMV/JAR/00000.JAR'); // only the BD-J worker reads the jar
+    expect(h.requested).toContain('BDMV/STREAM/00000.M2TS');
+    expect(h.ownFetch).not.toHaveBeenCalled();
   }, 90_000);
 
   it('runs First Play: Java plays playlist 00000 with no picker and no notice', async () => {

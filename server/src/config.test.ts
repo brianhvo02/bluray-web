@@ -16,6 +16,7 @@ describe('loadConfig', () => {
       trustedProxy: 'caddy',
       tmdbApiKey: null,
       titleLibrary: 'owners',
+      rtc: { port: 47998 },
     });
   });
 
@@ -30,6 +31,7 @@ describe('loadConfig', () => {
       trustedProxy: 'caddy',
       tmdbApiKey: null,
       titleLibrary: 'owners',
+      rtc: { port: 47998 },
     });
   });
 
@@ -100,5 +102,21 @@ describe('loadConfig', () => {
 
   it('rejects a group named like a root', () => {
     expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv1=/b@drv0' })).toThrow('group "drv0" is also a root name');
+  });
+
+  it('reads RTC_PORT, RTC_LAN_ADDRESS and RTC_ADVERTISE', () => {
+    expect(loadConfig({}).rtc).toEqual({ port: 47998 });
+    expect(loadConfig({ RTC_PORT: '47990', RTC_LAN_ADDRESS: '192.168.1.98', RTC_ADVERTISE: '127.0.0.1, 192.0.2.4' }).rtc).toEqual({
+      port: 47990,
+      lanAddress: '192.168.1.98',
+      advertise: ['127.0.0.1', '192.0.2.4'],
+    });
+    expect(() => loadConfig({ RTC_PORT: '0' })).toThrow('RTC_PORT');
+    expect(() => loadConfig({ RTC_PORT: '65535' })).toThrow('RTC_PORT');
+    expect(() => loadConfig({ RTC_LAN_ADDRESS: '172.18.0.2' })).toThrow('RTC_LAN_ADDRESS');
+    expect(() => loadConfig({ RTC_ADVERTISE: '100.100.1.1' })).toThrow('RTC_ADVERTISE');
+    expect(() => loadConfig({ RTC_LAN_ADDRESS: 'nas.local' })).toThrow('RTC_LAN_ADDRESS');
+    expect(() => loadConfig({ RTC_LAN_ADDRESS: '127.0.0.1' })).toThrow('RTC_LAN_ADDRESS');
+    expect(loadConfig({ RTC_LAN_ADDRESS: '10.0.0.8' }).rtc.lanAddress).toBe('10.0.0.8');
   });
 });

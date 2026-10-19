@@ -18,6 +18,8 @@ interface TitleLibraryProps {
   readonly controller: PlayerController;
   /** From `GET me`: owners get the settings and the Unsorted shelf. */
   readonly owner: boolean;
+  /** This device is no longer an owner (the NAS refused the settings): the caller asks `me` again. */
+  readonly onOwnerLost?: () => void;
   /** "Browse by folder instead": the folder browser. */
   readonly onFolders: () => void;
   readonly onClose: () => void;
@@ -124,7 +126,7 @@ function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
 }
 
 /** The NAS by title (spec §14, mockups 1–3): search, shelves, recently added and A–Z, then a title's seasons and discs. */
-export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: TitleLibraryProps): ReactElement {
+export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, onClose }: TitleLibraryProps): ReactElement {
   const [titles, setTitles] = useState<TitleSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -287,7 +289,20 @@ export function TitleLibrary({ nas, controller, owner, onFolders, onClose }: Tit
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
   const filing: OwnerFiling | undefined = owner ? { nas, tmdb, onChanged: changed } : undefined;
 
-  if (settings) return <AdminScreen nas={nas} thisDeviceId={deviceId} onClose={() => setSettings(false)} onTitlesChanged={changed} />;
+  if (settings) {
+    return (
+      <AdminScreen
+        nas={nas}
+        thisDeviceId={deviceId}
+        onClose={() => setSettings(false)}
+        onAccessLost={() => {
+          setSettings(false);
+          onOwnerLost?.();
+        }}
+        onTitlesChanged={changed}
+      />
+    );
+  }
 
   if (ownerScreen === 'hidden') {
     const toUnsorted = (): void => {

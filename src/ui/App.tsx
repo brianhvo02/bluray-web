@@ -131,7 +131,7 @@ export function App(): ReactElement {
       {snapshot.playlists.length === 0 ? (
         <LandingScreen controller={controller} snapshot={snapshot} nas={nas} pairCode={pairCode} />
       ) : (
-        <PlayerScreen controller={controller} snapshot={snapshot} shaderModel={shaders} shaderState={shaderState} />
+        <PlayerScreen controller={controller} snapshot={snapshot} shaderModel={shaders} shaderState={shaderState} nas={nas} />
       )}
     </div>
   );

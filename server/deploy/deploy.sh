@@ -2,13 +2,24 @@
 # Builds the server image, ships it to the NAS, (re)starts the service and
 # adds the /bluray/* route to Caddy. Run from the Mac: npm run server:deploy
 # With --owner-code it deploys nothing: it mints one owner pairing code on the
-# running server and prints it with its link and a terminal QR.
+# running server and prints it with its link and a terminal QR. Extra args go to
+# the command: --owner-code --person <name> mints for that owner person.
+# With --nas-id it deploys nothing: it prints the running server's rendezvous
+# NAS id, for the Worker's TURN_NAS_IDS secret.
 set -euo pipefail
 
 HOST="${BLURAY_NAS_HOST:-mediaserver}"
 
 if [ "${1:-}" = "--owner-code" ]; then
-  exec ssh "$HOST" docker exec bluray-server node server.mjs owner-code
+  shift
+  # Extra args (such as --person <name>) pass through, quoted for the remote shell.
+  ARGS=""
+  if [ $# -gt 0 ]; then ARGS="$(printf ' %q' "$@")"; fi
+  exec ssh "$HOST" "docker exec bluray-server node server.mjs owner-code$ARGS"
+fi
+
+if [ "${1:-}" = "--nas-id" ]; then
+  exec ssh "$HOST" "docker exec bluray-server node server.mjs nas-id"
 fi
 
 REMOTE_DIR='~/bluray-server'
@@ -30,6 +41,10 @@ docker save "bluray-server:$TAG" bluray-server:latest | gzip | ssh "$HOST" 'gunz
 
 echo "==> Writing $REMOTE_DIR/compose.yaml and starting the service"
 ssh "$HOST" "mkdir -p $REMOTE_DIR && cat > $REMOTE_DIR/compose.yaml" < server/deploy/compose.yaml
+# Keep the step-2 auth.json (before people) beside the migrated one, so the step-2 image can be rolled back to. Run in
+# the old container, which holds the data volume; when it isn't running there is nothing to copy from, so carry on.
+ssh "$HOST" "docker exec bluray-server sh -c 'test -f /data/auth.step2.json || ! test -f /data/auth.json || cp /data/auth.json /data/auth.step2.json'" \
+  || echo "    (no running bluray-server: no rollback copy of auth.json made)"
 ssh "$HOST" "cd $REMOTE_DIR && docker compose up -d"
 
 echo "==> Routing /bluray/* in Caddy"

@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import type { DiscSpec } from '../disc/disc-spec';
+import { discTransfer, type DiscSpec } from '../disc/disc-spec';
 import type { ScreenRect } from './background';
 import type { BdjErrorCode } from './errors';
 import type { Coalesce } from './input';
@@ -70,3 +70,8 @@ export type BdjCallName =
   | 'setVirtualPackage'
   | 'setUOMask'
   | 'setKeyInterest';
+
+/** What posting `m` must transfer: a boot message's fetch port (the WebRTC route), else nothing. */
+export function bootTransfer(m: ToBdj): Transferable[] {
+  return m.type === 'boot' ? discTransfer(m.disc) : [];
+}

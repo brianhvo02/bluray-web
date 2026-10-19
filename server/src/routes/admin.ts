@@ -1,10 +1,13 @@
 import type { OwnerChoice, TitleKind } from '../../../src/engine/disc/nas-api';
-import type { Auth } from '../auth';
-import { formatCode, pairingLink } from '../codes';
+import { AuthConflict, AuthNotFound } from '../auth';
+import type { Auth, Device, Person, PersonRef } from '../auth';
+import type { BdjStore } from '../bdj-store';
+import { formatCode, pairingLink, unregisterCodes } from '../codes';
 import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
 import type { Handler, Response } from '../http';
 import type { Library } from '../library';
+import type { RelayState } from '../rtc/relay';
 import type { DiscEvidence } from '../titles/evidence';
 import { groupKey } from '../titles/match';
 import { parseName } from '../titles/parse-name';
@@ -13,6 +16,8 @@ import type { TitleLibrary } from './titles';
 
 export interface AdminOptions {
   library: Library;
+  /** Each person's BD-J saved data: its size is listed, and it is cleared with the person. */
+  bdjStore: BdjStore;
   /** The `https` route registered with each code: this server's public API base. */
   publicBase: string;
   /** Absent until the rendezvous client exists: codes then come back with `rendezvous: false`. */
@@ -21,6 +26,8 @@ export interface AdminOptions {
   registrarDeadlineMs?: number;
   /** The title library; its owner routes answer 404 without it. */
   titles?: TitleLibrary;
+  /** The Cloudflare relay's settings and usage; `admin/relay` answers 404 without it. */
+  relay?: RelayState;
   now?: () => number;
   /** How long an owner's lookup may take before it answers 503. Default 10 s. */
   lookupTimeoutMs?: number;
@@ -49,6 +56,60 @@ export function bearerToken(header: string | undefined): string | null {
   return m ? m[1]! : null;
 }
 
+/** An Auth failure as its answer: 404 for an unknown person or device, 409 for the last owner, 400 for a bad name. */
+function authFailure(err: unknown): Response {
+  if (err instanceof AuthNotFound) return json(404, { error: err.message });
+  if (err instanceof AuthConflict) return json(409, { error: err.reason });
+  if (err instanceof RangeError) return json(400, { error: 'bad name' });
+  throw err;
+}
+
+/** Runs an Auth change, answering its failure. */
+function attempt<T>(change: () => T): { ok: T } | { failed: Response } {
+  try {
+    return { ok: change() };
+  } catch (err) {
+    return { failed: authFailure(err) };
+  }
+}
+
+/** A person as the admin screen shows them, with their devices and saved bytes. */
+function personView(person: Person, devices: readonly Device[], store: BdjStore) {
+  return {
+    id: person.id,
+    name: person.name,
+    owner: person.owner,
+    createdAt: person.createdAt,
+    savedBytes: store.usage(person.id),
+    devices: devices.filter((d) => d.personId === person.id).map(({ id, name, pairedAt, lastSeen, lastRoute }) => ({ id, name, pairedAt, lastSeen, lastRoute })),
+  };
+}
+
+/** `{personId}` or `{newPerson: {name, owner}}`, each with an optional `invite`; null for anything else. */
+function parseCodeRequest(body: unknown): { ref: PersonRef; invite: boolean } | null {
+  if (!isObject(body)) return null;
+  const invite = body.invite ?? false;
+  if (typeof invite !== 'boolean') return null;
+  if (hasKeys(body, ['personId'], ['invite'])) return typeof body.personId === 'string' ? { ref: { personId: body.personId }, invite } : null;
+  if (!hasKeys(body, ['newPerson'], ['invite'])) return null;
+  const p = body.newPerson;
+  if (!isObject(p) || !hasKeys(p, ['name', 'owner']) || typeof p.name !== 'string' || typeof p.owner !== 'boolean') return null;
+  return { ref: { newPerson: { name: p.name, owner: p.owner } }, invite };
+}
+
+/** `GET admin/relay` → `{enabled, allowPaid, usage}`; `PUT admin/relay {enabled?, allowPaid?}` changes the settings and answers the same. */
+async function relayRoute(req: Parameters<Handler>[0], relay: RelayState): Promise<Response> {
+  if (req.method === 'PUT') {
+    const body = await readJson(req);
+    if (!isObject(body) || Object.keys(body).length === 0 || !hasKeys(body, [], ['enabled', 'allowPaid'])) throw new HttpError(400, 'bad relay settings');
+    if ((body.enabled !== undefined && typeof body.enabled !== 'boolean') || (body.allowPaid !== undefined && typeof body.allowPaid !== 'boolean')) {
+      throw new HttpError(400, 'bad relay settings');
+    }
+    relay.set({ ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(body.allowPaid !== undefined ? { allowPaid: body.allowPaid as boolean } : {}) });
+  }
+  return json(200, { ...relay.settings(), usage: relay.usage() });
+}
+
 /** `/api/admin/*`, for owner devices only; the token must come as `Authorization: Bearer`. */
 export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
   const lookups = new LookupLimiter(opts.now ?? Date.now);
@@ -62,8 +123,14 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
 
     const [, , , collection, id, ...rest] = path.split('/');
     if (rest.length > 0) {
-      // the one three-segment route
+      // the three-segment routes
       if (opts.titles && collection === 'discs' && rest.length === 1 && rest[0] === 'choice') return choiceRoute(req.method, decode(id!), req, opts.library, opts.titles);
+      if (req.method === 'DELETE' && collection === 'people' && rest.length === 1 && rest[0] === 'saved-data') {
+        const target = decode(id!);
+        if (!auth.people().some((p) => p.id === target)) return json(404, { error: 'unknown person' });
+        opts.bdjStore.clear(target);
+        return { status: 204 };
+      }
       return null;
     }
     const route = `${req.method} ${collection ?? ''}${id === undefined ? '' : '/:id'}`;
@@ -72,18 +139,61 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       const answer = await titleAdminRoute(route, id === undefined ? undefined : decode(id), req, url, opts.library, opts.titles);
       if (answer) return answer;
     }
+    if (opts.relay && (route === 'GET relay' || route === 'PUT relay')) return relayRoute(req, opts.relay);
     switch (route) {
       case 'GET devices':
         return json(200, {
-          devices: auth.devices().map(({ id, name, owner, pairedAt, lastSeen }) => ({ id, name, owner, pairedAt, lastSeen })),
+          devices: auth.devices().map(({ id, name, owner, personId, personName, pairedAt, lastSeen }) => ({ id, name, owner, personId, personName, pairedAt, lastSeen })),
         });
-      case 'GET codes':
-        return json(200, { codes: auth.codes().map(({ id, owner, expiresAt }) => ({ id, owner, expiresAt })) });
-      case 'POST codes': {
+      case 'GET people': {
+        auth.pruneOrphans();
+        const devices = auth.devices();
+        return json(200, { people: auth.people().map((p) => personView(p, devices, opts.bdjStore)) });
+      }
+      case 'POST people': {
         const body = await readJson(req);
-        const owner = (body as { owner?: unknown } | null)?.owner;
-        if (typeof owner !== 'boolean') throw new HttpError(400, 'bad request');
-        const { record, code } = auth.createCode({ owner });
+        if (!isObject(body) || !hasKeys(body, ['name'], ['owner']) || typeof body.name !== 'string') throw new HttpError(400, 'bad person');
+        const owner = body.owner ?? false;
+        if (typeof owner !== 'boolean') throw new HttpError(400, 'bad person');
+        const made = attempt(() => auth.createPerson(body.name as string, owner));
+        return 'failed' in made ? made.failed : json(201, personView(made.ok, [], opts.bdjStore));
+      }
+      case 'PATCH people/:id': {
+        const body = await readJson(req);
+        if (!isObject(body) || !hasKeys(body, [], ['name', 'owner']) || Object.keys(body).length === 0) throw new HttpError(400, 'bad person');
+        if ((body.name !== undefined && typeof body.name !== 'string') || (body.owner !== undefined && typeof body.owner !== 'boolean')) throw new HttpError(400, 'bad person');
+        const change = { ...(body.name !== undefined ? { name: body.name as string } : {}), ...(body.owner !== undefined ? { owner: body.owner as boolean } : {}) };
+        const updated = attempt(() => auth.updatePerson(decode(id!), change));
+        return 'failed' in updated ? updated.failed : json(200, personView(updated.ok, auth.devices(), opts.bdjStore));
+      }
+      case 'DELETE people/:id': {
+        const target = decode(id!);
+        const codes = auth.codes().filter((c) => c.personId === target).map((c) => c.hash);
+        const removed = attempt(() => auth.removePerson(target));
+        if ('failed' in removed) return removed.failed;
+        opts.bdjStore.clear(target);
+        unregisterCodes(opts.registrar, codes);
+        return { status: 204 };
+      }
+      case 'PATCH devices/:id': {
+        const body = await readJson(req);
+        if (!isObject(body) || !hasKeys(body, ['personId']) || typeof body.personId !== 'string') throw new HttpError(400, 'bad device');
+        const moved = attempt(() => auth.moveDevice(decode(id!), body.personId as string));
+        return 'failed' in moved ? moved.failed : { status: 204 };
+      }
+      case 'GET codes': {
+        auth.pruneOrphans();
+        const names = new Map(auth.people().map((p) => [p.id, p.name]));
+        return json(200, {
+          codes: auth.codes().map(({ id, personId, invite, expiresAt }) => ({ id, personId, personName: names.get(personId) ?? '', invite, expiresAt })),
+        });
+      }
+      case 'POST codes': {
+        const request = parseCodeRequest(await readJson(req));
+        if (request === null) throw new HttpError(400, 'bad request');
+        const minted = attempt(() => auth.createCode(request.ref, { invite: request.invite }));
+        if ('failed' in minted) return minted.failed;
+        const { record, code, person } = minted.ok;
         let rendezvous = false;
         if (opts.registrar) {
           try {
@@ -97,22 +207,22 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
             console.error('rendezvous registration failed', err);
           }
         }
-        return json(200, { code: formatCode(code), link: pairingLink(code), expiresAt: record.expiresAt, rendezvous });
+        return json(200, {
+          code: formatCode(code), link: pairingLink(code), expiresAt: record.expiresAt, rendezvous, personId: person.id, personName: person.name, invite: record.invite,
+        });
       }
       case 'DELETE devices/:id': {
         const target = decode(id!);
-        const devices = auth.devices();
-        const found = devices.find((d) => d.id === target);
-        if (!found) return json(404, { error: 'unknown device' });
-        // Synchronous from here to the revoke, so two owners can't remove each other at once. `owner-code` recovers anyway.
-        if (found.owner && devices.filter((d) => d.owner).length === 1) return json(409, { error: 'last-owner' });
-        auth.revokeDevice(target);
-        return { status: 204 };
+        if (!auth.devices().some((d) => d.id === target)) return json(404, { error: 'unknown device' });
+        const revoked = attempt(() => auth.revokeDevice(target));
+        return 'failed' in revoked ? revoked.failed : { status: 204 };
       }
       case 'DELETE codes/:id': {
         const target = decode(id!);
-        if (!auth.codes().some((c) => c.id === target)) return json(404, { error: 'unknown code' });
+        const found = auth.codes().find((c) => c.id === target);
+        if (!found) return json(404, { error: 'unknown code' });
         auth.deleteCode(target);
+        unregisterCodes(opts.registrar, [found.hash]);
         return { status: 204 };
       }
       case 'POST rescan':

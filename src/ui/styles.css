@@ -25,9 +25,13 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .library-row { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; }
 .library-name { overflow-wrap: anywhere; }
 .library-actions { display: flex; gap: 8px; }
-.admin-new-code, .admin-device { display: flex; align-items: center; gap: 12px; }
+.admin-new-code, .admin-device { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .admin-device { justify-content: space-between; }
-.admin-confirm { flex: none; display: flex; align-items: center; gap: 8px; }
+.admin-person { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px solid #2a2a30; }
+.admin-person-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.admin-person-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-person .library-rows { padding-left: 16px; }
+.admin-confirm { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .admin-owner { display: inline-flex; align-items: center; gap: 6px; }
 .admin-qr { display: block; width: min(240px, 100%); height: auto; }
 .admin-code-text { font-size: 1.4em; letter-spacing: 0.05em; }
@@ -35,7 +39,12 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .badge { border: 1px solid #4a4a55; border-radius: 4px; padding: 0 6px; font-size: 0.8em; }
 .preflight { display: flex; flex-direction: column; gap: 8px; }
 .preflight h3, .preflight p { margin: 0; }
-.preflight-actions { display: flex; gap: 8px; }
+.preflight-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.buffer-progress { display: flex; align-items: center; gap: 12px; }
+.buffer-ring { width: 40px; height: 40px; transform: rotate(-90deg); }
+.buffer-ring circle { fill: none; stroke-width: 3; }
+.buffer-ring-track { stroke: #3a3a42; }
+.buffer-ring-fill { stroke: #6ea8ff; stroke-linecap: round; transition: stroke-dasharray 0.3s; }
 
 .player { position: relative; height: 100%; background: #000; overflow: hidden; }
 .player.idle { cursor: auto; }
@@ -148,3 +157,4 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .admin-owner { min-height: 44px; }
   .admin-owner input { width: 24px; height: 24px; }
 }
+.relay-badge { align-self: flex-start; background: rgba(0, 0, 0, 0.6); border-radius: 6px; padding: 2px 8px; font-size: 0.85em; pointer-events: none; }

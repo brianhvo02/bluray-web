@@ -65,6 +65,18 @@ describe('createServer', () => {
     expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, PUT, PATCH, DELETE');
   });
 
+  it('allows the precondition headers in a preflight, and exposes ETag', async () => {
+    const base = await start();
+    const pre = await fetch(`${base}/api/bdj-store/persistent/0a1b2c3d`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://bluray-web.pages.dev', 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'if-match' },
+    });
+    const allowed = pre.headers.get('access-control-allow-headers')!.split(',').map((h) => h.trim().toLowerCase());
+    expect(allowed).toEqual(expect.arrayContaining(['authorization', 'content-type', 'range', 'if-match', 'if-none-match']));
+    const res = await fetch(`${base}/api/health`, { headers: { Origin: 'https://bluray-web.pages.dev' } });
+    expect(res.headers.get('access-control-expose-headers')).toBe('ETag');
+  });
+
   it('answers 404 JSON when no handler matches', async () => {
     const base = await start();
     const res = await fetch(`${base}/nope`);

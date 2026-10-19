@@ -7,8 +7,10 @@ import { normalizeTitle } from '../../../src/engine/disc/title-text';
 import type { OwnTitle, TitleDetail, TitleSummary } from '../../../src/engine/disc/nas-api';
 import { appHandlers } from '../app';
 import { Auth } from '../auth';
+import { BdjStore } from '../bdj-store';
 import { createServer } from '../http';
 import { Library } from '../library';
+import { RelayState } from '../rtc/relay';
 import { Store } from '../store';
 import { ArtCache } from '../titles/art';
 import { artIdOf } from '../titles/catalogue';
@@ -68,11 +70,17 @@ function fakeSource(results: Record<string, Entry[]>): MetadataSource & { down: 
   return src;
 }
 
+/** A code for a new guest, or for the first owner person. */
+function mint(auth: Auth, owner: boolean) {
+  return auth.createCode(owner ? { personId: auth.firstOwnerPerson().id } : { newPerson: { name: 'Guest', owner: false } });
+}
+
 let tmp: string;
 let clock: number;
 let base = '';
 let close: (() => void) | undefined;
 let auth: Auth;
+let relay: RelayState;
 let owner: OwnerStore;
 let service: TitleService;
 let anilist: ReturnType<typeof fakeSource>;
@@ -89,9 +97,10 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number } = {}): Promise<void> {
+async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number; nasId?: string | null } = {}): Promise<void> {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
+  relay = new RelayState(data, () => clock);
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
   evidence = [A, ...BOX, COPY];
   vi.spyOn(library, 'evidence').mockImplementation(() => evidence);
@@ -104,7 +113,7 @@ async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: num
     now: () => clock, setTimer: () => () => {},
   });
   await service.runNow();
-  const server = createServer(appHandlers({ auth, library, now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, lookupTimeoutMs: opts.lookupTimeoutMs }));
+  const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), now: () => clock, publicBase: 'https://nas.example/bluray/api/', titles: { service, owner }, relay, lookupTimeoutMs: opts.lookupTimeoutMs, nasId: opts.nasId }));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   close = () => {
@@ -116,7 +125,7 @@ async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: num
 async function token(isOwner: boolean): Promise<string> {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
-  const { code } = auth.createCode({ owner: isOwner });
+  const { code } = mint(auth, isOwner);
   const device = auth.redeem(code, isOwner ? 'Mac' : 'Phone', jwk)!;
   const challenge = auth.challenge(device.id)!;
   const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new TextEncoder().encode(challenge));
@@ -187,13 +196,28 @@ describe('title routes', () => {
     expect(artFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('reports both flags on GET /api/me', async () => {
+  it('reports both flags and the person on GET /api/me', async () => {
     await start();
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false });
-    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true });
+    const person = expect.any(String);
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest', relay: null, nasId: null });
+    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner', relay: null, nasId: null });
     owner.setGate('everyone');
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest', relay: null, nasId: null });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
+  });
+
+  it("gives the NAS's rendezvous id in GET /api/me, so a pairing made before WebRTC can learn it", async () => {
+    await start({ nasId: 'N'.repeat(43) });
+    const me = (await (await get('/api/me', await token(false))).json()) as { nasId: unknown };
+    expect(me.nasId).toBe('N'.repeat(43));
+  });
+
+  it("adds the relay's usage to GET /api/me while the relay is on", async () => {
+    await start();
+    relay.set({ enabled: true });
+    relay.addBytes(412e9);
+    const me = (await (await get('/api/me', await token(false))).json()) as { relay: unknown };
+    expect(me.relay).toEqual({ usedBytes: 412e9, freeBytes: 1e12, resetsOn: expect.stringMatching(/^\d{4}-\d{2}-01$/) });
   });
 });
 

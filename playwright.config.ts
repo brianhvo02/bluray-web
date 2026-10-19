@@ -19,7 +19,17 @@ export default defineConfig({
     {
       name: 'firefox',
       testIgnore: /mobile-.*\.spec\.ts/,
-      use: { ...devices['Desktop Firefox'], launchOptions: { firefoxUserPrefs: { 'media.autoplay.default': 0 } } },
+      use: {
+        ...devices['Desktop Firefox'],
+        launchOptions: {
+          firefoxUserPrefs: {
+            'media.autoplay.default': 0,
+            // The NAS drops mDNS (.local) candidates, and Firefox never checks the loopback address the NAS E2E's
+            // WebRTC route advertises, so Firefox gives its host addresses in the clear for the NAS to check
+            'media.peerconnection.ice.obfuscate_host_addresses': false,
+          },
+        },
+      },
     },
     {
       name: 'webkit',

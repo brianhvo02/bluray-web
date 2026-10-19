@@ -6,6 +6,7 @@ import { PairScreen } from './nas/PairScreen';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import type { NasPairing } from './nas/nas-store';
+import { pairedAs } from './nas/people-model';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
@@ -80,7 +81,11 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     }
     setNasView({ kind: 'checking' });
     nas.me().then(
-      (me) => setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' })),
+      (me) => {
+        setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' }));
+        // `me` may have brought this device's person name up to date.
+        loadPairing();
+      },
       // an older NAS without `me`, or any failure: the folder browser shows what is wrong, if anything
       () => setNasView((v) => (v.kind === 'checking' ? { kind: 'folders' } : v)),
     );
@@ -304,7 +309,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
           />
         ) : (
           <p className="status" data-testid="nas-paired">
-            Paired with the NAS as {pairing.deviceName}.{' '}
+            {pairedAs(pairing)}{' '}
             {!browsing && (
               <button
                 type="button"
@@ -323,7 +328,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
           </p>
         ))}
       {paired && nasView.kind === 'checking' && <p className="status">Loading…</p>}
-      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onFolders={showFolders} onClose={closeNas} />}
+      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onOwnerLost={() => setBrowsing(true)} onFolders={showFolders} onClose={closeNas} />}
       {paired && nasView.kind === 'folders' && <LibraryScreen nas={nas} controller={controller} onClose={closeNas} />}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">

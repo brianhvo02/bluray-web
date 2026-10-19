@@ -25,9 +25,13 @@ import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
 import { createByteSource, type DiscSpec } from './disc/disc-spec';
+import { portFetch, serveFetch } from './disc/port-fetch';
 import type { FileSource } from './disc/file-source';
 import { RemoteDiscError, TokenRelay } from './disc/http-transport';
 import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
+import { CacheFill } from './disc/cache-fill';
+import type { DiscManifest } from './disc/nas-api';
+import { ReadAheadCache, SEGMENT_BYTES } from './disc/read-ahead-cache';
 import { RemoteSource } from './disc/remote-source';
 import { BdVk } from './graphics/graphics-controller';
 import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
@@ -37,6 +41,7 @@ import { itemPackets, lookupSpn, markTitlePkt, nextPlaymark } from './nav/packet
 import { PgStreamControl } from './nav/subtitles';
 import { Timeline, type Chapter } from './nav/timeline';
 import { PlaybackPipeline, type PipelineAudioUnit, type PipelineUnit } from './playback/pipeline';
+import { bufferRanges } from './playback/buffer-ranges';
 import { PLAYABLE_AUDIO, audioEntryFor, chooseStreams } from './playback/stream-selection';
 import { audioTracks } from './playback/tracks';
 import type { FontFile } from './ass/font-tables';
@@ -47,7 +52,7 @@ import { AssRenderer } from './ass/renderer';
 import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import type { AudioTrack, BdjMemoryTelemetry, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
+import type { AudioTrack, BufferRequest, BdjMemoryTelemetry, EngineCommand, EngineEvent, FileData, MenuKey, NoticeCode, PlaybackState, ShaderSetData, SubtitleChoice } from './protocol';
 import type { FromBdj } from './bdj/worker-protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
@@ -115,7 +120,33 @@ export interface PlayerDeps {
   readonly fetch?: typeof fetch;
   /** A NAS disc's range request size (REMOTE_CHUNK_BYTES) and read-ahead budget (the memory profile's) when set. */
   readonly remoteLimits?: { readonly chunkBytes?: number; readonly readAheadBytes?: number };
+  /**
+   * The origin's private file system (navigator.storage.getDirectory()), where a NAS disc's on-disk read-ahead cache
+   * lives (buffer first); without it NAS discs have none and bufferAhead does nothing.
+   */
+  readonly readAheadCacheRoot?: () => Promise<FileSystemDirectoryHandle>;
+  /** Epoch ms, for the read-ahead cache's age; Date.now by default. */
+  readonly epochMs?: () => number;
+  /** The read-ahead cache's segment size (SEGMENT_BYTES by default; tests use smaller). */
+  readonly readAheadSegmentBytes?: number;
 }
+
+/** A bufferFirst open: it waits for its fill until the target is held, a cancelBuffer, or a close or open drops it. */
+interface OpenHold {
+  cancelled: boolean;
+  abandoned: boolean;
+  readonly released: Promise<void>;
+  release(): void;
+}
+
+function openHold(): OpenHold {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  return { cancelled: false, abandoned: false, released, release };
+}
+
+/** While a fill follows playback, the play position is looked at again this often (freeing what playback passed). */
+const FILL_KICK_MS = 1000;
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
   const id = setTimeout(fn, ms);
@@ -220,6 +251,16 @@ interface EarlyBdj {
   readonly regs: RegisterFile;
   readonly status: StatusBlockWriter;
   readonly plane: GraphicsPlaneReader;
+  readonly disc: BdjDisc;
+}
+
+/**
+ * How one BD-J worker reads the disc. On the port route it gets a fetch port of its own in its boot message, which the
+ * engine serves with its own port fetch (a worker can't use the engine's port); `stop` ends that relay.
+ */
+interface BdjDisc {
+  readonly port: MessagePort | null;
+  readonly stop: () => void;
 }
 
 /**
@@ -242,6 +283,8 @@ interface BdjTitle {
   booted: boolean;
   /** The plane's visible() as last reported in a bdjMenu event. */
   menuVisible: boolean;
+  /** How the worker reads the disc: its fetch port and that port's relay, on the port route. */
+  readonly disc: BdjDisc;
   /** Taps forwarded to Java, waiting for a reaction (the ignored-tap rule). */
   readonly taps: TapReactionWatch;
   /** The BD-J worker's last memory report (memoryTelemetry). */
@@ -347,12 +390,25 @@ export class Player {
   private bdjDiscId: string | null = null;
   /** The class library, loading from the first BD-J disc on. */
   private bdjClassLibrary: Promise<ClassLibrarySource> | null = null;
-  /** The open disc as the UI gave it (with the latest NAS token), for the BD-J worker's own disc model. */
+  /** The open disc as the UI gave it (with the latest NAS token, without its fetch port), for the BD-J worker's own disc model. */
   private discSpec: DiscSpec = { kind: 'files', entries: [] };
+  /** The open NAS disc's fetch port (the WebRTC route) and the fetch over it, which BD-J workers' relays use too. */
+  private discPort: { readonly port: MessagePort; readonly fetch: typeof fetch } | null = null;
   /** Fresh NAS tokens for the open (or opening) disc's reads, asked of the controller. */
   private tokens: TokenRelay | null = null;
   /** The opening (then open) disc's NAS source, which takes token refreshes. */
   private remote: RemoteSource | null = null;
+  /** The NAS disc's on-disk read-ahead cache, opening (null: it has none). */
+  private cache: Promise<ReadAheadCache | null> | null = null;
+  /** The read-ahead cache's fill in progress. */
+  private filling: CacheFill | null = null;
+  private lastFillKickMs = Number.NEGATIVE_INFINITY;
+  /**
+   * The last bufferFirst open sent (queued or running): cancelBuffer lets it open at once, a close or another open drops
+   * it unopened. Set when the command arrives, so commands sent after it see it before it runs.
+   */
+  private openHold: OpenHold | null = null;
+  private readonly holds = new WeakMap<EngineCommand, OpenHold>();
   private bdj: BdjTitle | null = null;
   /** Taps on a BD-J menu that brought no reaction (telemetry). */
   private bdjTapsIgnored = 0;
@@ -401,12 +457,55 @@ export class Player {
     });
   }
 
+  /**
+   * Once, at the engine worker's start: says whether this device can keep a read-ahead cache (readAheadCache), and
+   * clears the caches over 24 hours old.
+   */
+  async startReadAheadCache(): Promise<void> {
+    const root = this.deps.readAheadCacheRoot;
+    let available = false;
+    if (root) {
+      try {
+        await root();
+        available = true;
+        await ReadAheadCache.clearExpired(root, (this.deps.epochMs ?? Date.now)());
+      } catch {
+        // no OPFS here (a private window): NAS discs read only the network
+      }
+    }
+    this.deps.emit({ type: 'readAheadCache', available });
+  }
+
   /** Commands run strictly one at a time, in arrival order. */
   handle(cmd: EngineCommand): Promise<void> {
     // a read waiting for a fresh token holds up the queue, so the token cannot wait in it
     if (cmd.type === 'remoteToken') {
       this.remoteToken(cmd.token);
       return Promise.resolve();
+    }
+    // a bufferFirst open waits for its fill: cancelling can't wait in the queue behind it
+    if (cmd.type === 'cancelBuffer') {
+      const hold = this.openHold;
+      if (hold) {
+        // play now, with pauses: the disc opens at once and its fill goes on ahead of playback
+        hold.cancelled = true;
+        hold.release();
+      } else {
+        this.stopFill();
+      }
+      return Promise.resolve();
+    }
+    // a disc buffering before it opens (or queued to) is dropped unopened by what comes after it
+    if ((cmd.type === 'open' || cmd.type === 'close') && this.openHold) {
+      this.openHold.abandoned = true;
+      this.openHold.release();
+      this.openHold = null;
+      this.stopFill();
+    }
+    if (cmd.type === 'open' && cmd.bufferFirst) {
+      const hold = openHold();
+      this.holds.set(cmd, hold);
+      this.openHold = hold;
     }
     this.queue = this.queue.then(() => this.run(cmd));
     return this.queue;
@@ -416,10 +515,14 @@ export class Player {
     try {
       switch (cmd.type) {
         case 'open':
-          await this.open(cmd.disc);
+          await this.open(cmd.disc, cmd.bufferFirst, this.holds.get(cmd) ?? null);
           break;
         case 'remoteToken':
+        case 'cancelBuffer':
           break; // handled at once
+        case 'bufferAhead':
+          await this.fill(cmd, false);
+          break;
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
           if (this.shaderStage) this.compositor.setShaderStage?.(this.shaderStage);
@@ -525,6 +628,7 @@ export class Player {
 
   /** One render tick (requestAnimationFrame in the worker; called directly by tests). */
   tick(): void {
+    this.kickFill(false);
     this.navigator?.tick(this.clock.nowUs());
     if (this.bdj) {
       this.bdj.status.setTime45(this.titleTime45());
@@ -656,7 +760,21 @@ export class Player {
     this.deps.requestFrame(loop);
   }
 
-  private async open(spec: DiscSpec): Promise<void> {
+  private async open(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null): Promise<void> {
+    try {
+      if (hold?.abandoned) {
+        // dropped while queued: the disc that was open stays as it was until the command that dropped it
+        if (spec.kind === 'remote') spec.fetchPort?.close();
+        if (spec.kind === 'remote' && spec.fetchPort) this.deps.emit({ type: 'fetchPortClosed' });
+        return;
+      }
+      await this.openDisc(spec, bufferFirst, hold);
+    } finally {
+      if (this.openHold === hold) this.openHold = null;
+    }
+  }
+
+  private async openDisc(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
     this.bdjLatency = new InputLatency();
@@ -669,7 +787,8 @@ export class Player {
     this.setState('loading');
     const source = this.createSource(spec);
     // spec §4.7: the class library loads, and a BD-J First Play's worker boots, while the disc opens
-    const early = this.bdjSupported ? await this.startEarlyBdj(source) : null;
+    // (not while it buffers first: the disc's First Play waits for that)
+    const early = this.bdjSupported && !bufferFirst ? await this.startEarlyBdj(source) : null;
     let disc: DiscModel;
     try {
       disc = await openDisc(source);
@@ -680,6 +799,18 @@ export class Player {
     }
     this.source = source;
     this.disc = disc;
+    if (bufferFirst && hold && !hold.abandoned) {
+      // the fill goes on ahead of playback for as long as the disc is open; the open waits for its target
+      const fill = await this.fill(bufferFirst, true);
+      if (fill && !hold.cancelled) await Promise.race([fill.reached, hold.released]);
+    }
+    if (hold?.abandoned) {
+      // a close or another open came while it filled: the disc is dropped without being opened
+      this.dropRemote();
+      this.source = null;
+      this.disc = null;
+      return;
+    }
     this.soundsPlayed = 0;
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
@@ -705,10 +836,15 @@ export class Player {
 
   /** The disc's bytes; a NAS disc's waits show a notice, and its 401s ask the controller for a fresh token. */
   private createSource(spec: DiscSpec): FileSource | RemoteSource {
+    if (spec.kind === 'remote' && spec.fetchPort) {
+      const { fetchPort, ...rest } = spec;
+      this.discPort = { port: fetchPort, fetch: portFetch(fetchPort) };
+      spec = rest;
+    }
     this.discSpec = spec;
     const tokens = new TokenRelay(() => this.deps.emit({ type: 'remoteTokenNeeded' }), this.deps.setTimer ?? defaultSetTimer);
     const source: FileSource | RemoteSource = createByteSource(spec, {
-      fetch: this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
+      fetch: this.discPort?.fetch ?? this.deps.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init)),
       readAheadBytes: this.deps.remoteLimits?.readAheadBytes ?? this.memory.remoteReadAheadBytes,
       ...(this.deps.remoteLimits?.chunkBytes ? { chunkBytes: this.deps.remoteLimits.chunkBytes } : {}),
       onWaiting: (waiting) => {
@@ -721,8 +857,125 @@ export class Player {
     if (source instanceof RemoteSource) {
       this.remote = source;
       this.tokens = tokens;
+      if (spec.kind === 'remote') this.cache = this.openCache(source, spec.manifest);
+    } else if (this.deps.readAheadCacheRoot) {
+      void ReadAheadCache.clearAll(this.deps.readAheadCacheRoot).catch(() => undefined); // another disc opened
     }
     return source;
+  }
+
+  /**
+   * The disc's on-disk read-ahead cache, which the source reads before the network; other discs' caches, and this
+   * one's when over 24 hours old, are cleared first. Null when there is no cache root or it fails (no OPFS, a private
+   * window): the disc then reads only the network.
+   */
+  private async openCache(source: RemoteSource, manifest: DiscManifest): Promise<ReadAheadCache | null> {
+    const root = this.deps.readAheadCacheRoot;
+    if (!root) return null;
+    const sizes = new Map(manifest.files.map((f) => [f.path.toUpperCase(), f.size]));
+    try {
+      const cache = await ReadAheadCache.open(manifest.discId, {
+        root,
+        now: this.deps.epochMs ?? Date.now,
+        fileSize: (path) => sizes.get(path.toUpperCase()),
+        ...(this.deps.readAheadSegmentBytes ? { segmentBytes: this.deps.readAheadSegmentBytes } : {}),
+      });
+      await cache.clearOthers();
+      if (this.remote !== source) {
+        cache.close(); // the disc closed meanwhile
+        return null;
+      }
+      source.setCache(cache);
+      return cache;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Starts filling the read-ahead cache with the request's playlist (the main title's without one), in playback order
+   * from `fromSeconds`, reporting bufferProgress. Without `follow` it stops once `targetBytes` are held; with it (a
+   * bufferFirst open) it goes on ahead of the play position to the end of the playlist, freeing what playback has
+   * passed, until the disc closes. One fill runs at a time: a new one replaces it. Resolves with the fill, or null when
+   * there is none (no NAS disc, or no cache: then bufferProgress says 'no-cache').
+   */
+  private async fill(req: BufferRequest, follow: boolean): Promise<CacheFill | null> {
+    this.stopFill();
+    const remote = this.remote;
+    const disc = this.disc;
+    if (!remote || !disc) return null;
+    const noCache = (): null => {
+      this.deps.emit({ type: 'bufferProgress', bytes: 0, targetBytes: req.targetBytes, mbps: 0, stopped: 'no-cache' });
+      return null;
+    };
+    const cache = await this.cache;
+    if (!cache || this.remote !== remote) return this.remote === remote ? noCache() : null;
+    const playlistId = req.playlistId !== undefined && disc.playlists.has(req.playlistId) ? req.playlistId : disc.summaries[0]?.id;
+    const mpls = playlistId === undefined ? undefined : disc.playlists.get(playlistId);
+    if (!mpls) return null;
+    let clips = disc.clips;
+    const missing = [...new Set(mpls.playItems.map((p) => p.clipId))].filter((id) => !clips.has(id));
+    try {
+      if (missing.length > 0) clips = new Map([...clips, ...(await loadClips(remote, missing))]);
+    } catch {
+      this.deps.emit({ type: 'bufferProgress', bytes: 0, targetBytes: req.targetBytes, mbps: 0, stopped: 'failed' });
+      return null;
+    }
+    if (this.remote !== remote) return null;
+    // Following playback: from the play position while this playlist plays; while another one plays the fill idles
+    // (null), and with none playing it keeps the last position (the request's start before playback).
+    let lastUs = Math.max(0, req.fromSeconds) * 1e6;
+    const position = (): number | null => {
+      const s = this.session;
+      if (!follow || !s) return lastUs;
+      if (s.playlistId !== playlistId) return null;
+      lastUs = this.clock.nowUs();
+      return lastUs;
+    };
+    const segmentBytes = this.deps.readAheadSegmentBytes ?? SEGMENT_BYTES;
+    const fill = new CacheFill({
+      remote,
+      cache,
+      ranges: () => {
+        const at = position();
+        return at === null ? null : bufferRanges(mpls, clips, (path) => remote.size(path), at, remote.chunkBytes);
+      },
+      follow,
+      targetBytes: req.targetBytes,
+      leadCapBytes: req.targetBytes + segmentBytes,
+      segmentBytes,
+      progress: (p) => {
+        if (this.filling === fill) this.deps.emit({ type: 'bufferProgress', ...p });
+      },
+      nowMs: () => this.deps.nowMs(),
+      setTimer: this.deps.setTimer ?? defaultSetTimer,
+      // a flap (nas-lost, a 5xx, a full disk that eviction may free) is retried; these are not
+      permanent: (err) => err instanceof RemoteDiscError && (err.reason === 'disc-changed' || err.reason === 'nas-unpaired'),
+    });
+    this.filling = fill;
+    remote.setWriteThrough(follow ? (path, offset, bytes) => fill.keep(path, offset, bytes) : null);
+    void fill.run().finally(() => {
+      if (this.filling !== fill) return;
+      this.filling = null;
+      remote.setWriteThrough(null);
+    });
+    return fill;
+  }
+
+  /** Stops the fill; what the cache holds stays. */
+  private stopFill(): void {
+    this.filling?.stop();
+    this.filling = null;
+    this.remote?.setWriteThrough(null);
+  }
+
+  /** The play position moved: a following fill looks again (now, or at most every FILL_KICK_MS while playing). */
+  private kickFill(force: boolean): void {
+    if (!this.filling) return;
+    const now = this.deps.nowMs();
+    if (!force && now - this.lastFillKickMs < FILL_KICK_MS) return;
+    this.lastFillKickMs = now;
+    this.filling.kick();
   }
 
   /** A fresh NAS token: for the reads waiting on one, the open disc's source and its BD-J worker, and later BD-J boots. */
@@ -737,10 +990,39 @@ export class Player {
 
   /** Forgets the NAS disc: its fetches stop and its read-ahead is freed. */
   private dropRemote(): void {
+    this.stopFill();
     this.remote?.close();
     this.remote = null;
+    void this.cache?.then((cache) => cache?.close());
+    this.cache = null;
     this.tokens = null;
     this.discSpec = { kind: 'files', entries: [] };
+    if (this.discPort) {
+      this.discPort.port.close();
+      this.discPort = null;
+      this.deps.emit({ type: 'fetchPortClosed' });
+    }
+  }
+
+  /** How a new BD-J worker reads the disc: on the port route, through a fetch port relayed to the engine's own. */
+  private bdjDisc(): BdjDisc {
+    const route = this.discPort;
+    if (!route) return { port: null, stop: () => undefined };
+    const { port1, port2 } = new MessageChannel();
+    const stopServing = serveFetch(port1, route.fetch);
+    return {
+      port: port2,
+      stop: () => {
+        stopServing();
+        port1.close();
+      },
+    };
+  }
+
+  /** The disc in a BD-J worker's boot message: the open disc with its latest token, and the worker's fetch port. */
+  private bootDisc(disc: BdjDisc): DiscSpec {
+    const spec = this.discSpec;
+    return spec.kind === 'remote' && disc.port ? { ...spec, fetchPort: disc.port } : spec;
   }
 
   private get bdjSupported(): boolean {
@@ -795,6 +1077,7 @@ export class Player {
       regs: this.newProgramRegs(index, true),
       status: new StatusBlockWriter(createStatusBlock()),
       plane: new GraphicsPlaneReader(createGraphicsPlane()),
+      disc: this.bdjDisc(),
     };
     this.applyBdjSettings(early.regs);
     this.earlyBdj = early;
@@ -808,7 +1091,7 @@ export class Player {
           registers: early.regs.shared!,
           status: early.status.buffer,
           plane: early.plane.buffer,
-          disc: this.discSpec,
+          disc: this.bootDisc(early.disc),
           readAheadBytes: this.memory.bdjRemoteReadAheadBytes,
           discId: bdid?.discId ?? null,
           classLibrary,
@@ -843,6 +1126,7 @@ export class Player {
   /** Terminates an early BD-J worker no title adopted. */
   private dropEarlyBdj(): void {
     this.earlyBdj?.worker.terminate();
+    this.earlyBdj?.disc.stop();
     this.earlyBdj = null;
   }
 
@@ -867,6 +1151,8 @@ export class Player {
     if (!early) this.applyBdjSettings(programRegs); // an early worker's registers have them already
     const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
     const plane = early?.plane ?? new GraphicsPlaneReader(createGraphicsPlane());
+    // an early worker's boot (sent or still to come) and the session's carry the same disc: only one reaches the worker
+    const bdjDisc = early?.disc ?? this.bdjDisc();
     let entry: BdjTitle | null = null;
     let ended = false;
     const live = (): boolean => !ended;
@@ -931,7 +1217,7 @@ export class Player {
         if (notice) this.notice('bdj-tap-ignored', BDJ_TAP_IGNORED_MESSAGE);
       },
     });
-    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, taps, memory: null };
+    entry = { session, host, events, regs: programRegs, status, plane, end: () => void (ended = true), pendingTitle: null, booted: false, menuVisible: false, disc: bdjDisc, taps, memory: null };
     this.bdjStartup ??= { bootMs: null, firstPlaylistMs: null, firstFrameMs: null };
     this.bdj = entry;
     this.bindPg(programRegs);
@@ -950,7 +1236,7 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
-    await entry.session.boot(this.discSpec, this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
+    await entry.session.boot(this.bootDisc(entry.disc), this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
     if (this.bdjStartup && this.bdjStartup.bootMs === null) this.bdjStartup.bootMs = this.sinceOpenMs();
@@ -1012,6 +1298,7 @@ export class Player {
     this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
     entry.session.stop();
+    entry.disc.stop();
     // the menu goes at once (Review Focus 2): nothing of the plane or the background still is drawn again
     this.background.clear();
     this.backgroundDirty = false; // repainted here
@@ -2030,6 +2317,7 @@ export class Player {
     s.pipeline.setAudioStream(s.audioActive ? s.audioStream : null);
     s.pipeline.setIgStream(this.igStreamNumber());
     s.pipeline.start(t);
+    this.kickFill(true); // a seek outside what the cache holds restarts the fill there
   }
 
   private async play(): Promise<void> {

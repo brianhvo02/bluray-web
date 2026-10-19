@@ -2,13 +2,18 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appHandlers } from './app';
 import { Auth } from './auth';
-import { ownerCode } from './cli';
-import type { CodeRegistrar } from './codes';
+import { BdjStore } from './bdj-store';
+import { ownerCode, printNasId } from './cli';
 import { loadConfig } from './config';
 import type { Config } from './config';
 import { createServer } from './http';
+import type { Handler } from './http';
 import { Library, nextNightly } from './library';
 import { RendezvousClient } from './rendezvous-client';
+import { RtcPeers } from './rtc/peer';
+import { RelayState, turnResponder } from './rtc/relay';
+import { AddressAdvertiser } from './rtc/public-address';
+import { SignallingClient } from './rtc/signalling-client';
 import { trustedProxy } from './routes/pair';
 import { Store } from './store';
 import { createAniList } from './titles/anilist';
@@ -20,6 +25,7 @@ import type { Entry, MetadataSource } from './titles/sources';
 import { createTmdb } from './titles/tmdb';
 
 const SHUTDOWN_GRACE_MS = 3_000;
+const STUN_URL = 'stun:stun.cloudflare.com:3478';
 const DEFAULT_DISCDB_INDEX = '/app/data/discdb-index.json';
 
 /** AniList and TMDB, or the recorded entries of `METADATA_FIXTURE` in E2E tests (ruling R3). */
@@ -35,9 +41,44 @@ function metadataSources(config: Config): { anilist: MetadataSource; tmdb: Metad
 }
 
 /** The rendezvous client when `RENDEZVOUS_URL` is set; its key lives next to the auth data. */
-function rendezvousRegistrar(config: Config): CodeRegistrar | undefined {
+function rendezvousRegistrar(config: Config): RendezvousClient | undefined {
   if (config.rendezvousUrl === undefined) return undefined;
-  return new RendezvousClient(config.rendezvousUrl, join(config.dataDir, 'rendezvous-key.json'));
+  return new RendezvousClient(config.rendezvousUrl, rendezvousKeyFile(config));
+}
+
+/** The NAS's rendezvous key, next to the auth data. */
+function rendezvousKeyFile(config: Config): string {
+  return join(config.dataDir, 'rendezvous-key.json');
+}
+
+/**
+ * The WebRTC route: peers on UDP `RTC_PORT` advertising the public IPv4 (STUN at start, then hourly) and
+ * `RTC_LAN_ADDRESS`, and the signalling socket to the rendezvous Worker. Gives the function that stops it all.
+ */
+function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousClient, handlers: readonly Handler[], auth: Auth, relay: RelayState): () => Promise<void> {
+  // A changed public address likely means the signalling socket's path died with the old one.
+  const advertiser = new AddressAdvertiser({ stun: STUN_URL, lan: config.rtc.lanAddress, fixed: config.rtc.advertise, onChange: () => signalling.reconnect() });
+  // STUN only: the NAS's own peer never uses the relay (see `stunOnly`); devices get TURN through `turn-request`.
+  const peers = new RtcPeers({
+    handlers, auth, port: config.rtc.port, advertise: () => advertiser.advertise(), iceServers: async () => [{ urls: STUN_URL }], now: Date.now,
+    onRelayedBytes: (bytes) => relay.addBytes(bytes),
+  });
+  peers.listen().then(
+    () => console.log(`WebRTC on UDP ${config.rtc.port}`),
+    (err: unknown) => console.error(`WebRTC: UDP ${config.rtc.port} could not be bound`, err),
+  );
+  const onTurnRequest = turnResponder({
+    relay, auth, credentials: () => rendezvous.turnServers(), now: Date.now,
+    onServers: (sid, ips) => peers.noteTurnServers(sid, ips),
+  });
+  const signalling = new SignallingClient({ url: rendezvousUrl, signer: rendezvous, peers, onTurnRequest });
+  signalling.start();
+  void advertiser.start();
+  return async () => {
+    signalling.stop();
+    advertiser.stop();
+    await peers.closeAll();
+  };
 }
 
 async function serve(config: Config): Promise<void> {
@@ -56,7 +97,13 @@ async function serve(config: Config): Promise<void> {
     titleLibrary: config.titleLibrary,
   });
   library.onScanned(() => void titles.runNow());
-  const server = createServer(appHandlers({ auth, library, publicBase: config.publicBase, registrar: rendezvousRegistrar(config), trustProxy, titles: { service: titles, owner } }));
+  const rendezvous = rendezvousRegistrar(config);
+  const relay = new RelayState(config.dataDir, Date.now);
+  // the key's thumbprint, read (or made) locally: `me` gives it to pairings made before the WebRTC route
+  const nasId = rendezvous ? await rendezvous.localNasId() : null;
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId });
+  const server = createServer(handlers);
+  const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 
   const scheduleScans = (): void => {
     const run = (): void => {
@@ -80,6 +127,7 @@ async function serve(config: Config): Promise<void> {
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => {
       titles.close();
+      void stopRtc();
       server.close(() => process.exit(0));
       // Long disc streams would otherwise hold shutdown until Docker's SIGKILL.
       setTimeout(() => server.closeAllConnections(), SHUTDOWN_GRACE_MS).unref();
@@ -87,14 +135,24 @@ async function serve(config: Config): Promise<void> {
   }
 }
 
+/** `owner-code`'s arguments: nothing, or `--person <name>`; null for anything else. */
+function ownerCodeArgs(args: readonly string[]): { person?: string } | null {
+  if (args.length === 0) return {};
+  if (args.length === 2 && args[0] === '--person' && args[1]!.trim() !== '') return { person: args[1]! };
+  return null;
+}
+
 const config = loadConfig(process.env);
 const command = process.argv[2];
+const ownerArgs = command === 'owner-code' ? ownerCodeArgs(process.argv.slice(3)) : null;
 if (command === undefined) {
   await serve(config);
-} else if (command === 'owner-code') {
+} else if (ownerArgs !== null) {
   const registrar = rendezvousRegistrar(config);
-  await ownerCode(config.dataDir, Date.now, console.log, registrar && { registrar, publicBase: config.publicBase });
+  await ownerCode(config.dataDir, Date.now, console.log, registrar && { registrar, publicBase: config.publicBase }, ownerArgs.person);
+} else if (command === 'nas-id' && process.argv.length === 3) {
+  await printNasId(rendezvousKeyFile(config));
 } else {
-  console.error(`unknown command "${command}"; usage: node server.mjs [owner-code]`);
+  console.error(`unknown command "${process.argv.slice(2).join(' ')}"; usage: node server.mjs [owner-code [--person <name>] | nas-id]`);
   process.exit(2);
 }

@@ -1,5 +1,5 @@
 import type { CodeLookup, CodeRoutes, EcPublicJwk } from '../../src/engine/disc/nas-api';
-import { ECDSA_KEY, ECDSA_SIGN, MAX_CODE_AHEAD_MS, codeHashOf, fromBase64url, nasIdOf, signedMessage } from './protocol';
+import { ECDSA_KEY, ECDSA_SIGN, MAX_CODE_AHEAD_MS, codeHashOf, fromBase64url, isNasId, nasIdOf, signedMessage, unregisterMessage } from './protocol';
 
 /** The part of a Durable Object's storage API the registry uses (the KV-style API, on SQLite-backed storage). */
 export interface RegistryStorage {
@@ -38,21 +38,45 @@ const LIMITS = {
   lookup: { max: 10, windowMs: MINUTE },
   nas: { max: 5, windowMs: HOUR },
   codes: { max: 30, windowMs: HOUR },
+  unregister: { max: 60, windowMs: HOUR },
+  /** Signalling WebSocket attempts, NAS and device sockets alike, counted here for every NAS id at once. */
+  signal: { max: 10, windowMs: MINUTE },
+  /** TURN credentials minted for one NAS (`POST /turn`), after its signature checked. */
+  turn: { max: 30, windowMs: HOUR },
+  /** TURN credentials minted for every NAS at once, a cap on what the Worker's key can cost. */
+  turnDay: { max: 500, windowMs: DAY },
 } as const;
 type Route = keyof typeof LIMITS;
-const ROUTES: Readonly<Record<string, Route>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
+const ROUTES: Readonly<Record<string, Exclude<Route, 'unregister' | 'signal' | 'turn' | 'turnDay'>>> = { '/nas': 'nas', '/codes': 'codes', '/codes/lookup': 'lookup' };
 
 /** Failed lookups allowed per hour across all clients; successful ones need a valid 60-bit code and don't count. */
 const FAILED_LOOKUPS_PER_HOUR = 1_000;
-const CODES_PER_NAS = 5;
+/** Room for a few 3-day invites beside the 10-minute codes; codes the NAS unregisters free their place at once. */
+const CODES_PER_NAS = 20;
 const NAS_TTL_MS = 90 * DAY;
 const MAX_ROUTE_LENGTH = 512;
 const ALARM_PAGE = 500;
+
+/** The one registry instance's name (`idFromName`). */
+export const REGISTRY_NAME = 'registry';
+
+/**
+ * Paths only the Worker's own objects call (the Worker in `index.ts` never routes them from outside): the
+ * Signalling object reads a NAS's key and marks a NAS seen when its socket authenticates, and the Worker counts a
+ * client's signalling attempts and a NAS's TURN credentials.
+ */
+export const INTERNAL = {
+  nasKey: '/internal/nas-key',
+  nasTouch: '/internal/nas-touch',
+  signalAttempt: '/internal/signal-attempt',
+  turnAttempt: '/internal/turn-attempt',
+} as const;
 
 /** Storage keys: NAS public keys, codes by hash (never the code), and the rate-limit logs. */
 const nasKey = (nasId: string): string => `nas:${nasId}`;
 const codeKey = (codeHash: string): string => `code:${codeHash}`;
 const rateKey = (route: Route, client: string): string => `rate:${route}:${client}`;
+const TURN_DAY_KEY = rateKey('turnDay', 'all');
 const FAILED_KEY = 'global:failed-lookups';
 
 export function json(status: number, body: unknown): Response {
@@ -118,13 +142,24 @@ export class CodeRegistry {
   }
 
   async fetch(request: Request): Promise<Response> {
-    const route = ROUTES[new URL(request.url).pathname];
-    if (route === undefined) return json(404, { error: 'not found' });
-    if (request.method !== 'POST') return json(405, { error: 'method not allowed' });
+    const url = new URL(request.url);
+    if (url.pathname === INTERNAL.nasKey) return this.nasKeyOf(url.searchParams.get('nasId'));
+    if (url.pathname === INTERNAL.nasTouch) return this.touchNas(url.searchParams.get('nasId'));
+    if (url.pathname === INTERNAL.signalAttempt) {
+      const allowed = await this.allow(rateKey('signal', clientBucket(request.headers.get('CF-Connecting-IP'))), LIMITS.signal);
+      return allowed ? new Response(null, { status: 204 }) : json(429, { error: 'too many requests' });
+    }
+    if (url.pathname === INTERNAL.turnAttempt) return this.turnAttempt(url.searchParams.get('nasId'));
+    const path = ROUTES[url.pathname];
+    if (path === undefined) return json(404, { error: 'not found' });
+    const route: Route = path === 'codes' && request.method === 'DELETE' ? 'unregister' : path;
+    if (request.method !== 'POST' && route !== 'unregister') return json(405, { error: 'method not allowed' });
     const client = clientBucket(request.headers.get('CF-Connecting-IP'));
     if (!(await this.allow(rateKey(route, client), LIMITS[route]))) return json(429, { error: 'too many requests' });
     const body = await readJson(request);
     switch (route) {
+      case 'unregister':
+        return this.unregisterCode(body);
       case 'nas':
         return this.registerNas(body);
       case 'codes':
@@ -162,6 +197,48 @@ export class CodeRegistry {
       }
       if (page.size < ALARM_PAGE) return next;
     }
+  }
+
+  /** Internal `GET /internal/nas-key?nasId=` → `{ publicKeyJwk }` of a live NAS, or 404. */
+  private async nasKeyOf(nasId: string | null): Promise<Response> {
+    if (!isNasId(nasId)) return json(404, { error: 'unknown nas' });
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, this.now())) return json(404, { error: 'unknown nas' });
+    return json(200, { publicKeyJwk: nas.publicKeyJwk });
+  }
+
+  /**
+   * Internal `POST /internal/nas-touch?nasId=` → 204: a live NAS's signalling socket authenticated, so the NAS
+   * counts as seen; a NAS that only signals (no new codes) then stays registered. 404 for an unknown or expired NAS.
+   */
+  private async touchNas(nasId: string | null): Promise<Response> {
+    if (!isNasId(nasId)) return json(404, { error: 'unknown nas' });
+    const now = this.now();
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, now)) return json(404, { error: 'unknown nas' });
+    await this.storage.put<NasRecord>(nasKey(nasId), { ...nas, lastSeen: now });
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Internal `POST /internal/turn-attempt?nasId=` → 204 and counts one minting, or 429 `{ error, scope }` when the
+   * NAS's hourly limit (`scope: 'nas'`) or every NAS's daily cap (`scope: 'global'`) is reached; a refused try
+   * counts against neither.
+   */
+  private async turnAttempt(nasId: string | null): Promise<Response> {
+    if (!isNasId(nasId)) return json(400, { error: 'bad request' });
+    const now = this.now();
+    const recent = async (key: string, limit: { windowMs: number }): Promise<number[]> =>
+      ((await this.storage.get<number[]>(key)) ?? []).filter((t) => t > now - limit.windowMs);
+    const nasKeyName = rateKey('turn', nasId);
+    const mine = await recent(nasKeyName, LIMITS.turn);
+    if (mine.length >= LIMITS.turn.max) return json(429, { error: 'turn-rate-limited', scope: 'nas' });
+    const all = await recent(TURN_DAY_KEY, LIMITS.turnDay);
+    if (all.length >= LIMITS.turnDay.max) return json(429, { error: 'turn-rate-limited', scope: 'global' });
+    await this.storage.put(nasKeyName, [...mine, now]);
+    await this.storage.put(TURN_DAY_KEY, [...all, now]);
+    await this.armAlarm(now + LIMITS.turn.windowMs);
+    return new Response(null, { status: 204 });
   }
 
   /** `POST /nas { publicKeyJwk }` → `{ nasId }`; the id is the key's thumbprint, so this is idempotent. */
@@ -231,6 +308,36 @@ export class CodeRegistry {
   }
 
   /**
+   * `DELETE /codes { nasId, codeHash, signature }` → 204, signed by the NAS's key over `unregisterMessage`. Idempotent;
+   * it removes the code only when that NAS registered it, and answers the same either way.
+   */
+  private async unregisterCode(body: unknown): Promise<Response> {
+    if (!isObject(body)) return json(400, { error: 'bad request' });
+    const { nasId, codeHash, signature } = body;
+    if (typeof nasId !== 'string' || !BASE64URL_32_BYTES.test(nasId) || typeof codeHash !== 'string' || !/^[0-9a-f]{64}$/.test(codeHash) || typeof signature !== 'string') {
+      return json(400, { error: 'bad request' });
+    }
+    const known = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(known, this.now())) return json(401, { error: 'unknown nas' });
+    const key = await crypto.subtle.importKey('jwk', known.publicKeyJwk, ECDSA_KEY, false, ['verify']);
+    const sig = fromBase64url(signature);
+    if (sig === null || sig.length !== 64 || !(await crypto.subtle.verify(ECDSA_SIGN, key, sig, unregisterMessage({ nasId, codeHash })))) {
+      return json(401, { error: 'bad signature' });
+    }
+
+    // Storage operations only from here on, so no other request interleaves with this update.
+    const nas = await this.storage.get<NasRecord>(nasKey(nasId));
+    if (!live(nas, this.now())) return json(401, { error: 'unknown nas' });
+    const existing = await this.storage.get<CodeRecord>(codeKey(codeHash));
+    if (existing?.nasId === nasId) await this.storage.delete(codeKey(codeHash));
+    if (codeHash in nas.codes) {
+      const { [codeHash]: _gone, ...codes } = nas.codes;
+      await this.storage.put<NasRecord>(nasKey(nasId), { ...nas, codes });
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  /**
    * `POST /codes/lookup { code }` → `{ nasId, routes }`; never anything for an unknown or expired code.
    * Failed lookups share an hourly budget: once it is spent they answer 429, while valid codes still resolve.
    */
@@ -240,7 +347,8 @@ export class CodeRegistry {
     const hash = await codeHashOf(body.code);
     const record = hash === null ? undefined : await this.storage.get<CodeRecord>(codeKey(hash));
     if (record && record.expiresAt > now) {
-      const answer: CodeLookup = { nasId: record.nasId, routes: record.routes };
+      // Every registered NAS keeps a signalling socket, so every code can be reached over WebRTC.
+      const answer: CodeLookup = { nasId: record.nasId, routes: { ...record.routes, webrtc: { nasId: record.nasId } } };
       return json(200, answer);
     }
     if (!(await this.allow(FAILED_KEY, { max: FAILED_LOOKUPS_PER_HOUR, windowMs: HOUR }))) return json(429, { error: 'too many lookups' });

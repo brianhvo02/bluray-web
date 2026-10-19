@@ -8,6 +8,14 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** `lockFile` waited its 5 s and another holder still has the lock. */
+export class LockHeldError extends Error {
+  constructor(path: string) {
+    super(`${path} is held`);
+    this.name = 'LockHeldError';
+  }
+}
+
 export function isCode(err: unknown, code: string): boolean {
   return (err as NodeJS.ErrnoException | null)?.code === code;
 }
@@ -66,7 +74,7 @@ export function lockFile(file: string): () => void {
     } catch (err) {
       if (!isCode(err, 'ENOENT')) throw err;
     }
-    if (Date.now() > deadline) throw new Error(`${path} is held`);
+    if (Date.now() > deadline) throw new LockHeldError(path);
     sleepSync(10);
   }
 }

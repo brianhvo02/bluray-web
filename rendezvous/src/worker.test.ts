@@ -4,7 +4,7 @@ import worker from './index';
 import type { Env } from './index';
 import { fireAlarm, memoryState } from './memory-state';
 import type { MemoryStorage } from './memory-state';
-import { base64url, codeHashOf, signedMessage } from './protocol';
+import { base64url, codeHashOf, signedMessage, unregisterMessage } from './protocol';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -18,6 +18,8 @@ let clock: number;
 let storage: MemoryStorage;
 let registry: CodeRegistry;
 let env: Env;
+/** The requests the Worker passed to the Signalling Durable Object, with the name of the instance. */
+let signalled: { name: string; request: Request }[];
 
 beforeEach(() => {
   clock = 1_800_000_000_000;
@@ -29,7 +31,17 @@ beforeEach(() => {
       idFromName: (name: string) => ({ name }),
       get: () => ({ fetch: (request: Request) => registry.fetch(request) }),
     },
+    SIGNALLING: {
+      idFromName: (name: string) => ({ name }),
+      get: (id: object) => ({
+        fetch: async (request: Request) => {
+          signalled.push({ name: (id as { name: string }).name, request });
+          return new Response(null, { status: 200, headers: { 'X-Signalling': '1' } });
+        },
+      }),
+    },
   };
+  signalled = [];
 });
 
 /** A distinct code hash per number. */
@@ -76,6 +88,18 @@ async function registerCode(keys: CryptoKeyPair, nasId: string, expiresAt = cloc
   return call('/codes', await signedCode(keys, { nasId, codeHash, routes: ROUTES, expiresAt }));
 }
 
+async function unregisterCode(keys: CryptoKeyPair, nasId: string, codeHash = CODE_HASH): Promise<Response> {
+  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, unregisterMessage({ nasId, codeHash }));
+  return callDelete({ nasId, codeHash, signature: base64url(new Uint8Array(signature)) });
+}
+
+function callDelete(body: unknown): Promise<Response> {
+  return worker.fetch(
+    new Request('https://rendezvous.example/codes', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    env,
+  );
+}
+
 describe('protocol', () => {
   it('hashes a code as hex SHA-256 of its normalized form (shared test vector)', async () => {
     expect(await codeHashOf('k7qm-4xp2-r9td')).toBe(CODE_HASH);
@@ -92,7 +116,7 @@ describe('rendezvous', () => {
 
     const res = await lookup('k7qm-4xp2-r9td');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ nasId, routes: ROUTES });
+    expect(await res.json()).toEqual({ nasId, routes: { ...ROUTES, webrtc: { nasId } } });
     // A lookup doesn't consume the code; the NAS's redeem does.
     expect((await lookup(CODE)).status).toBe(200);
   });
@@ -117,12 +141,15 @@ describe('rendezvous', () => {
     expect((await registerCode(keys, 'A'.repeat(43))).status).toBe(401);
   });
 
-  it('rejects an expiry in the past or more than 15 minutes ahead, so a captured request cannot be replayed later', async () => {
+  it('rejects an expiry in the past or more than 3 days and 1 hour ahead, so a captured request cannot be replayed later', async () => {
     const keys = await nasKey();
     const nasId = await registerNas(keys);
+    const DAY = 24 * 60 * MINUTE;
     expect((await registerCode(keys, nasId, clock - 1)).status).toBe(400);
-    expect((await registerCode(keys, nasId, clock + 15 * MINUTE + 1)).status).toBe(400);
-    expect((await registerCode(keys, nasId, clock + 15 * MINUTE)).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY + 120 * MINUTE)).status).toBe(400);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY + 60 * MINUTE + 1)).status).toBe(400);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY)).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY + 60 * MINUTE)).status).toBe(204);
   });
 
   it("won't let one NAS take over another NAS's code", async () => {
@@ -132,7 +159,7 @@ describe('rendezvous', () => {
     const nasB = await registerNas(b);
     expect((await registerCode(a, nasA)).status).toBe(204);
     expect((await registerCode(b, nasB)).status).toBe(409);
-    expect(await (await lookup(CODE)).json()).toEqual({ nasId: nasA, routes: ROUTES });
+    expect(await (await lookup(CODE)).json()).toEqual({ nasId: nasA, routes: { ...ROUTES, webrtc: { nasId: nasA } } });
   });
 
   it('answers 404 for an unknown code or an expired one, and the alarm deletes expired codes', async () => {
@@ -194,15 +221,58 @@ describe('rendezvous', () => {
     expect((await call('/codes', {})).status).toBe(400);
   });
 
-  it('allows at most 5 live codes per NAS', async () => {
+  it('allows at most 20 live codes per NAS', async () => {
     const keys = await nasKey();
     const nasId = await registerNas(keys);
-    for (let i = 0; i < 5; i++) expect((await registerCode(keys, nasId, clock + (5 + i) * MINUTE, hashOf(i))).status).toBe(204);
-    expect((await registerCode(keys, nasId, clock + 10 * MINUTE, hashOf(5))).status).toBe(429);
+    for (let i = 0; i < 20; i++) expect((await registerCode(keys, nasId, clock + (5 + i) * MINUTE, hashOf(i))).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 30 * MINUTE, hashOf(20))).status).toBe(429);
     // Registering a live code again is not a new one.
-    expect((await registerCode(keys, nasId, clock + 10 * MINUTE, hashOf(4))).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 10 * MINUTE, hashOf(19))).status).toBe(204);
     clock += 5 * MINUTE;
-    expect((await registerCode(keys, nasId, clock + 10 * MINUTE, hashOf(5))).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 10 * MINUTE, hashOf(20))).status).toBe(204);
+  });
+
+  it('frees a place under the cap when the NAS unregisters a code', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    for (let i = 0; i < 20; i++) expect((await registerCode(keys, nasId, clock + 3 * DAY, hashOf(i))).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY, hashOf(20))).status).toBe(429);
+    expect((await unregisterCode(keys, nasId, hashOf(3))).status).toBe(204);
+    expect((await registerCode(keys, nasId, clock + 3 * DAY, hashOf(20))).status).toBe(204);
+  });
+
+  it('unregisters a code signed by its NAS, idempotently', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    expect((await registerCode(keys, nasId)).status).toBe(204);
+    expect((await unregisterCode(keys, nasId)).status).toBe(204);
+    expect((await lookup(CODE)).status).toBe(404);
+    expect(keys_('code:')).toEqual([]);
+    expect((await unregisterCode(keys, nasId)).status).toBe(204);
+  });
+
+  it("won't let one NAS unregister another NAS's code", async () => {
+    const a = await nasKey();
+    const b = await nasKey();
+    const nasA = await registerNas(a);
+    const nasB = await registerNas(b);
+    expect((await registerCode(a, nasA)).status).toBe(204);
+    expect((await unregisterCode(b, nasB)).status).toBe(204);
+    expect((await lookup(CODE)).status).toBe(200);
+    // B's key over A's id: a bad signature
+    expect((await unregisterCode(b, nasA)).status).toBe(401);
+    expect((await lookup(CODE)).status).toBe(200);
+  });
+
+  it('refuses a registration signature replayed as an unregistration', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    const registration = await signedCode(keys, { nasId, codeHash: CODE_HASH, routes: ROUTES, expiresAt: clock + 10 * MINUTE });
+    expect((await call('/codes', registration)).status).toBe(204);
+    expect((await callDelete({ nasId, codeHash: CODE_HASH, signature: registration.signature })).status).toBe(401);
+    expect((await callDelete(registration)).status).toBe(401);
+    expect((await lookup(CODE)).status).toBe(200);
+    expect((await callDelete({ nasId, codeHash: 'x' })).status).toBe(400);
   });
 
   it('expires a NAS 90 days after its last code, each code refreshing it', async () => {
@@ -300,6 +370,59 @@ describe('rendezvous', () => {
     expect((await call('/elsewhere', {})).status).toBe(404);
     const get = await worker.fetch(new Request('https://rendezvous.example/codes/lookup'), env);
     expect(get.status).toBe(405);
+    expect(get.headers.get('Allow')).toBe('POST, OPTIONS');
+    const deleteLookup = await worker.fetch(new Request('https://rendezvous.example/codes/lookup', { method: 'DELETE' }), env);
+    expect(deleteLookup.status).toBe(405);
+    expect((await worker.fetch(new Request('https://rendezvous.example/codes', { method: 'PUT' }), env)).headers.get('Allow')).toBe('POST, DELETE, OPTIONS');
+  });
+});
+
+describe('signalling routes', () => {
+  const NAS_ID = 'N'.repeat(43);
+
+  function upgrade(path: string, ip = '203.0.113.7', headers: Record<string, string> = { Upgrade: 'websocket' }): Promise<Response> {
+    return worker.fetch(new Request(`https://rendezvous.example${path}`, { headers: { ...headers, 'CF-Connecting-IP': ip } }), env);
+  }
+
+  it('routes WebSocket upgrades on /signal/nas and /signal/device to the Signalling object of that NAS', async () => {
+    const nas = await upgrade(`/signal/nas?nasId=${NAS_ID}`);
+    expect(nas.headers.get('X-Signalling')).toBe('1');
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`, '203.0.113.8', { upgrade: 'WebSocket' })).headers.get('X-Signalling')).toBe('1');
+    expect(signalled.map((s) => [s.name, new URL(s.request.url).pathname])).toEqual([
+      [NAS_ID, '/signal/nas'],
+      [NAS_ID, '/signal/device'],
+    ]);
+  });
+
+  it('refuses a request that is not an upgrade with 426, and a malformed NAS id with 400', async () => {
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`, '203.0.113.7', {})).status).toBe(426);
+    expect((await upgrade('/signal/device?nasId=short')).status).toBe(400);
+    expect((await upgrade('/signal/device')).status).toBe(400);
+    expect((await upgrade(`/signal/device?nasId=${'*'.repeat(43)}`)).status).toBe(400);
+    const post = await worker.fetch(new Request(`https://rendezvous.example/signal/nas?nasId=${NAS_ID}`, { method: 'POST', headers: { Upgrade: 'websocket' } }), env);
+    expect(post.status).toBe(405);
+    expect(signalled).toEqual([]);
+  });
+
+  it('allows 10 connection attempts per minute per IP, across NAS ids and both roles', async () => {
+    for (let i = 0; i < 10; i++) expect((await upgrade(`/signal/${i % 2 ? 'nas' : 'device'}?nasId=${String(i).repeat(43)}`)).status).toBe(200);
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`)).status).toBe(429);
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`, '198.51.100.3')).status).toBe(200);
+    expect(signalled).toHaveLength(11);
+    clock += MINUTE;
+    expect((await upgrade(`/signal/device?nasId=${NAS_ID}`)).status).toBe(200);
+  });
+
+  it('never routes the registry\'s internal paths from outside', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    expect((await worker.fetch(new Request(`https://rendezvous.example/internal/nas-key?nasId=${nasId}`), env)).status).toBe(404);
+    expect((await call('/internal/signal-attempt', {})).status).toBe(404);
+    // The registry itself answers the key to the Signalling object.
+    const res = await registry.fetch(new Request(`https://registry.internal/internal/nas-key?nasId=${nasId}`));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { publicKeyJwk: { kty: string } }).publicKeyJwk.kty).toBe('EC');
+    expect((await registry.fetch(new Request(`https://registry.internal/internal/nas-key?nasId=${'Z'.repeat(43)}`))).status).toBe(404);
   });
 });
 

@@ -1,7 +1,8 @@
 import type { webcrypto } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ECDSA_KEY, ECDSA_SIGN, base64url, nasIdOf, signedMessage } from '../../rendezvous/src/protocol';
+import { ECDSA_KEY, ECDSA_SIGN, base64url, iceServersOf, nasIdOf, signedMessage, turnRequestMessage, unregisterMessage } from '../../rendezvous/src/protocol';
+import type { IceServerInfo } from '../../rendezvous/src/protocol';
 import type { EcPublicJwk } from '../../src/engine/disc/nas-api';
 import type { CodeRegistrar } from './codes';
 import { createOnce } from './store';
@@ -27,6 +28,7 @@ export class RendezvousClient implements CodeRegistrar {
     base: string,
     private readonly keyFile: string,
     private readonly fetchFn: typeof fetch = fetch,
+    private readonly now: () => number = Date.now,
   ) {
     this.base = base.endsWith('/') ? base : `${base}/`;
   }
@@ -40,6 +42,26 @@ export class RendezvousClient implements CodeRegistrar {
     return this.nasId;
   }
 
+  /**
+   * This NAS's id, the thumbprint of its public key, without asking the service (the key is made when there is none).
+   * It is the id `POST /nas` answers and the one the Worker's `TURN_NAS_IDS` lists.
+   */
+  async localNasId(): Promise<string> {
+    return nasIdOf((await this.loadKey()).publicKeyJwk);
+  }
+
+  /** Registers the public key again (as after the service lost its registry), giving this NAS's id. */
+  reregister(): Promise<string> {
+    this.nasId = undefined;
+    return this.ensureRegistered();
+  }
+
+  /** The base64url ECDSA P-256 signature of `message` by this NAS's key (as for the signalling socket's challenge). */
+  async sign(message: Uint8Array<ArrayBuffer>): Promise<string> {
+    const { privateKey } = await this.loadKey();
+    return base64url(new Uint8Array(await crypto.subtle.sign(ECDSA_SIGN, privateKey, message)));
+  }
+
   async registerCode(codeHash: string, routes: { https: string }, expiresAt: number): Promise<void> {
     let status = await this.postCode(await this.ensureRegistered(), codeHash, routes, expiresAt);
     if (status === 401) {
@@ -48,6 +70,40 @@ export class RendezvousClient implements CodeRegistrar {
       status = await this.postCode(await this.ensureRegistered(), codeHash, routes, expiresAt);
     }
     if (status !== 204) throw new Error(`rendezvous POST /codes answered ${status}`);
+  }
+
+  /** Signs and sends `DELETE /codes`; the service answers 204 whether or not it still held the code. */
+  async unregisterCode(codeHash: string): Promise<void> {
+    const nasId = await this.ensureRegistered();
+    const { privateKey } = await this.loadKey();
+    const signature = await crypto.subtle.sign(ECDSA_SIGN, privateKey, unregisterMessage({ nasId, codeHash }));
+    const res = await this.send('DELETE', 'codes', { nasId, codeHash, signature: base64url(new Uint8Array(signature)) });
+    await res.body?.cancel();
+    if (res.status !== 204) throw new Error(`rendezvous DELETE /codes answered ${res.status}`);
+  }
+
+  /**
+   * Fresh TURN credentials (an hour) from the Worker's `POST /turn`, signed with this NAS's key. A 401 may mean the
+   * service lost its registry, so the key is registered again, once. Throws when the Worker can't give any.
+   */
+  async turnServers(): Promise<IceServerInfo[]> {
+    let res = await this.postTurn(await this.ensureRegistered());
+    if (res.status === 401) {
+      await res.body?.cancel();
+      res = await this.postTurn(await this.reregister());
+    }
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      throw new Error(`rendezvous POST /turn answered ${res.status}`);
+    }
+    const servers = iceServersOf(((await res.json()) as { iceServers?: unknown }).iceServers);
+    if (servers === null) throw new Error('rendezvous POST /turn answered no usable servers');
+    return servers;
+  }
+
+  private async postTurn(nasId: string): Promise<Response> {
+    const ts = this.now();
+    return this.post('turn', { nasId, ts, signature: await this.sign(turnRequestMessage({ nasId, ts })) });
   }
 
   private async register(): Promise<string> {
@@ -73,8 +129,12 @@ export class RendezvousClient implements CodeRegistrar {
   }
 
   private post(path: string, body: unknown): Promise<Response> {
+    return this.send('POST', path, body);
+  }
+
+  private send(method: 'POST' | 'DELETE', path: string, body: unknown): Promise<Response> {
     return this.fetchFn(new URL(path, this.base), {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(TIMEOUT_MS),

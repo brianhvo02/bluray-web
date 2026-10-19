@@ -4,7 +4,7 @@ import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { MemoryProfileName } from '../engine/memory-profile';
-import type { AudioTrack, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
+import type { AudioTrack, BufferRequest, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 import { DROP_WARN_RATE, DropMeter } from './drop-meter';
 
@@ -34,6 +34,10 @@ export interface PlayerSnapshot {
   readonly bdjRemoteRequests: number;
   /** The current BD-J menu has already opened the remote for an ignored tap. */
   readonly bdjRemoteOpenedInMenu: boolean;
+  /** The open disc is on the NAS (opened with openRemote). */
+  readonly remoteDisc: boolean;
+  /** The open NAS disc is read over WebRTC (its base is `rtc://`), so its connection may be relayed. */
+  readonly rtcDisc: boolean;
   /** Clicks on an HDMV menu that hit no button, counted since the page loaded (a touch that missed shows the controls). */
   readonly menuTapMisses: number;
   readonly warnings: readonly string[];
@@ -65,6 +69,10 @@ export interface PlayerSnapshot {
   readonly shaders: { readonly state: ShaderState; readonly set: string | null; readonly error: string | null };
   /** Drop rate while a set is active and the rate is above DROP_WARN_RATE; else null. */
   readonly shaderDropWarning: number | null;
+  /** The open NAS disc's read-ahead cache fill (buffer first), as its last bufferProgress said; null before any. */
+  readonly buffer: { readonly bytes: number; readonly targetBytes: number; readonly mbps: number; readonly stopped?: 'failed' | 'no-cache' } | null;
+  /** Whether this device can keep a read-ahead cache (the engine says at its start; null until then). Kept across discs. */
+  readonly readAheadCache: boolean | null;
 }
 
 /** The engine's last 'subtitles' event. */
@@ -103,6 +111,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   bdjTapsIgnored: 0,
   bdjRemoteRequests: 0,
   bdjRemoteOpenedInMenu: false,
+  remoteDisc: false,
+  rtcDisc: false,
   menuTapMisses: 0,
   warnings: [],
   currentPlaylistId: null,
@@ -125,6 +135,8 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   encodingPrompt: null,
   shaders: { state: 'off', set: null, error: null },
   shaderDropWarning: null,
+  buffer: null,
+  readAheadCache: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -149,7 +161,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'noticeCleared':
       return { ...s, notices: s.notices.filter((n) => n.code !== e.code) };
     case 'remoteTokenNeeded':
-      return s; // answered by the controller
+    case 'fetchPortClosed':
+      return s; // handled by the controller
     case 'unsupported':
       return withNotice(s, { code: `unsupported-${e.kind}`, message: e.message });
     case 'error':
@@ -185,9 +198,24 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, indexTitles: { titles: e.titles, hasTopMenu: e.hasTopMenu } };
     case 'playlistCleared':
       return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
+    case 'bufferProgress':
+      return { ...s, buffer: { bytes: e.bytes, targetBytes: e.targetBytes, mbps: e.mbps, ...(e.stopped ? { stopped: e.stopped } : {}) } };
+    case 'readAheadCache':
+      return { ...s, readAheadCache: e.available };
     case 'shaderStatus':
       return { ...s, shaders: { state: e.state, set: e.set, error: e.error }, shaderDropWarning: e.state === 'active' ? s.shaderDropWarning : null };
   }
+}
+
+/** The backstop for releasing a replaced NAS disc's fetch port serving, should the engine never report the port closed. */
+export const FETCH_PORT_RELEASE_MS = 5_000;
+
+function releaseServing(entry: { release: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }): void {
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = null;
+  const release = entry.release;
+  entry.release = null;
+  release?.();
 }
 
 export interface WorkerLike {
@@ -241,6 +269,13 @@ export class PlayerController {
   private backgroundPaused = false;
   /** The open NAS disc's token source, asked when the engine's reads get a 401. */
   private refreshToken: (() => Promise<string>) | null = null;
+  /**
+   * What serves the fetch port of each NAS disc the engine may still read, oldest first. One is released when the
+   * engine reports that port closed (fetchPortClosed, after it dropped the disc and aborted its reads), or, as a
+   * backstop, FETCH_PORT_RELEASE_MS after its disc was replaced or closed. A released entry stays until its event, so
+   * the events and the entries stay in step.
+   */
+  private readonly servings: Array<{ release: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }> = [];
   private opens = 0;
 
   constructor(
@@ -258,6 +293,7 @@ export class PlayerController {
       if (e.type === 'soundEffects') audio.loadEffects(e.clips);
       else if (e.type === 'soundEffect') audio.playEffect(e.id);
       else if (e.type === 'remoteTokenNeeded') this.answerTokenRequest();
+      else if (e.type === 'fetchPortClosed') this.fetchPortClosed();
       else this.update(this.withDropWarning(reduceEvent(this.snapshot, e), e));
     };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
@@ -357,21 +393,51 @@ export class PlayerController {
   open(entries: ReadonlyArray<readonly [string, File]>): void {
     this.opens++;
     this.refreshToken = null;
+    this.supersedeServings();
     this.startAudio();
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading' });
     this.post({ type: 'open', disc: { kind: 'files', entries } });
   }
 
   /**
    * A disc on the NAS. `refreshToken` gives a fresh session token when the NAS refuses the current one; a token
-   * refreshed on schedule goes to the engine through setRemoteToken.
+   * refreshed on schedule goes to the engine through setRemoteToken. A spec's fetch port (the WebRTC route) is
+   * transferred to the engine, and `release` (what serves it) runs once the engine has closed that port, after another disc
+   * opened or this one closed (or failed to open), so no read of it fails early. With `bufferFirst` the engine fills the
+   * disc's read-ahead cache (bufferProgress) before it opens the disc; cancelBuffer opens it at once.
    */
-  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>): void {
+  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>, release?: () => void, bufferFirst?: BufferRequest): void {
     this.opens++;
+    this.supersedeServings();
     this.refreshToken = refreshToken ?? null;
+    if (spec.fetchPort) this.servings.push({ release: release ?? null, timer: null });
+    else release?.(); // nothing crosses to the engine to serve
     this.startAudio();
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
-    this.post({ type: 'open', disc: spec });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading', remoteDisc: true, rtcDisc: spec.base.startsWith('rtc://') });
+    this.post(bufferFirst ? { type: 'open', disc: spec, bufferFirst } : { type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
+  }
+
+  /** Fetches the open NAS disc's main playlist from `fromSeconds` on into its read-ahead cache, `targetBytes` of it. */
+  bufferAhead(fromSeconds: number, targetBytes: number): void {
+    this.post({ type: 'bufferAhead', fromSeconds, targetBytes });
+  }
+
+  /** Stops the fill; a disc opened with bufferFirst opens at once (it plays now, with pauses). */
+  cancelBuffer(): void {
+    this.post({ type: 'cancelBuffer' });
+  }
+
+  /** The open disc is being replaced or closed: its serving goes once the engine has closed its port, or after the backstop. */
+  private supersedeServings(): void {
+    for (const entry of this.servings) {
+      if (entry.release && !entry.timer) entry.timer = setTimeout(() => releaseServing(entry), FETCH_PORT_RELEASE_MS);
+    }
+  }
+
+  /** The engine closed the oldest fetch port it held. */
+  private fetchPortClosed(): void {
+    const entry = this.servings.shift();
+    if (entry) releaseServing(entry);
   }
 
   /** A fresh session token for the open NAS disc. */
@@ -648,8 +714,9 @@ export class PlayerController {
   closeDisc(): void {
     this.opens++;
     this.refreshToken = null;
+    this.supersedeServings();
     this.post({ type: 'close' });
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache });
   }
 
   private post(cmd: EngineCommand, transfer: Transferable[] = []): void {

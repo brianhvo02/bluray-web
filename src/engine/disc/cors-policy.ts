@@ -3,11 +3,12 @@
 /** Origins the player is served from: production, Pages previews and local dev/preview. */
 const ALLOWED_ORIGIN = /^(https:\/\/([a-z0-9-]+\.)?bluray-web\.pages\.dev|http:\/\/localhost:(5173|4173))$/;
 
-/** CORS headers for a response to `origin`; every response carries `Vary` and CORP. */
+/** CORS headers for a response to `origin`; every response carries `Vary` and CORP, and exposes `ETag` (the BD-J store's). */
 export function corsHeaders(origin: string | null | undefined): Record<string, string> {
   const headers: Record<string, string> = {
     Vary: 'Origin',
     'Cross-Origin-Resource-Policy': 'cross-origin',
+    'Access-Control-Expose-Headers': 'ETag',
   };
   if (origin != null && ALLOWED_ORIGIN.test(origin)) headers['Access-Control-Allow-Origin'] = origin;
   return headers;

@@ -71,11 +71,10 @@ function inlined(manifest: DiscManifest, path: string): Uint8Array | null {
 }
 
 /**
- * What the manifest's inlined playlists and clip info say about the main title, read with the engine's parsers and
- * its (libbluray's) choice of main title among the playlists whose clips are all on the disc.
+ * The main title's playlist, from the manifest's inlined playlists, by the engine's (libbluray's) choice of main title
+ * among the playlists with video whose clips are all on the disc; null when there is none or it can't be read.
  */
-export function discFacts(manifest: DiscManifest): DiscFacts {
-  const unknown: DiscFacts = { peakMbps: null, uhd: false };
+export function mainPlaylist(manifest: DiscManifest): Mpls | null {
   try {
     const files = new Set(manifest.files.map((f) => f.path));
     const candidates: MainTitleCandidate[] = [];
@@ -94,7 +93,28 @@ export function discFacts(manifest: DiscManifest): DiscFacts {
       if (hasVideo && complete) candidates.push({ id: m[1]!, mpls });
     }
     const mainId = chooseMainTitle(candidates);
-    const clipIds = [...new Set(candidates.find((c) => c.id === mainId)?.mpls.playItems.map((p) => p.clipId) ?? [])];
+    return candidates.find((c) => c.id === mainId)?.mpls ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Playlist `id` (an episode's), from the manifest's inlined playlists; null when it isn't there or can't be read. */
+export function playlistOf(manifest: DiscManifest, id: string): Mpls | null {
+  const bytes = inlined(manifest, `BDMV/PLAYLIST/${id}.MPLS`);
+  if (!bytes) return null;
+  try {
+    return parseMpls(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/** What the manifest's inlined playlists and clip info say about the main title (mainPlaylist). */
+export function discFacts(manifest: DiscManifest): DiscFacts {
+  const unknown: DiscFacts = { peakMbps: null, uhd: false };
+  try {
+    const clipIds = [...new Set(mainPlaylist(manifest)?.playItems.map((p) => p.clipId) ?? [])];
     const clips = clipIds.flatMap((id) => {
       const bytes = inlined(manifest, clipInfoPath(id));
       return bytes ? [parseClpi(bytes)] : [];

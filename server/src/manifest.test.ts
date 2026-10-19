@@ -8,6 +8,7 @@ import type { DiscManifest } from '../../src/engine/disc/nas-api';
 import { buildUdf250 } from '../../tests/helpers/udf-image';
 import { appHandlers } from './app';
 import type { Auth } from './auth';
+import { BdjStore } from './bdj-store';
 import { createServer } from './http';
 import { IsoTrees } from './iso';
 import { Library } from './library';
@@ -244,7 +245,7 @@ describe('disc routes', () => {
 
   it('sits behind the token guard in the app', async () => {
     const auth = { verify: (token: string) => (token === 'good' ? { id: 'd' } : null) } as unknown as Auth;
-    const app = createServer(appHandlers({ auth, library, publicBase: 'https://nas.example/' }));
+    const app = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(tmp), publicBase: 'https://nas.example/' }));
     await new Promise<void>((r) => app.listen(0, r));
     try {
       const appBase = `http://127.0.0.1:${(app.address() as AddressInfo).port}/api/discs/${ids.menu}`;

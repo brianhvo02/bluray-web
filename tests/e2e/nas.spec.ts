@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, test, type Page } from '@playwright/test';
-import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, OWNER_SERIES, PROJECTS, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
+import { expect, test, type Page, type Route } from '@playwright/test';
+import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, NAS_SERVER_KEY, OWNER_SERIES, PROJECTS, RENDEZVOUS_URL, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
+import { telemetry } from './telemetry';
 
 // The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
 // library's top level lists), and the rendezvous Worker that turns a code into the server's address. Its title
@@ -113,12 +114,57 @@ async function libraryReady(): Promise<void> {
  * code is registered under a new NAS key (the server makes one when its key file is gone).
  */
 function ownerCode(): string {
+  return mintOwnerCode(() => rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true }));
+}
+
+/**
+ * A fresh owner code whose WebRTC route leads to the running server: minted under the server's own rendezvous key
+ * (its NAS id, whose signalling socket is open), put back in place of the last code's.
+ */
+function serverOwnerCode(): string {
+  return mintOwnerCode(() => copyFileSync(NAS_SERVER_KEY, join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json')));
+}
+
+function mintOwnerCode(prepareKey: () => void): string {
   const out = exclusively(() => {
-    rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true });
+    prepareKey();
     return execFileSync(process.execPath, [SERVER, 'owner-code'], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
   });
   expect(out).toContain('Rendezvous: registered');
   return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
+}
+
+/**
+ * Counts the bytes the page's WebRTC data channels receive (`window.__rtcBytes`), in every page load: the positive proof
+ * that the disc's reads came over the channel.
+ */
+async function countChannelBytes(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __rtcBytes: number };
+    w.__rtcBytes = 0;
+    const create = RTCPeerConnection.prototype.createDataChannel;
+    RTCPeerConnection.prototype.createDataChannel = function (this: RTCPeerConnection, ...args: Parameters<typeof create>) {
+      const channel = create.apply(this, args);
+      channel.addEventListener('message', (e: MessageEvent<unknown>) => {
+        const data = e.data;
+        w.__rtcBytes += data instanceof ArrayBuffer ? data.byteLength : data instanceof Blob ? data.size : String(data).length;
+      });
+      return channel;
+    };
+  });
+}
+
+const channelBytes = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __rtcBytes: number }).__rtcBytes);
+
+/** The rendezvous lookup as for a NAS whose HTTPS route this network can't use: its WebRTC route only. */
+async function webrtcOnlyLookup(page: Page): Promise<void> {
+  await page.route(`${RENDEZVOUS_URL}/codes/lookup`, async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const response = await route.fetch();
+    const body = (await response.json()) as { routes?: { webrtc?: unknown } };
+    expect(body.routes?.webrtc).toBeDefined();
+    await route.fulfill({ response, json: { ...body, routes: { webrtc: body.routes?.webrtc } } });
+  });
 }
 
 /** Chrome asks before a page reaches the local network; the tests answer for the user where the browser supports it. */
@@ -189,6 +235,43 @@ test("plays disc1 from the NAS after a pre-flight showing this connection's thro
   await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 });
 
+test('buffers first on a slow connection: the pre-flight asks, and Wait fills the cache, then the disc plays', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'one browser is enough for the pre-flight flow; the cache is unit-tested');
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  // ?bufferask=1: disc1 plays for 8 s, so its wait is seconds long; the flag makes the pre-flight ask before any wait.
+  const code = ownerCode();
+  await page.goto(`/?pair=${code}&telemetry=1&bufferask=1`);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+  await skipWithoutH264(page, { realtime: false });
+  // The probe throttled to about 1 Mbps (125 kB in a second), below disc1's rate (about 2.9 Mbps with the margin).
+  await page.route('**/discs/*/probe?*', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: { 'Access-Control-Allow-Origin': new URL(page.url()).origin }, body: Buffer.alloc(125_000) });
+  });
+  await page.getByTestId('nas-open').click();
+  await page.getByTestId('browse-folders').click();
+  await discRow(page, 'disc1').click();
+  await expect(page.getByTestId('nas-buffer-wait')).toHaveText('About 1 minutes before it can play straight through', { timeout: 15_000 });
+  await expect(page.getByTestId('nas-play')).toHaveText('Play now with pauses');
+  await expect(page.getByRole('button', { name: 'Lower quality (coming later)' })).toBeDisabled();
+  await page.getByTestId('nas-wait').click();
+  // disc1 opens to its playlists once the cache holds the wait's bytes
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  const cached = await page.evaluate(async () => {
+    const top = await (await navigator.storage.getDirectory()).getDirectoryHandle('read-ahead');
+    const names: string[] = [];
+    for await (const disc of (top as unknown as { values(): AsyncIterable<FileSystemDirectoryHandle> }).values()) {
+      for await (const name of (disc as unknown as { keys(): AsyncIterable<string> }).keys()) names.push(name);
+    }
+    return names;
+  });
+  expect(cached.some((name) => name.startsWith('BDMV_2fSTREAM_2f00001_2eM2TS.') && name.endsWith('.bin'))).toBe(true);
+  await page.getByTestId('playlist-00000').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
+});
+
 test('opens disc-menu from the NAS into its menu', async ({ page, browserName }) => {
   await openLibrary(page, browserName);
   await skipWithoutH264(page, { realtime: false });
@@ -202,6 +285,68 @@ test('plays the playlist the Java of disc-bdj selects, from the NAS', async ({ p
   await playFromNas(page, 'disc-bdj');
   await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 30_000 });
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+});
+
+test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable: disc1 for 3 s, then disc-bdj', async ({ page, browserName }) => {
+  // Measured 2026-10-19 in Playwright's Firefox on Linux (CI and the Playwright image): the peer connection gathers no
+  // ICE candidates at all, whatever the media.peerconnection.ice.* prefs, and fails before the answer arrives.
+  // Firefox on macOS runs this test, and the device run covers real browsers.
+  test.skip(browserName === 'firefox' && process.platform === 'linux', 'Playwright Firefox on Linux gathers no ICE candidates');
+  test.setTimeout(180_000);
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  const httpsTried: string[] = [];
+  await page.context().route(`http://localhost:${NAS_PORT}/**`, (route) => {
+    httpsTried.push(route.request().url());
+    return route.abort('connectionrefused');
+  });
+  await webrtcOnlyLookup(page);
+  await countChannelBytes(page);
+  const code = serverOwnerCode();
+  await page.goto(`/?pair=${code}&telemetry=1&rtcrelayed=1`);
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 30_000 });
+  await skipWithoutH264(page);
+  const browse = async (): Promise<void> => {
+    await page.getByTestId('nas-open').click();
+    await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 30_000 });
+    await page.getByTestId('browse-folders').click();
+    await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+  };
+  await browse();
+  await playFromNas(page, 'disc1');
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId('playlist-00000').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 20_000 });
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 20_000 }).toBeGreaterThanOrEqual(3_000_000);
+  await expect(page.getByTestId('relay-badge')).toContainText('Relayed'); // ?rtcrelayed=1 makes the connection count as relayed
+  expect(await channelBytes(page)).toBeGreaterThan(1_000_000); // most of disc1's first 1.3 MB clip, over the channel
+
+  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once.
+  await page.reload();
+  await browse();
+  await playFromNas(page, 'disc-bdj');
+  await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 45_000 });
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  await expect.poll(() => channelBytes(page)).toBeGreaterThan(500_000); // disc-bdj's 0.66 MB clip, over the channel
+  expect(httpsTried).toEqual([]);
+});
+
+test("a device that connects while the NAS's signalling socket is down is told it can't connect", async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  await webrtcOnlyLookup(page);
+  const code = ownerCode(); // under a NAS key of its own, whose signalling socket never opens
+  const closed: string[] = [];
+  page.on('websocket', (ws) => ws.on('close', () => closed.push(new URL(ws.url()).pathname)));
+  await page.goto(`/?pair=${code}`);
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  const started = Date.now();
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('pair-error')).toHaveText("Can't connect to the NAS from this network. Try another Wi-Fi or mobile data.", { timeout: 15_000 });
+  // The Worker's offline close (4404), not the 10 s wait for its hello.
+  expect(Date.now() - started).toBeLessThan(8_000);
+  expect(closed).toContain('/signal/device');
 });
 
 test('plays disc1.iso from the NAS', async ({ page, browserName }) => {
@@ -256,62 +401,73 @@ test('a disc deleted after its pre-flight fails to open, and Play works again', 
   await expect(page.getByTestId('nas-play')).toBeEnabled();
 });
 
-test('the owner mints a code, pairs a second browser as Mum, revokes it, and rescans', async ({ page, browser, browserName }) => {
+test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans', async ({ page, browser, browserName }) => {
   await openLibrary(page, browserName);
   await page.getByTestId('nas-settings').click();
   await expect(page.getByTestId('nas-admin')).toBeVisible();
-  await expect(page.getByTestId('nas-owner-code')).not.toBeChecked();
+  // A code for a new person, Mika, not an owner, sent as an invite.
+  await expect(page.getByTestId('nas-code-person')).toHaveValue('new');
+  await page.getByTestId('nas-new-person-name').fill('Mika');
+  await expect(page.getByTestId('nas-new-person-owner')).not.toBeChecked();
+  await page.getByTestId('nas-code-invite').check();
+  const mintedResponse = page.waitForResponse((r) => r.url().endsWith('/admin/codes') && r.request().method() === 'POST');
   await page.getByTestId('nas-new-code').click();
+  const minted = (await (await mintedResponse).json()) as { personId: string; personName: string; invite: boolean };
+  expect(minted).toMatchObject({ personName: 'Mika', invite: true });
   const codeText = page.getByTestId('nas-code');
   await expect(codeText).toHaveText(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/, { timeout: 15_000 });
   await expect(page.getByTestId('nas-code-qr')).toBeVisible();
-  await expect(page.getByTestId('nas-code-expiry')).toHaveText(/^Expires in (10:00|9:[0-5]\d)$/);
+  await expect(page.getByTestId('nas-code-for')).toHaveText('For Mika · an invite, valid 3 days');
+  await expect(page.getByTestId('nas-code-expiry')).toHaveText('Expires in 3 days');
   await expect(page.getByTestId('nas-code-copy')).toBeVisible();
   const code = (await codeText.textContent())!;
+  // Every browser's project makes its own Mika on the shared server: this one is found by its id.
+  const mikaRow = page.locator(`[data-testid="nas-person-Mika"][data-person-id="${minted.personId}"]`);
+  await expect(mikaRow).toContainText('No devices yet');
 
-  // A second browser, as the person the owner pairs.
-  const mumContext = await browser.newContext();
+  // A second browser, as Mika.
+  const mikaContext = await browser.newContext();
   try {
-    const mum = await mumContext.newPage();
-    await allowLocalNetwork(mum, browserName);
-    await mum.goto('/');
-    await mum.getByTestId('pair-code').fill(code);
-    await mum.getByTestId('pair-device-name').fill('Mum');
-    const redeemed = mum.waitForResponse((r) => r.url().endsWith('/pair/redeem') && r.request().method() === 'POST');
-    await mum.getByTestId('pair-button').click();
-    const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
-    await expect(mum.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    const mika = await mikaContext.newPage();
+    await allowLocalNetwork(mika, browserName);
+    await mika.goto('/');
+    await mika.getByTestId('pair-code').fill(code);
+    await mika.getByTestId('pair-device-name').fill('iPad');
+    await mika.getByTestId('pair-button').click();
+    await expect(mika.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await expect(mika.getByTestId('nas-paired')).toContainText('Paired as Mika.');
     // Review Focus 5. The gate is the server's, so the browsers take turns with it.
     await exclusivelyAsync('gate', async () => {
       try {
         // A guest while the gate is closed: the folder browser, with no error notice.
-        await mum.getByTestId('nas-open').click();
-        await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
-        await expect(mum.getByTestId('title-library')).toHaveCount(0);
-        await expect(mum.getByTestId('nas-error')).toHaveCount(0);
-        await expect(mum.getByTestId('error')).toHaveCount(0);
+        await mika.getByTestId('nas-open').click();
+        await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await expect(mika.getByTestId('title-library')).toHaveCount(0);
+        await expect(mika.getByTestId('nas-error')).toHaveCount(0);
+        await expect(mika.getByTestId('error')).toHaveCount(0);
         // A guest: the listing is up, and there is no way into the settings.
-        await expect(mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
-        await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
+        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
+        await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
 
         // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
         await setGate('everyone');
-        await mum.reload();
-        await mum.getByTestId('nas-open').click();
-        await expect(mum.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
-        await expect(mum.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
-        await expect(mum.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
-        await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
-        await mum.getByTestId('browse-folders').click();
-        await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await mika.reload();
+        await mika.getByTestId('nas-open').click();
+        await expect(mika.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+        await expect(mika.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
+        await expect(mika.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
+        await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
+        await mika.getByTestId('browse-folders').click();
+        await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
       } finally {
         await setGate('owners');
       }
     });
 
-    // The owner sees both devices: this one and Mum (other tests' devices share the server).
-    const mumRow = page.locator(`[data-testid="nas-device"][data-device-id="${deviceId}"]`);
-    await expect(mumRow).toContainText(/^Mum · paired .+ · last seen just now/, { timeout: 15_000 });
+    // The owner's People list shows Mika with one device (other tests' people and devices share the server).
+    await expect(mikaRow.getByTestId('nas-device')).toHaveCount(1, { timeout: 15_000 });
+    await expect(mikaRow.getByTestId('nas-device')).toContainText(/^iPad · last seen just now/);
+    await expect(mikaRow.locator('.badge')).toHaveCount(0);
     const ownRow = page.getByTestId('nas-device').filter({ hasText: '(this device)' });
     await expect(ownRow).toHaveCount(1);
     // This device's own row asks first.
@@ -319,39 +475,73 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
     await expect(ownRow).toContainText('Revoke this device?');
     await ownRow.getByTestId('nas-revoke-cancel').click();
     await expect(ownRow.getByTestId('nas-revoke')).toBeVisible();
-    await mumRow.getByTestId('nas-revoke').click();
-    await expect(mumRow).toHaveCount(0);
+    // So does taking owner rights from this device's own person.
+    const ownPersonRow = page.locator('[data-person-id]').filter({ has: ownRow });
+    await ownPersonRow.getByTestId('nas-person-owner').click();
+    await expect(ownPersonRow).toContainText('This device will lose NAS settings. Only another owner can give them back.');
+    await ownPersonRow.getByRole('button', { name: 'Cancel' }).click();
+    await expect(ownPersonRow.getByTestId('nas-person-owner')).toHaveText('Remove owner');
+    // Removing Mika says what goes first.
+    await mikaRow.getByTestId('nas-person-remove').click();
+    await expect(mikaRow).toContainText('Remove Mika? Their device iPad is unpaired.');
+    await mikaRow.getByTestId('nas-person-remove-confirm').click();
+    await expect(mikaRow).toHaveCount(0);
 
-    // Mum's next library request finds the device revoked: back to the landing screen.
-    await mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
-    await expect(mum.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
-    await expect(mum.getByTestId('pair-screen')).toBeVisible();
-    await expect(mum.getByTestId('nas-library')).toHaveCount(0);
+    // Mika's next library request finds the device gone with its person: back to pairing.
+    await mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+    await expect(mika.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
+    await expect(mika.getByTestId('pair-screen')).toBeVisible();
+    await expect(mika.getByTestId('nas-library')).toHaveCount(0);
   } finally {
-    await mumContext.close();
+    await mikaContext.close();
   }
 
   await page.getByTestId('nas-rescan').click();
   await expect(page.getByTestId('nas-admin-status')).toHaveText('Rescanning…');
 
-  // Ticking Owner mints an owner code. The answer is stubbed: a second code per browser registered with the
-  // rendezvous service would pass its 5-live-codes cap on this server's key (redeeming one is tested in server/).
-  await page.getByTestId('nas-owner-code').check();
+  // A plain code for an existing person: this device's. The answer is stubbed: another code per browser registered
+  // with the rendezvous service would pass its 20-live-codes cap on this server's key (redeeming one is tested in server/).
+  const ownPerson = page.locator('[data-person-id]').filter({ has: page.getByTestId('nas-device').filter({ hasText: '(this device)' }) });
+  const ownPersonId = (await ownPerson.getAttribute('data-person-id'))!;
+  await expect(page.getByTestId('nas-code-person')).toHaveValue('new');
+  await page.getByTestId('nas-code-person').selectOption(ownPersonId);
+  await expect(page.getByTestId('nas-new-person-name')).toHaveCount(0);
+  await page.getByTestId('nas-code-invite').uncheck();
   const origin = new URL(page.url()).origin;
-  let minted: unknown;
+  let body: unknown;
   await page.route('**/api/admin/codes', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
-    minted = route.request().postDataJSON();
+    body = route.request().postDataJSON();
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       headers: { 'Access-Control-Allow-Origin': origin },
-      body: JSON.stringify({ code: 'K7QM-4XP2-R9TD', link: 'https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD', expiresAt: Date.now() + 600_000, rendezvous: false }),
+      body: JSON.stringify({
+        code: 'K7QM-4XP2-R9TD', link: 'https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD', expiresAt: Date.now() + 600_000, rendezvous: false,
+        personId: ownPersonId, personName: 'Owner', invite: false,
+      }),
     });
   });
   await page.getByTestId('nas-new-code').click();
   await expect(codeText).toHaveText('K7QM-4XP2-R9TD');
-  expect(minted).toEqual({ owner: true });
+  await expect(page.getByTestId('nas-code-for')).toHaveText('For Owner · valid 10 minutes');
+  expect(body).toEqual({ personId: ownPersonId, invite: false });
+  // The stub's code wasn't registered with the rendezvous service: it says where the code still works.
+  await expect(page.getByTestId('nas-code-rendezvous')).toHaveText(
+    "The pairing service didn't take this code, so it only works on your home network or over Tailscale. Try again later for a friend away from home.",
+  );
+
+  // Another owner takes this device's owner status away (stubbed, as the Owner person is every browser's): the next
+  // people reload is refused, the settings close, and the library no longer offers them.
+  const stub = (status: number, json: unknown) => (route: Route) =>
+    route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': origin }, body: JSON.stringify(json) });
+  await page.route('**/api/admin/people', stub(403, { error: 'forbidden' }));
+  await page.route('**/api/me', stub(200, { owner: false, titleLibrary: false, personId: ownPersonId, personName: 'Owner' }));
+  await page.getByTestId('nas-new-code').click();
+  await expect(page.getByTestId('nas-admin')).toHaveCount(0);
+  await expect(page.getByTestId('nas-admin-error')).toHaveCount(0);
+  await expect(page.getByTestId('nas-crumbs')).toBeVisible();
+  await expect(page.getByTestId('nas-settings')).toHaveCount(0);
 });
 
 test('an owner browses the NAS by title: shelves, search, a series and its season', async ({ page, browserName }) => {

@@ -10,7 +10,8 @@
  */
 import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
-import { createServer, request, type IncomingHttpHeaders, type OutgoingHttpHeaders } from 'node:http';
+import { createServer, request, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -110,7 +111,25 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   // Nothing proxies here; the default ('caddy') would only log that it does not resolve.
   TRUSTED_PROXY: '127.0.0.1',
   METADATA_FIXTURE,
+  // The WebRTC route on loopback: no STUN discovery, and a UDP port of its own.
+  RTC_ADVERTISE: '127.0.0.1',
+  RTC_PORT: '47990',
 };
+
+/**
+ * The running server's rendezvous key (its NAS id), kept here: `ownerCode()` in nas.spec.ts replaces the key file for
+ * each code, and a code that should lead to this server over WebRTC is minted with this key put back.
+ */
+export const NAS_SERVER_KEY = join(NAS_E2E_DIR, 'server-rendezvous-key.json');
+
+/** Makes the server's rendezvous key before it starts, in its data folder and in NAS_SERVER_KEY. */
+async function makeServerKey(): Promise<void> {
+  const pair = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])) as CryptoKeyPair;
+  const key = JSON.stringify({ privateKeyJwk: await crypto.subtle.exportKey('jwk', pair.privateKey) });
+  mkdirSync(NAS_ENV.DATA_DIR!, { recursive: true });
+  writeFileSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), key, { mode: 0o600 });
+  writeFileSync(NAS_SERVER_KEY, key, { mode: 0o600 });
+}
 
 /** Puts `changed/<project>` (a copy of disc1, timestamps kept so its disc id never changes) back in the root. */
 export function restoreChangedDisc(project: string): string {
@@ -119,16 +138,26 @@ export function restoreChangedDisc(project: string): string {
   return dir;
 }
 
-/** The rendezvous Worker's fetch handler over node:http, as its tests run it (no workerd). */
+/**
+ * The rendezvous Worker's fetch handler over node:http, as its tests run it (no workerd), and its signalling: the real
+ * `Signalling` object per NAS id over a Node WebSocket stand-in (signalling-standin.ts).
+ */
 async function startRendezvous(): Promise<void> {
   // Imported here: playwright.config.ts and nas.spec.ts import this file's constants only.
   const { CodeRegistry } = await import('../../rendezvous/src/code-registry');
   const { default: worker } = await import('../../rendezvous/src/index');
   const { memoryState } = await import('../../rendezvous/src/memory-state');
+  const { completeUpgrade, signallingNamespace } = await import('./signalling-standin');
   const registry = new CodeRegistry(memoryState());
-  const env = { CODE_REGISTRY: { idFromName: (name: string) => ({ name }), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) } };
+  const CODE_REGISTRY = { idFromName: (name: string) => ({ name }), get: () => ({ fetch: (r: Request) => registry.fetch(r) }) };
+  const env = { CODE_REGISTRY, SIGNALLING: signallingNamespace({ CODE_REGISTRY }) };
   let client = 0;
-  createServer((req, res) => {
+  /** Every request counts as a new client (see below). */
+  const clientAddress = (): string => {
+    client = (client + 1) % 65_536;
+    return `198.18.${client >> 8}.${client & 255}`;
+  };
+  const server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
@@ -138,8 +167,7 @@ async function startRendezvous(): Promise<void> {
       if (origin !== undefined) headers.set('Origin', origin);
       // Every request counts as a new client: a run pairs a browser for each test, far more than the 10 lookups a
       // minute one address gets (that limit is unit-tested in rendezvous/).
-      client = (client + 1) % 65_536;
-      headers.set('CF-Connecting-IP', `198.18.${client >> 8}.${client & 255}`);
+      headers.set('CF-Connecting-IP', clientAddress());
       const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
       const request = new Request(`${RENDEZVOUS_URL}${req.url ?? '/'}`, { method: req.method, headers, body });
       worker.fetch(request, env).then(
@@ -156,7 +184,21 @@ async function startRendezvous(): Promise<void> {
         },
       );
     });
-  }).listen(RENDEZVOUS_PORT);
+  });
+  // Signalling sockets (`/signal/nas`, `/signal/device`): through the Worker's own routing and limits.
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) if (typeof value === 'string') headers.set(name, value);
+    headers.set('CF-Connecting-IP', clientAddress());
+    worker.fetch(new Request(`${RENDEZVOUS_URL}${req.url ?? '/'}`, { method: req.method, headers }), env).then(
+      (answer) => completeUpgrade(req, socket, head, answer),
+      (err: unknown) => {
+        console.error('rendezvous stand-in: a signalling upgrade failed', err);
+        socket.destroy();
+      },
+    );
+  });
+  server.listen(RENDEZVOUS_PORT);
 }
 
 /** Sets every file and folder under `dir` to `when`, deepest first. */
@@ -193,6 +235,7 @@ async function main(): Promise<void> {
     }
   }
   await startRendezvous();
+  await makeServerKey();
   const env = { ...process.env, ...NAS_ENV, ...(TRANSLATE ? { PORT: String(NAS_INNER_PORT) } : {}) };
   const server = spawn(process.execPath, [SERVER], { env, stdio: 'inherit' });
   if (TRANSLATE) startNasProxy();

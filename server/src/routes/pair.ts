@@ -4,7 +4,9 @@ import type { IncomingMessage } from 'node:http';
 import { isIP } from 'node:net';
 import { p256PublicJwk } from '../auth';
 import type { Auth } from '../auth';
-import { HttpError, json, readJson } from '../http';
+import { codeHash, unregisterCodes } from '../codes';
+import type { CodeRegistrar } from '../codes';
+import { HttpError, json, readJson, viaChannel } from '../http';
 import type { Handler } from '../http';
 
 type JsonWebKey = webcrypto.JsonWebKey;
@@ -119,7 +121,7 @@ async function readObject(req: IncomingMessage): Promise<Record<string, unknown>
 const unauthorized = () => json(401, { error: 'unauthorized' });
 
 /** `POST /api/pair/redeem`, `POST /api/session/challenge` and `POST /api/session`: the only routes open to unpaired devices. */
-export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (address: string) => boolean }): Handler {
+export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (address: string) => boolean; registrar?: CodeRegistrar }): Handler {
   const limiter = new FailureLimiter(opts.now);
   return async (req, url) => {
     if (req.method !== 'POST') return null;
@@ -142,7 +144,9 @@ export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (a
             attempt.fail();
             return json(401, { error: 'invalid code' });
           }
-          return json(200, { deviceId: device.id, owner: device.owner });
+          // the code is spent: free its place with the rendezvous service
+          unregisterCodes(opts.registrar, [codeHash(code)]);
+          return json(200, { deviceId: device.id, owner: device.owner, personId: device.personId, personName: device.personName });
         } finally {
           attempt.release();
         }
@@ -153,8 +157,12 @@ export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (a
       }
       case '/api/session': {
         const body = await readObject(req);
-        const session = auth.startSession(str(body, 'deviceId'), str(body, 'challenge'), str(body, 'signature'));
-        return session ? json(200, session) : unauthorized();
+        const deviceId = str(body, 'deviceId');
+        const session = auth.startSession(deviceId, str(body, 'challenge'), str(body, 'signature'));
+        if (!session) return unauthorized();
+        // a data channel's session is noted by the rtc layer, which knows whether it is relayed
+        if (!viaChannel(req)) auth.noteRoute(deviceId, 'https');
+        return json(200, session);
       }
       default:
         return null;

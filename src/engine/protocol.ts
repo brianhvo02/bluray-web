@@ -139,8 +139,34 @@ export interface AudioTrack {
 /** Remote-control keys for disc menus (BD_VK_*); topMenu is a menu call. */
 export type MenuKey = 'up' | 'down' | 'left' | 'right' | 'ok' | '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | 'topMenu' | 'popup';
 
+/** What to hold in a NAS disc's read-ahead cache: a playlist from `fromSeconds` on, `targetBytes` of it. */
+export interface BufferRequest {
+  readonly fromSeconds: number;
+  readonly targetBytes: number;
+  /** The playlist to buffer (an episode's); the disc's main title when absent or not on the disc. */
+  readonly playlistId?: string;
+}
+
 export type EngineCommand =
-  | { readonly type: 'open'; readonly disc: DiscSpec }
+  /**
+   * `bufferFirst` (a NAS disc, buffer first): the disc's playlists are read, then the playlist is fetched into the
+   * read-ahead cache until it holds `targetBytes`, and only then is the disc opened ('titles', First Play). The fill
+   * then goes on ahead of the play position to the playlist's end while the disc is open (a seek moves it), freeing
+   * what playback has passed. cancelBuffer opens the disc at once (the fill goes on); a close or another open drops it
+   * unopened, even while it is still queued. Every other command sent after it waits for it, as the queue does.
+   */
+  | { readonly type: 'open'; readonly disc: DiscSpec; readonly bufferFirst?: BufferRequest }
+  /**
+   * Fetch the open NAS disc's playlist (`playlistId`, else its main title) from `fromSeconds` on into its read-ahead
+   * cache until it holds `targetBytes` of it, reporting bufferProgress, then stop; it doesn't follow playback (a
+   * bufferFirst open's fill does). It replaces any fill running.
+   */
+  | ({ readonly type: 'bufferAhead' } & BufferRequest)
+  /**
+   * Handled at once, not queued: a bufferFirst open waiting for its fill opens now (its fill goes on); otherwise the
+   * fill stops (what the cache holds stays).
+   */
+  | { readonly type: 'cancelBuffer' }
   /** A fresh session token for the open NAS disc (a scheduled refresh, or the answer to remoteTokenNeeded). Handled at once, not queued. */
   | { readonly type: 'remoteToken'; readonly token: string }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
@@ -220,8 +246,22 @@ export type EngineEvent =
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
   /** The condition behind a notice is over (nas-waiting: the read landed). */
   | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
+  /**
+   * The read-ahead cache's fill: bytes held from the start position on, out of `targetBytes` (the request's, or all
+   * there is when that is less), and the connection's rate over the fill so far (Mbps). It is over when bytes reach
+   * targetBytes (a bufferFirst disc's fill goes on), and with `stopped` when it ended early: a read or a cache write
+   * failed, or this device has no cache ('no-cache'). A bufferFirst open then opens the disc without the lead.
+   */
+  | { readonly type: 'bufferProgress'; readonly bytes: number; readonly targetBytes: number; readonly mbps: number; readonly stopped?: 'failed' | 'no-cache' }
+  /** Once, at the engine's start: whether this device can keep a read-ahead cache (OPFS with sync access handles). */
+  | { readonly type: 'readAheadCache'; readonly available: boolean }
   /** The NAS answered 401: send remoteToken with a fresh token within 10 s, or the disc fails as unpaired. */
   | { readonly type: 'remoteTokenNeeded' }
+  /**
+   * The engine closed a NAS disc's fetch port (the disc was replaced, closed or failed to open), one event per port, in
+   * the order the discs were opened: what serves that port on the main thread can stop now without failing its reads.
+   */
+  | { readonly type: 'fetchPortClosed' }
   | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }

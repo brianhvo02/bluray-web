@@ -30,6 +30,7 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
                           nav_chapter_get_current), moved out of nav/navigator.ts
     demux/pes-assembler.ts derived from src/libbluray/decoders/m2ts_demux.c (PES completion by PES_packet_length)
     playback/pipeline.ts  derived from src/libbluray/bdnav/navigation.c (_fill_clip start packet)
+    playback/buffer-ranges.ts derived from src/libbluray/bdnav/navigation.c (_fill_clip start packet), as playback/pipeline.ts
     graphics/segments.ts  from src/libbluray/decoders/graphics_processor.c (segment joining), pg_decode.c, pg.h
     graphics/ig-decoder.ts from src/libbluray/decoders/ig_decode.c, ig.h, graphics_processor.c (IG display set decoding)
     graphics/pg-decoder.ts from src/libbluray/decoders/pg_decode.c, graphics_processor.c (PG display sets)
