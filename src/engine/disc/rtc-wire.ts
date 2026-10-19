@@ -231,7 +231,7 @@ export class WireClient {
   }
 
   /** Bound, so it can be handed on as a `typeof fetch`. */
-  readonly fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+  readonly fetch = async (input: Request | string | URL, init: RequestInit = {}): Promise<Response> => {
     if (typeof Request !== 'undefined' && input instanceof Request) {
       init = { method: input.method, headers: input.headers, signal: input.signal, body: input.body ? await input.arrayBuffer() : null, ...init };
       input = input.url;

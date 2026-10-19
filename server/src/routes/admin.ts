@@ -78,7 +78,7 @@ function personView(person: Person, devices: readonly Device[], store: BdjStore)
     owner: person.owner,
     createdAt: person.createdAt,
     savedBytes: store.usage(person.id),
-    devices: devices.filter((d) => d.personId === person.id).map(({ id, name, pairedAt, lastSeen }) => ({ id, name, pairedAt, lastSeen })),
+    devices: devices.filter((d) => d.personId === person.id).map(({ id, name, pairedAt, lastSeen, lastRoute }) => ({ id, name, pairedAt, lastSeen, lastRoute })),
   };
 }
 

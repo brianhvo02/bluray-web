@@ -91,7 +91,7 @@ interface PersonView {
   owner: boolean;
   createdAt: number;
   savedBytes: number;
-  devices: { id: string; name: string; pairedAt: number; lastSeen: number }[];
+  devices: { id: string; name: string; pairedAt: number; lastSeen: number; lastRoute?: string }[];
 }
 
 describe('admin people', () => {
@@ -107,7 +107,7 @@ describe('admin people', () => {
       ['Owner', true, ['Mac']],
       ['Mika', false, []],
     ]);
-    expect(Object.keys(list.people[0]!.devices[0]!).sort()).toEqual(['id', 'lastSeen', 'name', 'pairedAt']);
+    expect(Object.keys(list.people[0]!.devices[0]!).sort()).toEqual(['id', 'lastRoute', 'lastSeen', 'name', 'pairedAt']);
 
     const renamed = await send('PATCH', `/api/admin/people/${mika.id}`, owner, { name: 'Mika R', owner: true });
     expect(renamed.status).toBe(200);

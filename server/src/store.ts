@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { linkSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isCode, lockFile, replaceAtomically, syncDir, writeSynced } from './atomic-json';
-import type { PairingCode, Person, StoredDevice } from './auth';
+import type { DeviceRoute, PairingCode, Person, StoredDevice } from './auth';
 
 export interface AuthData {
   people: Person[];
@@ -103,6 +103,11 @@ function validate(file: string, parsed: unknown): AuthData {
   devices.forEach((d, i) =>
     fields(`devices[${i}]`, d, { id: 'string', name: 'string', personId: 'string', publicKeyJwk: 'object', pairedAt: 'number', lastSeen: 'number' }),
   );
+  const routes: readonly unknown[] = ['https', 'webrtc', 'relay'] satisfies DeviceRoute[];
+  devices.forEach((d, i) => {
+    const route = (d as Record<string, unknown>).lastRoute;
+    if (route !== undefined && !routes.includes(route)) fail(file, `devices[${i}].lastRoute is not a route`);
+  });
   codes.forEach((c, i) => fields(`codes[${i}]`, c, { id: 'string', hash: 'string', personId: 'string', invite: 'boolean', expiresAt: 'number' }));
   const ids = new Set((people as Person[]).map((p) => p.id));
   (devices as StoredDevice[]).forEach((d, i) => {

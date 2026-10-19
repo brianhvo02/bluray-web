@@ -65,8 +65,24 @@ const SAFETY_HEADERS: Readonly<Record<string, string>> = {
   'Content-Security-Policy': "sandbox; default-src 'none'",
 };
 
+/** The headers a response goes out with, on either route: safety, CORS for `origin`, then the handler's own. */
+export function responseHeaders(origin: string | undefined, response: Response): Record<string, string> {
+  return { ...SAFETY_HEADERS, ...corsHeaders(origin), ...response.headers };
+}
+
+/** Requests that came over a WebRTC data channel rather than HTTPS. */
+const channelRequests = new WeakSet<IncomingMessage>();
+
+/** Marks a data channel's request stand-in, for {@link viaChannel}. */
+export function markChannelRequest(req: IncomingMessage): void {
+  channelRequests.add(req);
+}
+
+/** Whether `req` came over a data channel (see `rtc/dispatch.ts`); false for HTTPS. */
+export const viaChannel = (req: IncomingMessage): boolean => channelRequests.has(req);
+
 function send(res: ServerResponse, origin: string | undefined, response: Response): void {
-  res.writeHead(response.status, { ...SAFETY_HEADERS, ...corsHeaders(origin), ...response.headers });
+  res.writeHead(response.status, responseHeaders(origin, response));
   const { body } = response;
   if (body instanceof Readable) {
     const length = Number(response.headers?.['Content-Length'] ?? NaN);
@@ -80,6 +96,14 @@ function send(res: ServerResponse, origin: string | undefined, response: Respons
   } else {
     res.end(body);
   }
+}
+
+/**
+ * Answers `req` with the built-in health check, then `handlers`; HttpErrors become their answers, anything else
+ * thrown is the caller's to answer (a generic 500). Both the HTTPS server and the data channels use it.
+ */
+export function handle(handlers: readonly Handler[], req: IncomingMessage): Promise<Response> {
+  return route([health, ...handlers], req);
 }
 
 async function route(handlers: readonly Handler[], req: IncomingMessage): Promise<Response> {
@@ -104,10 +128,9 @@ async function route(handlers: readonly Handler[], req: IncomingMessage): Promis
 
 /** An HTTP server running `handlers` after the built-in health check, with CORS on every response. */
 export function createServer(handlers: readonly Handler[]): http.Server {
-  const all = [health, ...handlers];
   const server = http.createServer((req, res) => {
     const origin = req.headers.origin;
-    route(all, req)
+    handle(handlers, req)
       .then((response) => send(res, origin, response))
       .catch((err: unknown) => {
         console.error(err);

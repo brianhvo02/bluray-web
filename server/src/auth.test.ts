@@ -307,6 +307,42 @@ describe('People', () => {
     expect(auth.verify(b.token)).not.toBeNull();
   });
 
+  it('tells listeners when a device goes: on revoke and on removing its person, once per device, not on a move', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');
+    const phone = await pair(auth, { newPerson: { name: 'Mika', owner: false } }, 'Phone');
+    const tablet = await pair(auth, { personId: phone.device.personId }, 'Tablet');
+    const tv = await pair(auth, { newPerson: { name: 'Den TV', owner: false } }, 'TV');
+    const gone: string[] = [];
+    const stop = auth.onDeviceGone((id) => gone.push(id));
+    auth.moveDevice(tv.device.id, phone.device.personId);
+    expect(gone).toEqual([]);
+    auth.revokeDevice(tv.device.id);
+    expect(gone).toEqual([tv.device.id]);
+    auth.revokeDevice(tv.device.id);
+    expect(gone).toEqual([tv.device.id]);
+    auth.removePerson(phone.device.personId);
+    expect(gone.slice(1).sort()).toEqual([phone.device.id, tablet.device.id].sort());
+    stop();
+    const other = await pair(auth, { newPerson: { name: 'Sora', owner: false } }, 'Laptop');
+    auth.revokeDevice(other.device.id);
+    expect(gone).toHaveLength(3);
+  });
+
+  it('notes the route a device last used, keeps it across a restart, and reads files without it', async () => {
+    const auth = new Auth(new Store(tmp), now);
+    const { device } = await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');
+    expect(auth.devices()[0]!.lastRoute).toBeUndefined();
+    auth.noteRoute(device.id, 'relay');
+    expect(new Auth(new Store(tmp), now).devices()[0]!.lastRoute).toBe('relay');
+    auth.noteRoute('nope', 'https');
+    const file = join(tmp, 'auth.json');
+    const data = JSON.parse(readFileSync(file, 'utf8')) as { devices: Record<string, unknown>[] };
+    data.devices[0]!.lastRoute = 'carrier-pigeon';
+    writeFileSync(file, JSON.stringify(data));
+    expect(() => new Auth(new Store(tmp), now).devices()).toThrow(/lastRoute/);
+  });
+
   it('removing a person revokes their devices and codes', async () => {
     const auth = new Auth(new Store(tmp), now);
     await pair(auth, { personId: auth.firstOwnerPerson().id }, 'Mac');

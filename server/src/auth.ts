@@ -15,6 +15,9 @@ export interface Person {
   pending?: true;
 }
 
+/** How a device reached the NAS: HTTPS (home network or Tailscale), a direct WebRTC channel, or one through the relay. */
+export type DeviceRoute = 'https' | 'webrtc' | 'relay';
+
 /** A device as stored: its owner status comes from its person. */
 export interface StoredDevice {
   readonly id: string;
@@ -23,6 +26,8 @@ export interface StoredDevice {
   readonly publicKeyJwk: JsonWebKey;
   readonly pairedAt: number;
   lastSeen: number;
+  /** The route of its last session; absent until one starts (and in files from before routes were noted). */
+  lastRoute?: DeviceRoute;
 }
 
 /** What `verify`, `devices` and `redeem` return: the stored device with its person's name and owner status. */
@@ -108,6 +113,7 @@ export function p256PublicJwk(jwk: unknown): JsonWebKey | null {
 export class Auth {
   /** Outstanding challenges → their device; single use, in memory only. */
   private readonly challenges = new Map<string, { deviceId: string; expiresAt: number }>();
+  private readonly goneListeners = new Set<(deviceId: string) => void>();
 
   constructor(
     private readonly store: Store,
@@ -218,14 +224,33 @@ export class Auth {
     return this.device(text.slice(0, dot));
   }
 
+  /** Records the route of the session `deviceId` just started; nothing for an unknown device. */
+  noteRoute(deviceId: string, route: DeviceRoute): void {
+    const current = this.store.read().devices.find((d) => d.id === deviceId);
+    if (!current || current.lastRoute === route) return;
+    this.store.update((data) => {
+      const stored = data.devices.find((d) => d.id === deviceId);
+      if (stored) stored.lastRoute = route;
+    });
+  }
+
+  /** Calls `listener` with each device revoked, on its own or with its person; returns the way to stop. */
+  onDeviceGone(listener: (deviceId: string) => void): () => void {
+    this.goneListeners.add(listener);
+    return () => this.goneListeners.delete(listener);
+  }
+
   /** Throws AuthConflict('last-owner') when this is the last device of an owner. */
   revokeDevice(id: string): void {
-    this.store.update((data) => {
+    const found = this.store.update((data) => {
       const before = ownerDeviceCount(data);
+      const had = data.devices.some((d) => d.id === id);
       data.devices = data.devices.filter((d) => d.id !== id);
       keepOwner(before, data);
+      return had;
     });
     this.dropChallenges((deviceId) => deviceId === id);
+    if (found) this.devicesGone([id]);
   }
 
   people(): Person[] {
@@ -266,6 +291,7 @@ export class Auth {
       keepOwner(before, data);
     });
     this.dropChallenges((deviceId) => gone.has(deviceId));
+    this.devicesGone(gone);
   }
 
   moveDevice(deviceId: string, personId: string): void {
@@ -338,6 +364,18 @@ export class Auth {
   private derive(data: AuthData, stored: StoredDevice): Device | null {
     const person = data.people.find((p) => p.id === stored.personId);
     return person ? { ...stored, owner: person.owner, personName: person.name } : null;
+  }
+
+  private devicesGone(ids: Iterable<string>): void {
+    for (const id of ids) {
+      for (const listener of [...this.goneListeners]) {
+        try {
+          listener(id);
+        } catch (err) {
+          console.error(err);
+        }
+      }
+    }
   }
 
   private dropChallenges(gone: (deviceId: string) => boolean): void {

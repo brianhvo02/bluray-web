@@ -6,7 +6,7 @@ import { p256PublicJwk } from '../auth';
 import type { Auth } from '../auth';
 import { codeHash, unregisterCodes } from '../codes';
 import type { CodeRegistrar } from '../codes';
-import { HttpError, json, readJson } from '../http';
+import { HttpError, json, readJson, viaChannel } from '../http';
 import type { Handler } from '../http';
 
 type JsonWebKey = webcrypto.JsonWebKey;
@@ -157,8 +157,12 @@ export function pairRoutes(auth: Auth, opts: { now: () => number; trustProxy: (a
       }
       case '/api/session': {
         const body = await readObject(req);
-        const session = auth.startSession(str(body, 'deviceId'), str(body, 'challenge'), str(body, 'signature'));
-        return session ? json(200, session) : unauthorized();
+        const deviceId = str(body, 'deviceId');
+        const session = auth.startSession(deviceId, str(body, 'challenge'), str(body, 'signature'));
+        if (!session) return unauthorized();
+        // a data channel's session is noted by the rtc layer, which knows whether it is relayed
+        if (!viaChannel(req)) auth.noteRoute(deviceId, 'https');
+        return json(200, session);
       }
       default:
         return null;
