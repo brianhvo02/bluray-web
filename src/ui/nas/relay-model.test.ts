@@ -27,6 +27,10 @@ describe('routeLabel', () => {
 });
 
 describe('relaySettingsCopy', () => {
+  it('asks before paid use, with the price', () => {
+    expect(relaySettingsCopy.paidConfirm).toBe('Beyond the free allowance, Cloudflare bills the relay to your Cloudflare account (about $0.05 per GB). Allow paid use?');
+  });
+
   it('cites the date the terms were checked', () => {
     expect(relaySettingsCopy.terms).toContain('2026-10-19');
   });

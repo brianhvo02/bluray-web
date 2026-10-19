@@ -88,6 +88,22 @@ describe('playlist lifecycle', () => {
     expect(c.getSnapshot().playlists).toEqual([]);
   });
 
+  it('marks a NAS disc as remote (and as WebRTC for an rtc:// base) until a local disc opens or the disc closes', () => {
+    const spec = (base: string) => ({ kind: 'remote' as const, base, token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } });
+    expect(INITIAL_SNAPSHOT.remoteDisc).toBe(false);
+    expect(INITIAL_SNAPSHOT.rtcDisc).toBe(false);
+    const c = new PlayerController(new FakeWorker(), new FakeAudio());
+    c.openRemote(spec('https://nas.example/discs/a/'));
+    expect([c.getSnapshot().remoteDisc, c.getSnapshot().rtcDisc]).toEqual([true, false]);
+    c.openRemote(spec('rtc://nas1/api/discs/a/'));
+    expect([c.getSnapshot().remoteDisc, c.getSnapshot().rtcDisc]).toEqual([true, true]);
+    c.open([]);
+    expect([c.getSnapshot().remoteDisc, c.getSnapshot().rtcDisc]).toEqual([false, false]);
+    c.openRemote(spec('rtc://nas1/api/discs/a/'));
+    c.closeDisc();
+    expect([c.getSnapshot().remoteDisc, c.getSnapshot().rtcDisc]).toEqual([false, false]);
+  });
+
   it('counts every open and close, so a wait begun for one open can tell another from it', () => {
     const c = new PlayerController(new FakeWorker(), new FakeAudio());
     expect(c.discOpens).toBe(0);

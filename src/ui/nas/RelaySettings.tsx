@@ -9,6 +9,7 @@ import { relaySettingsCopy, usageLine } from './relay-model';
 export function RelaySettings({ nas }: { nas: NasClient }): ReactElement | null {
   const [settings, setSettings] = useState<NasRelaySettings | null>(null);
   const [missing, setMissing] = useState(false);
+  const [confirmingPaid, setConfirmingPaid] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,6 +34,7 @@ export function RelaySettings({ nas }: { nas: NasClient }): ReactElement | null 
     nas.admin.setRelay(patch).then(
       (s) => {
         setSettings(s);
+        setConfirmingPaid(false);
         setBusy(false);
       },
       (err: unknown) => {
@@ -53,10 +55,22 @@ export function RelaySettings({ nas }: { nas: NasClient }): ReactElement | null 
             {relaySettingsCopy.enable}
           </label>
           <label className="admin-switch">
-            <input type="checkbox" role="switch" data-testid="nas-relay-paid" checked={settings.allowPaid} disabled={busy} onChange={(e) => change({ allowPaid: e.target.checked })} />{' '}
+            <input type="checkbox" role="switch" data-testid="nas-relay-paid" checked={settings.allowPaid || confirmingPaid} disabled={busy} onChange={(e) => (e.target.checked ? setConfirmingPaid(true) : confirmingPaid ? setConfirmingPaid(false) : change({ allowPaid: false }))} />{' '}
             {relaySettingsCopy.allowPaid}
           </label>
-          {settings.allowPaid && <p className="status">{relaySettingsCopy.paidWarning}</p>}
+          {confirmingPaid && (
+            <div className="admin-confirm-box" role="group" aria-label="Confirm">
+              <p>{relaySettingsCopy.paidConfirm}</p>
+              <span className="admin-confirm">
+                <button type="button" data-testid="nas-relay-paid-confirm" disabled={busy} onClick={() => change({ allowPaid: true })}>
+                  Allow
+                </button>
+                <button type="button" data-testid="nas-relay-paid-cancel" onClick={() => setConfirmingPaid(false)}>
+                  Cancel
+                </button>
+              </span>
+            </div>
+          )}
           <p className="status" data-testid="nas-relay-usage">
             {usageLine(settings.usage)}
           </p>

@@ -497,7 +497,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
         onClick={onCanvasClick}
       />
       <div className="notices">
-        {nas && snapshot.remoteDisc && <RelayBadge nas={nas} />}
+        {nas && snapshot.rtcDisc && <RelayBadge nas={nas} />}
         {snapshot.error && (
           <div className="error-banner" role="alert" data-testid="error">
             {snapshot.error.message}

@@ -1,4 +1,3 @@
-import { relayLimitMessage } from './rtc/rtc-connection';
 import type { NasRelayUsage, NasRoute } from './nas-client';
 
 const GB = 1e9;
@@ -9,8 +8,16 @@ export function usageLine(usage: Pick<NasRelayUsage, 'usedBytes' | 'freeBytes'>)
   return `Relay this month: ${gb(usage.usedBytes)} of ${gb(usage.freeBytes)} GB free`;
 }
 
-/** "The relay's free allowance for this month is used up. It resets on {date}." */
-export const limitMessage: (resetsOn: string, locale?: string) => string = relayLimitMessage;
+/** "The relay's free allowance for this month is used up. It resets on {date}.", the date (`YYYY-MM-DD`, UTC) in `locale`. */
+export function relayLimitMessage(resetsOn: string, locale?: string): string {
+  const day = new Date(`${resetsOn}T00:00:00Z`);
+  const date = Number.isNaN(day.getTime())
+    ? resetsOn
+    : new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(day);
+  return `The relay's free allowance for this month is used up. It resets on ${date}.`;
+}
+
+export const limitMessage = relayLimitMessage;
 
 /** The badge shown while a NAS disc plays over a relayed connection. */
 export const RELAYED_BADGE = 'Relayed';
@@ -22,7 +29,7 @@ export const relaySettingsCopy = {
   allowPaid: 'Allow paid use beyond the free allowance',
   terms:
     "Cloudflare's relay (TURN) gives 1,000 GB free each month; its terms were checked on 2026-10-19. The usage shown is the NAS's own estimate. It is off until you turn it on, and stops at the free allowance unless you allow paid use.",
-  paidWarning: 'Beyond the free allowance, Cloudflare bills the relay to your account.',
+  paidConfirm: 'Beyond the free allowance, Cloudflare bills the relay to your Cloudflare account (about $0.05 per GB). Allow paid use?',
 } as const;
 
 /** How a device last reached the NAS, on the admin screen. */

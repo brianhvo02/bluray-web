@@ -36,6 +36,8 @@ export interface PlayerSnapshot {
   readonly bdjRemoteOpenedInMenu: boolean;
   /** The open disc is on the NAS (opened with openRemote). */
   readonly remoteDisc: boolean;
+  /** The open NAS disc is read over WebRTC (its base is `rtc://`), so its connection may be relayed. */
+  readonly rtcDisc: boolean;
   /** Clicks on an HDMV menu that hit no button, counted since the page loaded (a touch that missed shows the controls). */
   readonly menuTapMisses: number;
   readonly warnings: readonly string[];
@@ -106,6 +108,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   bdjRemoteRequests: 0,
   bdjRemoteOpenedInMenu: false,
   remoteDisc: false,
+  rtcDisc: false,
   menuTapMisses: 0,
   warnings: [],
   currentPlaylistId: null,
@@ -399,7 +402,7 @@ export class PlayerController {
     if (spec.fetchPort) this.servings.push({ release: release ?? null, timer: null });
     else release?.(); // nothing crosses to the engine to serve
     this.startAudio();
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading', remoteDisc: true });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading', remoteDisc: true, rtcDisc: spec.base.startsWith('rtc://') });
     this.post({ type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
   }
 

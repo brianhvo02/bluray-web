@@ -1,3 +1,4 @@
+import { relayLimitMessage } from '../relay-model';
 import { NAS_LOST_MESSAGE } from '../../../engine/disc/http-transport';
 import { WireClient } from '../../../engine/disc/rtc-wire';
 import type { WireChannel } from '../../../engine/disc/rtc-wire';
@@ -16,14 +17,7 @@ const REPLY_TIMEOUT_MS = 10_000;
 
 export const RTC_UNREACHABLE = "Can't connect to the NAS from this network. Try another Wi-Fi or mobile data.";
 
-/** "The relay's free allowance for this month is used up. It resets on {date}.", the date (`YYYY-MM-DD`, UTC) in `locale`. */
-export function relayLimitMessage(resetsOn: string, locale?: string): string {
-  const day = new Date(`${resetsOn}T00:00:00Z`);
-  const date = Number.isNaN(day.getTime())
-    ? resetsOn
-    : new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(day);
-  return `The relay's free allowance for this month is used up. It resets on ${date}.`;
-}
+export { relayLimitMessage };
 
 /** The API base of a NAS reached over WebRTC; `NasClient` sends URLs under it through the connection. */
 export const RTC_BASE = (nasId: string): string => `rtc://${nasId}/api/`;
@@ -154,7 +148,7 @@ export class RtcConnection implements RtcLink {
 
   get relayed(): boolean {
     // ?rtcrelayed=1 is test-only (E2E): the connection counts as relayed, so the badge can be seen without a relay.
-    return this.isRelayed || globalThis.location?.search.includes('rtcrelayed=1') === true;
+    return this.isRelayed || new URLSearchParams(globalThis.location?.search ?? '').get('rtcrelayed') === '1';
   }
 
   /**
