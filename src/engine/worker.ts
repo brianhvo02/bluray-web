@@ -79,7 +79,7 @@ const player = new Player({
     return { rt, libbluray: brokenClassLibrary ? new Uint8Array(0) : libbluray, libblurayAwt };
   },
   // buffer first: a NAS disc's on-disk read-ahead cache, written through sync access handles (dedicated workers only)
-  ...(typeof navigator.storage?.getDirectory === 'function' ? { readAheadCacheRoot: () => navigator.storage.getDirectory() } : {}),
+  ...(readAheadCacheSupported() ? { readAheadCacheRoot: () => navigator.storage.getDirectory() } : {}),
   // bd_set_player_setting_str as a player application sets it: the browser's language and region
   playerSettings: playerSettingsForLocale(navigator.language),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
@@ -104,6 +104,13 @@ const player = new Player({
 scope.onmessage = (event) => {
   void player.handle(event.data);
 };
+void player.startReadAheadCache();
+
+/** OPFS with sync access handles (dedicated workers), which the read-ahead cache writes through. */
+function readAheadCacheSupported(): boolean {
+  const fileHandle = (self as unknown as { FileSystemFileHandle?: { prototype: Record<string, unknown> } }).FileSystemFileHandle;
+  return typeof navigator.storage?.getDirectory === 'function' && typeof fileHandle?.prototype.createSyncAccessHandle === 'function';
+}
 
 /** Whether a 2D canvas applies `ctx.filter` (Safari ignores it): a blurred dot must spread to its neighbour. */
 function supportsCanvasFilter(): boolean {

@@ -70,7 +70,9 @@ export interface PlayerSnapshot {
   /** Drop rate while a set is active and the rate is above DROP_WARN_RATE; else null. */
   readonly shaderDropWarning: number | null;
   /** The open NAS disc's read-ahead cache fill (buffer first), as its last bufferProgress said; null before any. */
-  readonly buffer: { readonly bytes: number; readonly targetBytes: number; readonly mbps: number } | null;
+  readonly buffer: { readonly bytes: number; readonly targetBytes: number; readonly mbps: number; readonly stopped?: 'failed' | 'no-cache' } | null;
+  /** Whether this device can keep a read-ahead cache (the engine says at its start; null until then). Kept across discs. */
+  readonly readAheadCache: boolean | null;
 }
 
 /** The engine's last 'subtitles' event. */
@@ -134,6 +136,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   shaders: { state: 'off', set: null, error: null },
   shaderDropWarning: null,
   buffer: null,
+  readAheadCache: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -196,7 +199,9 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'playlistCleared':
       return { ...s, currentPlaylistId: null, durationUs: 0, chapters: [], timeUs: 0, audioTracks: [], selectedAudio: null };
     case 'bufferProgress':
-      return { ...s, buffer: { bytes: e.bytes, targetBytes: e.targetBytes, mbps: e.mbps } };
+      return { ...s, buffer: { bytes: e.bytes, targetBytes: e.targetBytes, mbps: e.mbps, ...(e.stopped ? { stopped: e.stopped } : {}) } };
+    case 'readAheadCache':
+      return { ...s, readAheadCache: e.available };
     case 'shaderStatus':
       return { ...s, shaders: { state: e.state, set: e.set, error: e.error }, shaderDropWarning: e.state === 'active' ? s.shaderDropWarning : null };
   }
@@ -390,7 +395,7 @@ export class PlayerController {
     this.refreshToken = null;
     this.supersedeServings();
     this.startAudio();
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading' });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading' });
     this.post({ type: 'open', disc: { kind: 'files', entries } });
   }
 
@@ -408,7 +413,7 @@ export class PlayerController {
     if (spec.fetchPort) this.servings.push({ release: release ?? null, timer: null });
     else release?.(); // nothing crosses to the engine to serve
     this.startAudio();
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, engineState: 'loading', remoteDisc: true, rtcDisc: spec.base.startsWith('rtc://') });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading', remoteDisc: true, rtcDisc: spec.base.startsWith('rtc://') });
     this.post(bufferFirst ? { type: 'open', disc: spec, bufferFirst } : { type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
   }
 
@@ -711,7 +716,7 @@ export class PlayerController {
     this.refreshToken = null;
     this.supersedeServings();
     this.post({ type: 'close' });
-    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted });
+    this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache });
   }
 
   private post(cmd: EngineCommand, transfer: Transferable[] = []): void {

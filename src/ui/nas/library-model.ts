@@ -99,6 +99,17 @@ export function mainPlaylist(manifest: DiscManifest): Mpls | null {
   }
 }
 
+/** Playlist `id` (an episode's), from the manifest's inlined playlists; null when it isn't there or can't be read. */
+export function playlistOf(manifest: DiscManifest, id: string): Mpls | null {
+  const bytes = inlined(manifest, `BDMV/PLAYLIST/${id}.MPLS`);
+  if (!bytes) return null;
+  try {
+    return parseMpls(bytes);
+  } catch {
+    return null;
+  }
+}
+
 /** What the manifest's inlined playlists and clip info say about the main title (mainPlaylist). */
 export function discFacts(manifest: DiscManifest): DiscFacts {
   const unknown: DiscFacts = { peakMbps: null, uhd: false };

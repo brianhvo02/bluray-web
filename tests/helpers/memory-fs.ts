@@ -11,6 +11,10 @@ export class MemoryFile {
 
   constructor(readonly name: string) {}
 
+  async getFile(): Promise<{ readonly size: number }> {
+    return { size: this.bytes.length };
+  }
+
   async createSyncAccessHandle(): Promise<MemorySyncHandle> {
     if (this.locked) throw new DOMException(`${this.name} already has an open access handle`, 'NoModificationAllowedError');
     this.locked = true;
@@ -105,6 +109,10 @@ export class MemoryDirectory {
 
   async *keys(): AsyncIterableIterator<string> {
     for (const name of [...this.entries.keys()]) yield name;
+  }
+
+  async *values(): AsyncIterableIterator<MemoryDirectory | MemoryFile> {
+    for (const entry of [...this.entries.values()]) yield entry;
   }
 
   /** As the browser's handle, for code that takes one. */

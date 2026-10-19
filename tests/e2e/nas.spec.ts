@@ -267,7 +267,7 @@ test('buffers first on a slow connection: the pre-flight asks, and Wait fills th
     }
     return names;
   });
-  expect(cached).toContain('BDMV_2fSTREAM_2f00001_2eM2TS.bin');
+  expect(cached.some((name) => name.startsWith('BDMV_2fSTREAM_2f00001_2eM2TS.') && name.endsWith('.bin'))).toBe(true);
   await page.getByTestId('playlist-00000').click();
   await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
 });

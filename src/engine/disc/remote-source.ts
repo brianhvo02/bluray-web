@@ -28,14 +28,12 @@ export interface RemoteSourceOptions {
 
 /** A read pending this long shows "Waiting for the NAS drive…" (spun-down disks take seconds to start). */
 export const WAITING_AFTER_MS = 3_000;
-/** Range requests in flight at most while filling the on-disk cache (buffer first). */
-export const FILL_IN_FLIGHT = 2;
 
 /** Where chunks are looked for before the network: the disc's on-disk read-ahead cache (ReadAheadCache). */
 export interface ChunkCache {
   read(path: string, offset: number, length: number): Promise<Uint8Array | null>;
   write(path: string, offset: number, bytes: Uint8Array): Promise<void>;
-  has(path: string, offset: number, length: number): Promise<boolean>;
+  has(path: string, offset: number, length: number): boolean;
 }
 
 interface Chunk {
@@ -70,6 +68,9 @@ export class RemoteSource implements ByteSource {
   private waitingReads = 0;
   private closed = false;
   private cache: ChunkCache | null = null;
+  private writeThrough = false;
+  /** Chunks the cache fill is fetching (fillChunk), by chunk key. */
+  private readonly filling = new Map<string, Promise<Uint8Array>>();
 
   constructor(
     manifest: DiscManifest,
@@ -148,45 +149,41 @@ export class RemoteSource implements ByteSource {
   }
 
   /**
-   * Fetches `path`'s chunks covering `start`..`end` (aligned out to whole chunks) into the cache, in order, and
-   * FILL_IN_FLIGHT at a time; chunks the cache holds already are not fetched again. After each chunk, `onChunk` gets
-   * its size and whether it came over the network, and answers whether to go on. Resolves false when it was stopped
-   * that way, true at the end of the range; rejects when `signal` aborts or a read fails.
+   * Fetches the chunk of `path` at `offset` (a chunk boundary) into the cache unless it holds it, and resolves with the
+   * bytes that came over the network (0 when it was held). A read of that chunk meanwhile waits for this fetch rather
+   * than fetching it again.
    */
-  async fill(path: string, start: number, end: number, signal: AbortSignal, onChunk: (bytes: number, fromNetwork: boolean) => boolean): Promise<boolean> {
+  async fillChunk(path: string, offset: number, signal: AbortSignal): Promise<number> {
     const cache = this.cache;
     if (!cache) throw new Error('this disc has no read-ahead cache');
     const key = path.toUpperCase();
-    const size = this.get(path);
-    const chunkBytes = this.opts.chunkBytes;
-    const last = Math.ceil(Math.min(end, size) / chunkBytes) - 1;
-    let next = Math.floor(start / chunkBytes);
-    const stop = new AbortController();
-    const onAbort = (): void => stop.abort(signal.reason);
-    signal.throwIfAborted();
-    signal.addEventListener('abort', onAbort, { once: true });
-    const queue: Array<{ readonly offset: number; readonly length: number; readonly bytes: Promise<Uint8Array | null> }> = [];
-    const startOne = (): void => {
-      const offset = next++ * chunkBytes;
-      const length = Math.min(chunkBytes, size - offset);
-      const bytes = (async () => ((await cache.has(key, offset, length)) ? null : this.transport.read(key, offset, length, stop.signal)))();
-      bytes.catch(() => undefined); // awaited in order below; one abandoned on a stop must not go unhandled
-      queue.push({ offset, length, bytes });
-    };
+    const length = Math.min(this.opts.chunkBytes, this.get(path) - offset);
+    if (length <= 0 || cache.has(key, offset, length)) return 0;
+    const ck = chunkKey(key, Math.floor(offset / this.opts.chunkBytes));
+    const fetching = this.transport.read(key, offset, length, signal).then(async (bytes) => {
+      await cache.write(key, offset, bytes);
+      return bytes;
+    });
+    this.filling.set(ck, fetching);
     try {
-      while (next <= last && queue.length < FILL_IN_FLIGHT) startOne();
-      for (let head = queue.shift(); head; head = queue.shift()) {
-        const bytes = await abortable(head.bytes, stop.signal); // a stop doesn't wait for a read the network holds up
-        stop.signal.throwIfAborted();
-        if (bytes) await cache.write(key, head.offset, bytes);
-        if (!onChunk(head.length, bytes !== null)) return false;
-        if (next <= last) startOne();
-      }
-      return true;
+      return (await fetching).length;
     } finally {
-      signal.removeEventListener('abort', onAbort);
-      stop.abort(new DOMException('the fill is over', 'AbortError'));
+      if (this.filling.get(ck) === fetching) this.filling.delete(ck);
     }
+  }
+
+  /** The chunk at `offset` of `path` is being fetched (by a read, read-ahead or the fill). */
+  isFetching(path: string, offset: number): boolean {
+    const ck = chunkKey(path.toUpperCase(), Math.floor(offset / this.opts.chunkBytes));
+    return this.chunks.get(ck)?.pending === true || this.filling.has(ck);
+  }
+
+  /**
+   * While a fill follows playback (bufferFirst), chunks read from the network are kept in the cache too, so the fill
+   * doesn't fetch them again; the fill frees them once playback has passed them.
+   */
+  setWriteThrough(on: boolean): void {
+    this.writeThrough = on;
   }
 
   /** Aborts every fetch and drops the cache (the disc was closed). */
@@ -298,15 +295,20 @@ export class RemoteSource implements ByteSource {
     return chunk;
   }
 
-  /** A chunk from the cache when it holds it, else from the network. */
+  /** A chunk from the cache when it holds it, or from the fill fetching it, else from the network. */
   private async readThrough(path: string, start: number, size: number, signal: AbortSignal): Promise<Uint8Array> {
     const cache = this.cache;
     if (cache) {
       const cached = await cache.read(path, start, size).catch(() => null);
       signal.throwIfAborted();
       if (cached) return cached;
+      const filling = this.filling.get(chunkKey(path, Math.floor(start / this.opts.chunkBytes)));
+      const filled = filling ? await abortable(filling, signal).catch((err: unknown) => (signal.aborted ? Promise.reject(err) : null)) : null;
+      if (filled) return filled;
     }
-    return this.transport.read(path, start, size, signal);
+    const bytes = await this.transport.read(path, start, size, signal);
+    if (cache && this.writeThrough) void cache.write(path, start, bytes).catch(() => undefined);
+    return bytes;
   }
 
   /** Starts read-ahead after the cursor while requests and the budget allow. */

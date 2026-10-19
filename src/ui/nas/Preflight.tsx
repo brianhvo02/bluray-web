@@ -3,8 +3,8 @@ import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { BufferRequest } from '../../engine/protocol';
 import type { PlayerController } from '../../player/player-controller';
-import { bufferPlan, playlistFacts, storageRoom, tooBigCopy, waitCopy, type BufferPlan } from './buffer-model';
-import { discBadges, discFacts, formatSize, mainPlaylist, openFailed, preflightLines, type DiscFacts } from './library-model';
+import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, storageRoom, tooBigCopy, waitCopy, watchBufferFailure, type BufferPlan } from './buffer-model';
+import { discBadges, discFacts, formatSize, mainPlaylist, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
 import { NasHttpError, type NasClient } from './nas-client';
 import { playOnceOpen } from './play-once-open';
@@ -86,28 +86,37 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
     // The probe runs once per disc opened here; onFacts is left out on purpose (a new callback is no new disc).
   }, [nas, disc.id]);
 
-  /** The main title's length and bytes against this connection; null until both are known (or with no title). */
+  /**
+   * The length and bytes of what plays (the episode's playlist, else the main title's) against this connection; null
+   * until both are known (or with no playlist).
+   */
   const need = useMemo(() => {
-    const main = manifest && mainPlaylist(manifest);
-    if (!main || typeof mbps !== 'number') return null;
+    const playlist = manifest && ((playlistId !== undefined ? playlistOf(manifest, playlistId) : null) ?? mainPlaylist(manifest));
+    if (!playlist || typeof mbps !== 'number') return null;
     const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
-    return { ...playlistFacts(main.playItems, sizes), connectionMbps: mbps };
-  }, [manifest, mbps]);
+    return { ...playlistFacts(playlist.playItems, sizes), connectionMbps: mbps };
+  }, [manifest, mbps, playlistId]);
   /** Whether the connection keeps up, before the storage is asked for (persist() can prompt). */
   const keepsUp = need !== null && bufferPlan({ ...need, quotaBytes: Infinity }).kind === 'play';
+  /** The connection is slower, and this device can't keep a read-ahead cache (the engine said at its start). */
+  const cannotBuffer = need !== null && !keepsUp && snapshot.readAheadCache === false;
   useEffect(() => {
-    if (need === null || keepsUp) return;
+    if (need === null || keepsUp || cannotBuffer) return;
     let live = true;
-    void storageRoom(globalThis.navigator?.storage).then((room) => {
+    const storage = globalThis.navigator?.storage;
+    const reclaimable = typeof storage?.getDirectory === 'function' ? () => readAheadCacheBytes(() => storage.getDirectory()) : undefined;
+    void storageRoom(storage, reclaimable).then((room) => {
       if (live) setQuota(room);
     });
     return () => {
       live = false;
     };
-  }, [need, keepsUp]);
-  /** null while unknown: Play then plays at once, as without a measurement. */
+  }, [need, keepsUp, cannotBuffer]);
+  /** The storage estimate is still pending: what Play would do isn't known yet. */
+  const estimating = need !== null && !keepsUp && !cannotBuffer && quota === undefined;
+  /** null while unknown (or when the device can't buffer): Play then plays at once, as without a measurement. */
   const plan: BufferPlan | null =
-    need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(askEveryWait() ? { silentBelowS: 0 } : {}) });
+    need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : cannotBuffer || quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(askEveryWait() ? { silentBelowS: 0 } : {}) });
 
   const play = (bufferFirst?: BufferRequest): void => {
     if (!manifest) return;
@@ -122,6 +131,7 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst);
         releaseWait.current?.();
         releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
+        if (bufferFirst) watchBufferFailure(controller); // for as long as this disc is open, past this screen
         setOpening(bufferFirst ? 'buffering' : 'launched');
       },
     ).catch((err: unknown) => {
@@ -130,8 +140,8 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
     });
   };
 
-  /** Buffer first: the bytes the plan holds ahead, from the start of the main title. */
-  const waitFor = (bytes: number): void => play({ fromSeconds: 0, targetBytes: Math.ceil(bytes) });
+  /** Buffer first: the bytes the plan holds ahead, from the start of what plays. */
+  const waitFor = (bytes: number): void => play({ fromSeconds: 0, targetBytes: Math.ceil(bytes), ...(playlistId !== undefined ? { playlistId } : {}) });
   const stopWaiting = (): void => {
     controller.closeDisc(); // the engine drops the disc unopened
     setOpening('idle');
@@ -190,6 +200,11 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
               {waitCopy(plan.waitS)}
             </p>
           )}
+          {cannotBuffer && (
+            <p className="status" data-testid="nas-buffer-unavailable">
+              {BUFFER_FAILED_COPY}
+            </p>
+          )}
           {plan?.kind === 'too-big' && (
             <p className="status" data-testid="nas-buffer-too-big">
               {tooBigCopy(plan.canHoldBytes, plan.bytes)}
@@ -204,10 +219,10 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
             <button
               type="button"
               data-testid="nas-play"
-              disabled={!manifest || opening !== 'idle'}
+              disabled={!manifest || opening !== 'idle' || estimating}
               onClick={() => (plan?.kind === 'silent' ? waitFor(plan.bytes) : play())}
             >
-              {plan?.kind === 'ask' || plan?.kind === 'too-big' ? 'Play now with pauses' : 'Play'}
+              {plan?.kind === 'ask' || plan?.kind === 'too-big' || cannotBuffer ? 'Play now with pauses' : 'Play'}
             </button>
             {plan?.kind === 'ask' && (
               <button type="button" disabled>

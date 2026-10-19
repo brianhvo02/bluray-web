@@ -29,6 +29,8 @@ import { portFetch, serveFetch } from './disc/port-fetch';
 import type { FileSource } from './disc/file-source';
 import { RemoteDiscError, TokenRelay } from './disc/http-transport';
 import { checkStreamReadable, loadClips, openDisc, peekIndex, playlistPath, readBdid, streamPath, type DiscModel } from './disc/open-disc';
+import { CacheFill } from './disc/cache-fill';
+import type { DiscManifest } from './disc/nas-api';
 import { ReadAheadCache } from './disc/read-ahead-cache';
 import { RemoteSource } from './disc/remote-source';
 import { BdVk } from './graphics/graphics-controller';
@@ -125,7 +127,26 @@ export interface PlayerDeps {
   readonly readAheadCacheRoot?: () => Promise<FileSystemDirectoryHandle>;
   /** Epoch ms, for the read-ahead cache's age; Date.now by default. */
   readonly epochMs?: () => number;
+  /** The read-ahead cache's segment size (SEGMENT_BYTES by default; tests use smaller). */
+  readonly readAheadSegmentBytes?: number;
 }
+
+/** A bufferFirst open: it waits for its fill until the target is held, a cancelBuffer, or a close or open drops it. */
+interface OpenHold {
+  cancelled: boolean;
+  abandoned: boolean;
+  readonly released: Promise<void>;
+  release(): void;
+}
+
+function openHold(): OpenHold {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  return { cancelled: false, abandoned: false, released, release };
+}
+
+/** While a fill follows playback, the play position is looked at again this often (freeing what playback passed). */
+const FILL_KICK_MS = 1000;
 
 const defaultSetTimer = (ms: number, fn: () => void): (() => void) => {
   const id = setTimeout(fn, ms);
@@ -380,9 +401,14 @@ export class Player {
   /** The NAS disc's on-disk read-ahead cache, opening (null: it has none). */
   private cache: Promise<ReadAheadCache | null> | null = null;
   /** The read-ahead cache's fill in progress. */
-  private filling: AbortController | null = null;
-  /** A bufferFirst open in progress: cancelBuffer lets it open at once, a close or another open drops it unopened. */
-  private openHold: { cancelled: boolean; abandoned: boolean } | null = null;
+  private filling: CacheFill | null = null;
+  private lastFillKickMs = Number.NEGATIVE_INFINITY;
+  /**
+   * The last bufferFirst open sent (queued or running): cancelBuffer lets it open at once, a close or another open drops
+   * it unopened. Set when the command arrives, so commands sent after it see it before it runs.
+   */
+  private openHold: OpenHold | null = null;
+  private readonly holds = new WeakMap<EngineCommand, OpenHold>();
   private bdj: BdjTitle | null = null;
   /** Taps on a BD-J menu that brought no reaction (telemetry). */
   private bdjTapsIgnored = 0;
@@ -431,6 +457,25 @@ export class Player {
     });
   }
 
+  /**
+   * Once, at the engine worker's start: says whether this device can keep a read-ahead cache (readAheadCache), and
+   * clears the caches over 24 hours old.
+   */
+  async startReadAheadCache(): Promise<void> {
+    const root = this.deps.readAheadCacheRoot;
+    let available = false;
+    if (root) {
+      try {
+        await root();
+        available = true;
+        await ReadAheadCache.clearExpired(root, (this.deps.epochMs ?? Date.now)());
+      } catch {
+        // no OPFS here (a private window): NAS discs read only the network
+      }
+    }
+    this.deps.emit({ type: 'readAheadCache', available });
+  }
+
   /** Commands run strictly one at a time, in arrival order. */
   handle(cmd: EngineCommand): Promise<void> {
     // a read waiting for a fresh token holds up the queue, so the token cannot wait in it
@@ -438,16 +483,29 @@ export class Player {
       this.remoteToken(cmd.token);
       return Promise.resolve();
     }
-    // a bufferFirst open waits for its fill: stopping it can't wait in the queue either
+    // a bufferFirst open waits for its fill: cancelling can't wait in the queue behind it
     if (cmd.type === 'cancelBuffer') {
-      if (this.openHold) this.openHold.cancelled = true;
-      this.stopFill();
+      const hold = this.openHold;
+      if (hold) {
+        // play now, with pauses: the disc opens at once and its fill goes on ahead of playback
+        hold.cancelled = true;
+        hold.release();
+      } else {
+        this.stopFill();
+      }
       return Promise.resolve();
     }
-    // a disc buffering before it opens is dropped unopened by what comes after it
+    // a disc buffering before it opens (or queued to) is dropped unopened by what comes after it
     if ((cmd.type === 'open' || cmd.type === 'close') && this.openHold) {
       this.openHold.abandoned = true;
+      this.openHold.release();
+      this.openHold = null;
       this.stopFill();
+    }
+    if (cmd.type === 'open' && cmd.bufferFirst) {
+      const hold = openHold();
+      this.holds.set(cmd, hold);
+      this.openHold = hold;
     }
     this.queue = this.queue.then(() => this.run(cmd));
     return this.queue;
@@ -457,13 +515,13 @@ export class Player {
     try {
       switch (cmd.type) {
         case 'open':
-          await this.open(cmd.disc, cmd.bufferFirst);
+          await this.open(cmd.disc, cmd.bufferFirst, this.holds.get(cmd) ?? null);
           break;
         case 'remoteToken':
         case 'cancelBuffer':
           break; // handled at once
         case 'bufferAhead':
-          void this.fill(cmd);
+          await this.fill(cmd, false);
           break;
         case 'attachCanvas':
           this.compositor = this.deps.createCompositor(cmd.canvas);
@@ -570,6 +628,7 @@ export class Player {
 
   /** One render tick (requestAnimationFrame in the worker; called directly by tests). */
   tick(): void {
+    this.kickFill(false);
     this.navigator?.tick(this.clock.nowUs());
     if (this.bdj) {
       this.bdj.status.setTime45(this.titleTime45());
@@ -701,17 +760,21 @@ export class Player {
     this.deps.requestFrame(loop);
   }
 
-  private async open(spec: DiscSpec, bufferFirst?: BufferRequest): Promise<void> {
-    const hold = bufferFirst ? { cancelled: false, abandoned: false } : null;
-    this.openHold = hold;
+  private async open(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null): Promise<void> {
     try {
+      if (hold?.abandoned) {
+        // dropped while queued: the disc that was open stays as it was until the command that dropped it
+        if (spec.kind === 'remote') spec.fetchPort?.close();
+        if (spec.kind === 'remote' && spec.fetchPort) this.deps.emit({ type: 'fetchPortClosed' });
+        return;
+      }
       await this.openDisc(spec, bufferFirst, hold);
     } finally {
       if (this.openHold === hold) this.openHold = null;
     }
   }
 
-  private async openDisc(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: { cancelled: boolean; abandoned: boolean } | null): Promise<void> {
+  private async openDisc(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
     this.bdjLatency = new InputLatency();
@@ -736,7 +799,11 @@ export class Player {
     }
     this.source = source;
     this.disc = disc;
-    if (bufferFirst && hold && !hold.cancelled && !hold.abandoned) await this.fill(bufferFirst);
+    if (bufferFirst && hold && !hold.abandoned) {
+      // the fill goes on ahead of playback for as long as the disc is open; the open waits for its target
+      const fill = await this.fill(bufferFirst, true);
+      if (fill && !hold.cancelled) await Promise.race([fill.reached, hold.released]);
+    }
     if (hold?.abandoned) {
       // a close or another open came while it filled: the disc is dropped without being opened
       this.dropRemote();
@@ -790,7 +857,7 @@ export class Player {
     if (source instanceof RemoteSource) {
       this.remote = source;
       this.tokens = tokens;
-      if (spec.kind === 'remote') this.cache = this.openCache(source, spec.manifest.discId);
+      if (spec.kind === 'remote') this.cache = this.openCache(source, spec.manifest);
     } else if (this.deps.readAheadCacheRoot) {
       void ReadAheadCache.clearAll(this.deps.readAheadCacheRoot).catch(() => undefined); // another disc opened
     }
@@ -802,11 +869,17 @@ export class Player {
    * one's when over 24 hours old, are cleared first. Null when there is no cache root or it fails (no OPFS, a private
    * window): the disc then reads only the network.
    */
-  private async openCache(source: RemoteSource, discId: string): Promise<ReadAheadCache | null> {
+  private async openCache(source: RemoteSource, manifest: DiscManifest): Promise<ReadAheadCache | null> {
     const root = this.deps.readAheadCacheRoot;
     if (!root) return null;
+    const sizes = new Map(manifest.files.map((f) => [f.path.toUpperCase(), f.size]));
     try {
-      const cache = await ReadAheadCache.open(discId, { root, now: this.deps.epochMs ?? Date.now });
+      const cache = await ReadAheadCache.open(manifest.discId, {
+        root,
+        now: this.deps.epochMs ?? Date.now,
+        fileSize: (path) => sizes.get(path.toUpperCase()),
+        ...(this.deps.readAheadSegmentBytes ? { segmentBytes: this.deps.readAheadSegmentBytes } : {}),
+      });
       await cache.clearOthers();
       if (this.remote !== source) {
         cache.close(); // the disc closed meanwhile
@@ -820,55 +893,76 @@ export class Player {
   }
 
   /**
-   * Fetches the main playlist, from `fromSeconds` on in playback order, into the read-ahead cache until it holds
-   * `targetBytes` of it, emitting bufferProgress after each chunk. One fill runs at a time: a new one replaces it.
-   * Settles when it is done, stopped or failed (a failed read is reported by the disc's own reads, if it lasts).
+   * Starts filling the read-ahead cache with the request's playlist (the main title's without one), in playback order
+   * from `fromSeconds`, reporting bufferProgress. Without `follow` it stops once `targetBytes` are held; with it (a
+   * bufferFirst open) it goes on ahead of the play position to the end of the playlist, freeing what playback has
+   * passed, until the disc closes. One fill runs at a time: a new one replaces it. Resolves with the fill, or null when
+   * there is none (no NAS disc, or no cache: then bufferProgress says 'no-cache').
    */
-  private async fill(req: BufferRequest): Promise<void> {
+  private async fill(req: BufferRequest, follow: boolean): Promise<CacheFill | null> {
     this.stopFill();
     const remote = this.remote;
     const disc = this.disc;
-    const caching = this.cache;
-    if (!remote || !disc || !caching) return;
-    const controller = new AbortController();
-    this.filling = controller;
-    const signal = controller.signal;
+    if (!remote || !disc) return null;
+    const noCache = (): null => {
+      this.deps.emit({ type: 'bufferProgress', bytes: 0, targetBytes: req.targetBytes, mbps: 0, stopped: 'no-cache' });
+      return null;
+    };
+    const cache = await this.cache;
+    if (!cache || this.remote !== remote) return this.remote === remote ? noCache() : null;
+    const playlistId = req.playlistId !== undefined && disc.playlists.has(req.playlistId) ? req.playlistId : disc.summaries[0]?.id;
+    const mpls = playlistId === undefined ? undefined : disc.playlists.get(playlistId);
+    if (!mpls) return null;
+    let clips = disc.clips;
+    const missing = [...new Set(mpls.playItems.map((p) => p.clipId))].filter((id) => !clips.has(id));
     try {
-      const cache = await caching;
-      const main = disc.summaries[0] ? disc.playlists.get(disc.summaries[0].id) : undefined;
-      if (!cache || !main || signal.aborted) return;
-      const missing = [...new Set(main.playItems.map((p) => p.clipId))].filter((id) => !disc.clips.has(id));
-      const clips = missing.length > 0 ? new Map([...disc.clips, ...(await loadClips(remote, missing))]) : disc.clips;
-      const ranges = bufferRanges(main, clips, (path) => remote.size(path), Math.max(0, req.fromSeconds) * 1e6, remote.chunkBytes);
-      const targetBytes = Math.min(Math.max(0, req.targetBytes), ranges.reduce((sum, r) => sum + r.end - r.start, 0));
-      const startedMs = this.deps.nowMs();
-      let bytes = 0;
-      let networkBytes = 0;
-      const report = (): void => {
-        const seconds = Math.max(this.deps.nowMs() - startedMs, 1) / 1000;
-        this.deps.emit({ type: 'bufferProgress', bytes, targetBytes, mbps: (networkBytes * 8) / 1e6 / seconds });
-      };
-      report();
-      for (const range of ranges) {
-        if (bytes >= targetBytes || signal.aborted) break;
-        await remote.fill(range.path, range.start, range.end, signal, (n, fromNetwork) => {
-          bytes += n;
-          if (fromNetwork) networkBytes += n;
-          report();
-          return bytes < targetBytes;
-        });
-      }
+      if (missing.length > 0) clips = new Map([...clips, ...(await loadClips(remote, missing))]);
     } catch {
-      // a stop, a full disk, or a failed read (the disc's own reads report one that lasts)
-    } finally {
-      if (this.filling === controller) this.filling = null;
+      this.deps.emit({ type: 'bufferProgress', bytes: 0, targetBytes: req.targetBytes, mbps: 0, stopped: 'failed' });
+      return null;
     }
+    if (this.remote !== remote) return null;
+    const fromUs = Math.max(0, req.fromSeconds) * 1e6;
+    // following playback: from the play position while this playlist plays, else from the request's start
+    const position = (): number => {
+      const s = this.session;
+      return follow && s && s.playlistId === playlistId ? this.clock.nowUs() : fromUs;
+    };
+    const fill = new CacheFill({
+      remote,
+      cache,
+      ranges: () => bufferRanges(mpls, clips, (path) => remote.size(path), position(), remote.chunkBytes),
+      follow,
+      targetBytes: req.targetBytes,
+      progress: (p) => {
+        if (this.filling === fill) this.deps.emit({ type: 'bufferProgress', ...p });
+      },
+      nowMs: () => this.deps.nowMs(),
+    });
+    this.filling = fill;
+    remote.setWriteThrough(follow);
+    void fill.run().finally(() => {
+      if (this.filling !== fill) return;
+      this.filling = null;
+      remote.setWriteThrough(false);
+    });
+    return fill;
   }
 
   /** Stops the fill; what the cache holds stays. */
   private stopFill(): void {
-    this.filling?.abort(new DOMException('buffering stopped', 'AbortError'));
+    this.filling?.stop();
     this.filling = null;
+    this.remote?.setWriteThrough(false);
+  }
+
+  /** The play position moved: a following fill looks again (now, or at most every FILL_KICK_MS while playing). */
+  private kickFill(force: boolean): void {
+    if (!this.filling) return;
+    const now = this.deps.nowMs();
+    if (!force && now - this.lastFillKickMs < FILL_KICK_MS) return;
+    this.lastFillKickMs = now;
+    this.filling.kick();
   }
 
   /** A fresh NAS token: for the reads waiting on one, the open disc's source and its BD-J worker, and later BD-J boots. */
@@ -2210,6 +2304,7 @@ export class Player {
     s.pipeline.setAudioStream(s.audioActive ? s.audioStream : null);
     s.pipeline.setIgStream(this.igStreamNumber());
     s.pipeline.start(t);
+    this.kickFill(true); // a seek outside what the cache holds restarts the fill there
   }
 
   private async play(): Promise<void> {

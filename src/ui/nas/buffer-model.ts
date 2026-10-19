@@ -3,10 +3,20 @@
  * connection, and if not, how long to wait and how many bytes to hold ahead first.
  */
 
+import { CACHE_DIR, SEGMENT_BYTES } from '../../engine/disc/read-ahead-cache';
+
 /** The title's average rate is raised by this margin before it is compared with the connection. */
 export const RATE_MARGIN = 1.1;
 /** A wait shorter than this buffers silently (a progress ring, then play); a longer one asks first. */
 export const SILENT_BELOW_S = 120;
+/**
+ * The cache holds the lead plus what it frees a segment at a time: the segment playback is in and the one being
+ * written, past the lead itself. The lead is largest at the start (the connection is slower than the disc, so it only
+ * shrinks), so the plan's bytes plus this is the most the cache ever holds.
+ */
+export const CACHE_SLACK_BYTES = 2 * SEGMENT_BYTES;
+/** When the fill failed, or this device has no cache. */
+export const BUFFER_FAILED_COPY = "Couldn't buffer on this device, so it will play with pauses.";
 
 export type BufferPlan =
   | { readonly kind: 'play' }
@@ -36,7 +46,7 @@ export function bufferPlan({ durationS, playlistBytes, connectionMbps, quotaByte
   if (connectionMbps >= rateMbps) return { kind: 'play' };
   const waitS = durationS * (1 - Math.max(connectionMbps, 0) / rateMbps);
   const bytes = (waitS * Math.max(connectionMbps, 0) * 1e6) / 8;
-  if (bytes > quotaBytes) return { kind: 'too-big', canHoldBytes: quotaBytes, bytes };
+  if (bytes + CACHE_SLACK_BYTES > quotaBytes) return { kind: 'too-big', canHoldBytes: Math.max(0, quotaBytes - CACHE_SLACK_BYTES), bytes };
   return waitS < silentBelowS ? { kind: 'silent', waitS, bytes } : { kind: 'ask', waitS, bytes };
 }
 
@@ -61,8 +71,11 @@ export interface StorageManagerLike {
   estimate(): Promise<{ readonly quota?: number; readonly usage?: number }>;
 }
 
-/** The storage left for the cache: asks for persistence first (a refusal is fine), then the estimate's quota less usage. */
-export async function storageRoom(storage: StorageManagerLike | undefined): Promise<number> {
+/**
+ * The storage left for the cache: asks for persistence first (a refusal is fine), then the estimate's quota less
+ * usage, plus what the read-ahead cache holds now (`reclaimable`), which opening this disc clears or reuses.
+ */
+export async function storageRoom(storage: StorageManagerLike | undefined, reclaimable: () => Promise<number> = async () => 0): Promise<number> {
   if (!storage) return 0;
   try {
     await storage.persist();
@@ -71,7 +84,8 @@ export async function storageRoom(storage: StorageManagerLike | undefined): Prom
   }
   try {
     const { quota = 0, usage = 0 } = await storage.estimate();
-    return Math.max(0, quota - usage);
+    const held = await reclaimable().catch(() => 0);
+    return Math.max(0, quota - Math.max(0, usage - held));
   } catch {
     return 0;
   }
@@ -87,4 +101,57 @@ export function playlistFacts(
   let playlistBytes = 0;
   for (const id of clips) playlistBytes += fileSizes.get(`BDMV/STREAM/${id}.M2TS`) ?? 0;
   return { durationS, playlistBytes };
+}
+
+interface DirLike {
+  readonly kind: string;
+  getDirectoryHandle(name: string): Promise<DirLike>;
+  values(): AsyncIterable<DirLike | { readonly kind: string; getFile(): Promise<{ readonly size: number }> }>;
+}
+
+/** The bytes the read-ahead cache holds on this device (all discs), from the origin's private file system. */
+export async function readAheadCacheBytes(root: () => Promise<FileSystemDirectoryHandle>): Promise<number> {
+  let top: DirLike;
+  try {
+    top = await ((await root()) as unknown as DirLike).getDirectoryHandle(CACHE_DIR);
+  } catch {
+    return 0;
+  }
+  const walk = async (dir: DirLike): Promise<number> => {
+    let sum = 0;
+    for await (const entry of dir.values()) {
+      if (entry.kind === 'directory') sum += await walk(entry as DirLike);
+      else sum += (await (entry as { getFile(): Promise<{ size: number }> }).getFile()).size;
+    }
+    return sum;
+  };
+  return walk(top);
+}
+
+/** What watchBufferFailure needs of the PlayerController. */
+export interface BufferWatchController {
+  subscribe(listener: () => void): () => void;
+  getSnapshot(): { readonly buffer: { readonly stopped?: string } | null };
+  readonly discOpens: number;
+  showNotice(code: string, message: string): void;
+}
+
+/**
+ * For the disc just opened buffering first: once its fill ends early (a failed read or write, or no cache), the
+ * player says it will play with pauses (BUFFER_FAILED_COPY). Lets go when another disc opens or this one closes.
+ */
+export function watchBufferFailure(controller: BufferWatchController): () => void {
+  const open = controller.discOpens;
+  let unsubscribe: (() => void) | null = null;
+  const release = (): void => {
+    unsubscribe?.();
+    unsubscribe = null;
+  };
+  unsubscribe = controller.subscribe(() => {
+    if (controller.discOpens !== open) return release();
+    if (!controller.getSnapshot().buffer?.stopped) return;
+    release();
+    controller.showNotice('buffer-failed', BUFFER_FAILED_COPY);
+  });
+  return release;
 }

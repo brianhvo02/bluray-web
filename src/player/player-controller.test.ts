@@ -116,8 +116,21 @@ describe('playlist lifecycle', () => {
     c.cancelBuffer();
     c.bufferAhead(30, 500);
     expect(worker.posted.slice(1)).toEqual([{ type: 'cancelBuffer' }, { type: 'bufferAhead', fromSeconds: 30, targetBytes: 500 }]);
+    worker.emit({ type: 'bufferProgress', bytes: 250, targetBytes: 1000, mbps: 12, stopped: 'failed' });
+    expect(c.getSnapshot().buffer).toEqual({ bytes: 250, targetBytes: 1000, mbps: 12, stopped: 'failed' });
     c.openRemote(spec);
     expect(c.getSnapshot().buffer).toBeNull(); // a new disc starts without one
+  });
+
+  it('keeps whether this device has a read-ahead cache across discs', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    expect(c.getSnapshot().readAheadCache).toBeNull();
+    worker.emit({ type: 'readAheadCache', available: false });
+    c.openRemote({ kind: 'remote', base: 'https://nas.example/discs/a/', token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } });
+    c.open([]);
+    c.closeDisc();
+    expect(c.getSnapshot().readAheadCache).toBe(false);
   });
 
   it('counts every open and close, so a wait begun for one open can tell another from it', () => {
