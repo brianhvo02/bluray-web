@@ -22,6 +22,9 @@ import type { KeyStep, SettledStep } from './key-script';
 
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../src/bdj-classlib/${name}`, import.meta.url))));
 
+/** `wait menu`: how long a visible plane may go on flushing before the step holds anyway (bdj_trace.c MENU_ANIMATED_S). */
+const MENU_ANIMATED_MS = 30_000;
+
 /** One virtual-clock step: 5 render quanta of 128 frames at 48 kHz. */
 const STEP_MS = 640 / 48;
 
@@ -177,6 +180,8 @@ export async function replayPlayerBdj(
   const steps: SettledStep[] = [];
   const stepCalls: number[] = [];
   let lastFlushAt = 0;
+  /** Since when the flushed plane has been visible (null: it is not), for `wait menu`. */
+  let visibleSince: number | null = null;
   let stepIdx = 0;
   let stepFrom = { events: 0, flushes: 0, at: 0 };
   let lastWorker: BdjWorkerHandle | null = null;
@@ -235,6 +240,7 @@ export async function replayPlayerBdj(
       // being handed over, belongs to the next step (bdj_trace.c takes step_flushes before running a step's input)
       const mark = { events: events.length, flushes: flushes.length, at: performance.now() };
       let held = true;
+      let animated = false;
       switch (s.kind) {
         case 'waitFlush':
           held = flushes.length >= s.n;
@@ -242,6 +248,15 @@ export async function replayPlayerBdj(
         case 'waitStill':
           held = flushes.length > stepFrom.flushes && performance.now() - lastFlushAt >= s.ms;
           break;
+        case 'waitMenu': {
+          // bdj_trace.c's plane_menu: visible and still for ms, or visible for 30 s while flushing on (animated)
+          if (!plane?.visible()) visibleSince = null; // an init or close clears the plane without a flush
+          const visible = visibleSince !== null;
+          const still = visible && performance.now() - lastFlushAt >= s.ms;
+          animated = !still && visible && performance.now() - visibleSince! >= MENU_ANIMATED_MS;
+          held = still || animated;
+          break;
+        }
         case 'waitPlaylist':
           held = events.slice(stepFrom.events).some((e) => e.type === 'chapters' && (s.playlist === null || Number(e.playlistId) === s.playlist));
           break;
@@ -257,7 +272,13 @@ export async function replayPlayerBdj(
         return;
       }
       stepCalls.push(trace.length);
-      steps.push({ script: 'step', n: stepIdx, step: s.text, ...(s.kind === 'waitStill' ? { hash: flushes.at(-1) ?? null } : {}) });
+      steps.push({
+        script: 'step',
+        n: stepIdx,
+        step: s.text,
+        // an animated menu has no settled plane: only that it was visible counts (tools/bdj-library/README.md)
+        ...(animated ? { animated: true as const } : s.kind === 'waitStill' || s.kind === 'waitMenu' ? { hash: flushes.at(-1) ?? null } : {}),
+      });
       stepIdx++;
       stepFrom = s.kind === 'key' || s.kind === 'pointer' ? mark : { events: events.length, flushes: flushes.length, at: performance.now() };
     }
@@ -266,6 +287,9 @@ export async function replayPlayerBdj(
     ? hookFlushes((hash) => {
         flushes.push(hash);
         lastFlushAt = performance.now();
+        // the hook runs after the writer published the flush, so the reader's flag is this flush's
+        if (!plane?.visible()) visibleSince = null;
+        else visibleSince ??= lastFlushAt;
       })
     : () => undefined;
   try {

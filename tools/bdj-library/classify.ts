@@ -18,6 +18,8 @@ export interface RunStep {
   readonly step: string;
   /** `wait still` steps: the settled plane's hash (the last flush before the step; null before any flush). */
   readonly hash?: string | null;
+  /** A `wait menu` step that held on an animated menu (visible, still flushing after 30 s): no hash, only visible. */
+  readonly animated?: boolean;
   readonly calls: number;
 }
 
@@ -122,7 +124,8 @@ export function parseLibblurayRun(stdout: string, stderr: string, wallMs: number
       }
     } else if (o.script === 'step') {
       const text = String(o.step);
-      steps.push({ n: Number(o.n), step: text, ...(text.startsWith('wait still') ? { hash: last } : {}), calls: calls.length });
+      const settled = text.startsWith('wait still') || text.startsWith('wait menu');
+      steps.push({ n: Number(o.n), step: text, ...(o.animated ? { animated: true } : settled ? { hash: last } : {}), calls: calls.length });
     } else if (o.script === 'end') {
       end = o as { why?: string };
     }
@@ -159,7 +162,7 @@ const isNav = (c: TraceEntry): boolean => c.call === 'selectTitleN' || c.call ==
 export function progress(r: RunRecord): Progress {
   const s = r.steps;
   const h = (i: number): string | null | undefined => s[i]?.hash;
-  const menu = s.some((x) => visible(x.hash)) || visible(r.endHash);
+  const menu = s.some((x) => x.animated || visible(x.hash)) || visible(r.endHash);
   const changed = (a: number, b: number): boolean => s.length > b && h(a) !== h(b) && (visible(h(a)) || visible(h(b)));
   const arrows = menu && (changed(STEP.menu, STEP.afterRight) || changed(STEP.afterRight, STEP.afterDown));
   let ok = false;
@@ -221,7 +224,8 @@ export function compareRuns(ours: RunRecord, lib: RunRecord): Comparison {
     const b = lib.steps[i]!;
     const d = setDiff(segment(ours, i), segment(lib, i));
     if (d) return { equal: false, libPrefix: false, first: `step ${i} (${a.step}): ${d}` };
-    if (a.hash !== b.hash) return { equal: false, libPrefix: false, first: `step ${i} (${a.step}): settled plane libbluray ${b.hash ?? 'none'}, ours ${a.hash ?? 'none'}` };
+    // an animated menu (either side) has no settled plane: that it was visible is the whole check
+    if (!a.animated && !b.animated && a.hash !== b.hash) return { equal: false, libPrefix: false, first: `step ${i} (${a.step}): settled plane libbluray ${b.hash ?? 'none'}, ours ${a.hash ?? 'none'}` };
   }
   if (n > STEP.ok) {
     const after = (r: RunRecord): TraceEntry | undefined => r.calls.slice(r.steps[STEP.ok]!.calls).find(isNav);
@@ -253,7 +257,7 @@ const UNSUPPORTED_VIDEO = /MPEG-2|VC-1/;
 function shortfall(r: RunRecord): string {
   const p = progress(r);
   const stop = r.end === 'done' ? '' : `, stops at step ${r.steps.length}${r.end === 'timeout' ? ' (timeout)' : ` (${r.end})`}`;
-  if (r.steps.length === 0) return `${r.flushes ? 'never settles' : 'draws nothing'}${stop}`;
+  if (r.steps.length === 0) return `${!r.flushes ? 'draws nothing' : visible(r.endHash) ? 'never settles' : 'flushes, nothing visible'}${stop}`;
   if (!p.menu) return `no menu${stop}`;
   if (!p.arrows) return `arrows change nothing${stop}`;
   if (!p.ok) return `ok starts nothing${stop}`;
@@ -261,16 +265,31 @@ function shortfall(r: RunRecord): string {
 }
 
 /**
+ * Whether libbluray's run failed on its own: an error, crash or no output, or it never selected a playlist, or never
+ * showed a visible plane.
+ */
+export function libFailed(lib: RunRecord): boolean {
+  return (
+    lib.end === 'error' ||
+    lib.end === 'killed' ||
+    lib.end === 'no-output' ||
+    !lib.calls.some((c) => c.call === 'selectPlaylistN' && c.ret === 1 && Number(c.args[0]) >= 0) ||
+    !progress(lib).menu
+  );
+}
+
+/**
  * The verdict for a disc from our run and libbluray's (null: libbluray was not run). In order:
- *  - works: ours reached a visible menu, an arrow changed it and ok started a playlist or title, and libbluray did the
- *    same (equal steps, settled hashes, calls and end plane), or libbluray stopped earlier and its run is a prefix of
- *    ours ("libbluray stopped early (stub)"). Without a libbluray run, ours alone decides ("not compared").
+ *  - works: ours reached a visible menu, an arrow changed it and ok started something, and libbluray did the same
+ *    (equal steps, settled hashes and calls), or libbluray stopped earlier or failed on its own, as it does with stub
+ *    streams ("libbluray stopped early (stub)"). Without a libbluray run, ours alone decides ("not compared").
  *  - missing-class: ours fell short and Java could not load a platform class (the first one named), whatever libbluray
  *    did (libbluray never lacks a JDK class; with stub streams it often gets no further, which the detail says).
  *  - unsupported-video: ours fell short and a playlist with MPEG-2 or VC-1 video was refused (the same).
- *  - libbluray-fails-too: both runs are equal and fall short of the goals, or neither run reached the menu.
+ *  - libbluray-fails-too: libbluray failed on its own (libFailed) and ours fell short too.
  *  - error: our run failed (player or BD-J failure, crash, killed, no record).
- *  - stall: ours stopped (a wait timed out) before libbluray did, or before the menu.
+ *  - stall: ours never reached a menu, stopped at an earlier step than libbluray, or stopped where libbluray did with
+ *    the same run ("same as libbluray").
  *  - diverges: otherwise, with the first differing step.
  */
 export function classify(ours: RunRecord, lib: RunRecord | null): { verdict: DiscVerdict; detail: string } {
@@ -279,20 +298,23 @@ export function classify(ours: RunRecord, lib: RunRecord | null): { verdict: Dis
   const cmp = lib ? compareRuns(ours, lib) : null;
   if (oursOk && !lib) return { verdict: 'works', detail: 'not compared: no libbluray run' };
   if (oursOk && cmp?.equal) return { verdict: 'works', detail: 'same as libbluray' };
-  if (oursOk && lib && cmp?.libPrefix) return { verdict: 'works', detail: `libbluray stopped early (stub): ${shortfall(lib)}` };
+  if (oursOk && lib && (lib.steps.length < ours.steps.length || libFailed(lib))) return { verdict: 'works', detail: `libbluray stopped early (stub): ${shortfall(lib)}` };
   // a class ours lacks or a video codec ours refuses is ours to fix whatever libbluray does with stub streams
-  const libToo = lib && !progress(lib).menu ? `; libbluray (stub) also: ${shortfall(lib)}` : '';
+  const libToo = lib && libFailed(lib) ? `; libbluray (stub) also: ${shortfall(lib)}` : '';
   if (ours.missingClasses.length) {
     const more = ours.missingClasses.length > 1 ? ` (+${ours.missingClasses.length - 1} more)` : '';
     return { verdict: 'missing-class', detail: `${ours.missingClasses[0]}${more}${libToo}` };
   }
   const refused = ours.rejectedPlaylists.find((r) => r.video !== null && UNSUPPORTED_VIDEO.test(r.video));
   if (refused) return { verdict: 'unsupported-video', detail: `playlist ${refused.playlist} (${refused.video}) refused${libToo}` };
-  if (lib && cmp?.equal) return { verdict: 'libbluray-fails-too', detail: `both: ${shortfall(lib)}` };
-  if (lib && !progress(lib).menu && !p.menu) return { verdict: 'libbluray-fails-too', detail: `neither reaches the menu (libbluray: ${shortfall(lib)}; ours: ${shortfall(ours)})` };
+  if (lib && libFailed(lib)) {
+    const noPlaylist = lib.calls.some((c) => c.call === 'selectPlaylistN' && c.ret === 1) ? '' : ', selects no playlist';
+    return { verdict: 'libbluray-fails-too', detail: `libbluray: ${shortfall(lib)}${noPlaylist}; ours: ${shortfall(ours)}` };
+  }
   if (ours.end === 'error' || ours.end === 'bdj-failed' || ours.end === 'killed' || ours.end === 'no-output') {
     return { verdict: 'error', detail: `${ours.end}${ours.endDetail ? `: ${ours.endDetail}` : ''}` };
   }
+  if (lib && cmp?.equal) return { verdict: 'stall', detail: `same as libbluray: ${shortfall(ours)}` };
   const libSteps = lib?.steps.length ?? Infinity;
   if (!p.menu || (ours.end !== 'done' && ours.steps.length < libSteps)) {
     const theirs = lib ? `; libbluray reaches step ${lib.steps.length}${lib.end === 'done' ? ' (done)' : ''}` : '';

@@ -17,7 +17,7 @@ Measures how many of the BD-J discs in the developer's NAS library work in our p
   - Runs `generic.keys` on every disc of `map.tsv` with `bdj` 1. Our side runs `tests/bdj/replay-player.ts` (the real `Player`, BD-J in process) in one child process per disc (`check.ts --run-ours <dir> <out>`), killed at 150 s, `--jobs` at a time (default 6). libbluray's side runs `tools/bdj-trace/run.sh <dir> --keys generic.keys --seconds 140 --wait-timeout 60 --tail 5`, killed at 150 s, `--lib-jobs` at a time (default 3). Ours runs first, then libbluray, so the two phases don't slow each other (both wait in wall time).
   - Both sides use the same limits: each step may wait 60 s, a run ends at 140 s, and it goes on 5 s past the script's end.
   - Incremental: our run is reused while the disc's fingerprint and the contents of `src/`, `tests/bdj/`, `tools/bdj-library/` and the script are unchanged, and libbluray's while the fingerprint, the `bluray-web-bdj-trace` image and the script are. `--only` re-runs the given discs, `--force` re-runs everything, `--ours-only` reuses libbluray's runs where present and runs none, and `--no-run` only reclassifies.
-  - A libbluray run with no script end line (HotSpot under amd64 emulation sometimes dies at once with a SIGSEGV in `libzip.so`) is run once more.
+  - A crashed libbluray run, one with no script end line (HotSpot under amd64 emulation sometimes dies at once with a SIGSEGV in `libzip.so`, or the run was killed), is run once more.
   - Writes `raw/<id>.ours.json` (the RunRecord), `raw/<id>.ours.json.tmp.log` (the Java log), `raw/<id>.lib.jsonl`, `.lib.err` and `.lib.meta.json`, then `results/<id>.json` and `summary.md`.
 
 ## The generic script
@@ -25,7 +25,7 @@ Measures how many of the BD-J discs in the developer's NAS library work in our p
 `generic.keys` (the `.keys` syntax of `tools/bdj-trace/README.md`, Key scripts):
 
 ```
-wait still 1500
+wait menu 1500
 key right
 wait still 1000
 key down
@@ -33,6 +33,8 @@ wait still 1000
 key ok
 wait playlist any
 ```
+
+`wait menu 1500` (Ruling R2) holds once the flushed plane is visible (a pixel with non-zero alpha: `GraphicsPlaneReader.visible()` in ours, the same test over the harness's plane at each flush) and has not flushed for 1500 ms, so a blank start-up frame never satisfies it. A menu that stays visible but keeps flushing for 30 s (an animation) satisfies it too: the step is marked `animated` and its hash is not compared, only that it was visible. An init or close, which clears the plane, makes it invisible at once.
 
 `wait playlist any` holds once any playlist starts after the previous step: a `BD_EVENT_PLAYLIST` in the harness (`bdj_trace.c`), a `chapters` event in our replay (`tests/bdj/key-script.ts`, `replay-player.ts`). `wait title any` works the same in the harness.
 
@@ -45,7 +47,7 @@ One run of the script on one disc by one side (`classify.ts`):
 | `side` | `ours` or `libbluray` |
 | `end` | `done` (the script and its tail ran), `timeout` (a step's wait did not hold in 60 s; that step is the first one missing from `steps`), `limit` (the run reached 140 s), `bdj-failed` (our player gave up on BD-J), `error` (player or harness failure), `killed` (the 150 s kill), `no-output` (the process left no record) |
 | `endDetail` | why it failed (a message, paths scrubbed) or null |
-| `steps` | each step that ran: `n`, `step` (its text), `hash` for `wait still` steps (the settled plane: the last flush before the step), and `calls`: how many control calls the run had made before the step ran |
+| `steps` | each step that ran: `n`, `step` (its text), `hash` for `wait menu` and `wait still` steps (the settled plane: the last flush before the step), `animated` for a `wait menu` step that held on an animated menu (no hash), and `calls`: how many control calls the run had made before the step ran |
 | `calls` | the control calls (`tests/bdj/format.ts` `CONTROL_CALLS`) in order, through the run's tail (libbluray: up to the script's end line) |
 | `endHash`, `flushes` | the last flushed plane, and the number of flushes |
 | `missingClasses` | platform classes Java could not load: every `NoClassDefFoundError` and every `ClassNotFoundException` of a platform class (`java.`, `javax.`, `sun.`, `org.dvb.`, ...; ours leaves out `org.videolan.` probes), caught where the throwable is made in ours (Java often swallows them) and from the log on both sides |
@@ -58,24 +60,24 @@ One run of the script on one disc by one side (`classify.ts`):
 
 `progress(run)` says what a run achieved:
 
-- **menu**: a settled plane (any `wait still` step, or the end plane) is not the empty plane (`EMPTY_PLANE_HASH`).
+- **menu**: a settled plane (any `wait menu` or `wait still` step, or the end plane) is not the empty plane (`EMPTY_PLANE_HASH`), or the `wait menu` step held on an animated menu.
 - **arrows**: the settled plane after `key right` differs from the one before, or the one after `key down` from the one after `key right`, with a visible plane on one side.
 - **ok**: after `key ok`, a `selectTitleN`, a successful `selectPlaylistN` of a playlist other than the last one before it, or a `seekN` (a menu that plays its feature from a chapter of the playlist behind it).
 
 `compareRuns(ours, lib)` compares the runs step by step:
 
-- Up to `key ok`, for each step: the distinct control calls made since the step before, then the step's settled hash. Distinct calls rather than the sequence, and with `selectRateN` and `selectPlaylistN(-1)` left out, because the stub streams end every playlist at once, at a moment that depends on each side's pacing: Java pauses and stops at different points, and a menu that loops its background playlist loops a different number of times. A different register value, playlist, key interest or UO mask still shows.
+- Up to `key ok`, for each step: the distinct control calls made since the step before, then the step's settled hash (not for an `animated` step, on either side). Distinct calls rather than the sequence, and with `selectRateN` and `selectPlaylistN(-1)` left out, because the stub streams end every playlist at once, at a moment that depends on each side's pacing: Java pauses and stops at different points, and a menu that loops its background playlist loops a different number of times. A different register value, playlist, key interest or UO mask still shows.
 - After `key ok`, where the disc plays and the two sides loop at their own pace: the first call that starts something (`selectTitleN`, `selectPlaylistN`, `seekN`).
 - When one run stops before the other: before `key ok`, libbluray's remaining calls must be among ours up to our next step for libbluray's run to count as a prefix of ours.
 
 `classify(ours, lib)` gives the first verdict that applies:
 
-1. **works**: ours achieved menu, arrows and ok, and either the runs are equal (`same as libbluray`), or libbluray stopped earlier and its run is a prefix of ours (`libbluray stopped early (stub): ...`; libbluray with stub streams gets less far than with real video). Without a libbluray run, ours alone decides (`not compared`).
-2. **libbluray-fails-too**: the runs are equal but fall short of the goals, or neither run reached a menu. The detail names where; it also names a class ours misses, if any.
-3. **missing-class**: ours fell short and Java could not load a platform class (the first one named).
-4. **unsupported-video**: ours fell short and refused a playlist with MPEG-2 or VC-1 video.
+1. **works**: ours achieved menu, arrows and ok, and either the runs are equal (`same as libbluray`), or libbluray stopped at an earlier step or failed on its own (`libbluray stopped early (stub): ...`; libbluray with stub streams gets less far than with real video). Without a libbluray run, ours alone decides (`not compared`).
+2. **missing-class**: ours fell short and Java could not load a platform class (the first one named), whatever libbluray did: libbluray never lacks a JDK class. When libbluray failed too, the detail adds `libbluray (stub) also: ...`.
+3. **unsupported-video**: ours fell short and refused a playlist with MPEG-2 or VC-1 video (the same).
+4. **libbluray-fails-too**: libbluray failed on its own (`libFailed`: its run ended in an error, a crash or no output, or it never selected a playlist, or never showed a visible plane), and ours fell short too.
 5. **error**: our run failed (`bdj-failed`, `error`, `killed`, `no-output`).
-6. **stall**: ours never settled on a menu, or stopped at an earlier step than libbluray.
+6. **stall**: ours never reached a menu, stopped at an earlier step than libbluray, or stopped where libbluray did with the same run (`same as libbluray: ...`).
 7. **diverges**: otherwise, with the first difference.
 
 The settled-point rule is 5d's R3: settled hashes and calls, not flush counts. Stub streams make libbluray do less than it does with real video (RENTAL_FAMILY selects its menu playlist and draws nothing), which is why libbluray falling short is reported as such and never as ours.

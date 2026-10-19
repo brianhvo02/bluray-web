@@ -7,12 +7,12 @@ import { classify, discId, EMPTY_PLANE_HASH, missingClassesFromLog, parseLibblur
 // Made-up runs of the generic script: playlist 7 behind the menu, ok starts playlist 8.
 const sel = (pl: number, ret = 1): TraceEntry => ({ call: 'selectPlaylistN', args: [pl, -1, -1, '-1'], ret });
 const reg = (n: number, v: number): TraceEntry => ({ call: 'writeRegN', args: [0, n, v, -1], ret: 0 });
-const STEPS = ['wait still 1500', 'key right', 'wait still 1000', 'key down', 'wait still 1000', 'key ok', 'wait playlist any'];
+const STEPS = ['wait menu 1500', 'key right', 'wait still 1000', 'key down', 'wait still 1000', 'key ok', 'wait playlist any'];
 const CALLS = [sel(7), reg(1, 0), reg(1, 1), sel(8)];
 /** The steps up to `count`, with the given settled hashes and the control-call count before each. */
 function steps(hashes: readonly string[], callsBefore: readonly number[], count = STEPS.length): RunStep[] {
   let w = 0;
-  return STEPS.slice(0, count).map((step, n) => ({ n, step, ...(step.startsWith('wait still') ? { hash: hashes[w++] ?? null } : {}), calls: callsBefore[n]! }));
+  return STEPS.slice(0, count).map((step, n) => ({ n, step, ...(step.startsWith('wait still') || step.startsWith('wait menu') ? { hash: hashes[w++] ?? null } : {}), calls: callsBefore[n]! }));
 }
 const BEFORE = [1, 1, 2, 2, 3, 3, 3];
 function run(over: Partial<RunRecord> = {}): RunRecord {
@@ -72,9 +72,23 @@ describe('classify', () => {
     expect(classify(noMenu(), lib({ end: 'timeout', steps: [], calls: [sel(7)], endHash: null })).verdict).toBe('libbluray-fails-too');
   });
 
-  it('libbluray-fails-too when both runs are equal and fall short', () => {
+  it('libbluray-fails-too only when libbluray fails on its own (error, no playlist, nothing drawn) and ours too', () => {
+    expect(classify(noMenu(), lib({ end: 'error', steps: [], calls: [], endHash: null })).verdict).toBe('libbluray-fails-too');
+    expect(classify(noMenu(), lib({ calls: [reg(1, 0)] })).detail).toMatch(/selects no playlist/);
+    // libbluray did as well as ours, and both fall short: not libbluray's failure
     const still = steps(['aaaaaaaa', 'aaaaaaaa', 'aaaaaaaa'], BEFORE);
-    expect(classify(run({ steps: still }), lib({ steps: still }))).toEqual({ verdict: 'libbluray-fails-too', detail: expect.stringContaining('arrows change nothing') });
+    expect(classify(run({ steps: still }), lib({ steps: still }))).toEqual({ verdict: 'stall', detail: expect.stringMatching(/^same as libbluray: arrows change nothing/) });
+  });
+
+  it('works when ours passes every step and libbluray, on stub streams, stops early or fails', () => {
+    const differs = lib({ end: 'timeout', steps: steps(['dddddddd'], BEFORE, 2), calls: [sel(9)], endHash: 'dddddddd' });
+    expect(classify(run(), differs)).toEqual({ verdict: 'works', detail: expect.stringMatching(/^libbluray stopped early \(stub\)/) });
+    expect(classify(run(), lib({ end: 'killed', steps: [], calls: [], endHash: null })).verdict).toBe('works');
+  });
+
+  it('does not compare the hash of an animated menu step, only that it was visible', () => {
+    const animated = (h: readonly string[]): RunStep[] => steps(h, BEFORE).map((x, i) => (i === 0 ? { n: 0, step: x.step, animated: true, calls: x.calls } : x));
+    expect(classify(run({ steps: animated(['aaaaaaaa', 'bbbbbbbb', 'cccccccc']) }), lib({ steps: steps(['eeeeeeee', 'bbbbbbbb', 'cccccccc'], BEFORE) }))).toEqual({ verdict: 'works', detail: 'same as libbluray' });
   });
 
   it('missing-class with the class name, from the Java log', () => {
@@ -134,14 +148,16 @@ describe('parseLibblurayRun', () => {
       '{"call":"readRegN","args":[1,4],"ret":0}',
       '{"call":"selectPlaylistN","args":[7,-1,-1,"-1"],"ret":1}',
       '{"plane":"flush","n":1,"hash":"aaaaaaaa","t":10}',
-      '{"script":"step","n":0,"step":"wait still 1500","flushes":1,"t":20}',
+      '{"script":"step","n":0,"step":"wait menu 1500","flushes":1,"t":20}',
       '{"script":"step","n":1,"step":"key right","flushes":1,"t":20}',
       '{"script":"end","why":"timeout","n":2,"text":"wait still 1000","flushes":1,"t":30}',
       '{"call":"selectPlaylistN","args":[0,-1,-1,"-1"],"ret":1}',
     ].join('\n');
     const r = parseLibblurayRun(out, 'bdj_trace: script step 2 "wait still 1000" did not hold within 60 s\n', 5);
     expect(r.end).toBe('timeout');
-    expect(r.steps).toEqual([{ n: 0, step: 'wait still 1500', hash: 'aaaaaaaa', calls: 1 }, { n: 1, step: 'key right', calls: 1 }]);
+    expect(r.steps).toEqual([{ n: 0, step: 'wait menu 1500', hash: 'aaaaaaaa', calls: 1 }, { n: 1, step: 'key right', calls: 1 }]);
+    const animated = parseLibblurayRun('{"script":"step","n":0,"step":"wait menu 1500","flushes":9,"animated":true,"t":20}\n', '', 5);
+    expect(animated.steps).toEqual([{ n: 0, step: 'wait menu 1500', animated: true, calls: 0 }]);
     expect(r.calls).toEqual([sel(7)]);
     expect(r.endHash).toBe('aaaaaaaa');
     expect(r.endDetail).toMatch(/did not hold/);
@@ -149,9 +165,10 @@ describe('parseLibblurayRun', () => {
 });
 
 describe('generic.keys', () => {
-  it('is the brief\'s script, with `wait playlist any`', () => {
+  it('is the brief\'s script, with `wait menu` and `wait playlist any`', () => {
     const steps = parseKeyScript(readFileSync(new URL('./generic.keys', import.meta.url), 'utf8'));
     expect(steps.map((s) => s.text)).toEqual(STEPS);
+    expect(steps[0]).toEqual({ kind: 'waitMenu', text: 'wait menu 1500', ms: 1500 });
     expect(steps.at(-1)).toEqual({ kind: 'waitPlaylist', text: 'wait playlist any', playlist: null });
   });
 });

@@ -35,6 +35,19 @@ static uint32_t plane[PLANE_W * PLANE_H];
 static pthread_mutex_t plane_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int flushes;             /* guarded by plane_mutex; read by the main thread for `wait flush` */
 static double last_flush_s;     /* guarded by plane_mutex: when the last flush happened, for `wait still` */
+static int plane_visible;       /* guarded by plane_mutex: the last flushed plane has a pixel with non-zero alpha */
+static double visible_since = -1; /* guarded by plane_mutex: since when the flushed plane has been visible (-1: not) */
+
+/* whether the plane has a pixel with non-zero alpha (called with plane_mutex held) */
+static int plane_has_alpha(void)
+{
+  for (size_t i = 0; i < (size_t)PLANE_W * PLANE_H; i++) {
+    if (plane[i] >> 24) {
+      return 1;
+    }
+  }
+  return 0;
+}
 
 /* FNV-1a 32 over the plane's 1920x1080 ARGB words in row-major order, each word as its 4 little-endian bytes
  * (B, G, R, A). bluray-web computes the same hash over its BD-J plane. */
@@ -101,6 +114,8 @@ static void argb(void *h, const BD_ARGB_OVERLAY *ov)
     case BD_ARGB_OVERLAY_INIT:
     case BD_ARGB_OVERLAY_CLOSE:
       memset(plane, 0, sizeof plane);
+      plane_visible = 0; /* a cleared plane is transparent at once */
+      visible_since = -1;
       break;
     case BD_ARGB_OVERLAY_DRAW:
       for (int y = 0; y < ov->h && ov->y + y < PLANE_H; y++) {
@@ -113,6 +128,12 @@ static void argb(void *h, const BD_ARGB_OVERLAY *ov)
     case BD_ARGB_OVERLAY_FLUSH: {
       int k = ++flushes;
       last_flush_s = now_s();
+      plane_visible = plane_has_alpha();
+      if (!plane_visible) {
+        visible_since = -1;
+      } else if (visible_since < 0) {
+        visible_since = last_flush_s;
+      }
       if (planes_on) {
         printf("{\"plane\":\"flush\",\"n\":%d,\"hash\":\"%08x\",\"t\":%ld}\n", k, plane_hash(), (long)(now_s() * 1000));
         fflush(stdout);
@@ -138,7 +159,7 @@ static int flush_count(void)
 
 /* ---- key scripts (the .keys syntax of tests/vm-trace/scripts, extended) ---- */
 
-typedef enum { S_WAIT_FLUSH, S_WAIT_STILL, S_WAIT_PLAYLIST, S_WAIT_TITLE, S_KEY, S_MOUSE, S_CLICK } step_kind;
+typedef enum { S_WAIT_FLUSH, S_WAIT_STILL, S_WAIT_MENU, S_WAIT_PLAYLIST, S_WAIT_TITLE, S_KEY, S_MOUSE, S_CLICK } step_kind;
 typedef struct {
   step_kind kind;
   int a, b;
@@ -216,6 +237,7 @@ static int parse_script(const char *path, step_t **out)
     if (!strcmp(w[0], "wait") && cnt == 3) {
       if (!strcmp(w[1], "flush")) s.kind = S_WAIT_FLUSH;
       else if (!strcmp(w[1], "still")) s.kind = S_WAIT_STILL;
+      else if (!strcmp(w[1], "menu")) s.kind = S_WAIT_MENU;
       else if (!strcmp(w[1], "playlist")) s.kind = S_WAIT_PLAYLIST;
       else if (!strcmp(w[1], "title")) s.kind = S_WAIT_TITLE;
       else goto bad;
@@ -296,11 +318,26 @@ static int plane_still(int ms)
   return met;
 }
 
+/* `wait menu MS`: the flushed plane is visible (a pixel with non-zero alpha) and has not flushed for MS milliseconds;
+ * or it has stayed visible for MENU_ANIMATED_S while flushing on (an animated menu: step_animated is set) */
+#define MENU_ANIMATED_S 30.0
+static int step_animated;
+static int plane_menu(int ms)
+{
+  pthread_mutex_lock(&plane_mutex);
+  int still = plane_visible && (now_s() - last_flush_s) * 1000 >= ms;
+  int animated = !still && plane_visible && visible_since >= 0 && now_s() - visible_since >= MENU_ANIMATED_S;
+  pthread_mutex_unlock(&plane_mutex);
+  step_animated = animated;
+  return still || animated;
+}
+
 static int wait_met(const step_t *s)
 {
   switch (s->kind) {
     case S_WAIT_FLUSH: return flush_count() >= s->a;
     case S_WAIT_STILL: return plane_still(s->a);
+    case S_WAIT_MENU: return plane_menu(s->a);
     case S_WAIT_PLAYLIST: return seen_since_step(1, s->a);
     case S_WAIT_TITLE: return seen_since_step(0, s->a);
     default: return 1;
@@ -321,11 +358,11 @@ static void run_step(BLURAY *bd, const step_t *s)
   }
 }
 
-static void step_line(int n, const char *text)
+static void step_line(int n, const char *text, int animated)
 {
   /* step text is made of script words ([A-Za-z0-9_]), nothing to escape */
-  printf("{\"script\":\"step\",\"n\":%d,\"step\":\"%s\",\"flushes\":%d,\"t\":%ld}\n", n, text, flush_count(),
-         (long)(now_s() * 1000));
+  printf("{\"script\":\"step\",\"n\":%d,\"step\":\"%s\",\"flushes\":%d,%s\"t\":%ld}\n", n, text, flush_count(),
+         animated ? "\"animated\":true," : "", (long)(now_s() * 1000));
   fflush(stdout);
 }
 
@@ -392,7 +429,7 @@ int main(int argc, char **argv)
     while (idx < nsteps && wait_met(&steps[idx])) {
       step_flushes = flush_count(); /* before the step: a key's reaction may flush at once */
       run_step(bd, &steps[idx]);
-      step_line(idx, steps[idx].text);
+      step_line(idx, steps[idx].text, steps[idx].kind == S_WAIT_MENU && step_animated);
       idx++;
       nseen = 0;
       step_start = now_s();

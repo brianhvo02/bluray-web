@@ -330,9 +330,10 @@ async function main(argv: readonly string[]): Promise<void> {
     const base = join(raw, `${d.id}.lib`);
     const args = [RUN_SH, d.dir, '--keys', SCRIPT, '--seconds', String(RUN_LIMIT_S), '--wait-timeout', String(STEP_TIMEOUT_S), '--tail', String(TAIL_S)];
     let r = await runKilled('bash', args, `${base}.jsonl`, `${base}.err`);
-    // HotSpot under amd64 emulation now and then dies at once (SIGSEGV in libzip): such a run has no script end line
+    // a crashed run (no script end line: HotSpot under amd64 emulation now and then dies with a SIGSEGV in libzip, or the
+    // run was killed) is run once more
     let retried = false;
-    if (!r.killed && !readFileSync(`${base}.jsonl`, 'utf8').includes('"script":"end"')) {
+    if (!readFileSync(`${base}.jsonl`, 'utf8').includes('"script":"end"')) {
       retried = true;
       r = await runKilled('bash', args, `${base}.jsonl`, `${base}.err`);
     }

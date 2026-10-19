@@ -1,5 +1,5 @@
 # The library check's generic script (tools/bdj-library/README.md): reach the menu, try two arrows, press ok.
-wait still 1500
+wait menu 1500
 key right
 wait still 1000
 key down
