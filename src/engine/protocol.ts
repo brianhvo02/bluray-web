@@ -9,7 +9,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
+export type NoticeCode = 'no-picture' | 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
 /** RemoteFailure: a NAS disc changed, the NAS cannot be reached, or this device is no longer paired. */
 export type ErrorCode = DiscErrorCode | RemoteFailure | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
@@ -20,6 +20,7 @@ export interface Telemetry {
   readonly avOffsetMeanUs: number | null;
   readonly avOffsetMaxAbsUs: number | null;
   readonly framesInWindow: number;
+  /** Decoded frames presented; stays 0 for a playlist without a picture (whose bdj.firstFrameMs is its first black frame). */
   readonly framesPresented: number;
   readonly framesDropped: number;
   readonly audioBufferedMs: number;
@@ -84,6 +85,7 @@ export interface BdjMemoryTelemetry {
 export interface BdjStartup {
   readonly bootMs: number | null;
   readonly firstPlaylistMs: number | null;
+  /** For a playlist without a picture: its first black frame with the planes (framesPresented stays 0). */
   readonly firstFrameMs: number | null;
 }
 
@@ -245,8 +247,8 @@ export type EngineEvent =
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
   /** The condition behind a notice is over (nas-waiting: the read landed). */
-  /** The notice of that code is no longer true ('unsupported-video': this disc's no-picture notice, once a playlist with a picture starts). */
-  | { readonly type: 'noticeCleared'; readonly code: NoticeCode | 'unsupported-video' }
+  /** The notice of that code is no longer true ('no-picture': once a playlist with a picture starts). */
+  | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
   /**
    * The read-ahead cache's fill: bytes held from the start position on, out of `targetBytes` (the request's, or all
    * there is when that is less), and the connection's rate over the fill so far (Mbps). It is over when bytes reach
@@ -264,10 +266,11 @@ export type EngineEvent =
    */
   | { readonly type: 'fetchPortClosed' }
   /**
-   * A stream the browser can't decode. kind 'video' with NO_PICTURE_MESSAGE: the playlist plays without a picture (once per
-   * disc, however many such playlists play).
+   * A stream the browser can't decode. With `noPicture` (kind 'video', NO_PICTURE_MESSAGE): the playlist plays without a
+   * picture; sent once per disc, it is the disc-level notice 'no-picture'. Otherwise it is the playlist's notice
+   * 'unsupported-<kind>'.
    */
-  | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
+  | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string; readonly noPicture?: true }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }
   /** The current playlist was torn down (a new pick, a failed pick, or close). */
@@ -277,6 +280,7 @@ export type EngineEvent =
 
 /**
  * The notice of a playlist whose video (MPEG-2, VC-1) the browser can't decode: it plays without a picture. Sent once per
- * disc, and cleared (noticeCleared 'unsupported-video') when a playlist with a picture starts; that disc never sends it again.
+ * disc (unsupported with noPicture, the notice 'no-picture'), and cleared (noticeCleared 'no-picture') when a playlist with
+ * a picture starts; that disc never sends it again.
  */
 export const NO_PICTURE_MESSAGE = "This disc's video can't be played here yet, so it will play without a picture.";

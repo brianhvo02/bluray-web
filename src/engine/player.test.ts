@@ -114,7 +114,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory; segmentBytes?: number } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory; segmentBytes?: number; mutateFiles?: (files: Map<string, Uint8Array<ArrayBuffer>>) => void; videoCodecApi?: VideoCodecApi } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
@@ -126,6 +126,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     subPathIg: opts.subPathIg,
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
+  opts.mutateFiles?.(files);
   for (const [path, bytes] of Object.entries(opts.extraFiles ?? {})) files.set(path, bytes);
   const remote = typeof opts.remote === 'function' ? opts.remote(files) : opts.remote;
   const events: EngineEvent[] = [];
@@ -139,7 +140,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   const clock = { ms: 1000 };
   const player = new Player({
     emit: (e) => events.push(e),
-    videoCodecApi: fakeApi,
+    videoCodecApi: opts.videoCodecApi ?? fakeApi,
     nowMs: () => clock.ms,
     requestFrame: (cb) => frames.push(cb),
     createAudioDecoder: opts.createAudioDecoder ?? noWasmFactory,
@@ -553,13 +554,15 @@ describe('Player', () => {
       expect(times(h).at(-1)! - at).toBeGreaterThan(500_000);
       expect(decoders).toHaveLength(0); // no VideoDecoder for that stream
       expect(h.drawn).toEqual([]);
-      expect(noPicture(h)).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE }]);
+      expect(noPicture(h)).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE, noPicture: true }]);
       expect(lastTelemetry(h)?.clockMode).toBe('audio');
       expect(h.events.some((e) => e.type === 'error')).toBe(false);
     });
 
-    it('runs on the wall clock when there is no audio either, and ends at the end of the playlist', async () => {
-      const h = await harness(undefined, { videoCodingType: CodingType.MPEG2_VIDEO });
+    it('runs on the wall clock when there is no audio either, and ends once the reader is done, as libbluray on EOF (R11)', async () => {
+      // ~1.2 MB a second of video nobody decodes and nothing else: reading is paced on the clock, and with nothing
+      // delivered to play out the playlist ends at EOF, before its 8 s
+      const h = await harness(undefined, { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 50_000 });
       await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
       await untilPlaying(h);
       await h.play(1000);
@@ -570,7 +573,70 @@ describe('Player', () => {
         await h.play(500);
         expect(lastState(h)).toBe('ended');
       }, { timeout: 10_000 });
-      expect(times(h).at(-1)).toBeGreaterThan(7_500_000);
+      expect(times(h).at(-1)).toBeGreaterThan(1_000_000);
+      expect(times(h).at(-1)).toBeLessThan(7_500_000);
+    });
+
+    it('ends a truncated clip at its end of data plus the play-out of what was delivered, not at its duration (R11)', async () => {
+      // 00000 is 00001 (4 s) then 00002 (4 s), cut to its first half: the audio delivered ends near 6 s
+      const h = await harness(CodingType.LPCM, {
+        videoCodingType: CodingType.MPEG2_VIDEO,
+        mutateFiles: (files) => {
+          const clip = files.get('BDMV/STREAM/00002.m2ts')!;
+          files.set('BDMV/STREAM/00002.m2ts', clip.slice(0, Math.floor(clip.length / 2 / 6144) * 6144));
+        },
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await vi.waitFor(async () => {
+        await h.play(500);
+        expect(lastState(h)).toBe('ended');
+      }, { timeout: 15_000 });
+      expect(times(h).at(-1)).toBeGreaterThan(5_000_000);
+      expect(times(h).at(-1)).toBeLessThan(7_000_000);
+      expect(lastTelemetry(h)?.audioUnderruns ?? 0).toBe(0);
+    });
+
+    it('keeps the audio fed without a picture at low bitrates, on the audio clock (R10)', async () => {
+      // LPCM and ~0.5 MB/s in all, the video dropped: reading paced on what was delivered never lets the audio run dry
+      const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 12_800, clipSeconds: 16 });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      const from = h.events.length;
+      await h.play(12_000);
+      expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioUnderruns: 0 });
+      expect(h.events.slice(from).filter((e) => e.type === 'state' && e.state === 'buffering')).toEqual([]);
+    }, 30_000);
+
+    it('clears a picked playlist whose decoder cannot be configured, so the picker shows why (UnsupportedCodecError stays)', async () => {
+      const h = await harness(CodingType.LPCM, { videoCodecApi: { ...fakeApi, isConfigSupported: async (config) => ({ supported: false, config }) } });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await vi.waitFor(async () => {
+        await h.play(50);
+        expect(lastState(h)).toBe('error');
+      }, { timeout: 5000 });
+      const cleared = h.events.findIndex((e) => e.type === 'playlistCleared');
+      const unsupported = h.events.findIndex((e) => e.type === 'unsupported' && e.kind === 'video');
+      expect(cleared).toBeGreaterThanOrEqual(0);
+      expect(cleared).toBeLessThan(unsupported);
+      expect(h.events[unsupported]).toMatchObject({ codec: 'H.264/AVC' });
+      expect(h.events[unsupported]).not.toHaveProperty('noPicture');
+    });
+
+    it('does not use up the disc\'s notice on a playlist that fails to open', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.MPEG2_VIDEO },
+        ],
+        dropFiles: ['BDMV/STREAM/00001.m2ts'],
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      expect(lastState(h)).toBe('error');
+      expect(noPicture(h)).toEqual([]);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(1);
     });
 
     it('seeks and skips chapters from the clip info', async () => {
@@ -605,7 +671,7 @@ describe('Player', () => {
       await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
       await untilPlaying(h);
       expect(noPicture(h)).toHaveLength(2);
-      expect(noPicture(h)[1]).toMatchObject({ codec: 'VC-1', message: NO_PICTURE_MESSAGE });
+      expect(noPicture(h)[1]).toMatchObject({ codec: 'VC-1', message: NO_PICTURE_MESSAGE, noPicture: true });
     });
 
     it('decodes the picture again for a playlist the browser can decode', async () => {
@@ -631,7 +697,7 @@ describe('Player', () => {
           { id: '00001', clipIds: ['00002'] },
         ],
       });
-      const cleared = () => h.events.filter((e) => e.type === 'noticeCleared' && e.code === 'unsupported-video');
+      const cleared = () => h.events.filter((e) => e.type === 'noticeCleared' && e.code === 'no-picture');
       await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
       await untilPlaying(h);
       expect(cleared()).toHaveLength(0);
@@ -1196,7 +1262,7 @@ describe('Player with HDMV navigation', () => {
       const plane = h.igDraws.at(-1)!;
       expect(plane.hash()).not.toBe(new OverlayPlane(plane.width, plane.height).hash());
       expect(h.order.every((o) => !o.startsWith('video:') || o === 'video:null')).toBe(true);
-      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE });
+      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE, noPicture: true });
       await h.player.handle({ type: 'menuKey', key: 'ok' });
       await untilPlaylist(h, '00001');
       await untilPlaying(h);
@@ -1496,7 +1562,7 @@ describe('Player with HDMV navigation', () => {
       });
       await untilPlaying(h);
       expect(chapterIds(h)).toEqual(['00001']);
-      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'VC-1', message: NO_PICTURE_MESSAGE });
+      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'VC-1', message: NO_PICTURE_MESSAGE, noPicture: true });
       expect(h.events.some((e) => e.type === 'error')).toBe(false);
     });
   });

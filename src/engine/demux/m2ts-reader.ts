@@ -30,8 +30,6 @@ export class M2tsReader {
   private readonly chunkPackets: number;
   private cursor: number;
   private prefetch: Promise<Uint8Array> | null = null;
-  /** End (exclusive, in source packets) of what has been asked of the source: the chunks read and the prefetch. */
-  private requested: number;
   private readonly abort = new AbortController();
   private done = false;
   private corruptPackets = 0;
@@ -43,12 +41,11 @@ export class M2tsReader {
     const requested = opts.chunkPackets ?? DEFAULT_CHUNK_PACKETS;
     this.chunkPackets = Math.max(1, Math.round(requested / PACKETS_PER_ALIGNED_UNIT)) * PACKETS_PER_ALIGNED_UNIT;
     this.cursor = Math.floor(opts.startSpn / PACKETS_PER_ALIGNED_UNIT) * PACKETS_PER_ALIGNED_UNIT;
-    this.requested = this.cursor;
   }
 
-  /** Source packet where what has been asked of the source ends (the next read starts there). */
-  get requestedSpn(): number {
-    return this.requested;
+  /** Source packet where the chunks handed out by next() end (the prefetch is not counted): what was delivered. */
+  get deliveredSpn(): number {
+    return this.cursor;
   }
 
   get stats(): DemuxStats {
@@ -90,7 +87,6 @@ export class M2tsReader {
   }
 
   private readPackets(spn: number, count: number): Promise<Uint8Array> {
-    this.requested = Math.max(this.requested, spn + count);
     const read = this.opts.source.read(this.opts.path, spn * SOURCE_PACKET_SIZE, count * SOURCE_PACKET_SIZE, this.abort.signal);
     read.catch(() => undefined); // an abandoned prefetch must not surface as an unhandled rejection
     return read;

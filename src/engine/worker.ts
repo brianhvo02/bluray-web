@@ -31,6 +31,8 @@ const scope = self as unknown as WorkerScope;
  *   seen in the browser;
  * - nonestedworkers (?nonestedworkers=1): the worker behaves as if it could not start workers, so the capability
  *   fallback (spec m5d §4.5) can be seen in a browser that has them;
+ * - nodecoder (?nodecoder=1): the browser supports no video decoder configuration, so a decoder that fails to configure
+ *   (UnsupportedCodecError) can be seen in any browser;
  * - telemetry (?telemetry=1): telemetry carries the BD-J plane's settled hash (PlayerDeps.planeHashTelemetry) and BD-J's
  *   memory (PlayerDeps.memoryTelemetry).
  */
@@ -59,7 +61,7 @@ async function fetchBytes(url: string): Promise<Uint8Array> {
 
 const player = new Player({
   emit: (event) => scope.postMessage(event),
-  videoCodecApi: browserVideoCodecApi,
+  videoCodecApi: testFlags.has('nodecoder') ? { ...browserVideoCodecApi, isConfigSupported: async (config) => ({ supported: false, config }) } : browserVideoCodecApi,
   nowMs: () => performance.now(),
   requestFrame: (callback) => {
     if (scope.requestAnimationFrame) scope.requestAnimationFrame(() => callback());

@@ -316,8 +316,10 @@ interface Session {
   videoState: 'unconfigured' | 'configuring' | 'configured' | 'failed';
   pendingVideo: VideoUnit[];
   dropBeforeUs: number;
-  /** Without a picture: the latest PTS the reader delivered since the last start (read-ahead is paced on it). */
-  readUs: number;
+  /** Without a picture: the latest audio PTS delivered since the last start (read-ahead is paced on it and the pipeline's position). */
+  audioReadUs: number;
+  /** Without a picture: the latest PTS of anything delivered (audio, PG, IG) since the last start; the playlist ends once it has played out. */
+  deliveredEndUs: number;
   /** Without a picture: its first frame (black, with the planes over it) has been composited. */
   blankComposited: boolean;
   eof: boolean;
@@ -667,8 +669,9 @@ export class Player {
     this.paint(frame, now);
     this.feedDecoder(s); // presenting freed decoded-frame slots
     const last = this.presenter.current;
-    // without a picture the playlist ends when the reader has reached its end and the clock the playlist's
-    const endUs = s.decoder ? (last?.timestamp ?? 0) + 100_000 : s.timeline.durationUs;
+    // without a picture the playlist ends, as libbluray's does on EOF, once the reader is done and what it delivered
+    // (audio, PG, IG) has played out, or at its duration if that comes first
+    const endUs = s.decoder ? (last?.timestamp ?? 0) + 100_000 : Math.min(s.timeline.durationUs, s.deliveredEndUs + 100_000);
     if (this.state === 'playing' && !this.held && s.flushed && this.presenter.size === 0 && now >= endUs) {
       this.wantPlaying = false;
       this.ring?.setPlaying(false);
@@ -1854,15 +1857,9 @@ export class Player {
       this.deps.emit({ type: 'unsupported', kind: 'audio', codec, message: `This playlist's audio (${codec}) can't be played yet, so video will play without sound.` });
     }
     // libbluray opens a playlist whatever its video: one the browser can't decode plays without a picture (audio,
-    // subtitles, menus and the clock run), with a notice once per disc
+    // subtitles, menus and the clock run), with a notice once per disc. With nothing else playable either it still plays,
+    // silent black, as libbluray does (R12); UnsupportedCodecError stays for a decoder whose configuration fails.
     const picture = isSupportedVideoCoding(choice.video.codingType);
-    if (!picture && this.noPictureNotice === 'unsent') {
-      this.noPictureNotice = 'shown';
-      this.deps.emit({ type: 'unsupported', kind: 'video', codec: codingName(choice.video.codingType), message: NO_PICTURE_MESSAGE });
-    } else if (picture && this.noPictureNotice === 'shown') {
-      this.noPictureNotice = 'cleared'; // the picture is back: the notice goes, and this disc does not show it again
-      this.deps.emit({ type: 'noticeCleared', code: 'unsupported-video' });
-    }
     // With a disc program (HDMV or BD-J) the audio stream register (PSR1) decides, when it names a playable stream
     let audioIndex = choice.audioIndex;
     let audioEntry = choice.audio;
@@ -1877,8 +1874,8 @@ export class Player {
 
     const decoder = picture ? new WebCodecsVideoDecoder(this.deps.videoCodecApi) : null;
     const ref: { current: Session | null } = { current: null };
-    const read = (ptsUs: number): void => {
-      if (ref.current && ptsUs > ref.current.readUs) ref.current.readUs = ptsUs;
+    const delivered = (ptsUs: number): void => {
+      if (ref.current && ptsUs > ref.current.deliveredEndUs) ref.current.deliveredEndUs = ptsUs;
     };
     const pipeline = new PlaybackPipeline(
       { source, timeline, clips, videoPid: choice.video.pid, readVideo: picture, playItems: mpls.playItems, audioStream: audioActive ? audioIndex : null, igStream: this.igStreamNumber() },
@@ -1887,16 +1884,17 @@ export class Player {
           if (ref.current) this.onVideoUnit(ref.current, u);
         },
         audio: (u) => {
-          read(u.ptsUs);
+          delivered(u.ptsUs);
+          if (ref.current && u.ptsUs > ref.current.audioReadUs) ref.current.audioReadUs = u.ptsUs;
           if (ref.current) this.onAudioUnit(ref.current, u);
         },
         ig: (u) => {
-          read(u.ptsUs);
+          delivered(u.ptsUs);
           // units of a superseded session or a torn-down navigator are dropped
           if (ref.current && ref.current === this.session) this.navigator?.pushIg(u);
         },
         pg: (u) => {
-          read(u.ptsUs);
+          delivered(u.ptsUs);
           // outside the play item's IN/OUT time PG is filtered out, as libbluray's m2ts_filter does
           if (ref.current && ref.current === this.session && u.inRange) this.pg?.push(u);
         },
@@ -1933,7 +1931,8 @@ export class Player {
       videoState: 'unconfigured',
       pendingVideo: [],
       dropBeforeUs: 0,
-      readUs: -Infinity,
+      audioReadUs: -Infinity,
+      deliveredEndUs: -Infinity,
       blankComposited: false,
       eof: false,
       flushed: false,
@@ -1956,6 +1955,15 @@ export class Player {
     this.audioDecodeErrors = 0;
     this.audioCodec = null;
     this.sentPgTracks = '';
+    this.compositor?.startPlaylist?.(picture);
+    // the disc's no-picture notice, only for a playlist that opened (one that failed to open does not use it up)
+    if (!picture && this.noPictureNotice === 'unsent') {
+      this.noPictureNotice = 'shown';
+      this.deps.emit({ type: 'unsupported', kind: 'video', codec: codingName(choice.video.codingType), message: NO_PICTURE_MESSAGE, noPicture: true });
+    } else if (picture && this.noPictureNotice === 'shown') {
+      this.noPictureNotice = 'cleared'; // the picture is back: the notice goes, and this disc does not show it again
+      this.deps.emit({ type: 'noticeCleared', code: 'no-picture' });
+    }
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
     await this.startAt(startUs, caller !== 'bdj', openPkt);
@@ -2298,7 +2306,8 @@ export class Player {
     this.pg?.seek(); // GC_CTRL_PG_RESET in _seek_internal: the subtitle on screen goes
     if (s.videoState === 'configured') s.decoder?.reset();
     s.pendingVideo = [];
-    s.readUs = -Infinity;
+    s.audioReadUs = -Infinity;
+    s.deliveredEndUs = -Infinity;
     s.decimator?.reset();
     s.eof = false;
     s.flushed = false;
@@ -2445,6 +2454,9 @@ export class Player {
           (err: unknown) => {
             if (this.session !== s) return;
             s.videoState = 'failed';
+            // a playlist the user picked whose decoder can't be configured is gone (playlistCleared), so the picker
+            // shows the reason, as for a pick that fails to open; a disc program's playlist stays, in error
+            if (err instanceof UnsupportedCodecError && s.owner === 'user') this.teardownSession();
             this.fail(err);
           },
         );
@@ -2562,9 +2574,10 @@ export class Player {
 
   /** True when the compressed-video backlog has used its read-ahead budget, so reading must wait. */
   private readerBlocked(s: Session): boolean {
-    // without a picture, reading keeps the same lead over the clock as with one: from where the source has been read to
-    // (the clip's EP map or byte rate) and the PTS of what else it delivered, so it never runs faster than real time
-    if (!s.decoder) return Math.max(s.readUs, s.pipeline.readUs ?? -Infinity) - this.clock.nowUs() >= MAX_ENCODED_VIDEO_US;
+    // without a picture, reading keeps the same lead over the clock as with one, on what was delivered: the audio's PTS
+    // and a lower bound of the pipeline's position (EP map or byte rate), so the audio never falls behind the clock while
+    // reading waits, and reading never runs faster than real time where the position is known
+    if (!s.decoder) return Math.max(s.audioReadUs, s.pipeline.readUs ?? -Infinity) - this.clock.nowUs() >= MAX_ENCODED_VIDEO_US;
     const pending = s.pendingVideo;
     if (pending.length === 0) return false;
     let min = Infinity;

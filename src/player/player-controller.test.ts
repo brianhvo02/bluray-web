@@ -186,7 +186,7 @@ describe('notices across playlists', () => {
 });
 
 describe('the no-picture notice', () => {
-  const noPicture: EngineEvent = { type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE };
+  const noPicture: EngineEvent = { type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE, noPicture: true };
   const codes = (c: PlayerController): string[] => c.getSnapshot().notices.map((n) => n.code);
 
   it('stays for the disc when another playlist is picked, and goes when another disc opens (Review Focus 4)', () => {
@@ -198,12 +198,12 @@ describe('the no-picture notice', () => {
     worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
     c.playPlaylist('00001'); // the engine sends it once per disc: nothing comes for this one
     worker.emit({ type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
-    expect(c.getSnapshot().notices).toEqual([{ code: 'unsupported-video', message: NO_PICTURE_MESSAGE }]);
+    expect(c.getSnapshot().notices).toEqual([{ code: 'no-picture', message: NO_PICTURE_MESSAGE }]);
     c.open([]);
     expect(codes(c)).toEqual([]);
     c.playPlaylist('00000');
     worker.emit(noPicture); // the next disc's own notice
-    expect(codes(c)).toEqual(['unsupported-video']);
+    expect(codes(c)).toEqual(['no-picture']);
   });
 
   it('goes when a playlist with a picture starts, and is not shown again for the disc (R9)', () => {
@@ -213,9 +213,9 @@ describe('the no-picture notice', () => {
     c.playPlaylist('00000');
     worker.emit(noPicture);
     worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
-    expect(codes(c)).toEqual(['unsupported-video']);
+    expect(codes(c)).toEqual(['no-picture']);
     c.playPlaylist('00001'); // H.264: the engine clears the notice before the playlist's chapters
-    worker.emit({ type: 'noticeCleared', code: 'unsupported-video' });
+    worker.emit({ type: 'noticeCleared', code: 'no-picture' });
     worker.emit({ type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
     expect(codes(c)).toEqual([]);
     c.playPlaylist('00000'); // MPEG-2 again: the engine sends nothing more for this disc
@@ -225,8 +225,8 @@ describe('the no-picture notice', () => {
 
   it('reduces noticeCleared for the no-picture notice', () => {
     const shown = reduceEvent(INITIAL_SNAPSHOT, noPicture);
-    expect(shown.notices).toEqual([{ code: 'unsupported-video', message: NO_PICTURE_MESSAGE }]);
-    expect(reduceEvent(shown, { type: 'noticeCleared', code: 'unsupported-video' }).notices).toEqual([]);
+    expect(shown.notices).toEqual([{ code: 'no-picture', message: NO_PICTURE_MESSAGE }]);
+    expect(reduceEvent(shown, { type: 'noticeCleared', code: 'no-picture' }).notices).toEqual([]);
   });
 
   it('is dismissed like any notice and does not come back for the next playlist', () => {
@@ -234,7 +234,7 @@ describe('the no-picture notice', () => {
     const c = new PlayerController(worker, new FakeAudio());
     c.playPlaylist('00000');
     worker.emit(noPicture);
-    c.dismissNotice('unsupported-video');
+    c.dismissNotice('no-picture');
     c.playPlaylist('00001');
     expect(codes(c)).toEqual([]);
   });

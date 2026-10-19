@@ -66,7 +66,7 @@ export class PlaybackPipeline {
   /** The stream file `current` reads and its clip's TS_recording_rate. */
   private currentClip: { readonly path: string; readonly recordingRate: number } | null = null;
   /** How `current` maps a source packet to playlist time (readUs). */
-  private currentPlace: { readonly item: number; readonly entries: readonly EpEntry[]; readonly startSpn: number; readonly startUs: number; readonly recordingRate: number } | null = null;
+  private currentPlace: { readonly item: number; readonly entries: readonly EpEntry[]; readonly startSpn: number; readonly startUs: number; readonly fromItemStart: boolean; readonly recordingRate: number } | null = null;
   private audioStream: number | null;
   private igStream: number | null;
   private pgPid: number | null = null;
@@ -101,9 +101,10 @@ export class PlaybackPipeline {
   }
 
   /**
-   * Playlist time up to which the source has been asked for data (read or prefetched), so reading can be paced on the
-   * clock without decoding anything: the EP-map entry at or after that packet (the data before it is earlier), else the
-   * clip's TS_recording_rate from where the read started; never past the play item's end. Null between reads.
+   * Playlist time the data delivered so far has surely reached (a lower bound), so reading can be paced on the clock
+   * without decoding anything: the EP-map entry at or before the end of the chunks handed out (not the prefetch), else,
+   * for a read from the play item's start, the clip's TS_recording_rate. Null when that is unknown (no EP map and no rate,
+   * or a seek inside an item without an EP map): then reading is not paced on it. Null between reads too.
    */
   get readUs(): number | null {
     const reader = this.current;
@@ -112,22 +113,23 @@ export class PlaybackPipeline {
     const { timeline } = this.config;
     const item = timeline.items[place.item]!;
     const endUs = timeline.itemStartUs(place.item) + ((item.outTime - item.inTime) * 1000) / 45;
-    const spn = reader.requestedSpn;
-    let us: number | null = null;
+    const spn = reader.deliveredSpn;
     const entries = place.entries;
     if (entries.length > 0) {
       let lo = 0;
-      let hi = entries.length; // the first entry at or after spn (entries ascend in spn)
+      let hi = entries.length; // the first entry after spn (entries ascend in spn); the one before it is at or before spn
       while (lo < hi) {
         const mid = (lo + hi) >> 1;
-        if (entries[mid]!.spn < spn) lo = mid + 1;
+        if (entries[mid]!.spn <= spn) lo = mid + 1;
         else hi = mid;
       }
-      us = lo < entries.length ? timeline.toPlaylistUs(place.item, entries[lo]!.pts * 2).us : endUs;
-    } else if (place.recordingRate > 0) {
-      us = place.startUs + (((spn - place.startSpn) * TS_PACKET_SIZE) / place.recordingRate) * 1e6;
+      if (lo === 0) return null; // not yet at the first entry: a little lead-in, not paced
+      return Math.min(endUs, timeline.toPlaylistUs(place.item, entries[lo - 1]!.pts * 2).us);
     }
-    return us === null ? endUs : Math.min(us, endUs);
+    if (place.recordingRate > 0 && place.fromItemStart) {
+      return Math.min(endUs, place.startUs + (((spn - place.startSpn) * TS_PACKET_SIZE) / place.recordingRate) * 1e6);
+    }
+    return null;
   }
 
   get stats(): DemuxStats {
@@ -196,7 +198,8 @@ export class PlaybackPipeline {
       this.current = reader;
       this.currentClip = { path: streamPath(item.clipId), recordingRate: clip.recordingRate };
       const entries = ep?.entries.filter((e) => e.spn >= range.startSpn && e.spn < range.endSpn) ?? [];
-      this.currentPlace = { item: i, entries, startSpn, startUs: i === startPos.item.index ? fromUs : timeline.itemStartUs(i), recordingRate: clip.recordingRate };
+      const placeStartUs = i === startPos.item.index ? fromUs : timeline.itemStartUs(i);
+      this.currentPlace = { item: i, entries, startSpn, startUs: placeStartUs, fromItemStart: placeStartUs <= timeline.itemStartUs(i), recordingRate: clip.recordingRate };
 
       for (;;) {
         while (this.sinks.isFull()) {

@@ -597,7 +597,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(events(BdjEvent.PLAYLIST)).toContain(1);
     w.emit({ type: 'call', id: 2, name: 'selectRate', args: [1, START] });
     await until(h, () => lastState(h) === 'playing');
-    expect(h.events.filter((e) => e.type === 'unsupported')).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE }]);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE, noPicture: true }]);
     expect(h.events.some((e) => e.type === 'error')).toBe(false);
     // the first frame is the black one with the planes over it, composited once the playlist plays
     await until(h, () => (lastTelemetry(h)?.bdj?.firstFrameMs ?? null) !== null);

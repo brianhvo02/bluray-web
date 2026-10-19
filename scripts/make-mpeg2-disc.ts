@@ -13,8 +13,9 @@ if (!outDir) {
 }
 
 // An HDMV disc whose video is MPEG-2 (which browsers can't decode), so it plays without a picture
-// (tests/e2e/unsupported-video.spec.ts). First Play loops the top menu (playlist 00001, an always-on IG menu whose two
-// buttons, 8x4 at (100, 100) and (100, 200), jump to title 1); title 1 plays 00000 with English PG subtitles on.
+// (tests/e2e/unsupported-video.spec.ts). First Play loops the top menu (playlist 00001, an always-on IG menu with two
+// buttons, 8x4 at (100, 100) and (100, 200), both carrying the one command JumpTitle 1); title 1 plays 00000 with
+// English PG subtitles on.
 
 const MENU_SECONDS = 6;
 const FEATURE_SECONDS = 8;

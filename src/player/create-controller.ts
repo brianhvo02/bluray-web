@@ -5,9 +5,10 @@ import { PlayerController } from './player-controller';
 
 export function createController(): PlayerController {
   const params = new URLSearchParams(location.search);
-  // Test-only (E2E): ?bdjfail=1, ?nonestedworkers=1 and ?telemetry=1 go to the engine worker as flags in its name
-  // (engine/worker.ts): an unreadable class library, no workers started from workers, the BD-J plane's hash in telemetry.
-  const flags = ['bdjfail', 'nonestedworkers', 'telemetry'].filter((f) => params.has(f));
+  // Test-only (E2E): ?bdjfail=1, ?nonestedworkers=1, ?nodecoder=1 and ?telemetry=1 go to the engine worker as flags in
+  // its name (engine/worker.ts): an unreadable class library, no workers started from workers, no video decoder
+  // configuration supported, the BD-J plane's hash in telemetry.
+  const flags = ['bdjfail', 'nonestedworkers', 'nodecoder', 'telemetry'].filter((f) => params.has(f));
   // (the options stay an object literal with a literal type: Vite reads it to bundle the worker as a module)
   const worker = new Worker(new URL('../engine/worker.ts', import.meta.url), { type: 'module', name: flags.length > 0 ? `bluray-engine:${flags.join(',')}` : 'bluray-engine' });
   const controller = new PlayerController(worker, new AudioOutput());

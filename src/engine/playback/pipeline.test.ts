@@ -183,6 +183,49 @@ describe('PlaybackPipeline IG', () => {
 });
 
 describe('PlaybackPipeline', () => {
+  it.each([
+    ['1 MB/s', 33_000],
+    ['0.5 MB/s', 12_800],
+  ])('paced on what it delivered, keeps the audio ahead of the clock with the video dropped (%s, R10)', async (_rate, frameBytes) => {
+    // LPCM (192 kB/s) and video of `frameBytes` a frame at 24 fps, video PID dropped. The player's rule: reading waits
+    // while max(audio PTS delivered, readUs) is 2 s or more ahead of the clock; the clock starts once reading first waits
+    // and runs in real time while it waits (reads take no time here).
+    const seconds = 30;
+    const files = buildSyntheticDisc({ clips: [syntheticClip('00001', seconds, { audio: CodingType.LPCM, frameBytes })], playlists: [{ id: '00000', clipIds: ['00001'] }] });
+    const source = syntheticSource(files);
+    const mpls = parseMpls(await readWhole(source, 'BDMV/PLAYLIST/00000.MPLS'));
+    const config: PipelineConfig = { source, timeline: new Timeline(mpls.playItems), clips: await loadClips(source, ['00001']), videoPid: VIDEO_PID, readVideo: false, playItems: mpls.playItems, audioStream: 1 };
+    let clockUs: number | null = null;
+    let audioUs = -Infinity;
+    let minLead = Infinity;
+    let finish!: () => void;
+    const done = new Promise<void>((r) => (finish = r));
+    let pipeline!: PlaybackPipeline;
+    pipeline = new PlaybackPipeline(
+      config,
+      {
+        video: () => undefined,
+        audio: (u) => (audioUs = Math.max(audioUs, u.ptsUs)),
+        isFull: () => {
+          const blocked = Math.max(audioUs, pipeline.readUs ?? -Infinity) - (clockUs ?? 0) >= 2_000_000;
+          if (blocked) clockUs ??= 0;
+          // the audio still to come is behind the clock: an underrun (the last 0.1 s, where the clip ends, aside)
+          if (clockUs !== null && clockUs < (seconds - 0.1) * 1e6) minLead = Math.min(minLead, audioUs - clockUs);
+          return blocked;
+        },
+        ended: () => finish(),
+        failed: () => finish(),
+      },
+      async (ms) => {
+        if (clockUs !== null) clockUs += ms * 1000;
+      },
+    );
+    pipeline.start(0);
+    await done;
+    expect(clockUs).not.toBeNull();
+    expect(minLead).toBeGreaterThan(0);
+  });
+
   it('reports how far into the playlist the source has been read, from the EP map, so reading can be paced on a clock', async () => {
     // 10 s of 100 kB frames (~2.4 MB a second, an EP entry every second), no audio: nothing but the video PID, dropped
     const files = buildSyntheticDisc({ clips: [syntheticClip('00001', 10, { frameBytes: 100_000 })], playlists: [{ id: '00000', clipIds: ['00001'] }] });
@@ -228,7 +271,8 @@ describe('PlaybackPipeline', () => {
     clock.us = 4_000_000;
     await turns(20);
     expect(furthest).toBeGreaterThan(held);
-    expect(furthest).toBeLessThan(size * 0.8);
+    // what was delivered reaches 2 s past the clock (a lower bound), plus up to a GOP and the reader's prefetch
+    expect(furthest).toBeLessThan(size * 0.9);
     clock.us = 20_000_000;
     await turns(40);
     expect(ended).toBe(true);
