@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import type { TitleSummary } from '../../engine/disc/nas-api';
-import { TMDB_ATTRIBUTION, countdown, deleteTitleQuestion, deviceRow, gateSwitchOn, matchingStatus, newCode, ownTitleKind, ownTitles, revoke, withGate } from './admin-model';
-import { NasHttpError, type NasClient, type NasDevice, type NasTitleStatus } from './nas-client';
+import { TMDB_ATTRIBUTION, countdown, deleteTitleQuestion, gateSwitchOn, matchingStatus, newCode, ownTitleKind, ownTitles, withGate } from './admin-model';
+import { NasHttpError, type NasClient, type NasPerson, type NasTitleStatus } from './nas-client';
+import { PeopleSection } from './PeopleSection';
+import { MAX_PERSON_NAME, NEW_PERSON, codeSummary } from './people-model';
 import { displayName } from './title-model';
 import { parseNumber } from './unsorted-model';
 import { qrSvg } from './qr';
@@ -17,8 +19,8 @@ interface AdminScreenProps {
   readonly now?: () => number;
 }
 
-/** While a code is shown, the devices list is reloaded this often, so the device that redeems it turns up. */
-const DEVICE_POLL_MS = 3_000;
+/** While a code is shown, the people list is reloaded this often, so the device that redeems it turns up. */
+const PEOPLE_POLL_MS = 3_000;
 /** While titles are being matched, the status is reloaded this often. */
 const STATUS_POLL_MS = 5_000;
 
@@ -26,6 +28,8 @@ interface ShownCode {
   readonly code: string;
   readonly link: string;
   readonly expiresAt: number;
+  readonly personName: string;
+  readonly invite: boolean;
   readonly qr: { size: number; path: string };
 }
 
@@ -304,51 +308,66 @@ function TitleLibrarySettings({ nas, now, onTitlesChanged }: { nas: NasClient; n
   );
 }
 
-/** NAS settings, for owners: a new pairing code with its QR and countdown, the paired devices with Revoke, and Rescan. */
+/**
+ * NAS settings, for owners: a new pairing code for a person (or a new one, optionally as a 3-day invite) with its QR and
+ * countdown, the People list (spec §4.3), and Rescan.
+ */
 export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitlesChanged }: AdminScreenProps): ReactElement {
-  const [devices, setDevices] = useState<NasDevice[] | null>(null);
-  const [owner, setOwner] = useState(false);
+  const [people, setPeople] = useState<NasPerson[] | null>(null);
+  /** The person picker: a person's id, or NEW_PERSON. */
+  const [picked, setPicked] = useState(NEW_PERSON);
+  const [newName, setNewName] = useState('');
+  const [newOwner, setNewOwner] = useState(false);
+  const [invite, setInvite] = useState(false);
   const [code, setCode] = useState<ShownCode | null>(null);
   const [copied, setCopied] = useState(false);
   const [minting, setMinting] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** Rows whose revoke is in flight: their button is disabled, so a double tap sends one request. */
-  const [revoking, setRevoking] = useState<ReadonlySet<string>>(new Set());
-  /** This device's row asks "Revoke this device?" before revoking. */
-  const [confirmingSelf, setConfirmingSelf] = useState(false);
   const codeRef = useRef<HTMLElement>(null);
   const [, setTick] = useState(0);
 
-  /** Loads the devices. A failing poll only shows its error when no other is showing, so it can't hide a refusal unread. */
-  const loadDevices = useCallback(
+  /** Loads the people. A failing poll only shows its error when no other is showing, so it can't hide a refusal unread. */
+  const loadPeople = useCallback(
     (poll: boolean): Promise<void> =>
-      nas.admin.devices().then(setDevices, (err: unknown) => setError((shown) => (poll && shown !== null ? shown : message(err)))),
+      nas.admin.people().then(setPeople, (err: unknown) => setError((shown) => (poll && shown !== null ? shown : message(err)))),
     [nas],
   );
   useEffect(() => {
-    void loadDevices(false);
-  }, [loadDevices]);
+    void loadPeople(false);
+  }, [loadPeople]);
+  const reloadPeople = useCallback(() => void loadPeople(false), [loadPeople]);
+
+  // A person picked who has since gone (removed here) falls back to "New person…".
+  useEffect(() => {
+    if (people !== null && picked !== NEW_PERSON && !people.some((p) => p.id === picked)) setPicked(NEW_PERSON);
+  }, [people, picked]);
 
   const live = code !== null && now() < code.expiresAt;
   useEffect(() => {
     if (!live) return;
     const tick = window.setInterval(() => setTick((t) => t + 1), 1_000);
-    const poll = window.setInterval(() => void loadDevices(true), DEVICE_POLL_MS);
+    const poll = window.setInterval(() => void loadPeople(true), PEOPLE_POLL_MS);
     return () => {
       window.clearInterval(tick);
       window.clearInterval(poll);
     };
-  }, [live, loadDevices]);
+  }, [live, loadPeople]);
 
-  const onNewCode = (): void => {
+  const onNewCode = (e: FormEvent): void => {
+    e.preventDefault();
     setError(null);
     setMinting(true);
-    newCode(nas.admin, owner).then(
+    newCode(nas.admin, picked, newName, newOwner, invite).then(
       (minted) => {
         setCode({ ...minted, qr: qrSvg(minted.link) });
         setCopied(false);
         setMinting(false);
+        // A new person is on the NAS now: the next code goes to them unless another is picked.
+        setPicked(minted.personId);
+        setNewName('');
+        setNewOwner(false);
+        void loadPeople(false);
       },
       (err: unknown) => {
         setError(message(err));
@@ -381,25 +400,6 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
     );
   };
 
-  const onRevoke = (id: string): void => {
-    setError(null);
-    setConfirmingSelf(false);
-    setRevoking((ids) => new Set(ids).add(id));
-    void revoke(nas.admin, id).then((failed) => {
-      setRevoking((ids) => {
-        const next = new Set(ids);
-        next.delete(id);
-        return next;
-      });
-      if (failed) {
-        setError(failed);
-        return;
-      }
-      setDevices((list) => list?.filter((d) => d.id !== id) ?? null);
-      void loadDevices(false);
-    });
-  };
-
   const onRescan = (): void => {
     setError(null);
     nas.admin.rescan().then(
@@ -418,14 +418,44 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
           Back
         </button>
       </div>
-      <div className="admin-new-code">
-        <button type="button" data-testid="nas-new-code" onClick={onNewCode} disabled={minting}>
+      <form className="admin-new-code" onSubmit={onNewCode}>
+        <label>
+          For{' '}
+          <select data-testid="nas-code-person" value={picked} onChange={(e) => setPicked(e.target.value)} disabled={minting}>
+            {(people ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+            <option value={NEW_PERSON}>New person…</option>
+          </select>
+        </label>
+        {picked === NEW_PERSON && (
+          <>
+            <label>
+              Name{' '}
+              <input
+                type="text"
+                data-testid="nas-new-person-name"
+                maxLength={MAX_PERSON_NAME}
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                disabled={minting}
+              />
+            </label>
+            <label className="admin-owner">
+              <input type="checkbox" data-testid="nas-new-person-owner" checked={newOwner} onChange={(e) => setNewOwner(e.target.checked)} disabled={minting} /> Owner
+            </label>
+          </>
+        )}
+        <label className="admin-owner">
+          <input type="checkbox" data-testid="nas-code-invite" checked={invite} onChange={(e) => setInvite(e.target.checked)} disabled={minting} /> Send as an invite
+          (valid 3 days)
+        </label>
+        <button type="submit" data-testid="nas-new-code" disabled={minting}>
           New pairing code
         </button>
-        <label className="admin-owner">
-          <input type="checkbox" data-testid="nas-owner-code" checked={owner} onChange={(e) => setOwner(e.target.checked)} /> Owner
-        </label>
-      </div>
+      </form>
       {code && (
         <div className="admin-code">
           <svg
@@ -449,46 +479,16 @@ export function AdminScreen({ nas, thisDeviceId, onClose, now = Date.now, onTitl
               </button>
             )}
           </p>
+          <p className="status" data-testid="nas-code-for">
+            {codeSummary(code.personName, code.invite)}
+          </p>
           <p className="status" data-testid="nas-code-expiry">
             {countdown(code.expiresAt, at)}
           </p>
         </div>
       )}
-      <h3>Devices</h3>
-      {devices === null ? (
-        !error && <p className="status">Loading…</p>
-      ) : (
-        <ul className="library-rows">
-          {devices.map((d) => {
-            const row = deviceRow(d, at, thisDeviceId);
-            return (
-              <li key={row.id} className="admin-device" data-testid="nas-device" data-device-id={row.id}>
-                <span className="library-name">{row.text}</span>
-                {row.thisDevice && confirmingSelf ? (
-                  <span className="admin-confirm">
-                    Revoke this device?{' '}
-                    <button type="button" data-testid="nas-revoke-confirm" disabled={revoking.has(row.id)} onClick={() => onRevoke(row.id)}>
-                      Revoke
-                    </button>{' '}
-                    <button type="button" data-testid="nas-revoke-cancel" onClick={() => setConfirmingSelf(false)}>
-                      Cancel
-                    </button>
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    data-testid="nas-revoke"
-                    disabled={revoking.has(row.id)}
-                    onClick={() => (row.thisDevice ? setConfirmingSelf(true) : onRevoke(row.id))}
-                  >
-                    Revoke
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      <h3>People</h3>
+      <PeopleSection nas={nas} people={people} thisDeviceId={thisDeviceId} now={at} onChanged={reloadPeople} onError={setError} />
       <div>
         <button type="button" data-testid="nas-rescan" onClick={onRescan}>
           Rescan

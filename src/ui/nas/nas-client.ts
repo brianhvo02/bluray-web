@@ -31,18 +31,44 @@ export interface NasSession {
   readonly expiresAt: number;
 }
 
-export interface NasDevice {
+/** One of a person's paired devices, as `GET admin/people` lists it. */
+export interface NasPersonDevice {
   readonly id: string;
   readonly name: string;
-  readonly owner: boolean;
   readonly pairedAt: number;
   readonly lastSeen: number;
 }
 
-/** `GET me`: whether this device is an owner, and whether the title library is open to it. */
+/** A person on the NAS: their devices, and the size of their BD-J saved data. */
+export interface NasPerson {
+  readonly id: string;
+  readonly name: string;
+  readonly owner: boolean;
+  readonly createdAt: number;
+  readonly savedBytes: number;
+  readonly devices: readonly NasPersonDevice[];
+}
+
+/** Who a new pairing code is for: someone on the NAS, or a person made with the code. */
+export type NasCodeTarget = { readonly personId: string } | { readonly newPerson: { readonly name: string; readonly owner: boolean } };
+
+/** `POST admin/codes`: the code, its link, and the person a device pairing with it becomes. */
+export interface NasMintedCode {
+  readonly code: string;
+  readonly link: string;
+  readonly expiresAt: number;
+  readonly rendezvous: boolean;
+  readonly personId: string;
+  readonly personName: string;
+  readonly invite: boolean;
+}
+
+/** `GET me`: whether this device is an owner, whether the title library is open to it, and whose device it is. */
 export interface NasMe {
   readonly owner: boolean;
   readonly titleLibrary: boolean;
+  readonly personId: string;
+  readonly personName: string;
 }
 
 /** `GET admin/metadata/status`: the title matcher's progress and counts. */
@@ -61,7 +87,9 @@ export interface NasTitleStatus {
 
 export interface NasCode {
   readonly id: string;
-  readonly owner: boolean;
+  readonly personId: string;
+  readonly personName: string;
+  readonly invite: boolean;
   readonly expiresAt: number;
 }
 
@@ -130,15 +158,19 @@ export interface SkippedDisc {
   readonly reason: 'direct' | 'copy' | 'no-number' | 'conflict';
 }
 
-/** A stored record usable as a pairing: a missing or damaged key pair (say, after storage was tampered with) is not. */
+/**
+ * A stored record usable as a pairing: a missing or damaged key pair (say, after storage was tampered with) is not.
+ * A pairing stored before people has no `personName`, and stays usable.
+ */
 function isPairing(value: unknown): value is NasPairing {
   if (typeof value !== 'object' || value === null) return false;
-  const { base, deviceId, deviceName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
+  const { base, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
   const k = key as Partial<CryptoKeyPair> | null | undefined;
   return (
     typeof base === 'string' &&
     typeof deviceId === 'string' &&
     typeof deviceName === 'string' &&
+    (personName === undefined || typeof personName === 'string') &&
     typeof owner === 'boolean' &&
     k?.privateKey instanceof CryptoKey &&
     k.publicKey instanceof CryptoKey
@@ -157,10 +189,25 @@ export class NasClient {
   private readonly unpairedListeners = new Set<() => void>();
 
   readonly admin = {
-    devices: async (): Promise<NasDevice[]> => ((await this.json('admin/devices')) as { devices: NasDevice[] }).devices,
+    people: async (): Promise<NasPerson[]> => ((await this.json('admin/people')) as { people: NasPerson[] }).people,
+    createPerson: async (name: string, owner: boolean): Promise<NasPerson> => (await this.json('admin/people', jsonPost({ name, owner }))) as NasPerson,
+    /** Renames a person or makes them an owner or not; leaving no owner device is refused with 409 `last-owner`. */
+    updatePerson: async (id: string, change: { readonly name?: string; readonly owner?: boolean }): Promise<NasPerson> =>
+      (await this.json(`admin/people/${encodeURIComponent(id)}`, jsonBody('PATCH', change))) as NasPerson,
+    /** Removes a person, unpairing their devices and deleting their saved data. */
+    removePerson: async (id: string): Promise<void> => {
+      await this.ok(`admin/people/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    },
+    clearSavedData: async (id: string): Promise<void> => {
+      await this.ok(`admin/people/${encodeURIComponent(id)}/saved-data`, { method: 'DELETE' });
+    },
+    moveDevice: async (id: string, personId: string): Promise<void> => {
+      await this.ok(`admin/devices/${encodeURIComponent(id)}`, jsonBody('PATCH', { personId }));
+    },
     codes: async (): Promise<NasCode[]> => ((await this.json('admin/codes')) as { codes: NasCode[] }).codes,
-    createCode: async (owner: boolean): Promise<{ code: string; link: string; expiresAt: number }> =>
-      (await this.json('admin/codes', jsonPost({ owner }))) as { code: string; link: string; expiresAt: number },
+    /** A pairing code for a person, or for a new one; an invite lasts 3 days, a plain code 10 minutes. */
+    createCode: async (target: NasCodeTarget, invite: boolean): Promise<NasMintedCode> =>
+      (await this.json('admin/codes', jsonPost({ ...target, invite }))) as NasMintedCode,
     revokeDevice: async (id: string): Promise<void> => {
       await this.ok(`admin/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },
@@ -270,8 +317,8 @@ export class NasClient {
     if (res.status === 401) throw new Error(NAS_MESSAGES.invalidCode);
     if (res.status === 429) throw new Error(NAS_MESSAGES.tooMany);
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
-    const { deviceId, owner } = (await res.json()) as { deviceId: string; owner: boolean };
-    const pairing: NasPairing = { base, deviceId, deviceName: name, owner, key };
+    const { deviceId, owner, personName } = (await res.json()) as { deviceId: string; owner: boolean; personName: string };
+    const pairing: NasPairing = { base, deviceId, deviceName: name, personName, owner, key };
     await this.deps.store.put(pairing);
     this.reset(pairing);
   }
@@ -301,7 +348,7 @@ export class NasClient {
     return (await this.json(`library?path=${encodeURIComponent(path)}`)) as { folders: FolderEntry[]; discs: DiscEntry[]; scanning: boolean };
   }
 
-  /** Whether this device is an owner, and whether it may browse by title (the release gate). */
+  /** Whether this device is an owner, whether it may browse by title (the release gate), and whose device it is. */
   async me(): Promise<NasMe> {
     return (await this.json('me')) as NasMe;
   }

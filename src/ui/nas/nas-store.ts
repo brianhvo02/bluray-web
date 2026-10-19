@@ -6,6 +6,8 @@ export interface NasPairing {
   readonly base: string;
   readonly deviceId: string;
   readonly deviceName: string;
+  /** The person this device belongs to; absent on a pairing stored before people. */
+  readonly personName?: string;
   readonly owner: boolean;
   readonly key: CryptoKeyPair;
 }

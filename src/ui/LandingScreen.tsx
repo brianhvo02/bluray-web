@@ -6,6 +6,7 @@ import { PairScreen } from './nas/PairScreen';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import type { NasPairing } from './nas/nas-store';
+import { pairedAs } from './nas/people-model';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
@@ -304,7 +305,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
           />
         ) : (
           <p className="status" data-testid="nas-paired">
-            Paired with the NAS as {pairing.deviceName}.{' '}
+            {pairedAs(pairing)}{' '}
             {!browsing && (
               <button
                 type="button"

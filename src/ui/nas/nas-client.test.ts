@@ -267,6 +267,88 @@ describe('NasClient', () => {
     ]);
   });
 
+  it("sends the owner's people, device and code routes", async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const real = server.fetch;
+    const sent: string[] = [];
+    const mika = { id: 'p1', name: 'Mika', owner: false, createdAt: 1, savedBytes: 0, devices: [] };
+    const minted = { code: 'K7QM-4XP2-R9TD', link: 'https://example/?pair=K7QM4XP2R9TD', expiresAt: 2, rendezvous: true, personId: 'p1', personName: 'Mika', invite: true };
+    const answer = async (url: URL, init?: RequestInit): Promise<Response> => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length) + url.search;
+      if (route.startsWith('session')) {
+        server.nas = undefined;
+        try {
+          return await real(url, init);
+        } finally {
+          server.nas = answer;
+        }
+      }
+      sent.push(`${init?.method ?? 'GET'} ${route}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`);
+      if (route === 'admin/people' && init?.method === 'POST') return Response.json(mika, { status: 201 });
+      if (route === 'admin/people') return Response.json({ people: [mika] });
+      if (route === 'admin/codes' && init?.method === 'POST') return Response.json(minted);
+      if (route === 'admin/codes') return Response.json({ codes: [{ id: 'c1', personId: 'p1', personName: 'Mika', invite: true, expiresAt: 2 }] });
+      if (route === 'admin/people/p%2F2' && init?.method === 'PATCH') return Response.json({ error: 'last-owner' }, { status: 409 });
+      if (route.startsWith('admin/people/') && init?.method === 'PATCH') return Response.json({ ...mika, name: 'Sora' });
+      return new Response(null, { status: 204 });
+    };
+    server.nas = answer;
+
+    expect(await nas.admin.people()).toEqual([mika]);
+    expect(await nas.admin.createPerson('Mika', false)).toEqual(mika);
+    expect(await nas.admin.updatePerson('p1', { name: 'Sora' })).toEqual({ ...mika, name: 'Sora' });
+    await expect(nas.admin.updatePerson('p/2', { owner: false })).rejects.toMatchObject({ status: 409, code: 'last-owner' });
+    await nas.admin.removePerson('p1');
+    await nas.admin.clearSavedData('p1');
+    await nas.admin.moveDevice('d1', 'p1');
+    await nas.admin.revokeDevice('d1');
+    expect(await nas.admin.createCode({ personId: 'p1' }, false)).toEqual(minted);
+    expect(await nas.admin.createCode({ newPerson: { name: 'Mika', owner: false } }, true)).toEqual(minted);
+    expect(await nas.admin.codes()).toEqual([{ id: 'c1', personId: 'p1', personName: 'Mika', invite: true, expiresAt: 2 }]);
+    expect(sent).toEqual([
+      'GET admin/people',
+      'POST admin/people {"name":"Mika","owner":false}',
+      'PATCH admin/people/p1 {"name":"Sora"}',
+      'PATCH admin/people/p%2F2 {"owner":false}',
+      'DELETE admin/people/p1',
+      'DELETE admin/people/p1/saved-data',
+      'PATCH admin/devices/d1 {"personId":"p1"}',
+      'DELETE admin/devices/d1',
+      'POST admin/codes {"personId":"p1","invite":false}',
+      'POST admin/codes {"newPerson":{"name":"Mika","owner":false},"invite":true}',
+      'GET admin/codes',
+    ]);
+  });
+
+  it("makes a code for a new person on the real server, and the device that redeems it is that person's", async () => {
+    const server = fakeServer();
+    const owner = client(server);
+    await owner.pair(await server.code(), 'Mac Safari');
+    const minted = await owner.admin.createCode({ newPerson: { name: 'Mika', owner: false } }, true);
+    expect(minted).toMatchObject({ personName: 'Mika', invite: true });
+    // The server here has no registrar, so the guest's lookup is answered directly.
+    const store = memoryStore();
+    const guest = client(server, store);
+    const lookup = vi.spyOn(guest, 'lookup').mockResolvedValue({ nasId: 'nas1', routes: { https: BASE } });
+    await guest.pair(minted.code, 'iPad');
+    expect(lookup).toHaveBeenCalledOnce();
+    expect(store.value).toMatchObject({ deviceName: 'iPad', owner: false, personName: 'Mika' });
+    const people = await owner.admin.people();
+    expect(people.find((p) => p.name === 'Mika')).toMatchObject({ owner: false, savedBytes: 0, devices: [{ name: 'iPad' }] });
+  });
+
+  it('loads a pairing stored before people, without a person name', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    store.value = { base: BASE, deviceId: 'd1', deviceName: 'iPad', owner: true, key };
+    const nas = client(server, store);
+    expect(await nas.pairing()).toEqual({ base: BASE, deviceId: 'd1', deviceName: 'iPad', owner: true, key });
+    expect(store.value).not.toBeNull();
+  });
+
   it('keeps the private key non-extractable', async () => {
     const server = fakeServer();
     const store = memoryStore();

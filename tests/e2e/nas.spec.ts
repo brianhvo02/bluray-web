@@ -256,62 +256,73 @@ test('a disc deleted after its pre-flight fails to open, and Play works again', 
   await expect(page.getByTestId('nas-play')).toBeEnabled();
 });
 
-test('the owner mints a code, pairs a second browser as Mum, revokes it, and rescans', async ({ page, browser, browserName }) => {
+test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans', async ({ page, browser, browserName }) => {
   await openLibrary(page, browserName);
   await page.getByTestId('nas-settings').click();
   await expect(page.getByTestId('nas-admin')).toBeVisible();
-  await expect(page.getByTestId('nas-owner-code')).not.toBeChecked();
+  // A code for a new person, Mika, not an owner, sent as an invite.
+  await expect(page.getByTestId('nas-code-person')).toHaveValue('new');
+  await page.getByTestId('nas-new-person-name').fill('Mika');
+  await expect(page.getByTestId('nas-new-person-owner')).not.toBeChecked();
+  await page.getByTestId('nas-code-invite').check();
+  const mintedResponse = page.waitForResponse((r) => r.url().endsWith('/admin/codes') && r.request().method() === 'POST');
   await page.getByTestId('nas-new-code').click();
+  const minted = (await (await mintedResponse).json()) as { personId: string; personName: string; invite: boolean };
+  expect(minted).toMatchObject({ personName: 'Mika', invite: true });
   const codeText = page.getByTestId('nas-code');
   await expect(codeText).toHaveText(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/, { timeout: 15_000 });
   await expect(page.getByTestId('nas-code-qr')).toBeVisible();
-  await expect(page.getByTestId('nas-code-expiry')).toHaveText(/^Expires in (10:00|9:[0-5]\d)$/);
+  await expect(page.getByTestId('nas-code-for')).toHaveText('For Mika · an invite, valid 3 days');
+  await expect(page.getByTestId('nas-code-expiry')).toHaveText('Expires in 3 days');
   await expect(page.getByTestId('nas-code-copy')).toBeVisible();
   const code = (await codeText.textContent())!;
+  // Every browser's project makes its own Mika on the shared server: this one is found by its id.
+  const mikaRow = page.locator(`[data-testid="nas-person-Mika"][data-person-id="${minted.personId}"]`);
+  await expect(mikaRow).toContainText('No devices yet');
 
-  // A second browser, as the person the owner pairs.
-  const mumContext = await browser.newContext();
+  // A second browser, as Mika.
+  const mikaContext = await browser.newContext();
   try {
-    const mum = await mumContext.newPage();
-    await allowLocalNetwork(mum, browserName);
-    await mum.goto('/');
-    await mum.getByTestId('pair-code').fill(code);
-    await mum.getByTestId('pair-device-name').fill('Mum');
-    const redeemed = mum.waitForResponse((r) => r.url().endsWith('/pair/redeem') && r.request().method() === 'POST');
-    await mum.getByTestId('pair-button').click();
-    const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
-    await expect(mum.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    const mika = await mikaContext.newPage();
+    await allowLocalNetwork(mika, browserName);
+    await mika.goto('/');
+    await mika.getByTestId('pair-code').fill(code);
+    await mika.getByTestId('pair-device-name').fill('iPad');
+    await mika.getByTestId('pair-button').click();
+    await expect(mika.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await expect(mika.getByTestId('nas-paired')).toContainText('Paired as Mika.');
     // Review Focus 5. The gate is the server's, so the browsers take turns with it.
     await exclusivelyAsync('gate', async () => {
       try {
         // A guest while the gate is closed: the folder browser, with no error notice.
-        await mum.getByTestId('nas-open').click();
-        await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
-        await expect(mum.getByTestId('title-library')).toHaveCount(0);
-        await expect(mum.getByTestId('nas-error')).toHaveCount(0);
-        await expect(mum.getByTestId('error')).toHaveCount(0);
+        await mika.getByTestId('nas-open').click();
+        await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await expect(mika.getByTestId('title-library')).toHaveCount(0);
+        await expect(mika.getByTestId('nas-error')).toHaveCount(0);
+        await expect(mika.getByTestId('error')).toHaveCount(0);
         // A guest: the listing is up, and there is no way into the settings.
-        await expect(mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
-        await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
+        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
+        await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
 
         // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
         await setGate('everyone');
-        await mum.reload();
-        await mum.getByTestId('nas-open').click();
-        await expect(mum.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
-        await expect(mum.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
-        await expect(mum.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
-        await expect(mum.getByTestId('nas-settings')).toHaveCount(0);
-        await mum.getByTestId('browse-folders').click();
-        await expect(mum.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await mika.reload();
+        await mika.getByTestId('nas-open').click();
+        await expect(mika.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+        await expect(mika.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
+        await expect(mika.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
+        await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
+        await mika.getByTestId('browse-folders').click();
+        await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
       } finally {
         await setGate('owners');
       }
     });
 
-    // The owner sees both devices: this one and Mum (other tests' devices share the server).
-    const mumRow = page.locator(`[data-testid="nas-device"][data-device-id="${deviceId}"]`);
-    await expect(mumRow).toContainText(/^Mum · paired .+ · last seen just now/, { timeout: 15_000 });
+    // The owner's People list shows Mika with one device (other tests' people and devices share the server).
+    await expect(mikaRow.getByTestId('nas-device')).toHaveCount(1, { timeout: 15_000 });
+    await expect(mikaRow.getByTestId('nas-device')).toContainText(/^iPad · last seen just now/);
+    await expect(mikaRow.locator('.badge')).toHaveCount(0);
     const ownRow = page.getByTestId('nas-device').filter({ hasText: '(this device)' });
     await expect(ownRow).toHaveCount(1);
     // This device's own row asks first.
@@ -319,39 +330,51 @@ test('the owner mints a code, pairs a second browser as Mum, revokes it, and res
     await expect(ownRow).toContainText('Revoke this device?');
     await ownRow.getByTestId('nas-revoke-cancel').click();
     await expect(ownRow.getByTestId('nas-revoke')).toBeVisible();
-    await mumRow.getByTestId('nas-revoke').click();
-    await expect(mumRow).toHaveCount(0);
+    // Removing Mika says what goes first.
+    await mikaRow.getByTestId('nas-person-remove').click();
+    await expect(mikaRow).toContainText('Remove Mika? Their device iPad is unpaired.');
+    await mikaRow.getByTestId('nas-person-remove-confirm').click();
+    await expect(mikaRow).toHaveCount(0);
 
-    // Mum's next library request finds the device revoked: back to the landing screen.
-    await mum.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
-    await expect(mum.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
-    await expect(mum.getByTestId('pair-screen')).toBeVisible();
-    await expect(mum.getByTestId('nas-library')).toHaveCount(0);
+    // Mika's next library request finds the device gone with its person: back to pairing.
+    await mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+    await expect(mika.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
+    await expect(mika.getByTestId('pair-screen')).toBeVisible();
+    await expect(mika.getByTestId('nas-library')).toHaveCount(0);
   } finally {
-    await mumContext.close();
+    await mikaContext.close();
   }
 
   await page.getByTestId('nas-rescan').click();
   await expect(page.getByTestId('nas-admin-status')).toHaveText('Rescanning…');
 
-  // Ticking Owner mints an owner code. The answer is stubbed: a second code per browser registered with the
-  // rendezvous service would pass its 5-live-codes cap on this server's key (redeeming one is tested in server/).
-  await page.getByTestId('nas-owner-code').check();
+  // A plain code for an existing person: this device's. The answer is stubbed: another code per browser registered
+  // with the rendezvous service would pass its 5-live-codes cap on this server's key (redeeming one is tested in server/).
+  const ownPerson = page.locator('[data-person-id]').filter({ has: page.getByTestId('nas-device').filter({ hasText: '(this device)' }) });
+  const ownPersonId = (await ownPerson.getAttribute('data-person-id'))!;
+  await expect(page.getByTestId('nas-code-person')).toHaveValue('new');
+  await page.getByTestId('nas-code-person').selectOption(ownPersonId);
+  await expect(page.getByTestId('nas-new-person-name')).toHaveCount(0);
+  await page.getByTestId('nas-code-invite').uncheck();
   const origin = new URL(page.url()).origin;
-  let minted: unknown;
+  let body: unknown;
   await page.route('**/api/admin/codes', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
-    minted = route.request().postDataJSON();
+    body = route.request().postDataJSON();
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
       headers: { 'Access-Control-Allow-Origin': origin },
-      body: JSON.stringify({ code: 'K7QM-4XP2-R9TD', link: 'https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD', expiresAt: Date.now() + 600_000, rendezvous: false }),
+      body: JSON.stringify({
+        code: 'K7QM-4XP2-R9TD', link: 'https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD', expiresAt: Date.now() + 600_000, rendezvous: false,
+        personId: ownPersonId, personName: 'Owner', invite: false,
+      }),
     });
   });
   await page.getByTestId('nas-new-code').click();
   await expect(codeText).toHaveText('K7QM-4XP2-R9TD');
-  expect(minted).toEqual({ owner: true });
+  await expect(page.getByTestId('nas-code-for')).toHaveText('For Owner · valid 10 minutes');
+  expect(body).toEqual({ personId: ownPersonId, invite: false });
 });
 
 test('an owner browses the NAS by title: shelves, search, a series and its season', async ({ page, browserName }) => {

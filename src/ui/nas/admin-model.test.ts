@@ -1,44 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ADMIN_MESSAGES, TMDB_ATTRIBUTION, countdown, deviceRow, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, revoke, withGate, type AdminApi } from './admin-model';
+import { TMDB_ATTRIBUTION, countdown, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
 import type { TitleSummary } from '../../engine/disc/nas-api';
-import { NasHttpError, type NasDevice } from './nas-client';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const NOW = Date.UTC(2026, 9, 17, 12, 0, 0);
-const DATES = { locale: 'en-GB', timeZone: 'UTC' } as const;
-
-const device = (over: Partial<NasDevice> = {}): NasDevice => ({
-  id: 'd1',
-  name: 'Mum',
-  owner: false,
-  pairedAt: Date.UTC(2026, 9, 3, 9, 30),
-  lastSeen: NOW - 5 * MINUTE,
-  ...over,
-});
 
 function fakeApi(over: Partial<AdminApi> = {}): AdminApi {
   return {
-    devices: vi.fn(async () => []),
-    createCode: vi.fn(async (owner: boolean) => ({ code: 'K7QM-4XP2-R9TD', link: `https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD&owner=${owner}`, expiresAt: NOW + 10 * MINUTE })),
-    revokeDevice: vi.fn(async () => {}),
-    rescan: vi.fn(async () => {}),
+    createCode: vi.fn(async (_target, invite: boolean) => ({
+      code: 'K7QM-4XP2-R9TD',
+      link: 'https://bluray-web.pages.dev/?pair=K7QM4XP2R9TD',
+      expiresAt: NOW + (invite ? 3 * DAY : 10 * MINUTE),
+      rendezvous: true,
+      personId: 'p1',
+      personName: 'Mika',
+      invite,
+    })),
     ...over,
   };
 }
-
-describe('deviceRow', () => {
-  it('reads name · paired <date> · last seen <relative>', () => {
-    expect(deviceRow(device(), NOW, 'other', DATES)).toEqual({ id: 'd1', text: 'Mum · paired 3 Oct 2026 · last seen 5 minutes ago', thisDevice: false });
-  });
-
-  it("marks this device's own row", () => {
-    const row = deviceRow(device({ id: 'me', name: 'iPad' }), NOW, 'me', DATES);
-    expect(row.text).toBe('iPad (this device) · paired 3 Oct 2026 · last seen 5 minutes ago');
-    expect(row.thisDevice).toBe(true);
-  });
-});
 
 describe('lastSeen', () => {
   it('says just now under a minute', () => {
@@ -64,6 +46,15 @@ describe('countdown', () => {
     expect(countdown(NOW + 65_000, NOW)).toBe('Expires in 1:05');
   });
 
+  it('counts an invite down in days and hours, rounded up to the hour', () => {
+    expect(countdown(NOW + 3 * DAY, NOW)).toBe('Expires in 3 days');
+    expect(countdown(NOW + 3 * DAY, NOW + 1_000)).toBe('Expires in 3 days');
+    expect(countdown(NOW + 3 * DAY, NOW + HOUR)).toBe('Expires in 2 days 23 hours');
+    expect(countdown(NOW + DAY + HOUR, NOW)).toBe('Expires in 1 day 1 hour');
+    expect(countdown(NOW + 5 * HOUR, NOW)).toBe('Expires in 5 hours');
+    expect(countdown(NOW + HOUR, NOW)).toBe('Expires in 60:00');
+  });
+
   it('says Expired once the time is up', () => {
     expect(countdown(NOW, NOW)).toBe('Expired');
     expect(countdown(NOW, NOW + 5_000)).toBe('Expired');
@@ -71,35 +62,22 @@ describe('countdown', () => {
 });
 
 describe('newCode', () => {
-  it('mints a guest code while the Owner box is off', async () => {
+  it('mints a code for the person picked', async () => {
     const api = fakeApi();
-    await newCode(api, false);
-    expect(api.createCode).toHaveBeenCalledExactlyOnceWith(false);
+    await newCode(api, 'p1', '', false, false);
+    expect(api.createCode).toHaveBeenCalledExactlyOnceWith({ personId: 'p1' }, false);
   });
 
-  it('mints an owner code when the Owner box is ticked', async () => {
+  it('mints an invite for a new person, an owner when the box is ticked', async () => {
     const api = fakeApi();
-    await newCode(api, true);
-    expect(api.createCode).toHaveBeenCalledExactlyOnceWith(true);
+    expect(await newCode(api, 'new', ' Mika ', true, true)).toMatchObject({ personName: 'Mika', invite: true });
+    expect(api.createCode).toHaveBeenCalledExactlyOnceWith({ newPerson: { name: 'Mika', owner: true } }, true);
   });
-});
 
-describe('revoke', () => {
-  it('revokes the device and reports no error', async () => {
+  it("refuses a new person without a name, and doesn't ask the NAS", async () => {
     const api = fakeApi();
-    expect(await revoke(api, 'd1')).toBeNull();
-    expect(api.revokeDevice).toHaveBeenCalledExactlyOnceWith('d1');
-  });
-
-  it("says the last owner can't be removed when the NAS answers 409 last-owner", async () => {
-    const api = fakeApi({ revokeDevice: vi.fn(async () => Promise.reject(new NasHttpError(409, 'last-owner'))) });
-    expect(await revoke(api, 'me')).toBe("You can't remove the last owner.");
-    expect(ADMIN_MESSAGES.lastOwner).toBe("You can't remove the last owner.");
-  });
-
-  it("passes other failures' messages on", async () => {
-    const api = fakeApi({ revokeDevice: vi.fn(async () => Promise.reject(new NasHttpError(404, 'unknown device'))) });
-    expect(await revoke(api, 'gone')).toBe('The NAS answered 404 (unknown device).');
+    await expect(newCode(api, 'new', ' ', false, false)).rejects.toThrow('Give the new person a name.');
+    expect(api.createCode).not.toHaveBeenCalled();
   });
 });
 
