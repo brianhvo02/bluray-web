@@ -3,8 +3,8 @@
 # Pinned: the emsdk image audio.wasm uses (by digest), and FreeType as Ubuntu 24.04 ships it to the libbluray BD-J
 # harness (tools/bdj-trace/Dockerfile: apt snapshot 20261015T000000Z, libfreetype6 2.13.2+dfsg-1ubuntu0.2): the
 # source package from that snapshot, checked by SHA-256, with Ubuntu's patches that touch the library (its options
-# and two security fixes). Options and modules: config/ in this folder. linux/amd64 everywhere, so CI and
-# Apple-silicon hosts produce the same bytes.
+# and two security fixes) and ftgrays-dda.patch (the host's curve flattening). Options and modules: config/ in this
+# folder. linux/amd64 everywhere, so CI and Apple-silicon hosts produce the same bytes.
 set -euo pipefail
 
 FT_VERSION=2.13.2
@@ -32,6 +32,9 @@ tar -xJf "freetype_${FT_VERSION}+dfsg.orig.tar.xz"
 tar -xJf "freetype_${UBUNTU_REVISION}.debian.tar.xz"
 cd "freetype-$FT_VERSION"
 for p in $PATCHES; do patch -p1 --quiet < "../debian/patches/$p"; done
+# The harness's FreeType runs on x86-64, where ftgrays.c flattens curves by DDA (FT_SSE2); wasm32 would split them
+# instead, and large glyphs' edges round differently (Ruling R18). Same arithmetic as the host's, in plain C.
+patch -p1 --quiet < /out/ftgrays-dda.patch
 
 FT=src
 SOURCES="$FT/base/ftsystem.c $FT/base/ftinit.c $FT/base/ftdebug.c $FT/base/ftbase.c

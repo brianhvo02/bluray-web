@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static const int SIZES[] = { 12, 16, 24, 36 };
+static const int SIZES[] = { 12, 16, 24, 36, 40, 48, 72 };
 /* printable ASCII, then a few non-ASCII characters the font has, then one it lacks (U+3042, glyph 0) */
 static const unsigned EXTRA[] = { 0xe9, 0xdf, 0x3a9, 0x416, 0x20ac, 0x3042 };
 static const unsigned KERN_PAIRS[][2] = { { 'A', 'V' }, { 'T', 'o' }, { 'L', 'T' }, { 'a', 'b' } };
