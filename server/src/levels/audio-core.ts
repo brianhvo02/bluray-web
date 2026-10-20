@@ -137,17 +137,42 @@ export function nominalAudioBps(codingType: number, firstFrame: Uint8Array): num
   }
 }
 
+/**
+ * The rate a kept audio stream takes at a level, in the source packets that carry it: `nominalAudioBps` of the PES's
+ * payload, scaled by the packets the whole PES needs (⌈PES bytes ÷ 184⌉ × 192) over the coded bytes it holds. The PES
+ * header, LPCM's 4-byte header and the last packet's stuffing cost a stream 7% (24-bit stereo LPCM, 5 ms per PES) to
+ * 20% (16-bit stereo LPCM) over its nominal rate, which the budget must hold. `pes` is a whole PES as the level carries
+ * it (a TrueHD or DTS-HD PES reduced to its core). Throws when the frame can't be read.
+ */
+export function audioWireBps(codingType: number, pes: Uint8Array): number {
+  if (pes.length < 9 || pes.length < 9 + pes[8]!) throw new Error(`levels: a 0x${codingType.toString(16)} audio PES is shorter than its header`);
+  const payload = pes.subarray(9 + pes[8]!);
+  const nominal = nominalAudioBps(codingType, payload);
+  const coded = coreCoding(codingType) === CodingType.LPCM ? payload.length - LPCM_HEADER_BYTES : payload.length;
+  if (coded <= 0) throw new Error(`levels: a 0x${codingType.toString(16)} audio PES holds no audio`);
+  return Math.ceil((nominal * Math.ceil(pes.length / TS_PAYLOAD) * SOURCE_PACKET_SIZE) / coded);
+}
+
+const LPCM_HEADER_BYTES = 4;
+/** What `audioWireBps` adds at most over a nominal rate (16-bit stereo LPCM's 1.2, with room), for `fallbackAudioBps`. */
+const FALLBACK_WIRE_FACTOR = 1.25;
+
 /** Channels LPCM stores for a CLPI audio_presentation_type (multi-channel as 8, the most it may hold). */
 const LPCM_CHANNELS: Readonly<Record<number, number>> = { 1: 1, 3: 2, 6: 8, 12: 8 };
 /** Sample rates of a CLPI sampling_frequency code (the combined codes by their higher rate). */
 const LPCM_RATES: Readonly<Record<number, number>> = { 1: 48_000, 4: 96_000, 5: 192_000, 12: 192_000, 14: 96_000 };
 
 /**
- * A nominal rate for a level's audio when no frame of it could be read at the clip's start: by the coding the level
- * carries, AC-3 at 640 kb/s, DTS at 1509 kb/s, LPCM from the CLPI's channels and rate at 24 bits, anything else 1.5 Mb/s.
- * Generous on purpose: an interval's budget must hold its audio.
+ * The rate of a level's audio in source packets when no frame of it could be read at the clip's start: by the coding the
+ * level carries, AC-3 at 640 kb/s, DTS at 1509 kb/s, LPCM from the CLPI's channels and rate at 24 bits, anything else
+ * 1.5 Mb/s, each × 1.25 for its packets (`audioWireBps` adds at most 1.2). Generous on purpose: an interval's budget must
+ * hold its audio.
  */
 export function fallbackAudioBps(codingType: number, clpiStream: { readonly format: number; readonly rate: number } | null): number {
+  return Math.ceil(fallbackNominalBps(codingType, clpiStream) * FALLBACK_WIRE_FACTOR);
+}
+
+function fallbackNominalBps(codingType: number, clpiStream: { readonly format: number; readonly rate: number } | null): number {
   switch (coreCoding(codingType)) {
     case CodingType.AC3:
       return 640_000;

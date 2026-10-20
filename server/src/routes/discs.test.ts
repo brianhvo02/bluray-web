@@ -143,6 +143,16 @@ afterEach(async () => {
 
 const withToken = (path: string, token = 't1'): string => `${base}${path}${path.includes('?') ? '&' : '?'}t=${token}`;
 
+/** Waits for the service's scan of a disc's clips (milliseconds for the fixtures), without leasing. */
+async function scanned(discId: string): Promise<void> {
+  for (let i = 0; i < 1000; i++) {
+    const size = await service.size(discId, 'h264-1080', 1, CLPI);
+    if (size === null || typeof size === 'number') return;
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  throw new Error('the scan never finished');
+}
+
 async function levelManifest(disc: string, level = 'h264-1080'): Promise<DiscManifest> {
   const res = await fetch(withToken(`/discs/${ids[disc]}/manifest?level=${level}&audio=1`));
   expect(res.status).toBe(200);
@@ -151,6 +161,7 @@ async function levelManifest(disc: string, level = 'h264-1080'): Promise<DiscMan
 
 describe('disc routes at a quality level', () => {
   beforeEach(async () => {
+    for (const id of Object.values(ids)) await scanned(id!);
     await listen([discRoutes(library, { service, auth })]);
   });
 
@@ -279,11 +290,12 @@ describe('disc routes at a quality level', () => {
 
 describe('range reads at a level, against a stub service', () => {
   const SIZE = 10 * MAX_LEVEL_READ_BYTES;
-  let size = SIZE;
+  let size: number | { retryAfter: 1 } = SIZE;
+  let manifest: Awaited<ReturnType<LevelRouteService['manifest']>> = null;
   const reads: { offset: number; length: number }[] = [];
   let answer: () => Promise<Buffer | { retryAfter: 1 } | { busy: true } | null>;
   const stub: LevelRouteService = {
-    manifest: async () => null,
+    manifest: async () => manifest,
     levels: async () => null,
     release: () => {},
     size: async () => size,
@@ -297,6 +309,7 @@ describe('range reads at a level, against a stub service', () => {
 
   beforeEach(async () => {
     size = SIZE;
+    manifest = null;
     reads.length = 0;
     answer = async () => Buffer.alloc(reads.at(-1)!.length, 1);
     await listen([discRoutes(library, { service: stub, auth })]);
@@ -366,6 +379,20 @@ describe('range reads at a level, against a stub service', () => {
     expect(moved.status).toBe(404);
     expect(await moved.json()).toEqual({ error: 'disc-changed' });
   });
+
+  it('answers the manifest and a read with 503 Retry-After: 1 while the disc’s clips are being scanned', async () => {
+    manifest = { retryAfter: 1 };
+    const res = await fetch(withToken(`/discs/${ids.levels}/manifest?level=h264-1080&audio=1`));
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('1');
+    expect(await res.json()).toEqual({ error: 'retry' });
+    size = { retryAfter: 1 };
+    const read = await fetch(withToken(`/discs/${ids.levels}/files/${M2TS}?level=h264-1080&audio=1`), { headers: { Range: 'bytes=0-191' } });
+    expect(read.status).toBe(503);
+    expect(read.headers.get('retry-after')).toBe('1');
+    expect(await read.json()).toEqual({ error: 'retry' });
+    expect(reads).toEqual([]);
+  });
 });
 
 describe('with LEVELS_BACKEND=off', () => {
@@ -399,6 +426,7 @@ describe.skipIf(!runFfmpegTests)('disc routes with libx264 (LEVELS_BACKEND=x264)
   it('answers a range read of a level’s .m2ts with 206 and the right length', async () => {
     service.close();
     service = makeService({ backend: x264Backend, realClock: true });
+    await scanned(ids.levels!);
     await listen([discRoutes(library, { service, auth })]);
     const manifest = await levelManifest('levels');
     const size = manifest.files.find((f) => f.path === M2TS)!.size;

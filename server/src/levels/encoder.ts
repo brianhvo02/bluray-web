@@ -8,7 +8,7 @@ import { analyzeAvc } from '../../../src/engine/decode/h264';
 import { analyzeHevc } from '../../../src/engine/decode/hevc';
 import { readTimestamp } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
-import { SOURCE_PACKET_BYTES, type IntervalPlan, type LevelDef } from './levels';
+import { SOURCE_PACKET_BYTES, VIDEO_FLOOR_BPS, type IntervalPlan, type LevelDef } from './levels';
 import type { EncodedPes } from './remux';
 
 /** What an encoder backend needs to build one ffmpeg run. */
@@ -826,7 +826,8 @@ export function deinterlaces(scan: ScanInfo): boolean {
   return scan.interlaced && !scan.softPulldown;
 }
 
-export const MIN_RETRY_RATE_BPS = 1_000_000;
+/** The floor of the over-budget retry, which the budget formula counts on (`graphicsAllowanceBps`). */
+export const MIN_RETRY_RATE_BPS = VIDEO_FLOOR_BPS;
 /** The retry aims this far under the rate that would just fill the budget. */
 const RETRY_MARGIN = 0.95;
 

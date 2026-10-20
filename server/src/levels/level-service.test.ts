@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { cpSync, createReadStream, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseMpls } from '../../../src/engine/bdmv/mpls-parser';
@@ -16,7 +16,7 @@ import { M2tsReader } from '../../../src/engine/demux/m2ts-reader';
 import { PesAssembler, readTimestamp, type PesPacket } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
 import { readIsoTree } from '../iso';
-import { nominalAudioBps } from './audio-core';
+import { audioWireBps, fallbackAudioBps, nominalAudioBps } from './audio-core';
 import { Capacity } from './capacity';
 import type { Clock } from './clip-run';
 import { clpiStreamAttrs, rewriteClpi } from './clpi-writer';
@@ -38,6 +38,7 @@ import { FAILURE_BACKOFF_MS } from './clip-run';
 import { ENCODER_VERSION, clipFrameTicks, loadDisc, planHash } from './level-version';
 import { keptAudioFor, levelDefFor, planClip, videoAttrsFor } from './levels';
 import { rewriteMpls } from './mpls-writer';
+import { FileNonVideoStore, nonVideoBytes, scanNonVideo } from './nonvideo-scan';
 import { SegmentCache } from './segment-cache';
 
 const SYNTHETIC = join(import.meta.dirname, '../../../fixtures/synthetic');
@@ -221,7 +222,15 @@ let service: LevelService;
 let capacity: Capacity;
 
 function makeService(
-  options: { readAheadMs?: number; waitFilmMs?: number; log?: (message: string) => void; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
+  options: {
+    readAheadMs?: number;
+    waitFilmMs?: number;
+    log?: (message: string) => void;
+    discs?: (id: string) => Promise<LevelDiscSource | null>;
+    backend?: EncoderBackend;
+    codecs?: ReadonlySet<'h264' | 'hevc'>;
+    nonVideoStore?: FileNonVideoStore;
+  } = {},
 ): LevelService {
   capacity = new Capacity({ h264: 190, hevc: 100 }, clock.now);
   return new LevelService({
@@ -236,14 +245,16 @@ function makeService(
     ...(options.waitFilmMs === undefined ? {} : { waitFilmMs: options.waitFilmMs }),
     ...(options.codecs ? { codecs: options.codecs } : {}),
     ...(options.log ? { log: options.log } : {}),
+    ...(options.nonVideoStore ? { nonVideoStore: options.nonVideoStore } : {}),
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   scratch = mkdtempSync(join(tmpdir(), 'level-service-'));
   clock = new ManualClock();
   fake = new FakeFfmpeg();
   service = makeService();
+  await ready();
 });
 
 afterEach(async () => {
@@ -255,9 +266,23 @@ afterEach(async () => {
 
 const never = new AbortController().signal;
 
+/**
+ * Waits for the service's scan of the disc's clips (what they keep besides their video; a few milliseconds for the
+ * fixtures), without leasing: until a level's file size is answered.
+ */
+async function ready(s: LevelService = service, discId = DISC_ID): Promise<void> {
+  for (let i = 0; i < 1000; i++) {
+    const size = await s.size(discId, 'h264-1080', 1, CLPI_PATH);
+    if (size === null || typeof size === 'number') return;
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  throw new Error('the scan never finished');
+}
+
 async function levelManifest(s: LevelService = service): Promise<DiscManifest> {
+  await ready(s);
   const m = await s.manifest(DISC_ID, 'h264-1080', 1, VIEWING);
-  if (!m || 'busy' in m) throw new Error('no manifest');
+  if (!m || 'busy' in m || 'retryAfter' in m) throw new Error('no manifest');
   return m;
 }
 
@@ -292,17 +317,26 @@ describe('LevelService: manifest', () => {
     const item = parseMpls(mplsBytes).playItems[0]!;
     const kept = keptAudioFor(item, 1)!;
     expect(kept.pid).toBe(TRUEHD);
-    // The kept audio's nominal rate, from the first AC-3 core PES of the TrueHD PID, read with the engine's demuxer.
-    const pes: PesPacket[] = [];
-    const assembler = new PesAssembler((p) => pes.push(p));
+    // The kept audio's rate in source packets, from the first AC-3 core PES of the TrueHD PID, read with the engine's demuxer.
+    const raw: Uint8Array[][] = [];
     const m2ts = fixtureBytes('STREAM/00001.m2ts');
     for (let at = 0; at + 192 <= m2ts.length; at += 192) {
       const ts = parseSourcePacket(m2ts, at);
-      if (ts?.pid === TRUEHD) assembler.push(ts);
+      if (ts?.pid !== TRUEHD || !ts.hasPayload) continue;
+      if (ts.payloadUnitStart) raw.push([]);
+      raw.at(-1)?.push(ts.payload);
     }
-    assembler.flush();
-    const core = pes.find((p) => p.streamIdExtension === 0x76)!;
-    const audioBps = nominalAudioBps(CodingType.TRUEHD, core.payload);
+    const parsed = (bytes: Uint8Array): PesPacket => {
+      const out: PesPacket[] = [];
+      const assembler = new PesAssembler((p) => out.push(p));
+      assembler.push({ pid: TRUEHD, payloadUnitStart: true, continuityCounter: 0, hasPayload: true, payload: bytes });
+      assembler.flush();
+      return out[0]!;
+    };
+    const core = raw.map((chunks) => Buffer.concat(chunks)).map((b) => b.subarray(0, 6 + ((b[4]! << 8) | b[5]!))).find((b) => parsed(b).streamIdExtension === 0x76)!;
+    const nominal = nominalAudioBps(CodingType.TRUEHD, parsed(core).payload);
+    const audioBps = audioWireBps(CodingType.TRUEHD, core);
+    expect(audioBps).toBe(Math.ceil((nominal * Math.ceil(core.length / 184) * 192) / parsed(core).payload.length));
     expect(await firstAudioBps(createReadStream(join(DISC_DIR, 'BDMV/STREAM/00001.m2ts')), TRUEHD, CodingType.TRUEHD)).toBe(audioBps);
 
     const def = levelDefFor('h264-1080', { height: 1080 });
@@ -368,6 +402,7 @@ describe('LevelService: levels', () => {
 
   it('never offers the original of an MPEG-2 disc', async () => {
     const s = makeService({ discs: async (id) => folderDiscSource(join(SYNTHETIC, 'disc-mpeg2'), { id, name: 'Starfall Wanderer' }) });
+    await ready(s, 'any');
     const levels = (await s.levels('mpeg2', { hevc: false, hevc10: false, hdr: false }))!;
     expect(levels[0]).toMatchObject({ level: 'original', available: false, reason: 'unplayable' });
     expect(levels.find((l) => l.level === 'h264-1080')).toMatchObject({ available: true });
@@ -407,6 +442,7 @@ describe('LevelService: reads', () => {
   it('restarts at a seek far ahead of the encoder, and a read back hits the cache (Review Focus 2)', async () => {
     service.close();
     service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
+    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -436,6 +472,7 @@ describe('LevelService: reads', () => {
   it('gives each viewing its own encoder: a viewer far ahead doesn’t restart another’s', async () => {
     service.close();
     service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
+    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -469,6 +506,7 @@ describe('LevelService: reads', () => {
     // Scaled down: the fixture has 10 s of film. A 120 s window with a 1 s wait distance stands for a seek 60 s ahead.
     service.close();
     service = makeService({ readAheadMs: 120_000, waitFilmMs: 1000 });
+    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -681,6 +719,7 @@ describe('LevelService: fix round 1', () => {
     cpSync(join(disc1, 'PLAYLIST/00001.mpls'), join(dir, 'BDMV/PLAYLIST/00001.mpls'));
     service.close();
     service = serviceOn(dir);
+    await ready(service);
     const manifest = await levelManifest();
 
     const bpsOf = (m2ts: string, coding: number): Promise<number> => firstAudioBps(createReadStream(m2ts), TRUEHD, coding);
@@ -737,6 +776,7 @@ describe('LevelService: fix round 1', () => {
       const disc = await loadDisc(DISC_ID, folderDiscSource(dir, { id: DISC_ID, name: 'Starfall Wanderer' }));
       expect(disc.main!.video).toMatchObject({ codingType: CodingType.HEVC, height: 2160, hdr });
       const s = serviceOn(dir);
+      await ready(s);
       const levels = (await s.levels(DISC_ID, { hevc: true, hevc10: true, hdr: true }))!.map((x) => x.level);
       expect(levels).toEqual(hdr ? ['original', 'hevc-1080-hdr', 'h264-1080-sdr'] : ['original', 'h264-1080', 'hevc-1080', 'phone-720']);
       s.close();
@@ -749,6 +789,7 @@ describe('LevelService: fix round 1', () => {
     const dir = discCopy();
     service.close();
     service = serviceOn(dir);
+    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -757,8 +798,12 @@ describe('LevelService: fix round 1', () => {
     const m2ts = join(dir, 'BDMV/STREAM/00001.m2ts');
     writeFileSync(m2ts, readFileSync(m2ts)); // the same bytes, a new file
     utimesSync(m2ts, new Date(), new Date(Date.now() + 60_000));
-    // The read sees the change: the old encoder stops, and interval 0 is encoded again (the old bytes are never served).
+    // The read sees the change: the old encoder stops, the clip is scanned again (retryAfter meanwhile), and interval 0 is
+    // encoded again (the old bytes are never served).
     fake.auto = true;
+    expect(await readInterval(l, 0)).toEqual({ retryAfter: 1 });
+    expect(fake.runs[0]!.child.killed).toBe(true);
+    await ready(service);
     const again = await bytesOf(readInterval(l, 0));
     expect(fake.runs[0]!.child.killed).toBe(true);
     expect(fake.runs.length).toBe(2);
@@ -772,6 +817,7 @@ describe('LevelService: fix round 1', () => {
   it('answers a read the restarted encoder won’t reach with retryAfter, so two reads two windows apart both finish (Minor 1)', async () => {
     service.close();
     service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
+    await ready(service);
     const l = layout(await levelManifest());
     const results: unknown[] = [];
     const a = readInterval(l, 0).then((r) => results.push(['a', r]));
@@ -832,12 +878,53 @@ describe('LevelService: fix round 1', () => {
   });
 });
 
+describe('LevelService: the scan of what each clip keeps besides its video', () => {
+  const storeOptions = (logged: string[]) => ({ nonVideoStore: new FileNonVideoStore(join(scratch, 'levels-scan')), log: (m: string) => logged.push(m) });
+
+  it('answers retryAfter until the disc’s clips are scanned, then sizes every interval with the scan', async () => {
+    service.close();
+    const logged: string[] = [];
+    service = makeService(storeOptions(logged));
+    expect(await service.manifest(DISC_ID, 'h264-1080', 1, VIEWING)).toEqual({ retryAfter: 1 });
+    expect(await service.size(DISC_ID, 'h264-1080', 1, M2TS_PATH)).toEqual({ retryAfter: 1 });
+    expect(await service.read(DISC_ID, 'h264-1080', 1, M2TS_PATH, 0, 192, VIEWING, never)).toEqual({ retryAfter: 1 });
+    expect(capacity.inUse().viewings).toEqual([]); // no lease while it scans
+    const manifest = await levelManifest();
+
+    const clpi = parseClpi(fixtureBytes('CLIPINF/00001.clpi'));
+    const def = levelDefFor('h264-1080', { height: 1080 });
+    const bps = await firstAudioBps(createReadStream(join(DISC_DIR, 'BDMV/STREAM/00001.m2ts')), TRUEHD, CodingType.TRUEHD);
+    const m2ts = fixtureBytes('STREAM/00001.m2ts');
+    const scan = await scanNonVideo((from) => Readable.from([Buffer.from(m2ts.subarray(from))]), clpi, VIDEO, planClip(clpi, def, 0).intervals);
+    expect(manifest.files.find((f) => f.path === M2TS_PATH)!.size).toBe(planClip(clpi, def, bps, nonVideoBytes(scan, TRUEHD)).sizeBytes);
+    expect(logged.filter((m) => m.startsWith('levels: scanned clip'))).toHaveLength(1);
+    // Stored: a restart answers at once, without reading the clip again.
+    service.close();
+    service = makeService(storeOptions(logged));
+    const again = await service.manifest(DISC_ID, 'h264-1080', 1, VIEWING);
+    expect(again && 'files' in again ? again.files : null).toEqual(manifest.files);
+    expect(logged.filter((m) => m.startsWith('levels: scanned clip'))).toHaveLength(1);
+  });
+
+  it('scans a replaced clip again', async () => {
+    const dir = discCopy();
+    service.close();
+    const logged: string[] = [];
+    service = serviceOn(dir, { log: (m) => logged.push(m) });
+    await levelManifest();
+    utimesSync(join(dir, 'BDMV/STREAM/00001.m2ts'), new Date(), new Date(Date.now() + 5_000));
+    expect(await service.manifest(DISC_ID, 'h264-1080', 1, VIEWING)).toEqual({ retryAfter: 1 });
+    await levelManifest();
+    expect(logged.filter((m) => m.startsWith('levels: scanned clip'))).toHaveLength(2);
+  });
+});
+
 describe('LevelService: final review', () => {
   it('prices the levels with the audio stream asked for', async () => {
     const client = { hevc: false, hevc10: false, hdr: false };
     const sizeAt = async (audio: number): Promise<number> => {
       const m = await service.manifest(DISC_ID, 'h264-1080', audio, viewingIdOf('dev-a', DISC_ID, 'h264-1080', audio));
-      if (!m || 'busy' in m) throw new Error('no manifest');
+      if (!m || 'busy' in m || 'retryAfter' in m) throw new Error('no manifest');
       return m.files.find((f) => f.path === M2TS_PATH)!.size;
     };
     const [one, two] = [await sizeAt(1), await sizeAt(2)];
@@ -848,7 +935,7 @@ describe('LevelService: final review', () => {
     expect(await at(2)).toBeCloseTo((two * 8) / film / 1e6, 1);
   });
 
-  it('falls back to the coding’s nominal audio rate, and logs it, when the kept audio has no readable frame at the clip’s start', async () => {
+  it('falls back to the coding’s fallback audio rate, and logs it, when the kept audio has no readable frame at the clip’s start', async () => {
     const dir = discCopy();
     const m2ts = join(dir, 'BDMV/STREAM/00001.m2ts');
     const bytes = readFileSync(m2ts);
@@ -862,17 +949,19 @@ describe('LevelService: final review', () => {
     const logged: string[] = [];
     service.close();
     service = serviceOn(dir, { log: (m) => logged.push(m) });
+    await ready(service);
     const manifest = await levelManifest();
     const clpi = parseClpi(fixtureBytes('CLIPINF/00001.clpi'));
     const size = manifest.files.find((f) => f.path === M2TS_PATH)!.size;
-    expect(size).toBe(planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), 640_000).sizeBytes);
-    expect(logged.some((m) => m.includes('nominal'))).toBe(true);
+    expect(size).toBe(planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), fallbackAudioBps(CodingType.TRUEHD, null)).sizeBytes);
+    expect(logged.some((m) => m.includes('fallback'))).toBe(true);
   });
 });
 
 describe('LevelService: for the routes', () => {
   it('offers no level of a codec whose encoder failed its self-test (x264: H.264 only)', async () => {
     const s = makeService({ codecs: new Set(['h264']) });
+    await ready(s);
     const levels = (await s.levels(DISC_ID, { hevc: true, hevc10: true, hdr: true }))!;
     expect(levels.map((l) => [l.level, l.available, l.reason])).toEqual([
       ['original', true, undefined],
@@ -899,6 +988,7 @@ describe('LevelService: for the routes', () => {
     expect(await service.originalPlayable(DISC_ID)).toBe(true);
     expect(await service.originalPlayable('gone')).toBeNull();
     const s = makeService({ discs: async (id) => folderDiscSource(join(SYNTHETIC, 'disc-mpeg2'), { id, name: 'Starfall Wanderer' }) });
+    await ready(s, 'any');
     expect(await s.originalPlayable('mpeg2')).toBe(false);
     s.close();
   });

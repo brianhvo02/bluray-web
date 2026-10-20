@@ -6,7 +6,7 @@ import type { UdfFile } from '../../../src/engine/disc/udf';
 import { IsoTrees, isoFileStream, isoUnchanged, readIsoFiles } from '../iso';
 import type { Library } from '../library';
 import { buildIsoManifest, buildManifest, discUnchanged, resolveDiscFile, resolveIsoFile } from '../manifest';
-import { nominalAudioBps, PesCoreFilter } from './audio-core';
+import { audioWireBps, PesCoreFilter } from './audio-core';
 import type { ClipInput, ClipReader } from './encoder';
 import { SOURCE_PACKET_BYTES } from './levels';
 
@@ -31,8 +31,9 @@ export interface LevelDiscSource {
 }
 
 /**
- * The nominal rate of an audio PID's first readable frame in `stream` (the head of a clip): its PES packets are
- * gathered in order, reduced to the core a level carries, and the first one `nominalAudioBps` reads decides.
+ * The rate an audio PID takes at a level, in source packets, from its first readable frame in `stream` (the head of a
+ * clip): its PES packets are gathered in order, reduced to the core a level carries, and the first one `audioWireBps`
+ * reads decides.
  */
 export async function firstAudioBps(stream: Readable, pid: number, coding: number): Promise<number> {
   const filter = new PesCoreFilter(coding);
@@ -54,7 +55,7 @@ export async function firstAudioBps(stream: Readable, pid: number, coding: numbe
     const core = pes.length >= 9 ? filter.push(pes) : null;
     if (!core) return null;
     try {
-      return nominalAudioBps(coding, core.subarray(9 + core[8]!));
+      return audioWireBps(coding, core);
     } catch (err) {
       lastError = err as Error;
       return null;

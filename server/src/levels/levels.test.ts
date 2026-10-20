@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { Clpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import type { PlayItem, StreamEntry } from '../../../src/engine/bdmv/mpls-parser';
-import { LEVELS, coreCoding, keptAudioFor, levelDefFor, levelsFor, mapSpn, planClip, videoAttrsFor } from './levels';
+import { LEVELS, coreCoding, keptAudioFor, levelDefFor, levelsFor, mapSpn, planClip, videoAllowanceBytes, videoAttrsFor } from './levels';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
 
@@ -18,6 +18,9 @@ function clip(entries: Array<{ pts: number; spn: number }>, presentationEnd: num
     epMaps: [{ pid: 0x1011, epStreamType: 1, entries }],
   };
 }
+
+/** ⌈seconds × bps ÷ 8 ÷ 6144⌉ × 6144. */
+const budget = (seconds: number, bps: number): number => Math.ceil((seconds * bps) / 8 / 6144) * 6144;
 
 describe('planClip', () => {
   it('gives a 1.001 s interval its budget: ⌈duration × (peak + audio + 1.5 Mbps) ÷ 8 ÷ 6144⌉ × 6144', () => {
@@ -46,6 +49,38 @@ describe('planClip', () => {
     expect(sizeBytes).toBe(total);
     // the last interval runs to the end of the STC sequence's presentation
     expect(intervals.at(-1)!.endPts45).toBe(c.atcSequences[0]!.stc[0]!.presentationEnd);
+  });
+
+  it('gives an interval at least its measured kept bytes plus its video’s room, rounded to an aligned unit', () => {
+    // The music disc's interval 198: 0.04 s, one frame. The rate part gave it 43 008 bytes at phone-720 against 25 728
+    // kept (the LPCM the source muxed among its own IDR) and a 15 KB IDR at the 1 Mbps floor.
+    const c = clip([{ pts: 450_000, spn: 0 }, { pts: 487_620, spn: 4000 }, { pts: 489_420, spn: 6000 }], 527_040);
+    const level = LEVELS['phone-720'];
+    const rate = planClip(c, level, 2_457_600).intervals;
+    expect(rate[1]!.budgetBytes).toBe(budget(0.04, 3_750_000 + 2_457_600 + 1_500_000));
+    const { intervals, sizeBytes } = planClip(c, level, 2_457_600, [200_000, 25_728, 1_000]);
+    expect(intervals[1]!.budgetBytes).toBe(Math.ceil((25_728 + videoAllowanceBytes(1_800, level)) / 6144) * 6144);
+    expect(intervals[1]!.budgetBytes - 25_728).toBeGreaterThanOrEqual(48 * 1024); // an IDR's room, however short the interval
+    // Where the rate part holds more, it stands: the kept bytes only ever raise a budget.
+    expect(intervals[0]!.budgetBytes).toBe(rate[0]!.budgetBytes);
+    expect(intervals[2]!.budgetBytes).toBe(rate[2]!.budgetBytes);
+    expect(intervals[2]!.spnStart).toBe((intervals[0]!.budgetBytes + intervals[1]!.budgetBytes) / 192);
+    expect(sizeBytes).toBe(intervals.reduce((n, iv) => n + iv.budgetBytes, 0));
+  });
+
+  it('gives a burst of subtitles its room on top of the video at the level’s peak', () => {
+    // 1 s with 768 KB of PG (a disc with 5 PG streams) and 230 KB of audio: the rate part's 1.5 Mb/s can't hold it.
+    const c = clip([{ pts: 450_000, spn: 0 }, { pts: 495_045, spn: 2000 }], 540_090);
+    const level = LEVELS['phone-720'];
+    const kept = 768_000 + 230_400 + 6_000;
+    const iv = planClip(c, level, 1_728_000, [kept, 0]).intervals[0]!;
+    expect(iv.budgetBytes).toBeGreaterThan(budget(1.001, 3_750_000 + 1_728_000 + 1_500_000));
+    expect(iv.budgetBytes - kept).toBeGreaterThanOrEqual((1.001 * level.peakBps) / 8);
+  });
+
+  it('refuses a scan of another clip (another count of intervals)', () => {
+    const c = clip([{ pts: 450_000, spn: 0 }, { pts: 495_045, spn: 2000 }], 540_090);
+    expect(() => planClip(c, LEVELS['phone-720'], 0, [1])).toThrow(/intervals/);
   });
 
   it('carries a PTS wrap within one STC sequence', () => {

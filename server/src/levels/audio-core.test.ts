@@ -6,7 +6,7 @@ import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import { AudioFramer } from '../../../src/engine/decode/audio-frames';
 import { PesAssembler, type PesPacket } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
-import { KeptStreams, PesCoreFilter, fallbackAudioBps, mpegCrc32, nominalAudioBps, pmtFor, type KeptPacket } from './audio-core';
+import { KeptStreams, PesCoreFilter, audioWireBps, fallbackAudioBps, mpegCrc32, nominalAudioBps, pmtFor, type KeptPacket } from './audio-core';
 import { LEVELS, planClip } from './levels';
 
 const DISC = join(import.meta.dirname, '../../../fixtures/synthetic/disc-levels/BDMV');
@@ -513,16 +513,56 @@ describe('nominalAudioBps', () => {
   });
 });
 
+describe('audioWireBps', () => {
+  /** A PES of `payload` with the 5-byte PTS of every Blu-ray audio PES (a 14-byte header). */
+  const pesOf = (streamId: number, payload: Uint8Array): Uint8Array => {
+    const length = 8 + payload.length;
+    return concat([new Uint8Array([0, 0, 1, streamId, length >> 8, length & 0xff, 0x80, 0x80, 5, 0x21, 0, 1, 0, 1]), payload]);
+  };
+  /** 5 ms of LPCM (240 samples a channel) behind its 4-byte header: stereo (assignment 3) at 48 kHz. */
+  const lpcm5ms = (bits: 16 | 24): Uint8Array => {
+    const samples = new Uint8Array(4 + 240 * 2 * (bits / 8));
+    samples.set([(240 * 2 * (bits / 8)) >> 8, (240 * 2 * (bits / 8)) & 0xff, (3 << 4) | 1, (bits === 16 ? 1 : 3) << 6]);
+    return samples;
+  };
+
+  it('counts LPCM at the source packets it takes: 24-bit stereo 2.304 Mb/s → 2.4576 (8 packets for 1440 bytes)', () => {
+    // The music disc's LPCM measured 2.458 Mb/s on the wire against its nominal 2.304.
+    expect(audioWireBps(CodingType.LPCM, pesOf(0xbd, lpcm5ms(24)))).toBe(2_457_600);
+  });
+
+  it('counts 16-bit stereo LPCM 1.536 Mb/s as 1.8432 (6 packets for 960 bytes)', () => {
+    expect(audioWireBps(CodingType.LPCM, pesOf(0xbd, lpcm5ms(16)))).toBe(1_843_200);
+  });
+
+  it('counts an AC-3 640 kb/s frame in its 14 packets plus the one its PES header spills into', () => {
+    const frame = new Uint8Array(2560);
+    frame.set([0x0b, 0x77, 0, 0, 0x00 | 36, 8 << 3, 0]);
+    // 2574 bytes: 14 packets of 184 bytes (2576) hold it.
+    expect(audioWireBps(CodingType.AC3, pesOf(0xbd, frame))).toBe(Math.ceil((640_000 * 14 * 192) / 2560));
+  });
+
+  it('counts a DTS core at its own packets', () => {
+    // 2013 + 14 bytes: 12 packets. The DTS-HD discs' cores measured 1.727 Mb/s on the wire.
+    expect(audioWireBps(CodingType.DTS, pesOf(0xbd, dtsCore(2013)))).toBe(Math.ceil((1_509_750 * 12 * 192) / 2013));
+  });
+
+  it('throws on a PES it cannot read', () => {
+    expect(() => audioWireBps(CodingType.AC3, new Uint8Array([0, 0, 1, 0xbd, 0, 3, 0x80, 0x80]))).toThrow();
+    expect(() => audioWireBps(CodingType.AC3, pesOf(0xbd, new Uint8Array([1, 2, 3, 4, 5, 6])))).toThrow();
+  });
+});
+
 describe('fallbackAudioBps', () => {
-  it('gives each coding’s nominal rate when no frame could be read: AC-3 640k, DTS 1509k, LPCM from the CLPI, else 1.5 Mbps', () => {
-    expect(fallbackAudioBps(CodingType.AC3, null)).toBe(640_000);
-    expect(fallbackAudioBps(CodingType.TRUEHD, null)).toBe(640_000); // carried as its AC-3 core
-    expect(fallbackAudioBps(CodingType.DTS, null)).toBe(1_509_000);
-    expect(fallbackAudioBps(CodingType.DTSHD_MASTER, null)).toBe(1_509_000); // carried as its DTS core
-    expect(fallbackAudioBps(CodingType.EAC3, null)).toBe(1_500_000);
+  it('gives each coding’s nominal rate × 1.25 for its packets: AC-3 640k, DTS 1509k, LPCM from the CLPI, else 1.5 Mbps', () => {
+    expect(fallbackAudioBps(CodingType.AC3, null)).toBe(800_000);
+    expect(fallbackAudioBps(CodingType.TRUEHD, null)).toBe(800_000); // carried as its AC-3 core
+    expect(fallbackAudioBps(CodingType.DTS, null)).toBe(Math.ceil(1_509_000 * 1.25));
+    expect(fallbackAudioBps(CodingType.DTSHD_MASTER, null)).toBe(Math.ceil(1_509_000 * 1.25)); // carried as its DTS core
+    expect(fallbackAudioBps(CodingType.EAC3, null)).toBe(1_875_000);
     // LPCM: stereo (3) at 48 kHz (1), 24-bit; multi-channel (6) at 96 kHz (4) stored as 8 channels
-    expect(fallbackAudioBps(CodingType.LPCM, { format: 3, rate: 1 })).toBe(2 * 48_000 * 24);
-    expect(fallbackAudioBps(CodingType.LPCM, { format: 6, rate: 4 })).toBe(8 * 96_000 * 24);
-    expect(fallbackAudioBps(CodingType.LPCM, null)).toBe(8 * 48_000 * 24);
+    expect(fallbackAudioBps(CodingType.LPCM, { format: 3, rate: 1 })).toBe(2 * 48_000 * 24 * 1.25);
+    expect(fallbackAudioBps(CodingType.LPCM, { format: 6, rate: 4 })).toBe(8 * 96_000 * 24 * 1.25);
+    expect(fallbackAudioBps(CodingType.LPCM, null)).toBe(8 * 48_000 * 24 * 1.25);
   });
 });

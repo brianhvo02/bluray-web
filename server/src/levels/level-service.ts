@@ -3,9 +3,10 @@ import type { DiscManifest } from '../../../src/engine/disc/nas-api';
 import type { Capacity, EncoderCodec } from './capacity';
 import { ClipRunner, RetryLater, realClock, type Clock } from './clip-run';
 import type { ClipInput, EncoderBackend, ScanInfo } from './encoder';
-import type { LevelDiscSource } from './level-discs';
-import { audioBpsOf, buildVersion, fpsOf, loadDisc, type ClipVersion, type DiscInfo, type EncodedLevel, type Version } from './level-version';
+import type { ClipSource, LevelDiscSource } from './level-discs';
+import { audioBpsOf, buildVersion, fpsOf, loadDisc, type ClipInfo, type ClipVersion, type DiscInfo, type EncodedLevel, type Version } from './level-version';
 import { SOURCE_PACKET_BYTES, keptAudioFor, levelDefFor, levelsFor, planClip, type IntervalPlan, type LevelId } from './levels';
+import { nonVideoBytes, scanNonVideo, type NonVideoScan, type NonVideoStore } from './nonvideo-scan';
 import type { SegmentCache } from './segment-cache';
 
 export { firstAudioBps, folderDiscSource, isoDiscSource, libraryDiscSources, type ClipSource, type LevelDiscSource } from './level-discs';
@@ -21,6 +22,11 @@ export const READ_WAIT_MS = 15_000;
 export const ENCODER_IDLE_MS = 60_000;
 const DISC_INFOS = 16;
 const VERSIONS = 32;
+/**
+ * Clips' scans kept in memory (a few KB for a short clip, a few hundred for a film); an older one is read from the store
+ * again. Far more than a disc's clips, so one disc's scans never push each other out.
+ */
+const SCANS = 4096;
 
 /** Why a level isn't available: `no-encoder` when the NAS's encoder for its codec failed its self-test (or has none). */
 export type LevelReason = 'unplayable' | 'no-encoder' | 'no-hevc' | 'no-hevc10' | 'no-hdr-display' | 'busy';
@@ -74,6 +80,8 @@ export interface LevelServiceOptions {
   readonly waitMs?: number;
   readonly idleMs?: number;
   readonly log?: (message: string) => void;
+  /** Where each clip's scan of its kept bytes is kept (`/data/levels-scan`); without it, in memory only. */
+  readonly nonVideoStore?: NonVideoStore;
 }
 
 class Lru<V> {
@@ -134,8 +142,15 @@ export class LevelService {
   private readonly runners = new Map<string, ClipRunner>();
   private readonly clock: Clock;
   private readonly log: (message: string) => void;
-  /** Aborted by `close()`: stops the scan probes still running. */
+  /** Aborted by `close()`: stops the scan probes and the clip scans still running. */
   private readonly closing = new AbortController();
+  /** Each clip's scan of its kept bytes, by `<disc id>:<clip id>:<size>-<mtime>`: running or done. */
+  private readonly scans = new Map<string, { readonly scan: Promise<NonVideoScan>; readonly lookup: Promise<void> }>();
+  private readonly scanned = new Lru<NonVideoScan>(SCANS);
+  /** One clip read through at a time, server-wide: the scans run one after another. */
+  private scanQueue: Promise<unknown> = Promise.resolve();
+  /** Discs whose clips were all scanned (until a clip changes). */
+  private readonly ready = new Set<string>();
 
   constructor(private readonly options: LevelServiceOptions) {
     this.clock = options.clock ?? realClock;
@@ -144,14 +159,19 @@ export class LevelService {
 
   /**
    * The disc's manifest at a level and audio stream (1-based, as PSR1), and a lease for the viewing; `busy` when the GPU
-   * has no room for it, null when the disc is gone or isn't offered at that level.
+   * has no room for it, null when the disc is gone or isn't offered at that level. `retryAfter` while the disc's clips
+   * are being scanned for what they keep besides their video (once per clip, a full read: minutes for a long film),
+   * since every interval's budget needs it.
    */
-  async manifest(discId: string, level: string, audio: number, viewingId: string): Promise<DiscManifest | { busy: true } | null> {
+  async manifest(discId: string, level: string, audio: number, viewingId: string): Promise<DiscManifest | { busy: true } | { retryAfter: 1 } | null> {
     const source = await this.options.discs(discId);
     if (!source) return null;
+    if (await this.preparing(await this.discInfo(discId, source))) return { retryAfter: 1 };
     let version = await this.version(discId, level, audio, source);
     if (version && !(await this.unchanged([...version.clips.values()]))) {
       this.invalidate(discId);
+      // A replaced clip is scanned again before its version is built.
+      if (await this.preparing(await this.discInfo(discId, source))) return { retryAfter: 1 };
       version = await this.version(discId, level, audio, source);
     }
     if (!version) return null;
@@ -177,10 +197,14 @@ export class LevelService {
     signal: AbortSignal,
   ): Promise<Buffer | { retryAfter: 1 } | { busy: true } | null> {
     const key = path.toUpperCase();
+    const prepared = await this.prepared(discId);
+    if (prepared !== true) return prepared;
     let version = await this.version(discId, level, audio);
     let clip = version?.clips.get(key);
     if (version && clip && !(await this.unchanged([clip]))) {
       this.invalidate(discId);
+      const again = await this.prepared(discId);
+      if (again !== true) return again;
       version = await this.version(discId, level, audio);
       clip = version?.clips.get(key);
     }
@@ -226,6 +250,10 @@ export class LevelService {
     const audio = keptAudioFor(main.item, audioNumber);
     const audioBps = audio ? await audioBpsOf(disc, main, audio, this.log) : 0;
     const fps = fpsOf(main.video.rate);
+    // Priced with the main clip's scan once there is one; before, by the rate formula alone (a little low).
+    const mainSource = await disc.source.clip(main.m2tsPath);
+    const scan = mainSource ? this.scanned.get(this.scanKey(discId, main, mainSource)) : undefined;
+    const keptBytes = (pid: number | null): number[] | undefined => (scan ? nonVideoBytes(scan, pid) : undefined);
     const replacing = deviceId === undefined ? [] : this.leasesOf(`${deviceId}:${discId}:`);
     for (const level of offered) {
       if (level === 'original') continue;
@@ -241,14 +269,16 @@ export class LevelService {
               : !this.options.capacity.fits(def.codec, fps, replacing)
                 ? 'busy'
                 : undefined;
-      const budget = mbps(planClip(main.clpi, def, audioBps).sizeBytes);
+      const budget = mbps(planClip(main.clpi, def, audioBps, keptBytes(audio?.pid ?? null)).sizeBytes);
       out.push({ level, label: LABELS[level], budgetMbps: budget, ...(reason ? { available: false, reason } : { available: true }) });
     }
     return out;
   }
 
   /** The size of a file of the disc at a level and audio stream, as its manifest gives it; null when there is none. */
-  async size(discId: string, level: string, audio: number, path: string): Promise<number | null> {
+  async size(discId: string, level: string, audio: number, path: string): Promise<number | { retryAfter: 1 } | null> {
+    const prepared = await this.prepared(discId);
+    if (prepared !== true) return prepared;
     const version = await this.version(discId, level, audio);
     return version?.sizes.get(path.toUpperCase()) ?? null;
   }
@@ -312,6 +342,7 @@ export class LevelService {
   private invalidate(discId: string): void {
     this.log(`levels: a clip of disc ${discId} changed; its levels are rebuilt`);
     this.discInfos.delete(discId);
+    this.ready.delete(discId);
     this.versions.deleteWhere((key) => key.startsWith(`${discId}:`));
     this.closeRunners((key) => key.includes(`|${discId}:`));
   }
@@ -399,6 +430,7 @@ export class LevelService {
           log: this.log,
           signal: this.closing.signal,
           backendId: this.options.backend.id,
+          nonVideo: (info, clip) => this.nonVideo(discId, info, clip).scan,
         });
       })();
       version = built;
@@ -411,6 +443,92 @@ export class LevelService {
       );
     }
     return version;
+  }
+
+  /** Whether a disc's clips were all scanned: true, `retryAfter` while one is being scanned, null when the disc is gone. */
+  private async prepared(discId: string): Promise<true | { retryAfter: 1 } | null> {
+    if (this.ready.has(discId)) return true;
+    const source = await this.options.discs(discId);
+    if (!source) return null;
+    return (await this.preparing(await this.discInfo(discId, source))) ? { retryAfter: 1 } : true;
+  }
+
+  /**
+   * Starts the scan of each of the disc's clips not scanned yet (a stored scan is looked up first, within the request);
+   * whether one is still running.
+   */
+  private async preparing(disc: DiscInfo): Promise<boolean> {
+    if (this.ready.has(disc.id)) return false;
+    const keys: string[] = [];
+    const lookups: Promise<void>[] = [];
+    for (const info of disc.clips.values()) {
+      const clip = await disc.source.clip(info.m2tsPath);
+      if (!clip) continue;
+      const key = this.scanKey(disc.id, info, clip);
+      if (this.scanned.get(key)) continue;
+      keys.push(key);
+      lookups.push(this.nonVideo(disc.id, info, clip).lookup);
+    }
+    await Promise.all(lookups);
+    const pending = keys.some((key) => !this.scanned.get(key));
+    if (!pending) this.ready.add(disc.id);
+    return pending;
+  }
+
+  private scanKey(discId: string, info: ClipInfo, clip: ClipSource): string {
+    return `${discId}:${info.id}:${clip.size}-${clip.mtimeMs}`;
+  }
+
+  /**
+   * A clip's scan of what it keeps besides its video: stored, or read through once (one clip at a time, server-wide)
+   * and stored. `lookup` settles once the store was asked (the scan is in `scanned` by then when the store had it). A
+   * failed scan is forgotten, so the next request scans again.
+   */
+  private nonVideo(discId: string, info: ClipInfo, clip: ClipSource): { scan: Promise<NonVideoScan>; lookup: Promise<void> } {
+    const key = this.scanKey(discId, info, clip);
+    const done = this.scanned.get(key);
+    if (done) return { scan: Promise.resolve(done), lookup: Promise.resolve() };
+    const known = this.scans.get(key);
+    if (known) return known;
+    const store = this.options.nonVideoStore;
+    // The intervals are the EP map's at every level; only their source packets matter here.
+    const intervals = planClip(info.clpi, levelDefFor('phone-720', info.video), 0).intervals;
+    const storeKey = { discId, clipId: info.id, size: clip.size, mtimeMs: clip.mtimeMs, intervals };
+    let lookedUp = (): void => {};
+    const lookup = new Promise<void>((resolve) => (lookedUp = resolve));
+    const scan = (async () => {
+      let stored: NonVideoScan | null = null;
+      try {
+        stored = store ? await store.get(storeKey).catch(() => null) : null;
+        if (stored) this.scanned.set(key, stored);
+      } finally {
+        lookedUp();
+      }
+      if (stored) return stored;
+      const run = this.scanQueue.then(async () => {
+        const started = this.clock.now();
+        const counted = await scanNonVideo(clip.read, info.clpi, info.video.pid, intervals, this.closing.signal);
+        this.log(`levels: scanned clip ${info.id} of disc ${discId} (${intervals.length} intervals) in ${Math.round((this.clock.now() - started) / 1000)} s`);
+        await store?.put(storeKey, counted).catch((err: Error) => this.log(`levels: the scan of clip ${info.id} of disc ${discId} was not stored: ${err.message}`));
+        this.scanned.set(key, counted);
+        return counted;
+      });
+      this.scanQueue = run.catch(() => {});
+      return run;
+    })();
+    const entry = { scan, lookup };
+    this.scans.set(key, entry);
+    // Done (it is in `scanned` then) or failed (scanned again on the next request): either way no longer running.
+    scan.then(
+      () => {
+        if (this.scans.get(key) === entry) this.scans.delete(key);
+      },
+      (err: Error) => {
+        if (this.scans.get(key) === entry) this.scans.delete(key);
+        if (!this.closing.signal.aborted) this.log(`levels: the scan of clip ${info.id} of disc ${discId} failed: ${err.message}`);
+      },
+    );
+    return entry;
   }
 
   private discInfo(discId: string, source: LevelDiscSource): Promise<DiscInfo> {

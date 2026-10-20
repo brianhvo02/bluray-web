@@ -193,8 +193,9 @@ async function release(levels: DiscLevels, req: IncomingMessage, url: URL, discI
 
 /**
  * `GET /api/discs/<id>/levels?hevc=&hevc10=&hdr=&audio=` (priced with that audio stream, 1 by default), and the manifest and files at `?level=<level>&audio=<n>` (spec §5):
- * a level's manifest leases the GPU for the token's device's viewing; a read answers 503 with `Retry-After: 1` while the
- * encoder hasn't reached its bytes (or was restarted or closed), and 503 `busy` when the GPU has no room for the viewing.
+ * a level's manifest leases the GPU for the token's device's viewing; the manifest and reads answer 503 with
+ * `Retry-After: 1` while the disc's clips are scanned (once per clip), a read also while the encoder hasn't reached its
+ * bytes (or was restarted or closed), and 503 `busy` when the GPU has no room for the viewing.
  * A read is clamped to 4 MiB.
  */
 async function levelRoute(levels: DiscLevels, req: IncomingMessage, url: URL, discId: string, action: string, encodedPath: string | undefined): Promise<Response> {
@@ -215,6 +216,7 @@ async function levelRoute(levels: DiscLevels, req: IncomingMessage, url: URL, di
   if (action === 'manifest') {
     const manifest = await service.manifest(discId, level, audio, viewingId);
     if (!manifest) return notFound();
+    if ('retryAfter' in manifest) return retryLater();
     return 'busy' in manifest ? busy(service, discId) : json(200, manifest);
   }
 
@@ -226,6 +228,7 @@ async function levelRoute(levels: DiscLevels, req: IncomingMessage, url: URL, di
   }
   const size = await service.size(discId, level, audio, path);
   if (size === null) return notFound();
+  if (typeof size !== 'number') return retryLater();
   // No Range (or one we don't serve, as parseRange's null) means `bytes=0-`, as for the original; an empty file is 200.
   if (size === 0) return { status: 200, headers: bytesHeaders(0) };
   const range = parseRange(req.headers.range, size) ?? { start: 0, end: size - 1, asked: false };

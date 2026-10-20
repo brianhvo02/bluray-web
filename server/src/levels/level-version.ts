@@ -11,6 +11,7 @@ import { clpiVideoIsHdr, rewriteClpi } from './clpi-writer';
 import { deinterlaces, frameTicks, probeScan, type ClipInput, type ScanInfo } from './encoder';
 import { firstAudioBps, type ClipSource, type LevelDiscSource } from './level-discs';
 import {
+  BUDGET_VERSION,
   SOURCE_PACKET_BYTES,
   coreCoding,
   keptAudioFor,
@@ -25,6 +26,7 @@ import {
   type LevelId,
 } from './levels';
 import { rewriteMpls, type VideoAttrs } from './mpls-writer';
+import { nonVideoBytes, type NonVideoScan } from './nonvideo-scan';
 import type { SegmentCache } from './segment-cache';
 
 export type EncodedLevel = Exclude<LevelId, 'original'>;
@@ -116,6 +118,11 @@ export interface VersionDeps {
   readonly signal?: AbortSignal;
   /** The encoder backend's id, for the segment cache key. */
   readonly backendId: string;
+  /**
+   * A clip's scan of what it keeps besides its video (`scanNonVideo`), which sizes every interval's budget to hold its
+   * bursts. Without it, the budgets are the rate formula's alone (tests of other parts).
+   */
+  readonly nonVideo?: (info: ClipInfo, source: ClipSource) => Promise<NonVideoScan>;
 }
 
 async function fileBytes(manifest: DiscManifest, source: LevelDiscSource, path: string): Promise<Uint8Array | null> {
@@ -176,8 +183,9 @@ export async function loadDisc(id: string, source: LevelDiscSource): Promise<Dis
 }
 
 /**
- * The kept audio's nominal rate, from its first frame in the clip (spec §5.2); one read per clip and PID. With no
- * readable frame in the clip's first 16 MiB, the coding's nominal rate (`fallbackAudioBps`), logged.
+ * The kept audio's rate in source packets (`audioWireBps`: its nominal rate, spec §5.2, plus what its packets add), from
+ * its first frame in the clip; one read per clip and PID. With no readable frame in the clip's first 16 MiB, the
+ * coding's fallback (`fallbackAudioBps`), logged.
  */
 export function audioBpsOf(disc: DiscInfo, info: ClipInfo, kept: KeptAudio, log: (message: string) => void = () => {}): Promise<number> {
   const key = `${info.id}:${kept.pid}`;
@@ -191,7 +199,7 @@ export function audioBpsOf(disc: DiscInfo, info: ClipInfo, kept: KeptAudio, log:
       } catch (err) {
         const stream = info.clpi.programs.flatMap((p) => p.streams).find((s) => s.pid === kept.pid) ?? null;
         const bps = fallbackAudioBps(kept.coding, stream);
-        log(`levels: ${(err as Error).message} in ${info.m2tsPath}; using the nominal ${bps} b/s of coding 0x${kept.coding.toString(16)}`);
+        log(`levels: ${(err as Error).message} in ${info.m2tsPath}; using the fallback ${bps} b/s of coding 0x${kept.coding.toString(16)}`);
         return bps;
       }
     })();
@@ -222,7 +230,8 @@ function scanOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: VersionD
 
 /**
  * A short hash of what decides a clip's bytes at a level besides the clip itself: the level's definition, the kept
- * audio, every interval's place and budget, the encoder backend and its version, and whether the clip is deinterlaced. It is part of
+ * audio, every interval's place and budget (and the budget formula's version), the encoder backend and its version, and
+ * whether the clip is deinterlaced. It is part of
  * the segment cache key, so a changed plan never reuses bytes made for another.
  */
 /**
@@ -247,7 +256,7 @@ export function planHash(
   encode: { readonly backend: string; readonly deinterlace: boolean },
 ): string {
   const h = createHash('sha256');
-  h.update(JSON.stringify({ encoder: ENCODER_VERSION, def, kept, backend: encode.backend, deinterlace: encode.deinterlace }));
+  h.update(JSON.stringify({ encoder: ENCODER_VERSION, budget: BUDGET_VERSION, def, kept, backend: encode.backend, deinterlace: encode.deinterlace }));
   for (const iv of intervals) h.update(`${iv.startPts45},${iv.endPts45},${iv.srcSpnStart},${iv.srcSpnEnd},${iv.budgetBytes};`);
   return h.digest('hex').slice(0, 12);
 }
@@ -270,7 +279,8 @@ export async function buildVersion(key: string, disc: DiscInfo, level: EncodedLe
     const def = levelDefFor(level, info.video);
     const kept = keptAudioFor(info.item, audio);
     const audioBps = kept ? await audioBpsOf(disc, info, kept, deps.log) : 0;
-    const { intervals, sizeBytes } = planClip(info.clpi, def, audioBps);
+    const keptBytes = deps.nonVideo ? nonVideoBytes(await deps.nonVideo(info, source), kept?.pid ?? null) : undefined;
+    const { intervals, sizeBytes } = planClip(info.clpi, def, audioBps, keptBytes);
     const streams = info.clpi.programs.flatMap((p) => p.streams);
     const graphics = [...new Set(streams.filter((s) => GRAPHICS_CODINGS.has(s.codingType)).map((s) => s.pid))];
     const video = videoAttrsFor(def, info.video.rate);
