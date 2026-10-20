@@ -145,7 +145,8 @@ const cases: Case[] = [
 ];
 
 for (const c of cases) {
-  describe(`remuxInterval on ${c.disc}`, () => {
+  // Whole-clip demux and re-mux of the fixture discs: a few seconds locally, up to ~10 s on CI runners.
+  describe(`remuxInterval on ${c.disc}`, { timeout: 30_000 }, () => {
     const m2ts = readFileSync(join(fixture(c.disc), 'STREAM/00001.m2ts'));
     const packets = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
     const clpi = parseClpi(readFileSync(join(fixture(c.disc), 'CLIPINF/00001.clpi')));
