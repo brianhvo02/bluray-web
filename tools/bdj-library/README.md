@@ -83,6 +83,7 @@ One run of the script on one disc by one side (`classify.ts`):
 
 - Up to `key ok`, for each step both ran: the set of distinct starting calls made since the step before (`selectPlaylistN` of a playlist ≥ 0 that succeeded, `selectTitleN`, `seekN`; Ruling R3), then the step's settled hash (not for an `animated` step, on either side). Only starting calls, and as a set, because everything else (register writes, rates, UO masks, key interest) and the number of times a menu loops its background playlist move with the stub streams' timing, which differs between the two sides.
 - After `key ok`, where the disc plays and the two sides loop at their own pace: the first call that starts something (`selectTitleN`, `selectPlaylistN`, `seekN`).
+- When both stopped at the same step before `key ok`: the starting calls since that step, then the plane each ended on, unless both stopped on a wait that never held (`timeout`): then neither plane settled (an animated menu), and two frames of an animation are no difference.
 - When libbluray stopped first: it must agree on every step both ran, and the starting calls it made after its last step must be among ours up to our next step; then its run is a prefix of ours (`libPrefix`).
 
 `classify(ours, lib)` gives the first verdict that applies:

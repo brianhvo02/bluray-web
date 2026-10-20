@@ -309,7 +309,10 @@ export function compareRuns(ours: RunRecord, lib: RunRecord): Comparison {
   if (lib.steps.length > ours.steps.length) return { equal: false, libPrefix: false, oursShort: true, first: `ours stops before step ${n} (${lib.steps[n]!.step}), libbluray goes on` };
   const d = setDiff(tail(ours), tail(lib));
   if (d) return { equal: false, libPrefix: false, first: `after step ${n - 1}: ${d}` };
-  if (ours.endHash !== lib.endHash) return { equal: false, libPrefix: false, first: `end plane: libbluray ${lib.endHash ?? 'none'}, ours ${ours.endHash ?? 'none'}` };
+  // both stopped on a wait that never held: the plane never settled on either side (an animated menu), so the planes
+  // they ended on are two frames of it, not a difference
+  const unsettled = ours.end === 'timeout' && lib.end === 'timeout';
+  if (!unsettled && ours.endHash !== lib.endHash) return { equal: false, libPrefix: false, first: `end plane: libbluray ${lib.endHash ?? 'none'}, ours ${ours.endHash ?? 'none'}` };
   return { equal: true, libPrefix: false, first: null };
 }
 

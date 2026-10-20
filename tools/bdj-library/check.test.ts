@@ -109,6 +109,10 @@ describe('classify', () => {
   it('unconfirmed when both time out at step 2 on a menu that keeps repainting: no key was compared', () => {
     const two = (side: 'ours' | 'libbluray'): RunRecord => run({ side, end: 'timeout', steps: steps(['aaaaaaaa'], BEFORE, 2), calls: [sel(7)], endHash: 'aaaaaaaa' });
     expect(classify(two('ours'), two('libbluray'))).toEqual({ verdict: 'unconfirmed', detail: 'right not tried; down not tried; ok not tried (same as libbluray)' });
+    // the menu never settled on either side, so the planes they ended on are two frames of its animation, not a difference
+    const animated = (side: 'ours' | 'libbluray', endHash: string): RunRecord =>
+      run({ side, end: 'timeout', steps: steps(['x'], BEFORE, 2).map((x, i) => (i === 0 ? { n: 0, step: x.step, animated: true, calls: x.calls } : x)), calls: [sel(7)], endHash });
+    expect(classify(animated('ours', 'bbbbbbbb'), animated('libbluray', 'cccccccc'))).toEqual({ verdict: 'unconfirmed', detail: 'right not tried; down not tried; ok not tried (same as libbluray)' });
   });
 
   it('works when ours passes every step and libbluray, on stub streams, stops early or fails, agreeing as far as it went', () => {
