@@ -84,6 +84,17 @@ const T_METHODS: AsmMethod[] = [
     ],
   },
   {
+    // holds the monitor long enough for another thread to block entering, sets n to 1, exits (no notify), then sets 2
+    name: 'holder', desc: '()V', code: [
+      LDC_W, TCLASS, DUP, ASTORE_0, MONITORENTER, INVOKESTATIC, method('T', 'burn', '()V'),
+      ICONST_1, PUTSTATIC, n, ALOAD_0, MONITOREXIT, ICONST_2, PUTSTATIC, n, RETURN,
+    ],
+  },
+  {
+    // enters the monitor (blocking while the holder has it) and records n as it finds it
+    name: 'entrant', desc: '()V', code: [LDC_W, TCLASS, DUP, ASTORE_0, MONITORENTER, GETSTATIC, n, PUTSTATIC, done, ALOAD_0, MONITOREXIT, RETURN],
+  },
+  {
     // the same through a synchronized method: the monitor passes on at its return
     name: 'producerSync', desc: '()V', code: [INVOKESTATIC, method('T', 'markSync', '()V'), ICONST_2, PUTSTATIC, n, RETURN],
   },
@@ -213,6 +224,17 @@ describe('monitors', () => {
       expect(get('done')).toBe(1);
       expect(get('n')).toBe(2);
     }
+  });
+
+  it('a monitor passed to a thread blocked entering lets it run before the releaser goes on (Ruling R19)', async () => {
+    const { jvm, clock, spawn, get } = setup();
+    jvm.threads.slice = 1000; // the holder's slice ends inside the monitor, so the entrant runs and blocks
+    const h = spawn('holder');
+    const e = spawn('entrant');
+    expect(await runWithClock(jvm, clock)).toBe('idle');
+    expect([h.uncaught, e.uncaught]).toEqual([null, null]);
+    expect(get('done')).toBe(1);
+    expect(get('n')).toBe(2);
   });
 
   it('two threads incrementing under the same monitor reach 20,000', async () => {

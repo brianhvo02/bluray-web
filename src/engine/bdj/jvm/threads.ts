@@ -538,7 +538,6 @@ export class Scheduler {
     this.makeRunnable(t);
   }
 
-  /** Frees the monitor and hands it on: a woken waiter takes it with its count, a blocked entrant retries. */
   /**
    * Frees a monitor and hands it on: to a waiter woken by notify (it takes the monitor back), or to the first thread
    * blocked entering. Ruling R19: either way the releasing thread's slice ends here (preempt), so the thread handed the

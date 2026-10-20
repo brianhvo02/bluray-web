@@ -1442,6 +1442,8 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
               // the monitor passed to another thread, which runs first (Ruling R19)
               f.pc = pc;
               f.sp = sp;
+              // this instruction counted, unlike at the budget check (which stops before running one)
+              if (prof) prof.bytecodes.set(f.method, (prof.bytecodes.get(f.method) ?? 0) + (profBudget - budget));
               return 'budget';
             }
             break;
