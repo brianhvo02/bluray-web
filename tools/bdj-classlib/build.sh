@@ -10,6 +10,7 @@ PLATFORM="${BDJ_TRACE_PLATFORM:-linux/amd64}"
 
 docker build --platform "$PLATFORM" -t "$IMAGE" "$HERE"
 mkdir -p "$ROOT/src/bdj-classlib"
-docker run --rm --platform "$PLATFORM" --user "$(id -u):$(id -g)" -v "$ROOT:/work" -w /work "$IMAGE" \
+# offline, like the trace harness (tools/bdj-trace/run.sh): the conformance programs record HotSpot with no network
+docker run --rm --network none --platform "$PLATFORM" --user "$(id -u):$(id -g)" -v "$ROOT:/work" -w /work "$IMAGE" \
   bash tools/bdj-classlib/pack.sh
 ls -l "$ROOT/src/bdj-classlib"

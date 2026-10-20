@@ -98,7 +98,7 @@ sed -E 's/^(.*)\.([^.]+)$/\1 \2/' "$T/natives" | sort -u \
   > "$T/native-names"
 
 # descriptors via javap inside the image
-docker run --rm --platform "$PLATFORM" -v "$T:/in:ro" -v "$ROOT/tools/bdj-classlib:/tools:ro" \
+docker run --rm --network none --platform "$PLATFORM" -v "$T:/in:ro" -v "$ROOT/tools/bdj-classlib:/tools:ro" \
   bluray-web-bdj-trace bash /tools/resolve-natives.sh > "$T/natives.resolved"
 { cat tests/bdj/natives.txt; cat "$T/natives.resolved"; } | grep -v '^$' | LC_ALL=C sort -u > "$T/natives.new"
 cp "$T/natives.new" tests/bdj/natives.txt

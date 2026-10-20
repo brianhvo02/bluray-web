@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prints libbluray's BD-J native-call trace (JSONL) for <disc> on stdout; libbluray's log goes to stderr.
 #   run.sh <disc> [--until <call>[#<n>]] [--seconds N] [--jvm-option OPT]... [--planes] [--keys FILE] [--tail S] [--wait-timeout S]
-#          [--dump-planes DIR]
+#          [--dump-planes DIR] [--name NAME] [--online]
 #   <disc>:        a folder name under fixtures/synthetic, or a path to a disc folder (the one holding BDMV/)
 #   --until CALL:  stop right after the first trace line for CALL (a JNI name without the Java_org_videolan_Libbluray_
 #                  prefix, e.g. selectPlaylistN); CALL#N stops after the N-th (selectPlaylistN#2)
@@ -14,6 +14,9 @@
 #                  with steps left (raise --seconds for key runs: the default 60 is often too short)
 #   --dump-planes DIR: also write DIR/<k>.png (the whole 1920x1080 plane) at flush k
 #   --name NAME:   the container's name (so a caller can `docker kill` it)
+#   --online:      give the container a network. Runs are offline by default (`--network none`), as libbluray is on a
+#                  machine with no network: a disc's BD-Live attempts fail at once and never reach a real server. Nothing
+#                  in the repo passes --online; it is for a one-off comparison by hand
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -27,6 +30,7 @@ NAME_ARGS=()
 MOUNTS=()
 HARNESS_ARGS=()
 SECONDS_ARG=60
+NETWORK_ARGS=(--network none)
 JVM_OPTIONS=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,6 +40,7 @@ while [ $# -gt 0 ]; do
     --planes) HARNESS_ARGS+=(--planes); shift ;;
     --tail) HARNESS_ARGS+=(--tail "$2"); shift 2 ;;
     --name) NAME_ARGS=(--name "$2"); shift 2 ;;
+    --online) NETWORK_ARGS=(); shift ;;
     --wait-timeout) HARNESS_ARGS+=(--wait-timeout "$2"); shift 2 ;;
     --keys)
       [ -f "$2" ] || { echo "no such script: $2" >&2; exit 2; }
@@ -58,7 +63,7 @@ else
   DISC_DIR="$ROOT/fixtures/synthetic/$DISC"
 fi
 
-exec docker run --rm ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} --platform "$PLATFORM" -e BD_DEBUG_MASK -e BD_DEBUG_FILE \
+exec docker run --rm ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} ${NETWORK_ARGS[@]+"${NETWORK_ARGS[@]}"} --platform "$PLATFORM" -e BD_DEBUG_MASK -e BD_DEBUG_FILE \
   ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
   -v "$DISC_DIR:/disc:ro" \
   ${MOUNTS[@]+"${MOUNTS[@]}"} \
