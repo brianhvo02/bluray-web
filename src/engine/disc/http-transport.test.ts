@@ -114,9 +114,67 @@ describe('HttpTransport', () => {
     controller.abort(reason);
     await expect(reading).rejects.toBe(reason);
   });
+
+  it('appends the query after the token to every URL, and keeps it across a token refresh', async () => {
+    const { fetch, seen } = recording((url) => (url.includes('t=new') ? partial([5]) : new Response(null, { status: 401 })));
+    const t = new HttpTransport(FAKE_NAS_BASE, 'old', { fetch, query: 'level=l1&audio=2', refreshToken: async () => 'new' });
+    await t.read('BDMV/X', 0, 1);
+    await t.read('BDMV/Y', 0, 1);
+    expect(seen.map((s) => s.url.split('?')[1])).toEqual(['t=old&level=l1&audio=2', 't=new&level=l1&audio=2', 't=new&level=l1&audio=2']);
+  });
+
+  it('a 503 with Retry-After: 1 is retried after 1 s with the same range, then succeeds', async () => {
+    vi.useFakeTimers();
+    const { fetch, seen } = recording((_url, n) => (n === 1 ? new Response(null, { status: 503, headers: { 'Retry-After': '1' } }) : partial([4])));
+    const t = new HttpTransport(FAKE_NAS_BASE, 'tok', { fetch });
+    const reading = t.read('BDMV/X', 10, 1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(seen).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(Array.from(await reading)).toEqual([4]);
+    expect(seen.map((s) => s.headers.range)).toEqual(['bytes=10-10', 'bytes=10-10']);
+  });
+
+  it('keeps retrying 503s until the 30 s request budget, measured from the first attempt, then fails as lost', async () => {
+    vi.useFakeTimers();
+    const { fetch, seen } = recording(() => new Response(null, { status: 503, headers: { 'Retry-After': '1' } }));
+    const t = new HttpTransport(FAKE_NAS_BASE, 'tok', { fetch });
+    const settled = t.read('BDMV/X', 0, 1).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await settled).toMatchObject({ code: 'read-failed', message: 'Connection to the NAS lost.', reason: 'nas-lost' });
+    expect(seen.length).toBeGreaterThan(25);
+  });
+
+  it('a 503 without Retry-After is a refusal: no retry, the read fails with the NAS message', async () => {
+    const { fetch, seen } = recording(() => Response.json({ error: 'busy', message: 'The NAS is busy.' }, { status: 503 }));
+    const t = new HttpTransport(FAKE_NAS_BASE, 'tok', { fetch });
+    await expect(t.read('BDMV/X', 0, 1)).rejects.toMatchObject({ code: 'read-failed', message: 'The NAS is busy.' });
+    expect(seen).toHaveLength(1);
+  });
+
+  it('an abort during the Retry-After wait rejects at once', async () => {
+    vi.useFakeTimers();
+    const { fetch } = recording(() => new Response(null, { status: 503, headers: { 'Retry-After': '1' } }));
+    const t = new HttpTransport(FAKE_NAS_BASE, 'tok', { fetch });
+    const controller = new AbortController();
+    const reading = t.read('X', 0, 1, controller.signal);
+    const settled = reading.catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(100);
+    const reason = new DOMException('seek', 'AbortError');
+    controller.abort(reason);
+    expect(await settled).toBe(reason);
+  });
 });
 
 describe('createByteSource (remote)', () => {
+  it('passes the spec query to every files request', async () => {
+    const { fetch, seen } = recording(() => new Response(new Uint8Array(1), { status: 206 }));
+    const spec = { kind: 'remote', base: FAKE_NAS_BASE, token: 'tok', query: 'level=l1&audio=0', manifest: { discId: 'd', name: 'D', files: [{ path: 'BDMV/STREAM/00001.M2TS', size: 10 }], inline: {} } } as const;
+    const source = createByteSource(spec, { fetch, readAheadBytes: 0, onWaiting: () => undefined });
+    await source.read('BDMV/STREAM/00001.M2TS', 0, 1);
+    expect(seen.map((s) => s.url)).toEqual([`${FAKE_NAS_BASE}files/BDMV/STREAM/00001.M2TS?t=tok&level=l1&audio=0`]);
+  });
+
   it('a first read that takes 3.5 s shows waiting at 3 s and clears it when it lands', async () => {
     vi.useFakeTimers();
     const nas = fakeNas(new Map([['BDMV/STREAM/00001.M2TS', new Uint8Array([1, 2, 3])]]));

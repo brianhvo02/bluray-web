@@ -23,6 +23,8 @@ export interface RemoteDiscSpec {
   readonly base: string;
   readonly token: string;
   readonly manifest: DiscManifest;
+  /** Extra query parameters for every files request (without the '?'): `level=<id>&audio=<n>` for a quality level. */
+  readonly query?: string;
   /**
    * Where the disc's requests go when they can't be fetched from this worker (the WebRTC route, whose connection lives
    * on the main thread): `portFetch` over it. It must be in the message's transfer list.
@@ -61,6 +63,7 @@ export function createByteSource(spec: DiscSpec, deps: ByteSourceDeps): FileSour
   if (spec.kind === 'files') return new FileSource(normalizeDiscPaths(spec.entries));
   const transport = new HttpTransport(spec.base, spec.token, {
     fetch: deps.fetch,
+    ...(spec.query ? { query: spec.query } : {}),
     ...(deps.refreshToken ? { refreshToken: () => deps.refreshToken!() } : {}),
   });
   return new RemoteSource(spec.manifest, transport, {

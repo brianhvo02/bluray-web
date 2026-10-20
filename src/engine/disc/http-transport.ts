@@ -40,6 +40,8 @@ export interface HttpTransportOptions {
   readonly fetch: typeof fetch;
   /** A fresh session token, asked for once when a request answers 401; none (or a rejection) means unpaired. */
   readonly refreshToken?: () => Promise<string>;
+  /** Extra query parameters for every files URL (without the '?'), such as `level=<id>&audio=<n>`; kept across token refreshes. */
+  readonly query?: string;
 }
 
 /**
@@ -62,9 +64,17 @@ export class HttpTransport implements RangeTransport {
   async read(path: string, offset: number, length: number, signal?: AbortSignal): Promise<Uint8Array> {
     if (length <= 0) return new Uint8Array(0);
     let retried = false;
+    const deadline = Date.now() + REQUEST_TIMEOUT_MS;
     for (;;) {
       const token = this.token;
       const answer = await this.request(path, offset, length, token, signal);
+      if (answer.status === 503) {
+        // the NAS is still encoding what this read needs: wait as long as it says, within the read's budget
+        const left = deadline - Date.now();
+        if (left <= 0) throw nasLost(path);
+        await sleep(Math.min(answer.retryAfterMs ?? 1000, left), signal);
+        continue;
+      }
       if (answer.status !== 401) return answer.bytes;
       if (retried) throw unpaired(path);
       retried = true;
@@ -85,9 +95,9 @@ export class HttpTransport implements RangeTransport {
   }
 
   /** One request, cut off after REQUEST_TIMEOUT_MS. The bytes of a 206 (empty for 416), or a 401 to retry. */
-  private async request(path: string, offset: number, length: number, token: string, signal?: AbortSignal): Promise<{ status: number; bytes: Uint8Array }> {
+  private async request(path: string, offset: number, length: number, token: string, signal?: AbortSignal): Promise<{ status: number; bytes: Uint8Array; retryAfterMs?: number }> {
     signal?.throwIfAborted();
-    const url = `${this.base}files/${path.split('/').map(encodeURIComponent).join('/')}?t=${encodeURIComponent(token)}`;
+    const url = `${this.base}files/${path.split('/').map(encodeURIComponent).join('/')}?t=${encodeURIComponent(token)}${this.opts.query ? `&${this.opts.query}` : ''}`;
     const controller = new AbortController();
     const lost = nasLost(path);
     const timer = setTimeout(() => controller.abort(lost), REQUEST_TIMEOUT_MS);
@@ -105,6 +115,14 @@ export class HttpTransport implements RangeTransport {
         case 404:
           if ((await errorOf(response)) === 'disc-changed') throw discChanged(path);
           throw new DiscError('read-failed', `Failed to read ${path}: the NAS does not have it`, [path]);
+        case 503: {
+          const seconds = Number(response.headers.get('Retry-After'));
+          // without Retry-After the NAS refused (no room to encode a level): not worth retrying
+          if (!response.headers.has('Retry-After') || !Number.isFinite(seconds) || seconds < 0) {
+            throw new DiscError('read-failed', (await messageOf(response)) ?? `Failed to read ${path}: HTTP 503`, [path]);
+          }
+          return { status: 503, bytes: new Uint8Array(0), retryAfterMs: seconds * 1000 };
+        }
         default:
           throw new DiscError('read-failed', `Failed to read ${path}: HTTP ${response.status}`, [path]);
       }
@@ -118,6 +136,31 @@ export class HttpTransport implements RangeTransport {
       signal?.removeEventListener('abort', onAbort);
     }
   }
+}
+
+async function messageOf(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { message?: unknown };
+    return typeof body.message === 'string' ? body.message : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Waits `ms`; an abort of `signal` rejects at once with its reason. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 async function errorOf(response: Response): Promise<string | null> {
