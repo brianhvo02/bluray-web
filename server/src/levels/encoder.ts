@@ -858,12 +858,24 @@ function encodeOne(backend: EncoderBackend, options: ClipEncoderOptions, index: 
   });
 }
 
+/** The one try below the floor, before an interval is given up: its video barely more than its IDR. */
+export const LAST_TRY_RATE_BPS = 250_000;
+
+/** An interval whose bytes can't fit its budget at any rate, even with its graphics dropped: it is never served. */
+export class IntervalDoesNotFit extends Error {
+  constructor(readonly index: number) {
+    super(`levels: interval ${index} overflows its budget even at ${LAST_TRY_RATE_BPS / 1000} kbps with its graphics dropped`);
+    this.name = 'IntervalDoesNotFit';
+  }
+}
+
 /**
  * The over-budget retry (Review Focus 1): re-encodes interval `index` at `rate × (budget ÷ actual) × 0.95`, where
  * `actual` is the re-muxed size the last try needed (budget + overflow), down to a floor of 1 Mbps, until `remux` fits
- * it into the plan's budget. One try is always made, at the floor at least. When it doesn't fit at the floor, `lastResort`
- * gets the floor's video (the re-mux drops subtitle and menu PES, `shedGraphics`); throws when that can't fit it either:
- * an interval is never served truncated or oversized. An abort of `signal` (its run stopped) kills the ffmpeg and rejects.
+ * it into the plan's budget. One try is always made, at the floor at least. When it doesn't fit at the floor,
+ * `lastResort` gets the floor's video (the re-mux drops subtitle and menu PES, `shedGraphics`); when that can't fit it
+ * either, one more try at 250 kbps (as it is, then through `lastResort`); then it throws `IntervalDoesNotFit`: an
+ * interval is never served truncated or oversized. An abort of `signal` (its run stopped) kills the ffmpeg and rejects.
  */
 export async function encodeIntervalAt(
   backend: EncoderBackend,
@@ -889,5 +901,10 @@ export async function encodeIntervalAt(
   } while (rate > MIN_RETRY_RATE_BPS);
   const shed = lastResort?.(video);
   if (shed) return { bytes: shed.bytes, rateBps: rate };
-  throw new Error(`levels: interval ${index} overflows its budget even at 1 Mbps`);
+  video = await encodeOne(backend, options, index, LAST_TRY_RATE_BPS, signal);
+  const last = remux(video);
+  if ('bytes' in last) return { bytes: last.bytes, rateBps: LAST_TRY_RATE_BPS };
+  const lastShed = lastResort?.(video);
+  if (lastShed) return { bytes: lastShed.bytes, rateBps: LAST_TRY_RATE_BPS };
+  throw new IntervalDoesNotFit(index);
 }

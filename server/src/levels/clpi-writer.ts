@@ -211,6 +211,7 @@ function keptFlags(entries: readonly EpEntry[], intervals: readonly IntervalPlan
   let j = 0;
   return intervals.map((iv, i) => {
     while (j < entries.length && !(entries[j]!.pts === iv.startPts45 && (i === 0 || entries[j]!.spn === iv.srcSpnStart))) j++;
+    if (j === entries.length) throw new Error(`levels: interval ${i} starts at no EP entry of the clip (PTS ${iv.startPts45})`);
     return flags[j] ?? 0;
   });
 }

@@ -17,6 +17,7 @@ import {
   MAX_INTERVALS_PER_RUN,
   PROBE_TIMEOUT_MS,
   deinterlaces,
+  IntervalDoesNotFit,
   encodeIntervalAt,
   epFramePts,
   frameTicks,
@@ -489,10 +490,10 @@ describe.skipIf(!runFfmpegTests)('encodeIntervalAt (libx264)', () => {
     expect(result.bytes.length).toBe(budget);
   }, 120_000);
 
-  it('tries once at the 1 Mbps floor, then gives up rather than serve an oversized interval', async () => {
+  it('tries once at the 1 Mbps floor and once at 250 kbps, then gives up rather than serve an oversized interval', async () => {
     const { options, rates, backend, remux } = setup(6144);
-    await expect(encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux)).rejects.toThrow(/1 Mbps/);
-    expect(rates).toEqual([1_000_000]);
+    await expect(encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux)).rejects.toThrow(IntervalDoesNotFit);
+    expect(rates).toEqual([1_000_000, 250_000]);
   }, 60_000);
 
   it('hands the floor’s video to the last resort when it still overflows, and serves what that gives', async () => {
@@ -506,8 +507,14 @@ describe.skipIf(!runFfmpegTests)('encodeIntervalAt (libx264)', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).toBeGreaterThan(0);
     expect(result).toEqual({ bytes: new Uint8Array(6144), rateBps: 1_000_000 });
-    // A last resort that can't fit it either: the interval is never served.
-    await expect(encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux, undefined, () => null)).rejects.toThrow(/1 Mbps/);
+    // A last resort that can't fit it either: one try at 250 kbps, through the last resort too, then never served.
+    const tries: number[] = [];
+    rates.length = 0;
+    await expect(
+      encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux, undefined, (video) => (tries.push(video.length), null)),
+    ).rejects.toThrow(/250 kbps/);
+    expect(rates).toEqual([1_000_000, 250_000]);
+    expect(tries).toHaveLength(2);
   }, 60_000);
 });
 

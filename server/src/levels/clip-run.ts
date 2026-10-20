@@ -1,8 +1,8 @@
 import type { Readable } from 'node:stream';
 import { KeptStreams, PesCoreFilter } from './audio-core';
-import { ClipEncoder, encodeIntervalAt, runWindow, MAX_INTERVALS_PER_RUN, type ClipEncoderOptions, type ClipReader, type EncoderBackend } from './encoder';
+import { ClipEncoder, IntervalDoesNotFit, encodeIntervalAt, runWindow, MAX_INTERVALS_PER_RUN, type ClipEncoderOptions, type ClipReader, type EncoderBackend } from './encoder';
 import { SOURCE_PACKET_BYTES, type IntervalPlan } from './levels';
-import { IntervalCollector, remuxInterval, shedGraphics, type EncodedPes, type IntervalSource, type RemuxInput } from './remux';
+import { IntervalCollector, remuxInterval, shedGraphics, type EncodedPes, type GraphicsByNumber, type IntervalSource, type RemuxInput } from './remux';
 import type { SegmentCache } from './segment-cache';
 
 /** Time and timers, injectable for tests. */
@@ -30,12 +30,35 @@ export interface KeptConfig {
   readonly videoStreamType: number;
   /** The source's PCR PID (CLPI STC sequence). */
   readonly pcrPid: number;
-  /** The kept PG then IG PIDs by stream number: what the last resort drops, from the end (`shedGraphics`). */
-  readonly graphicsPids?: readonly number[];
+  /** The kept PG and IG PIDs by stream number: what the last resort drops (`shedGraphics`). */
+  readonly graphics?: GraphicsByNumber;
 }
 
-/** Clips whose last resort was logged: once per clip. */
-const shedLogged = new WeakSet<ClipRunPlan>();
+/** Clips whose PG drops were logged: once per clip (an IG drop, a menu lost, is logged every time). */
+const pgShedLogged = new WeakSet<ClipRunPlan>();
+
+/**
+ * Intervals that fit their budget at no rate (`IntervalDoesNotFit`), per segment cache, by `<cache key>#<index>` (the
+ * cache key holds the plan's hash): a later read, by any viewing, gets the error at once instead of a re-encode every
+ * `FAILURE_BACKOFF_MS`. In memory, so a restart tries again; bounded.
+ */
+const unfittableByCache = new WeakMap<SegmentCache, Map<string, Error>>();
+const UNFITTABLE_MAX = 1024;
+
+function unfittableOf(cache: SegmentCache): Map<string, Error> {
+  let map = unfittableByCache.get(cache);
+  if (!map) unfittableByCache.set(cache, (map = new Map()));
+  return map;
+}
+
+function rememberUnfittable(cache: SegmentCache, key: string, err: Error): void {
+  const map = unfittableOf(cache);
+  map.set(key, err);
+  for (const oldest of map.keys()) {
+    if (map.size <= UNFITTABLE_MAX) break;
+    map.delete(oldest);
+  }
+}
 
 /** One clip at one level and audio stream: its plan, where its bytes come from, and how it is encoded. */
 export interface ClipRunPlan {
@@ -48,6 +71,8 @@ export interface ClipRunPlan {
   readonly encoder: Omit<ClipEncoderOptions, 'interlaced' | 'frameTicks' | 'maxIntervalsPerRun'>;
   readonly scan: () => Promise<{ readonly interlaced: boolean; readonly frameTicks: number }>;
   readonly kept: KeptConfig;
+  /** Names the clip in the log: `disc <id> clip <clip> at <level>, audio <n>`. */
+  readonly label?: string;
 }
 
 export interface ClipRunDeps {
@@ -236,6 +261,11 @@ export class ClipRunner {
       this.settle(index, bytes);
       return;
     }
+    const failed = unfittableOf(this.deps.cache).get(`${key}#${index}`);
+    if (failed) {
+      this.reject(index, failed);
+      return;
+    }
     if (this.closed) return;
     w.encoding = true;
     const run = this.run;
@@ -299,7 +329,7 @@ export class ClipRunner {
       const { intervals } = this.plan;
       const cacheKey = await this.plan.cacheKey();
       let from = this.head;
-      while (from < intervals.length && (this.recent.has(from) || (await this.deps.cache.has(cacheKey, from)))) from++;
+      while (from < intervals.length && (this.recent.has(from) || unfittableOf(this.deps.cache).has(`${cacheKey}#${from}`) || (await this.deps.cache.has(cacheKey, from)))) from++;
       if (this.run || this.closed) return;
       let waiting: number | null = null;
       for (const [index, w] of this.waiters) if (w.encoding && !w.settled && (waiting === null || index < waiting)) waiting = index;
@@ -537,16 +567,35 @@ class Run {
     if ('bytes' in first) return first.bytes;
     const options = this.options!;
     const rateBps = options.rateBps ?? options.level.targetBps;
+    const where = `${this.plan.label ?? 'a clip'}, interval ${plan.index}`;
+    let dropped = '';
     const lastResort = (v: readonly EncodedPes[]): { bytes: Uint8Array } | null => {
-      const shed = shedGraphics(input(v), kept.graphicsPids ?? []);
-      if (shed && !shedLogged.has(this.plan)) {
-        shedLogged.add(this.plan);
-        this.deps.log(`levels: interval ${plan.index} didn't fit even with its video at the floor; dropped the PES of PIDs ${shed.dropped.map((p) => `0x${p.toString(16)}`).join(', ')} from it (logged once per clip)`);
+      const shed = shedGraphics(input(v), kept.graphics ?? { pg: [], ig: [] });
+      if (!shed) return null;
+      const names = (kind: 'pg' | 'ig'): string => shed.dropped.filter((d) => d.kind === kind).map((d) => `0x${d.pid.toString(16)}`).join(', ');
+      const pg = names('pg');
+      const ig = names('ig');
+      dropped = `; dropped the PES of ${[pg && `PG ${pg}`, ig && `IG ${ig}`].filter(Boolean).join(' and ')}`;
+      if (ig) this.deps.log(`levels: ${where} didn't fit even with its video at the floor: dropped the menu PES of IG ${ig}${pg ? ` and of PG ${pg}` : ''}`);
+      else if (!pgShedLogged.has(this.plan)) {
+        pgShedLogged.add(this.plan);
+        this.deps.log(`levels: ${where} didn't fit even with its video at the floor: dropped the subtitle PES of PG ${pg} (PG drops are logged once per clip)`);
       }
       return shed;
     };
-    const retried = await encodeIntervalAt(this.deps.backend, options, plan.index, { rateBps, overflowBytes: first.overflow }, (v) => remuxInterval(input(v)), this.stopping.signal, lastResort);
-    this.deps.log(`levels: interval ${plan.index} overflowed its budget by ${first.overflow} bytes; re-encoded at ${retried.rateBps} bps`);
+    let retried: { bytes: Uint8Array; rateBps: number };
+    try {
+      retried = await encodeIntervalAt(this.deps.backend, options, plan.index, { rateBps, overflowBytes: first.overflow }, (v) => remuxInterval(input(v)), this.stopping.signal, lastResort);
+    } catch (err) {
+      if (err instanceof IntervalDoesNotFit) {
+        const named = new Error(`${err.message} (${where})`);
+        const key = await this.plan.cacheKey().catch(() => null);
+        if (key !== null) rememberUnfittable(this.deps.cache, `${key}#${plan.index}`, named);
+        throw named;
+      }
+      throw err;
+    }
+    this.deps.log(`levels: ${where} overflowed its budget by ${first.overflow} bytes; re-encoded at ${retried.rateBps} bps${dropped}`);
     return retried.bytes;
   }
 }

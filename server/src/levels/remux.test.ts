@@ -632,8 +632,8 @@ describe('the plan holds what an interval keeps', () => {
     const kept = [lead, ...keptOf(plan, [[0x1200, 260], [0x1201, 260], [0x1202, 13_000], [AUDIO, 300]])];
     const video = videoAt(plan, 1_000_000, 18_000);
     expect(fits(remuxed(plan, kept, video))).toBe(false);
-    const shed = shedGraphics(remuxed(plan, kept, video), [0x1200, 0x1201, 0x1202])!;
-    expect(shed.dropped).toEqual([0x1202]);
+    const shed = shedGraphics(remuxed(plan, kept, video), { pg: [0x1200, 0x1201, 0x1202], ig: [] })!;
+    expect(shed.dropped).toEqual([{ pid: 0x1202, kind: 'pg' }]);
     const pids = (bytes: Uint8Array): number[] => packetsOf(bytes).map(pidOf);
     const out = pids(shed.bytes);
     expect(out.filter((p) => p === 0x1202)).toHaveLength(1); // only the tail of the PES that began before
@@ -641,6 +641,26 @@ describe('the plan holds what an interval keeps', () => {
     expect(out.filter((p) => p === 0x1200)).toHaveLength(260);
     expect(out.filter((p) => p === VIDEO).length).toBeGreaterThan(0);
     // Nothing left to drop that would make room: null.
-    expect(shedGraphics(remuxed(plan, keptOf(plan, [[AUDIO, 20_000]]), video), [0x1200])).toBeNull();
+    expect(shedGraphics(remuxed(plan, keptOf(plan, [[AUDIO, 20_000]]), video), { pg: [0x1200], ig: [] })).toBeNull();
+  });
+
+  it('drops every PG stream, highest number first, before any IG stream, and names only streams that lost packets', () => {
+    const level = LEVELS['phone-720'];
+    const plan = planClip(clpi(Array(3).fill(45_045), 3), level, 1_728_000, { minInterval45: 0 }).intervals[0]!;
+    const video = videoAt(plan, 1_000_000, 18_000);
+    const order = { pg: [0x1200, 0x1201, 0x1202], ig: [0x1400, 0x1401] };
+    // PG 0x1201 has nothing in this interval; the PG streams together and IG 0x1401 overflow it, IG 0x1400 alone fits.
+    const base: Array<[number, number]> = [[AUDIO, 300], [0x1400, 400], [0x1401, 5_000], [0x1200, 600], [0x1202, 600]];
+    const shed = shedGraphics(remuxed(plan, keptOf(plan, base), video), order)!;
+    expect(shed.dropped).toEqual([
+      { pid: 0x1202, kind: 'pg' },
+      { pid: 0x1200, kind: 'pg' },
+      { pid: 0x1401, kind: 'ig' },
+    ]);
+    const out = packetsOf(shed.bytes).map(pidOf);
+    expect(out.filter((p) => p === 0x1400)).toHaveLength(400); // the lowest-numbered menu stays
+    // When dropping the PG streams is enough, no IG is touched.
+    const pgOnly = shedGraphics(remuxed(plan, keptOf(plan, [[AUDIO, 300], [0x1400, 400], [0x1202, 5_000]]), video), order)!;
+    expect(pgOnly.dropped).toEqual([{ pid: 0x1202, kind: 'pg' }]);
   });
 });

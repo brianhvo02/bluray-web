@@ -99,6 +99,16 @@ describe('rewriteClpi', () => {
     expect(kept.length).toBeLessThan(sourcePts.length);
   });
 
+  it('refuses a plan whose interval starts at no EP entry of the clip', () => {
+    const bytes = read('disc-mpeg2/BDMV/CLIPINF/00001.clpi');
+    const level = LEVELS['h264-1080'];
+    const plan = planClip(parseClpi(bytes), level, 0);
+    const moved = plan.intervals.map((iv, i) => (i === 1 ? { ...iv, startPts45: iv.startPts45 + 1 } : iv));
+    expect(() =>
+      rewriteClpi(bytes, { intervals: moved, level, keepPids: [], audio: null, videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 4 }),
+    ).toThrow(/no EP entry/);
+  });
+
   it('is byte-identical at the original level', () => {
     const bytes = read('disc-levels/BDMV/CLIPINF/00001.clpi');
     expect(rewriteClpi(bytes, { level: 'original' })).toEqual(bytes);

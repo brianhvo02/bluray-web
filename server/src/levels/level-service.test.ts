@@ -39,6 +39,12 @@ import { ENCODER_VERSION, clipFrameTicks, loadDisc, planHash } from './level-ver
 import { keptAudioFor, levelDefFor, planClip, videoAttrsFor } from './levels';
 import { rewriteMpls } from './mpls-writer';
 import { SegmentCache } from './segment-cache';
+import { shedGraphics } from './remux';
+
+vi.mock('./remux', async (importOriginal) => {
+  const remux = await importOriginal<typeof import('./remux')>();
+  return { ...remux, shedGraphics: vi.fn(remux.shedGraphics) };
+});
 
 /** The fixtures' EP intervals as they are: their GOPs are shorter than the plan's merge threshold. */
 const RAW_PLAN = { minInterval45: 0 };
@@ -133,13 +139,15 @@ class FakeFfmpeg {
   auto = false;
   /** Keyframe PTS whose first encode comes out this many bytes larger (an over-budget encode). */
   readonly oversize = new Map<number, number>();
+  /** Keyframe PTS whose every encode comes out this many bytes larger: at no rate does it fit. */
+  readonly stuck = new Map<number, number>();
   readonly backend: EncoderBackend = {
     id: 'fake',
     binary: 'fake-ffmpeg',
     args: (input) => [JSON.stringify({ startByte: input.startByte, keys: input.keyframesPts90 })],
   };
   readonly spawn = ((_binary: string, args: string[]) => {
-    const run = new FakeRun(JSON.parse(args[0]!) as { startByte: number; keys: number[] }, this.oversize);
+    const run = new FakeRun(JSON.parse(args[0]!) as { startByte: number; keys: number[] }, this.oversize, this.stuck);
     this.runs.push(run);
     if (this.auto) setImmediate(() => run.finish());
     return run.child;
@@ -162,12 +170,13 @@ class FakeRun {
   constructor(
     readonly args: { startByte: number; keys: number[] },
     private readonly oversize: Map<number, number>,
+    private readonly stuck: ReadonlyMap<number, number> = new Map(),
   ) {}
 
   step(n = 1): void {
     for (let i = 0; i < n && this.written < this.args.keys.length; i++, this.written++) {
       const key = this.args.keys[this.written]!;
-      const extra = this.oversize.get(key) ?? 0;
+      const extra = this.oversize.get(key) ?? this.stuck.get(key) ?? 0;
       this.oversize.delete(key);
       this.child.stdout.write(Buffer.concat([videoPes(key, true, extra), videoPes(key + 3750, false)]));
     }
@@ -513,6 +522,34 @@ describe('LevelService: reads', () => {
     expect(fake.runs[1]!.args.keys).toEqual([epFrame(l.pts45[3]!), epFrame(l.pts45[4]!)]);
   });
 
+  it('hands the clip’s PG streams to the last resort, then remembers an interval that fits at no rate (one 500, no re-encode loop)', async () => {
+    const logged: string[] = [];
+    service.close();
+    service = makeService({ log: (m) => logged.push(m) });
+    fake.auto = true;
+    const l = layout(await levelManifest());
+    const { length } = intervalRange(l, 3);
+    fake.stuck.set(epFrame(l.pts45[3]!), 8 * length); // interval 3 never fits, even with its subtitles dropped
+    const raw = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0, RAW_PLAN).intervals;
+    const intervalStart = (i: number): number => raw[i]!.srcSpnStart * 192;
+    vi.mocked(shedGraphics).mockClear();
+    await expect(readInterval(l, 3)).rejects.toThrow(/250 kbps with its graphics dropped/);
+    // The floor's video and the 250 kbps video both went through the last resort, with the clip's PG streams by number.
+    expect(vi.mocked(shedGraphics).mock.calls.map((c) => c[1])).toEqual([
+      { pg: PG, ig: [] },
+      { pg: PG, ig: [] },
+    ]);
+    expect(logged.some((m) => m.includes(`disc ${DISC_ID} clip 00001 at h264-1080, audio 1, interval 3`))).toBe(true);
+    const at3 = (): number => fake.runs.filter((r) => r.args.startByte === intervalStart(3)).length;
+    const encodes = at3();
+    expect(encodes).toBe(3); // the run from interval 3, then the floor and 250 kbps tries
+    // Later reads fail at once, also after the 5 s back-off, without encoding interval 3 again.
+    await expect(readInterval(l, 3)).rejects.toThrow(/250 kbps/);
+    clock.advance(10_000);
+    await expect(readInterval(l, 3)).rejects.toThrow(/250 kbps/);
+    expect(at3()).toBe(encodes);
+  });
+
   it('answers retryAfter once a read has waited 15 s, and the encoder carries on', async () => {
     const l = layout(await levelManifest());
     let settled: unknown = null;
@@ -586,10 +623,12 @@ const runFfmpegTests = hasX264 || Boolean(process.env.CI);
 
 describe.skipIf(!runFfmpegTests)('LevelService with libx264', () => {
   // As it is, and behind a filter that moves every frame's PTS as jellyfin-ffmpeg's QSV filters do (by up to a frame).
-  for (const [name, backend] of [
-    ['libx264', x264Backend],
-    ['PTS 1129 ticks early', distortingBackend(shiftedBy(1129))],
-    ['PTS a frame less a tick early', distortingBackend(shiftedBy(3749))],
+  for (const [name, backend, merged] of [
+    ['libx264', x264Backend, false],
+    ['PTS 1129 ticks early', distortingBackend(shiftedBy(1129)), false],
+    ['PTS a frame less a tick early', distortingBackend(shiftedBy(3749)), false],
+    // The production plan: disc-levels' GOPs are under 2 s, so it merges intervals and drops their EP entries.
+    ['libx264, merged plan', x264Backend, true],
   ] as const) {
     it(`serves disc-levels at h264-1080 (${name}): the manifest’s size, the source's frames with an IDR at every EP entry, the kept audio and both PG, no PiP or commentary`, async () => {
       service.close();
@@ -598,10 +637,16 @@ describe.skipIf(!runFfmpegTests)('LevelService with libx264', () => {
         cache: new SegmentCache(join(scratch, 'transcode'), 1 << 30),
         capacity: new Capacity({ h264: 190, hevc: 100 }),
         backend,
-        planTuning: RAW_PLAN,
+        ...(merged ? {} : { planTuning: RAW_PLAN }),
       });
       const manifest = await levelManifest();
       const l = layout(manifest);
+      const sourceEntries = parseClpi(fixtureBytes('CLIPINF/00001.clpi')).epMaps.find((m) => m.pid === VIDEO)!.entries;
+      if (merged) {
+        expect(l.pts45.length).toBeGreaterThan(1);
+        expect(l.pts45.length).toBeLessThan(sourceEntries.length);
+        for (const pts of l.pts45) expect(sourceEntries.some((e) => e.pts === pts)).toBe(true);
+      } else expect(l.pts45.length).toBe(sourceEntries.length);
       let bytes: Buffer | null = null;
       for (let tries = 0; !bytes && tries < 10; tries++) {
         const got = await service.read(DISC_ID, 'h264-1080', 1, M2TS_PATH, 0, l.size, VIEWING, never);

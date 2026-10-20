@@ -27,6 +27,7 @@ import {
   type PlanTuning,
 } from './levels';
 import { rewriteMpls, type VideoAttrs } from './mpls-writer';
+import type { GraphicsByNumber } from './remux';
 import type { SegmentCache } from './segment-cache';
 
 export type EncodedLevel = Exclude<LevelId, 'original'>;
@@ -305,12 +306,21 @@ export async function buildVersion(key: string, disc: DiscInfo, level: EncodedLe
   return { key, disc, codec: levelDefFor(level, main.video).codec, fps: fpsOf(main.video.rate), manifest, sizes, rewritten, clips };
 }
 
-/** The clip's graphics PIDs by stream number, as the play item's STN lists them: PG, then IG, then any it doesn't list. */
-function graphicsByNumber(item: PlayItem, graphics: readonly number[]): number[] {
+/**
+ * The clip's kept PG and IG PIDs by stream number: as the play item's STN lists them, then any it doesn't (by the CLPI's
+ * coding), each kind on its own.
+ */
+export function graphicsByNumber(info: Pick<ClipInfo, 'item' | 'clpi'>, graphics: readonly number[]): GraphicsByNumber {
   const kept = new Set(graphics);
-  const listed = [...item.stn.pg, ...item.stn.ig].map((s) => s.pid).filter((pid) => kept.has(pid));
-  const ordered = [...new Set(listed)];
-  return [...ordered, ...graphics.filter((pid) => !ordered.includes(pid))];
+  const coding = new Map(info.clpi.programs.flatMap((p) => p.streams).map((s) => [s.pid, s.codingType]));
+  const byNumber = (listed: readonly { pid: number }[], isKind: (c: number | undefined) => boolean): number[] => {
+    const ordered = [...new Set(listed.map((s) => s.pid).filter((pid) => kept.has(pid)))];
+    return [...ordered, ...graphics.filter((pid) => !ordered.includes(pid) && isKind(coding.get(pid)))];
+  };
+  return {
+    pg: byNumber(info.item.stn.pg, (c) => c !== CodingType.IG),
+    ig: byNumber(info.item.stn.ig, (c) => c === CodingType.IG),
+  };
 }
 
 function clipRunPlan(
@@ -333,6 +343,7 @@ function clipRunPlan(
   let cacheKey: Promise<string> | null = null;
   return {
     intervals,
+    label: `disc ${disc.id} clip ${info.id} at ${level}, audio ${audio}`,
     // Waits for the clip's scan probe (once per clip): the deinterlace decision is part of the key.
     cacheKey: () =>
       (cacheKey ??= scanOf(disc, info, source, deps).then(
@@ -361,7 +372,7 @@ function clipRunPlan(
       pmtPids: [...new Set(clpi.programs.map((p) => p.programMapPid))],
       videoStreamType: def.codec === 'h264' ? CodingType.AVC : CodingType.HEVC,
       pcrPid: stcs[0]?.pcrPid ?? video.pid,
-      graphicsPids: graphicsByNumber(info.item, graphics),
+      graphics: graphicsByNumber(info, graphics),
     },
   };
 }
