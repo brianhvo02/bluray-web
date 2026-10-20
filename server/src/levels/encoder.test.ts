@@ -18,8 +18,11 @@ import {
   PROBE_TIMEOUT_MS,
   deinterlaces,
   encodeIntervalAt,
+  epFramePts,
+  frameTicks,
   probeScan,
   qsvBackend,
+  SourceFrames,
   runWindow,
   x264Backend,
   type ClipEncoderOptions,
@@ -28,6 +31,7 @@ import {
 } from './encoder';
 import { levelDefFor, planClip, type IntervalPlan, type LevelDef } from './levels';
 import { IntervalCollector, remuxInterval, type EncodedPes, type IntervalSource } from './remux';
+import { distortingBackend, flooredTo, shiftedBy } from './test-backends';
 
 const VIDEO = 0x1011;
 const fixture = (disc: string): string => join(import.meta.dirname, '../../../fixtures/synthetic', disc, 'BDMV');
@@ -48,6 +52,7 @@ function argsInput(level: LevelDef, extra: Partial<EncoderArgsInput> = {}): Enco
     startByte: 1157 * 192,
     endByte: 2326 * 192,
     keyframesPts90: [989_696, 1_079_808, 1_169_920],
+    frameTicks: 3753,
     videoPid: VIDEO,
     sourceCoding: CodingType.AVC,
     level,
@@ -58,7 +63,8 @@ function argsInput(level: LevelDef, extra: Partial<EncoderArgsInput> = {}): Enco
   };
 }
 
-const KEYS = '10.996622,11.997866,12.999111';
+/** One microsecond after a 23.976 frame (3753 ticks) before each EP entry. */
+const KEYS = '10.954923,11.956167,12.957412';
 const OUT = ['-fps_mode', 'passthrough', '-enc_time_base', '1/90000', '-mpegts_copyts', '1', '-f', 'mpegts', 'pipe:1'];
 const TAIL = ['-forced_idr', '1', '-force_key_frames', KEYS, '-g', '1000', ...OUT];
 const QSV_HEAD = ['-hide_banner', '-nostats', '-loglevel', 'error', '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-copyts', '-c:v', 'h264_qsv'];
@@ -159,9 +165,14 @@ describe('qsvBackend arguments', () => {
     expect(args.slice(args.indexOf('-b:v'), args.indexOf('-b:v') + 6)).toEqual(['-b:v', '6400000', '-maxrate', '8000000', '-bufsize', '12800000']);
   });
 
-  it('floors keyframe times to the microsecond, never past the frame', () => {
-    const args = qsvBackend.args(argsInput(levelDefFor('h264-1080', { height: 1080 }), { keyframesPts90: [899_584, 90_000 * 3 + 1] }));
-    expect(args[args.indexOf('-force_key_frames') + 1]).toBe('9.995377,3.000011');
+  it('forces each keyframe one microsecond after the shortest frame time before its EP entry, never before 0', () => {
+    const args = qsvBackend.args(argsInput(levelDefFor('h264-1080', { height: 1080 }), { keyframesPts90: [899_584, 90_000 * 3 + 1, 3000], frameTicks: 3003 }));
+    // 896 581 and 266 998 ticks, plus a microsecond.
+    expect(args[args.indexOf('-force_key_frames') + 1]).toBe('9.962012,2.966645,0.000001');
+    expect(frameTicks(24_000 / 1001)).toBe(3753);
+    expect(frameTicks(24)).toBe(3750);
+    expect(frameTicks(30_000 / 1001)).toBe(3003);
+    expect(frameTicks(60_000 / 1001)).toBe(1501);
   });
 });
 
@@ -290,7 +301,7 @@ function recordingSpawn(children: ChildProcess[], replace?: { binary: string; ar
 
 describe.skipIf(!runFfmpegTests)('ClipEncoder (libx264)', () => {
   const level = levelDefFor('h264-1080', { height: 1080 });
-  const base = { videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false };
+  const base = { videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, frameTicks: 3750 };
 
   for (const input of ['path', 'reader'] as const) {
     it(`encodes disc-levels from interval 3: intervals 3…9, each opening with an IDR at its EP entry (${input})`, async () => {
@@ -330,7 +341,7 @@ describe.skipIf(!runFfmpegTests)('ClipEncoder (libx264)', () => {
 
   it('deinterlaces disc-mpeg2 (1080i29.97) to progressive frames at 29.97 fps', async () => {
     const intervals = intervalsOf('disc-mpeg2');
-    const run = await encodeFrom({ ...base, sourceCoding: CodingType.MPEG2_VIDEO, input: { path: clipPath('disc-mpeg2') }, intervals, interlaced: true }, 0);
+    const run = await encodeFrom({ ...base, sourceCoding: CodingType.MPEG2_VIDEO, frameTicks: 3003, input: { path: clipPath('disc-mpeg2') }, intervals, interlaced: true }, 0);
     expect([...run.intervals.keys()]).toEqual(intervals.map((iv) => iv.index));
     for (const video of run.intervals.values()) {
       const sps = analyzeAvc(esOf(video[0]!.pes)).sps;
@@ -372,7 +383,7 @@ describe.skipIf(!runFfmpegTests)('ClipEncoder (libx264)', () => {
 
   it('fails a run whose ffmpeg exits 0 before the window’s last interval', async () => {
     const intervals = intervalsOf('disc-levels');
-    // ffmpeg's real output for intervals 3…9, cut in the middle, played back by a stand-in that exits 0.
+    // ffmpeg's real output for intervals 3…9, cut in the middle, played back by a stand-in that reads its input and exits 0.
     const window = intervals.slice(3);
     const full = spawnSync(
       'ffmpeg',
@@ -381,7 +392,8 @@ describe.skipIf(!runFfmpegTests)('ClipEncoder (libx264)', () => {
         file: clipPath('disc-levels'),
         startByte: window[0]!.srcSpnStart * 192,
         endByte: window.at(-1)!.srcSpnEnd * 192,
-        keyframesPts90: window.map((iv) => iv.startPts45 * 2),
+        keyframesPts90: await epFramePts({ path: clipPath('disc-levels') }, VIDEO, window),
+        frameTicks: 3750,
       }),
       { maxBuffer: 1 << 28 },
     ).stdout;
@@ -390,7 +402,7 @@ describe.skipIf(!runFfmpegTests)('ClipEncoder (libx264)', () => {
     for (const stand of [cut, '/dev/null']) {
       const seen: number[] = [];
       const err = await new Promise<Error>((resolve, reject) => {
-        const encoder = new ClipEncoder(x264Backend, { ...base, input: { path: clipPath('disc-levels') }, intervals, spawn: recordingSpawn([], { binary: 'cat', args: [stand] }) });
+        const encoder = new ClipEncoder(x264Backend, { ...base, input: { path: clipPath('disc-levels') }, intervals, spawn: recordingSpawn([], { binary: 'sh', args: ['-c', 'cat > /dev/null; cat "$0"', stand] }) });
         encoder.on('interval', (index) => seen.push(index));
         encoder.on('error', resolve);
         encoder.on('end', () => reject(new Error('ended')));
@@ -403,14 +415,14 @@ describe.skipIf(!runFfmpegTests)('ClipEncoder (libx264)', () => {
 });
 
 describe.skipIf(!runFfmpegTests)('probeScan', () => {
-  it('finds disc-mpeg2 interlaced, without soft pulldown', async () => {
+  it('finds disc-mpeg2 interlaced, without soft pulldown, its frames 3003 ticks apart', async () => {
     const plan = intervalsOf('disc-mpeg2');
-    expect(await probeScan({ path: clipPath('disc-mpeg2') }, { startByte: plan[0]!.srcSpnStart * 192, videoPid: VIDEO })).toEqual({ interlaced: true, softPulldown: false });
+    expect(await probeScan({ path: clipPath('disc-mpeg2') }, { startByte: plan[0]!.srcSpnStart * 192, videoPid: VIDEO })).toEqual({ interlaced: true, softPulldown: false, frameTicks: 3003 });
   });
 
-  it('finds disc-levels progressive (read through a reader)', async () => {
+  it('finds disc-levels progressive at 24 fps, though its CLPI says 23.976 (read through a reader)', async () => {
     const path = clipPath('disc-levels');
-    expect(await probeScan({ read: (from) => createReadStream(path, { start: from }) }, { startByte: 0, videoPid: VIDEO })).toEqual({ interlaced: false, softPulldown: false });
+    expect(await probeScan({ read: (from) => createReadStream(path, { start: from }) }, { startByte: 0, videoPid: VIDEO })).toEqual({ interlaced: false, softPulldown: false, frameTicks: 3750 });
   });
 
   it('deinterlaces interlaced video, not soft-pulldown film', () => {
@@ -452,6 +464,7 @@ describe.skipIf(!runFfmpegTests)('encodeIntervalAt (libx264)', () => {
       level,
       interlaced: false,
       hdr: false,
+      frameTicks: 3750,
     };
     const remux = (video: readonly EncodedPes[]) =>
       remuxInterval({ plan, kept: source.kept, video, videoPid: VIDEO, videoTimeline: source.videoTimeline, pcr: null, endAts: source.endAts });
@@ -535,7 +548,7 @@ describe.skipIf(!runFfmpegTests)('open GOPs (libx264)', () => {
   const at = (pts45: number): number => frames.find((f) => Math.floor(f.pts / 512) * 256 === pts45)!.pts;
   const [tk, tNext] = [at(intervals[k]!.startPts45), at(intervals[k + 1]!.startPts45)];
   const want = frames.map((f) => f.pts).filter((p) => p >= tk && p < tNext).sort((a, b) => a - b);
-  const options: ClipEncoderOptions = { input: { path }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false };
+  const options: ClipEncoderOptions = { input: { path }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, frameTicks: 3750 };
   const shown = (video: readonly EncodedPes[]): number[] => video.map((v) => ptsOf(v.pes)).sort((a, b) => a - b);
 
   it('has leading pictures: frames of interval k that lie after EP entry k+1', () => {
@@ -604,11 +617,14 @@ describe('probeScan: a stuck ffprobe', () => {
 describe('encodeIntervalAt: tied to its run', () => {
   it('kills its ffmpeg and rejects when the run’s signal aborts', async () => {
     const signals: (string | undefined)[] = [];
+    let spawned!: () => void;
+    const started = new Promise<void>((resolve) => (spawned = resolve));
     const spawn = (() => {
+      spawned();
       const child = Object.assign(new EventEmitter(), {
         stdout: new PassThrough(),
         stderr: new PassThrough(),
-        stdin: null,
+        stdin: new PassThrough().resume(),
         kill: (signal?: string): boolean => {
           signals.push(signal);
           setImmediate(() => child.emit('close', null, signal));
@@ -619,13 +635,153 @@ describe('encodeIntervalAt: tied to its run', () => {
     }) as unknown as typeof nodeSpawn;
     const intervals = intervalsOf('disc-levels');
     const level = levelDefFor('h264-1080', { height: 1080 });
-    const options: ClipEncoderOptions = { input: { path: clipPath('disc-levels') }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, spawn };
+    const options: ClipEncoderOptions = { input: { path: clipPath('disc-levels') }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, frameTicks: 3750, spawn };
     const controller = new AbortController();
     const encoding = encodeIntervalAt(x264Backend, options, 3, { rateBps: level.targetBps, overflowBytes: 1000 }, () => ({ overflow: 1 }), controller.signal);
     const settled = encoding.catch((e: unknown) => e);
-    await new Promise((r) => setImmediate(r));
+    await started;
     controller.abort();
     expect(await settled).toBeInstanceOf(Error);
     expect(signals).toContain('SIGKILL');
   });
+});
+
+describe('SourceFrames', () => {
+  const G = 90_000 / (24_000 / 1001); // 3753.75
+  /** 23.976 film from PTS 378 000 000, I P B B P B B …: [pts, dts] in decode order, decoded a frame ahead. */
+  function film(count: number): Array<[number, number]> {
+    const pts = (k: number): number => 378_000_000 + Math.round(k * G);
+    const order: number[] = [0];
+    for (let k = 3; k < count; k += 3) order.push(k, k - 2, k - 1);
+    return order.map((k, i) => [pts(k), pts(i - 1)]);
+  }
+  const all = (frames: SourceFrames, list: Array<[number, number]>): void => list.forEach(([p, d]) => frames.add(p, d));
+
+  for (const [name, move] of [
+    ['unmoved', (p: number) => p],
+    ['1129 ticks earlier', (p: number) => p - 1129],
+    ['a frame less a tick earlier (3752)', (p: number) => p - 3752],
+    ['down to the 23.976 grid', (p: number) => Math.floor(p / G) * G],
+  ] as const) {
+    it(`gives encoded frames ${name} their source PTS, whatever order they come in`, () => {
+      const source = film(30);
+      const frames = new SourceFrames(VIDEO, 3753);
+      all(frames, source);
+      frames.end();
+      const encoded = source.map(([p]) => p).sort((a, b) => b - a); // any order: here the reverse
+      expect(encoded.map((p) => frames.match(Math.floor(move(p))))).toEqual(encoded);
+    });
+  }
+
+  it('waits until a source PES decodes after the frame (no later one can show before it), or the source ends', () => {
+    const source = film(9);
+    const frames = new SourceFrames(VIDEO, 3753);
+    const [i0, p3, b1] = source;
+    frames.add(...i0!);
+    frames.add(...p3!);
+    // B1 shows before P3 and isn't in yet: an encoded frame between I0 and P3 can't be placed.
+    expect(frames.match(b1![0] - 1129)).toBeNull();
+    frames.add(...b1!);
+    expect(frames.match(i0![0] - 1129)).toBe(i0![0]); // B1's DTS is past I0
+    expect(frames.match(b1![0] - 1129)).toBeNull(); // nothing yet decodes after B1
+    for (const pes of source.slice(3)) frames.add(...pes);
+    expect(frames.match(b1![0] - 1129)).toBe(b1![0]);
+    const last = Math.max(...source.map(([p]) => p));
+    expect(frames.match(last)).toBeNull();
+    frames.end();
+    expect(frames.match(last)).toBe(last);
+  });
+
+  it('takes a field pair (two PES half a frame apart) as one frame, at its first field', () => {
+    const frames = new SourceFrames(VIDEO, 3003);
+    for (let k = 0; k < 6; k++) {
+      frames.add(900_000 + k * 3003, 900_000 + k * 3003 - 1501);
+      frames.add(900_000 + k * 3003 + 1501, 900_000 + k * 3003);
+    }
+    frames.end();
+    // 2000 ticks earlier: past the previous pair's second field, still on this pair.
+    expect([0, 1, 2, 3, 4, 5].map((k) => frames.match(900_000 + k * 3003 - 2000))).toEqual([0, 1, 2, 3, 4, 5].map((k) => 900_000 + k * 3003));
+  });
+
+  it('fails when two encoded frames are one source frame, or one has no source frame', () => {
+    const frames = new SourceFrames(VIDEO, 3753);
+    all(frames, film(6));
+    frames.end();
+    expect(frames.match(378_000_000)).toBe(378_000_000);
+    expect(() => frames.match(378_000_000 - 100)).toThrow(/two encoded frames/);
+    expect(() => frames.match(379_000_000)).toThrow(/no source frame/);
+  });
+});
+
+describe.skipIf(!runFfmpegTests)('a build that moves PTS before the encoder (libx264 behind setpts)', () => {
+  const level = levelDefFor('h264-1080', { height: 1080 });
+  const discs = [
+    { disc: 'disc-levels', sourceCoding: CodingType.AVC, interlaced: false, frameTicks: 3750, moves: [shiftedBy(0), shiftedBy(1129), shiftedBy(3749)] },
+    { disc: 'disc-mpeg2', sourceCoding: CodingType.MPEG2_VIDEO, interlaced: true, frameTicks: 3003, moves: [shiftedBy(0), shiftedBy(1129), shiftedBy(3002), flooredTo('30000/1001')] },
+  ];
+  const optionsFor = (d: (typeof discs)[number]): ClipEncoderOptions => ({
+    input: { path: clipPath(d.disc) },
+    intervals: intervalsOf(d.disc),
+    videoPid: VIDEO,
+    sourceCoding: d.sourceCoding,
+    level,
+    interlaced: d.interlaced,
+    hdr: false,
+    frameTicks: d.frameTicks,
+  });
+  const decodeOrderOk = (video: readonly EncodedPes[]): void => {
+    for (const v of video) expect(v.dts90).toBeLessThanOrEqual(ptsOf(v.pes));
+  };
+
+  it('really moves them: ffmpeg’s output is off the source by the shift, its first frame 1129 ticks early', async () => {
+    const intervals = intervalsOf('disc-levels');
+    const window = intervals.slice(3, 5);
+    const keys = await epFramePts({ path: clipPath('disc-levels') }, VIDEO, window);
+    const input = { ...argsInput(level), file: clipPath('disc-levels'), startByte: window[0]!.srcSpnStart * 192, endByte: window[1]!.srcSpnEnd * 192, keyframesPts90: keys, frameTicks: 3750 };
+    const out = spawnSync('ffmpeg', distortingBackend(shiftedBy(1129)).args(input), { maxBuffer: 1 << 28 }).stdout;
+    const pts: number[] = [];
+    for (let at = 0; at + 188 <= out.length; at += 188) {
+      const ts = parseSourcePacket(out, at - 4);
+      if (ts?.payloadUnitStart && ts.payload[0] === 0 && ts.payload[3] === 0xe0) pts.push(readTimestamp(ts.payload, 9));
+    }
+    expect(Math.min(...pts)).toBe(keys[0]! - 1129);
+  }, 60_000);
+
+  for (const d of discs) {
+    for (const move of d.moves) {
+      it(`ClipEncoder on ${d.disc} (${move}): every interval opens with an IDR at its EP entry, and its PTS are the source's`, async () => {
+        const options = optionsFor(d);
+        const run = await encodeFrom(options, 0, distortingBackend(move));
+        expect([...run.intervals.keys()]).toEqual(options.intervals.map((iv) => iv.index));
+        expectIntervals(d.disc, options.intervals, run);
+        for (const video of run.intervals.values()) decodeOrderOk(video);
+      }, 60_000);
+    }
+
+    it(`encodeIntervalAt on ${d.disc}: the retry's PTS are the source's too`, async () => {
+      const options = optionsFor(d);
+      for (const move of d.moves.slice(1, 3)) {
+        let video: EncodedPes[] = [];
+        await encodeIntervalAt(distortingBackend(move), options, 1, { rateBps: 3_000_000, overflowBytes: 1 }, (v) => {
+          video = [...v];
+          return { bytes: new Uint8Array(0) };
+        });
+        expectIntervals(d.disc, options.intervals, { intervals: new Map([[1, video]]), lastIndex: 1 });
+        decodeOrderOk(video);
+      }
+    }, 60_000);
+  }
+
+  it('keeps an open GOP’s leading pictures, B-frames reordered, 1129 ticks early', async () => {
+    const { path, intervals, frames } = openGopClip();
+    const k = 2;
+    const at = (pts45: number): number => frames.find((f) => Math.floor(f.pts / 512) * 256 === pts45)!.pts;
+    const want = frames.map((f) => f.pts).filter((p) => p >= at(intervals[k]!.startPts45) && p < at(intervals[k + 1]!.startPts45)).sort((a, b) => a - b);
+    const options: ClipEncoderOptions = { input: { path }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level: levelDefFor('phone-720', { height: 360 }), interlaced: false, hdr: false, frameTicks: 3750 };
+    const run = await encodeFrom({ ...options, maxIntervalsPerRun: k + 1 }, 0, distortingBackend(shiftedBy(1129)));
+    const video = run.intervals.get(k)!;
+    expect(video.map((v) => ptsOf(v.pes)).sort((a, b) => a - b)).toEqual(want);
+    expect(analyzeAvc(esOf(video[0]!.pes)).idr).toBe(true);
+    decodeOrderOk(video);
+  }, 60_000);
 });

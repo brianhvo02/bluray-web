@@ -12,7 +12,7 @@ import { analyzeAvc } from '../../../src/engine/decode/h264';
 import type { ByteSource } from '../../../src/engine/disc/byte-source';
 import type { DiscManifest } from '../../../src/engine/disc/nas-api';
 import { M2tsReader } from '../../../src/engine/demux/m2ts-reader';
-import { PesAssembler, type PesPacket } from '../../../src/engine/demux/pes-assembler';
+import { PesAssembler, readTimestamp, type PesPacket } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
 import { readIsoTree } from '../iso';
 import { nominalAudioBps } from './audio-core';
@@ -20,6 +20,7 @@ import { Capacity } from './capacity';
 import type { Clock } from './clip-run';
 import { clpiStreamAttrs, rewriteClpi } from './clpi-writer';
 import { x264Backend, type EncoderBackend } from './encoder';
+import { distortingBackend, shiftedBy } from './test-backends';
 import {
   ENCODER_IDLE_MS,
   LevelService,
@@ -52,6 +53,19 @@ const M2TS_PATH = 'BDMV/STREAM/00001.M2TS';
 const VIEWING = viewingIdOf('dev1', DISC_ID, 'h264-1080', 1);
 
 const fixtureBytes = (path: string): Uint8Array => new Uint8Array(readFileSync(join(DISC_DIR, 'BDMV', path)));
+
+/** The PTS of the clip's video frames. */
+const SOURCE_PTS = ((): number[] => {
+  const clip = fixtureBytes('STREAM/00001.m2ts');
+  const out: number[] = [];
+  for (let at = 0; at + 192 <= clip.length; at += 192) {
+    const ts = parseSourcePacket(clip, at);
+    if (ts?.pid === VIDEO && ts.payloadUnitStart) out.push(readTimestamp(ts.payload, 9));
+  }
+  return out;
+})();
+/** The PTS of the frame at an EP entry (the EP map keeps it to 512 ticks): what the encoder is told, and what it gives back. */
+const epFrame = (pts45: number): number => SOURCE_PTS.find((p) => Math.floor(p / 512) === Math.floor((pts45 * 2) / 512))!;
 
 /** Timers that fire only when the test moves the clock. */
 class ManualClock implements Clock {
@@ -132,7 +146,8 @@ class FakeRun {
   readonly child = Object.assign(new EventEmitter(), {
     stdout: new PassThrough(),
     stderr: new PassThrough(),
-    stdin: null,
+    /** Takes the clip's bytes as ffmpeg would. */
+    stdin: new PassThrough().resume(),
     killed: false,
     kill: (): boolean => {
       this.child.killed = true;
@@ -150,7 +165,7 @@ class FakeRun {
       const key = this.args.keys[this.written]!;
       const extra = this.oversize.get(key) ?? 0;
       this.oversize.delete(key);
-      this.child.stdout.write(Buffer.concat([videoPes(key, true, extra), videoPes(key + 3003, false)]));
+      this.child.stdout.write(Buffer.concat([videoPes(key, true, extra), videoPes(key + 3750, false)]));
     }
   }
 
@@ -160,10 +175,12 @@ class FakeRun {
     this.child.stdout.end();
   }
 
+  /** ffmpeg ends: the rest of its output, then it exits with 0 once it has read all of its input. */
   finish(): void {
     if (this.child.killed) return;
     this.step(this.args.keys.length);
-    this.child.stdout.once('end', () => setImmediate(() => this.child.emit('close', 0, null)));
+    const read = new Promise<void>((resolve) => (this.child.stdin.writableFinished ? resolve() : this.child.stdin.once('finish', resolve)));
+    this.child.stdout.once('end', () => void read.then(() => setImmediate(() => this.child.emit('close', 0, null))));
     this.child.stdout.end();
   }
 }
@@ -366,7 +383,7 @@ describe('LevelService: reads', () => {
       const bytes = await bytesOf(readInterval(l, i));
       expect(bytes.length).toBe(intervalRange(l, i).length);
       const { pids, videoPts } = scan(bytes);
-      expect(videoPts).toEqual([l.pts45[i]! * 2, l.pts45[i]! * 2 + 3003]);
+      expect(videoPts).toEqual([epFrame(l.pts45[i]!), epFrame(l.pts45[i]!) + 3750]);
       expect(pids.has(TRUEHD)).toBe(true);
     }
     expect(fake.runs.length).toBe(1);
@@ -395,7 +412,7 @@ describe('LevelService: reads', () => {
     fake.runs[0]!.step(3); // intervals 0 and 1 are done; the encoder is at 2
     const first = await bytesOf(zero);
     const one = await bytesOf(readInterval(l, 1));
-    expect(scan(one).videoPts[0]).toBe(l.pts45[1]! * 2);
+    expect(scan(one).videoPts[0]).toBe(epFrame(l.pts45[1]!));
 
     const eight = readInterval(l, 8); // 6 s of film past the encoder: a seek
     await vi.waitFor(() => expect(fake.runs.length).toBe(2));
@@ -404,7 +421,7 @@ describe('LevelService: reads', () => {
     const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
     expect(seekRun.args.startByte).toBe(plan[8]!.srcSpnStart * 192);
     seekRun.finish();
-    expect(scan(await bytesOf(eight)).videoPts[0]).toBe(l.pts45[8]! * 2);
+    expect(scan(await bytesOf(eight)).videoPts[0]).toBe(epFrame(l.pts45[8]!));
 
     const runsBefore = fake.runs.length;
     const back = await bytesOf(readInterval(l, 1)); // nothing steps the encoder: only the cache can answer
@@ -429,10 +446,10 @@ describe('LevelService: reads', () => {
     await vi.waitFor(() => expect(fake.runs.length).toBe(2));
     expect(fake.runs[0]!.child.killed).toBe(false);
     fake.runs[1]!.finish();
-    expect(scan(await bytesOf(eight)).videoPts[0]).toBe(l.pts45[8]! * 2);
+    expect(scan(await bytesOf(eight)).videoPts[0]).toBe(epFrame(l.pts45[8]!));
     const one = readInterval(l, 1);
     fake.runs[0]!.step(1);
-    expect(scan(await bytesOf(one)).videoPts[0]).toBe(l.pts45[1]! * 2);
+    expect(scan(await bytesOf(one)).videoPts[0]).toBe(epFrame(l.pts45[1]!));
   });
 
   it('waits for an interval the running encoder will reach soon, without a restart', async () => {
@@ -443,7 +460,7 @@ describe('LevelService: reads', () => {
     await bytesOf(zero);
     const five = readInterval(l, 5);
     fake.runs[0]!.finish();
-    expect(scan(await bytesOf(five)).videoPts[0]).toBe(l.pts45[5]! * 2);
+    expect(scan(await bytesOf(five)).videoPts[0]).toBe(epFrame(l.pts45[5]!));
     expect(fake.runs.length).toBe(1);
   });
 
@@ -462,7 +479,7 @@ describe('LevelService: reads', () => {
     const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
     expect(fake.runs[1]!.args.startByte).toBe(plan[6]!.srcSpnStart * 192);
     fake.runs[1]!.finish();
-    expect(scan(await bytesOf(six)).videoPts[0]).toBe(l.pts45[6]! * 2);
+    expect(scan(await bytesOf(six)).videoPts[0]).toBe(epFrame(l.pts45[6]!));
   });
 
   it('re-encodes an interval whose encode overflows its budget before serving it (Review Focus 1)', async () => {
@@ -470,16 +487,16 @@ describe('LevelService: reads', () => {
     const manifest = await levelManifest();
     const l = layout(manifest);
     const { length } = intervalRange(l, 3);
-    fake.oversize.set(l.pts45[3]! * 2, length); // the first encode of interval 3 can't fit
+    fake.oversize.set(epFrame(l.pts45[3]!), length); // the first encode of interval 3 can't fit
     for (let i = 0; i < 10; i++) {
       const bytes = await bytesOf(readInterval(l, i));
       expect(bytes.length).toBe(intervalRange(l, i).length);
-      expect(scan(bytes).videoPts[0]).toBe(l.pts45[i]! * 2);
+      expect(scan(bytes).videoPts[0]).toBe(epFrame(l.pts45[i]!));
     }
     // The run, then interval 3 alone again.
     const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
     expect(fake.runs.map((r) => r.args.startByte / 192)).toEqual([0, plan[3]!.srcSpnStart]);
-    expect(fake.runs[1]!.args.keys).toEqual([l.pts45[3]! * 2, l.pts45[4]! * 2]);
+    expect(fake.runs[1]!.args.keys).toEqual([epFrame(l.pts45[3]!), epFrame(l.pts45[4]!)]);
   });
 
   it('answers retryAfter once a read has waited 15 s, and the encoder carries on', async () => {
@@ -496,7 +513,7 @@ describe('LevelService: reads', () => {
     expect(fake.runs[0]!.child.killed).toBe(false);
     // The retry finds the interval once the encoder made it.
     fake.runs[0]!.finish();
-    expect(scan(await bytesOf(readInterval(l, 4))).videoPts[0]).toBe(l.pts45[4]! * 2);
+    expect(scan(await bytesOf(readInterval(l, 4))).videoPts[0]).toBe(epFrame(l.pts45[4]!));
   });
 
   it('stops the encoder 60 s after the last read', async () => {
@@ -554,63 +571,72 @@ const hasX264 = spawnSync('ffmpeg', ['-hide_banner', '-encoders'], { encoding: '
 const runFfmpegTests = hasX264 || Boolean(process.env.CI);
 
 describe.skipIf(!runFfmpegTests)('LevelService with libx264', () => {
-  it('serves disc-levels at h264-1080: the manifest’s size, video at every EP entry, the kept audio and both PG, no PiP or commentary', async () => {
-    service.close();
-    service = new LevelService({
-      discs: async (id) => (id === DISC_ID ? folderDiscSource(DISC_DIR, { id, name: 'Starfall Wanderer' }) : null),
-      cache: new SegmentCache(join(scratch, 'transcode'), 1 << 30),
-      capacity: new Capacity({ h264: 190, hevc: 100 }),
-      backend: x264Backend,
-    });
-    const manifest = await levelManifest();
-    const l = layout(manifest);
-    let bytes: Buffer | null = null;
-    for (let tries = 0; !bytes && tries < 10; tries++) {
-      const got = await service.read(DISC_ID, 'h264-1080', 1, M2TS_PATH, 0, l.size, VIEWING, never);
-      if (Buffer.isBuffer(got)) bytes = got;
-      else expect(got).toEqual({ retryAfter: 1 });
-    }
-    expect(bytes).not.toBeNull();
-    expect(bytes!.length).toBe(l.size);
-
-    // Seek to every EP entry as the engine does, and demux: the first video there is an IDR at the entry's PTS.
-    const source: ByteSource = {
-      exists: (p) => p === M2TS_PATH,
-      size: () => bytes!.length,
-      list: () => [],
-      read: async (_p, offset, length) => bytes!.subarray(offset, offset + length),
-    };
-    for (let i = 0; i < l.spns.length; i++) {
-      const reader = new M2tsReader({ source, path: M2TS_PATH, startSpn: l.spns[i]!, pids: new Set([VIDEO]), chunkPackets: 32 });
-      let first: PesPacket | undefined;
-      while (!first) {
-        const got = await reader.next();
-        if (got === null) break;
-        first = got.find((p) => p.pid === VIDEO);
+  // As it is, and behind a filter that moves every frame's PTS as jellyfin-ffmpeg's QSV filters do (by up to a frame).
+  for (const [name, backend] of [
+    ['libx264', x264Backend],
+    ['PTS 1129 ticks early', distortingBackend(shiftedBy(1129))],
+    ['PTS a frame less a tick early', distortingBackend(shiftedBy(3749))],
+  ] as const) {
+    it(`serves disc-levels at h264-1080 (${name}): the manifest’s size, the source's frames with an IDR at every EP entry, the kept audio and both PG, no PiP or commentary`, async () => {
+      service.close();
+      service = new LevelService({
+        discs: async (id) => (id === DISC_ID ? folderDiscSource(DISC_DIR, { id, name: 'Starfall Wanderer' }) : null),
+        cache: new SegmentCache(join(scratch, 'transcode'), 1 << 30),
+        capacity: new Capacity({ h264: 190, hevc: 100 }),
+        backend,
+      });
+      const manifest = await levelManifest();
+      const l = layout(manifest);
+      let bytes: Buffer | null = null;
+      for (let tries = 0; !bytes && tries < 10; tries++) {
+        const got = await service.read(DISC_ID, 'h264-1080', 1, M2TS_PATH, 0, l.size, VIEWING, never);
+        if (Buffer.isBuffer(got)) bytes = got;
+        else expect(got).toEqual({ retryAfter: 1 });
       }
-      reader.cancel();
-      expect(first, `EP entry ${i}`).toBeDefined();
-      expect(Math.floor(first!.pts! / 512)).toBe(Math.floor((l.pts45[i]! * 2) / 512));
-      expect(analyzeAvc(first!.payload).idr).toBe(true);
-    }
+      expect(bytes).not.toBeNull();
+      expect(bytes!.length).toBe(l.size);
 
-    const { pids } = scan(bytes!);
-    expect(pids.has(VIDEO)).toBe(true);
-    expect(pids.has(TRUEHD)).toBe(true);
-    for (const pg of PG) expect(pids.has(pg)).toBe(true);
-    expect(pids.has(PIP)).toBe(false);
-    expect(pids.has(COMMENTARY)).toBe(false);
-    // The kept audio is the TrueHD PID's AC-3 core only.
-    const audio: PesPacket[] = [];
-    const assembler = new PesAssembler((p) => audio.push(p));
-    for (let at = 0; at + 192 <= bytes!.length; at += 192) {
-      const ts = parseSourcePacket(bytes!, at);
-      if (ts?.pid === TRUEHD) assembler.push(ts);
-    }
-    assembler.flush();
-    expect(audio.length).toBeGreaterThan(0);
-    expect(audio.every((p) => p.streamIdExtension === 0x76 || (p.payload[0] === 0x0b && p.payload[1] === 0x77))).toBe(true);
-  }, 120_000);
+      // Seek to every EP entry as the engine does, and demux: the first video there is an IDR at the entry's PTS.
+      const source: ByteSource = {
+        exists: (p) => p === M2TS_PATH,
+        size: () => bytes!.length,
+        list: () => [],
+        read: async (_p, offset, length) => bytes!.subarray(offset, offset + length),
+      };
+      for (let i = 0; i < l.spns.length; i++) {
+        const reader = new M2tsReader({ source, path: M2TS_PATH, startSpn: l.spns[i]!, pids: new Set([VIDEO]), chunkPackets: 32 });
+        let first: PesPacket | undefined;
+        while (!first) {
+          const got = await reader.next();
+          if (got === null) break;
+          first = got.find((p) => p.pid === VIDEO);
+        }
+        reader.cancel();
+        expect(first, `EP entry ${i}`).toBeDefined();
+        expect(first!.pts).toBe(epFrame(l.pts45[i]!));
+        expect(analyzeAvc(first!.payload).idr).toBe(true);
+      }
+
+      const { pids, videoPts } = scan(bytes!);
+      expect(pids.has(VIDEO)).toBe(true);
+      // Every frame on the source's clock, as the untouched audio and subtitles are.
+      expect(videoPts.sort((a, b) => a - b)).toEqual([...SOURCE_PTS].sort((a, b) => a - b));
+      expect(pids.has(TRUEHD)).toBe(true);
+      for (const pg of PG) expect(pids.has(pg)).toBe(true);
+      expect(pids.has(PIP)).toBe(false);
+      expect(pids.has(COMMENTARY)).toBe(false);
+      // The kept audio is the TrueHD PID's AC-3 core only.
+      const audio: PesPacket[] = [];
+      const assembler = new PesAssembler((p) => audio.push(p));
+      for (let at = 0; at + 192 <= bytes!.length; at += 192) {
+        const ts = parseSourcePacket(bytes!, at);
+        if (ts?.pid === TRUEHD) assembler.push(ts);
+      }
+      assembler.flush();
+      expect(audio.length).toBeGreaterThan(0);
+      expect(audio.every((p) => p.streamIdExtension === 0x76 || (p.payload[0] === 0x0b && p.payload[1] === 0x77))).toBe(true);
+    }, 120_000);
+  }
 });
 
 /** A copy of disc-levels to change, in the test's scratch folder. */
@@ -716,7 +742,7 @@ describe('LevelService: fix round 1', () => {
     expect(fake.runs[0]!.child.killed).toBe(true);
     expect(fake.runs.length).toBe(2);
     expect(fake.runs[1]!.args.startByte).toBe(0);
-    expect(scan(again).videoPts[0]).toBe(l.pts45[0]! * 2);
+    expect(scan(again).videoPts[0]).toBe(epFrame(l.pts45[0]!));
     // The manifest is the rebuilt one, and stays it.
     expect(layout(await levelManifest())).toEqual(l);
     expect(fake.runs.length).toBe(2);
@@ -752,7 +778,7 @@ describe('LevelService: fix round 1', () => {
     expect(fake.runs.length).toBe(1);
     clock.advance(FAILURE_BACKOFF_MS);
     fake.auto = true;
-    expect(scan(await bytesOf(readInterval(l, 0))).videoPts[0]).toBe(l.pts45[0]! * 2);
+    expect(scan(await bytesOf(readInterval(l, 0))).videoPts[0]).toBe(epFrame(l.pts45[0]!));
     expect(fake.runs.length).toBe(2);
   });
 

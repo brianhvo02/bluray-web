@@ -8,7 +8,7 @@ import type { EncoderCodec } from './capacity';
 import type { ClipRunPlan } from './clip-run';
 import { fallbackAudioBps } from './audio-core';
 import { clpiVideoIsHdr, rewriteClpi } from './clpi-writer';
-import { deinterlaces, probeScan, type ClipInput, type ScanInfo } from './encoder';
+import { deinterlaces, frameTicks, probeScan, type ClipInput, type ScanInfo } from './encoder';
 import { firstAudioBps, type ClipSource, type LevelDiscSource } from './level-discs';
 import {
   SOURCE_PACKET_BYTES,
@@ -81,7 +81,7 @@ export interface DiscInfo {
   /** By `<clip id>:<PID>`. */
   readonly audioBps: Map<string, Promise<number>>;
   /** By clip id. */
-  readonly scans: Map<string, Promise<boolean>>;
+  readonly scans: Map<string, Promise<ScanInfo>>;
 }
 
 export interface ClipVersion {
@@ -204,13 +204,13 @@ export function audioBpsOf(disc: DiscInfo, info: ClipInfo, kept: KeptAudio, log:
   return bps;
 }
 
-/** Whether a clip is deinterlaced: one scan probe per clip (ruling L-R6), a failed one tried again next time. */
-function interlacedOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: VersionDeps): Promise<boolean> {
+/** A clip's scan: one probe per clip (ruling L-R6), a failed one tried again next time. */
+function scanOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: VersionDeps): Promise<ScanInfo> {
   let scan = disc.scans.get(info.id);
   if (!scan) {
     const probe = deps.probe ?? ((input, options) => probeScan(input, { ...options, ...(deps.spawn ? { spawn: deps.spawn } : {}) }));
     const startByte = videoEpMap(info.clpi)!.entries[0]!.spn * SOURCE_PACKET_BYTES;
-    const probing = probe(clip.input, { startByte, videoPid: info.video.pid, ...(deps.signal ? { signal: deps.signal } : {}) }).then(deinterlaces);
+    const probing = probe(clip.input, { startByte, videoPid: info.video.pid, ...(deps.signal ? { signal: deps.signal } : {}) });
     scan = probing;
     disc.scans.set(info.id, probing);
     probing.catch(() => {
@@ -307,8 +307,8 @@ function clipRunPlan(
     intervals,
     // Waits for the clip's scan probe (once per clip): the deinterlace decision is part of the key.
     cacheKey: () =>
-      (cacheKey ??= interlacedOf(disc, info, source, deps).then(
-        (deinterlace) => deps.cache.key(disc.id, level, audio, `${info.id}.${planHash(def, kept, intervals, { backend: deps.backendId, deinterlace })}`, source.size, source.mtimeMs),
+      (cacheKey ??= scanOf(disc, info, source, deps).then(
+        (scan) => deps.cache.key(disc.id, level, audio, `${info.id}.${planHash(def, kept, intervals, { backend: deps.backendId, deinterlace: deinterlaces(scan) })}`, source.size, source.mtimeMs),
         (err: Error) => {
           cacheKey = null; // probed again next time
           throw err;
@@ -325,7 +325,8 @@ function clipRunPlan(
       hdr: video.hdr,
       ...(deps.spawn ? { spawn: deps.spawn } : {}),
     },
-    interlaced: () => interlacedOf(disc, info, source, deps),
+    scan: () =>
+      scanOf(disc, info, source, deps).then((scan) => ({ interlaced: deinterlaces(scan), frameTicks: scan.frameTicks ?? frameTicks(fpsOf(video.rate)) })),
     kept: {
       keepPids: [0, ...graphics, ...ownPcrPids, ...(kept ? [kept.pid] : [])],
       coreFilters,

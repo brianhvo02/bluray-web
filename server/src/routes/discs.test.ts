@@ -65,7 +65,7 @@ function silentFfmpeg(): { spawn: typeof nodeSpawn; runs: { killed: boolean }[];
     const child = Object.assign(new EventEmitter(), {
       stdout: new PassThrough(),
       stderr: new PassThrough(),
-      stdin: null,
+      stdin: new PassThrough().resume(),
       killed: false,
       kill: (): boolean => {
         child.killed = true;
@@ -121,7 +121,8 @@ function makeService(options: { backend?: EncoderBackend; realClock?: boolean } 
     capacity,
     backend: options.backend ?? ffmpeg.backend,
     ...(options.backend ? {} : { spawn: ffmpeg.spawn, clock }),
-    probe: async () => ({ interlaced: false, softPulldown: false }),
+    // disc-levels' frames are 3750 ticks apart (24 fps), as the real probe finds, though its CLPI says 23.976.
+    probe: async () => ({ interlaced: false, softPulldown: false, frameTicks: 3750 }),
   });
 }
 

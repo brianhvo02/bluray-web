@@ -39,9 +39,9 @@ export interface ClipRunPlan {
   readonly cacheKey: () => Promise<string>;
   /** The source clip's bytes, fed to the kept-stream filter. */
   readonly read: ClipReader;
-  /** The encoder's options but `interlaced`, which `interlaced()` answers (one ffprobe per clip). */
-  readonly encoder: Omit<ClipEncoderOptions, 'interlaced' | 'maxIntervalsPerRun'>;
-  readonly interlaced: () => Promise<boolean>;
+  /** The encoder's options but `interlaced` and `frameTicks`, which `scan()` answers (one ffprobe per clip). */
+  readonly encoder: Omit<ClipEncoderOptions, 'interlaced' | 'frameTicks' | 'maxIntervalsPerRun'>;
+  readonly scan: () => Promise<{ readonly interlaced: boolean; readonly frameTicks: number }>;
   readonly kept: KeptConfig;
 }
 
@@ -396,10 +396,10 @@ class Run {
   }
 
   start(): void {
-    this.plan.interlaced().then(
-      (interlaced) => {
+    this.plan.scan().then(
+      ({ interlaced, frameTicks }) => {
         if (this.stopped) return;
-        this.options = { ...this.plan.encoder, interlaced, maxIntervalsPerRun: this.count };
+        this.options = { ...this.plan.encoder, interlaced, frameTicks, maxIntervalsPerRun: this.count };
         const encoder = new ClipEncoder(this.deps.backend, this.options);
         this.encoder = encoder;
         encoder.on('interval', (index, video) => {
