@@ -1,13 +1,14 @@
-import { spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createReadStream, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createReadStream, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import { analyzeAvc, avcIsInterlaced } from '../../../src/engine/decode/h264';
-import { readTimestamp } from '../../../src/engine/demux/pes-assembler';
+import { PesAssembler, readTimestamp, type PesPacket } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
+import { CLIP_START_PTS, buildSyntheticDisc } from '../../../tests/helpers/synthetic-disc';
 import { KeptStreams, PesCoreFilter } from './audio-core';
 import {
   ClipEncoder,
@@ -177,19 +178,26 @@ describe('runWindow', () => {
   it('bounds a run of a long clip to 300 intervals (its keyframe list stays far below the argument limit)', () => {
     const plan = fakePlan(9000); // two and a half hours
     expect(MAX_INTERVALS_PER_RUN).toBe(300);
-    const { window, endSpn } = runWindow(plan, 0, [], MAX_INTERVALS_PER_RUN);
+    const { window, overrun, endSpn } = runWindow(plan, 0, [], MAX_INTERVALS_PER_RUN);
     expect(window.map((iv) => iv.index)).toEqual(Array.from({ length: 300 }, (_, i) => i));
-    expect(endSpn).toBe(300_000);
+    // The run reads one interval more, for the leading pictures of an open GOP.
+    expect(overrun?.index).toBe(300);
+    expect(endSpn).toBe(301_000);
     const args = x264Backend.args(argsInput(levelDefFor('h264-1080', { height: 1080 }), { keyframesPts90: window.map((iv) => iv.startPts45 * 2) }));
     expect(args.join(' ').length).toBeLessThan(8192);
+    expect(runWindow(plan, 8900, [], MAX_INTERVALS_PER_RUN)).toMatchObject({ overrun: null, endSpn: 9_000_000 });
     expect(runWindow(plan, 8900, [], MAX_INTERVALS_PER_RUN).window.length).toBe(100);
+    expect(runWindow(plan, 5, [], 1)).toMatchObject({ window: [plan[5]], overrun: plan[6], endSpn: 7_000 });
   });
 
   it('stops at the next STC sequence, its bytes ending where that sequence starts', () => {
     const plan = fakePlan(20, (i) => (i < 10 ? 450_000 + i * 45_000 : 90_000 + i * 45_000));
-    const { window, endSpn } = runWindow(plan, 3, [0, 9_990], MAX_INTERVALS_PER_RUN);
+    const { window, overrun, endSpn } = runWindow(plan, 3, [0, 9_990], MAX_INTERVALS_PER_RUN);
     expect(window.map((iv) => iv.index)).toEqual([3, 4, 5, 6, 7, 8, 9]);
+    expect(overrun).toBeNull();
     expect(endSpn).toBe(9_990);
+    // A size-bounded run whose over-run interval holds the next STC's start reads only up to it.
+    expect(runWindow(plan, 3, [0, 9_990], 6)).toMatchObject({ overrun: plan[9], endSpn: 9_990 });
     expect(runWindow(plan, 10, [0, 9_990], MAX_INTERVALS_PER_RUN).window.map((iv) => iv.index)).toEqual([10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
   });
 
@@ -449,5 +457,88 @@ describe.skipIf(!runFfmpegTests)('encodeIntervalAt (libx264)', () => {
     const { options, rates, backend, remux } = setup(6144);
     await expect(encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux)).rejects.toThrow(/1 Mbps/);
     expect(rates).toEqual([1_000_000]);
+  }, 60_000);
+});
+
+/**
+ * A clip with open GOPs: libx264 with two B-frames per P and `open-gop`, a recovery-point I-frame every 24 frames (an EP
+ * entry every second). The B-frames after each I-frame in decode order are the previous GOP's last pictures in display.
+ */
+function openGopClip(): { path: string; intervals: IntervalPlan[]; frames: Array<{ spn: number; pts: number }> } {
+  const ts = execFileSync('ffmpeg', [
+    '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=24', '-frames:v', '120',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-x264-params', 'keyint=24:min-keyint=24:scenecut=0:bframes=2:b-adapt=0:open-gop=1:aud=1:repeat-headers=1',
+    '-f', 'mpegts', '-',
+  ], { maxBuffer: 1 << 28 });
+  const pes: PesPacket[] = [];
+  const assembler = new PesAssembler((p) => pes.push(p));
+  for (let at = 0; at + 188 <= ts.length; at += 188) {
+    const packet = parseSourcePacket(ts, at - 4);
+    if (packet && packet.pid === 0x100) assembler.push(packet);
+  }
+  assembler.flush();
+  const shift = CLIP_START_PTS - Math.min(...pes.map((p) => p.pts!));
+  const videoAus = pes.map((p) => p.payload.slice());
+  const files = buildSyntheticDisc({
+    clips: [{
+      clipId: '00001',
+      videoAus,
+      keyIndices: videoAus.flatMap((au, i) => (analyzeAvc(au).key ? [i] : [])),
+      startPts: CLIP_START_PTS,
+      pts: pes.map((p) => p.pts! + shift),
+      dts: pes.map((p) => (p.dts ?? p.pts!) + shift),
+    }],
+    playlists: [{ id: '00000', clipIds: ['00001'] }],
+  });
+  const root = join(scratch, 'open-gop');
+  for (const [name, bytes] of files) {
+    mkdirSync(join(root, name, '..'), { recursive: true });
+    writeFileSync(join(root, name), bytes);
+  }
+  const path = join(root, 'BDMV/STREAM/00001.m2ts');
+  const clip = readFileSync(path);
+  const frames: Array<{ spn: number; pts: number }> = [];
+  for (let spn = 0; (spn + 1) * 192 <= clip.length; spn++) {
+    const packet = parseSourcePacket(clip, spn * 192);
+    if (packet?.pid === VIDEO && packet.payloadUnitStart) frames.push({ spn, pts: readTimestamp(packet.payload, 9) });
+  }
+  const clpi = parseClpi(readFileSync(join(root, 'BDMV/CLIPINF/00001.clpi')));
+  return { path, intervals: planClip(clpi, levelDefFor('phone-720', { height: 360 }), 0).intervals, frames };
+}
+
+describe.skipIf(!runFfmpegTests)('open GOPs (libx264)', () => {
+  const level = levelDefFor('phone-720', { height: 360 });
+  const { path, intervals, frames } = openGopClip();
+  const k = 2;
+  /** T_k and T_k+1: the PTS of the frames at the EP entries. */
+  const at = (pts45: number): number => frames.find((f) => Math.floor(f.pts / 512) * 256 === pts45)!.pts;
+  const [tk, tNext] = [at(intervals[k]!.startPts45), at(intervals[k + 1]!.startPts45)];
+  const want = frames.map((f) => f.pts).filter((p) => p >= tk && p < tNext).sort((a, b) => a - b);
+  const options: ClipEncoderOptions = { input: { path }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false };
+  const shown = (video: readonly EncodedPes[]): number[] => video.map((v) => ptsOf(v.pes)).sort((a, b) => a - b);
+
+  it('has leading pictures: frames of interval k that lie after EP entry k+1', () => {
+    expect(intervals.length).toBe(5);
+    expect(want.length).toBe(24);
+    expect(frames.some((f) => f.spn >= intervals[k + 1]!.srcSpnStart && f.pts < tNext)).toBe(true);
+  });
+
+  it('a window that ends at interval k keeps every frame of [T_k, T_k+1)', async () => {
+    const run = await encodeFrom({ ...options, maxIntervalsPerRun: k + 1 }, 0);
+    expect([...run.intervals.keys()]).toEqual([0, 1, 2]);
+    expect(run.lastIndex).toBe(k);
+    expect(shown(run.intervals.get(k)!)).toEqual(want);
+    expect(analyzeAvc(esOf(run.intervals.get(k)![0]!.pes)).idr).toBe(true);
+  }, 60_000);
+
+  it('a retry of interval k keeps every frame of [T_k, T_k+1)', async () => {
+    let video: readonly EncodedPes[] = [];
+    await encodeIntervalAt(x264Backend, options, k, { rateBps: 3_000_000, overflowBytes: 1 }, (v) => {
+      video = v;
+      return { bytes: new Uint8Array(0) };
+    });
+    expect(shown(video)).toEqual(want);
+    expect(analyzeAvc(esOf(video[0]!.pes)).idr).toBe(true);
   }, 60_000);
 });

@@ -181,35 +181,42 @@ export interface ClipEncoderEvents {
   end: [lastIndex: number];
 }
 
-/** A run's intervals: from `from`, in one STC sequence, with increasing PTS (no 33-bit wrap), at most `max`. */
+/**
+ * A run's intervals: from `from`, in one STC sequence, with increasing PTS (no 33-bit wrap), at most `max`; and the
+ * over-run interval after them when the run stops only for its size. With an open GOP, the source's leading pictures
+ * of the next GOP (display time before the next EP entry, so the last interval's) come after that entry's bytes, so the
+ * run reads the over-run interval too and forces its IDR: the encode's split stays aligned, and everything from that
+ * IDR on is dropped.
+ */
 export function runWindow(
   intervals: readonly IntervalPlan[],
   from: number,
   stcStarts: readonly number[],
   max: number,
-): { window: IntervalPlan[]; endSpn: number } {
+): { window: IntervalPlan[]; overrun: IntervalPlan | null; endSpn: number } {
   const first = intervals[from];
   if (!first) throw new Error(`levels: the clip has no interval ${from}`);
   const stcOf = (spn: number): number => stcStarts.filter((s) => s > 0 && s <= spn).length;
+  // A new STC sequence, or a 33-bit PTS wrap, ends a run: ffmpeg would unwrap or jump the timestamps the splitter
+  // matches on. (A wrap loses the leading pictures of the GOP after it: rare enough to accept.)
+  const continues = (i: number): boolean =>
+    stcOf(intervals[i]!.srcSpnStart) === stcOf(first.srcSpnStart) && intervals[i]!.startPts45 > intervals[i - 1]!.startPts45;
   const window = [first];
-  for (let i = from + 1; i < intervals.length && window.length < max; i++) {
-    const iv = intervals[i]!;
-    // A new STC sequence, or a 33-bit PTS wrap: ffmpeg would unwrap or jump the timestamps the splitter matches on.
-    if (stcOf(iv.srcSpnStart) !== stcOf(first.srcSpnStart) || iv.startPts45 <= intervals[i - 1]!.startPts45) break;
-    window.push(iv);
-  }
-  const last = window.at(-1)!;
-  // The run's bytes end where the next STC sequence starts, else at the last interval's end; every video PES of an
-  // interval lies before the next EP entry's (the video PID's packets are in order).
+  let i = from + 1;
+  for (; i < intervals.length && window.length < max && continues(i); i++) window.push(intervals[i]!);
+  const overrun = i < intervals.length && continues(i) ? intervals[i]! : null;
+  const last = overrun ?? window.at(-1)!;
+  // The bytes end where the next STC sequence starts, else at the end of the over-run (or last) interval.
   const nextStc = stcStarts.find((s) => s > last.srcSpnStart && s < last.srcSpnEnd);
-  return { window, endSpn: nextStc ?? last.srcSpnEnd };
+  return { window, overrun, endSpn: nextStc ?? last.srcSpnEnd };
 }
 
 /**
  * Runs ffmpeg over one window of a clip's EP intervals (`runWindow`: one STC sequence, at most 300 intervals) and hands
  * over the encoded video one interval at a time, in decode order: an access unit whose PTS is an EP entry's (to its
  * 512-tick grain) starts that entry's interval, and must be an IDR. Frames before the first interval's IDR (leading
- * pictures of an open GOP) are dropped. `end` follows the window's last interval; a run that stops short is an error.
+ * pictures of an open GOP) are dropped, and so is everything from the over-run interval's IDR on. `end` follows the
+ * window's last interval; a run that stops short is an error.
  */
 export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
   private process: ChildProcess | null = null;
@@ -228,7 +235,7 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
     this.stop();
     const run = ++this.run;
     const { options } = this;
-    const { window, endSpn } = runWindow(options.intervals, fromInterval, options.stcStarts ?? [], options.maxIntervalsPerRun ?? MAX_INTERVALS_PER_RUN);
+    const { window, overrun, endSpn } = runWindow(options.intervals, fromInterval, options.stcStarts ?? [], options.maxIntervalsPerRun ?? MAX_INTERVALS_PER_RUN);
     const first = window[0]!;
     const lastIndex = window.at(-1)!.index;
     const startByte = first.srcSpnStart * SOURCE_PACKET_BYTES;
@@ -238,7 +245,7 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
       file: 'path' in options.input ? options.input.path : 'pipe:0',
       startByte,
       endByte,
-      keyframesPts90: window.map((iv) => iv.startPts45 * 2),
+      keyframesPts90: [...window, ...(overrun ? [overrun] : [])].map((iv) => iv.startPts45 * 2),
       videoPid: options.videoPid,
       sourceCoding: options.sourceCoding,
       level: options.level,
@@ -264,7 +271,7 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
       reader.pipe(child.stdin!);
     }
 
-    const splitter = new IntervalSplitter(window, options.level.codec);
+    const splitter = new IntervalSplitter(window, overrun, options.level.codec);
     let emitted = -1;
     const emit = (done: { index: number; video: EncodedPes[] }): void => {
       if (!live()) return;
@@ -334,14 +341,19 @@ class IntervalSplitter {
   private videoPid: number | null = null;
   private chunks: Uint8Array[] = [];
   private current: { plan: IntervalPlan; video: EncodedPes[] } | null = null;
+  /** The over-run interval's IDR came: everything from it on is dropped. */
+  private past = false;
   /** EP PTS grain → interval: unique within the run's one STC sequence. */
   private readonly starts: ReadonlyMap<number, IntervalPlan>;
+  private readonly last: IntervalPlan;
 
   constructor(
     private readonly window: readonly IntervalPlan[],
+    overrun: IntervalPlan | null,
     private readonly codec: LevelDef['codec'],
   ) {
-    this.starts = new Map(window.map((iv) => [Math.floor((iv.startPts45 * 2) / EP_PTS_GRAIN), iv]));
+    this.starts = new Map([...window, ...(overrun ? [overrun] : [])].map((iv) => [Math.floor((iv.startPts45 * 2) / EP_PTS_GRAIN), iv]));
+    this.last = window.at(-1)!;
   }
 
   /** Parses the packet at `at` of `data`; returns the intervals it completed. */
@@ -376,6 +388,10 @@ class IntervalSplitter {
 
   private endPes(): { index: number; video: EncodedPes[] } | null {
     if (this.chunks.length === 0) return null;
+    if (this.past) {
+      this.chunks = [];
+      return null;
+    }
     const size = this.chunks.reduce((n, c) => n + c.length, 0);
     let pes = new Uint8Array(size);
     let at = 0;
@@ -399,13 +415,19 @@ class IntervalSplitter {
       const idr = this.codec === 'h264' ? analyzeAvc(es).idr : analyzeHevc(es).idr;
       if (!idr) throw new Error(`levels: interval ${plan.index} of the encode doesn't start with an IDR`);
       done = this.current ? { index: this.current.plan.index, video: this.current.video } : null;
-      this.current = { plan, video: [] };
+      this.current = plan.index > this.last.index ? null : { plan, video: [] };
+      this.past = this.current === null;
+      if (this.past) return done;
     }
     // Before the first interval's IDR: leading pictures of the source's open GOP, not part of the run.
     if (!this.current) return done;
     const { plan: cur } = this.current;
     const offset = (pts - cur.startPts45 * 2 + PTS_WRAP) % PTS_WRAP;
-    if (offset >= (cur.endPts45 - cur.startPts45) * 2) throw new Error(`levels: a frame of the encode lies past interval ${cur.index}`);
+    if (offset >= (cur.endPts45 - cur.startPts45) * 2) {
+      // Past the window's end (the over-run's frames, should its IDR be late): not this run's.
+      if (cur === this.last) return done;
+      throw new Error(`levels: a frame of the encode lies past interval ${cur.index}`);
+    }
     this.current.video.push({ pes, dts90 });
     return done;
   }
