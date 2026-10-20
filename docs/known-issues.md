@@ -14,6 +14,12 @@ what would change that decision.
   fail on streams with `frame_mbs_only_flag` 0 ("Decoding error"; TSURUNE's 1080i logo is MBAFF), so those streams
   are configured with `prefer-software`. Frames come out as woven fields, so motion shows combing. *Revisit if* a
   disc has long interlaced content (a deinterlacing shader in the compositor would fix it).
+- **H.264 that redefines a PPS id switches to software decoding, dropping up to one GOP once.** Some encoders resend
+  PPS 0 with other content on nearly every picture. Chrome's hardware decoder on macOS fails on such a stream every
+  few seconds ("Decoding error", then frames lost to the next keyframe); ffmpeg and Chrome's software decoder decode
+  it cleanly. The first PPS only shows up after `configure()`, so the decoder reopens with `prefer-software` when it
+  sees the redefinition and resumes at the next key unit. That costs about a second of frames at the start of each
+  playlist. *Revisit if* that gap shows (holding the first GOP until the PPS pattern is known would remove it).
 
 ## Menus (HDMV)
 

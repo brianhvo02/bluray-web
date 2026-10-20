@@ -55,5 +55,5 @@ export function analyzeHevc(data: Uint8Array): AccessUnitInfo {
     if (type === IDR_W_RADL || type === IDR_N_LP) idr = true;
     if (type === NAL_SPS) sps ??= nal;
   }
-  return { key, idr, sps, data };
+  return { key, idr, sps, pps: [], data };
 }

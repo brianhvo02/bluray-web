@@ -4,7 +4,8 @@ export const TEST_SPS = new Uint8Array([0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40
 export const INTERLACED_SPS = hex('67640029ac1b1a501e0113f7808800001f4800075307130000243d50000393874625c6260000487aa00007270e8c4b87c70c2960');
 /** Full SPS of synthetic disc1: High 4.1, progressive (frame_mbs_only_flag 1). */
 export const PROGRESSIVE_SPS = hex('67640029acb201405ff2e022000003000200000300601e306490');
-const TEST_PPS = [0x68, 0xeb, 0xe3, 0xcb];
+/** PPS id 0. */
+export const TEST_PPS = [0x68, 0xeb, 0xe3, 0xcb];
 const AUD = [0x09, 0xf0];
 const RECOVERY_SEI = [0x06, 0x06, 0x01, 0x84, 0x80];
 const IDR_SLICE = [0x65, 0x88, 0x84, 0x00, 0x33];
@@ -18,6 +19,8 @@ export interface AvcAuOptions {
   sps?: boolean;
   /** The SPS NAL to carry instead of TEST_SPS. */
   spsNal?: Uint8Array;
+  /** A PPS NAL to carry (also without an SPS) instead of TEST_PPS. */
+  ppsNal?: Uint8Array;
   mvc?: boolean;
   /** Extra slice payload bytes, to make units larger than one TS packet. */
   fill?: number;
@@ -25,7 +28,9 @@ export interface AvcAuOptions {
 
 export function avcAu(opts: AvcAuOptions = {}): Uint8Array<ArrayBuffer> {
   const nals: number[][] = [AUD];
-  if (opts.sps ?? opts.idr) nals.push(Array.from(opts.spsNal ?? TEST_SPS), TEST_PPS);
+  if (opts.sps ?? opts.idr) nals.push(Array.from(opts.spsNal ?? TEST_SPS));
+  if (opts.ppsNal) nals.push(Array.from(opts.ppsNal));
+  else if (opts.sps ?? opts.idr) nals.push(TEST_PPS);
   if (opts.recovery) nals.push(RECOVERY_SEI);
   if (opts.mvc) nals.push(MVC_PREFIX);
   const slice = opts.idr ? IDR_SLICE : NON_IDR_SLICE;

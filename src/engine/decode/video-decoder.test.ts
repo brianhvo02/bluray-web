@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { INTERLACED_SPS, PROGRESSIVE_SPS, avcAu } from '../../../tests/helpers/h264-units';
+import { INTERLACED_SPS, PROGRESSIVE_SPS, TEST_PPS, avcAu } from '../../../tests/helpers/h264-units';
 import { CodingType } from '../bdmv/stream-types';
 import { DecoderError, UnsupportedCodecError } from './decoder';
 import { WebCodecsVideoDecoder, type VideoCodecApi, type VideoDecoderLike } from './video-decoder';
@@ -57,7 +57,7 @@ class FakeDecoder implements VideoDecoderLike {
   }
 }
 
-function setup(supported: boolean | ((codec: string) => boolean) = true): { api: VideoCodecApi; created: FakeDecoder[]; checked: VideoDecoderConfig[] } {
+function setup(supported: boolean | ((codec: string, config: VideoDecoderConfig) => boolean) = true): { api: VideoCodecApi; created: FakeDecoder[]; checked: VideoDecoderConfig[] } {
   const created: FakeDecoder[] = [];
   const checked: VideoDecoderConfig[] = [];
   const api: VideoCodecApi = {
@@ -68,7 +68,7 @@ function setup(supported: boolean | ((codec: string) => boolean) = true): { api:
     },
     isConfigSupported: async (config) => {
       checked.push(config);
-      return { supported: typeof supported === 'function' ? supported(config.codec) : supported, config };
+      return { supported: typeof supported === 'function' ? supported(config.codec, config) : supported, config };
     },
     makeChunk: (init) => init as unknown as EncodedVideoChunk,
   };
@@ -175,6 +175,52 @@ describe('WebCodecsVideoDecoder', () => {
     const { api, checked } = setup();
     await new WebCodecsVideoDecoder(api).configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true, spsNal: PROGRESSIVE_SPS }) });
     expect(checked).toEqual([{ codec: 'avc1.640029' }]);
+  });
+
+  describe('a PPS id redefined with other content (Chrome hardware decoders fail on it now and then)', () => {
+    const OTHER_PPS_0 = new Uint8Array([0x68, 0xee, 0x35, 0x25]);
+    const PPS_1 = new Uint8Array([0x68, 0x5e, 0x3c, 0xb0]);
+
+    const settled = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+    async function hardware(supported: Parameters<typeof setup>[0] = true): Promise<{ dec: WebCodecsVideoDecoder; created: FakeDecoder[]; checked: VideoDecoderConfig[] }> {
+      const { api, created, checked } = setup(supported);
+      const dec = new WebCodecsVideoDecoder(api);
+      await dec.configure({ codingType: CodingType.AVC, firstUnit: avcAu({ idr: true, spsNal: PROGRESSIVE_SPS }) });
+      dec.decode({ data: avcAu({ idr: true, spsNal: PROGRESSIVE_SPS }), ptsUs: 0, discard: false });
+      return { dec, created, checked };
+    }
+
+    it('reopens the decoder in software and resumes at the next key unit', async () => {
+      const { dec, created, checked } = await hardware();
+      dec.decode({ data: avcAu({ ppsNal: OTHER_PPS_0 }), ptsUs: 41_708, discard: false });
+      await settled();
+      expect(checked.at(-1)).toEqual({ codec: 'avc1.640029', hardwareAcceleration: 'prefer-software' });
+      expect(created).toHaveLength(2);
+      expect(created[1].config?.hardwareAcceleration).toBe('prefer-software');
+      dec.decode({ data: avcAu(), ptsUs: 83_416, discard: false });
+      expect(created[1].chunks).toHaveLength(0);
+      dec.decode({ data: avcAu({ idr: true, spsNal: PROGRESSIVE_SPS }), ptsUs: 125_125, discard: false });
+      expect(created[1].chunks.map((c) => c.type)).toEqual(['key']);
+    });
+
+    it('keeps the hardware decoder for a repeated PPS or a new id', async () => {
+      const { dec, created, checked } = await hardware();
+      dec.decode({ data: avcAu({ ppsNal: new Uint8Array(TEST_PPS) }), ptsUs: 41_708, discard: false });
+      dec.decode({ data: avcAu({ ppsNal: PPS_1 }), ptsUs: 83_416, discard: false });
+      await settled();
+      expect(checked).toHaveLength(1);
+      expect(created).toHaveLength(1);
+      expect(created[0].chunks).toHaveLength(3);
+    });
+
+    it('keeps the hardware decoder when the browser has no software decoder', async () => {
+      const { dec, created } = await hardware((_codec, config) => config.hardwareAcceleration !== 'prefer-software');
+      dec.decode({ data: avcAu({ ppsNal: OTHER_PPS_0 }), ptsUs: 41_708, discard: false });
+      await settled();
+      expect(created).toHaveLength(1);
+      expect(created[0].chunks).toHaveLength(2);
+    });
   });
 
   it('rejects unsupported codecs', async () => {
