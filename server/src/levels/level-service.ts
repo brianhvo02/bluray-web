@@ -67,7 +67,7 @@ export interface LevelServiceOptions {
   /** Injectable for tests: how ffmpeg is started. */
   readonly spawn?: typeof nodeSpawn;
   /** Injectable for tests: the scan probe (ffprobe). */
-  readonly probe?: (input: ClipInput, options: { readonly startByte: number; readonly videoPid: number }) => Promise<ScanInfo>;
+  readonly probe?: (input: ClipInput, options: { readonly startByte: number; readonly videoPid: number; readonly signal?: AbortSignal }) => Promise<ScanInfo>;
   readonly clock?: Clock;
   readonly readAheadMs?: number;
   readonly waitFilmMs?: number;
@@ -134,6 +134,8 @@ export class LevelService {
   private readonly runners = new Map<string, ClipRunner>();
   private readonly clock: Clock;
   private readonly log: (message: string) => void;
+  /** Aborted by `close()`: stops the scan probes still running. */
+  private readonly closing = new AbortController();
 
   constructor(private readonly options: LevelServiceOptions) {
     this.clock = options.clock ?? realClock;
@@ -266,6 +268,7 @@ export class LevelService {
 
   /** Stops every encoder. */
   close(): void {
+    this.closing.abort();
     this.closeRunners(() => true);
   }
 
@@ -393,6 +396,7 @@ export class LevelService {
           ...(this.options.spawn ? { spawn: this.options.spawn } : {}),
           ...(this.options.probe ? { probe: this.options.probe } : {}),
           log: this.log,
+          signal: this.closing.signal,
         });
       })();
       version = built;

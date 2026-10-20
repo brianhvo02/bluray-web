@@ -456,11 +456,23 @@ export const SCAN_PROBE_FRAMES = 120;
  * Probes about the first 120 frames of the primary video from the clip's first EP entry (`startByte`) with ffprobe:
  * `interlaced_frame` and `repeat_pict` per frame. Task 6 calls it once per clip.
  */
+/** A scan probe that hasn't answered after this long is killed, and the probe fails (tried again on the next build). */
+export const PROBE_TIMEOUT_MS = 20_000;
+
 export function probeScan(
   input: ClipInput,
-  options: { readonly startByte: number; readonly videoPid: number; readonly binary?: string; readonly spawn?: typeof nodeSpawn },
+  options: {
+    readonly startByte: number;
+    readonly videoPid: number;
+    readonly binary?: string;
+    readonly spawn?: typeof nodeSpawn;
+    /** Kills the probe, as when the service closes. */
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+  },
 ): Promise<ScanInfo> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) return reject(new Error('levels: the scan probe was stopped'));
     const piped = 'read' in input;
     const source = piped ? 'pipe:0' : `subfile,,start,${options.startByte},end,0,,:${input.path}`;
     const args = [
@@ -480,11 +492,28 @@ export function probeScan(
     }
     let out = '';
     let err = '';
+    let stopped: string | null = null;
+    const stop = (why: string): void => {
+      stopped ??= why;
+      child.kill('SIGKILL');
+    };
+    const timer = setTimeout(() => stop(`levels: ffprobe timed out after ${(options.timeoutMs ?? PROBE_TIMEOUT_MS) / 1000} s`), options.timeoutMs ?? PROBE_TIMEOUT_MS);
+    const onAbort = (): void => stop('levels: the scan probe was stopped');
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    const done = (): void => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
     child.stdout!.on('data', (chunk: Buffer) => (out += chunk.toString('utf8')));
     child.stderr!.on('data', (chunk: Buffer) => (err = (err + chunk.toString('utf8')).slice(-STDERR_KEEP)));
-    child.on('error', (e) => reject(new Error(`levels: ffprobe did not start: ${e.message}`)));
+    child.on('error', (e) => {
+      done();
+      reject(new Error(`levels: ffprobe did not start: ${e.message}`));
+    });
     child.on('close', (code) => {
+      done();
       reader?.destroy();
+      if (stopped !== null) return reject(new Error(stopped));
       if (code !== 0) return reject(new Error(`levels: ffprobe exited with ${code}: ${err.trim()}`));
       try {
         const frames = (JSON.parse(out) as { frames?: Array<{ interlaced_frame?: number; repeat_pict?: number }> }).frames ?? [];

@@ -1,7 +1,9 @@
 import { execFileSync, spawn as nodeSpawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createReadStream, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterAll, describe, expect, it } from 'vitest';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import { CodingType } from '../../../src/engine/bdmv/stream-types';
@@ -13,6 +15,7 @@ import { KeptStreams, PesCoreFilter } from './audio-core';
 import {
   ClipEncoder,
   MAX_INTERVALS_PER_RUN,
+  PROBE_TIMEOUT_MS,
   deinterlaces,
   encodeIntervalAt,
   probeScan,
@@ -541,4 +544,42 @@ describe.skipIf(!runFfmpegTests)('open GOPs (libx264)', () => {
     expect(shown(video)).toEqual(want);
     expect(analyzeAvc(esOf(video[0]!.pes)).idr).toBe(true);
   }, 60_000);
+});
+
+describe('probeScan: a stuck ffprobe', () => {
+  /** A child that never answers; `kill` records its signal and then closes it, as a killed process does. */
+  function stuckChild(): { spawn: typeof nodeSpawn; signals: (string | undefined)[] } {
+    const signals: (string | undefined)[] = [];
+    const spawn = (() => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        stdin: null,
+        kill: (signal?: string): boolean => {
+          signals.push(signal);
+          setImmediate(() => child.emit('close', null, signal));
+          return true;
+        },
+      });
+      return child;
+    }) as unknown as typeof nodeSpawn;
+    return { spawn, signals };
+  }
+
+  it('is killed with SIGKILL after its timeout (20 s by default), and the probe fails', async () => {
+    expect(PROBE_TIMEOUT_MS).toBe(20_000);
+    const { spawn, signals } = stuckChild();
+    const probing = probeScan({ path: '/nowhere.m2ts' }, { startByte: 0, videoPid: VIDEO, spawn, timeoutMs: 30 });
+    await expect(probing).rejects.toThrow(/timed out/);
+    expect(signals).toEqual(['SIGKILL']);
+  });
+
+  it('is killed when its signal aborts (the service closes)', async () => {
+    const { spawn, signals } = stuckChild();
+    const controller = new AbortController();
+    const probing = probeScan({ path: '/nowhere.m2ts' }, { startByte: 0, videoPid: VIDEO, spawn, signal: controller.signal });
+    controller.abort();
+    await expect(probing).rejects.toThrow();
+    expect(signals).toEqual(['SIGKILL']);
+  });
 });

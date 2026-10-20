@@ -110,8 +110,10 @@ export interface Version {
 export interface VersionDeps {
   readonly cache: SegmentCache;
   readonly spawn?: typeof nodeSpawn;
-  readonly probe?: (input: ClipInput, options: { readonly startByte: number; readonly videoPid: number }) => Promise<ScanInfo>;
+  readonly probe?: (input: ClipInput, options: { readonly startByte: number; readonly videoPid: number; readonly signal?: AbortSignal }) => Promise<ScanInfo>;
   readonly log?: (message: string) => void;
+  /** Aborted when the service closes: stops a scan probe still running. */
+  readonly signal?: AbortSignal;
 }
 
 async function fileBytes(manifest: DiscManifest, source: LevelDiscSource, path: string): Promise<Uint8Array | null> {
@@ -206,7 +208,7 @@ function interlacedOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: Ve
   if (!scan) {
     const probe = deps.probe ?? ((input, options) => probeScan(input, { ...options, ...(deps.spawn ? { spawn: deps.spawn } : {}) }));
     const startByte = videoEpMap(info.clpi)!.entries[0]!.spn * SOURCE_PACKET_BYTES;
-    const probing = probe(clip.input, { startByte, videoPid: info.video.pid }).then(deinterlaces);
+    const probing = probe(clip.input, { startByte, videoPid: info.video.pid, ...(deps.signal ? { signal: deps.signal } : {}) }).then(deinterlaces);
     scan = probing;
     disc.scans.set(info.id, probing);
     probing.catch(() => {
