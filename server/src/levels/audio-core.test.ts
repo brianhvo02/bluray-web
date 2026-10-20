@@ -143,6 +143,39 @@ function dtsExss(fsize: number): Uint8Array {
   return f;
 }
 
+/** One source packet of `pid` carrying `payload` (at most 184 bytes), stuffed with an adaptation field. */
+function rawPacket(pid: number, start: boolean, cc: number, payload: Uint8Array): Uint8Array {
+  const p = new Uint8Array(PACKET);
+  p.set([0, 0, 0, 0, 0x47, (start ? 0x40 : 0) | (pid >> 8), pid & 0xff], 0);
+  if (payload.length === 184) {
+    p[7] = 0x10 | cc;
+    p.set(payload, 8);
+    return p;
+  }
+  const af = 183 - payload.length;
+  p[7] = 0x30 | cc;
+  p[8] = af;
+  if (af > 0) {
+    p[9] = 0;
+    p.fill(0xff, 10, 9 + af);
+  }
+  p.set(payload, 9 + af);
+  return p;
+}
+
+/** The ES_info length of each stream in a PMT section. */
+function pmtDescriptorLengths(section: Uint8Array): Map<number, number> {
+  const programInfo = ((section[10]! & 0x0f) << 8) | section[11]!;
+  const end = 3 + (((section[1]! & 0x0f) << 8) | section[2]!) - 4;
+  const out = new Map<number, number>();
+  for (let o = 12 + programInfo; o < end; ) {
+    const len = ((section[o + 3]! & 0x0f) << 8) | section[o + 4]!;
+    out.set(((section[o + 1]! & 0x1f) << 8) | section[o + 2]!, len);
+    o += 5 + len;
+  }
+  return out;
+}
+
 /** The ES loop of a PMT section. */
 function pmtStreams(section: Uint8Array): Array<{ pid: number; streamType: number }> {
   const programInfo = ((section[10]! & 0x0f) << 8) | section[11]!;
@@ -268,6 +301,55 @@ describe('KeptStreams on disc-levels', () => {
       { pid: 0x1201, streamType: 0x90 },
     ]);
     expect((((section[8]! & 0x1f) << 8) | section[9]!)).toBe(0x1001);
+    expect(pmtDescriptorLengths(section)).toEqual(new Map([[0x1011, 0], [0x1100, 0], [0x1200, 6], [0x1201, 6]]));
+  });
+
+  it("drops the video's descriptors even when the level keeps its stream_type", () => {
+    const kept = new KeptStreams(new Set([0x1200]), new Map(), { video: { pid: 0x1011, streamType: CodingType.AVC } });
+    const [pmt] = runAll(kept, [psiPacket(0x100, discPmt([{ pid: 0x1011, streamType: 0x1b }, { pid: 0x1200, streamType: 0x90 }]))]);
+    expect(pmtDescriptorLengths(pmt!.subarray(9))).toEqual(new Map([[0x1011, 0], [0x1200, 6]]));
+  });
+
+  it('reads a PMT section whose first packet holds fewer than 3 of its bytes', () => {
+    const section = discPmt([{ pid: 0x1011, streamType: 0x1b }, { pid: 0x1200, streamType: 0x90 }]);
+    const first = new Uint8Array(184).fill(0xff);
+    first[0] = 182; // pointer_field: the section starts at the packet's last byte
+    first[183] = section[0]!;
+    const rest = new Uint8Array(184).fill(0xff);
+    rest.set(section.subarray(1));
+    const kept = new KeptStreams(new Set([0x1200]), new Map(), { video: { pid: 0x1011, streamType: CodingType.HEVC } });
+    const out = runAll(kept, [rawPacket(0x100, true, 0, first), rawPacket(0x100, false, 1, rest)]);
+    expect(out).toHaveLength(1);
+    expect(pmtStreams(out[0]!.subarray(9))).toEqual([{ pid: 0x1011, streamType: 0x24 }, { pid: 0x1200, streamType: 0x90 }]);
+  });
+});
+
+describe('KeptStreams on odd PES', () => {
+  const ac3 = (n: number): Uint8Array => {
+    const b = new Uint8Array(n).fill(0x11);
+    b.set([0x0b, 0x77]);
+    return b;
+  };
+
+  it('reads PES_packet_length from the next packet when the unit start holds fewer than 6 payload bytes', () => {
+    const pes = buildPes(0xfd, ac3(300), 0x76);
+    const packets = [rawPacket(0x1100, true, 0, pes.subarray(0, 4)), ...packetize(0x1100, pes.subarray(4), 1).map((p) => (p[5]! &= ~0x40, p))];
+    const kept = new KeptStreams(new Set(), new Map([[0x1100, new PesCoreFilter(CodingType.TRUEHD)]]));
+    const out = packets.flatMap((p, i) => kept.filter(p, i)); // no flush: a declared PES is handed over at its last packet
+    expect(out.map((k) => k.bytes)).toEqual(packets);
+    expect(demux(out.map((k) => k.bytes)).pes[0]!.payload).toEqual(ac3(300));
+  });
+
+  it('drops an unbounded PES on a filtered PID that grows past 64 KiB, and keeps the next one', () => {
+    const big = buildPes(0xbd, ac3(70_000));
+    big[4] = 0;
+    big[5] = 0;
+    const small = buildPes(0xbd, ac3(500));
+    const bigPackets = packetize(0x1100, big);
+    const smallPackets = packetize(0x1100, small, bigPackets.length);
+    const kept = new KeptStreams(new Set(), new Map([[0x1100, new PesCoreFilter(CodingType.TRUEHD)]]));
+    const out = runAll(kept, [...bigPackets, ...smallPackets]);
+    expect(out).toEqual(smallPackets);
   });
 });
 

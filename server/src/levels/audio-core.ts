@@ -14,17 +14,18 @@ const TS_PAYLOAD = 184;
 const PAT_PID = 0;
 /** The PMT PID of every Blu-ray clip (CLPI program_map_PID). */
 const BD_PMT_PID = 0x0100;
+/** The most a PES held on a filtered PID may grow to: the largest PES of declared length (6 + 0xFFFF, about 64 KiB). */
+const MAX_OPEN_PES = 6 + 0xffff;
 
-/** A whole PES packet parsed with the engine's demuxer: header fields, and where its payload starts and ends. */
-function parsePes(pes: Uint8Array): (PesPacket & { headerEnd: number; payloadEnd: number }) | null {
+/** A whole PES packet (an audio one, with the optional header) parsed with the engine's demuxer, and its header's length. */
+function parsePes(pes: Uint8Array): (PesPacket & { headerEnd: number }) | null {
   const out: PesPacket[] = [];
   const assembler = new PesAssembler((p) => out.push(p));
   assembler.push({ pid: 0, payloadUnitStart: true, continuityCounter: 0, hasPayload: true, payload: pes });
   assembler.flush();
   const p = out[0];
-  if (!p) return null;
-  // The assembler hands over a subarray of a fresh copy of `pes`, so its offset is the header's length.
-  return { ...p, headerEnd: p.payload.byteOffset, payloadEnd: p.payload.byteOffset + p.payload.length };
+  if (!p || pes.length < 9) return null;
+  return { ...p, headerEnd: 9 + pes[8]! };
 }
 
 function concat(parts: readonly Uint8Array[]): Uint8Array {
@@ -237,8 +238,8 @@ interface Pending {
   readonly packets: Uint8Array[];
   readonly chunks: Uint8Array[];
   size: number;
-  /** PES: 6 + PES_packet_length (0 when unbounded). PSI: the section's length once known (0 before). */
-  expected: number;
+  /** PES: 6 + PES_packet_length (0 when unbounded). PSI: the section's length. Null until enough bytes arrived to read it. */
+  expected: number | null;
 }
 
 export interface KeptStreamsOptions {
@@ -258,21 +259,22 @@ export interface KeptPacket {
 }
 
 /**
- * Picks a clip's packets for a level. Its output for a packet depends only on the packets from the start of that
- * packet's PES (or PSI section), never on where the run began, so interval k's packets are byte-identical whether the
- * run started at the clip's start or at k (ruling L-R4):
+ * Picks a clip's packets for a level. Interval k's packets come out byte-identical whether the run started at the clip's
+ * start or at k (ruling L-R4), under two models:
  *
- * - Each kept packet carries an assigning SPN: a packet on an unfiltered PID its own; every packet made from a filtered
- *   PES (changed or not) or a PMT section the SPN of that unit's first packet. A unit belongs to the interval holding it.
- * - A unit whose first packet came before the run's first packet is discarded (its tail is dropped), as it belongs to an
- *   earlier interval, which a run started there produces whole. Unfiltered PIDs pass their packets regardless.
- * - The PIDs in `keepPids` pass bit-exact. A PID with a core filter is collected per PES and filtered: an unchanged PES
- *   passes as its original packets, bit-exact; a shrunk one is re-packetized onto the same PID, the packets taking the
- *   original packets' TP_extra_headers in order (the first keeps its ATS) and continuity counters running on from the
- *   first original packet's. So counters are continuous within a PES, and jump only at a PES start where packets were
- *   dropped, which loses nothing for PES of declared length (all Blu-ray audio).
- * - The PAT passes. A PMT is regenerated (`pmtFor`) with only the kept streams, the core filters' streams at their core
- *   coding and the level's video, its counters running on from the original first packet's.
+ * - **Pass-through PIDs** (`keepPids`: PG, IG and any other kept as is) and the PAT: every packet passes bit-exact and is
+ *   assigned its own SPN. A run started at k passes the tails of PES that began earlier too: each packet stands alone.
+ * - **Filtered PIDs** (those with a core filter) and the PMT: packets are collected per unit (PES or section), and every
+ *   packet made from a unit is assigned the SPN of the unit's first packet, so a unit belongs to the interval holding its
+ *   start. A unit whose first packet came before the run's first packet is discarded, as it belongs to an earlier
+ *   interval, which a run started there produces whole. An unchanged PES passes as its original packets, bit-exact; a
+ *   shrunk one is re-packetized onto the same PID, the packets taking the original packets' TP_extra_headers in order
+ *   (the first keeps its ATS) and continuity counters running on from the first original packet's. So counters are
+ *   continuous within a PES, and jump only at a PES start where packets were dropped, which loses nothing for PES of
+ *   declared length (all Blu-ray audio). Not carried: the adaptation fields of the original packets of a rebuilt PES,
+ *   and adaptation-only packets on a filtered PID. A unit growing past 6 + 0xFFFF bytes is dropped.
+ * - The PMT is regenerated (`pmtFor`) with only the kept streams, the core filters' streams at their core coding and the
+ *   level's video (without the original's descriptors), its counters running on from the original first packet's.
  * - Everything else, nulls included, is dropped.
  *
  * A filtered PES is returned when its last packet arrives, so it can come after packets assigned to a later interval;
@@ -314,9 +316,8 @@ export class KeptStreams {
     const out: KeptPacket[] = [];
     let p = this.pending.get(pid);
     if (start) {
-      if (p && p.expected === 0) out.push(...this.finishPes(pid, p));
-      const declared = payload.length >= 6 ? (payload[4]! << 8) | payload[5]! : 0;
-      p = { spn, packets: [], chunks: [], size: 0, expected: declared > 0 ? 6 + declared : 0 };
+      if (p && p.expected === 0) out.push(...this.finishPes(pid, p)); // an unbounded PES ends here; a declared one cut short is dropped
+      p = { spn, packets: [], chunks: [], size: 0, expected: null };
       this.pending.set(pid, p);
     } else if (!p) {
       return out; // the tail of a PES that began before this run: it belongs to an earlier interval
@@ -324,7 +325,16 @@ export class KeptStreams {
     p.packets.push(packet);
     p.chunks.push(payload);
     p.size += payload.length;
-    if (p.expected !== 0 && p.size >= p.expected) {
+    if (p.expected === null && p.size >= 6) {
+      const head = p.chunks.length === 1 ? payload : concat(p.chunks);
+      const declared = (head[4]! << 8) | head[5]!;
+      p.expected = declared > 0 ? 6 + declared : 0;
+    }
+    if (p.size > MAX_OPEN_PES) {
+      this.pending.delete(pid);
+      return out;
+    }
+    if (p.expected && p.size >= p.expected) {
       this.pending.delete(pid);
       out.push(...this.finishPes(pid, p));
     }
@@ -333,7 +343,7 @@ export class KeptStreams {
 
   private finishPes(pid: number, p: Pending): KeptPacket[] {
     let pes = concat(p.chunks);
-    if (p.expected !== 0) pes = pes.subarray(0, p.expected);
+    if (p.expected) pes = pes.subarray(0, p.expected);
     const kept = this.coreFilters.get(pid)!.push(pes);
     if (!kept) return [];
     const bytes = kept === pes ? p.packets : this.packetize(pid, kept, p.packets);
@@ -344,7 +354,7 @@ export class KeptStreams {
     if (!hasPayload) return [];
     let p = this.pending.get(pid);
     if (start) {
-      p = { spn, packets: [], chunks: [], size: 0, expected: 0 };
+      p = { spn, packets: [], chunks: [], size: 0, expected: null };
       this.pending.set(pid, p);
       payload = payload.subarray(1 + payload[0]!);
     } else if (!p) {
@@ -353,9 +363,12 @@ export class KeptStreams {
     p.packets.push(packet);
     p.chunks.push(payload);
     p.size += payload.length;
-    const head = p.chunks[0]!;
-    if (p.expected === 0 && head.length >= 3) p.expected = sectionEnd(head);
-    if (p.expected === 0 || p.size < p.expected) return [];
+    if (p.expected === null && p.size >= 3) p.expected = sectionEnd(concat(p.chunks));
+    if (p.size > MAX_OPEN_PES) {
+      this.pending.delete(pid);
+      return [];
+    }
+    if (p.expected === null || p.size < p.expected) return [];
     this.pending.delete(pid);
     const pmt = parsePmt(concat(p.chunks).subarray(0, p.expected));
     if (!pmt) return [];
@@ -365,15 +378,21 @@ export class KeptStreams {
     return this.packetize(pid, withPointer, p.packets, 0xff).map((b) => ({ spn: p.spn, bytes: b }));
   }
 
-  /** The original PMT's streams a level keeps, in their order; a stream whose coding changes loses its descriptors. */
+  /**
+   * The original PMT's streams a level keeps, in their order. The level's video never keeps the original's descriptors
+   * (its format and resolution change); another stream whose coding changes loses them too.
+   */
   private keptPmtStreams(original: readonly Required<PmtStream>[]): PmtStream[] {
     const video = this.options.video;
     const out: PmtStream[] = [];
     if (video && !original.some((s) => s.pid === video.pid)) out.push(video);
     for (const s of original) {
+      if (video && s.pid === video.pid) {
+        out.push({ pid: video.pid, streamType: video.streamType });
+        continue;
+      }
       let streamType: number;
-      if (video && s.pid === video.pid) streamType = video.streamType;
-      else if (this.coreFilters.has(s.pid)) streamType = coreCoding(s.streamType);
+      if (this.coreFilters.has(s.pid)) streamType = coreCoding(s.streamType);
       else if (this.keepPids.has(s.pid)) streamType = s.streamType;
       else continue;
       out.push(streamType === s.streamType ? s : { pid: s.pid, streamType });
