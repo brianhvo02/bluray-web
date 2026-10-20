@@ -115,7 +115,7 @@ public class StoreXlet implements Xlet {
         return n;
     }
 
-    /** The text in the fallback font at 36 px, a size whose glyphs freetype.wasm renders as the harness does (its golden's largest). */
+    /** The text in the fallback font at 36 px, the golden's largest: freetype.wasm diverges from the harness FreeType at 40 px and above (5e Task 7). */
     private void show(String text) {
         scene = HSceneFactory.getInstance().getDefaultHScene();
         scene.setVisible(false);

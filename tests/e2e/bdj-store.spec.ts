@@ -140,7 +140,6 @@ test.describe('saved data across viewings (disc-bdj-store)', () => {
       const goneAt = Date.now();
       let next: Page;
       if (how === 'closed') {
-        // runBeforeUnload: the page is closed as a tab is, with its pagehide (without it Playwright skips the unload handlers)
         // the tab goes without its unload handlers (Playwright's default), as a killed tab does: the save cannot lean on
         // pagehide. (With runBeforeUnload, WebKit never closes a page that plays.) Another tab stays open.
         next = await context.newPage();
