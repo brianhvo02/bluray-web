@@ -340,6 +340,17 @@ describe('KeptStreams on odd PES', () => {
     expect(demux(out.map((k) => k.bytes)).pes[0]!.payload).toEqual(ac3(300));
   });
 
+  it('reports the SPN of the earliest unit still open', () => {
+    const pes = buildPes(0xfd, ac3(300), 0x76);
+    const packets = packetize(0x1100, pes, 0);
+    const kept = new KeptStreams(new Set(), new Map([[0x1100, new PesCoreFilter(CodingType.TRUEHD)]]));
+    expect(kept.openSince()).toBeNull();
+    kept.filter(packets[0]!, 7);
+    expect(kept.openSince()).toBe(7);
+    kept.filter(packets[1]!, 9);
+    expect(kept.openSince()).toBeNull();
+  });
+
   it('drops an unbounded PES on a filtered PID that grows past 64 KiB, and keeps the next one', () => {
     const big = buildPes(0xbd, ac3(70_000));
     big[4] = 0;

@@ -302,6 +302,16 @@ export class KeptStreams {
     return this.keepPids.has(ts.pid) ? [{ spn, bytes: packet }] : [];
   }
 
+  /**
+   * The source packet number of the earliest unit (a PES on a filtered PID, or a PMT section) still being collected, or
+   * null. An interval ending at `end` has all its kept packets once this is null or at least `end`.
+   */
+  openSince(): number | null {
+    let min: number | null = null;
+    for (const p of this.pending.values()) if (min === null || p.spn < min) min = p.spn;
+    return min;
+  }
+
   /** The PES still open on each filtered PID: an unbounded one is complete; a declared one cut short is dropped. */
   flush(): KeptPacket[] {
     const out: KeptPacket[] = [];
