@@ -62,6 +62,9 @@ export const SELECT_PLAYLIST_TIMEOUT_MS = 20_000;
 /** At the start-up timeout, how long the worker has to log its thread dump before it is stopped. */
 export const DUMP_WAIT_MS = 1_000;
 
+/** At a stop with unsaved storage changes, how long the worker has to save them before it is terminated. */
+export const STOP_SAVE_WAIT_MS = 3_000;
+
 export class BdjSession {
   private stopped = false;
   private bootDone: (() => void) | null = null;
@@ -77,6 +80,9 @@ export class BdjSession {
   private readonly answering = new Map<number, BdjCallName>();
   /** The start-up timeout has fired: the session fails once the worker's thread dump is in (or DUMP_WAIT_MS on). */
   private timedOut: (() => void) | null = null;
+  /** The worker's storage scopes have changes it has not saved yet (its `unsaved` messages). */
+  private unsaved = false;
+  private stopping: Promise<void> | null = null;
 
   constructor(private readonly deps: BdjSessionDeps) {
     deps.worker.onmessage = (e) => this.receive(e.data);
@@ -160,24 +166,55 @@ export class BdjSession {
     return this.activityCount;
   }
 
-  /** Terminates the worker; nothing it sent afterwards is acted on. */
-  stop(): void {
-    if (this.stopped) return;
+  /** The page is going away (pagehide): the worker saves its storage changes now. */
+  flush(): void {
+    if (!this.stopped && this.unsaved) this.post({ type: 'flush' });
+  }
+
+  /**
+   * Terminates the worker; nothing it sent afterwards is acted on. When its storage scopes have unsaved changes, it
+   * first saves them (stop, then stopped; at most STOP_SAVE_WAIT_MS). Settles once the worker is terminated.
+   */
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.stopped = true;
     this.cancelTimeout?.();
     this.cancelTimeout = null;
-    this.deps.worker.onmessage = null;
-    this.deps.worker.onerror = null;
-    this.deps.worker.terminate();
     this.bootDone?.();
     this.bootDone = null;
+    const worker = this.deps.worker;
+    worker.onerror = null;
+    if (!this.unsaved) {
+      worker.onmessage = null;
+      worker.terminate();
+      return (this.stopping = Promise.resolve());
+    }
+    return (this.stopping = new Promise<void>((resolve) => {
+      const done = (): void => {
+        cancel();
+        worker.onmessage = null;
+        worker.onerror = null;
+        worker.terminate();
+        resolve();
+      };
+      const cancel = this.deps.setTimer(STOP_SAVE_WAIT_MS, () => {
+        this.deps.onLog?.(`BD-J worker did not save its storage within ${STOP_SAVE_WAIT_MS} ms of the stop`, true);
+        done();
+      });
+      worker.onmessage = (e) => {
+        if (e.data.type === 'stopped') done();
+        else if (e.data.type === 'log') this.deps.onLog?.(e.data.line, e.data.error);
+      };
+      worker.onerror = () => done();
+      this.post({ type: 'stop' });
+    }));
   }
 
   private receive(m: FromBdj): void {
     if (this.stopped) return;
     // after the start-up timeout only the dump is waited for: Java is refused as after stop() (nothing it sends is
     // acted on), so a playlist it selects now does not play behind the fallback
-    if (this.timedOut && m.type !== 'log' && m.type !== 'dumped') return;
+    if (this.timedOut && m.type !== 'log' && m.type !== 'dumped' && m.type !== 'unsaved') return;
     switch (m.type) {
       case 'booted':
         this.deps.onLog?.(`BD-J booted in ${Math.round(m.bootMs)} ms`, false);
@@ -207,6 +244,11 @@ export class BdjSession {
         break;
       case 'dumped':
         this.timedOut?.();
+        break;
+      case 'unsaved':
+        this.unsaved = m.unsaved;
+        break;
+      case 'stopped':
         break;
     }
   }

@@ -20,6 +20,9 @@ import { GraphicsPlaneReader, GraphicsPlaneWriter } from './graphics-plane';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
+import type { BdjStore } from './store/bdj-store';
+import { ScopeSync } from './store/scope-sync';
+import { discScopes, storeSource } from './store/scopes';
 import { WorkerBdjHost } from './worker-host';
 import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
 
@@ -95,6 +98,11 @@ export interface BdjWorkerOptions {
   readonly loadDefaultFont?: () => Promise<Uint8Array>;
   /** Reads a NAS disc's files; the worker's fetch by default. */
   readonly fetch?: typeof fetch;
+  /**
+   * Where the disc's saved data (/persistent/, /buda/) lasts between sessions, for the disc's source (scopes.ts
+   * storeSource); without it (or with null) it lasts until BD-J stops, as before.
+   */
+  readonly createStore?: (source: string) => BdjStore | null;
 }
 
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
@@ -128,6 +136,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const startup = new StartupWatch();
   /** The plane Java draws into, read for its visibility. */
   let planeView: GraphicsPlaneReader | null = null;
+
+  /** The storage scopes once loaded and in the VFS. */
+  let sync: ScopeSync | null = null;
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -234,6 +245,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (!model) throw new Error('the disc model is not loaded yet');
         return model;
       };
+      // the storage scopes load while the JDK starts up too: Libbluray.init (and so every xlet) waits for them
+      const store = options.createStore?.(storeSource(m.disc)) ?? null;
+      const storeLoading = store ? loadScopes(store, disc, m.discId) : Promise.resolve(null);
       planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
         disc,
@@ -276,10 +290,14 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });
         },
+        onVfsChange: (path, change, to) => sync?.changed(path, change, to),
+        onVfsFull: (path) => sync?.refused(path),
       });
       // boot() reports a JDK failure itself, with its BdjError code
-      await Promise.all([loading, rt.bootJdk().catch(() => undefined)]);
+      const [, , scopes] = await Promise.all([loading, rt.bootJdk().catch(() => undefined), storeLoading]);
       if (ended) return;
+      scopes?.attach(rt.jvm.opts.vfs!);
+      sync = scopes;
       await rt.boot();
     } catch (e) {
       fail(e);
@@ -290,6 +308,33 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     post({ type: 'booted', bootMs: performance.now() - t0 });
     if (m.memoryStatsMs) reportMemory(m.memoryStatsMs);
     for (const w of waiting.splice(0)) deliver(w);
+  };
+
+  /** The disc's storage scopes from `store`; null (saved data lasts the session only) when they cannot be worked out. */
+  const loadScopes = async (store: BdjStore, disc: Parameters<typeof discScopes>[0], discId: string | null): Promise<ScopeSync | null> => {
+    try {
+      return await ScopeSync.load(await discScopes(disc, discId), {
+        store,
+        setTimer: (ms, fn) => {
+          const id = setTimeout(fn, ms);
+          return () => clearTimeout(id);
+        },
+        log: (line) => post({ type: 'log', line, error: false }),
+        onUnsaved: (unsaved) => port.postMessage({ type: 'unsaved', unsaved }),
+      });
+    } catch (e) {
+      post({ type: 'log', line: `BD-J storage: the disc's storage scopes could not be read (${e instanceof Error ? e.message : String(e)}); saved data lasts until BD-J stops`, error: false });
+      return null;
+    }
+  };
+
+  /** The engine stops BD-J: Java halts where it is, and what it wrote is saved before the worker is terminated. */
+  const stop = async (): Promise<void> => {
+    ended = true;
+    driving?.abort();
+    rt?.jvm.threads.halt();
+    await sync?.flush();
+    port.postMessage({ type: 'stopped' });
   };
 
   /**
@@ -323,6 +368,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   };
 
   port.onmessage = ({ data: m }) => {
+    // a stop and a flush come after a failure too: what Java wrote before it is still saved
+    if (m.type === 'stop') return void stop();
+    if (m.type === 'flush') return void sync?.flush();
     if (ended) return;
     switch (m.type) {
       case 'remoteToken':

@@ -665,6 +665,11 @@ export class PlayerController {
     this.update({ ...this.snapshot, subtitles: { ...subs, scale } });
   }
 
+  /** The page is going away: a BD-J disc's saved data is stored now rather than after its debounce. */
+  flushSaves(): void {
+    this.post({ type: 'flushSaves' });
+  }
+
   /** Tells the engine which memory limits to use (sent once, before a disc opens). */
   setMemoryProfile(profile: MemoryProfileName): void {
     this.post({ type: 'setMemoryProfile', profile });

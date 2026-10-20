@@ -427,6 +427,11 @@ export class Player {
   private planeSeen: { plane: GraphicsPlaneReader; version: number; hash: string | null } | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
   private earlyBdj: EarlyBdj | null = null;
+  /**
+   * Stopped BD-J workers still saving their storage scopes: a new worker's boot waits for them, so it loads what they
+   * saved (the same disc reopened, or BD-J entered again).
+   */
+  private bdjSaving: Promise<void> = Promise.resolve();
   /** When the open command for this disc arrived (nowMs), and BD-J start-up times since then (telemetry `bdj`). */
   private openedAtMs = 0;
   private bdjStartup: { bootMs: number | null; firstPlaylistMs: number | null; firstFrameMs: number | null } | null = null;
@@ -494,6 +499,11 @@ export class Player {
       this.remoteToken(cmd.token);
       return Promise.resolve();
     }
+    // the page is going away (pagehide): the BD-J worker saves its storage at once, not behind queued commands
+    if (cmd.type === 'flushSaves') {
+      this.bdj?.session.flush();
+      return Promise.resolve();
+    }
     // a bufferFirst open waits for its fill: cancelling can't wait in the queue behind it
     if (cmd.type === 'cancelBuffer') {
       const hold = this.openHold;
@@ -530,6 +540,7 @@ export class Player {
           break;
         case 'remoteToken':
         case 'cancelBuffer':
+        case 'flushSaves':
           break; // handled at once
         case 'bufferAhead':
           await this.fill(cmd, false);
@@ -1104,7 +1115,7 @@ export class Player {
     this.earlyBdj = early;
     void (async () => {
       try {
-        const [classLibrary, bdid] = await Promise.all([library, readBdid(source)]);
+        const [classLibrary, bdid] = await Promise.all([library, readBdid(source), this.bdjSaving]);
         // once adopted, the session sends the same boot itself (EarlyBdjWorker passes only the first)
         if (this.earlyBdj !== early) return;
         early.worker.boot({
@@ -1257,6 +1268,8 @@ export class Player {
       return;
     }
     if (this.bdj !== entry) return;
+    await this.bdjSaving; // a stopped worker's saves, which this one loads
+    if (this.bdj !== entry) return;
     await entry.session.boot(this.bootDisc(entry.disc), this.memory.bdjRemoteReadAheadBytes, this.bdjDiscId, classes);
     if (this.bdj !== entry) return;
     entry.booted = true;
@@ -1318,7 +1331,8 @@ export class Player {
     this.planeSeen = null;
     this.releaseBdjStill();
     this.openGeneration++; // a playlist Java asked for that is still loading never opens (as stopNavigator)
-    entry.session.stop();
+    const saved = entry.session.stop();
+    this.bdjSaving = Promise.all([this.bdjSaving, saved]).then(() => undefined);
     entry.disc.stop();
     // the menu goes at once (Review Focus 2): nothing of the plane or the background still is drawn again
     this.background.clear();

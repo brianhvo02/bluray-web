@@ -41,7 +41,11 @@ export type ToBdj =
   | { readonly type: 'event'; readonly ev: number; readonly param: number; readonly coalesce?: Coalesce }
   | { readonly type: 'reply'; readonly id: number; readonly value: number | string }
   /** Log a thread dump (diagnostics), then answer `dumped`. */
-  | { readonly type: 'dump'; readonly reason: string };
+  | { readonly type: 'dump'; readonly reason: string }
+  /** Save the storage scopes' changes now (the page is going away: pagehide). */
+  | { readonly type: 'flush' }
+  /** BD-J stops: Java is halted, the storage scopes' changes are saved, then the worker answers `stopped`. */
+  | { readonly type: 'stop' };
 
 export type FromBdj =
   | { readonly type: 'booted'; readonly bootMs: number }
@@ -54,7 +58,11 @@ export type FromBdj =
   /** The NAS answered 401: the engine asks the controller for a fresh token and sends it as remoteToken. */
   | { readonly type: 'remoteTokenNeeded' }
   /** The thread dump asked for has been logged. */
-  | { readonly type: 'dumped' };
+  | { readonly type: 'dumped' }
+  /** Whether the storage scopes have changes not saved yet (sent when it changes): a stop then waits for `stopped`. */
+  | { readonly type: 'unsaved'; readonly unsaved: boolean }
+  /** The answer to `stop`: the worker can be terminated. */
+  | { readonly type: 'stopped' };
 
 export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';
 

@@ -8,7 +8,7 @@ import type { DiscSpec } from '../disc/disc-spec';
 import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
-import { BdjSession, DUMP_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
+import { BdjSession, DUMP_WAIT_MS, STOP_SAVE_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
@@ -280,6 +280,55 @@ describe('BdjSession rules', () => {
     expect(h.failures).toEqual([]);
     expect(h.logs).not.toContain('late');
     expect(f.sent.length).toBe(sent);
+  });
+
+  it('with unsaved storage changes, a stop lets the worker save them (stop, stopped) before it is terminated', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 1 });
+    h.session.flush();
+    expect(f.sent.map((m) => m.type)).toEqual(['boot']); // nothing to save yet
+    f.emit({ type: 'unsaved', unsaved: true });
+    h.session.flush(); // pagehide
+    expect(f.sent.map((m) => m.type)).toEqual(['boot', 'flush']);
+    let done = false;
+    const stopped = h.session.stop().then(() => void (done = true));
+    expect(f.sent.at(-1)).toEqual({ type: 'stop' });
+    expect(f.terminated()).toBe(false);
+    f.emit({ type: 'call', id: 1, name: 'writeReg', args: [1, 4, 1, -1] }); // Java is not answered after the stop
+    f.emit({ type: 'log', line: 'BD-J storage: saved', error: false });
+    expect(h.calls).toEqual([]);
+    expect(h.logs).toContain('BD-J storage: saved');
+    await Promise.resolve();
+    expect(done).toBe(false);
+    f.emit({ type: 'stopped' });
+    await stopped;
+    expect(f.terminated()).toBe(true);
+    expect(h.session.stop()).toBe(h.session.stop()); // once
+  });
+
+  it('terminates a worker that does not answer the stop within STOP_SAVE_WAIT_MS, and stops at once once all is saved', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'unsaved', unsaved: true });
+    const stopped = h.session.stop();
+    h.clock.advance(STOP_SAVE_WAIT_MS - 1);
+    expect(f.terminated()).toBe(false);
+    h.clock.advance(1);
+    await stopped;
+    expect(f.terminated()).toBe(true);
+    expect(h.logs).toContain(`BD-J worker did not save its storage within ${STOP_SAVE_WAIT_MS} ms of the stop`);
+
+    const g = fakeWorker();
+    const k = session(g.worker);
+    void k.session.boot(DISC, 0, null, CLASSES);
+    g.emit({ type: 'unsaved', unsaved: true });
+    g.emit({ type: 'unsaved', unsaved: false });
+    void k.session.stop();
+    expect(g.terminated()).toBe(true);
+    expect(g.sent.map((m) => m.type)).toEqual(['boot']);
   });
 
   it('sends a title start the host asks for during selectTitle only after that call is answered', async () => {

@@ -205,7 +205,12 @@ export type EngineCommand =
   | { readonly type: 'close' }
   /** Shade the video with this set (compiled in the background), or draw it unshaded (null). Kept across discs. */
   | { readonly type: 'setVideoShaders'; readonly set: ShaderSetData | null }
-  | { readonly type: 'setMemoryProfile'; readonly profile: MemoryProfileName };
+  | { readonly type: 'setMemoryProfile'; readonly profile: MemoryProfileName }
+  /**
+   * The page is going away (pagehide, or hidden): a BD-J title saves what its disc wrote under /persistent/ and /buda/
+   * now rather than at the end of its 2 s debounce. Handled at once, not queued.
+   */
+  | { readonly type: 'flushSaves' };
 
 export type EngineEvent =
   /** `bdjSupported`: this engine runs BD-J titles. */

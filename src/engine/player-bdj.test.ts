@@ -447,6 +447,42 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'start')).toEqual([{ type: 'start', title: 0xffff }]));
   });
 
+  it("flushes BD-J's saved data on flushSaves (pagehide), and a disc reopened boots only once the stopped worker has saved", async () => {
+    const workers = [handWorker(), handWorker()];
+    let created = 0;
+    const player = new Player({
+      emit: () => undefined,
+      videoCodecApi: fakeVideoCodecApi,
+      nowMs: () => 1000,
+      requestFrame: () => undefined,
+      createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
+      createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+      setTimer: () => () => undefined,
+      createBdjWorker: () => workers[created++]!.worker,
+      loadClassLibrary: async () => CLASSES,
+    });
+    players.push(player);
+    const [first, second] = workers as [ReturnType<typeof handWorker>, ReturnType<typeof handWorker>];
+    const disc = { kind: 'files', entries: discEntries(bdjDisc()) } as const;
+    await player.handle({ type: 'open', disc });
+    await vi.waitFor(() => expect(first.sent.some((m) => m.type === 'boot')).toBe(true));
+    first.emit({ type: 'booted', bootMs: 1 });
+    first.emit({ type: 'unsaved', unsaved: true }); // Java wrote under /persistent/
+    void player.handle({ type: 'flushSaves' });
+    expect(first.sent.at(-1)).toEqual({ type: 'flush' });
+
+    await player.handle({ type: 'close' });
+    expect(first.sent.at(-1)).toEqual({ type: 'stop' });
+    expect(first.terminated()).toBe(false);
+    await player.handle({ type: 'open', disc });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(created).toBe(2);
+    expect(second.sent.some((m) => m.type === 'boot')).toBe(false); // it would load the scopes before they are saved
+    first.emit({ type: 'stopped' });
+    expect(first.terminated()).toBe(true);
+    await vi.waitFor(() => expect(second.sent.some((m) => m.type === 'boot')).toBe(true));
+  });
+
   it("writes the application's player settings to the registers Java reads (bd_set_player_setting_str)", async () => {
     const w = handWorker();
     await harness(bdjDisc(), { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });

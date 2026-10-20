@@ -6,6 +6,7 @@ import { runBdjWorker, type BdjPort, type BdjWorkerHandle } from '../../src/engi
 import { GraphicsPlaneReader, GraphicsPlaneWriter, planeHash } from '../../src/engine/bdj/graphics-plane';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import type { ClassLibrarySource } from '../../src/engine/bdj/runtime';
+import { MemoryBdjStore, type BdjStore } from '../../src/engine/bdj/store/bdj-store';
 import type { WorkerLike } from '../../src/engine/bdj/session';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from '../../src/engine/bdj/worker-protocol';
 import { createAudioDecoderFactory } from '../../src/engine/decode/audio-decoder';
@@ -87,7 +88,7 @@ export function traceEntryOf(name: BdjCallName, args: readonly BdjWireValue[], v
  * Two ends of an in-process channel between the engine and runBdjWorker: messages are delivered by reference (the
  * disc's Blob stand-ins for clips over 4 GiB cannot be cloned) on a later macrotask, in order, as a MessagePort does.
  */
-function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void, onHandle: (h: BdjWorkerHandle) => void): WorkerLike {
+function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void, onHandle: (h: BdjWorkerHandle) => void, store: BdjStore): WorkerLike {
   let closed = false;
   let handle: BdjWorkerHandle | null = null;
   const port: BdjPort = {
@@ -112,7 +113,7 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
       handle?.runtime?.jvm.threads.halt();
     },
   };
-  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts });
+  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts, createStore: () => store });
   onHandle(handle);
   return worker;
 }
@@ -205,6 +206,8 @@ export async function replayPlayerBdj(
     }
   };
 
+  // the disc's saved data, empty at first as in a browser that never played it, and kept across its BD-J workers
+  const store = new MemoryBdjStore();
   const player = new Player({
     emit: (e) => events.push(e),
     videoCodecApi: fakeVideoCodecApi,
@@ -216,9 +219,14 @@ export async function replayPlayerBdj(
     // the replay has its own timeout; the first-playlist timer would measure the virtual clock's real-time steps
     setTimer: () => () => undefined,
     createBdjWorker: () =>
-      inProcessWorker(onToBdj, onFromBdj, (h) => {
-        lastWorker = h;
-      }),
+      inProcessWorker(
+        onToBdj,
+        onFromBdj,
+        (h) => {
+          lastWorker = h;
+        },
+        store,
+      ),
     loadClassLibrary: async () => classes,
     bdjLog: opts.log ? (line) => opts.log!(line) : undefined,
     playerSettings: HARNESS_SETTINGS,

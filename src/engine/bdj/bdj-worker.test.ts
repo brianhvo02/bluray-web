@@ -8,7 +8,9 @@ import { BDJ_REMOTE_CHUNK_BYTES, BDJ_REMOTE_IN_FLIGHT } from '../disc/disc-spec'
 import type { DiscManifest } from '../disc/nas-api';
 import { fakeNas } from '../../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
-import { discEntries } from '../../../tests/helpers/synthetic-disc';
+import { discEntries, syntheticSource } from '../../../tests/helpers/synthetic-disc';
+import type { BdjStore, LoadedSnapshot, SaveResult, Snapshot } from './store/bdj-store';
+import { discScopes } from './store/scopes';
 import { StartupWatch, runBdjWorker, type BdjPort } from './bdj-worker';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
@@ -210,5 +212,72 @@ describe('runBdjWorker', () => {
     expect(ranges.length).toBeGreaterThan(0);
     expect(Math.max(...ranges)).toBeLessThanOrEqual(BDJ_REMOTE_CHUNK_BYTES);
     expect(maxInFlight).toBeLessThanOrEqual(BDJ_REMOTE_IN_FLIGHT);
+  }, 90_000);
+});
+
+describe('runBdjWorker and the storage scopes', () => {
+  class GatedStore implements BdjStore {
+    readonly loads: string[] = [];
+    readonly saved = new Map<string, Snapshot>();
+    private release!: () => void;
+    readonly gate = new Promise<void>((resolve) => (this.release = resolve));
+    open(): void {
+      this.release();
+    }
+    async load(scope: string): Promise<LoadedSnapshot> {
+      this.loads.push(scope);
+      await this.gate;
+      return scope.startsWith('persistent/') ? { files: [{ path: '1/count', mtime: 1000, bytes: new Uint8Array([7]) }], etag: 'e1' } : { files: [], etag: null };
+    }
+    async save(scope: string, snapshot: Snapshot): Promise<SaveResult> {
+      this.saved.set(scope, snapshot);
+      return { etag: `e${this.saved.size + 1}` };
+    }
+  }
+
+  it('boots Libbluray only once both scopes are loaded, and saves what Java wrote before it answers a stop', async () => {
+    const received: FromBdj[] = [];
+    const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+    const store = new GatedStore();
+    const sources: string[] = [];
+    const handle = runBdjWorker(port, { createStore: (source) => (sources.push(source), store) });
+    const files = fixtureDiscFiles('disc-bdj');
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        disc: { kind: 'files', entries: discEntries(files) },
+        readAheadBytes: 0,
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+      },
+    });
+    const scopes = await discScopes(syntheticSource(files), null);
+    expect(scopes.map((s) => s.key)).toEqual([expect.stringMatching(/^persistent\/[0-9a-f]{8}$/), expect.stringMatching(/^buda\/[0-9a-f]{8}\/[0-9a-f]{32}$/)]);
+    await vi.waitFor(() => expect(store.loads).toEqual(scopes.map((s) => s.key)));
+    expect(sources).toEqual(['local']);
+    await vi.waitFor(() => expect(handle.runtime).not.toBeNull());
+    await handle.runtime!.bootJdk(); // the JDK starts meanwhile
+    await new Promise((r) => setTimeout(r, 50));
+    expect(received.map((m) => m.type)).not.toContain('booted');
+    store.open();
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+    const vfs = handle.runtime!.jvm.opts.vfs!;
+    const persistent = scopes[0]!.dir;
+    expect(vfs.stat(`${persistent}/1/count`)?.size).toBe(1);
+
+    // a write through the VFS (as Java's FileOutputStream makes it) is unsaved until the stop saves it
+    const h = vfs.open(`${persistent}/1/count`, 'w')!;
+    vfs.write(h, new Uint8Array([8]), 0, 1);
+    vfs.close(h);
+    expect(received.filter((m) => m.type === 'unsaved')).toEqual([{ type: 'unsaved', unsaved: true }]);
+    port.onmessage!({ data: { type: 'stop' } });
+    await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
+    expect([...store.saved.get(scopes[0]!.key)!.files[0]!.bytes]).toEqual([8]);
+    expect(store.saved.has(scopes[1]!.key)).toBe(false);
+    expect(received.filter((m) => m.type === 'unsaved').at(-1)).toEqual({ type: 'unsaved', unsaved: false });
+    expect(handle.runtime!.jvm.threads.isHalted).toBe(true);
   }, 90_000);
 });
