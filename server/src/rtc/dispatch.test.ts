@@ -11,6 +11,8 @@ import { Auth } from '../auth';
 import { BdjStore } from '../bdj-store';
 import { createServer } from '../http';
 import type { Handler, Response as HttpResponse } from '../http';
+import type { LevelRouteService } from '../routes/discs';
+import { discRoutes } from '../routes/discs';
 import { Library, SETTLE_MS } from '../library';
 import { Store } from '../store';
 import { serveChannel } from './dispatch';
@@ -272,6 +274,64 @@ describe('serveChannel', () => {
     expect(stream!.destroyed).toBe(true);
     await expect((await conn.client.fetch('/api/test/short', { headers: auth })).arrayBuffer()).rejects.toThrow(/ended early/);
     // the channel stays usable after both
+    expect((await conn.client.fetch('/api/health')).status).toBe(200);
+  });
+});
+
+describe('serveChannel and the quality levels', () => {
+  /** A level service whose reads answer `retryAfter`, or wait until their signal aborts. */
+  function stubLevels(read: LevelRouteService['read']): LevelRouteService {
+    return {
+      manifest: async () => null,
+      levels: async () => null,
+      release: () => {},
+      size: async () => 1 << 20,
+      originalPlayable: async () => true,
+      read,
+    };
+  }
+  const discId = (): string => library.list('drv')!.discs[0]!.id;
+
+  it('answers a level read the encoder hasn’t reached with 503 and Retry-After: 1', async () => {
+    handlers.unshift(discRoutes(library, { service: stubLevels(async () => ({ retryAfter: 1 })), auth }));
+    const conn = open();
+    const { token } = await sessionOver(conn);
+    const res = await conn.client.fetch(`/api/discs/${discId()}/files/BDMV/STREAM/00001.M2TS?level=h264-1080&audio=1`, {
+      headers: { Authorization: `Bearer ${token}`, Range: 'bytes=0-191' },
+    });
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('1');
+    expect(await res.json()).toEqual({ error: 'retry' });
+  });
+
+  it('aborts a waiting level read when the peer cancels the request', async () => {
+    let signal: AbortSignal | undefined;
+    const aborted = new Promise<void>((resolve) => {
+      handlers.unshift(
+        discRoutes(library, {
+          service: stubLevels(async (_d, _l, _a, _p, _o, _n, _v, s) => {
+            signal = s;
+            await new Promise<void>((r) => s.addEventListener('abort', () => r(), { once: true }));
+            resolve();
+            return { retryAfter: 1 };
+          }),
+          auth,
+        }),
+      );
+    });
+    const conn = open();
+    const { token } = await sessionOver(conn);
+    const abort = new AbortController();
+    const pending = conn.client.fetch(`/api/discs/${discId()}/files/BDMV/STREAM/00001.M2TS?level=h264-1080&audio=1`, {
+      headers: { Authorization: `Bearer ${token}`, Range: 'bytes=0-191' },
+      signal: abort.signal,
+    });
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    expect(signal!.aborted).toBe(false);
+    abort.abort();
+    await expect(pending).rejects.toThrow();
+    await aborted;
+    expect(signal!.aborted).toBe(true);
     expect((await conn.client.fetch('/api/health')).status).toBe(200);
   });
 });

@@ -8,6 +8,8 @@ ADD --checksum=sha256:a0cde241ae297fa6f0265c0bf15ce9eb9ee97c008904a59ab367a67d59
 
 # jellyfin-ffmpeg (GPL-3.0 build, see NOTICE) with Intel's media driver (iHD) and oneVPL runtime under
 # /usr/lib/jellyfin-ffmpeg: the quality levels' encoder (server/src/levels/). It runs as a child process.
+# Pinned to an exact build. Jellyfin prunes old builds from its repository, so when this step fails because the version
+# is gone, bump it to the newest jellyfin-ffmpeg7 in https://repo.jellyfin.org/debian/dists/bookworm/main/binary-amd64/.
 ARG JELLYFIN_FFMPEG_VERSION=7.1.4-3-bookworm
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \

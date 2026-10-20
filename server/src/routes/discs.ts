@@ -4,7 +4,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
 import type { DiscEntry } from '../../../src/engine/disc/nas-api';
 import type { Auth } from '../auth';
-import { json } from '../http';
+import { json, requestSignal } from '../http';
 import type { Handler, Response } from '../http';
 import { IsoTrees, isoFileStream, isoUnchanged } from '../iso';
 import { RetryLater } from '../levels/clip-run';
@@ -129,7 +129,8 @@ export function discRoutes(library: Library, levels?: DiscLevels): Handler {
     }
     if (!(req.method === 'GET' || (read && req.method === 'HEAD'))) return null;
     const level = url.searchParams.get('level');
-    const atLevel = action === 'levels' || ((action === 'manifest' || action === 'files') && level !== null && level !== 'original');
+    // `level=original`, an empty `level=` or none: the original disc.
+    const atLevel = action === 'levels' || ((action === 'manifest' || action === 'files') && level !== null && level !== '' && level !== 'original');
     if (atLevel && !levels) return notFound();
 
     const disc = library.disc(id);
@@ -223,31 +224,31 @@ async function levelRoute(levels: DiscLevels, req: IncomingMessage, url: URL, di
   }
   const size = await service.size(discId, level, audio, path);
   if (size === null) return notFound();
-  const range = parseRange(req.headers.range ?? 'bytes=0-', size);
-  if (range === 'unsatisfiable' || range === null) return { status: 416, headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': '0' } };
+  // No Range (or one we don't serve, as parseRange's null) means `bytes=0-`, as for the original; an empty file is 200.
+  if (size === 0) return { status: 200, headers: bytesHeaders(0) };
+  const range = parseRange(req.headers.range, size) ?? { start: 0, end: size - 1, asked: false };
+  if (range === 'unsatisfiable') return { status: 416, headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', 'Content-Length': '0' } };
   const start = range.start;
   const end = Math.min(range.end, start + MAX_LEVEL_READ_BYTES - 1);
   // The whole file, unasked for a range and small enough: 200, as for the original.
-  const whole = req.headers.range === undefined && start === 0 && end === size - 1;
+  const whole = 'asked' in range && start === 0 && end === size - 1;
   const headers: Record<string, string> = whole ? {} : { 'Content-Range': `bytes ${start}-${end}/${size}` };
   const length = end - start + 1;
-  if (req.method === 'HEAD' || length === 0) return { status: whole ? 200 : 206, headers: { ...bytesHeaders(length), ...headers } };
+  if (req.method === 'HEAD') return { status: whole ? 200 : 206, headers: { ...bytesHeaders(length), ...headers } };
 
-  const abort = new AbortController();
-  // The connection went away: stop waiting (the encoder carries on). A data channel's request has no socket events.
-  const socket = req.socket as Partial<Pick<NodeJS.EventEmitter, 'once' | 'off'>> | undefined;
-  const onClose = (): void => abort.abort(new Error('levels: the client went away'));
-  socket?.once?.('close', onClose);
+  // The requester went away (the connection closed, or the data channel's request was cancelled): stop waiting; the
+  // encoder carries on.
+  const gone = requestSignal(req);
   let got: Awaited<ReturnType<LevelRouteService['read']>>;
   try {
-    got = await service.read(discId, level, audio, path, start, length, viewingId, abort.signal);
+    got = await service.read(discId, level, audio, path, start, length, viewingId, gone.signal);
   } catch (err) {
-    if (err instanceof RetryLater || abort.signal.aborted) return retryLater();
+    if (err instanceof RetryLater || gone.signal.aborted) return retryLater();
     // The file's size moved between the size and the read: its clip was replaced.
     if (err instanceof RangeError) return discChanged();
     throw err;
   } finally {
-    socket?.off?.('close', onClose);
+    gone.done();
   }
   if (got === null) return notFound();
   if ('retryAfter' in got) return retryLater();

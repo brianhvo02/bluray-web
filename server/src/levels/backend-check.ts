@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { LevelsConfig } from '../config';
+import type { EncoderCodec } from './capacity';
 import { qsvBackend, x264Backend, type EncoderBackend } from './encoder';
 
 /** The GPU's render node, which compose passes into the container (spec §6.2). */
@@ -12,22 +13,46 @@ const HEAD = ['-hide_banner', '-nostats', '-loglevel', 'error'];
 const TESTSRC = ['-f', 'lavfi', '-i', 'testsrc=duration=1:size=1280x720:rate=24'];
 const NULL_OUT = ['-f', 'null', '-'];
 
-/** One second of `testsrc` through the encoder, to nowhere. */
-const SELF_TESTS: Readonly<Record<'qsv' | 'x264', { readonly encoder: string; readonly args: readonly string[]; readonly backend: EncoderBackend }>> = {
+const QSV_DEVICE = ['-init_hw_device', `vaapi=va:${RENDER_NODE}`, '-init_hw_device', 'qsv=hw@va', '-filter_hw_device', 'hw'];
+
+interface SelfTest {
+  readonly codec: EncoderCodec;
+  /** For the log: the encoder (and profile) tested. */
+  readonly name: string;
+  readonly args: readonly string[];
+}
+
+/** One second of `testsrc` through each codec's encoder, to nowhere: every codec the backend's levels use. */
+const SELF_TESTS: Readonly<Record<'qsv' | 'x264', { readonly backend: EncoderBackend; readonly tests: readonly SelfTest[] }>> = {
   qsv: {
-    encoder: 'h264_qsv',
-    args: [
-      ...HEAD, '-init_hw_device', `vaapi=va:${RENDER_NODE}`, '-init_hw_device', 'qsv=hw@va', '-filter_hw_device', 'hw',
-      ...TESTSRC, '-vf', 'format=nv12,hwupload=extra_hw_frames=64', '-c:v', 'h264_qsv', ...NULL_OUT,
-    ],
     backend: qsvBackend,
+    tests: [
+      {
+        codec: 'h264',
+        name: 'h264_qsv',
+        args: [...HEAD, ...QSV_DEVICE, ...TESTSRC, '-vf', 'format=nv12,hwupload=extra_hw_frames=64', '-c:v', 'h264_qsv', ...NULL_OUT],
+      },
+      {
+        codec: 'hevc',
+        name: 'hevc_qsv Main10',
+        args: [...HEAD, ...QSV_DEVICE, ...TESTSRC, '-vf', 'format=p010le,hwupload=extra_hw_frames=64', '-c:v', 'hevc_qsv', '-profile:v', 'main10', ...NULL_OUT],
+      },
+    ],
   },
+  // libx264 encodes H.264 only: the HEVC levels aren't offered (`x264Backend` refuses them).
   x264: {
-    encoder: 'libx264',
-    args: [...HEAD, ...TESTSRC, '-c:v', 'libx264', '-preset', 'veryfast', ...NULL_OUT],
     backend: x264Backend,
+    tests: [{ codec: 'h264', name: 'libx264', args: [...HEAD, ...TESTSRC, '-c:v', 'libx264', '-preset', 'veryfast', ...NULL_OUT] }],
   },
 };
+
+/** The encoder the quality levels use, and the codecs whose self-test passed. */
+export interface LevelsEncoder {
+  readonly backend: EncoderBackend;
+  readonly codecs: ReadonlySet<EncoderCodec>;
+}
+
+const CODEC_NAMES: Readonly<Record<EncoderCodec, string>> = { h264: 'H.264', hevc: 'HEVC' };
 
 export interface BackendCheckDeps {
   readonly spawn?: typeof nodeSpawn;
@@ -72,11 +97,11 @@ function run(spawn: typeof nodeSpawn, binary: string, args: readonly string[], t
 }
 
 /**
- * The encoder backend the quality levels use, or null for Original only (spec §6.2): `LEVELS_BACKEND=off`; `qsv` without
- * the render node; or a 1 s `testsrc` encode with the backend's encoder that fails or takes over 10 s. The backend runs
- * `FFMPEG_PATH`. Logs one line saying which.
+ * The encoder the quality levels use, or null for Original only (spec §6.2): `LEVELS_BACKEND=off`; `qsv` without the
+ * render node; or when every codec's 1 s `testsrc` encode fails or takes over 10 s. `qsv` tests H.264 and HEVC Main10,
+ * and offers the codecs that pass; `x264` tests and offers H.264 only. The backend runs `FFMPEG_PATH`. Logs one line.
  */
-export async function levelsBackend(config: Pick<LevelsConfig, 'backend' | 'ffmpegPath'>, deps: BackendCheckDeps = {}): Promise<EncoderBackend | null> {
+export async function levelsBackend(config: Pick<LevelsConfig, 'backend' | 'ffmpegPath'>, deps: BackendCheckDeps = {}): Promise<LevelsEncoder | null> {
   const log = deps.log ?? console.log;
   if (config.backend === 'off') {
     log('quality levels: off (LEVELS_BACKEND=off); only Original is offered');
@@ -86,13 +111,25 @@ export async function levelsBackend(config: Pick<LevelsConfig, 'backend' | 'ffmp
     log(`quality levels: off; no ${RENDER_NODE} for Quick Sync, so only Original is offered`);
     return null;
   }
-  const test = SELF_TESTS[config.backend];
+  const { backend, tests } = SELF_TESTS[config.backend];
   const started = Date.now();
-  const failure = await run(deps.spawn ?? nodeSpawn, config.ffmpegPath, test.args, deps.timeoutMs ?? SELF_TEST_TIMEOUT_MS);
-  if (failure !== null) {
-    log(`quality levels: off; the ${test.encoder} self-test failed (${failure}), so only Original is offered`);
+  const codecs = new Set<EncoderCodec>();
+  const failures: string[] = [];
+  for (const test of tests) {
+    const failure = await run(deps.spawn ?? nodeSpawn, config.ffmpegPath, test.args, deps.timeoutMs ?? SELF_TEST_TIMEOUT_MS);
+    if (failure === null) codecs.add(test.codec);
+    else failures.push(`the ${test.name} self-test failed (${failure})`);
+  }
+  if (codecs.size === 0) {
+    log(`quality levels: off; ${failures.join(', and ')}, so only Original is offered`);
     return null;
   }
-  log(`quality levels: ${config.backend} (${test.encoder} self-test passed in ${Date.now() - started} ms)`);
-  return { ...test.backend, binary: config.ffmpegPath };
+  const only = codecs.size < 2 ? `, ${[...codecs].map((c) => CODEC_NAMES[c]).join('')} only` : '';
+  if (failures.length > 0) log(`quality levels: ${config.backend}${only}; ${failures.join(', and ')}`);
+  else {
+    const names = tests.map((t) => t.name);
+    const passed = names.length > 1 ? `${names.join(' and ')} self-tests passed` : `${names[0]} self-test passed`;
+    log(`quality levels: ${config.backend}${only} (${passed} in ${Date.now() - started} ms)`);
+  }
+  return { backend: { ...backend, binary: config.ffmpegPath }, codecs };
 }

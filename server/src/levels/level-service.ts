@@ -1,6 +1,6 @@
 import type { spawn as nodeSpawn } from 'node:child_process';
 import type { DiscManifest } from '../../../src/engine/disc/nas-api';
-import type { Capacity } from './capacity';
+import type { Capacity, EncoderCodec } from './capacity';
 import { ClipRunner, RetryLater, realClock, type Clock } from './clip-run';
 import type { ClipInput, EncoderBackend, ScanInfo } from './encoder';
 import type { LevelDiscSource } from './level-discs';
@@ -20,7 +20,8 @@ export const ENCODER_IDLE_MS = 60_000;
 const DISC_INFOS = 16;
 const VERSIONS = 32;
 
-export type LevelReason = 'unplayable' | 'no-hevc' | 'no-hevc10' | 'no-hdr-display' | 'busy';
+/** Why a level isn't available: `no-encoder` when the NAS's encoder for its codec failed its self-test (or has none). */
+export type LevelReason = 'unplayable' | 'no-encoder' | 'no-hevc' | 'no-hevc10' | 'no-hdr-display' | 'busy';
 
 export interface LevelInfo {
   readonly level: LevelId;
@@ -59,6 +60,8 @@ export interface LevelServiceOptions {
   readonly cache: SegmentCache;
   readonly capacity: Capacity;
   readonly backend: EncoderBackend;
+  /** The codecs the backend encodes (whose self-test passed); levels of other codecs aren't offered. Default: both. */
+  readonly codecs?: ReadonlySet<EncoderCodec>;
   /** Injectable for tests: how ffmpeg is started. */
   readonly spawn?: typeof nodeSpawn;
   /** Injectable for tests: the scan probe (ffprobe). */
@@ -221,8 +224,9 @@ export class LevelService {
     for (const level of offered) {
       if (level === 'original') continue;
       const def = levelDefFor(level, main.video);
-      const reason: LevelReason | undefined =
-        def.codec === 'hevc' && !client.hevc
+      const reason: LevelReason | undefined = !this.encodes(level)
+        ? 'no-encoder'
+        : def.codec === 'hevc' && !client.hevc
           ? 'no-hevc'
           : def.hdr && !client.hevc10
             ? 'no-hevc10'
@@ -365,8 +369,14 @@ export class LevelService {
     return runner;
   }
 
+  /** Whether the backend encodes a level's codec (the codec doesn't depend on the source). */
+  private encodes(level: string): boolean {
+    const codecs = this.options.codecs;
+    return !codecs || codecs.has(levelDefFor(level as EncodedLevel, { height: 1080 }).codec);
+  }
+
   private async version(discId: string, level: string, audio: number, known?: LevelDiscSource): Promise<Version | null> {
-    if (!ENCODED_LEVELS.has(level) || !Number.isInteger(audio) || audio < 1 || audio > 32) return null;
+    if (!ENCODED_LEVELS.has(level) || !Number.isInteger(audio) || audio < 1 || audio > 32 || !this.encodes(level)) return null;
     const key = `${discId}:${level}:${audio}`;
     let version = this.versions.get(key);
     if (!version) {

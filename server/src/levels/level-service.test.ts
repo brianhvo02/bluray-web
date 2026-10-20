@@ -200,7 +200,9 @@ let fake: FakeFfmpeg;
 let service: LevelService;
 let capacity: Capacity;
 
-function makeService(options: { readAheadMs?: number; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend } = {}): LevelService {
+function makeService(
+  options: { readAheadMs?: number; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
+): LevelService {
   capacity = new Capacity({ h264: 190, hevc: 100 }, clock.now);
   return new LevelService({
     discs: options.discs ?? (async (id) => (id === DISC_ID ? folderDiscSource(DISC_DIR, { id, name: 'Starfall Wanderer' }) : null)),
@@ -211,6 +213,7 @@ function makeService(options: { readAheadMs?: number; discs?: (id: string) => Pr
     probe: async () => ({ interlaced: false, softPulldown: false }),
     clock,
     ...(options.readAheadMs === undefined ? {} : { readAheadMs: options.readAheadMs }),
+    ...(options.codecs ? { codecs: options.codecs } : {}),
   });
 }
 
@@ -757,6 +760,22 @@ describe('LevelService: fix round 1', () => {
 });
 
 describe('LevelService: for the routes', () => {
+  it('offers no level of a codec whose encoder failed its self-test (x264: H.264 only)', async () => {
+    const s = makeService({ codecs: new Set(['h264']) });
+    const levels = (await s.levels(DISC_ID, { hevc: true, hevc10: true, hdr: true }))!;
+    expect(levels.map((l) => [l.level, l.available, l.reason])).toEqual([
+      ['original', true, undefined],
+      ['h264-1080', true, undefined],
+      ['hevc-1080', false, 'no-encoder'],
+      ['phone-720', true, undefined],
+    ]);
+    expect(await s.manifest(DISC_ID, 'hevc-1080', 1, viewingIdOf('dev1', DISC_ID, 'hevc-1080', 1))).toBeNull();
+    expect(await s.size(DISC_ID, 'hevc-1080', 1, M2TS_PATH)).toBeNull();
+    expect(await s.read(DISC_ID, 'hevc-1080', 1, M2TS_PATH, 0, 192, viewingIdOf('dev1', DISC_ID, 'hevc-1080', 1), never)).toBeNull();
+    expect(await s.manifest(DISC_ID, 'h264-1080', 1, VIEWING)).not.toBeNull();
+    s.close();
+  });
+
   it('gives a file’s size at a level, null for a file or level it doesn’t have', async () => {
     const manifest = await levelManifest();
     for (const f of manifest.files) expect(await service.size(DISC_ID, 'h264-1080', 1, f.path.toLowerCase())).toBe(f.size);

@@ -73,9 +73,27 @@ export function responseHeaders(origin: string | undefined, response: Response):
 /** Requests that came over a WebRTC data channel rather than HTTPS. */
 const channelRequests = new WeakSet<IncomingMessage>();
 
-/** Marks a data channel's request stand-in, for {@link viaChannel}. */
-export function markChannelRequest(req: IncomingMessage): void {
+/** A data channel request's own abort: the peer cancelled it, or the channel closed. */
+const channelSignals = new WeakMap<IncomingMessage, AbortSignal>();
+
+/** Marks a data channel's request stand-in, for {@link viaChannel}, with the signal that aborts it ({@link requestSignal}). */
+export function markChannelRequest(req: IncomingMessage, signal?: AbortSignal): void {
   channelRequests.add(req);
+  if (signal) channelSignals.set(req, signal);
+}
+
+/**
+ * A signal that aborts when the requester has gone away: the data channel's request was cancelled, or the HTTP
+ * connection closed. Call `done` once the handler has stopped waiting.
+ */
+export function requestSignal(req: IncomingMessage): { signal: AbortSignal; done: () => void } {
+  const channel = channelSignals.get(req);
+  if (channel) return { signal: channel, done: () => {} };
+  const abort = new AbortController();
+  const socket = req.socket as Partial<Pick<NodeJS.EventEmitter, 'once' | 'off'>> | undefined;
+  const onClose = (): void => abort.abort(new Error('the client went away'));
+  socket?.once?.('close', onClose);
+  return { signal: abort.signal, done: () => socket?.off?.('close', onClose) };
 }
 
 /** Whether `req` came over a data channel (see `rtc/dispatch.ts`); false for HTTPS. */

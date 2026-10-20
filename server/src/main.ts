@@ -91,14 +91,15 @@ function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousC
  * `LEVELS_BACKEND=off`, there is no GPU for `qsv`, or the self-test fails. Segments are cached under `/data/transcode`.
  */
 async function levelService(config: Config, library: Library): Promise<LevelService | undefined> {
-  const backend = await levelsBackend(config.levels);
-  if (!backend) return undefined;
+  const encoder = await levelsBackend(config.levels);
+  if (!encoder) return undefined;
   const { ffprobePath } = config.levels;
   return new LevelService({
     discs: libraryDiscSources(library),
     cache: new SegmentCache(join(config.dataDir, 'transcode'), config.levels.cacheBytes),
     capacity: new Capacity(GPU_BUDGETS),
-    backend,
+    backend: encoder.backend,
+    codecs: encoder.codecs,
     probe: (input, options) => probeScan(input, { ...options, binary: ffprobePath }),
     log: console.log,
   });

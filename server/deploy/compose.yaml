@@ -22,8 +22,9 @@ services:
       # the home gateway. The NAS advertises its public IPv4 (from STUN) and this LAN address, never Docker's or
       # Tailscale's.
       RTC_LAN_ADDRESS: 192.168.1.98
-      # Quality levels: re-encoding on the GPU through Intel Quick Sync (jellyfin-ffmpeg in the image). A failed self-test
-      # at start, or no render node, leaves only Original. Segments are cached in /data/transcode (50 GB by default).
+      # Quality levels: re-encoding on the GPU through Intel Quick Sync (jellyfin-ffmpeg in the image). The render node
+      # comes from compose.gpu.yaml, which deploy.sh adds only when the NAS has one; without it, or when the self-test at
+      # start fails, only Original is offered. Segments are cached in /data/transcode (50 GB by default).
       LEVELS_BACKEND: qsv
     env_file:
       - path: .env
@@ -79,11 +80,6 @@ services:
         read_only: true
         bind: { create_host_path: false, propagation: rslave }
       - bluray-data:/data
-    # The GPU's render node for Quick Sync, and its group (render, GID 993 on the NAS) so the `node` user may open it.
-    devices:
-      - "/dev/dri/renderD128:/dev/dri/renderD128"
-    group_add:
-      - "993"
     ports:
       - "47998:47998/udp"
     networks:

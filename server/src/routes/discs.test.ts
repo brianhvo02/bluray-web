@@ -253,7 +253,10 @@ describe('disc routes at a quality level', () => {
   it('keeps level=original (or none) as today, byte for byte', async () => {
     const plain = await fetch(withToken(`/discs/${ids.levels}/manifest`));
     const original = await fetch(withToken(`/discs/${ids.levels}/manifest?level=original&audio=2`));
-    expect(await original.text()).toBe(await plain.text());
+    const empty = await fetch(withToken(`/discs/${ids.levels}/manifest?level=`));
+    const text = await plain.text();
+    expect(await original.text()).toBe(text);
+    expect(await empty.text()).toBe(text);
     const range = { headers: { Range: 'bytes=192-383' } };
     const a = await fetch(withToken(`/discs/${ids.levels}/files/${M2TS}`), range);
     const b = await fetch(withToken(`/discs/${ids.levels}/files/${M2TS}?level=original`), range);
@@ -266,13 +269,14 @@ describe('disc routes at a quality level', () => {
 
 describe('range reads at a level, against a stub service', () => {
   const SIZE = 10 * MAX_LEVEL_READ_BYTES;
+  let size = SIZE;
   const reads: { offset: number; length: number }[] = [];
   let answer: () => Promise<Buffer | { retryAfter: 1 } | { busy: true } | null>;
   const stub: LevelRouteService = {
     manifest: async () => null,
     levels: async () => null,
     release: () => {},
-    size: async () => SIZE,
+    size: async () => size,
     originalPlayable: async () => true,
     read: async (_d, _l, _a, _p, offset, length) => {
       reads.push({ offset, length });
@@ -282,6 +286,7 @@ describe('range reads at a level, against a stub service', () => {
   };
 
   beforeEach(async () => {
+    size = SIZE;
     reads.length = 0;
     answer = async () => Buffer.alloc(reads.at(-1)!.length, 1);
     await listen([discRoutes(library, { service: stub, auth })]);
@@ -304,6 +309,29 @@ describe('range reads at a level, against a stub service', () => {
       { offset: 100, length: MAX_LEVEL_READ_BYTES },
       { offset: 0, length: MAX_LEVEL_READ_BYTES },
       { offset: 0, length: 2_097_152 },
+    ]);
+  });
+
+  it('reads a Range it doesn’t serve as bytes=0-, and an empty file as 200 with no body', async () => {
+    const res = await fetch(withToken(`/discs/${ids.levels}/files/${M2TS}?level=h264-1080&audio=1`), { headers: { Range: 'bytes=500-100' } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe(`bytes 0-${MAX_LEVEL_READ_BYTES - 1}/${SIZE}`);
+    await res.arrayBuffer();
+    size = 2000;
+    const small = await fetch(withToken(`/discs/${ids.levels}/files/${M2TS}?level=h264-1080&audio=1`), { headers: { Range: 'bytes=0-1,5-6' } });
+    expect(small.status).toBe(200);
+    expect(small.headers.get('content-range')).toBeNull();
+    expect((await small.arrayBuffer()).byteLength).toBe(2000);
+    size = 0;
+    for (const range of [undefined, 'bytes=0-']) {
+      const empty = await fetch(withToken(`/discs/${ids.levels}/files/${M2TS}?level=h264-1080&audio=1`), range ? { headers: { Range: range } } : {});
+      expect(empty.status).toBe(200);
+      expect(empty.headers.get('content-length')).toBe('0');
+      expect(await empty.text()).toBe('');
+    }
+    expect(reads).toEqual([
+      { offset: 0, length: MAX_LEVEL_READ_BYTES },
+      { offset: 0, length: 2000 },
     ]);
   });
 
