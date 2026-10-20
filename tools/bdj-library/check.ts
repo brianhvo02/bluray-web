@@ -422,17 +422,18 @@ async function main(argv: readonly string[]): Promise<void> {
   await pool(libTodo, libJobs, async (d) => {
     const base = join(raw, `${d.id}.lib`);
     const args = [RUN_SH, d.dir, '--keys', SCRIPT, '--seconds', String(RUN_LIMIT_S), '--wait-timeout', String(STEP_TIMEOUT_S), '--tail', String(TAIL_S)];
-    const run = (attempt: number): ReturnType<typeof runKilled> => {
+    const run = (attempt: number, extra: readonly string[] = []): ReturnType<typeof runKilled> => {
       const name = `bdjlib-${d.id}-${attempt}`;
-      return runKilled('bash', [...args, '--name', name], `${base}.jsonl`, `${base}.err`, name);
+      return runKilled('bash', [...args, ...extra, '--name', name], `${base}.jsonl`, `${base}.err`, name);
     };
     let r = await run(1);
     // a crashed run (no script end line: HotSpot under amd64 emulation now and then dies with a SIGSEGV in libzip, or the
-    // run was killed) is run once more
+    // run was killed) is run once more, without memory-mapped zip directories: on some discs the libzip crash comes
+    // back on every run (ZipFile.getEntry in mapped memory, under emulation), and the option changes nothing else
     let retried = false;
     if (!readFileSync(`${base}.jsonl`, 'utf8').includes('"script":"end"')) {
       retried = true;
-      r = await run(2);
+      r = await run(2, ['--jvm-option', '-Dsun.zip.disableMemoryMapping=true']);
     }
     writeFileSync(`${base}.meta.json`, JSON.stringify({ killed: r.killed, code: r.code, ms: r.ms, retried }));
     writeStamp(d, 'lib', lStamp);
