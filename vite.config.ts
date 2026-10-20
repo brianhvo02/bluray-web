@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
+import type { Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
 
@@ -12,8 +13,30 @@ const crossOriginIsolation = {
   'Cross-Origin-Embedder-Policy': 'require-corp',
 };
 
+/**
+ * `server.headers` and `preview.headers` reach 200 responses only. A 304 without them made WebKit refuse a revalidated
+ * worker script ("Worker load was blocked by Cross-Origin-Embedder-Policy"): the BD-J worker when a page opened a
+ * BD-J disc a second time, the engine worker after a reload. This sets them on every response, as public/_headers does.
+ */
+const isolateEveryResponse: Plugin = {
+  name: 'cross-origin-isolation-on-every-response',
+  configureServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      for (const [name, value] of Object.entries(crossOriginIsolation)) res.setHeader(name, value);
+      next();
+    });
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      for (const [name, value] of Object.entries(crossOriginIsolation)) res.setHeader(name, value);
+      next();
+    });
+  },
+};
+
 export default defineConfig({
   plugins: [
+    isolateEveryResponse,
     react(),
     VitePWA({
       strategies: 'injectManifest',
