@@ -58,16 +58,19 @@ function rawPes(packets: readonly Uint8Array[], pid: number): Array<{ spn: numbe
   });
 }
 
+/** One whole PES, parsed by the engine's demuxer. */
+function parseRaw(pid: number, bytes: Uint8Array): PesPacket | undefined {
+  const out: PesPacket[] = [];
+  const a = new PesAssembler((p) => out.push(p));
+  a.push({ pid, payloadUnitStart: true, continuityCounter: 0, hasPayload: true, payload: bytes });
+  a.flush();
+  return out[0];
+}
+
 /** The source's PES on `pid` whose first packet lies in the interval, parsed. */
 function pesIn(packets: readonly Uint8Array[], pid: number, plan: IntervalPlan): PesPacket[] {
   const inside = rawPes(packets, pid).filter((r) => r.spn >= plan.srcSpnStart && r.spn < plan.srcSpnEnd);
-  return inside.flatMap((r) => {
-    const out: PesPacket[] = [];
-    const a = new PesAssembler((p) => out.push(p));
-    a.push({ pid, payloadUnitStart: true, continuityCounter: 0, hasPayload: true, payload: r.bytes });
-    a.flush();
-    return out;
-  });
+  return inside.flatMap((r) => parseRaw(pid, r.bytes) ?? []);
 }
 
 /** The source's video PES of an interval, as a stand-in for the encoder's output. */
@@ -75,17 +78,20 @@ function videoOf(packets: readonly Uint8Array[], plan: IntervalPlan): EncodedPes
   return rawPes(packets, VIDEO)
     .filter((r) => r.spn >= plan.srcSpnStart && r.spn < plan.srcSpnEnd)
     .map((r) => {
-      const parsed: PesPacket[] = [];
-      const a = new PesAssembler((x) => parsed.push(x));
-      a.push({ pid: VIDEO, payloadUnitStart: true, continuityCounter: 0, hasPayload: true, payload: r.bytes });
-      a.flush();
-      return { pes: r.bytes, dts90: parsed[0]!.dts ?? parsed[0]!.pts! };
+      const parsed = parseRaw(VIDEO, r.bytes)!;
+      return { pes: r.bytes, dts90: parsed.dts ?? parsed.pts! };
     });
 }
 
 /** Runs a collector over the whole clip, in order, and takes every interval as soon as it is ready. */
-function collectAll(packets: readonly Uint8Array[], intervals: readonly IntervalPlan[], streams: KeptStreams, pcrPid = 0x1001): IntervalSource[] {
-  const collector = new IntervalCollector(streams, VIDEO, pcrPid);
+function collectAll(
+  packets: readonly Uint8Array[],
+  intervals: readonly IntervalPlan[],
+  streams: KeptStreams,
+  pcrPid = 0x1001,
+  stcStarts: readonly number[] = [],
+): IntervalSource[] {
+  const collector = new IntervalCollector(streams, { videoPid: VIDEO, pcrPid, intervals, stcStarts });
   const out: IntervalSource[] = [];
   let next = 0;
   packets.forEach((p, spn) => {
@@ -130,6 +136,7 @@ const cases: Case[] = [
   },
   {
     disc: 'disc-mpeg2',
+    // AVC on purpose: the level's video is H.264 (the encoder's output), while the stand-in PES here are the source's MPEG-2.
     streams: () => new KeptStreams(new Set(), new Map([[0x1100, new PesCoreFilter(CodingType.AC3)]]), { video: { pid: VIDEO, streamType: CodingType.AVC } }),
     audioPid: 0x1100,
     keepAudio: () => true,
@@ -241,6 +248,31 @@ describe('remuxInterval budgets and PSI', () => {
     expect(out.map(atsOf).every((a, i, all) => i === 0 || a >= all[i - 1]!)).toBe(true);
   });
 
+  it('places video of other DTS and PES count within the source video\'s arrival range, in order', () => {
+    const plan = intervals[2]!;
+    const source = pesIn(packets, VIDEO, plan);
+    const d0 = source[0]!.dts ?? source[0]!.pts!;
+    // Every third frame dropped, DTS stretched by 1.25 and started 50 ms early: some land before the first source PES
+    // and some after the last.
+    const video = source
+      .filter((_, i) => i % 3 !== 2)
+      .map((p, i) => {
+        const dts = d0 - 4500 + Math.round(i * 1.25 * 3754 * 1.5);
+        return { pes: videoPes(dts + 3003, dts, p.payload), dts90: dts };
+      });
+    expect(video.length).not.toBe(source.length);
+    const timeline = sources[2]!.videoTimeline;
+    expect(video[0]!.dts90).toBeLessThan(timeline[0]!.dts90);
+    expect(video.at(-1)!.dts90).toBeGreaterThan(timeline.at(-1)!.dts90);
+    const out = packetsOf(bytesOf(remuxInterval(inputFor(plan, sources[2]!, video))));
+    expect(out.map(atsOf).every((a, i, all) => i === 0 || a >= all[i - 1]!)).toBe(true);
+    const videoAts = out.filter((p) => pidOf(p) === VIDEO).map(atsOf);
+    expect(Math.min(...videoAts)).toBe(timeline[0]!.ats);
+    expect(Math.max(...videoAts)).toBe(timeline.at(-1)!.ats);
+    const back = demux(out).pes.filter((p) => p.pid === VIDEO);
+    expect(back.map((p) => [p.pts, p.dts, p.payload])).toEqual(video.map((v) => [v.dts90 + 3003, v.dts90, parseRaw(VIDEO, v.pes)!.payload]));
+  });
+
   it('orders kept packets by assigned SPN and raises an ATS that would go back', () => {
     const at = (pid: number, ats: number): Uint8Array => {
       const p = new Uint8Array(PACKET).fill(0xff);
@@ -331,6 +363,42 @@ describe('remuxInterval with PCR on the video PID', () => {
     });
   });
 
+  it('falls back to the latest earlier PCR in the same STC sequence for an interval without one', () => {
+    const plan = intervals[4]!;
+    const noPcr = packets.map((p, spn) => {
+      if (spn < plan.srcSpnStart || spn >= plan.srcSpnEnd || pidOf(p) !== VIDEO || (p[7]! & 0x20) === 0) return p;
+      const q = p.slice();
+      q[9] = q[9]! & ~0x10;
+      return q;
+    });
+    const fallback = collectAll(noPcr, intervals, cases[0]!.streams(), VIDEO);
+    const lastOf3 = noPcr.findLast((p, spn) => spn < plan.srcSpnStart && pidOf(p) === VIDEO && (p[7]! & 0x20) !== 0 && (p[9]! & 0x10) !== 0)!;
+    expect(fallback[4]!.pcr).toEqual({ ats: atsOf(lastOf3), pcr27: PCR0 + atsOf(lastOf3) });
+    expect(fallback[5]!.pcr).toEqual(sources[5]!.pcr);
+    expect(collectAll(noPcr, intervals, cases[0]!.streams(), VIDEO, [plan.srcSpnStart])[4]!.pcr).toBeNull();
+  });
+
+  it('keeps ATS and PCR from going back across an interval end that a kept PES straddles', () => {
+    const { plans, k, pes } = straddle(packets, intervals);
+    const moved = collectAll(packets, plans, cases[0]!.streams(), VIDEO);
+    const outs = [k, k + 1].map((i) => packetsOf(bytesOf(remuxInterval(inputFor(plans[i]!, moved[i]!, videoOf(packets, plans[i]!), { pcr: moved[i]!.pcr })))));
+    const endAts = moved[k]!.endAts!;
+    expect(atsOf(packets[pes.at(-1)!]!)).toBeGreaterThan(endAts); // the PES's tail arrived after the end
+    expect(Math.max(...outs[0]!.map(atsOf))).toBe(endAts);
+    const both = outs.flat();
+    expect(both.map(atsOf).every((a, i, all) => i === 0 || a >= all[i - 1]!)).toBe(true);
+    const pcrs = both.filter((p) => pidOf(p) === VIDEO && (p[7]! & 0x30) === 0x20).map(readPcr);
+    expect(pcrs.every((v, i) => i === 0 || v >= pcrs[i - 1]!)).toBe(true);
+  });
+
+  it('refuses to rewrite a PMT section that runs past its packet', () => {
+    const long = new Uint8Array(200);
+    long.set([0x02, 0xb0, 197]);
+    const pmt = psiPacket(0x100, long.subarray(0, 183), 0);
+    const source = { ...sources[3]!, kept: [{ spn: intervals[3]!.srcSpnStart, bytes: pmt }, ...sources[3]!.kept] };
+    expect(() => remuxInterval(inputFor(intervals[3]!, source, videoOf(packets, intervals[3]!), { pcr: source.pcr }))).toThrow(/spans packets/);
+  });
+
   it('names the video PID as PCR_PID in the PMT, with a valid CRC', () => {
     const pmt = psiPacket(0x100, pmtFor([{ pid: VIDEO, streamType: 0x1b }, { pid: 0x1200, streamType: 0x90 }], { pcrPid: 0x1001 }), 0);
     const source = { ...sources[3]!, kept: [{ spn: intervals[3]!.srcSpnStart, bytes: pmt }, ...sources[3]!.kept] };
@@ -356,34 +424,65 @@ describe('IntervalCollector', () => {
     const sources = collectAll(packets, intervals, cases[0]!.streams());
     intervals.forEach((plan, k) => {
       expect(sources[k]!.kept).toEqual(all.filter((x) => x.spn >= plan.srcSpnStart && x.spn < plan.srcSpnEnd));
+      expect(sources[k]!.endAts).toBe(plan.srcSpnEnd < packets.length ? atsOf(packets[plan.srcSpnEnd]!) : undefined);
     });
     expect(sources.flatMap((s) => s.kept)).toHaveLength(all.length);
   });
 
-  it('is not ready while a PES started in the interval is still open past its end', () => {
-    const plan = intervals[1]!;
-    const collector = new IntervalCollector(cases[0]!.streams(), VIDEO, 0x1001);
+  it('is not ready until a PES that straddles the interval end is complete, and gives that PES whole to the interval', () => {
+    const { plans, k, pes } = straddle(packets, intervals);
+    const plan = plans[k]!;
+    const collector = new IntervalCollector(cases[0]!.streams(), { videoPid: VIDEO, pcrPid: 0x1001, intervals: plans });
+    const last = pes.at(-1)!;
     let spn = 0;
-    for (; spn <= plan.srcSpnEnd; spn++) collector.push(packets[spn]!, spn);
-    // Fed through the next interval's first packet: ready only if no unit that began in interval 1 is open.
-    const open = rawPes(packets, 0x1100).find((r) => r.spn >= plan.srcSpnStart && r.spn < plan.srcSpnEnd && lastPacketOf(r.spn) > plan.srcSpnEnd);
-    expect(collector.ready(plan)).toBe(open === undefined);
-    for (; !collector.ready(plan); spn++) collector.push(packets[spn]!, spn);
-    expect(() => collector.take(plan)).not.toThrow();
-    expect(() => new IntervalCollector(cases[0]!.streams(), VIDEO, 0x1001).take(plan)).toThrow();
-  });
-
-  /** The SPN of the last packet of the PES on 0x1100 that starts at `start`. */
-  function lastPacketOf(start: number): number {
-    let last = start;
-    for (let i = start + 1; i < packets.length; i++) {
-      if (pidOf(packets[i]!) !== 0x1100) continue;
-      if (packets[i]![5]! & 0x40) break;
-      last = i;
+    for (; spn < last; spn++) {
+      collector.push(packets[spn]!, spn);
+      if (spn >= plan.srcSpnEnd) expect(collector.ready(plan)).toBe(false);
     }
-    return last;
-  }
+    expect(() => collector.take(plan)).toThrow();
+    collector.push(packets[last]!, last);
+    expect(collector.ready(plan)).toBe(true);
+    const mine = collector.take(plan).kept.map((x) => x.bytes);
+    for (const at of pes) expect(mine).toContain(packets[at]!);
+    for (spn = last + 1; spn < packets.length && !collector.ready(plans[k + 1]!); spn++) collector.push(packets[spn]!, spn);
+    const next = collector.take(plans[k + 1]!).kept.map((x) => x.bytes);
+    for (const at of pes) expect(next).not.toContain(packets[at]!);
+  });
 });
+
+/**
+ * The intervals with interval 1's end moved onto the second packet of an AC-3 core PES that starts in it, so the PES
+ * straddles the end; `pes` lists that PES's packets' SPNs.
+ */
+function straddle(packets: readonly Uint8Array[], intervals: readonly IntervalPlan[]): { plans: IntervalPlan[]; k: number; pes: number[] } {
+  const k = 1;
+  for (const r of rawPes(packets, 0x1100)) {
+    if (r.spn < intervals[k]!.srcSpnStart + 50 || r.spn >= intervals[k]!.srcSpnEnd) continue;
+    if (parseRaw(0x1100, r.bytes)?.streamIdExtension !== 0x76) continue;
+    const pes: number[] = [r.spn];
+    for (let i = r.spn + 1; i < packets.length && !(pidOf(packets[i]!) === 0x1100 && packets[i]![5]! & 0x40); i++) if (pidOf(packets[i]!) === 0x1100) pes.push(i);
+    if (pes.length < 3) continue;
+    const end = pes[1]!;
+    const plans = intervals.map((iv, i) => (i === k ? { ...iv, srcSpnEnd: end } : i === k + 1 ? { ...iv, srcSpnStart: end } : iv));
+    return { plans, k, pes };
+  }
+  throw new Error('no AC-3 core PES of 3 packets or more in interval 1');
+}
+
+/** An unbounded video PES with a PTS and a DTS. */
+function videoPes(pts: number, dts: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(19 + payload.length);
+  out.set([0, 0, 1, 0xe0, 0, 0, 0x80, 0xc0, 10]);
+  const ts = (at: number, prefix: number, v: number): void => {
+    const high = Math.floor(v / 2 ** 30) & 0x07;
+    const low = v % 2 ** 30;
+    out.set([(prefix << 4) | (high << 1) | 1, (low >>> 22) & 0xff, (((low >>> 15) & 0x7f) << 1) | 1, (low >>> 7) & 0xff, ((low & 0x7f) << 1) | 1], at);
+  };
+  ts(9, 3, pts);
+  ts(14, 1, dts);
+  out.set(payload, 19);
+  return out;
+}
 
 /** A PSI section on one source packet (pointer_field 0, stuffed with 0xFF), at `ats`. */
 function psiPacket(pid: number, section: Uint8Array, ats: number): Uint8Array {

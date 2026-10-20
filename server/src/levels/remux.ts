@@ -146,16 +146,16 @@ function nullPacket(): Uint8Array {
 }
 
 /**
- * A copy of a PMT packet naming `pcrPid` as PCR_PID, with its CRC redone; the packet itself when it already does, or
- * when its section isn't whole in it (a Blu-ray PMT always is).
+ * A copy of a PMT packet naming `pcrPid` as PCR_PID, with its CRC redone; the packet itself when it already does.
+ * Throws when the section isn't whole in the packet (a Blu-ray PMT always is).
  */
 function withPcrPid(packet: Uint8Array, pcrPid: number): Uint8Array {
   const ts = parseSourcePacket(packet, 0);
   if (!ts?.payloadUnitStart || !ts.hasPayload) return packet;
   const at = ts.payload.byteOffset - packet.byteOffset + 1 + ts.payload[0]!;
-  if (packet[at] !== 0x02 || at + 12 > SOURCE_PACKET_SIZE) return packet;
-  const end = at + 3 + (((packet[at + 1]! & 0x0f) << 8) | packet[at + 2]!);
-  if (end > SOURCE_PACKET_SIZE || (((packet[at + 8]! & 0x1f) << 8) | packet[at + 9]!) === pcrPid) return packet;
+  const end = at + 12 > SOURCE_PACKET_SIZE ? Infinity : at + 3 + (((packet[at + 1]! & 0x0f) << 8) | packet[at + 2]!);
+  if (end > SOURCE_PACKET_SIZE) throw new Error('levels: a PMT section spans packets; PCR_PID cannot be rewritten');
+  if (packet[at] !== 0x02 || (((packet[at + 8]! & 0x1f) << 8) | packet[at + 9]!) === pcrPid) return packet;
   const out = packet.slice();
   out[at + 8] = 0xe0 | (pcrPid >> 8);
   out[at + 9] = pcrPid & 0xff;
@@ -170,7 +170,8 @@ function withPcrPid(packet: Uint8Array, pcrPid: number): Uint8Array {
  *
  * - **Kept packets** go in the order of their assigned SPN (stable within one SPN), each with its original ATS, raised
  *   where needed so the output's ATS never decreases (a filtered PES comes whole at its first packet's SPN, so its tail
- *   can arrive later than the next packets of other PIDs). Their TS bytes are unchanged, except the PMT's PCR_PID when
+ *   can arrive later than the next packets of other PIDs) and lowered to `endAts` (the tail of a PES that runs on past
+ *   the interval's end). Their TS bytes are unchanged, except the PMT's PCR_PID when
  *   PCR moves onto the video PID.
  * - **Video** PES go onto `videoPid`, each at the ATS where the source put the video of the same DTS (interpolated
  *   between the source's PES starts, clamped to them), its packets spread up to the next PES's ATS. This keeps the
@@ -193,6 +194,9 @@ export function remuxInterval(input: RemuxInput): { bytes: Uint8Array } | { over
     .sort((a, b) => a.k.spn - b.k.spn || a.i - b.i)
     .map(({ k }) => k.bytes);
   const ref = kept[0] ? atsOf(kept[0]) : (input.videoTimeline[0]?.ats ?? input.pcr?.ats ?? 0);
+  // A kept PES assigned here can run on past the interval's end: its tail takes the end's ATS, so the next interval's
+  // packets (and PCRs) never arrive before this one's.
+  const endAts = input.endAts === undefined ? Infinity : unwrap(input.endAts, ref, ATS_WRAP);
 
   // Kept packets at their own ATS, never earlier than the one before; the leading PSI run sets the video's floor.
   const keptSlots: Slot[] = [];
@@ -202,7 +206,7 @@ export function remuxInterval(input: RemuxInput): { bytes: Uint8Array } | { over
   for (const bytes of kept) {
     const pid = pidOf(bytes);
     const isPsi = pid === PAT_PID || pmtPids.has(pid);
-    last = Math.max(last, unwrap(atsOf(bytes), ref, ATS_WRAP));
+    last = Math.max(last, Math.min(endAts, unwrap(atsOf(bytes), ref, ATS_WRAP)));
     if (leadingPsi === keptSlots.length && isPsi) {
       floor = last;
       leadingPsi++;
@@ -360,34 +364,49 @@ function readPcr(packet: Uint8Array): number | null {
   return base * 300 + (((packet[14]! & 0x01) << 8) | packet[15]!);
 }
 
+export interface IntervalCollectorOptions {
+  readonly videoPid: number;
+  /** The source's PCR PID (from the PMT); its PCRs are collected only when it is the video PID. */
+  readonly pcrPid: number;
+  /** The clip's intervals: the ATS at each one's end SPN is kept for its `endAts`, and no other. */
+  readonly intervals: readonly IntervalPlan[];
+  /** SPNs where the clip's STC sequences start (CLPI spnStcStart); a PCR anchor never carries across one. */
+  readonly stcStarts?: readonly number[];
+}
+
 /**
  * Collects a clip's source packets, fed in order from an interval's start, into what each interval's re-mux needs: the
- * kept packets assigned to it (ruling L-R4), the source video's PES starts and, when PCR rides on the video PID, a PCR.
- * A filtered PES that starts in an interval completes only past its end, so an interval is ready once the source was fed
- * past its end and no unit started in it is still open (or `finish()` was called at the clip's end).
+ * kept packets assigned to it (ruling L-R4), the source video's PES starts and, when PCR rides on the video PID, a PCR
+ * (the interval's first, else the latest earlier one in the same STC sequence). A filtered PES that starts in an
+ * interval completes only past its end, so an interval is ready once the source was fed past its end and no unit
+ * started in it is still open (or `finish()` was called at the clip's end).
  */
 export class IntervalCollector {
   private held: KeptPacket[] = [];
   private timeline: Array<VideoAnchor & { spn: number }> = [];
   private pcrs: Array<PcrAnchor & { spn: number }> = [];
+  /** The latest PCR of the intervals already taken. */
+  private earlierPcr: (PcrAnchor & { spn: number }) | null = null;
+  private readonly endSpns: ReadonlySet<number>;
   private atsAt = new Map<number, number>();
   private lastSpn = -1;
   private finished = false;
 
-  /** `pcrPid`: the source's PCR PID (CLPI or PMT); its PCRs are collected only when it is the video PID. */
   constructor(
     private readonly streams: KeptStreams,
-    private readonly videoPid: number,
-    private readonly pcrPid: number,
-  ) {}
+    private readonly options: IntervalCollectorOptions,
+  ) {
+    this.endSpns = new Set(options.intervals.map((iv) => iv.srcSpnEnd));
+  }
 
   push(packet: Uint8Array, spn: number): void {
     this.held.push(...this.streams.filter(packet, spn));
     this.lastSpn = spn;
-    this.atsAt.set(spn, atsOf(packet));
+    if (this.endSpns.has(spn)) this.atsAt.set(spn, atsOf(packet));
+    const { videoPid, pcrPid } = this.options;
     const ts = parseSourcePacket(packet, 0);
-    if (!ts || ts.pid !== this.videoPid) return;
-    if (this.pcrPid === this.videoPid) {
+    if (!ts || ts.pid !== videoPid) return;
+    if (pcrPid === videoPid) {
       const pcr = readPcr(packet);
       if (pcr !== null) this.pcrs.push({ spn, ats: atsOf(packet), pcr27: pcr });
     }
@@ -415,7 +434,9 @@ export class IntervalCollector {
     if (!this.ready(plan)) throw new Error(`levels: interval ${plan.index} isn't collected yet`);
     const inside = (spn: number): boolean => spn >= plan.srcSpnStart && spn < plan.srcSpnEnd;
     const after = (spn: number): boolean => spn >= plan.srcSpnEnd;
-    const pcr = this.pcrs.find((p) => inside(p.spn));
+    const earlier = this.earlierPcr;
+    const sameStc = (from: number): boolean => !(this.options.stcStarts ?? []).some((s) => s > from && s <= plan.srcSpnStart);
+    const pcr = this.pcrs.find((p) => inside(p.spn)) ?? (earlier && earlier.spn < plan.srcSpnStart && sameStc(earlier.spn) ? earlier : undefined);
     const endAts = this.atsAt.get(plan.srcSpnEnd);
     const source: IntervalSource = {
       kept: this.held.filter((k) => inside(k.spn)),
@@ -423,6 +444,7 @@ export class IntervalCollector {
       pcr: pcr ? { ats: pcr.ats, pcr27: pcr.pcr27 } : null,
       ...(endAts === undefined ? {} : { endAts }),
     };
+    for (const p of this.pcrs) if (!after(p.spn)) this.earlierPcr = p;
     this.held = this.held.filter((k) => after(k.spn));
     this.timeline = this.timeline.filter((a) => after(a.spn));
     this.pcrs = this.pcrs.filter((p) => after(p.spn));
