@@ -164,6 +164,15 @@ describe('disc routes at a quality level', () => {
     expect(hevc.levels.find((l) => l.level === 'hevc-1080')).toMatchObject({ available: true });
   });
 
+  it('prices the levels with the audio stream asked for (audio=, 1 by default); a bad audio number is 404', async () => {
+    type Levels = { levels: { level: string; budgetMbps: number }[] };
+    const at = async (query: string): Promise<number> =>
+      ((await (await fetch(withToken(`/discs/${ids.levels}/levels?hevc=0&hevc10=0&hdr=0${query}`))).json()) as Levels).levels.find((l) => l.level === 'h264-1080')!.budgetMbps;
+    expect(await at('&audio=1')).toBe(await at(''));
+    expect(await at('&audio=2')).not.toBe(await at(''));
+    expect((await fetch(withToken(`/discs/${ids.levels}/levels?audio=x`))).status).toBe(404);
+  });
+
   it('serves a manifest at a level with the rewritten CLPI, and leases for the token’s device', async () => {
     const original = (await (await fetch(withToken(`/discs/${ids.mpeg2}/manifest`))).json()) as DiscManifest;
     const level = await levelManifest('mpeg2');

@@ -206,6 +206,7 @@ export class LevelService {
     discId: string,
     client: { readonly hevc: boolean; readonly hevc10: boolean; readonly hdr: boolean },
     deviceId?: string,
+    audioNumber = 1,
   ): Promise<LevelInfo[] | null> {
     const source = await this.options.discs(discId);
     if (!source) return null;
@@ -222,7 +223,7 @@ export class LevelService {
       budgetMbps: mbps(disc.sizes.get(main.m2tsPath) ?? 0),
       ...(offered.includes('original') ? { available: true } : { available: false, reason: 'unplayable' as const }),
     });
-    const audio = keptAudioFor(main.item, 1);
+    const audio = keptAudioFor(main.item, audioNumber);
     const audioBps = audio ? await audioBpsOf(disc, main, audio, this.log) : 0;
     const fps = fpsOf(main.video.rate);
     const replacing = deviceId === undefined ? [] : this.leasesOf(`${deviceId}:${discId}:`);

@@ -782,6 +782,21 @@ describe('LevelService: fix round 1', () => {
 });
 
 describe('LevelService: final review', () => {
+  it('prices the levels with the audio stream asked for', async () => {
+    const client = { hevc: false, hevc10: false, hdr: false };
+    const sizeAt = async (audio: number): Promise<number> => {
+      const m = await service.manifest(DISC_ID, 'h264-1080', audio, viewingIdOf('dev-a', DISC_ID, 'h264-1080', audio));
+      if (!m || 'busy' in m) throw new Error('no manifest');
+      return m.files.find((f) => f.path === M2TS_PATH)!.size;
+    };
+    const [one, two] = [await sizeAt(1), await sizeAt(2)];
+    expect(two).not.toBe(one); // stream 2 (AC-3) travels at another rate than stream 1 (TrueHD's core)
+    const film = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals.reduce((n, iv) => n + iv.endPts45 - iv.startPts45, 0) / 45_000;
+    const at = async (audio?: number): Promise<number> => (await service.levels(DISC_ID, client, undefined, audio))!.find((l) => l.level === 'h264-1080')!.budgetMbps;
+    expect(await at()).toBeCloseTo((one * 8) / film / 1e6, 1);
+    expect(await at(2)).toBeCloseTo((two * 8) / film / 1e6, 1);
+  });
+
   it('falls back to the coding’s nominal audio rate, and logs it, when the kept audio has no readable frame at the clip’s start', async () => {
     const dir = discCopy();
     const m2ts = join(dir, 'BDMV/STREAM/00001.m2ts');

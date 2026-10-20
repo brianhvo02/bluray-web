@@ -192,7 +192,7 @@ async function release(levels: DiscLevels, req: IncomingMessage, url: URL, discI
 }
 
 /**
- * `GET /api/discs/<id>/levels?hevc=&hevc10=&hdr=`, and the manifest and files at `?level=<level>&audio=<n>` (spec §5):
+ * `GET /api/discs/<id>/levels?hevc=&hevc10=&hdr=&audio=` (priced with that audio stream, 1 by default), and the manifest and files at `?level=<level>&audio=<n>` (spec §5):
  * a level's manifest leases the GPU for the token's device's viewing; a read answers 503 with `Retry-After: 1` while the
  * encoder hasn't reached its bytes (or was restarted or closed), and 503 `busy` when the GPU has no room for the viewing.
  * A read is clamped to 4 MiB.
@@ -202,7 +202,9 @@ async function levelRoute(levels: DiscLevels, req: IncomingMessage, url: URL, di
   const device = requestDevice(levels.auth, req.headers.authorization, url);
   if (!device) return json(401, { error: 'unauthorized' });
   if (action === 'levels') {
-    const list = await service.levels(discId, { hevc: flag(url, 'hevc'), hevc10: flag(url, 'hevc10'), hdr: flag(url, 'hdr') }, device.id);
+    const audio = audioParam(url);
+    if (!(audio >= 1 && audio <= 32)) return notFound();
+    const list = await service.levels(discId, { hevc: flag(url, 'hevc'), hevc10: flag(url, 'hevc10'), hdr: flag(url, 'hdr') }, device.id, audio);
     return list ? json(200, { levels: list }) : discChanged();
   }
   const level = url.searchParams.get('level')!;
