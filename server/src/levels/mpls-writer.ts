@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-import { parseMpls } from '../../../src/engine/bdmv/mpls-parser';
+import { parseMpls, type PlayItem } from '../../../src/engine/bdmv/mpls-parser';
 import { setAudioCoding, setVideoAttrs } from './clpi-writer';
 import type { KeptAudio } from './levels';
 import { coreCoding, keptAudioFor } from './levels';
@@ -30,10 +30,15 @@ export interface VideoAttrs {
  * The playlist at a level. In every play item's STN table only the primary audio `keptAudioFor`
  * picks for the requested stream number stays (none when it picks none), its coding set to the
  * core the level carries; secondary audio, secondary video and Dolby
- * Vision enhancement layers are gone, and the primary video's coding, format and rate are set.
- * PG, PiP PG and IG entries, sub paths, marks and extension data are copied.
+ * Vision enhancement layers are gone, and the primary video's coding, format and rate are set:
+ * `video` gives them for the whole playlist, or per play item (a playlist whose items play clips
+ * of different heights). PG, PiP PG and IG entries, sub paths, marks and extension data are copied.
  */
-export function rewriteMpls(original: Uint8Array, keep: { audioStreamNumber: number }, video: VideoAttrs): Uint8Array {
+export function rewriteMpls(
+  original: Uint8Array,
+  keep: { audioStreamNumber: number },
+  video: VideoAttrs | ((item: PlayItem, index: number) => VideoAttrs),
+): Uint8Array {
   const items = parseMpls(original).playItems;
   const listAt = readU32(original, LIST_AT);
   const list = sectionBytes(original, listAt);
@@ -43,7 +48,9 @@ export function rewriteMpls(original: Uint8Array, keep: { audioStreamNumber: num
   let at = 10;
   for (let i = 0; i < itemCount; i++) {
     const end = at + 2 + readU16(list, at);
-    w.bytes(rewritePlayItem(list.subarray(at, end), keptAudioFor(items[i]!, keep.audioStreamNumber), video, i));
+    const item = items[i]!;
+    const attrs = typeof video === 'function' ? video(item, i) : video;
+    w.bytes(rewritePlayItem(list.subarray(at, end), keptAudioFor(item, keep.audioStreamNumber), attrs, i));
     at = end;
   }
   w.bytes(list.subarray(at)); // sub paths

@@ -60,6 +60,21 @@ export interface ClipRunDeps {
 
 /** How far (in intervals) the source reader may run ahead of the re-muxer before it pauses. */
 const SOURCE_LEAD_INTERVALS = 8;
+/** Encoded intervals held for the re-muxer before ffmpeg's output is paused. */
+const VIDEO_LEAD_INTERVALS = 8;
+/** After a failed run, no new one starts for this long; reads are asked to retry. */
+export const FAILURE_BACKOFF_MS = 5_000;
+
+/**
+ * A read should be retried shortly: the encoder was restarted elsewhere for another read of the same viewing, or it is
+ * backing off after a failure. The service answers it with `retryAfter`.
+ */
+export class RetryLater extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryLater';
+  }
+}
 const MS_PER_45KHZ = 1 / 45;
 
 interface Waiter {
@@ -93,6 +108,10 @@ function waiter(): Waiter {
  * - A run covers one window (`runWindow`: one STC sequence, at most 300 intervals), sized to end `readAheadMs` of film
  *   past the latest read. When it ends, the next run starts at the first interval not cached once the lead over the
  *   latest read has fallen under half of `readAheadMs` (or a read waits past the window); until then the encoder idles.
+ * - A restart fails the reads waiting for intervals the new run won't reach with `RetryLater` (they come back, and are
+ *   served from the cache or decide again), so no read hangs on a run that was stopped.
+ * - A failed run fails the reads waiting for the encoder; for `FAILURE_BACKOFF_MS` no run starts and reads that need
+ *   one get `RetryLater`.
  * - `idleMs` after the last read, the run stops and `onIdle` is called.
  */
 export class ClipRunner {
@@ -106,6 +125,7 @@ export class ClipRunner {
   private idleTimer: unknown = null;
   private pumping = false;
   private closed = false;
+  private failedAt: number | null = null;
 
   constructor(
     private readonly plan: ClipRunPlan,
@@ -203,11 +223,19 @@ export class ClipRunner {
     w.encoding = true;
     const run = this.run;
     if (run && this.reaches(run, index)) return;
+    if (this.backingOff()) {
+      this.reject(index, new RetryLater(`levels: encoding failed less than ${FAILURE_BACKOFF_MS / 1000} s ago`));
+      return;
+    }
     this.startRun(index);
   }
 
+  private backingOff(): boolean {
+    return this.failedAt !== null && this.deps.clock.now() - this.failedAt < FAILURE_BACKOFF_MS;
+  }
+
   /** Whether `run` (or the run that continues it) will produce `index` soon enough to wait for. */
-  private reaches(run: Run, index: number): boolean {
+  private reaches(run: { readonly next: number }, index: number): boolean {
     if (index < run.next) return false; // produced already, and since gone from the cache
     return this.film[index]! - this.film[run.next]! <= this.deps.readAheadMs;
   }
@@ -228,11 +256,16 @@ export class ClipRunner {
       failed: (err) => {
         if (this.run !== run) return;
         this.run = null;
+        this.failedAt = this.deps.clock.now();
         this.deps.log(`levels: encoding from interval ${from} failed: ${err.message}`);
-        this.rejectAll(err);
+        for (const [index, w] of this.waiters) if (w.encoding) this.reject(index, err);
       },
     });
     this.run = run;
+    // Reads waiting for intervals this run won't reach come back later rather than wait on nothing.
+    for (const [index, w] of this.waiters) {
+      if (w.encoding && !this.reaches({ next: from }, index)) this.reject(index, new RetryLater(`levels: the encoder moved to interval ${from}`));
+    }
     run.start();
   }
 
@@ -243,7 +276,7 @@ export class ClipRunner {
 
   /** With no run: starts one at the first interval not cached, when a read waits or the lead fell under half the window. */
   private async pump(): Promise<void> {
-    if (this.pumping || this.run || this.closed) return;
+    if (this.pumping || this.run || this.closed || this.backingOff()) return;
     this.pumping = true;
     try {
       const { intervals, cacheKey } = this.plan;
@@ -281,12 +314,16 @@ export class ClipRunner {
     w.resolve(bytes);
   }
 
+  private reject(index: number, err: Error): void {
+    const w = this.waiters.get(index);
+    if (!w) return;
+    this.waiters.delete(index);
+    w.settled = true;
+    w.reject(err);
+  }
+
   private rejectAll(err: Error): void {
-    for (const [index, w] of this.waiters) {
-      this.waiters.delete(index);
-      w.settled = true;
-      w.reject(err);
-    }
+    for (const index of [...this.waiters.keys()]) this.reject(index, err);
   }
 }
 
@@ -351,6 +388,7 @@ class Run {
         this.encoder = encoder;
         encoder.on('interval', (index, video) => {
           this.videos.set(index, video);
+          if (this.videos.size > VIDEO_LEAD_INTERVALS) encoder.pause();
           void this.process();
         });
         encoder.on('error', (err) => this.fail(err));
@@ -413,8 +451,8 @@ class Run {
       data = joined;
     }
     const whole = data.length - (data.length % SOURCE_PACKET_BYTES);
-    // Each packet is copied: kept ones outlive the chunk, and must not pin it.
-    for (let at = 0; at < whole; at += SOURCE_PACKET_BYTES) this.collector.push(data.slice(at, at + SOURCE_PACKET_BYTES), this.spn++);
+    // Views into the chunk: the collector copies the few packets it keeps.
+    for (let at = 0; at < whole; at += SOURCE_PACKET_BYTES) this.collector.push(data.subarray(at, at + SOURCE_PACKET_BYTES), this.spn++);
     this.partial = data.slice(whole);
   }
 
@@ -439,6 +477,7 @@ class Run {
         if (!video || !this.collector.ready(plan)) break;
         const source = this.collector.take(plan);
         this.videos.delete(this.next);
+        if (this.videos.size <= VIDEO_LEAD_INTERVALS) this.encoder?.resume();
         if (this.paused && !this.tooFarAhead()) {
           this.paused = false;
           this.stream?.resume();

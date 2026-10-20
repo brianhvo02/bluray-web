@@ -110,6 +110,35 @@ function rewriteSequenceInfo(section: Uint8Array, intervals: readonly IntervalPl
   return out;
 }
 
+/**
+ * The coding attributes (after their length byte) of `pid`'s stream in a CLPI's ProgramInfo, as a view into `clpi`, or
+ * null. For HEVC video the fourth byte holds dynamic_range_type (high 4 bits) and color_space (libbluray clpi_parse.c,
+ * _parse_stream_attr).
+ */
+export function clpiStreamAttrs(clpi: Uint8Array, pid: number): Uint8Array | null {
+  const progAt = readU32(clpi, PROGRAM_AT);
+  if (!progAt) return null;
+  const section = sectionBytes(clpi, progAt);
+  const programCount = section[5]!;
+  let at = 6;
+  for (let p = 0; p < programCount; p++) {
+    const streamCount = section[at + 6]!;
+    at += 8;
+    for (let s = 0; s < streamCount; s++) {
+      const length = section[at + 2]!;
+      if (readU16(section, at) === pid) return section.subarray(at + 3, at + 3 + length);
+      at += 3 + length;
+    }
+  }
+  return null;
+}
+
+/** Whether a CLPI's HEVC video stream is HDR: a non-zero dynamic_range_type (0 is SDR). False for any other coding. */
+export function clpiVideoIsHdr(clpi: Uint8Array, pid: number): boolean {
+  const attrs = clpiStreamAttrs(clpi, pid);
+  return attrs !== null && attrs[0] === CodingType.HEVC && attrs.length > 3 && attrs[3]! >> 4 !== 0;
+}
+
 /** ProgramInfo with only the kept streams, the video's coding attributes set. */
 function rewriteProgramInfo(
   section: Uint8Array,

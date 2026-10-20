@@ -46,10 +46,10 @@ export class Capacity {
     return true;
   }
 
-  /** Whether a new viewing of `codec` at `fps` would be admitted now. */
-  fits(codec: EncoderCodec, fps: number): boolean {
+  /** Whether a new viewing of `codec` at `fps` would be admitted now, taking over `replacing` (as `lease`). */
+  fits(codec: EncoderCodec, fps: number, replacing: readonly string[] = []): boolean {
     this.expire();
-    return this.share(new Set()) + (fps * NEED_MARGIN) / this.budgets[codec] <= 1 + 1e-9;
+    return this.share(new Set(replacing)) + (fps * NEED_MARGIN) / this.budgets[codec] <= 1 + 1e-9;
   }
 
   has(viewingId: string): boolean {

@@ -429,6 +429,17 @@ describe('IntervalCollector', () => {
     expect(sources.flatMap((s) => s.kept)).toHaveLength(all.length);
   });
 
+  it('copies the packets it keeps out of the caller’s buffer, and only those', () => {
+    const collector = new IntervalCollector(cases[0]!.streams(), { videoPid: VIDEO, pcrPid: 0x1001, intervals });
+    const plan = intervals[0]!;
+    for (let spn = 0; spn < packets.length && !collector.ready(plan); spn++) collector.push(packets[spn]!, spn);
+    const kept = collector.take(plan).kept;
+    expect(kept.length).toBeGreaterThan(0);
+    // The test's packets are views into the whole file: none of the kept ones may still point into it.
+    for (const k of kept) expect(k.bytes.buffer).not.toBe(m2ts.buffer);
+    expect(packets[0]!.buffer).toBe(m2ts.buffer);
+  });
+
   it('is not ready until a PES that straddles the interval end is complete, and gives that PES whole to the interval', () => {
     const { plans, k, pes } = straddle(packets, intervals);
     const plan = plans[k]!;
@@ -443,10 +454,10 @@ describe('IntervalCollector', () => {
     collector.push(packets[last]!, last);
     expect(collector.ready(plan)).toBe(true);
     const mine = collector.take(plan).kept.map((x) => x.bytes);
-    for (const at of pes) expect(mine).toContain(packets[at]!);
+    for (const at of pes) expect(mine).toContainEqual(packets[at]!);
     for (spn = last + 1; spn < packets.length && !collector.ready(plans[k + 1]!); spn++) collector.push(packets[spn]!, spn);
     const next = collector.take(plans[k + 1]!).kept.map((x) => x.bytes);
-    for (const at of pes) expect(next).not.toContain(packets[at]!);
+    for (const at of pes) expect(next).not.toContainEqual(packets[at]!);
   });
 });
 

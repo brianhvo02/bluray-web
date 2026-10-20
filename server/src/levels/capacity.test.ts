@@ -43,6 +43,7 @@ describe('Capacity', () => {
     expect(c.lease('a2', 'h264', FILM)).toBe(true);
     expect(c.lease('a3', 'h264', FILM)).toBe(false);
     expect(c.fits('h264', FILM)).toBe(false);
+    expect(c.fits('h264', FILM, ['h2'])).toBe(true);
     c.release('h2');
     expect(c.fits('h264', FILM)).toBe(true);
   });

@@ -46,6 +46,29 @@ describe('rewriteMpls', () => {
     expect(after.marks).toEqual(before.marks);
   });
 
+  it('takes the video attributes per play item when given a function (clips of different heights)', () => {
+    const item = (clipId: string): PlayItemSpec => ({
+      clipId,
+      inTime: 0,
+      outTime: 900_000,
+      video: [{ pid: 0x1011, codingType: 0x02, format: clipId === '00001' ? 4 : 3, rate: 4 }],
+      audio: [{ pid: 0x1100, codingType: 0x81, lang: 'eng' }],
+    });
+    const bytes = buildMpls({ playItems: [item('00001'), item('00002')] });
+    const seen: string[] = [];
+    const out = parseMpls(
+      rewriteMpls(bytes, { audioStreamNumber: 1 }, (it, i) => {
+        seen.push(`${i}:${it.clipId}`);
+        return it.clipId === '00001' ? { newCoding: 0x1b, newFormat: 6, newRate: 4 } : { newCoding: 0x1b, newFormat: 3, newRate: 4 };
+      }),
+    );
+    expect(seen).toEqual(['0:00001', '1:00002']);
+    expect(out.playItems.map((p) => [p.stn.video[0]!.codingType, p.stn.video[0]!.format])).toEqual([
+      [0x1b, 6],
+      [0x1b, 3],
+    ]);
+  });
+
   it('rewrites every play item and keeps sub paths, IG, marks and the rest of each item', () => {
     const stream = (pid: number, codingType: number, lang = 'eng') => ({ pid, codingType, lang });
     const item = (clipId: string, inTime: number): PlayItemSpec => ({

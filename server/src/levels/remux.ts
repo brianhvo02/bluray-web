@@ -399,8 +399,12 @@ export class IntervalCollector {
     this.endSpns = new Set(options.intervals.map((iv) => iv.srcSpnEnd));
   }
 
+  /**
+   * Feeds the source packet at `spn`. `packet` may be a view into a larger read buffer: the packets kept from it are
+   * copied (only those), so they never pin the buffer.
+   */
   push(packet: Uint8Array, spn: number): void {
-    this.held.push(...this.streams.filter(packet, spn));
+    for (const k of this.streams.filter(packet, spn)) this.held.push(k.bytes.byteLength === k.bytes.buffer.byteLength ? k : { spn: k.spn, bytes: k.bytes.slice() });
     this.lastSpn = spn;
     if (this.endSpns.has(spn)) this.atsAt.set(spn, atsOf(packet));
     const { videoPid, pcrPid } = this.options;

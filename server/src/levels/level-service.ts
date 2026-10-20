@@ -1,36 +1,15 @@
 import type { spawn as nodeSpawn } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { open, readFile, stat } from 'node:fs/promises';
-import type { Readable } from 'node:stream';
-import { parseClpi, type Clpi } from '../../../src/engine/bdmv/clpi-parser';
-import { parseMpls, type Mpls, type PlayItem } from '../../../src/engine/bdmv/mpls-parser';
-import { CodingType } from '../../../src/engine/bdmv/stream-types';
-import type { DiscEntry, DiscManifest } from '../../../src/engine/disc/nas-api';
-import type { UdfFile } from '../../../src/engine/disc/udf';
-import { IsoTrees, isoFileStream, isoUnchanged, readIsoFiles } from '../iso';
-import type { Library } from '../library';
-import { buildIsoManifest, buildManifest, discUnchanged, resolveDiscFile, resolveIsoFile } from '../manifest';
-import { nominalAudioBps, PesCoreFilter } from './audio-core';
-import type { Capacity, EncoderCodec } from './capacity';
-import { ClipRunner, realClock, type Clock, type ClipRunPlan } from './clip-run';
-import { rewriteClpi } from './clpi-writer';
-import { deinterlaces, probeScan, type ClipInput, type ClipReader, type EncoderBackend, type ScanInfo } from './encoder';
-import {
-  SOURCE_PACKET_BYTES,
-  coreCoding,
-  keptAudioFor,
-  levelDefFor,
-  levelsFor,
-  planClip,
-  videoAttrsFor,
-  videoEpMap,
-  type IntervalPlan,
-  type KeptAudio,
-  type LevelDef,
-  type LevelId,
-} from './levels';
-import { rewriteMpls } from './mpls-writer';
+import type { DiscManifest } from '../../../src/engine/disc/nas-api';
+import type { Capacity } from './capacity';
+import { ClipRunner, RetryLater, realClock, type Clock } from './clip-run';
+import type { ClipInput, EncoderBackend, ScanInfo } from './encoder';
+import type { LevelDiscSource } from './level-discs';
+import { audioBpsOf, buildVersion, fpsOf, loadDisc, type ClipVersion, type DiscInfo, type EncodedLevel, type Version } from './level-version';
+import { SOURCE_PACKET_BYTES, keptAudioFor, levelDefFor, levelsFor, planClip, type IntervalPlan, type LevelId } from './levels';
 import type { SegmentCache } from './segment-cache';
+
+export { firstAudioBps, folderDiscSource, isoDiscSource, libraryDiscSources, type ClipSource, type LevelDiscSource } from './level-discs';
+export type { EncodedLevel } from './level-version';
 
 /** Film the encoder runs ahead of the latest read; a read this far ahead of it waits (spec §6.1). */
 export const READ_AHEAD_FILM_MS = 120_000;
@@ -38,30 +17,8 @@ export const READ_AHEAD_FILM_MS = 120_000;
 export const READ_WAIT_MS = 15_000;
 /** An encoder no read has touched for this long stops (spec §6.1). */
 export const ENCODER_IDLE_MS = 60_000;
-/** Where a clip's first audio frame is looked for. */
-const AUDIO_PROBE_BYTES = 16 * 1024 * 1024;
 const DISC_INFOS = 16;
 const VERSIONS = 32;
-
-export type EncodedLevel = Exclude<LevelId, 'original'>;
-
-/** A stream file of a disc: what ffmpeg reads, how the server reads it, and its identity for the cache key. */
-export interface ClipSource {
-  readonly input: ClipInput;
-  readonly read: ClipReader;
-  readonly size: number;
-  readonly mtimeMs: number;
-}
-
-/** One disc's original files, as the level service reads them. Paths are disc-relative and upper-case. */
-export interface LevelDiscSource {
-  manifest(): Promise<DiscManifest>;
-  /** A whole file (a CLPI or MPLS the manifest didn't inline), or null. */
-  readFile(path: string): Promise<Uint8Array | null>;
-  /** Bytes [offset, offset + length) of a file, or null when it is missing. */
-  readRange(path: string, offset: number, length: number): Promise<Buffer | null>;
-  clip(path: string): Promise<ClipSource | null>;
-}
 
 export type LevelReason = 'unplayable' | 'no-hevc' | 'no-hevc10' | 'no-hdr-display' | 'busy';
 
@@ -90,7 +47,7 @@ export function viewingIdOf(deviceId: string, discId: string, level: EncodedLeve
   return `${deviceId}:${discId}:${level}:${audio}`;
 }
 
-/** The device-and-disc part of a viewing id: the viewings one lease moves between. */
+/** The device-and-disc part of a viewing id (`<device>:<disc>:`): the viewings one lease moves between. */
 function viewerOf(viewingId: string): string {
   const audioAt = viewingId.lastIndexOf(':');
   return viewingId.slice(0, viewingId.lastIndexOf(':', audioAt - 1) + 1);
@@ -113,65 +70,6 @@ export interface LevelServiceOptions {
   readonly log?: (message: string) => void;
 }
 
-interface VideoInfo {
-  readonly pid: number;
-  readonly codingType: number;
-  readonly height: number;
-  /** CLPI frame-rate code. */
-  readonly rate: number;
-  readonly hdr: boolean;
-}
-
-interface ClipInfo {
-  readonly id: string;
-  readonly clpiPath: string;
-  readonly m2tsPath: string;
-  readonly clpiBytes: Uint8Array;
-  readonly clpi: Clpi;
-  readonly video: VideoInfo;
-  /** The first main-path play item that plays this clip: its STN picks the clip's kept audio. */
-  readonly item: PlayItem;
-}
-
-interface DiscInfo {
-  readonly id: string;
-  readonly source: LevelDiscSource;
-  readonly manifest: DiscManifest;
-  readonly sizes: ReadonlyMap<string, number>;
-  readonly playlists: readonly { readonly path: string; readonly bytes: Uint8Array; readonly clipIds: readonly string[] }[];
-  /** The clips with primary video that a playlist's main path plays: the ones a level re-encodes. */
-  readonly clips: ReadonlyMap<string, ClipInfo>;
-  /** The largest of them: its video decides the disc's levels, rates and capacity. */
-  readonly main: ClipInfo | null;
-  readonly audioBps: Map<number, Promise<number>>;
-  readonly scans: Map<string, Promise<boolean>>;
-}
-
-interface ClipVersion {
-  readonly info: ClipInfo;
-  readonly runPlan: ClipRunPlan;
-  readonly sizeBytes: number;
-}
-
-interface Version {
-  readonly key: string;
-  readonly disc: DiscInfo;
-  readonly codec: EncoderCodec;
-  readonly fps: number;
-  readonly manifest: DiscManifest;
-  readonly sizes: ReadonlyMap<string, number>;
-  /** CLPI and MPLS files rewritten for the level. */
-  readonly rewritten: ReadonlyMap<string, Uint8Array>;
-  /** By `.M2TS` path. */
-  readonly clips: ReadonlyMap<string, ClipVersion>;
-}
-
-/** CLPI video_format code → lines (libbluray bd_video_format_e). */
-const FORMAT_LINES: Readonly<Record<number, number>> = { 1: 480, 2: 576, 3: 480, 4: 1080, 5: 720, 6: 1080, 7: 576, 8: 2160 };
-/** CLPI frame-rate code → frames per second (an interlaced source is deinterlaced to its frame rate). */
-const RATE_FPS: Readonly<Record<number, number>> = { 1: 24_000 / 1001, 2: 24, 3: 25, 4: 30_000 / 1001, 6: 50, 7: 60_000 / 1001 };
-const GRAPHICS_CODINGS = new Set<number>([CodingType.PG, CodingType.IG, CodingType.TEXT_SUBTITLE]);
-
 class Lru<V> {
   private readonly map = new Map<string, V>();
   constructor(private readonly max: number) {}
@@ -191,24 +89,42 @@ class Lru<V> {
       this.map.delete(oldest);
     }
   }
-  delete(key: string, value: V): void {
-    if (this.map.get(key) === value) this.map.delete(key);
+  delete(key: string, value?: V): void {
+    if (value === undefined || this.map.get(key) === value) this.map.delete(key);
+  }
+  deleteWhere(test: (key: string) => boolean): void {
+    for (const key of [...this.map.keys()]) if (test(key)) this.map.delete(key);
   }
 }
 
-function isTimeout(signal: AbortSignal, reason: unknown): boolean {
-  return signal.aborted && signal.reason === reason;
+/** The interval holding byte `offset` of a level's clip. */
+function intervalAt(intervals: readonly IntervalPlan[], offset: number): number {
+  const spn = Math.floor(offset / SOURCE_PACKET_BYTES);
+  let lo = 0;
+  let hi = intervals.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (intervals[mid]!.spnStart <= spn) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+function filmSeconds(intervals: readonly IntervalPlan[]): number {
+  return Math.max(1, intervals.reduce((n, iv) => n + iv.endPts45 - iv.startPts45, 0)) / 45_000;
 }
 
 /**
  * Serves discs at re-encoded quality levels (spec §5–§6): each level is another version of the disc, with the same
- * files, its stream files re-encoded and the CLPI and MPLS files that describe them rewritten. Reads of a level's stream
- * files drive one encoder per clip (`ClipRunner`), ahead of the reader; finished intervals live in the segment cache.
- * Every viewing holds a lease on the GPU's capacity.
+ * files, its stream files re-encoded and the CLPI and MPLS files that describe them rewritten (`level-version.ts`).
+ * Reads of a level's stream files drive the viewing's encoder for that clip (`ClipRunner`), ahead of the reader;
+ * finished intervals live in the segment cache. Every viewing holds a lease on the GPU's capacity. A version is rebuilt
+ * when one of its clips was replaced (size or mtime).
  */
 export class LevelService {
   private readonly discInfos = new Lru<Promise<DiscInfo>>(DISC_INFOS);
   private readonly versions = new Lru<Promise<Version | null>>(VERSIONS);
+  /** By `<viewing id>|<version key>|<clip id>`. */
   private readonly runners = new Map<string, ClipRunner>();
   private readonly clock: Clock;
   private readonly log: (message: string) => void;
@@ -223,8 +139,13 @@ export class LevelService {
    * has no room for it, null when the disc is gone or isn't offered at that level.
    */
   async manifest(discId: string, level: string, audio: number, viewingId: string): Promise<DiscManifest | { busy: true } | null> {
-    if (!(await this.options.discs(discId))) return null;
-    const version = await this.version(discId, level, audio);
+    const source = await this.options.discs(discId);
+    if (!source) return null;
+    let version = await this.version(discId, level, audio, source);
+    if (version && !(await this.unchanged([...version.clips.values()]))) {
+      this.invalidate(discId);
+      version = await this.version(discId, level, audio, source);
+    }
     if (!version) return null;
     if (!this.admit(version, viewingId)) return { busy: true };
     return version.manifest;
@@ -232,9 +153,10 @@ export class LevelService {
 
   /**
    * Bytes [offset, offset + length) of a file of the disc at a level. A stream file's bytes come from the cache, or the
-   * read waits on the clip's encoder (restarted at the interval when it is not about to reach it); after 15 s of waiting
-   * the answer is `retryAfter`. `busy` when the viewing holds no lease and none is free; null when the disc or file is
-   * gone. Throws a RangeError when the range runs past the file.
+   * read waits on the viewing's encoder for the clip (restarted at the interval when it is not about to reach it); after
+   * 15 s of waiting, or when the encoder moved elsewhere or is backing off after a failure, the answer is `retryAfter`.
+   * `busy` when the viewing holds no lease and none is free; null when the disc or file is gone. Throws a RangeError
+   * when the range runs past the file.
    */
   async read(
     discId: string,
@@ -246,9 +168,15 @@ export class LevelService {
     viewingId: string,
     signal: AbortSignal,
   ): Promise<Buffer | { retryAfter: 1 } | { busy: true } | null> {
-    const version = await this.version(discId, level, audio);
-    if (!version) return null;
     const key = path.toUpperCase();
+    let version = await this.version(discId, level, audio);
+    let clip = version?.clips.get(key);
+    if (version && clip && !(await this.unchanged([clip]))) {
+      this.invalidate(discId);
+      version = await this.version(discId, level, audio);
+      clip = version?.clips.get(key);
+    }
+    if (!version) return null;
     const size = version.sizes.get(key);
     if (size === undefined) return null;
     if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 || offset + length > size) {
@@ -257,14 +185,20 @@ export class LevelService {
     if (!this.admit(version, viewingId)) return { busy: true };
     const rewritten = version.rewritten.get(key);
     if (rewritten) return Buffer.from(rewritten.subarray(offset, offset + length));
-    const clip = version.clips.get(key);
     if (!clip) return version.disc.source.readRange(key, offset, length);
     if (length === 0) return Buffer.alloc(0);
     return this.readClip(version, clip, viewingId, offset, length, signal);
   }
 
-  /** The levels a disc can be played at, for a client that decodes what `client` says. */
-  async levels(discId: string, client: { readonly hevc: boolean; readonly hevc10: boolean; readonly hdr: boolean }): Promise<LevelInfo[] | null> {
+  /**
+   * The levels a disc can be played at, for a client that decodes what `client` says. With `deviceId`, the capacity a
+   * level needs counts the device's own leases on this disc as free (choosing a level moves its lease).
+   */
+  async levels(
+    discId: string,
+    client: { readonly hevc: boolean; readonly hevc10: boolean; readonly hdr: boolean },
+    deviceId?: string,
+  ): Promise<LevelInfo[] | null> {
     const source = await this.options.discs(discId);
     if (!source) return null;
     const disc = await this.discInfo(discId, source);
@@ -274,16 +208,16 @@ export class LevelService {
     const durationS = filmSeconds(planClip(main.clpi, levelDefFor('phone-720', main.video), 0).intervals);
     const mbps = (bytes: number): number => Math.round((bytes * 8) / durationS / 100_000) / 10;
     const out: LevelInfo[] = [];
-    const originalSize = disc.sizes.get(main.m2tsPath) ?? 0;
     out.push({
       level: 'original',
       label: LABELS.original,
-      budgetMbps: mbps(originalSize),
+      budgetMbps: mbps(disc.sizes.get(main.m2tsPath) ?? 0),
       ...(offered.includes('original') ? { available: true } : { available: false, reason: 'unplayable' as const }),
     });
     const audio = keptAudioFor(main.item, 1);
-    const audioBps = audio ? await this.audioBps(disc, main, audio) : 0;
-    const fps = RATE_FPS[main.video.rate] ?? RATE_FPS[4]!;
+    const audioBps = audio ? await audioBpsOf(disc, main, audio) : 0;
+    const fps = fpsOf(main.video.rate);
+    const replacing = deviceId === undefined ? [] : this.leasesOf(`${deviceId}:${discId}:`);
     for (const level of offered) {
       if (level === 'original') continue;
       const def = levelDefFor(level, main.video);
@@ -294,7 +228,7 @@ export class LevelService {
             ? 'no-hevc10'
             : def.hdr && !client.hdr
               ? 'no-hdr-display'
-              : !this.options.capacity.fits(def.codec, fps)
+              : !this.options.capacity.fits(def.codec, fps, replacing)
                 ? 'busy'
                 : undefined;
       const budget = mbps(planClip(main.clpi, def, audioBps).sizeBytes);
@@ -303,12 +237,25 @@ export class LevelService {
     return out;
   }
 
-  /** Stops every encoder. */
-  close(): void {
-    for (const runner of this.runners.values()) runner.close();
-    this.runners.clear();
+  /** The viewing ended (the disc closed): its encoders stop and its lease is released. */
+  release(viewingId: string): void {
+    this.closeRunners((key) => key.startsWith(`${viewingId}|`));
+    this.options.capacity.release(viewingId);
   }
 
+  /** Stops every encoder. */
+  close(): void {
+    this.closeRunners(() => true);
+  }
+
+  private leasesOf(prefix: string): string[] {
+    return this.options.capacity
+      .inUse()
+      .viewings.filter((v) => v.viewingId.startsWith(prefix))
+      .map((v) => v.viewingId);
+  }
+
+  /** Touches the viewing's lease, or leases one, moving the device's lease on this disc (whose encoders then stop). */
   private admit(version: Version, viewingId: string): boolean {
     const { capacity } = this.options;
     if (capacity.has(viewingId)) {
@@ -316,8 +263,32 @@ export class LevelService {
       return true;
     }
     const viewer = viewerOf(viewingId);
-    const replacing = viewer ? capacity.inUse().viewings.filter((v) => v.viewingId.startsWith(viewer)).map((v) => v.viewingId) : [];
-    return capacity.lease(viewingId, version.codec, version.fps, replacing);
+    const replacing = viewer ? this.leasesOf(viewer).filter((id) => id !== viewingId) : [];
+    if (!capacity.lease(viewingId, version.codec, version.fps, replacing)) return false;
+    for (const old of replacing) this.closeRunners((key) => key.startsWith(`${old}|`));
+    return true;
+  }
+
+  private closeRunners(test: (key: string) => boolean): void {
+    for (const [key, runner] of this.runners) {
+      if (!test(key)) continue;
+      this.runners.delete(key);
+      runner.close();
+    }
+  }
+
+  /** Whether each clip's source still has the size and mtime its plan was built with. */
+  private async unchanged(clips: readonly ClipVersion[]): Promise<boolean> {
+    const stamps = await Promise.all(clips.map((c) => c.source.stamp()));
+    return stamps.every((s, i) => s !== null && s.size === clips[i]!.stamp.size && s.mtimeMs === clips[i]!.stamp.mtimeMs);
+  }
+
+  /** Forgets everything built from a disc: its information, its versions and their encoders. */
+  private invalidate(discId: string): void {
+    this.log(`levels: a clip of disc ${discId} changed; its levels are rebuilt`);
+    this.discInfos.delete(discId);
+    this.versions.deleteWhere((key) => key.startsWith(`${discId}:`));
+    this.closeRunners((key) => key.includes(`|${discId}:`));
   }
 
   private async readClip(version: Version, clip: ClipVersion, viewingId: string, offset: number, length: number, signal: AbortSignal): Promise<Buffer | { retryAfter: 1 }> {
@@ -346,7 +317,8 @@ export class LevelService {
       }
       return out;
     } catch (err) {
-      if (isTimeout(wait.signal, timeout) && !signal.aborted) return { retryAfter: 1 };
+      if (signal.aborted) throw err;
+      if (err instanceof RetryLater || (wait.signal.aborted && wait.signal.reason === timeout)) return { retryAfter: 1 };
       throw err;
     } finally {
       this.clock.clearTimeout(timer);
@@ -379,12 +351,21 @@ export class LevelService {
     return runner;
   }
 
-  private version(discId: string, level: string, audio: number): Promise<Version | null> {
-    if (!ENCODED_LEVELS.has(level) || !Number.isInteger(audio) || audio < 1 || audio > 32) return Promise.resolve(null);
+  private async version(discId: string, level: string, audio: number, known?: LevelDiscSource): Promise<Version | null> {
+    if (!ENCODED_LEVELS.has(level) || !Number.isInteger(audio) || audio < 1 || audio > 32) return null;
     const key = `${discId}:${level}:${audio}`;
     let version = this.versions.get(key);
     if (!version) {
-      const built = this.buildVersion(key, discId, level as EncodedLevel, audio);
+      const built = (async () => {
+        const source = known ?? (await this.options.discs(discId));
+        if (!source) return null;
+        const disc = await this.discInfo(discId, source);
+        return buildVersion(key, disc, level as EncodedLevel, audio, {
+          cache: this.options.cache,
+          ...(this.options.spawn ? { spawn: this.options.spawn } : {}),
+          ...(this.options.probe ? { probe: this.options.probe } : {}),
+        });
+      })();
       version = built;
       this.versions.set(key, built);
       built.then(
@@ -397,140 +378,6 @@ export class LevelService {
     return version;
   }
 
-  private async buildVersion(key: string, discId: string, level: EncodedLevel, audio: number): Promise<Version | null> {
-    const source = await this.options.discs(discId);
-    if (!source) return null;
-    const disc = await this.discInfo(discId, source);
-    const main = disc.main;
-    if (!main || !levelsFor(main.video).includes(level)) return null;
-
-    const rewritten = new Map<string, Uint8Array>();
-    const clips = new Map<string, ClipVersion>();
-    const defs = new Map<string, LevelDef>();
-    for (const info of disc.clips.values()) {
-      const clipSource = await source.clip(info.m2tsPath);
-      if (!clipSource) continue;
-      const def = levelDefFor(level, info.video);
-      defs.set(info.id, def);
-      const kept = keptAudioFor(info.item, audio);
-      const audioBps = kept ? await this.audioBps(disc, info, kept) : 0;
-      const { intervals, sizeBytes } = planClip(info.clpi, def, audioBps);
-      const streams = info.clpi.programs.flatMap((p) => p.streams);
-      const graphics = [...new Set(streams.filter((s) => GRAPHICS_CODINGS.has(s.codingType)).map((s) => s.pid))];
-      rewritten.set(
-        info.clpiPath,
-        rewriteClpi(info.clpiBytes, { intervals, level: def, keepPids: graphics, audio: kept, videoPid: info.video.pid, ...videoAttrsFor(def, info.video.rate) }),
-      );
-      clips.set(info.m2tsPath, { info, sizeBytes, runPlan: this.runPlan(disc, info, def, kept, graphics, intervals, clipSource, level, audio) });
-    }
-    if (clips.size === 0) return null;
-    for (const playlist of disc.playlists) {
-      const clipId = playlist.clipIds.find((id) => defs.has(id));
-      if (clipId === undefined) continue; // no clip with video: unchanged
-      const info = disc.clips.get(clipId)!;
-      rewritten.set(playlist.path, rewriteMpls(playlist.bytes, { audioStreamNumber: audio }, videoAttrsFor(defs.get(clipId)!, info.video.rate)));
-    }
-
-    const sizes = new Map(disc.sizes);
-    for (const [path, clip] of clips) sizes.set(path, clip.sizeBytes);
-    for (const [path, bytes] of rewritten) sizes.set(path, bytes.length);
-    const inline: Record<string, string> = { ...disc.manifest.inline };
-    for (const [path, bytes] of rewritten) if (path in inline) inline[path] = Buffer.from(bytes).toString('base64');
-    const manifest: DiscManifest = {
-      ...disc.manifest,
-      files: disc.manifest.files.map((f) => ({ path: f.path, size: sizes.get(f.path) ?? f.size })),
-      inline,
-    };
-    return {
-      key,
-      disc,
-      codec: defs.get(main.id)?.codec ?? levelDefFor(level, main.video).codec,
-      fps: RATE_FPS[main.video.rate] ?? RATE_FPS[4]!,
-      manifest,
-      sizes,
-      rewritten,
-      clips,
-    };
-  }
-
-  private runPlan(
-    disc: DiscInfo,
-    info: ClipInfo,
-    def: LevelDef,
-    kept: KeptAudio | null,
-    graphics: readonly number[],
-    intervals: readonly IntervalPlan[],
-    clipSource: ClipSource,
-    level: EncodedLevel,
-    audio: number,
-  ): ClipRunPlan {
-    const { clpi, video } = info;
-    const stcs = clpi.atcSequences.flatMap((a) => a.stc);
-    const stcStarts = stcs.map((s) => s.spnStcStart);
-    const pcrPid = stcs[0]?.pcrPid ?? video.pid;
-    const ownPcrPids = [...new Set(stcs.map((s) => s.pcrPid))].filter((pid) => pid !== video.pid);
-    const keepPids = [0, ...graphics, ...ownPcrPids, ...(kept ? [kept.pid] : [])];
-    const coreFilters = new Map<number, number>();
-    if (kept && kept.coding !== coreCoding(kept.coding)) coreFilters.set(kept.pid, kept.coding);
-    const firstEp = videoEpMap(clpi)!.entries[0]!;
-    return {
-      intervals,
-      cacheKey: this.options.cache.key(disc.id, level, audio, info.id, clipSource.size, clipSource.mtimeMs),
-      read: clipSource.read,
-      encoder: {
-        input: clipSource.input,
-        intervals,
-        stcStarts,
-        videoPid: video.pid,
-        sourceCoding: video.codingType,
-        level: def,
-        hdr: video.hdr,
-        ...(this.options.spawn ? { spawn: this.options.spawn } : {}),
-      },
-      interlaced: () => this.interlaced(disc, info, clipSource, firstEp.spn * SOURCE_PACKET_BYTES),
-      kept: {
-        keepPids,
-        coreFilters,
-        pmtPids: [...new Set(clpi.programs.map((p) => p.programMapPid))],
-        videoStreamType: def.codec === 'h264' ? CodingType.AVC : CodingType.HEVC,
-        pcrPid,
-      },
-    };
-  }
-
-  /** Whether a clip is deinterlaced: one scan probe per clip (ruling L-R6), a failed one tried again next time. */
-  private interlaced(disc: DiscInfo, info: ClipInfo, clipSource: ClipSource, startByte: number): Promise<boolean> {
-    let scan = disc.scans.get(info.id);
-    if (!scan) {
-      const probe = this.options.probe ?? ((input, options) => probeScan(input, { ...options, ...(this.options.spawn ? { spawn: this.options.spawn } : {}) }));
-      const probing = probe(clipSource.input, { startByte, videoPid: info.video.pid }).then(deinterlaces);
-      scan = probing;
-      disc.scans.set(info.id, probing);
-      probing.catch(() => {
-        if (disc.scans.get(info.id) === probing) disc.scans.delete(info.id);
-      });
-    }
-    return scan;
-  }
-
-  /** The kept audio's nominal rate, from its first frame in the clip (spec §5.2). */
-  private audioBps(disc: DiscInfo, info: ClipInfo, kept: KeptAudio): Promise<number> {
-    let bps = disc.audioBps.get(kept.pid);
-    if (!bps) {
-      const reading = (async () => {
-        const clip = await disc.source.clip(info.m2tsPath);
-        if (!clip) throw new Error(`levels: ${info.m2tsPath} is missing`);
-        return firstAudioBps(clip.read(0, Math.min(clip.size, AUDIO_PROBE_BYTES)), kept.pid, kept.coding);
-      })();
-      bps = reading;
-      disc.audioBps.set(kept.pid, reading);
-      reading.catch(() => {
-        if (disc.audioBps.get(kept.pid) === reading) disc.audioBps.delete(kept.pid);
-      });
-    }
-    return bps;
-  }
-
   private discInfo(discId: string, source: LevelDiscSource): Promise<DiscInfo> {
     let info = this.discInfos.get(discId);
     if (!info) {
@@ -541,230 +388,4 @@ export class LevelService {
     }
     return info;
   }
-}
-
-/** The interval holding byte `offset` of a level's clip. */
-function intervalAt(intervals: readonly IntervalPlan[], offset: number): number {
-  const spn = Math.floor(offset / SOURCE_PACKET_BYTES);
-  let lo = 0;
-  let hi = intervals.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (intervals[mid]!.spnStart <= spn) lo = mid;
-    else hi = mid - 1;
-  }
-  return lo;
-}
-
-function filmSeconds(intervals: readonly IntervalPlan[]): number {
-  return Math.max(1, intervals.reduce((n, iv) => n + iv.endPts45 - iv.startPts45, 0)) / 45_000;
-}
-
-async function fileBytes(disc: { manifest: DiscManifest; source: LevelDiscSource }, path: string): Promise<Uint8Array | null> {
-  const inline = disc.manifest.inline[path];
-  if (inline !== undefined) return new Uint8Array(Buffer.from(inline, 'base64'));
-  return disc.source.readFile(path);
-}
-
-/** Reads a disc's playlists and clip information, and finds the clips a level re-encodes. */
-async function loadDisc(id: string, source: LevelDiscSource): Promise<DiscInfo> {
-  const manifest = await source.manifest();
-  const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
-  const playlists: DiscInfo['playlists'][number][] = [];
-  const items = new Map<string, PlayItem>();
-  for (const { path } of manifest.files) {
-    if (!/^BDMV\/PLAYLIST\/[^/]+\.MPLS$/.test(path)) continue;
-    const bytes = await fileBytes({ manifest, source }, path);
-    let mpls: Mpls;
-    try {
-      if (!bytes) continue;
-      mpls = parseMpls(bytes);
-    } catch {
-      continue; // a playlist the player can't read either
-    }
-    const clipIds: string[] = [];
-    for (const item of mpls.playItems) {
-      for (const clipId of [item.clipId, ...item.angleClipIds]) {
-        clipIds.push(clipId);
-        if (!items.has(clipId)) items.set(clipId, item);
-      }
-    }
-    playlists.push({ path, bytes: bytes!, clipIds });
-  }
-
-  const clips = new Map<string, ClipInfo>();
-  for (const [clipId, item] of items) {
-    const clpiPath = `BDMV/CLIPINF/${clipId}.CLPI`;
-    const m2tsPath = `BDMV/STREAM/${clipId}.M2TS`;
-    if (!sizes.has(m2tsPath)) continue;
-    const clpiBytes = await fileBytes({ manifest, source }, clpiPath);
-    if (!clpiBytes) continue;
-    let clpi: Clpi;
-    try {
-      clpi = parseClpi(clpiBytes);
-    } catch {
-      continue;
-    }
-    const map = videoEpMap(clpi);
-    if (!map || map.entries.length === 0) continue;
-    const stream = clpi.programs.flatMap((p) => p.streams).find((s) => s.pid === map.pid)!;
-    const height = FORMAT_LINES[stream.format] ?? 1080;
-    // UHD discs carry HDR10 (the CLPI's dynamic range field isn't parsed): an HEVC 2160-line source is taken as HDR.
-    const hdr = stream.codingType === CodingType.HEVC && height >= 2160;
-    clips.set(clipId, { id: clipId, clpiPath, m2tsPath, clpiBytes, clpi, video: { pid: map.pid, codingType: stream.codingType, height, rate: stream.rate, hdr }, item });
-  }
-  let main: ClipInfo | null = null;
-  for (const c of clips.values()) if (!main || (sizes.get(c.m2tsPath) ?? 0) > (sizes.get(main.m2tsPath) ?? 0)) main = c;
-  return { id, source, manifest, sizes, playlists, clips, main, audioBps: new Map(), scans: new Map() };
-}
-
-/**
- * The nominal rate of an audio PID's first readable frame in `stream` (the head of a clip): its PES packets are
- * gathered in order, reduced to the core a level carries, and the first one `nominalAudioBps` reads decides.
- */
-export async function firstAudioBps(stream: Readable, pid: number, coding: number): Promise<number> {
-  const filter = new PesCoreFilter(coding);
-  let chunks: Uint8Array[] = [];
-  let partial = new Uint8Array(0);
-  let lastError: Error | null = null;
-  const tryPes = (): number | null => {
-    if (chunks.length === 0) return null;
-    const size = chunks.reduce((n, c) => n + c.length, 0);
-    let pes = new Uint8Array(size);
-    let at = 0;
-    for (const c of chunks) {
-      pes.set(c, at);
-      at += c.length;
-    }
-    chunks = [];
-    const declared = pes.length >= 6 ? (pes[4]! << 8) | pes[5]! : 0;
-    if (declared) pes = pes.subarray(0, 6 + declared);
-    const core = pes.length >= 9 ? filter.push(pes) : null;
-    if (!core) return null;
-    try {
-      return nominalAudioBps(coding, core.subarray(9 + core[8]!));
-    } catch (err) {
-      lastError = err as Error;
-      return null;
-    }
-  };
-  try {
-    for await (const chunk of stream as AsyncIterable<Buffer>) {
-      let data = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-      if (partial.length) {
-        const joined = new Uint8Array(partial.length + data.length);
-        joined.set(partial);
-        joined.set(data, partial.length);
-        data = joined;
-      }
-      const whole = data.length - (data.length % SOURCE_PACKET_BYTES);
-      for (let p = 0; p < whole; p += SOURCE_PACKET_BYTES) {
-        if (data[p + 4] !== 0x47 || (((data[p + 5]! & 0x1f) << 8) | data[p + 6]!) !== pid) continue;
-        const flags = data[p + 7]!;
-        if (!(flags & 0x10)) continue;
-        const payloadAt = flags & 0x20 ? p + 9 + data[p + 8]! : p + 8;
-        if (payloadAt >= p + SOURCE_PACKET_BYTES) continue;
-        if (data[p + 5]! & 0x40) {
-          const bps = tryPes();
-          if (bps !== null) return bps;
-        }
-        chunks.push(data.slice(payloadAt, p + SOURCE_PACKET_BYTES));
-      }
-      partial = data.slice(whole);
-    }
-    const bps = tryPes();
-    if (bps !== null) return bps;
-  } finally {
-    stream.destroy();
-  }
-  throw lastError ?? new Error(`levels: no audio frame of PID 0x${pid.toString(16)} at the clip's start`);
-}
-
-/** Collects a stream into one buffer. */
-async function collect(stream: Readable): Promise<Buffer> {
-  const parts: Buffer[] = [];
-  for await (const chunk of stream as AsyncIterable<Buffer>) parts.push(chunk);
-  return Buffer.concat(parts);
-}
-
-/** A folder disc's files for the level service. */
-export function folderDiscSource(dir: string, disc: { id: string; name: string }): LevelDiscSource {
-  return {
-    manifest: () => buildManifest(dir, disc),
-    async readFile(path) {
-      const abs = await resolveDiscFile(dir, path);
-      return abs ? new Uint8Array(await readFile(abs)) : null;
-    },
-    async readRange(path, offset, length) {
-      const abs = await resolveDiscFile(dir, path);
-      if (!abs) return null;
-      const handle = await open(abs, 'r');
-      try {
-        const out = Buffer.alloc(length);
-        let got = 0;
-        while (got < length) {
-          const { bytesRead } = await handle.read(out, got, length - got, offset + got);
-          if (bytesRead === 0) throw new Error(`levels: ${path} is shorter than its manifest says`);
-          got += bytesRead;
-        }
-        return out;
-      } finally {
-        await handle.close();
-      }
-    },
-    async clip(path) {
-      const abs = await resolveDiscFile(dir, path);
-      if (!abs) return null;
-      const st = await stat(abs);
-      return {
-        input: { path: abs },
-        read: (from, to) => createReadStream(abs, { start: from, ...(to === undefined ? {} : { end: to - 1 }) }),
-        size: st.size,
-        mtimeMs: st.mtimeMs,
-      };
-    },
-  };
-}
-
-/** An ISO disc's files for the level service: ffmpeg gets a stream file's bytes through a pipe. */
-export function isoDiscSource(abs: string, tree: ReadonlyMap<string, UdfFile>, disc: { id: string; name: string }): LevelDiscSource {
-  const file = (path: string): UdfFile | null => resolveIsoFile(tree, path);
-  return {
-    manifest: () => buildIsoManifest(abs, tree, disc),
-    async readFile(path) {
-      const f = file(path);
-      if (!f) return null;
-      const got = (await readIsoFiles(abs, [f])).get(f.path);
-      return got ? new Uint8Array(got) : null;
-    },
-    async readRange(path, offset, length) {
-      const f = file(path);
-      if (!f) return null;
-      if (length === 0) return Buffer.alloc(0);
-      return collect(isoFileStream(abs, f, offset, offset + length - 1));
-    },
-    async clip(path) {
-      const f = file(path);
-      if (!f) return null;
-      const { mtimeMs } = await stat(abs);
-      const read: ClipReader = (from, to) => isoFileStream(abs, f, from, (to ?? f.size) - 1);
-      return { input: { read }, read, size: f.size, mtimeMs };
-    },
-  };
-}
-
-/** The library's discs for the level service: a disc that is gone or changed since the scan is null. */
-export function libraryDiscSources(library: Library, isoTrees: IsoTrees = new IsoTrees()): (discId: string) => Promise<LevelDiscSource | null> {
-  return async (discId) => {
-    const disc: DiscEntry | null = library.disc(discId);
-    if (!disc) return null;
-    const abs = library.locate(disc);
-    if (!abs) return null;
-    if (disc.kind === 'iso') {
-      if (!(await isoUnchanged(disc, abs))) return null;
-      return isoDiscSource(abs, await isoTrees.get(disc.id, abs), disc);
-    }
-    if (!(await discUnchanged(disc, abs))) return null;
-    return folderDiscSource(abs, disc);
-  };
 }

@@ -319,6 +319,15 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
     });
   }
 
+  /** Stops reading ffmpeg's output (it then blocks on its pipe), so the caller can hold back: backpressure. */
+  pause(): void {
+    this.process?.stdout?.pause();
+  }
+
+  resume(): void {
+    this.process?.stdout?.resume();
+  }
+
   /** Stops the run and kills ffmpeg; no event follows. */
   stop(): void {
     this.run++;
