@@ -48,8 +48,8 @@ export interface SyntheticClipSpec {
   videoRate?: number;
   /** 90 kHz ticks per frame (default: 24 fps, FRAME_TICKS_90K). */
   frameTicks?: number;
-  /** PIDs of secondary video streams (AVC): listed in the CLPI and every play item's STN, with no packets. */
-  secondaryVideoPids?: number[];
+  /** Secondary video streams (AVC, one access unit per frame like the primary): multiplexed on their own PIDs and listed in the CLPI and every play item's STN. */
+  secondaryVideo?: Array<{ pid: number; videoAus: Uint8Array[] }>;
   /** Audio coding type: LPCM gets a real 440 Hz tone, other types get dummy payloads. Omit for no audio. */
   audio?: number;
   /** Index of one LPCM PES whose header gets a reserved sample-rate code (a corrupt unit). */
@@ -170,6 +170,9 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
       payload,
       videoIndex: i,
     }));
+    for (const sv of clip.secondaryVideo ?? []) {
+      sv.videoAus.forEach((payload, i) => units.push({ pid: sv.pid, streamId: 0xe1, pts: clip.startPts + i * frameTicks, payload }));
+    }
     const audioStreams: SyntheticAudioStream[] = clip.audioStreams ?? (clip.audio !== undefined ? [legacyAudioStream(clip, endPts)] : []);
     for (const stream of audioStreams) {
       for (const u of stream.units) {
@@ -191,7 +194,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
     );
     const audioSpecs = audioStreams.map((s) => ({ pid: s.pid, codingType: s.codingType, format: s.format, lang: s.lang }));
     const videoCodingType = clip.videoCodingType ?? CodingType.AVC;
-    const secondaryVideo = (clip.secondaryVideoPids ?? []).map((pid) => ({ pid, codingType: CodingType.AVC, format: clip.videoFormat, rate: clip.videoRate }));
+    const secondaryVideo = (clip.secondaryVideo ?? []).map(({ pid }) => ({ pid, codingType: CodingType.AVC, format: clip.videoFormat, rate: clip.videoRate }));
     const streams: Array<{ pid: number; codingType: number; format?: number; rate?: number }> = [
       { pid: VIDEO_PID, codingType: videoCodingType, format: clip.videoFormat, rate: clip.videoRate },
       ...secondaryVideo,

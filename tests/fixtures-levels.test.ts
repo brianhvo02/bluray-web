@@ -43,6 +43,13 @@ describe('disc-levels', () => {
     ]);
   });
 
+  it('carries packets on the secondary video PID', () => {
+    const m2ts = read('disc-levels', 'STREAM/00001.m2ts');
+    let packets = 0;
+    for (let at = 0; at + 192 <= m2ts.length; at += 192) if (((m2ts[at + 5] & 0x1f) << 8 | m2ts[at + 6]) === 0x1b00) packets++;
+    expect(packets).toBeGreaterThan(10);
+  });
+
   it('has an EP entry per second', () => {
     expect(Math.abs(clpi.epMaps[0].entries.length - 10)).toBeLessThanOrEqual(1);
   });

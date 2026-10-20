@@ -8,7 +8,7 @@ import { writeFixture } from './fixture-dir';
 import { encodeTestVideo } from './x264';
 
 // The discs that the NAS's quality levels are tested with: a 1080i MPEG-2 disc, and a 1080p H.264 disc with the extra streams
-// (TrueHD with an AC-3 core, an AC-3 commentary, a secondary video, two PG streams) that a re-encode has to drop or keep.
+// (TrueHD with an AC-3 core, an AC-3 commentary, a picture-in-picture secondary video, two PG streams) that a re-encode has to drop or keep.
 
 const root = process.argv[2];
 if (!root) {
@@ -113,7 +113,7 @@ function levelsDisc(): Map<string, Uint8Array<ArrayBuffer>> {
       startPts: CLIP_START_PTS,
       videoFormat: FORMAT_1080P,
       videoRate: RATE_23_976,
-      secondaryVideoPids: [0x1b00],
+      secondaryVideo: [{ pid: 0x1b00, videoAus: encodeTestVideo(frames, '320x180', ['-b:v', '60k', '-maxrate', '60k', '-bufsize', '120k', '-flags', '+bitexact', '-threads', '1']) }],
       audioStreams,
       pgStreams: [pgStream(0x1200, 'eng', 400), pgStream(0x1201, 'jpn', 700)],
     }],
