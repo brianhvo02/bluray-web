@@ -222,9 +222,24 @@ function scanOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: VersionD
 
 /**
  * A short hash of what decides a clip's bytes at a level besides the clip itself: the level's definition, the kept
- * audio, every interval's place and budget, the encoder backend and whether the clip is deinterlaced. It is part of
+ * audio, every interval's place and budget, the encoder backend and its version, and whether the clip is deinterlaced. It is part of
  * the segment cache key, so a changed plan never reuses bytes made for another.
  */
+/**
+ * The encoder's shortest frame time for a clip (`ClipEncoderOptions.frameTicks`): the probe's, never more than the
+ * CLPI rate's, so a clip that opens on a still (long frames in the probe) can't inflate it.
+ */
+export function clipFrameTicks(scan: ScanInfo, rate: number): number {
+  const clpi = frameTicks(fpsOf(rate));
+  return scan.frameTicks === undefined ? clpi : Math.min(scan.frameTicks, clpi);
+}
+
+/**
+ * Bumped whenever the encoder makes different bytes for the same plan, so no segment an earlier encoder cached is
+ * served: 2 restores the source's PTS and forces keyframes on the EP frames.
+ */
+export const ENCODER_VERSION = 2;
+
 export function planHash(
   def: LevelDef,
   kept: KeptAudio | null,
@@ -232,7 +247,7 @@ export function planHash(
   encode: { readonly backend: string; readonly deinterlace: boolean },
 ): string {
   const h = createHash('sha256');
-  h.update(JSON.stringify({ def, kept, backend: encode.backend, deinterlace: encode.deinterlace }));
+  h.update(JSON.stringify({ encoder: ENCODER_VERSION, def, kept, backend: encode.backend, deinterlace: encode.deinterlace }));
   for (const iv of intervals) h.update(`${iv.startPts45},${iv.endPts45},${iv.srcSpnStart},${iv.srcSpnEnd},${iv.budgetBytes};`);
   return h.digest('hex').slice(0, 12);
 }
@@ -326,7 +341,7 @@ function clipRunPlan(
       ...(deps.spawn ? { spawn: deps.spawn } : {}),
     },
     scan: () =>
-      scanOf(disc, info, source, deps).then((scan) => ({ interlaced: deinterlaces(scan), frameTicks: scan.frameTicks ?? frameTicks(fpsOf(video.rate)) })),
+      scanOf(disc, info, source, deps).then((scan) => ({ interlaced: deinterlaces(scan), frameTicks: clipFrameTicks(scan, video.rate) })),
     kept: {
       keepPids: [0, ...graphics, ...ownPcrPids, ...(kept ? [kept.pid] : [])],
       coreFilters,

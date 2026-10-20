@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { spawnSync, type spawn as nodeSpawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { cpSync, createReadStream, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -34,7 +35,7 @@ import {
   type LevelDiscSource,
 } from './level-service';
 import { FAILURE_BACKOFF_MS } from './clip-run';
-import { loadDisc, planHash } from './level-version';
+import { ENCODER_VERSION, clipFrameTicks, loadDisc, planHash } from './level-version';
 import { keptAudioFor, levelDefFor, planClip, videoAttrsFor } from './levels';
 import { rewriteMpls } from './mpls-writer';
 import { SegmentCache } from './segment-cache';
@@ -649,6 +650,26 @@ function discCopy(name = 'copy'): string {
 function serviceOn(dir: string, options: { readAheadMs?: number; log?: (message: string) => void } = {}): LevelService {
   return makeService({ ...options, discs: async (id) => (id === DISC_ID ? folderDiscSource(dir, { id, name: 'Starfall Wanderer' }) : null) });
 }
+
+describe('clipFrameTicks and the encoder version', () => {
+  it('takes the probe’s frame time, never more than the CLPI rate’s (a clip that opens on a still)', () => {
+    expect(clipFrameTicks({ interlaced: false, softPulldown: false, frameTicks: 3750 }, 1)).toBe(3750); // 24 fps video, a 23.976 CLPI
+    expect(clipFrameTicks({ interlaced: false, softPulldown: false, frameTicks: 90_000 }, 1)).toBe(3753); // a still's second
+    expect(clipFrameTicks({ interlaced: true, softPulldown: false }, 4)).toBe(3003); // no probe frames: the CLPI's 29.97
+  });
+
+  it('puts the encoder version in the plan hash: no segment of an earlier encoder is served', () => {
+    const def = levelDefFor('h264-1080', { height: 1080 });
+    const { intervals } = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), def, 0);
+    const encode = { backend: 'qsv', deinterlace: false };
+    // The hash before version 2, which had no encoder version in it.
+    const h = createHash('sha256');
+    h.update(JSON.stringify({ def, kept: null, backend: encode.backend, deinterlace: encode.deinterlace }));
+    for (const iv of intervals) h.update(`${iv.startPts45},${iv.endPts45},${iv.srcSpnStart},${iv.srcSpnEnd},${iv.budgetBytes};`);
+    expect(ENCODER_VERSION).toBe(2);
+    expect(planHash(def, null, intervals, encode)).not.toBe(h.digest('hex').slice(0, 12));
+  });
+});
 
 describe('LevelService: fix round 1', () => {
   it('reads each clip’s own audio rate, though two clips carry different audio on one PID', async () => {
