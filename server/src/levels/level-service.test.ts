@@ -24,6 +24,7 @@ import {
   ENCODER_IDLE_MS,
   LevelService,
   READ_AHEAD_FILM_MS,
+  WAIT_FILM_MS,
   READ_WAIT_MS,
   firstAudioBps,
   folderDiscSource,
@@ -201,7 +202,7 @@ let service: LevelService;
 let capacity: Capacity;
 
 function makeService(
-  options: { readAheadMs?: number; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
+  options: { readAheadMs?: number; waitFilmMs?: number; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
 ): LevelService {
   capacity = new Capacity({ h264: 190, hevc: 100 }, clock.now);
   return new LevelService({
@@ -213,6 +214,7 @@ function makeService(
     probe: async () => ({ interlaced: false, softPulldown: false }),
     clock,
     ...(options.readAheadMs === undefined ? {} : { readAheadMs: options.readAheadMs }),
+    ...(options.waitFilmMs === undefined ? {} : { waitFilmMs: options.waitFilmMs }),
     ...(options.codecs ? { codecs: options.codecs } : {}),
   });
 }
@@ -251,8 +253,9 @@ async function bytesOf(p: Promise<Buffer | { retryAfter: 1 } | { busy: true } | 
 }
 
 describe('LevelService: timings', () => {
-  it('uses the spec’s windows: 120 s of film ahead, 15 s of waiting, 60 s to idle', () => {
+  it('uses the spec’s windows: 120 s of film ahead, 15 s of waiting, 60 s to idle; a read waits on the encoder within 10 s of film', () => {
     expect(READ_AHEAD_FILM_MS).toBe(120_000);
+    expect(WAIT_FILM_MS).toBe(10_000);
     expect(READ_WAIT_MS).toBe(15_000);
     expect(ENCODER_IDLE_MS).toBe(60_000);
   });
@@ -383,7 +386,7 @@ describe('LevelService: reads', () => {
 
   it('restarts at a seek far ahead of the encoder, and a read back hits the cache (Review Focus 2)', async () => {
     service.close();
-    service = makeService({ readAheadMs: 3000 });
+    service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -412,7 +415,7 @@ describe('LevelService: reads', () => {
 
   it('gives each viewing its own encoder: a viewer far ahead doesn’t restart another’s', async () => {
     service.close();
-    service = makeService({ readAheadMs: 3000 });
+    service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -440,6 +443,24 @@ describe('LevelService: reads', () => {
     fake.runs[0]!.finish();
     expect(scan(await bytesOf(five)).videoPts[0]).toBe(l.pts45[5]! * 2);
     expect(fake.runs.length).toBe(1);
+  });
+
+  it('restarts at a seek inside the encode-ahead window but past the wait distance, rather than wait for the encoder', async () => {
+    // Scaled down: the fixture has 10 s of film. A 120 s window with a 1 s wait distance stands for a seek 60 s ahead.
+    service.close();
+    service = makeService({ readAheadMs: 120_000, waitFilmMs: 1000 });
+    const l = layout(await levelManifest());
+    const zero = readInterval(l, 0);
+    await vi.waitFor(() => expect(fake.runs.length).toBe(1));
+    fake.runs[0]!.step(3); // the encoder is at interval 2, and its window covers the whole clip
+    await bytesOf(zero);
+    const six = readInterval(l, 6); // 4 s of film ahead: inside the window, past the wait distance
+    await vi.waitFor(() => expect(fake.runs.length).toBe(2));
+    expect(fake.runs[0]!.child.killed).toBe(true);
+    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
+    expect(fake.runs[1]!.args.startByte).toBe(plan[6]!.srcSpnStart * 192);
+    fake.runs[1]!.finish();
+    expect(scan(await bytesOf(six)).videoPts[0]).toBe(l.pts45[6]! * 2);
   });
 
   it('re-encodes an interval whose encode overflows its budget before serving it (Review Focus 1)', async () => {
@@ -698,7 +719,7 @@ describe('LevelService: fix round 1', () => {
 
   it('answers a read the restarted encoder won’t reach with retryAfter, so two reads two windows apart both finish (Minor 1)', async () => {
     service.close();
-    service = makeService({ readAheadMs: 3000 });
+    service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
     const l = layout(await levelManifest());
     const results: unknown[] = [];
     const a = readInterval(l, 0).then((r) => results.push(['a', r]));

@@ -49,8 +49,10 @@ export interface ClipRunDeps {
   readonly backend: EncoderBackend;
   readonly cache: SegmentCache;
   readonly clock: Clock;
-  /** Film the encoder runs ahead of the latest read (spec §6.1: 120 s); a read this far ahead of it waits. */
+  /** Film the encoder runs ahead of the latest read (spec §6.1: 120 s). */
   readonly readAheadMs: number;
+  /** A read at most this much film ahead of the running encoder waits for it (10 s); one further ahead restarts it. */
+  readonly waitFilmMs: number;
   /** No read for this long stops the encoder (spec §6.1: 60 s). */
   readonly idleMs: number;
   /** Called once the runner went idle and stopped; the service forgets it. */
@@ -102,7 +104,7 @@ function waiter(): Waiter {
 /**
  * Serves one clip's intervals at a level (spec §6.1): from the segment cache, else from the clip's encoder run.
  *
- * - A read of an interval the running encoder will reach within `readAheadMs` of film waits for it; any other (a seek,
+ * - A read of an interval the running encoder will reach within `waitFilmMs` of film waits for it; any other (a seek,
  *   or an interval produced before and since evicted) restarts the encoder at that interval. Intervals already in the
  *   cache stay valid across restarts.
  * - A run covers one window (`runWindow`: one STC sequence, at most 300 intervals), sized to end `readAheadMs` of film
@@ -225,7 +227,7 @@ export class ClipRunner {
     if (this.closed) return;
     w.encoding = true;
     const run = this.run;
-    if (run && this.reaches(run, index)) return;
+    if (run && this.reachesSoon(run, index)) return;
     if (this.backingOff()) {
       this.reject(index, new RetryLater(`levels: encoding failed less than ${FAILURE_BACKOFF_MS / 1000} s ago`));
       return;
@@ -237,10 +239,10 @@ export class ClipRunner {
     return this.failedAt !== null && this.deps.clock.now() - this.failedAt < FAILURE_BACKOFF_MS;
   }
 
-  /** Whether `run` (or the run that continues it) will produce `index` soon enough to wait for. */
-  private reaches(run: { readonly next: number }, index: number): boolean {
+  /** Whether `run` will produce `index` soon enough to wait for: within `waitFilmMs` of film of where it is. */
+  private reachesSoon(run: { readonly next: number }, index: number): boolean {
     if (index < run.next) return false; // produced already, and since gone from the cache
-    return this.film[index]! - this.film[run.next]! <= this.deps.readAheadMs;
+    return this.film[index]! - this.film[run.next]! <= this.deps.waitFilmMs;
   }
 
   private startRun(from: number): void {
@@ -265,9 +267,9 @@ export class ClipRunner {
       },
     });
     this.run = run;
-    // Reads waiting for intervals this run won't reach come back later rather than wait on nothing.
+    // Reads waiting for intervals this run won't produce come back later rather than wait on nothing.
     for (const [index, w] of this.waiters) {
-      if (w.encoding && !this.reaches({ next: from }, index)) this.reject(index, new RetryLater(`levels: the encoder moved to interval ${from}`));
+      if (w.encoding && (index < from || index >= from + count)) this.reject(index, new RetryLater(`levels: the encoder moved to interval ${from}`));
     }
     run.start();
   }
