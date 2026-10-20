@@ -25,7 +25,11 @@ export interface LoadedSnapshot extends Snapshot {
   readonly etag: string | null;
 }
 
-export type SaveResult = { readonly etag: string } | { readonly conflict: Snapshot & { readonly etag: string } };
+/**
+ * A save's answer: the new version, or what is stored now (a conflict). A conflict's etag is null when nothing is
+ * stored any more (the record was removed): saving again with null creates it (the NAS's If-None-Match: *).
+ */
+export type SaveResult = { readonly etag: string } | { readonly conflict: Snapshot & { readonly etag: string | null } };
 
 /**
  * Keeps BD-J scopes. load answers an empty snapshot (etag null) for a scope never saved, at once. save replaces the
@@ -92,6 +96,11 @@ export function sortFiles(files: SnapshotFile[]): SnapshotFile[] {
  */
 export class MemoryBdjStore implements BdjStore {
   private readonly scopes = new Map<string, LoadedSnapshot & { readonly etag: string }>();
+
+  /** Forgets a scope, as when its record is removed elsewhere. */
+  remove(scope: string): void {
+    this.scopes.delete(scope);
+  }
   private n = 0;
 
   constructor(private readonly quotaBytes = SCOPE_QUOTA_BYTES) {}
@@ -104,7 +113,7 @@ export class MemoryBdjStore implements BdjStore {
     const bytes = snapshotBytes(snapshot);
     if (bytes > this.quotaBytes) throw new ScopeQuotaError(scope, bytes, this.quotaBytes);
     const current = this.scopes.get(scope);
-    if ((current?.etag ?? null) !== etag) return { conflict: { files: current?.files ?? [], etag: current?.etag ?? '' } };
+    if ((current?.etag ?? null) !== etag) return { conflict: { files: current?.files ?? [], etag: current?.etag ?? null } };
     const next = { files: snapshot.files.map((f) => ({ path: f.path, mtime: f.mtime, bytes: f.bytes.slice() })), etag: `m${++this.n}` };
     this.scopes.set(scope, next);
     return { etag: next.etag };

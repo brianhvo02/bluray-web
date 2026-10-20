@@ -272,12 +272,50 @@ describe('runBdjWorker and the storage scopes', () => {
     const h = vfs.open(`${persistent}/1/count`, 'w')!;
     vfs.write(h, new Uint8Array([8]), 0, 1);
     vfs.close(h);
-    expect(received.filter((m) => m.type === 'unsaved')).toEqual([{ type: 'unsaved', unsaved: true }]);
+    // false once the scopes are loaded (the engine then always waits for a stop's save), then true at the write
+    expect(received.filter((m) => m.type === 'unsaved')).toEqual([
+      { type: 'unsaved', unsaved: false },
+      { type: 'unsaved', unsaved: true },
+    ]);
     port.onmessage!({ data: { type: 'stop' } });
     await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
     expect([...store.saved.get(scopes[0]!.key)!.files[0]!.bytes]).toEqual([8]);
     expect(store.saved.has(scopes[1]!.key)).toBe(false);
     expect(received.filter((m) => m.type === 'unsaved').at(-1)).toEqual({ type: 'unsaved', unsaved: false });
     expect(handle.runtime!.jvm.threads.isHalted).toBe(true);
+  }, 90_000);
+
+  it("logs a save that fails at the stop, though the session has ended", async () => {
+    const received: FromBdj[] = [];
+    const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+    const store: BdjStore = {
+      load: async () => ({ files: [], etag: null }),
+      save: async () => {
+        throw new Error('the disk is gone');
+      },
+    };
+    const handle = runBdjWorker(port, { createStore: () => store });
+    const files = fixtureDiscFiles('disc-bdj');
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        disc: { kind: 'files', entries: discEntries(files) },
+        readAheadBytes: 0,
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+      },
+    });
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+    const [persistent] = await discScopes(syntheticSource(files), null);
+    const vfs = handle.runtime!.jvm.opts.vfs!;
+    vfs.mkdir(persistent!.dir);
+    const h = vfs.open(`${persistent!.dir}/save`, 'w')!;
+    vfs.write(h, new Uint8Array([1]), 0, 1);
+    port.onmessage!({ data: { type: 'stop' } });
+    await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
+    expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone)`, error: false });
   }, 90_000);
 });

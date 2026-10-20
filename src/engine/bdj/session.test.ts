@@ -308,7 +308,7 @@ describe('BdjSession rules', () => {
     expect(h.session.stop()).toBe(h.session.stop()); // once
   });
 
-  it('terminates a worker that does not answer the stop within STOP_SAVE_WAIT_MS, and stops at once once all is saved', async () => {
+  it('terminates a worker that does not answer the stop within STOP_SAVE_WAIT_MS; one without scopes stops at once', async () => {
     const f = fakeWorker();
     const h = session(f.worker);
     void h.session.boot(DISC, 0, null, CLASSES);
@@ -324,11 +324,25 @@ describe('BdjSession rules', () => {
     const g = fakeWorker();
     const k = session(g.worker);
     void k.session.boot(DISC, 0, null, CLASSES);
-    g.emit({ type: 'unsaved', unsaved: true });
-    g.emit({ type: 'unsaved', unsaved: false });
+    g.emit({ type: 'booted', bootMs: 1 }); // no `unsaved`: the worker has no scopes
+    k.session.flush();
     void k.session.stop();
     expect(g.terminated()).toBe(true);
     expect(g.sent.map((m) => m.type)).toEqual(['boot']);
+  });
+
+  it('with scopes, a stop always waits for the save, even before an unsaved change is heard of (one may be on its way)', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'unsaved', unsaved: false }); // the scopes are loaded
+    f.emit({ type: 'booted', bootMs: 1 });
+    const stopped = h.session.stop();
+    expect(f.sent.at(-1)).toEqual({ type: 'stop' });
+    expect(f.terminated()).toBe(false);
+    f.emit({ type: 'stopped' });
+    await stopped;
+    expect(f.terminated()).toBe(true);
   });
 
   it('sends a title start the host asks for during selectTitle only after that call is answered', async () => {

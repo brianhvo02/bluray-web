@@ -43,6 +43,33 @@ describe('IdbBdjStore', () => {
     expect(rec).toMatchObject({ source: 'local', scope: SCOPE, bytes: 3 });
   });
 
+  it('stores only the bytes of a view into a larger buffer (a VFS file with room to grow)', async () => {
+    const idb = new IDBFactory();
+    const buffer = new Uint8Array([9, 9, 1, 2, 3, 9, 9, 9]);
+    await new IdbBdjStore('local', idb).save(SCOPE, snap([['a', 1000, buffer.subarray(2, 5)]]), null);
+    const stored = (await record(idb, recordKey('local', SCOPE)))!.files[0]!.bytes;
+    expect([...stored]).toEqual([1, 2, 3]);
+    expect(stored.buffer.byteLength).toBe(3);
+  });
+
+  it('answers a conflict without an etag once the record is gone, and a save with none then creates it', async () => {
+    const idb = new IDBFactory();
+    const store = new IdbBdjStore('local', idb);
+    const saved = await store.save(SCOPE, snap([['a', 1000, bytes(1)]]), null);
+    const db = await new Promise<IDBDatabase>((resolve) => {
+      const r = idb.open(BDJ_STORE_DB);
+      r.onsuccess = () => resolve(r.result);
+    });
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(SCOPES_STORE, 'readwrite');
+      tx.objectStore(SCOPES_STORE).delete(recordKey('local', SCOPE));
+      tx.oncomplete = () => resolve();
+    });
+    db.close();
+    expect(await store.save(SCOPE, snap([['a', 2000, bytes(2)]]), 'etag' in saved ? saved.etag : null)).toEqual({ conflict: { files: [], etag: null } });
+    expect(await store.save(SCOPE, snap([['a', 2000, bytes(2)]]), null)).toEqual({ etag: expect.any(String) });
+  });
+
   it('keeps sources apart: a NAS disc and a picked folder with the same scope each have their own', async () => {
     const idb = new IDBFactory();
     const nas = new IdbBdjStore('nas:abc123', idb);

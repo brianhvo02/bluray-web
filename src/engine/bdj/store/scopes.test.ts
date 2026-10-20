@@ -7,7 +7,7 @@ import { NO_DISC_ID, discFingerprint, discScopes, javaDiscId, orgDirName, readBd
 const HEX32 = /^[0-9a-f]{32}$/;
 
 describe('scopesFor (BDJAppProxy.createStorage, BDJXletContext dvb.org.id)', () => {
-  it("names a disc's scopes as libbluray's Java does, with the NAS contract's ids as keys (RENTAL_FAMILY-like ids)", () => {
+  it("names a disc's scopes as libbluray's Java does, with the NAS contract's ids as keys (made-up ids of a typical disc)", () => {
     const s = scopesFor({ orgId: 0x7fff0123 }, '88000000000000000000000000139561', 'unused');
     expect(s.persistent).toEqual({ key: 'persistent/7fff0123', dir: '/persistent/7fff0123' });
     expect(s.buda).toEqual({ key: 'buda/7fff0123/88000000000000000000000000139561', dir: '/buda/7fff0123/88000000000000000000000000139561' });

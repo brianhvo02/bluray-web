@@ -14,6 +14,8 @@ import type { StoreScope } from './scopes';
 
 /** The save follows the last write by this much (the plan's Global Constraints). */
 export const SAVE_DEBOUNCE_MS = 2000;
+/** A disc that keeps writing more often than the debounce is still saved this often. */
+export const SAVE_MAX_WAIT_MS = 10_000;
 /** A scope whose load has not answered by then stays in memory only for the session (a hung IndexedDB). */
 export const LOAD_TIMEOUT_MS = 3000;
 /** A save that keeps meeting newer snapshots gives up after this many tries (until the next write). */
@@ -29,6 +31,7 @@ export interface ScopeSyncDeps {
   readonly onUnsaved?: (unsaved: boolean) => void;
   readonly quotaBytes?: number;
   readonly debounceMs?: number;
+  readonly maxWaitMs?: number;
   readonly loadTimeoutMs?: number;
 }
 
@@ -51,6 +54,8 @@ export class ScopeSync {
   private readonly states: ScopeState[];
   private vfs: ScopeVfs | null = null;
   private cancelTimer: (() => void) | null = null;
+  /** The longest wait for a save since the first unsaved write (SAVE_MAX_WAIT_MS). */
+  private cancelMaxWait: (() => void) | null = null;
   private flushing: Promise<void> = Promise.resolve();
   private saving = 0;
   private unsaved = false;
@@ -141,6 +146,8 @@ export class ScopeSync {
   flush(): Promise<void> {
     this.cancelTimer?.();
     this.cancelTimer = null;
+    this.cancelMaxWait?.();
+    this.cancelMaxWait = null;
     this.flushing = this.flushing.then(() => this.saveDirty());
     return this.flushing;
   }
@@ -152,6 +159,10 @@ export class ScopeSync {
     this.cancelTimer?.();
     this.cancelTimer = this.deps.setTimer(this.deps.debounceMs ?? SAVE_DEBOUNCE_MS, () => {
       this.cancelTimer = null;
+      void this.flush();
+    });
+    this.cancelMaxWait ??= this.deps.setTimer(this.deps.maxWaitMs ?? SAVE_MAX_WAIT_MS, () => {
+      this.cancelMaxWait = null;
       void this.flush();
     });
   }
@@ -190,10 +201,12 @@ export class ScopeSync {
           return;
         }
         // stored meanwhile elsewhere (another tab, another device): merged per file, newer mtime wins, ties ours
-        const { merged, fromRemote } = mergeSnapshots(snapshot, result.conflict);
+        // (a loose-only scope takes none of the stored subfolder paths: they belong to the disc scopes)
+        const remote = state.scope.looseOnly ? { files: result.conflict.files.filter((f) => !f.path.includes('/')) } : result.conflict;
+        const { merged, fromRemote } = mergeSnapshots(snapshot, remote);
         this.vfs.importFiles(state.scope.dir, fromRemote);
         state.etag = result.conflict.etag;
-        state.stored = result.conflict;
+        state.stored = remote;
         snapshot = merged;
         if (attempt >= SAVE_ATTEMPTS) throw new Error(`still stored elsewhere after ${attempt} tries`);
       }

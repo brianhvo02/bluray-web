@@ -59,7 +59,7 @@ export type FromBdj =
   | { readonly type: 'remoteTokenNeeded' }
   /** The thread dump asked for has been logged. */
   | { readonly type: 'dumped' }
-  /** Whether the storage scopes have changes not saved yet (sent when it changes): a stop then waits for `stopped`. */
+  /** The storage scopes are loaded (sent once, false) and, after that, whether they have changes not saved yet: a stop then waits for `stopped`. */
   | { readonly type: 'unsaved'; readonly unsaved: boolean }
   /** The answer to `stop`: the worker can be terminated. */
   | { readonly type: 'stopped' };

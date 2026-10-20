@@ -298,6 +298,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       if (ended) return;
       scopes?.attach(rt.jvm.opts.vfs!);
       sync = scopes;
+      // the engine hears that this session has scopes: its stop then always waits for the save (`stop`, `stopped`)
+      if (scopes) port.postMessage({ type: 'unsaved', unsaved: false });
       await rt.boot();
     } catch (e) {
       fail(e);
@@ -319,7 +321,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
           const id = setTimeout(fn, ms);
           return () => clearTimeout(id);
         },
-        log: (line) => post({ type: 'log', line, error: false }),
+        // straight to the engine, as the save state: saves still run after a stop or a failure has ended the session
+        log: (line) => port.postMessage({ type: 'log', line, error: false }),
         onUnsaved: (unsaved) => port.postMessage({ type: 'unsaved', unsaved }),
       });
     } catch (e) {
@@ -333,6 +336,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     ended = true;
     driving?.abort();
     rt?.jvm.threads.halt();
+    // the snapshot is what Java left when it halted, possibly in the middle of a write (a file half written stays so,
+    // as after a power cut)
     await sync?.flush();
     port.postMessage({ type: 'stopped' });
   };

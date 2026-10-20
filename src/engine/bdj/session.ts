@@ -80,8 +80,8 @@ export class BdjSession {
   private readonly answering = new Map<number, BdjCallName>();
   /** The start-up timeout has fired: the session fails once the worker's thread dump is in (or DUMP_WAIT_MS on). */
   private timedOut: (() => void) | null = null;
-  /** The worker's storage scopes have changes it has not saved yet (its `unsaved` messages). */
-  private unsaved = false;
+  /** The worker has storage scopes (it sent `unsaved`): a stop and a flush go to it. */
+  private storage = false;
   private stopping: Promise<void> | null = null;
 
   constructor(private readonly deps: BdjSessionDeps) {
@@ -168,12 +168,13 @@ export class BdjSession {
 
   /** The page is going away (pagehide): the worker saves its storage changes now. */
   flush(): void {
-    if (!this.stopped && this.unsaved) this.post({ type: 'flush' });
+    if (!this.stopped && this.storage) this.post({ type: 'flush' });
   }
 
   /**
-   * Terminates the worker; nothing it sent afterwards is acted on. When its storage scopes have unsaved changes, it
-   * first saves them (stop, then stopped; at most STOP_SAVE_WAIT_MS). Settles once the worker is terminated.
+   * Terminates the worker; nothing it sent afterwards is acted on. When it has storage scopes, it first saves them
+   * (stop, then stopped; at most STOP_SAVE_WAIT_MS), even if no unsaved change has been heard of yet (one may be on its
+   * way). Settles once the worker is terminated.
    */
   stop(): Promise<void> {
     if (this.stopping) return this.stopping;
@@ -184,7 +185,7 @@ export class BdjSession {
     this.bootDone = null;
     const worker = this.deps.worker;
     worker.onerror = null;
-    if (!this.unsaved) {
+    if (!this.storage) {
       worker.onmessage = null;
       worker.terminate();
       return (this.stopping = Promise.resolve());
@@ -246,7 +247,7 @@ export class BdjSession {
         this.timedOut?.();
         break;
       case 'unsaved':
-        this.unsaved = m.unsaved;
+        this.storage = true;
         break;
       case 'stopped':
         break;

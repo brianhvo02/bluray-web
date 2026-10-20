@@ -36,7 +36,7 @@ class MemoryStore implements BdjStore {
     const bytes = snapshot.files.reduce((n, f) => n + f.bytes.length, 0);
     if (bytes > this.quota) throw new ScopeQuotaError(scope, bytes, this.quota);
     const cur = this.scopes.get(scope);
-    if ((cur?.etag ?? null) !== etag) return { conflict: { files: cur?.snapshot.files ?? [], etag: cur?.etag ?? '' } };
+    if ((cur?.etag ?? null) !== etag) return { conflict: { files: cur?.snapshot.files ?? [], etag: cur?.etag ?? null } };
     const next = { snapshot: { files: snapshot.files.map((f) => ({ ...f, bytes: f.bytes.slice() })) }, etag: `e${++this.n}` };
     this.scopes.set(scope, next);
     this.saves.push({ scope, files: snapshot.files.map((f) => `${f.path}=${dec.decode(f.bytes)}`) });
@@ -237,6 +237,43 @@ describe('ScopeSync', () => {
     expect(lines).toEqual(["BD-J storage: /persistent/stray.txt is outside the disc's storage scopes; it lasts until BD-J stops"]);
   });
 
+  it('saves again after its stored record disappears: the retry creates it, and later saves go on', async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const idb = new IDBFactory();
+    const store = new IdbBdjStore('local', idb);
+    const { vfs, sync, lines } = await setup(store);
+    write(vfs, '/persistent/7fff0123/a', '1');
+    await sync.flush();
+    // the record goes (cleared elsewhere: another tab, the browser's storage settings)
+    await new Promise<void>((resolve, reject) => {
+      const r = idb.open('bdj-store');
+      r.onsuccess = () => {
+        const tx = r.result.transaction('scopes', 'readwrite');
+        tx.objectStore('scopes').delete(`local|${PERSISTENT.key}`);
+        tx.oncomplete = () => (r.result.close(), resolve());
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+    write(vfs, '/persistent/7fff0123/a', '2');
+    await sync.flush();
+    expect((await store.load(PERSISTENT.key)).files.map((f) => dec.decode(f.bytes))).toEqual(['2']);
+    write(vfs, '/persistent/7fff0123/a', '3');
+    await sync.flush();
+    expect((await store.load(PERSISTENT.key)).files.map((f) => dec.decode(f.bytes))).toEqual(['3']);
+    expect(lines.filter((l) => l.includes('could not'))).toEqual([]);
+  });
+
+  it('saves at least every 10 s while a disc keeps writing more often than every 2 s', async () => {
+    const store = new MemoryStore();
+    const { vfs } = await setup(store);
+    for (let t = 0; t < 9_500; t += 1_000) {
+      write(vfs, '/persistent/7fff0123/clock', String(t));
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(store.saves).toEqual([{ scope: PERSISTENT.key, files: ['clock=9000'] }]);
+  });
+
   describe('the organisation-level BUDA files (ruling R14)', () => {
     const ORG: StoreScope = { key: 'buda/7fff0123', dir: '/buda/7fff0123', looseOnly: true };
     const ALL = [PERSISTENT, BUDA, ORG];
@@ -272,6 +309,16 @@ describe('ScopeSync', () => {
       const { vfs } = await setup(store, { scopes: ALL });
       expect(read(vfs, '/buda/7fff0123/x.log')).toBe('kept');
       expect(read(vfs, `${BUDA.dir}/resume`)).toBe('<missing>');
+    });
+
+    it('takes no subfolder paths from a stored version it merges with', async () => {
+      const store = new MemoryStore();
+      const { vfs, sync } = await setup(store, { scopes: ALL });
+      write(vfs, '/buda/7fff0123/mine.log', 'a');
+      store.put(ORG.key, [['theirs.log', 5000, 'b'], ['some-disc/resume', 5000, 'c']]);
+      await sync.flush();
+      expect(store.text(ORG.key)).toEqual(['mine.log=a', 'theirs.log=b']);
+      expect(read(vfs, '/buda/7fff0123/some-disc/resume')).toBe('<missing>');
     });
 
     it('lasts into the next session with IndexedDB', async () => {

@@ -39,6 +39,11 @@ function newEtag(): string {
   return c?.randomUUID ? c.randomUUID() : `${Date.now().toString(36)}-${(etagCounter++).toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
+/** The view covers its whole buffer. */
+function wholeBuffer(b: Uint8Array): boolean {
+  return b.byteOffset === 0 && b.byteLength === b.buffer.byteLength;
+}
+
 function request<T>(r: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     r.onsuccess = () => resolve(r.result);
@@ -81,13 +86,14 @@ export class IdbBdjStore implements BdjStore {
     const current = (await request(store.get(key))) as ScopeRecord | undefined;
     if ((current?.etag ?? null) !== etag) {
       await done;
-      return { conflict: { files: current?.files ?? [], etag: current?.etag ?? '' } };
+      return { conflict: { files: current?.files ?? [], etag: current?.etag ?? null } };
     }
     const record: ScopeRecord = {
       source: this.source,
       scope,
       etag: newEtag(),
-      files: snapshot.files.map((f) => ({ path: f.path, mtime: f.mtime, bytes: f.bytes })),
+      // a view of part of a buffer (a VFS file's) is copied: the rest of its buffer is not stored
+      files: snapshot.files.map((f) => ({ path: f.path, mtime: f.mtime, bytes: wholeBuffer(f.bytes) ? f.bytes : f.bytes.slice() })),
       bytes,
       savedAt: this.nowMs(),
     };
