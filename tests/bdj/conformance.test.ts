@@ -305,7 +305,7 @@ describe('I/O and zip on the JDK class path alone', () => {
     await jvm.boot();
   }, 60_000);
 
-  it.each(['Io', 'Zip', 'Threads', 'Urls', 'Dates', 'Awt'])(
+  it.each(['Io', 'Zip', 'Threads', 'Urls', 'Net', 'Dates', 'Awt'])(
     '%s prints what HotSpot prints',
     async (name) => {
       await runCapturing(jvm, io, `conformance/${name}`);

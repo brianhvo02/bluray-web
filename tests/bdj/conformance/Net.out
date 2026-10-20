@@ -1,0 +1,18 @@
+lookup-name java.net.UnknownHostException
+lookup-all java.net.UnknownHostException
+lookup-literal returned 192.0.2.1
+http-name-stream java.net.UnknownHostException
+http-name-code java.net.UnknownHostException
+http-name-connect java.net.UnknownHostException
+http-address-stream java.net.SocketException
+socket-name java.net.UnknownHostException
+socket-address java.net.SocketException
+socket-address-timeout java.net.ConnectException
+socket-unresolved java.net.UnknownHostException
+lookup-localhost returned localhost/127.0.0.1(loopback),localhost/0:0:0:0:0:0:0:1(loopback)
+socket-loopback java.net.ConnectException
+socket-localhost java.net.ConnectException
+http-loopback java.net.ConnectException
+reverse-address returned 192.0.2.1
+reachable-address returned false
+carried on

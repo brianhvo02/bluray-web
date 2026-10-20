@@ -413,7 +413,8 @@ export function registerLangNatives(table: NativeTable): void {
       return bits.getFloat64(0);
     },
 
-    // System.getenv: the player has no environment variables
+    // System.getenv sees no variables. This deliberately differs from libbluray, where xlets under HotSpot see the real
+    // process environment: a browser has no environment to show them
     'java/lang/ProcessEnvironment.environ()[[B': (ctx) => ctx.jvm.newArray(ctx.jvm.loader.arrayOf(ctx.jvm.loader.primitive('B')), []),
     'java/lang/Runtime.availableProcessors()I': () => 1,
     'java/lang/Runtime.freeMemory()J': () => MEMORY,
