@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import { parseKeyScript } from '../../tests/bdj/key-script';
-import { classify, discId, EMPTY_PLANE_HASH, gapOf, missingClassesFromLog, parseLibblurayRun, progress, type RunRecord, type RunStep } from './classify';
+import { classify, countedGaps, discId, EMPTY_PLANE_HASH, gapOf, missingClassesFromLog, parseLibblurayRun, platformCaught, progress, type RunRecord, type RunStep, type ThrowFrame } from './classify';
 
 // Made-up runs of the generic script: playlist 7 behind the menu, ok starts playlist 8.
 const sel = (pl: number, ret = 1): TraceEntry => ({ call: 'selectPlaylistN', args: [pl, -1, -1, '-1'], ret });
@@ -162,6 +162,38 @@ describe('classify', () => {
     // ours to fix even where libbluray, with stub streams, gets no further
     const libNoMenu = lib({ end: 'timeout', steps: [], calls: [], endHash: null, flushes: 0 });
     expect(classify(noMenu({ missingClasses: missing }), libNoMenu)).toEqual({ verdict: 'missing-class', detail: 'java.io.FileWriter; libbluray (stub) also: draws nothing, stops at step 0 (timeout)' });
+  });
+
+  it('R13: a class the platform looked up and caught itself is no gap', () => {
+    const CNFE = ['java/lang/ClassNotFoundException', 'java/lang/ReflectiveOperationException', 'java/lang/Exception', 'java/lang/Throwable', 'java/lang/Object'];
+    const plain = (platform: boolean, pc = 5): ThrowFrame => ({ platform, pc, handlers: [] });
+    const catching = (platform: boolean, catchType: string | null, pc = 5): ThrowFrame => ({ platform, pc, handlers: [{ startPc: 0, endPc: 10, catchType }] });
+    // java.net.URL's protocol-handler lookup: Class.forName, ClassLoader.loadClass, then URL.getURLStreamHandler catches Exception
+    expect(platformCaught([plain(true), plain(true), catching(true, 'java/lang/Exception'), plain(false)], CNFE)).toBe(true);
+    // a catch-all (finally) catches too; a handler whose range misses the pc does not
+    expect(platformCaught([catching(true, null)], CNFE)).toBe(true);
+    expect(platformCaught([catching(true, 'java/lang/Exception', 12), plain(false)], CNFE)).toBe(false);
+    // the disc's code sees it first, whoever catches it later (the disc, or the platform's event loop around the disc)
+    expect(platformCaught([plain(true), catching(false, 'java/lang/Exception'), catching(true, null)], CNFE)).toBe(false);
+    expect(platformCaught([plain(true), plain(false), catching(true, 'java/lang/Throwable')], CNFE)).toBe(false);
+    // nobody catches it
+    expect(platformCaught([plain(true), plain(true)], CNFE)).toBe(false);
+    // another catch type does not catch it
+    expect(platformCaught([catching(true, 'java/io/IOException')], CNFE)).toBe(false);
+    // only lookups by name: a NoClassDefFoundError is a linkage gap wherever it is caught
+    expect(platformCaught([catching(true, null)], ['java/lang/NoClassDefFoundError', 'java/lang/LinkageError', 'java/lang/Error', 'java/lang/Throwable', 'java/lang/Object'])).toBe(false);
+
+    // classify does not count it (the BD-Live client then gets a MalformedURLException, as libbluray's would offline)
+    const probed = noMenu({ missingClasses: ['sun.net.www.protocol.https.Handler'], caughtGaps: ['sun.net.www.protocol.https.Handler'] });
+    expect(countedGaps(probed)).toEqual([]);
+    const libNoMenu = lib({ end: 'error', steps: [], calls: [], endHash: null, flushes: 0 });
+    expect(classify(probed, libNoMenu).verdict).toBe('libbluray-fails-too');
+    expect(classify(run({ missingClasses: ['sun.net.www.protocol.https.Handler'], caughtGaps: ['sun.net.www.protocol.https.Handler'] }), lib())).toEqual({ verdict: 'works', detail: 'same as libbluray' });
+    // a gap next to it still counts
+    expect(classify(noMenu({ missingClasses: ['sun.net.www.protocol.https.Handler', 'java.io.FileWriter'], caughtGaps: ['sun.net.www.protocol.https.Handler'] }), libNoMenu)).toEqual({
+      verdict: 'missing-class',
+      detail: 'java.io.FileWriter; libbluray (stub) also: draws nothing, stops at step 0 (error)',
+    });
   });
 
   it('unsupported-video when selectPlaylist returned 0 on an MPEG-2 or VC-1 playlist', () => {

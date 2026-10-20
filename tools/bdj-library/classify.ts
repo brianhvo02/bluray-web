@@ -46,6 +46,12 @@ export interface RunRecord {
   readonly flushes: number;
   /** Platform classes Java could not load (NoClassDefFoundError, or ClassNotFoundException of a platform class). */
   readonly missingClasses: readonly string[];
+  /**
+   * Entries of missingClasses whose every ClassNotFoundException the platform's own code caught before any of the
+   * disc's code saw it (platformCaught, Ruling R13): a designed lookup, such as java.net.URL looking for a protocol
+   * handler. Not counted as gaps (countedGaps). Absent in records made before R13.
+   */
+  readonly caughtGaps?: readonly string[];
   /** selectPlaylistN calls that returned 0, with the playlist's video codec (null: no video stream or unreadable). */
   readonly rejectedPlaylists: readonly { readonly playlist: number; readonly video: string | null }[];
   readonly wallMs: number;
@@ -113,6 +119,38 @@ export function missingClassesFromLog(lines: Iterable<string>): string[] {
     }
   }
   return [...out];
+}
+
+/** One frame of the stack a throwable was made on, as the interpreter will unwind it (interpreter.ts throwInto). */
+export interface ThrowFrame {
+  /** The frame's class belongs to the platform (the boot class path), not to the disc. */
+  readonly platform: boolean;
+  readonly pc: number;
+  /** The method's exception table: catch type as an internal class name, null for a catch-all (finally). */
+  readonly handlers: readonly { readonly startPc: number; readonly endPc: number; readonly catchType: string | null }[];
+}
+
+/**
+ * Ruling R13: whether a ClassNotFoundException made with this stack (`frames` innermost first; `chain` the throwable's
+ * class and its superclasses, internal names) is caught by the platform before any of the disc's code sees it: going
+ * out from the throw as the interpreter unwinds, a platform frame has a handler for it at its pc, and no disc frame
+ * comes first. A protocol-handler lookup in java.net.URL, or a parent loader's miss inside ClassLoader.loadClass, is
+ * such a case: the platform asks for a class that may not exist and carries on without it (HotSpot's JDK lacks many of
+ * them too). A ClassNotFoundException that reaches the disc's code, caught or not, is a gap.
+ */
+export function platformCaught(frames: readonly ThrowFrame[], chain: readonly string[]): boolean {
+  if (chain[0] !== 'java/lang/ClassNotFoundException') return false;
+  for (const f of frames) {
+    if (!f.platform) return false;
+    if (f.handlers.some((h) => f.pc >= h.startPc && f.pc < h.endPc && (h.catchType === null || chain.includes(h.catchType)))) return true;
+  }
+  return false;
+}
+
+/** The class-library gaps a run counts (Ruling R13): missingClasses less the ones the platform always caught itself. */
+export function countedGaps(r: RunRecord): readonly string[] {
+  const caught = new Set(r.caughtGaps ?? []);
+  return caught.size ? r.missingClasses.filter((c) => !caught.has(c)) : r.missingClasses;
 }
 
 const isControl = (o: { call?: unknown }): o is TraceEntry => typeof o.call === 'string' && CONTROL_CALLS.has(o.call);
@@ -356,7 +394,8 @@ export function unconfirmedKeys(ours: RunRecord, lib: RunRecord): string[] {
  *    only as far as libbluray shows them (a reaction on one side only is a difference). Without a libbluray run, ours
  *    alone decides: menu, arrows and ok ("not compared").
  *  - missing-class: Java lacked a platform class, native (`native: ...`) or platform method (`method: ...`), the first
- *    one named, whatever libbluray did (with stub streams it often gets no further, which the detail says).
+ *    one named, whatever libbluray did (with stub streams it often gets no further, which the detail says). A class
+ *    the platform looked up and always caught itself is not counted (countedGaps, Ruling R13).
  *  - unsupported-video: a playlist with MPEG-2 or VC-1 video was refused (the same).
  *  - libbluray-fails-too: libbluray failed on its own (libFailed) and ours showed no menu either.
  *  - stall: ours never showed a menu, or stopped at an earlier step than libbluray.
@@ -378,9 +417,10 @@ export function classify(ours: RunRecord, lib: RunRecord | null): { verdict: Dis
   }
   // a class ours lacks or a video codec ours refuses is ours to fix whatever libbluray does with stub streams
   const libToo = lib && libFailed(lib) ? `; libbluray (stub) also: ${shortfall(lib)}` : '';
-  if (ours.missingClasses.length) {
-    const more = ours.missingClasses.length > 1 ? ` (+${ours.missingClasses.length - 1} more)` : '';
-    return { verdict: 'missing-class', detail: `${ours.missingClasses[0]}${more}${libToo}` };
+  const gaps = countedGaps(ours);
+  if (gaps.length) {
+    const more = gaps.length > 1 ? ` (+${gaps.length - 1} more)` : '';
+    return { verdict: 'missing-class', detail: `${gaps[0]}${more}${libToo}` };
   }
   const refused = ours.rejectedPlaylists.find((r) => r.video !== null && UNSUPPORTED_VIDEO.test(r.video));
   if (refused) return { verdict: 'unsupported-video', detail: `playlist ${refused.playlist} (${refused.video}) refused${libToo}` };

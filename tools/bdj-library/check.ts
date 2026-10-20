@@ -18,13 +18,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import { Jvm } from '../../src/engine/bdj/jvm/jvm';
+import type { JThread } from '../../src/engine/bdj/jvm/threads';
 import type { JObject } from '../../src/engine/bdj/jvm/values';
 import { parseMpls } from '../../src/engine/bdmv/mpls-parser';
 import { codingName } from '../../src/engine/bdmv/stream-types';
 import { CONTROL_CALLS } from '../../tests/bdj/format';
 import { parseKeyScript } from '../../tests/bdj/key-script';
 import { replayPlayerBdj, type PlayerBdjReplay } from '../../tests/bdj/replay-player';
-import { classify, gapOf, libraryDir, missingClassesFromLog, parseLibblurayRun, platformClass, VERDICTS, type DiscVerdict, type RunEnd, type RunRecord } from './classify';
+import { classify, countedGaps, gapOf, libraryDir, missingClassesFromLog, parseLibblurayRun, platformCaught, platformClass, VERDICTS, type DiscVerdict, type RunEnd, type RunRecord, type ThrowFrame } from './classify';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -78,14 +79,37 @@ const scrub = (s: string): string => s.replace(/(^|\s)\/\S+/g, '$1<path>').slice
 /** Throwables that mean a gap in the class library (Task 2's work): a class, a native or a platform method missing. */
 const GAPS = new Set(['java/lang/NoClassDefFoundError', 'java/lang/ClassNotFoundException', 'java/lang/UnsatisfiedLinkError', 'java/lang/NoSuchMethodError']);
 
+/** The stack a throwable is made on, innermost first, as platformCaught reads it (catch types by name: nothing loads). */
+function throwFrames(t: JThread | null): ThrowFrame[] {
+  const out: ThrowFrame[] = [];
+  const frames = t?.frames ?? [];
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const { method, pc } = frames[i]!;
+    const cp = method.cls.file?.cp;
+    const name = (index: number): string | null => {
+      const c = cp?.[index];
+      const u = c?.tag === 'class' ? cp?.[c.name] : null;
+      return u?.tag === 'utf8' ? u.value : null;
+    };
+    const handlers = (method.code?.handlers ?? []).map((h) => ({ startPc: h.startPc, endPc: h.endPc, catchType: h.catchType === 0 ? null : (name(h.catchType) ?? '?') }));
+    out.push({ platform: method.cls.loader === null, pc, handlers });
+  }
+  return out;
+}
+
 async function runOurs(dir: string, out: string): Promise<void> {
   const t0 = performance.now();
-  // Java often catches a missing class and goes on quietly, so the throwables are caught where they are made
-  const thrown: { jvm: Jvm; e: JObject }[] = [];
+  // Java often catches a missing class and goes on quietly, so the throwables are caught where they are made; with the
+  // stack, so a lookup the platform catches itself (Ruling R13) can be told from a gap the disc meets
+  const thrown: { jvm: Jvm; e: JObject; caught: boolean }[] = [];
   const fill = Jvm.prototype.fillInStackTrace;
   Jvm.prototype.fillInStackTrace = function (this: Jvm, e, t) {
     fill.call(this, e, t);
-    if (thrown.length < 5000 && GAPS.has(e.cls.name)) thrown.push({ jvm: this, e });
+    if (thrown.length < 5000 && GAPS.has(e.cls.name)) {
+      const chain: string[] = [];
+      for (let c: typeof e.cls | null = e.cls; c; c = c.superClass) chain.push(c.name);
+      thrown.push({ jvm: this, e, caught: platformCaught(throwFrames(t), chain) });
+    }
   };
   const logs: string[] = [];
   let run: Partial<PlayerBdjReplay> & { stepCalls?: readonly number[] };
@@ -118,7 +142,8 @@ async function runOurs(dir: string, out: string): Promise<void> {
   controlBefore[trace.length] = n;
   const calls = trace.filter((c) => CONTROL_CALLS.has(c.call));
   const missing = new Set<string>();
-  for (const { jvm, e } of thrown) {
+  const seen = new Set<string>(); // a gap some throw of which reached the disc's code, or the log
+  for (const { jvm, e, caught } of thrown) {
     let msg = '';
     try {
       msg = jvm.describe(e);
@@ -127,8 +152,13 @@ async function runOurs(dir: string, out: string): Promise<void> {
     }
     const gap = gapOf(msg);
     if (gap) missing.add(gap);
+    if (gap && !caught) seen.add(gap);
   }
-  for (const c of missingClassesFromLog(logs)) missing.add(c);
+  for (const c of missingClassesFromLog(logs)) {
+    missing.add(c);
+    seen.add(c);
+  }
+  const caughtGaps = [...missing].filter((c) => !seen.has(c));
   const flushes = run.flushes ?? [];
   const record: RunRecord = {
     side: 'ours',
@@ -139,6 +169,7 @@ async function runOurs(dir: string, out: string): Promise<void> {
     endHash: flushes.at(-1) ?? null,
     flushes: flushes.length,
     missingClasses: [...missing],
+    ...(caughtGaps.length ? { caughtGaps } : {}),
     rejectedPlaylists: rejectedPlaylists(dir, calls),
     wallMs: Math.round(performance.now() - t0),
   };
@@ -292,13 +323,19 @@ function writeSummary(lib: string, results: readonly DiscResult[], runtime: stri
     ``,
     `| class | discs |`,
     `|---|---|`,
-    ...tally(by('missing-class').map((r) => r.ours.missingClasses[0]!)),
+    ...tally(by('missing-class').map((r) => countedGaps(r.ours)[0]!)),
     ``,
     `## Missing classes (any, every disc)`,
     ``,
     `| class | discs |`,
     `|---|---|`,
-    ...tally(results.flatMap((r) => r.ours.missingClasses)),
+    ...tally(results.flatMap((r) => countedGaps(r.ours))),
+    ``,
+    `## Classes the platform looked up and caught itself (not counted, Ruling R13)`,
+    ``,
+    `| class | discs |`,
+    `|---|---|`,
+    ...tally(results.flatMap((r) => r.ours.caughtGaps ?? [])),
     ``,
     `## Refused video (unsupported-video discs)`,
     ``,
