@@ -1,7 +1,7 @@
 # Lower Quality on the NAS (Step 4) — Design Spec
 
 Date: 2026-10-19
-Status: Approved by the user 2026-10-19.
+Status: Approved by the user 2026-10-19. Phase 1 (the NAS side, §5–§6) is built and checked locally with `scripts/verify-level.ts` on the x264 backend (2026-10-20); the NAS run (Quick Sync throughput, over-budget counts, the three-viewer load) is pending. Phase 2 (the client side, §7) waits for BD-J 5e's MPEG-2/VC-1 change.
 Parent spec: `2026-10-16-cross-browser-and-remote-design.md` §6 (step 4 sketch). Builds on `2026-10-18-webrtc-people-design.md` (people, the WebRTC route, buffer-first). Where this document and the parent disagree, this one wins for step 4.
 
 ## 1. Intent
