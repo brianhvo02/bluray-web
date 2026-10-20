@@ -9,8 +9,8 @@
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import type { EpEntry } from '../../../src/engine/bdmv/clpi-parser';
 import { CodingType } from '../../../src/engine/bdmv/stream-types';
-import type { IntervalPlan, LevelDef } from './levels';
-import { AUDIO_RATE_48K, SOURCE_PACKET_BYTES, mapSpn, mapSpnDown, maxBudgetRate } from './levels';
+import type { IntervalPlan, KeptAudio, LevelDef } from './levels';
+import { AUDIO_RATE_48K, SOURCE_PACKET_BYTES, coreCoding, mapSpn, mapSpnDown, maxBudgetRate } from './levels';
 import { BeWriter, readU16, readU32, rebuildSections, sectionBytes, writeU32 } from './sections';
 
 export type ClpiRewrite =
@@ -18,10 +18,10 @@ export type ClpiRewrite =
   | {
       readonly intervals: readonly IntervalPlan[];
       readonly level: LevelDef;
-      /** The streams kept besides the video (the chosen audio, PG, IG). */
+      /** The graphics streams kept (PG, IG); the video and `audio` are kept besides. */
       readonly keepPids: readonly number[];
-      /** The kept audio stream and the coding it travels as (`coreCoding`). */
-      readonly audio: { readonly pid: number; readonly newCoding: number };
+      /** The clip's kept audio (`keptAudioFor`), carried as its core; null keeps none. */
+      readonly audio: KeptAudio | null;
       readonly videoPid: number;
       readonly newCoding: number;
       readonly newFormat: number;
@@ -37,6 +37,8 @@ const EXTENSION_AT = 24;
 /** ClipInfo's number_of_source_packets (ClipInfo starts at 40). */
 const RECORDING_RATE_AT = 52;
 const NUM_SOURCE_PACKETS_AT = 56;
+/** is_angle_change_point among a fine entry's 4 leading bits. */
+const ANGLE_CHANGE_POINT = 0x8;
 
 /**
  * The CLPI of a clip at a level: the video's EP map regenerated from the plan, dropped streams
@@ -50,7 +52,8 @@ export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array
   if (intervals.length === 0) throw new Error('levels: an empty plan');
   const last = intervals.at(-1)!;
   const numSourcePackets = last.spnStart + last.budgetBytes / SOURCE_PACKET_BYTES;
-  const keep = new Set([videoPid, plan.audio.pid, ...plan.keepPids]);
+  const keep = new Set([videoPid, ...plan.keepPids]);
+  if (plan.audio) keep.add(plan.audio.pid);
   const parsed = parseClpi(original);
 
   const replace = new Map<number, Uint8Array | null>();
@@ -70,7 +73,8 @@ export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array
           m.pid === videoPid
             ? planEntries(intervals, m.entries.length)
             : m.entries.map((e) => ({ pts: e.pts, spn: mapSpnDown(intervals, e.spn) })),
-        flags: fineFlags(cpi, m.pid),
+        // I_end_position_offset describes the source's pictures, so only angle change points stay on the video
+        flags: m.pid === videoPid ? fineFlags(cpi, m.pid).map((f) => f & ANGLE_CHANGE_POINT) : fineFlags(cpi, m.pid),
       }));
     replace.set(CPI_AT, writeCpi(cpi, maps));
   }
@@ -111,7 +115,7 @@ function rewriteProgramInfo(
   section: Uint8Array,
   intervals: readonly IntervalPlan[],
   keep: ReadonlySet<number>,
-  plan: { videoPid: number; newCoding: number; newFormat: number; newRate: number; audio: { pid: number; newCoding: number } },
+  plan: { videoPid: number; newCoding: number; newFormat: number; newRate: number; audio: KeptAudio | null },
 ): Uint8Array {
   const w = new BeWriter();
   w.u32(0).bytes(section.subarray(4, 6)); // length, reserved
@@ -130,7 +134,7 @@ function rewriteProgramInfo(
       if (keep.has(pid)) {
         const entry = section.slice(at, end);
         if (pid === plan.videoPid) setVideoAttrs(entry.subarray(3), plan, true);
-        else if (pid === plan.audio.pid) setAudioCoding(entry.subarray(3), plan.audio.newCoding);
+        else if (pid === plan.audio?.pid) setAudioCoding(entry.subarray(3), coreCoding(plan.audio.coding));
         w.bytes(entry);
         kept++;
       }

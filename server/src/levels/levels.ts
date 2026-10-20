@@ -1,4 +1,5 @@
 import type { Clpi, EpMap } from '../../../src/engine/bdmv/clpi-parser';
+import type { PlayItem } from '../../../src/engine/bdmv/mpls-parser';
 import { CodingType, isVideoCoding } from '../../../src/engine/bdmv/stream-types';
 
 /** The quality levels a disc can be served at; `original` is the disc's own bytes. */
@@ -45,20 +46,59 @@ export function levelsFor(source: { codingType: number; height: number; hdr: boo
   return [...original, 'h264-1080', 'hevc-1080', 'phone-720'];
 }
 
-/** BD video_format codes (libbluray bluray.h, bd_video_format_e). */
+/**
+ * A level's definition for a source. The phone level never scales a standard-definition source
+ * up: a source of 576 lines or fewer keeps its own size (720 × 480 or 720 × 576).
+ */
+export function levelDefFor(id: LevelDef['id'], source: { height: number }): LevelDef {
+  const def = LEVELS[id];
+  if (id === 'phone-720' && source.height <= 576) return { ...def, width: 720, height: source.height <= 480 ? 480 : 576 };
+  return def;
+}
+
+/** BD video_format and frame-rate codes (libbluray bluray.h, bd_video_format_e and bd_video_rate_e). */
+const VIDEO_FORMAT_480P = 3;
 const VIDEO_FORMAT_720P = 5;
 const VIDEO_FORMAT_1080P = 6;
+const VIDEO_FORMAT_576P = 7;
+const VIDEO_RATE_25 = 3;
+const VIDEO_RATE_30000_1001 = 4;
 
 /**
- * The primary video's coding attributes at a level. The frame-rate code is the source's: an
- * interlaced source is deinterlaced to its frame rate, so 1080i 29.97 (rate 4) becomes 1080p 29.97.
+ * The primary video's coding attributes at a level. For 720p and 1080p the frame-rate code is the
+ * source's: an interlaced source is deinterlaced to its frame rate, so 1080i 29.97 (rate 4) becomes
+ * 1080p 29.97. Standard definition has one rate per format (480 lines 29.97, 576 lines 25), as
+ * 480i and 576i do on disc.
  */
 export function videoAttrsFor(level: LevelDef, sourceRate: number): { newCoding: number; newFormat: number; newRate: number } {
-  return {
-    newCoding: level.codec === 'h264' ? CodingType.AVC : CodingType.HEVC,
-    newFormat: level.height === 720 ? VIDEO_FORMAT_720P : VIDEO_FORMAT_1080P,
-    newRate: sourceRate,
-  };
+  const newCoding = level.codec === 'h264' ? CodingType.AVC : CodingType.HEVC;
+  if (level.height === 480) return { newCoding, newFormat: VIDEO_FORMAT_480P, newRate: VIDEO_RATE_30000_1001 };
+  if (level.height === 576) return { newCoding, newFormat: VIDEO_FORMAT_576P, newRate: VIDEO_RATE_25 };
+  return { newCoding, newFormat: level.height === 720 ? VIDEO_FORMAT_720P : VIDEO_FORMAT_1080P, newRate: sourceRate };
+}
+
+export interface KeptAudio {
+  /** 1-based, in the play item's STN. */
+  readonly streamNumber: number;
+  readonly pid: number;
+  /** The coding on the disc; the level carries `coreCoding(coding)`. */
+  readonly coding: number;
+}
+
+/**
+ * The primary audio a play item keeps at a level (ruling L-R3): the requested stream number
+ * (1-based, as PSR1) when the item has it as a main-clip stream; otherwise the item's first
+ * main-clip primary audio stream (stream 1 on any disc whose stream 1 is in the main clip);
+ * otherwise null, and the item keeps no audio. Sub-path audio is never kept. `coding` is the
+ * stream's coding on the disc; the level carries `coreCoding(coding)`.
+ */
+export function keptAudioFor(item: PlayItem, requestedNumber: number): KeptAudio | null {
+  const audio = item.stn.audio;
+  const isMain = (n: number): boolean => audio[n - 1]?.streamType === 1;
+  const streamNumber = isMain(requestedNumber) ? requestedNumber : audio.findIndex((a) => a.streamType === 1) + 1;
+  if (streamNumber === 0) return null;
+  const s = audio[streamNumber - 1]!;
+  return { streamNumber, pid: s.pid, coding: s.codingType };
 }
 
 /**
@@ -74,17 +114,28 @@ export function coreCoding(codingType: number): number {
 /** BD audio sample-rate code for 48 kHz, the rate of every AC-3 and DTS core. */
 export const AUDIO_RATE_48K = 1;
 
+/** Intervals shorter than this (the clip's last, cut at the presentation end) don't set the rate. */
+const MIN_RATE_INTERVAL_45 = 22_500;
+
 /**
- * The level's TS_recording_rate, bytes per second: the highest rate any interval's budget
- * stands for (budget ÷ duration), rounded up.
+ * The level's TS_recording_rate: the highest rate any interval's budget stands for (budget ÷
+ * duration), rounded up. The field counts 188-byte TS packets (the engine scales it by 192/188),
+ * so the budget's 192-byte source packets count 188 bytes each. Intervals under 0.5 s are left
+ * out unless there are no others.
  */
 export function maxBudgetRate(intervals: readonly IntervalPlan[]): number {
-  let max = 0;
-  for (const iv of intervals) {
-    const duration = iv.endPts45 - iv.startPts45;
-    if (duration > 0) max = Math.max(max, Math.ceil((iv.budgetBytes * PTS45_HZ) / duration));
-  }
-  return max;
+  const rate = (minDuration: number): number => {
+    let max = 0;
+    for (const iv of intervals) {
+      const duration = iv.endPts45 - iv.startPts45;
+      if (duration > 0 && duration >= minDuration) {
+        const tsBytes = (iv.budgetBytes / SOURCE_PACKET_BYTES) * TS_PACKET_BYTES;
+        max = Math.max(max, Math.ceil((tsBytes * PTS45_HZ) / duration));
+      }
+    }
+    return max;
+  };
+  return rate(MIN_RATE_INTERVAL_45) || rate(0);
 }
 
 /** One EP interval of a clip: the bytes from one video EP entry to the next, and its place at a level. */
@@ -106,6 +157,7 @@ export interface IntervalPlan {
 /** 32 source packets, the aligned unit of an m2ts file. */
 export const ALIGNED_UNIT_BYTES = 6144;
 export const SOURCE_PACKET_BYTES = 192;
+const TS_PACKET_BYTES = 188;
 /** Room for every PG and IG stream, which travel bit-exact. */
 export const GRAPHICS_ALLOWANCE_BPS = 1_500_000;
 const PTS45_WRAP = 2 ** 32;

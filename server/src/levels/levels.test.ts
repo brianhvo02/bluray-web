@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Clpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
-import { LEVELS, coreCoding, levelsFor, mapSpn, planClip, videoAttrsFor } from './levels';
+import type { PlayItem, StreamEntry } from '../../../src/engine/bdmv/mpls-parser';
+import { LEVELS, coreCoding, keptAudioFor, levelDefFor, levelsFor, mapSpn, planClip, videoAttrsFor } from './levels';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
 
@@ -80,9 +81,23 @@ describe('levelsFor', () => {
     expect(levelsFor({ codingType: 0x24, height: 2160, hdr: true })).toEqual(['original', 'hevc-1080-hdr', 'h264-1080-sdr']);
   });
 
-  it('does not scale a 720p or smaller source up to 1080p', () => {
+  it('offers a 720p or smaller source only the phone level besides original', () => {
     expect(levelsFor({ codingType: 0x1b, height: 720, hdr: false })).toEqual(['original', 'phone-720']);
     expect(levelsFor({ codingType: 0x02, height: 480, hdr: false })).toEqual(['phone-720']);
+  });
+});
+
+describe('levelDefFor', () => {
+  it('does not scale a source of 576 lines or fewer up: the phone level keeps its size', () => {
+    expect(levelDefFor('phone-720', { height: 576 })).toMatchObject({ width: 720, height: 576, codec: 'h264' });
+    expect(levelDefFor('phone-720', { height: 480 })).toMatchObject({ width: 720, height: 480 });
+    expect(levelDefFor('phone-720', { height: 720 })).toBe(LEVELS['phone-720']);
+    expect(levelDefFor('h264-1080', { height: 1080 })).toBe(LEVELS['h264-1080']);
+  });
+
+  it('gives the standard-definition phone level a BD format and rate pair: 576p 25, 480p 29.97', () => {
+    expect(videoAttrsFor(levelDefFor('phone-720', { height: 576 }), 3)).toEqual({ newCoding: 0x1b, newFormat: 7, newRate: 3 });
+    expect(videoAttrsFor(levelDefFor('phone-720', { height: 480 }), 4)).toEqual({ newCoding: 0x1b, newFormat: 3, newRate: 4 });
   });
 });
 
@@ -111,5 +126,52 @@ describe('coreCoding', () => {
     expect(coreCoding(0x85)).toBe(0x82);
     expect(coreCoding(0x86)).toBe(0x82);
     for (const c of [0x80, 0x81, 0x82, 0x84]) expect(coreCoding(c)).toBe(c);
+  });
+});
+
+describe('keptAudioFor (ruling L-R3)', () => {
+  const stream = (pid: number, codingType: number, streamType = 1): StreamEntry => ({
+    pid,
+    codingType,
+    format: 3,
+    rate: 1,
+    lang: 'eng',
+    charCode: 0,
+    subPath: streamType !== 1,
+    streamType,
+    subPathId: 0,
+    subClipId: 0,
+  });
+  const item = (audio: StreamEntry[]): PlayItem => ({
+    clipId: '00001',
+    codecId: 'M2TS',
+    connectionCondition: 1,
+    stcId: 0,
+    inTime: 0,
+    outTime: 9000,
+    uoMask: new Uint8Array(8),
+    stillMode: 0,
+    stillTime: 0,
+    isMultiAngle: false,
+    angleCount: 1,
+    angleClipIds: [],
+    stn: { video: [], audio, pg: [], ig: [], pipPg: [], secondaryAudio: [], secondaryVideo: [] },
+  });
+
+  it('keeps the requested stream when the item has it in the main clip', () => {
+    expect(keptAudioFor(item([stream(0x1100, 0x83), stream(0x1101, 0x81)]), 2)).toEqual({ streamNumber: 2, pid: 0x1101, coding: 0x81 });
+  });
+
+  it('keeps nothing on an item with no audio', () => {
+    expect(keptAudioFor(item([]), 1)).toBeNull();
+  });
+
+  it('falls back to stream 1 on an item with fewer tracks than requested', () => {
+    expect(keptAudioFor(item([stream(0x1100, 0x83)]), 3)).toEqual({ streamNumber: 1, pid: 0x1100, coding: 0x83 });
+  });
+
+  it('never keeps sub-path audio: a sub-path request falls back, and an item with only sub-path audio keeps none', () => {
+    expect(keptAudioFor(item([stream(0x1100, 0x81), stream(0x1101, 0x81, 2)]), 2)).toEqual({ streamNumber: 1, pid: 0x1100, coding: 0x81 });
+    expect(keptAudioFor(item([stream(0x1100, 0x81, 3)]), 1)).toBeNull();
   });
 });

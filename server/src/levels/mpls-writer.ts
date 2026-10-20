@@ -7,7 +7,10 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import { parseMpls } from '../../../src/engine/bdmv/mpls-parser';
 import { setAudioCoding, setVideoAttrs } from './clpi-writer';
+import type { KeptAudio } from './levels';
+import { coreCoding, keptAudioFor } from './levels';
 import { BeWriter, readU16, readU32, rebuildSections, sectionBytes } from './sections';
 
 /** Header offsets of the PlayList, PlayListMark and ExtensionData start addresses. */
@@ -23,20 +26,15 @@ export interface VideoAttrs {
   readonly newRate: number;
 }
 
-export interface KeptAudio {
-  /** 1-based, as PSR1. */
-  readonly audioStreamNumber: number;
-  /** The coding the stream travels as (`coreCoding`). */
-  readonly newCoding: number;
-}
-
 /**
- * The playlist at a level. In every play item's STN table only the chosen primary audio stays,
- * its coding set to the core the level carries; secondary audio, secondary video and Dolby
+ * The playlist at a level. In every play item's STN table only the primary audio `keptAudioFor`
+ * picks for the requested stream number stays (none when it picks none), its coding set to the
+ * core the level carries; secondary audio, secondary video and Dolby
  * Vision enhancement layers are gone, and the primary video's coding, format and rate are set.
  * PG, PiP PG and IG entries, sub paths, marks and extension data are copied.
  */
-export function rewriteMpls(original: Uint8Array, keep: KeptAudio, video: VideoAttrs): Uint8Array {
+export function rewriteMpls(original: Uint8Array, keep: { audioStreamNumber: number }, video: VideoAttrs): Uint8Array {
+  const items = parseMpls(original).playItems;
   const listAt = readU32(original, LIST_AT);
   const list = sectionBytes(original, listAt);
   const itemCount = readU16(list, 6);
@@ -45,7 +43,7 @@ export function rewriteMpls(original: Uint8Array, keep: KeptAudio, video: VideoA
   let at = 10;
   for (let i = 0; i < itemCount; i++) {
     const end = at + 2 + readU16(list, at);
-    w.bytes(rewritePlayItem(list.subarray(at, end), keep, video, i));
+    w.bytes(rewritePlayItem(list.subarray(at, end), keptAudioFor(items[i]!, keep.audioStreamNumber), video, i));
     at = end;
   }
   w.bytes(list.subarray(at)); // sub paths
@@ -55,7 +53,7 @@ export function rewriteMpls(original: Uint8Array, keep: KeptAudio, video: VideoA
   return rebuildSections(original, [LIST_AT, MARK_AT, EXTENSION_AT], new Map([[LIST_AT, newList]]));
 }
 
-function rewritePlayItem(item: Uint8Array, keep: KeptAudio, video: VideoAttrs, index: number): Uint8Array {
+function rewritePlayItem(item: Uint8Array, audio: KeptAudio | null, video: VideoAttrs, index: number): Uint8Array {
   let stnAt = 2 + PLAY_ITEM_FIXED_BYTES;
   const isMultiAngle = (item[2 + 10]! & 0x10) !== 0; // bit 11 of the 16 bits after codec_id
   if (isMultiAngle) {
@@ -66,7 +64,7 @@ function rewritePlayItem(item: Uint8Array, keep: KeptAudio, video: VideoAttrs, i
   if (stnEnd > item.length) throw new Error(`levels: play item ${index}'s STN runs past the item`);
   const w = new BeWriter();
   w.u16(0).bytes(item.subarray(2, stnAt));
-  w.bytes(rewriteStn(item.subarray(stnAt, stnEnd), keep, video, index));
+  w.bytes(rewriteStn(item.subarray(stnAt, stnEnd), audio, video, index));
   w.bytes(item.subarray(stnEnd));
   const out = w.toBytes();
   const length = out.length - 2;
@@ -75,12 +73,8 @@ function rewritePlayItem(item: Uint8Array, keep: KeptAudio, video: VideoAttrs, i
   return out;
 }
 
-function rewriteStn(stn: Uint8Array, keep: KeptAudio, video: VideoAttrs, index: number): Uint8Array {
-  const { audioStreamNumber } = keep;
+function rewriteStn(stn: Uint8Array, kept: KeptAudio | null, video: VideoAttrs, index: number): Uint8Array {
   const [videoCount, audioCount, pgCount, igCount, , , pipPgCount] = stn.subarray(4, 11);
-  if (audioStreamNumber < 1 || audioStreamNumber > audioCount!) {
-    throw new Error(`levels: play item ${index} has no audio stream ${audioStreamNumber} (it has ${audioCount})`);
-  }
   let at = 16; // length, 2 reserved, 8 counts, 4 reserved
   const take = (): Uint8Array => {
     const start = at;
@@ -95,15 +89,20 @@ function rewriteStn(stn: Uint8Array, keep: KeptAudio, video: VideoAttrs, index: 
     setVideoAttrs(entry.subarray(attrAt), video, false);
     return entry;
   });
-  const audio = Array.from({ length: audioCount! }, take)[audioStreamNumber - 1]!.slice();
-  setAudioCoding(audio.subarray(1 + audio[0]! + 1), keep.newCoding);
+  const audioEntries = Array.from({ length: audioCount! }, take);
+  const audio: Uint8Array[] = [];
+  if (kept) {
+    const entry = audioEntries[kept.streamNumber - 1]!.slice();
+    setAudioCoding(entry.subarray(1 + entry[0]! + 1), coreCoding(kept.coding));
+    audio.push(entry);
+  }
   const graphics = Array.from({ length: pgCount! + pipPgCount! + igCount! }, take); // PG, PiP PG, IG
 
   const w = new BeWriter();
   w.u16(0).bytes(stn.subarray(2, 4));
-  w.u8(videoCount!).u8(1).u8(pgCount!).u8(igCount!).u8(0).u8(0).u8(pipPgCount!).u8(0); // no secondary audio, secondary video or DV
+  w.u8(videoCount!).u8(audio.length).u8(pgCount!).u8(igCount!).u8(0).u8(0).u8(pipPgCount!).u8(0); // no secondary audio, secondary video or DV
   w.bytes(stn.subarray(12, 16));
-  for (const e of [...videos, audio, ...graphics]) w.bytes(e);
+  for (const e of [...videos, ...audio, ...graphics]) w.bytes(e);
   const out = w.toBytes();
   const length = out.length - 2;
   out[0] = length >>> 8;
