@@ -12,7 +12,7 @@ PLATFORM="${BDJ_TRACE_PLATFORM:-linux/amd64}"
 OUT="$ROOT/tests/bdj/fonts/freetype-golden.json"
 
 mkdir -p "$(dirname "$OUT")"
-docker run --rm --platform "$PLATFORM" \
+docker run --rm --network none --platform "$PLATFORM" \
   -v "$HERE/freetype_golden.c:/src/freetype_golden.c:ro" \
   -v "$ROOT/src/engine/ass/default-font.ttf:/fonts/default-font.ttf:ro" \
   "$IMAGE" sh -c 'gcc -O1 -Wall -Wextra -Werror -o /tmp/freetype_golden /src/freetype_golden.c $(pkg-config --cflags --libs freetype2) \
