@@ -144,8 +144,9 @@ SNAPSHOT=20261015T000000Z
   echo "  notice (SAX_NOTICE)."
   echo
   echo "How classes.txt is collected: from HotSpot's -verbose:class in the libbluray harness (tools/bdj-classlib/collect.sh),"
-  echo "over the synthetic and local BD-J discs and, with the library check's generic key script, the start-up files of"
-  echo "every BD-J disc of the developer's library. HotSpot's own platform font stack (sun/font, the X11 and fontconfig"
+  echo "run with no network, over the synthetic and local BD-J discs, the JVM conformance programs and, with the library"
+  echo "check's generic key script, the start-up files of every BD-J disc of the developer's library, plus a keep-list of"
+  echo "classes added by hand (in collect.sh). HotSpot's own platform font stack (sun/font, the X11 and fontconfig"
   echo "font managers), which its java.awt.Font loads, is left out: libbluray's java/awt/Font takes its place here. A few"
   echo "class families are listed whole, because a disc's use of them is open-ended:"
   echo "- sun/reflect/Unsafe*FieldAccessorImpl: reflection on a field picks one by the field's type and modifiers."
