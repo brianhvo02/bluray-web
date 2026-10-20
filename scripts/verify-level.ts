@@ -31,6 +31,16 @@ const READ_BYTES = 2 * 1024 * 1024;
 const SOURCE_PACKET = 192;
 /** Sessions last an hour; a new one is started once less than this is left. */
 const SESSION_MARGIN_MS = 5 * 60_000;
+/** A read not answered in full within this long fails the viewing (the NAS answers 503 Retry-After after 15 s of waiting). */
+const READ_TIMEOUT_MS = 120_000;
+
+/** Why a read got no answer: the timeout, or a connection that died; a wall-clock gap far past the timeout means this machine slept. */
+function noAnswer(err: Error, askedAt: number): string {
+  const waitedS = Math.round((Date.now() - askedAt) / 1000);
+  const slept = Date.now() - askedAt > 2 * READ_TIMEOUT_MS ? ' (far past the timeout: this machine probably slept; keep it awake, e.g. `caffeinate -i` and the lid open)' : '';
+  return err.name === 'TimeoutError' ? `no answer in ${waitedS} s${slept}` : `${err.message} after ${waitedS} s${slept}`;
+}
+
 /** A read that keeps answering 503 Retry-After for this long fails the viewing. */
 const RETRY_GIVE_UP_MS = 10 * 60_000;
 /** How much of a video PES is kept to find its first picture's NAL unit type. */
@@ -414,7 +424,15 @@ async function checkViewing(v: Viewing, level: Level, maxBytes: number | null, l
     let retryingSince: number | null = null;
     while (read < want) {
       const end = Math.min(want, read + READ_BYTES) - 1;
-      const res = await device.fetch(`discs/${disc}/files/${enc(main.m2tsPath)}${query}`, { headers: { Range: `bytes=${read}-${end}` } });
+      // A read the NAS doesn't answer in full within the timeout fails the viewing with that said, rather than wait forever
+      // (as when this machine sleeps mid-run: its connections die and nothing answers them).
+      const signal = AbortSignal.timeout(READ_TIMEOUT_MS);
+      const asked = Date.now();
+      const res = await device
+        .fetch(`discs/${disc}/files/${enc(main.m2tsPath)}${query}`, { headers: { Range: `bytes=${read}-${end}` }, signal })
+        .catch((err: Error) => {
+          throw new Error(`read at ${read}: ${noAnswer(err, asked)}`);
+        });
       if (res.status === 503) {
         const body = await res.text();
         if (!body.includes('"retry"')) throw new Error(`read at ${read}: HTTP 503 ${body}`);
@@ -428,7 +446,11 @@ async function checkViewing(v: Viewing, level: Level, maxBytes: number | null, l
       }
       retryingSince = null;
       if (res.status !== 206 && res.status !== 200) throw new Error(`read at ${read}: HTTP ${res.status} ${await res.text()}`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
+      const bytes = new Uint8Array(
+        await res.arrayBuffer().catch((err: Error) => {
+          throw new Error(`read at ${read}: ${noAnswer(err, asked)}`);
+        }),
+      );
       if (bytes.length === 0) throw new Error(`read at ${read}: an empty answer`);
       scan.push(bytes);
       await Promise.all([probe.write(bytes), decode.write(bytes)]);
@@ -486,7 +508,14 @@ async function checkViewing(v: Viewing, level: Level, maxBytes: number | null, l
   failures.push(...epFailures.slice(0, 5));
   if (epFailures.length > 5) failures.push(`… and ${epFailures.length - 5} more EP entries`);
 
-  const decodeErrors = Buffer.concat(decode.stderr).toString().split('\n').filter((l) => l.trim() !== '');
+  let decodeErrors = Buffer.concat(decode.stderr).toString().split('\n').filter((l) => l.trim() !== '');
+  // A capped read stops at an EP entry, where an audio PES the level split between two intervals (its packets keep their
+  // own SPNs) is cut short: ffmpeg then reports the stream's last audio packet as too small. Only that is excused.
+  const capped = want < size;
+  if (capped && decodeErrors.length > 0 && decodeErrors.length <= 2 && decodeErrors.some((l) => /packet too small/i.test(l)) && decodeErrors.every((l) => /packet too small|Invalid data found when processing input/i.test(l))) {
+    say(`ffmpeg's ${decodeErrors.length} errors are the last audio packet, cut short at the cap: ignored`);
+    decodeErrors = [];
+  }
   if (decodeExit !== 0) failures.push(`ffmpeg exited ${decodeExit}`);
   if (decodeErrors.length > 0) failures.push(`ffmpeg reported ${decodeErrors.length} errors, first: ${decodeErrors.slice(0, 3).join(' | ')}`);
 
