@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { INTERLACED_SPS, PROGRESSIVE_SPS, TEST_SPS, avcAu } from '../../../tests/helpers/h264-units';
+import { INTERLACED_SPS, PROGRESSIVE_SPS, TEST_PPS, TEST_SPS, avcAu } from '../../../tests/helpers/h264-units';
 import { ParseError } from '../util/byte-reader';
-import { analyzeAvc, avcCodecString, avcIsInterlaced } from './h264';
+import { analyzeAvc, avcCodecString, avcIsInterlaced, avcPpsId } from './h264';
 import { splitAnnexB } from './nal';
 
 describe('H.264 analysis', () => {
@@ -53,5 +53,16 @@ describe('H.264 analysis', () => {
 
   it('treats an SPS too short to read the flag as progressive', () => {
     expect(avcIsInterlaced(TEST_SPS)).toBe(false);
+  });
+
+  it('returns the PPS NAL units of the access unit', () => {
+    expect(analyzeAvc(avcAu({ idr: true })).pps.map((n) => Array.from(n))).toEqual([TEST_PPS]);
+    expect(analyzeAvc(avcAu()).pps).toEqual([]);
+  });
+
+  it('reads pic_parameter_set_id', () => {
+    expect(avcPpsId(new Uint8Array([0x68, 0xee, 0x35, 0x25]))).toBe(0);
+    expect(avcPpsId(new Uint8Array([0x68, 0x5e, 0x3c, 0xb0]))).toBe(1);
+    expect(avcPpsId(new Uint8Array([0x68]))).toBeNull();
   });
 });
