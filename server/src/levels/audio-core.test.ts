@@ -6,7 +6,8 @@ import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import { AudioFramer } from '../../../src/engine/decode/audio-frames';
 import { PesAssembler, type PesPacket } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
-import { KeptStreams, PesCoreFilter, mpegCrc32, nominalAudioBps, pmtFor } from './audio-core';
+import { KeptStreams, PesCoreFilter, mpegCrc32, nominalAudioBps, pmtFor, type KeptPacket } from './audio-core';
+import { LEVELS, planClip } from './levels';
 
 const DISC = join(import.meta.dirname, '../../../fixtures/synthetic/disc-levels/BDMV');
 const PACKET = 192;
@@ -38,9 +39,29 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
   return out;
 }
 
-function runAll(kept: KeptStreams, packets: readonly Uint8Array[]): Uint8Array[] {
-  return [...packets.flatMap((p) => kept.filter(p)), ...kept.flush()];
+/** Filters `packets`, the first at source packet number `firstSpn`, and flushes. */
+function run(kept: KeptStreams, packets: readonly Uint8Array[], firstSpn = 0): KeptPacket[] {
+  return [...packets.flatMap((p, i) => kept.filter(p, firstSpn + i)), ...kept.flush()];
 }
+
+function runAll(kept: KeptStreams, packets: readonly Uint8Array[]): Uint8Array[] {
+  return run(kept, packets).map((k) => k.bytes);
+}
+
+/** Splits packets at each unit start; checks the continuity counter steps by one inside each run. */
+function ccContinuousWithinUnits(packets: readonly Uint8Array[]): boolean {
+  for (let i = 1; i < packets.length; i++) {
+    const p = packets[i]!;
+    if (p[5]! & 0x40) continue;
+    if ((p[7]! & 0x0f) !== (((packets[i - 1]![7]! & 0x0f) + 1) & 0x0f)) return false;
+  }
+  return true;
+}
+
+const truehdKept = (): KeptStreams =>
+  new KeptStreams(new Set([0x1200, 0x1201]), new Map([[0x1100, new PesCoreFilter(CodingType.TRUEHD)]]), {
+    video: { pid: 0x1011, streamType: CodingType.AVC },
+  });
 
 const pidOf = (p: Uint8Array): number => ((p[5]! & 0x1f) << 8) | p[6]!;
 
@@ -201,8 +222,9 @@ describe('KeptStreams on disc-levels', () => {
     const kept = new KeptStreams(new Set([0x1100]), new Map([[0x1100, new PesCoreFilter(CodingType.TRUEHD)]]));
     const out = runAll(kept, packets);
     expect(new Set(out.map(pidOf))).toEqual(new Set([0x1100]));
-    const { pes, continuityErrors } = demux(out);
-    expect(continuityErrors).toBe(0);
+    expect(out.every((b) => packets.includes(b))).toBe(true); // the core's packets pass bit-exact, counters included
+    expect(ccContinuousWithinUnits(out)).toBe(true);
+    const { pes } = demux(out);
     expect(pes.every((p) => p.streamIdExtension === 0x76)).toBe(true);
 
     const coreIn = demux(packets).pes.filter((p) => p.pid === 0x1100 && p.streamIdExtension === 0x76);
@@ -261,12 +283,92 @@ describe('KeptStreams on a DTS-HD PID', () => {
     const out = runAll(kept, input);
     expect(out.length).toBeLessThan(input.length);
     expect(out.every((p) => p.length === PACKET && p[4] === 0x47 && pidOf(p) === pid)).toBe(true);
-    const { pes, continuityErrors } = demux(out);
-    expect(continuityErrors).toBe(0);
-    expect(pes.map((p) => p.payload)).toEqual(cores);
+    expect(demux(out).pes.map((p) => p.payload)).toEqual(cores);
     expect(out[0]!.subarray(0, 4)).toEqual(input[0]!.subarray(0, 4));
     const secondStart = out.findIndex((p, i) => i > 0 && (p[5]! & 0x40) !== 0);
     expect(out[secondStart]!.subarray(0, 4)).toEqual(input[17]!.subarray(0, 4));
+    // Counters run on from each PES's first original packet, so they don't depend on what came before it.
+    expect(ccContinuousWithinUnits(out)).toBe(true);
+    expect(out[0]![7]! & 0x0f).toBe(5);
+    expect(out[secondStart]![7]! & 0x0f).toBe((5 + 17) & 0x0f);
+    expect(run(new KeptStreams(new Set(), new Map([[pid, new PesCoreFilter(CodingType.DTSHD_MASTER)]])), input).map((k) => k.spn)).toEqual(
+      out.map((_, i) => (i < secondStart ? 0 : 17)),
+    );
+  });
+});
+
+describe('KeptStreams intervals (ruling L-R4)', () => {
+  const m2ts = readFileSync(join(DISC, 'STREAM/00001.m2ts'));
+  const packets = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
+  const clpi = parseClpi(readFileSync(join(DISC, 'CLIPINF/00001.clpi')));
+  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000);
+  const k3 = intervals[3]!.srcSpnStart;
+
+  // The fixture has no PSI: a PAT and a PMT go in front of each interval's first packet, fed at that packet's SPN.
+  const pat = psiPacket(0, patSection(0x100));
+  const all = clpi.programs[0]!.streams.map((s) => ({ pid: s.pid, streamType: s.codingType }));
+  const input: Array<{ bytes: Uint8Array; spn: number }> = [];
+  packets.forEach((bytes, spn) => {
+    const k = intervals.findIndex((iv) => iv.srcSpnStart === spn);
+    if (k >= 0) input.push({ bytes: pat, spn }, { bytes: psiPacket(0x100, discPmt(all), k & 0x0f), spn });
+    input.push({ bytes, spn });
+  });
+
+  /** A run of the filter that starts at `from`, as an encode restarted there would feed it. */
+  function feed(from: number): KeptPacket[] {
+    const kept = truehdKept();
+    return [...input.filter((p) => p.spn >= from).flatMap((p) => kept.filter(p.bytes, p.spn)), ...kept.flush()];
+  }
+
+  function expectSameFrom(startSpn: number): void {
+    const fromStart = feed(0).filter((k) => k.spn >= startSpn);
+    const fromK = feed(startSpn);
+    expect(fromK.length).toBeGreaterThan(0);
+    expect(fromK.map((k) => k.spn)).toEqual(fromStart.map((k) => k.spn));
+    expect(fromK.map((k) => k.bytes)).toEqual(fromStart.map((k) => k.bytes));
+  }
+
+  /** The SPN of the second packet of the first multi-packet AC-3 core PES at or after `from`. */
+  function insideCorePes(from: number): number {
+    for (let i = from; i < packets.length; i++) {
+      const p = packets[i]!;
+      if (pidOf(p) !== 0x1100 || !(p[5]! & 0x40)) continue;
+      const rest = packets.map((q, j) => ({ q, j })).filter(({ q, j }) => j > i && pidOf(q) === 0x1100);
+      const end = rest.findIndex(({ q }) => (q[5]! & 0x40) !== 0);
+      const tail = rest.slice(0, end < 0 ? rest.length : end);
+      const [pes] = demux([p, ...tail.map(({ q }) => q)]).pes;
+      if (tail.length > 0 && pes?.streamIdExtension === 0x76) return tail[0]!.j;
+    }
+    throw new Error('no multi-packet AC-3 core PES');
+  }
+
+  it("gives interval 3 and later the same bytes from a run started at the clip's start or at interval 3", () => {
+    expect(intervals.length).toBeGreaterThan(4);
+    expectSameFrom(k3);
+  });
+
+  it('assigns a TrueHD core PES that straddles the run start to its first packet, in both runs', () => {
+    const boundary = insideCorePes(k3);
+    expectSameFrom(boundary);
+    const second = packets[boundary]!;
+    const whole = feed(0).find((k) => k.bytes === second);
+    expect(whole).toBeDefined();
+    expect(whole!.spn).toBeLessThan(boundary); // kept whole by the earlier run, at its first packet's SPN
+    expect(feed(boundary).some((k) => k.bytes === second)).toBe(false); // and absent from the run started inside it
+  });
+
+  it('carries a filtered PES at its first packet and an unfiltered packet at its own SPN', () => {
+    const spnOf = new Map(packets.map((p, i) => [p, i] as const));
+    for (const k of feed(0)) {
+      const own = spnOf.get(k.bytes);
+      if (pidOf(k.bytes) === 0x1100) {
+        expect(own).toBeDefined();
+        expect(own!).toBeGreaterThanOrEqual(k.spn);
+        if (k.bytes[5]! & 0x40) expect(k.spn).toBe(own);
+      } else if (pidOf(k.bytes) === 0x1200 || pidOf(k.bytes) === 0x1201) {
+        expect(k.spn).toBe(own);
+      }
+    }
   });
 });
 
