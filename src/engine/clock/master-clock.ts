@@ -13,6 +13,10 @@ export class MasterClock {
   private baseUs = 0;
   private baseFrame = 0;
   private wallStartMs: number | null = null;
+  /** Audio mode: the frame count and time last read. While no frames play (paused) the time holds, whatever the
+   *  output latency does meanwhile (Chrome moves outputLatency in steps of a few ms, paused or not). */
+  private lastFrames = -1;
+  private lastUs = 0;
 
   constructor(private readonly nowMs: () => number) {}
 
@@ -26,6 +30,7 @@ export class MasterClock {
     this.baseUs = baseUs;
     this.baseFrame = source.readFrames();
     this.wallStartMs = null;
+    this.lastFrames = -1;
   }
 
   useWall(baseUs: number, running: boolean): void {
@@ -47,8 +52,12 @@ export class MasterClock {
 
   nowUs(): number {
     if (this.clockMode === 'audio' && this.audio) {
-      const playedUs = ((this.audio.readFrames() - this.baseFrame) * 1e6) / this.audio.sampleRate;
-      return this.baseUs + Math.max(0, playedUs - this.audio.latencyUs());
+      const frames = this.audio.readFrames();
+      if (frames === this.lastFrames) return this.lastUs;
+      const playedUs = ((frames - this.baseFrame) * 1e6) / this.audio.sampleRate;
+      this.lastFrames = frames;
+      this.lastUs = this.baseUs + Math.max(0, playedUs - this.audio.latencyUs());
+      return this.lastUs;
     }
     return this.wallStartMs === null ? this.baseUs : this.baseUs + (this.nowMs() - this.wallStartMs) * 1000;
   }
