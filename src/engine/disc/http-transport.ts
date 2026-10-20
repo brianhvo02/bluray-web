@@ -116,12 +116,15 @@ export class HttpTransport implements RangeTransport {
           if ((await errorOf(response)) === 'disc-changed') throw discChanged(path);
           throw new DiscError('read-failed', `Failed to read ${path}: the NAS does not have it`, [path]);
         case 503: {
+          // Retry-After says the NAS is still encoding; without it (a NAS from before it was CORS-exposed, or a proxy hid it)
+          // the body tells retry ('retry') from a refusal ('busy': no room to encode a level), which is not worth retrying
           const seconds = Number(response.headers.get('Retry-After'));
-          // without Retry-After the NAS refused (no room to encode a level): not worth retrying
-          if (!response.headers.has('Retry-After') || !Number.isFinite(seconds) || seconds < 0) {
-            throw new DiscError('read-failed', (await messageOf(response)) ?? `Failed to read ${path}: HTTP 503`, [path]);
+          if (response.headers.has('Retry-After') && Number.isFinite(seconds) && seconds >= 0) {
+            return { status: 503, bytes: new Uint8Array(0), retryAfterMs: seconds * 1000 };
           }
-          return { status: 503, bytes: new Uint8Array(0), retryAfterMs: seconds * 1000 };
+          const body = await bodyOf(response);
+          if (body.error === 'retry') return { status: 503, bytes: new Uint8Array(0), retryAfterMs: 1000 };
+          throw new DiscError('read-failed', body.message ?? `Failed to read ${path}: HTTP 503`, [path]);
         }
         default:
           throw new DiscError('read-failed', `Failed to read ${path}: HTTP ${response.status}`, [path]);
@@ -138,12 +141,13 @@ export class HttpTransport implements RangeTransport {
   }
 }
 
-async function messageOf(response: Response): Promise<string | null> {
+/** The `error` and `message` of a JSON error body, each null when absent or unreadable. */
+async function bodyOf(response: Response): Promise<{ error: string | null; message: string | null }> {
   try {
-    const body = (await response.json()) as { message?: unknown };
-    return typeof body.message === 'string' ? body.message : null;
+    const body = (await response.json()) as { error?: unknown; message?: unknown };
+    return { error: typeof body.error === 'string' ? body.error : null, message: typeof body.message === 'string' ? body.message : null };
   } catch {
-    return null;
+    return { error: null, message: null };
   }
 }
 

@@ -26,6 +26,11 @@ describe('corsHeaders', () => {
     expect(headers['Vary']).toBe('Origin');
     expect(headers['Cross-Origin-Resource-Policy']).toBe('cross-origin');
   });
+
+  it('exposes ETag and Retry-After, so the player sees when a level read should retry', () => {
+    const exposed = corsHeaders('https://bluray-web.pages.dev')['Access-Control-Expose-Headers']!.split(/,\s*/);
+    expect(exposed).toEqual(expect.arrayContaining(['ETag', 'Retry-After']));
+  });
 });
 
 describe('createServer', () => {
@@ -74,7 +79,7 @@ describe('createServer', () => {
     const allowed = pre.headers.get('access-control-allow-headers')!.split(',').map((h) => h.trim().toLowerCase());
     expect(allowed).toEqual(expect.arrayContaining(['authorization', 'content-type', 'range', 'if-match', 'if-none-match']));
     const res = await fetch(`${base}/api/health`, { headers: { Origin: 'https://bluray-web.pages.dev' } });
-    expect(res.headers.get('access-control-expose-headers')).toBe('ETag');
+    expect(res.headers.get('access-control-expose-headers')).toBe('ETag, Retry-After');
   });
 
   it('answers 404 JSON when no handler matches', async () => {

@@ -152,6 +152,16 @@ describe('HttpTransport', () => {
     expect(seen).toHaveLength(1);
   });
 
+  it('a 503 whose Retry-After is hidden (not CORS-exposed) but whose body says retry is retried after 1 s', async () => {
+    vi.useFakeTimers();
+    const { fetch, seen } = recording((_url, n) => (n === 1 ? Response.json({ error: 'retry' }, { status: 503 }) : partial([7])));
+    const t = new HttpTransport(FAKE_NAS_BASE, 'tok', { fetch });
+    const reading = t.read('BDMV/X', 3, 1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(Array.from(await reading)).toEqual([7]);
+    expect(seen).toHaveLength(2);
+  });
+
   it('an abort during the Retry-After wait rejects at once', async () => {
     vi.useFakeTimers();
     const { fetch } = recording(() => new Response(null, { status: 503, headers: { 'Retry-After': '1' } }));
