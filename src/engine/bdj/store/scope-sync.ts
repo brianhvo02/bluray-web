@@ -1,7 +1,8 @@
 /*
  * Original code for bluray-web: keeps a BD-J session's storage scopes (scopes.ts) in step with a BdjStore. The scopes
  * load before Libbluray.init, into the VFS's /persistent/ and /buda/; Java's writes mark a scope dirty, and it is saved
- * whole 2 s after the last one (spec §4.4), on the engine's flush (pagehide) and when BD-J stops.
+ * whole 2 s after the last one (spec §4.4; the browser's store sooner, its saveDebounceMs), on the engine's flush
+ * (pagehide) and when BD-J stops.
  *
  * Copyright (C) 2026  bluray-web contributors
  *
@@ -12,7 +13,7 @@ import type { Vfs, VfsChange } from '../jvm/vfs';
 import { EMPTY_SNAPSHOT, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles, type BdjStore, type Snapshot, type SnapshotFile } from './bdj-store';
 import type { StoreScope } from './scopes';
 
-/** The save follows the last write by this much (the plan's Global Constraints). */
+/** The save follows the last write by this much (the plan's Global Constraints), unless the store says less (BdjStore.saveDebounceMs). */
 export const SAVE_DEBOUNCE_MS = 2000;
 /** A disc that keeps writing more often than the debounce is still saved this often. */
 export const SAVE_MAX_WAIT_MS = 10_000;
@@ -157,7 +158,7 @@ export class ScopeSync {
     state.dirty = true;
     this.report();
     this.cancelTimer?.();
-    this.cancelTimer = this.deps.setTimer(this.deps.debounceMs ?? SAVE_DEBOUNCE_MS, () => {
+    this.cancelTimer = this.deps.setTimer(this.deps.debounceMs ?? this.deps.store.saveDebounceMs ?? SAVE_DEBOUNCE_MS, () => {
       this.cancelTimer = null;
       void this.flush();
     });

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Vfs } from '../jvm/vfs';
 import { ZipArchive } from '../jvm/zip';
 import { ScopeQuotaError, type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot } from './bdj-store';
-import { IdbBdjStore } from './idb-store';
+import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore } from './idb-store';
 import { SAVE_DEBOUNCE_MS, ScopeSync } from './scope-sync';
 import type { StoreScope } from './scopes';
 
@@ -137,6 +137,16 @@ describe('ScopeSync', () => {
     vfs.mkdir('/persistent/7fff0123/4002');
     await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
     expect(store.saves.length).toBe(1);
+  });
+
+  it("waits the store's own debounce when it has one (the browser's), not 2 s", async () => {
+    const store = Object.assign(new MemoryStore(), { saveDebounceMs: 100 });
+    const { vfs } = await setup(store);
+    write(vfs, '/persistent/7fff0123/4001/a', '1');
+    await vi.advanceTimersByTimeAsync(99);
+    expect(store.saves).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(store.saves).toEqual([{ scope: PERSISTENT.key, files: ['4001/a=1'] }]);
   });
 
   it('saves at once on flush (a stop, pagehide) without waiting for the debounce', async () => {
@@ -335,14 +345,17 @@ describe('ScopeSync', () => {
     });
   });
 
-  it('with IndexedDB, a save lasts into the next session, and two sources keep their own', async () => {
+  it('with IndexedDB, a save lasts into the next session, made soon after the write, and two sources keep their own', async () => {
     // fake-indexeddb schedules with setImmediate, which stays real here
     vi.useRealTimers();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const idb = new IDBFactory();
     const first = await setup(new IdbBdjStore('local', idb));
     write(first.vfs, '/persistent/7fff0123/4001/count', '1');
-    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+    // the browser's store saves IDB_SAVE_DEBOUNCE_MS after the write: a page can close soon after (pagehide is too late
+    // for IndexedDB in Chrome and Safari)
+    expect(IDB_SAVE_DEBOUNCE_MS).toBeLessThanOrEqual(100);
+    await vi.advanceTimersByTimeAsync(IDB_SAVE_DEBOUNCE_MS);
     await vi.waitFor(() => expect(first.unsaved).toEqual([true, false]));
     const next = await setup(new IdbBdjStore('local', idb));
     expect(read(next.vfs, '/persistent/7fff0123/4001/count')).toBe('1');

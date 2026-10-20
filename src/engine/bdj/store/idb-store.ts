@@ -15,6 +15,15 @@ export const BDJ_STORE_DB_VERSION = 1;
 export const SCOPES_STORE = 'scopes';
 export const SOURCE_INDEX = 'source';
 
+/**
+ * The browser's store saves this soon after Java's last write, not the 2 s a remote store waits: a page closed soon
+ * after a save must keep it (ruling R1, Review Focus 3), and the pagehide flush cannot see to that. Chrome and Safari
+ * drop an IndexedDB transaction started during pagehide, even one started on the page itself, and the flush has to
+ * cross two workers first, which the browser terminates as the page goes (Task 6's report has the measurements).
+ * Writes come in bursts (a FileWriter's open, writes and close; a few files): 100 ms gathers one into one save.
+ */
+export const IDB_SAVE_DEBOUNCE_MS = 100;
+
 /** One scope's snapshot as IndexedDB keeps it. */
 export interface ScopeRecord {
   /** `nas:<nasDiscId>` or `local` (scopes.ts storeSource). */
@@ -53,6 +62,7 @@ function request<T>(r: IDBRequest<T>): Promise<T> {
 
 /** The scopes of one disc source in the database `bdj-store`. Each save is one readwrite transaction, committed when it resolves. */
 export class IdbBdjStore implements BdjStore {
+  readonly saveDebounceMs = IDB_SAVE_DEBOUNCE_MS;
   private db: Promise<IDBDatabase> | null = null;
 
   constructor(

@@ -37,6 +37,11 @@ export type SaveResult = { readonly etag: string } | { readonly conflict: Snapsh
  * (the caller merges and saves again). Over the quota it rejects with ScopeQuotaError and the stored snapshot stays.
  */
 export interface BdjStore {
+  /**
+   * How long a save waits after the last write; without it the plan's 2 s (scope-sync.ts SAVE_DEBOUNCE_MS), which
+   * spares a remote store a request per write. A local store sets less (idb-store.ts IDB_SAVE_DEBOUNCE_MS).
+   */
+  readonly saveDebounceMs?: number;
   load(scope: string): Promise<LoadedSnapshot>;
   save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult>;
 }
