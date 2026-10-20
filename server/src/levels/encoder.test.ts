@@ -426,7 +426,7 @@ describe.skipIf(!runFfmpegTests)('encodeIntervalAt (libx264)', () => {
   function setup(budgetBytes: number) {
     const plan = { ...intervals[3]!, budgetBytes };
     const rates: number[] = [];
-    const backend: EncoderBackend = { binary: 'ffmpeg', args: (input) => (rates.push(input.rateBps), x264Backend.args(input)) };
+    const backend: EncoderBackend = { id: 'x264', binary: 'ffmpeg', args: (input) => (rates.push(input.rateBps), x264Backend.args(input)) };
     const options: ClipEncoderOptions = {
       input: { path: clipPath('disc-levels') },
       intervals: intervals.map((iv) => (iv.index === 3 ? plan : iv)),

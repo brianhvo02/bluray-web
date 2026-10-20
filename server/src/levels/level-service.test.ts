@@ -116,6 +116,7 @@ class FakeFfmpeg {
   /** Keyframe PTS whose first encode comes out this many bytes larger (an over-budget encode). */
   readonly oversize = new Map<number, number>();
   readonly backend: EncoderBackend = {
+    id: 'fake',
     binary: 'fake-ffmpeg',
     args: (input) => [JSON.stringify({ startByte: input.startByte, keys: input.keyframesPts90 })],
   };
@@ -657,13 +658,16 @@ describe('LevelService: fix round 1', () => {
     const def = levelDefFor('h264-1080', { height: 1080 });
     const bps = await firstAudioBps(createReadStream(join(DISC_DIR, 'BDMV/STREAM/00001.m2ts')), TRUEHD, CodingType.TRUEHD);
     const { intervals } = planClip(clpi, def, bps);
-    const hash = planHash(def, kept, intervals);
+    const encode = { backend: 'fake', deinterlace: false };
+    const hash = planHash(def, kept, intervals, encode);
     expect(hash).toMatch(/^[0-9a-f]{12}$/);
     await vi.waitFor(() => expect(readdirSync(join(scratch, 'transcode', DISC_ID, 'h264-1080', '1'))).toEqual([`00001.${hash}`]));
-    // Another budget, another audio stream or another level is another hash.
-    expect(planHash(def, kept, planClip(clpi, def, bps + 64_000).intervals)).not.toBe(hash);
-    expect(planHash(def, { ...kept, pid: COMMENTARY }, intervals)).not.toBe(hash);
-    expect(planHash(levelDefFor('phone-720', { height: 1080 }), kept, intervals)).not.toBe(hash);
+    // Another budget, another audio stream, another level, another backend or another deinterlace decision is another hash.
+    expect(planHash(def, kept, planClip(clpi, def, bps + 64_000).intervals, encode)).not.toBe(hash);
+    expect(planHash(def, { ...kept, pid: COMMENTARY }, intervals, encode)).not.toBe(hash);
+    expect(planHash(levelDefFor('phone-720', { height: 1080 }), kept, intervals, encode)).not.toBe(hash);
+    expect(planHash(def, kept, intervals, { ...encode, backend: 'x264' })).not.toBe(hash);
+    expect(planHash(def, kept, intervals, { ...encode, deinterlace: true })).not.toBe(hash);
   });
 
   it('reads HDR from the CLPI’s dynamic_range_type (Review: HDR was guessed)', async () => {

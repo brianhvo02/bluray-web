@@ -114,6 +114,8 @@ export interface VersionDeps {
   readonly log?: (message: string) => void;
   /** Aborted when the service closes: stops a scan probe still running. */
   readonly signal?: AbortSignal;
+  /** The encoder backend's id, for the segment cache key. */
+  readonly backendId: string;
 }
 
 async function fileBytes(manifest: DiscManifest, source: LevelDiscSource, path: string): Promise<Uint8Array | null> {
@@ -220,12 +222,17 @@ function interlacedOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: Ve
 
 /**
  * A short hash of what decides a clip's bytes at a level besides the clip itself: the level's definition, the kept
- * audio and every interval's place and budget. It is part of the segment cache key, so a changed plan never reuses
- * bytes made for another.
+ * audio, every interval's place and budget, the encoder backend and whether the clip is deinterlaced. It is part of
+ * the segment cache key, so a changed plan never reuses bytes made for another.
  */
-export function planHash(def: LevelDef, kept: KeptAudio | null, intervals: readonly IntervalPlan[]): string {
+export function planHash(
+  def: LevelDef,
+  kept: KeptAudio | null,
+  intervals: readonly IntervalPlan[],
+  encode: { readonly backend: string; readonly deinterlace: boolean },
+): string {
   const h = createHash('sha256');
-  h.update(JSON.stringify({ def, kept }));
+  h.update(JSON.stringify({ def, kept, backend: encode.backend, deinterlace: encode.deinterlace }));
   for (const iv of intervals) h.update(`${iv.startPts45},${iv.endPts45},${iv.srcSpnStart},${iv.srcSpnEnd},${iv.budgetBytes};`);
   return h.digest('hex').slice(0, 12);
 }
@@ -295,9 +302,18 @@ function clipRunPlan(
   const ownPcrPids = [...new Set(stcs.map((s) => s.pcrPid))].filter((pid) => pid !== video.pid);
   const coreFilters = new Map<number, number>();
   if (kept && kept.coding !== coreCoding(kept.coding)) coreFilters.set(kept.pid, kept.coding);
+  let cacheKey: Promise<string> | null = null;
   return {
     intervals,
-    cacheKey: deps.cache.key(disc.id, level, audio, `${info.id}.${planHash(def, kept, intervals)}`, source.size, source.mtimeMs),
+    // Waits for the clip's scan probe (once per clip): the deinterlace decision is part of the key.
+    cacheKey: () =>
+      (cacheKey ??= interlacedOf(disc, info, source, deps).then(
+        (deinterlace) => deps.cache.key(disc.id, level, audio, `${info.id}.${planHash(def, kept, intervals, { backend: deps.backendId, deinterlace })}`, source.size, source.mtimeMs),
+        (err: Error) => {
+          cacheKey = null; // probed again next time
+          throw err;
+        },
+      )),
     read: source.read,
     encoder: {
       input: source.input,

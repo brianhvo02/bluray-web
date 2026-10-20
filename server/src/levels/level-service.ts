@@ -398,6 +398,7 @@ export class LevelService {
           ...(this.options.probe ? { probe: this.options.probe } : {}),
           log: this.log,
           signal: this.closing.signal,
+          backendId: this.options.backend.id,
         });
       })();
       version = built;

@@ -36,6 +36,8 @@ export interface EncoderArgsInput {
 }
 
 export interface EncoderBackend {
+  /** Which encoder (`qsv`, `x264`): part of the segment cache key, since the two make different bytes. */
+  readonly id: string;
   readonly binary: string;
   args(input: EncoderArgsInput): string[];
 }
@@ -100,6 +102,7 @@ function qsvFilter(input: EncoderArgsInput): string {
  * deinterlacing, tone-mapping), `h264_qsv` at preset medium or `hevc_qsv` at veryfast, an IDR at every EP entry.
  */
 export const qsvBackend: EncoderBackend = {
+  id: 'qsv',
   binary: 'ffmpeg',
   args(input) {
     const { level } = input;
@@ -126,6 +129,7 @@ export const qsvBackend: EncoderBackend = {
 
 /** Software H.264 (libx264), for machines without Quick Sync, such as CI. HDR sources and HEVC levels aren't supported. */
 export const x264Backend: EncoderBackend = {
+  id: 'x264',
   binary: 'ffmpeg',
   args(input) {
     const { level } = input;

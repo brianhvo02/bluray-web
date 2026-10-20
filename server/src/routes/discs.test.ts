@@ -75,7 +75,7 @@ function silentFfmpeg(): { spawn: typeof nodeSpawn; runs: { killed: boolean }[];
     runs.push(child);
     return child;
   }) as unknown as typeof nodeSpawn;
-  return { spawn, runs, backend: { binary: 'fake-ffmpeg', args: () => [] } };
+  return { spawn, runs, backend: { id: 'fake', binary: 'fake-ffmpeg', args: () => [] } };
 }
 
 /** Every token is valid; it names the device `dev<n>` for token `t<n>`. */

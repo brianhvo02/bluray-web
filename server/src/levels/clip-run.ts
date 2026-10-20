@@ -35,8 +35,8 @@ export interface KeptConfig {
 /** One clip at one level and audio stream: its plan, where its bytes come from, and how it is encoded. */
 export interface ClipRunPlan {
   readonly intervals: readonly IntervalPlan[];
-  /** The segment cache key (`SegmentCache.key`). */
-  readonly cacheKey: string;
+  /** The segment cache key (`SegmentCache.key`); it waits for the clip's scan probe, and rejects when that fails. */
+  readonly cacheKey: () => Promise<string>;
   /** The source clip's bytes, fed to the kept-stream filter. */
   readonly read: ClipReader;
   /** The encoder's options but `interlaced`, which `interlaced()` answers (one ffprobe per clip). */
@@ -212,9 +212,16 @@ export class ClipRunner {
 
   /** The cache first; else the running encoder, or a new run. */
   private async find(index: number, w: Waiter): Promise<void> {
+    let key: string;
+    try {
+      key = await this.plan.cacheKey();
+    } catch (err) {
+      if (!w.settled && this.waiters.get(index) === w) this.reject(index, new Error(`levels: probing the clip's scan failed: ${(err as Error).message}`));
+      return;
+    }
     let bytes: Buffer | null;
     try {
-      bytes = await this.deps.cache.get(this.plan.cacheKey, index);
+      bytes = await this.deps.cache.get(key, index);
     } catch (err) {
       this.deps.log(`levels: the segment cache failed: ${(err as Error).message}`);
       bytes = null;
@@ -284,7 +291,8 @@ export class ClipRunner {
     if (this.pumping || this.run || this.closed || this.backingOff()) return;
     this.pumping = true;
     try {
-      const { intervals, cacheKey } = this.plan;
+      const { intervals } = this.plan;
+      const cacheKey = await this.plan.cacheKey();
       let from = this.head;
       while (from < intervals.length && (this.recent.has(from) || (await this.deps.cache.has(cacheKey, from)))) from++;
       if (this.run || this.closed) return;
@@ -305,8 +313,9 @@ export class ClipRunner {
     const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     this.recent.set(index, buffer);
     this.settle(index, buffer);
-    this.deps.cache
-      .put(this.plan.cacheKey, index, bytes)
+    this.plan
+      .cacheKey()
+      .then((key) => this.deps.cache.put(key, index, bytes))
       .catch((err: Error) => this.deps.log(`levels: storing interval ${index} failed: ${err.message}`))
       .finally(() => this.recent.delete(index));
   }
