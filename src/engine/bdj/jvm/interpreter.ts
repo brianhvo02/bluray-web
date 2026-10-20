@@ -235,16 +235,32 @@ function callNative(jvm: Jvm, t: JThread, m: JMethod, args: readonly JValue[]): 
   }
 }
 
+/**
+ * A debug aid (the BD-J library check): sees each Java method an exception unwinds into, in order, with whether a
+ * handler there takes it, and `method` null when it ends its thread uncaught. A rethrow of the same object unwinds
+ * again, so the observer sees every method the object ever reached.
+ */
+export type UnwindObserver = (exc: JObject, method: JMethod | null, caught: boolean) => void;
+
+let unwindObserver: UnwindObserver | null = null;
+
+/** Starts observing unwinds (null stops). */
+export function setUnwindObserver(o: UnwindObserver | null): void {
+  unwindObserver = o;
+}
+
 /** Unwinds to the nearest handler for `exc` (JVM §2.10); a frame with `then` receives the exception instead. */
 export function throwInto(jvm: Jvm, t: JThread, exc: JObject): void {
   for (;;) {
     const f = t.frames[t.frames.length - 1] as JFrame | undefined;
     if (!f) {
+      unwindObserver?.(exc, null, false);
       t.uncaught = exc;
       t.state = 'terminated';
       return;
     }
     const handler = findHandler(jvm, f, exc);
+    unwindObserver?.(exc, f.method, handler >= 0);
     if (handler >= 0) {
       f.stack[0] = exc;
       f.sp = 1;

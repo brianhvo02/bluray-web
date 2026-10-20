@@ -14,7 +14,8 @@ export class MasterClock {
   private baseFrame = 0;
   private wallStartMs: number | null = null;
   /** Audio mode: the frame count and time last read. While no frames play (paused) the time holds, whatever the
-   *  output latency does meanwhile (Chrome moves outputLatency in steps of a few ms, paused or not). */
+   *  output latency does meanwhile (Chrome moves outputLatency in steps of a few ms, paused or not). On resume, the
+   *  first frames played apply any latency change made during the pause in one step, a few ms forward or back. */
   private lastFrames = -1;
   private lastUs = 0;
 

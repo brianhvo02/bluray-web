@@ -47,8 +47,8 @@ export interface RunRecord {
   /** Platform classes Java could not load (NoClassDefFoundError, or ClassNotFoundException of a platform class). */
   readonly missingClasses: readonly string[];
   /**
-   * Entries of missingClasses whose every ClassNotFoundException the platform's own code caught before any of the
-   * disc's code saw it (platformCaught, Ruling R13): a designed lookup, such as java.net.URL looking for a protocol
+   * Entries of missingClasses whose every ClassNotFoundException died inside platform code, never reaching the disc's
+   * code nor ending a thread (gapExempt, Ruling R13): a designed lookup, such as java.net.URL looking for a protocol
    * handler. Not counted as gaps (countedGaps). Absent in records made before R13.
    */
   readonly caughtGaps?: readonly string[];
@@ -121,30 +121,21 @@ export function missingClassesFromLog(lines: Iterable<string>): string[] {
   return [...out];
 }
 
-/** One frame of the stack a throwable was made on, as the interpreter will unwind it (interpreter.ts throwInto). */
-export interface ThrowFrame {
-  /** The frame's class belongs to the platform (the boot class path), not to the disc. */
-  readonly platform: boolean;
-  readonly pc: number;
-  /** The method's exception table: catch type as an internal class name, null for a catch-all (finally). */
-  readonly handlers: readonly { readonly startPc: number; readonly endPc: number; readonly catchType: string | null }[];
-}
+/**
+ * Where a gap throwable went as the interpreter unwound it (interpreter.ts setUnwindObserver): each Java method it
+ * reached, in order, platform (boot class path) or the disc's, and 'uncaught' when it ended its thread.
+ */
+export type UnwindStep = { readonly platform: boolean } | 'uncaught';
 
 /**
- * Ruling R13: whether a ClassNotFoundException made with this stack (`frames` innermost first; `chain` the throwable's
- * class and its superclasses, internal names) is caught by the platform before any of the disc's code sees it: going
- * out from the throw as the interpreter unwinds, a platform frame has a handler for it at its pc, and no disc frame
- * comes first. A protocol-handler lookup in java.net.URL, or a parent loader's miss inside ClassLoader.loadClass, is
- * such a case: the platform asks for a class that may not exist and carries on without it (HotSpot's JDK lacks many of
- * them too). A ClassNotFoundException that reaches the disc's code, caught or not, is a gap.
+ * Ruling R13: whether a ClassNotFoundException is exempt from the gaps, a lookup the platform made and dropped (java.net.URL
+ * asking for a protocol handler, a parent loader's miss inside ClassLoader.loadClass). Exempt only when the object
+ * died inside platform frames: it never unwound into a method of the disc's, nor ended its thread, however many times
+ * it was caught and rethrown on the way (a catch-and-rethrow, or a finally, does not end it). A NoClassDefFoundError
+ * or another gap kind is never exempt. `kind` is the throwable's class (internal name).
  */
-export function platformCaught(frames: readonly ThrowFrame[], chain: readonly string[]): boolean {
-  if (chain[0] !== 'java/lang/ClassNotFoundException') return false;
-  for (const f of frames) {
-    if (!f.platform) return false;
-    if (f.handlers.some((h) => f.pc >= h.startPc && f.pc < h.endPc && (h.catchType === null || chain.includes(h.catchType)))) return true;
-  }
-  return false;
+export function gapExempt(kind: string, steps: readonly UnwindStep[]): boolean {
+  return kind === 'java/lang/ClassNotFoundException' && steps.every((s) => s !== 'uncaught' && s.platform);
 }
 
 /** The class-library gaps a run counts (Ruling R13): missingClasses less the ones the platform always caught itself. */
@@ -309,9 +300,11 @@ export function compareRuns(ours: RunRecord, lib: RunRecord): Comparison {
   if (lib.steps.length > ours.steps.length) return { equal: false, libPrefix: false, oursShort: true, first: `ours stops before step ${n} (${lib.steps[n]!.step}), libbluray goes on` };
   const d = setDiff(tail(ours), tail(lib));
   if (d) return { equal: false, libPrefix: false, first: `after step ${n - 1}: ${d}` };
-  // both stopped on a wait that never held: the plane never settled on either side (an animated menu), so the planes
-  // they ended on are two frames of it, not a difference
-  const unsettled = ours.end === 'timeout' && lib.end === 'timeout';
+  // both timed out on the same `wait quiet` step: the plane kept flushing to the end on both sides (a wait quiet holds
+  // after 1000 ms without a flush), so the planes they ended on are two frames of an animation, not a difference. A
+  // `wait menu` that timed out held nothing visible, and its planes are still compared
+  const quietStep = (i: number): boolean => i === STEP.afterRight || i === STEP.afterDown;
+  const unsettled = ours.end === 'timeout' && lib.end === 'timeout' && ours.steps.length === lib.steps.length && quietStep(ours.steps.length);
   if (!unsettled && ours.endHash !== lib.endHash) return { equal: false, libPrefix: false, first: `end plane: libbluray ${lib.endHash ?? 'none'}, ours ${ours.endHash ?? 'none'}` };
   return { equal: true, libPrefix: false, first: null };
 }

@@ -65,7 +65,7 @@ One run of the script on one disc by one side (`classify.ts`):
 | `calls` | the control calls (`tests/bdj/format.ts` `CONTROL_CALLS`) in order, through the run's tail (libbluray: up to the script's end line) |
 | `endHash`, `flushes` | the last flushed plane, and the number of flushes |
 | `missingClasses` | class-library gaps (Task 2's work): platform classes Java could not load (every `NoClassDefFoundError`, and every `ClassNotFoundException` of a platform class: `java.`, `javax.`, `sun.`, `org.dvb.`, ...; not `org.videolan.` probes, nor a disc's own obfuscated classes such as `org.w3c.dom.a`), missing natives (`UnsatisfiedLinkError`, as `native: <name>`) and methods missing from platform classes (`NoSuchMethodError`, as `method: <name>`). Ours catches them where the throwable is made (Java often swallows them); both sides also read them from the log (`gapOf`) |
-| `caughtGaps` | entries of `missingClasses` whose every `ClassNotFoundException` the platform's own code caught before any of the disc's code saw it (Ruling R13: `platformCaught` walks the stack the throwable was made on as the interpreter will unwind it). A designed lookup, such as `java.net.URL` asking for a protocol handler and carrying on without one. Not counted (`countedGaps`); listed apart in `summary.md` |
+| `caughtGaps` | entries of `missingClasses` whose every `ClassNotFoundException` died inside platform code (Ruling R13, `gaps.ts`): each gap throwable is followed as the interpreter unwinds it (`setUnwindObserver`), and it is exempt (`gapExempt`) only if it never unwound into a method of a class from the disc nor ended its thread, however often platform code caught and rethrew it. A designed lookup, such as `java.net.URL` asking for a protocol handler and carrying on without one. Not counted (`countedGaps`); listed apart in `summary.md` |
 | `rejectedPlaylists` | `selectPlaylistN` calls that returned 0, with the playlist's first video codec from its `.mpls` |
 | `wallMs` | the run's wall time |
 
@@ -83,7 +83,7 @@ One run of the script on one disc by one side (`classify.ts`):
 
 - Up to `key ok`, for each step both ran: the set of distinct starting calls made since the step before (`selectPlaylistN` of a playlist ≥ 0 that succeeded, `selectTitleN`, `seekN`; Ruling R3), then the step's settled hash (not for an `animated` step, on either side). Only starting calls, and as a set, because everything else (register writes, rates, UO masks, key interest) and the number of times a menu loops its background playlist move with the stub streams' timing, which differs between the two sides.
 - After `key ok`, where the disc plays and the two sides loop at their own pace: the first call that starts something (`selectTitleN`, `selectPlaylistN`, `seekN`).
-- When both stopped at the same step before `key ok`: the starting calls since that step, then the plane each ended on, unless both stopped on a wait that never held (`timeout`): then neither plane settled (an animated menu), and two frames of an animation are no difference.
+- When both stopped at the same step before `key ok`: the starting calls since that step, then the plane each ended on, unless both timed out on the same `wait quiet` step: a wait quiet holds after 1000 ms without a flush, so the plane kept flushing to the end on both sides (an animated menu), and two frames of an animation are no difference. A `wait menu` timeout held nothing visible, and its planes are compared.
 - When libbluray stopped first: it must agree on every step both ran, and the starting calls it made after its last step must be among ours up to our next step; then its run is a prefix of ours (`libPrefix`).
 
 `classify(ours, lib)` gives the first verdict that applies:
@@ -103,6 +103,7 @@ The settled-point rule is 5d's R3: settled hashes and calls, not flush counts. S
 
 - `sync.ts`, `check.ts`: the commands above.
 - `classify.ts`: `RunRecord`, `discId`, `gapOf`, `parseLibblurayRun`, `missingClassesFromLog`, `progress`, `compareRuns`, `libFailed`, `classify`. No disc, file or process access.
+- `gaps.ts`: `trackGaps`, the gap throwables of our run and where they unwound (R13). `lib-run.ts`: `libRunArgs`, run.sh's arguments for an attempt.
 - `video.ts`: `menuPlaylists`, `playlistClips`, `planVideo`, `parseVideoManifest`, `markReal` (real menu video).
 - `generic.keys`: the script.
 - `check.test.ts`: `classify` on made-up runs, `discId`, `parseLibblurayRun` and the script. `video.test.ts`: clip selection, the cap and the video record.

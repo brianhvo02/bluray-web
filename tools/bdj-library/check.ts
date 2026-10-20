@@ -17,15 +17,14 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TraceEntry } from '../../src/engine/bdj/host';
-import { Jvm } from '../../src/engine/bdj/jvm/jvm';
-import type { JThread } from '../../src/engine/bdj/jvm/threads';
-import type { JObject } from '../../src/engine/bdj/jvm/values';
 import { parseMpls } from '../../src/engine/bdmv/mpls-parser';
 import { codingName } from '../../src/engine/bdmv/stream-types';
 import { CONTROL_CALLS } from '../../tests/bdj/format';
 import { parseKeyScript } from '../../tests/bdj/key-script';
 import { replayPlayerBdj, type PlayerBdjReplay } from '../../tests/bdj/replay-player';
-import { classify, countedGaps, gapOf, libraryDir, missingClassesFromLog, parseLibblurayRun, platformCaught, platformClass, VERDICTS, type DiscVerdict, type RunEnd, type RunRecord, type ThrowFrame } from './classify';
+import { classify, countedGaps, gapOf, libraryDir, missingClassesFromLog, parseLibblurayRun, platformClass, VERDICTS, type DiscVerdict, type RunEnd, type RunRecord } from './classify';
+import { trackGaps } from './gaps';
+import { libRunArgs } from './lib-run';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const SELF = fileURLToPath(import.meta.url);
@@ -76,41 +75,9 @@ const scrub = (s: string): string => s.replace(/(^|\s)\/\S+/g, '$1<path>').slice
 
 // ---------------------------------------------------------------------------------------------------- child: ours
 
-/** Throwables that mean a gap in the class library (Task 2's work): a class, a native or a platform method missing. */
-const GAPS = new Set(['java/lang/NoClassDefFoundError', 'java/lang/ClassNotFoundException', 'java/lang/UnsatisfiedLinkError', 'java/lang/NoSuchMethodError']);
-
-/** The stack a throwable is made on, innermost first, as platformCaught reads it (catch types by name: nothing loads). */
-function throwFrames(t: JThread | null): ThrowFrame[] {
-  const out: ThrowFrame[] = [];
-  const frames = t?.frames ?? [];
-  for (let i = frames.length - 1; i >= 0; i--) {
-    const { method, pc } = frames[i]!;
-    const cp = method.cls.file?.cp;
-    const name = (index: number): string | null => {
-      const c = cp?.[index];
-      const u = c?.tag === 'class' ? cp?.[c.name] : null;
-      return u?.tag === 'utf8' ? u.value : null;
-    };
-    const handlers = (method.code?.handlers ?? []).map((h) => ({ startPc: h.startPc, endPc: h.endPc, catchType: h.catchType === 0 ? null : (name(h.catchType) ?? '?') }));
-    out.push({ platform: method.cls.loader === null, pc, handlers });
-  }
-  return out;
-}
-
 async function runOurs(dir: string, out: string): Promise<void> {
   const t0 = performance.now();
-  // Java often catches a missing class and goes on quietly, so the throwables are caught where they are made; with the
-  // stack, so a lookup the platform catches itself (Ruling R13) can be told from a gap the disc meets
-  const thrown: { jvm: Jvm; e: JObject; caught: boolean }[] = [];
-  const fill = Jvm.prototype.fillInStackTrace;
-  Jvm.prototype.fillInStackTrace = function (this: Jvm, e, t) {
-    fill.call(this, e, t);
-    if (thrown.length < 5000 && GAPS.has(e.cls.name)) {
-      const chain: string[] = [];
-      for (let c: typeof e.cls | null = e.cls; c; c = c.superClass) chain.push(c.name);
-      thrown.push({ jvm: this, e, caught: platformCaught(throwFrames(t), chain) });
-    }
-  };
+  const tracker = trackGaps();
   const logs: string[] = [];
   let run: Partial<PlayerBdjReplay> & { stepCalls?: readonly number[] };
   let end: RunEnd = 'done';
@@ -141,19 +108,10 @@ async function runOurs(dir: string, out: string): Promise<void> {
   });
   controlBefore[trace.length] = n;
   const calls = trace.filter((c) => CONTROL_CALLS.has(c.call));
-  const missing = new Set<string>();
-  const seen = new Set<string>(); // a gap some throw of which reached the disc's code, or the log
-  for (const { jvm, e, caught } of thrown) {
-    let msg = '';
-    try {
-      msg = jvm.describe(e);
-    } catch {
-      continue;
-    }
-    const gap = gapOf(msg);
-    if (gap) missing.add(gap);
-    if (gap && !caught) seen.add(gap);
-  }
+  const { all, counted } = tracker.gaps();
+  tracker.stop();
+  const missing = new Set<string>(all);
+  const seen = new Set<string>(counted); // a gap some throw of which reached the disc's code or ended a thread, or the log
   for (const c of missingClassesFromLog(logs)) {
     missing.add(c);
     seen.add(c);
@@ -331,7 +289,7 @@ function writeSummary(lib: string, results: readonly DiscResult[], runtime: stri
     `|---|---|`,
     ...tally(results.flatMap((r) => countedGaps(r.ours))),
     ``,
-    `## Classes the platform looked up and caught itself (not counted, Ruling R13)`,
+    `## Classes the platform looked up and dropped in its own code (not counted, Ruling R13)`,
     ``,
     `| class | discs |`,
     `|---|---|`,
@@ -421,19 +379,18 @@ async function main(argv: readonly string[]): Promise<void> {
   done = 0;
   await pool(libTodo, libJobs, async (d) => {
     const base = join(raw, `${d.id}.lib`);
-    const args = [RUN_SH, d.dir, '--keys', SCRIPT, '--seconds', String(RUN_LIMIT_S), '--wait-timeout', String(STEP_TIMEOUT_S), '--tail', String(TAIL_S)];
-    const run = (attempt: number, extra: readonly string[] = []): ReturnType<typeof runKilled> => {
+    const run = (attempt: number): ReturnType<typeof runKilled> => {
       const name = `bdjlib-${d.id}-${attempt}`;
-      return runKilled('bash', [...args, ...extra, '--name', name], `${base}.jsonl`, `${base}.err`, name);
+      const limits = { seconds: RUN_LIMIT_S, waitTimeout: STEP_TIMEOUT_S, tail: TAIL_S };
+      return runKilled('bash', libRunArgs(RUN_SH, d.dir, SCRIPT, limits, attempt, name), `${base}.jsonl`, `${base}.err`, name);
     };
     let r = await run(1);
     // a crashed run (no script end line: HotSpot under amd64 emulation now and then dies with a SIGSEGV in libzip, or the
-    // run was killed) is run once more, without memory-mapped zip directories: on some discs the libzip crash comes
-    // back on every run (ZipFile.getEntry in mapped memory, under emulation), and the option changes nothing else
+    // run was killed) is run once more, without memory-mapped zip directories (libRunArgs)
     let retried = false;
     if (!readFileSync(`${base}.jsonl`, 'utf8').includes('"script":"end"')) {
       retried = true;
-      r = await run(2, ['--jvm-option', '-Dsun.zip.disableMemoryMapping=true']);
+      r = await run(2);
     }
     writeFileSync(`${base}.meta.json`, JSON.stringify({ killed: r.killed, code: r.code, ms: r.ms, retried }));
     writeStamp(d, 'lib', lStamp);

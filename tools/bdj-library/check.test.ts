@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import { parseKeyScript } from '../../tests/bdj/key-script';
-import { classify, countedGaps, discId, EMPTY_PLANE_HASH, gapOf, missingClassesFromLog, parseLibblurayRun, platformCaught, progress, type RunRecord, type RunStep, type ThrowFrame } from './classify';
+import { libRunArgs } from './lib-run';
+import { classify, countedGaps, discId, EMPTY_PLANE_HASH, gapOf, missingClassesFromLog, parseLibblurayRun, progress, type RunRecord, type RunStep } from './classify';
 
 // Made-up runs of the generic script: playlist 7 behind the menu, ok starts playlist 8.
 const sel = (pl: number, ret = 1): TraceEntry => ({ call: 'selectPlaylistN', args: [pl, -1, -1, '-1'], ret });
@@ -113,6 +114,9 @@ describe('classify', () => {
     const animated = (side: 'ours' | 'libbluray', endHash: string): RunRecord =>
       run({ side, end: 'timeout', steps: steps(['x'], BEFORE, 2).map((x, i) => (i === 0 ? { n: 0, step: x.step, animated: true, calls: x.calls } : x)), calls: [sel(7)], endHash });
     expect(classify(animated('ours', 'bbbbbbbb'), animated('libbluray', 'cccccccc'))).toEqual({ verdict: 'unconfirmed', detail: 'right not tried; down not tried; ok not tried (same as libbluray)' });
+    // a wait menu that timed out with nothing visible is not an animation: the planes they ended on are compared
+    const blank = (side: 'ours' | 'libbluray', endHash: string): RunRecord => run({ side, end: 'timeout', steps: [], calls: [sel(7)], endHash, flushes: 3 });
+    expect(classify(blank('ours', 'bbbbbbbb'), blank('libbluray', 'cccccccc')).verdict).toBe('diverges');
   });
 
   it('works when ours passes every step and libbluray, on stub streams, stops early or fails, agreeing as far as it went', () => {
@@ -168,25 +172,8 @@ describe('classify', () => {
     expect(classify(noMenu({ missingClasses: missing }), libNoMenu)).toEqual({ verdict: 'missing-class', detail: 'java.io.FileWriter; libbluray (stub) also: draws nothing, stops at step 0 (timeout)' });
   });
 
-  it('R13: a class the platform looked up and caught itself is no gap', () => {
-    const CNFE = ['java/lang/ClassNotFoundException', 'java/lang/ReflectiveOperationException', 'java/lang/Exception', 'java/lang/Throwable', 'java/lang/Object'];
-    const plain = (platform: boolean, pc = 5): ThrowFrame => ({ platform, pc, handlers: [] });
-    const catching = (platform: boolean, catchType: string | null, pc = 5): ThrowFrame => ({ platform, pc, handlers: [{ startPc: 0, endPc: 10, catchType }] });
-    // java.net.URL's protocol-handler lookup: Class.forName, ClassLoader.loadClass, then URL.getURLStreamHandler catches Exception
-    expect(platformCaught([plain(true), plain(true), catching(true, 'java/lang/Exception'), plain(false)], CNFE)).toBe(true);
-    // a catch-all (finally) catches too; a handler whose range misses the pc does not
-    expect(platformCaught([catching(true, null)], CNFE)).toBe(true);
-    expect(platformCaught([catching(true, 'java/lang/Exception', 12), plain(false)], CNFE)).toBe(false);
-    // the disc's code sees it first, whoever catches it later (the disc, or the platform's event loop around the disc)
-    expect(platformCaught([plain(true), catching(false, 'java/lang/Exception'), catching(true, null)], CNFE)).toBe(false);
-    expect(platformCaught([plain(true), plain(false), catching(true, 'java/lang/Throwable')], CNFE)).toBe(false);
-    // nobody catches it
-    expect(platformCaught([plain(true), plain(true)], CNFE)).toBe(false);
-    // another catch type does not catch it
-    expect(platformCaught([catching(true, 'java/io/IOException')], CNFE)).toBe(false);
-    // only lookups by name: a NoClassDefFoundError is a linkage gap wherever it is caught
-    expect(platformCaught([catching(true, null)], ['java/lang/NoClassDefFoundError', 'java/lang/LinkageError', 'java/lang/Error', 'java/lang/Throwable', 'java/lang/Object'])).toBe(false);
-
+  it('R13: a class the platform looked up and dropped is no gap', () => {
+    // which gaps are exempt is decided as they unwind (gaps.test.ts); classify only leaves caughtGaps out
     // classify does not count it (the BD-Live client then gets a MalformedURLException, as libbluray's would offline)
     const probed = noMenu({ missingClasses: ['sun.net.www.protocol.https.Handler'], caughtGaps: ['sun.net.www.protocol.https.Handler'] });
     expect(countedGaps(probed)).toEqual([]);
@@ -272,5 +259,16 @@ describe('generic.keys', () => {
     expect(steps[0]).toEqual({ kind: 'waitMenu', text: 'wait menu 1500', ms: 1500 });
     expect(steps[2]).toEqual({ kind: 'waitQuiet', text: 'wait quiet 1000', ms: 1000 });
     expect(steps.at(-1)).toEqual({ kind: 'waitPlaylist', text: 'wait playlist any', playlist: null });
+  });
+});
+
+describe('libRunArgs', () => {
+  const limits = { seconds: 140, waitTimeout: 60, tail: 5 };
+  it('runs the script with the limits, and retries a crashed run without memory-mapped zip directories', () => {
+    const first = libRunArgs('run.sh', '/d', 'generic.keys', limits, 1, 'bdjlib-x-1');
+    expect(first).toEqual(['run.sh', '/d', '--keys', 'generic.keys', '--seconds', '140', '--wait-timeout', '60', '--tail', '5', '--name', 'bdjlib-x-1']);
+    const retry = libRunArgs('run.sh', '/d', 'generic.keys', limits, 2, 'bdjlib-x-2');
+    expect(retry.join(' ')).toContain('--jvm-option -Dsun.zip.disableMemoryMapping=true');
+    expect(retry.slice(-2)).toEqual(['--name', 'bdjlib-x-2']);
   });
 });
