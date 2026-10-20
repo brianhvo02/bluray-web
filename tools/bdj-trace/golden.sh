@@ -9,6 +9,10 @@
 #   disc-bdj-menu.<script>.jsonl: the run of tests/bdj/scripts/disc-bdj-menu.<script>.keys, reduced by settled.py to the
 #                         control calls and the plane hash at each `wait still` step and at the end (flush counts vary
 #                         between runs)
+#   disc-bdj-store.<script>.<n>.jsonl: the n-th of three runs of tests/bdj/scripts/disc-bdj-store.<script>.keys on one
+#                         storage (run.sh --storage, a Docker volume made for them and removed after), reduced as the
+#                         menu disc's: the disc counts its openings in /persistent and /buda, so each run draws the next
+#                         count
 #   local/<script>.jsonl: the same for tests/bdj/scripts/<script>.keys on a developer's disc in fixtures/local/<disc>
 #                         (gitignored); written only when that disc is present, and kept as it is otherwise, so CI,
 #                         which has no local discs, leaves them unchanged. Hashes and calls only, no disc content.
@@ -36,6 +40,21 @@ golden_keys() { # <disc> <script name>
   echo "wrote tests/bdj/golden/$1.$2.jsonl"
 }
 
+golden_openings() { # <disc> <script name> <runs>
+  local volume="bluray-web-bdj-golden-$$"
+  docker volume create "$volume" > /dev/null
+  trap "docker volume rm -f $volume > /dev/null" EXIT
+  local n
+  for n in $(seq 1 "$3"); do
+    local out="$ROOT/tests/bdj/golden/$1.$2.$n.jsonl"
+    "$ROOT/tools/bdj-trace/run.sh" "$1" --keys "$ROOT/tests/bdj/scripts/$1.$2.keys" --seconds 120 --wait-timeout 60 --storage "$volume" \
+      | python3 -I "$ROOT/tools/bdj-trace/settled.py" "$ROOT/tests/bdj/scripts/$1.$2.keys" > "$out"
+    echo "wrote tests/bdj/golden/$1.$2.$n.jsonl"
+  done
+  docker volume rm -f "$volume" > /dev/null
+  trap - EXIT
+}
+
 golden_local() { # <fixtures/local disc> <script name>
   local disc="$ROOT/fixtures/local/$1"
   if [ ! -d "$disc/BDMV" ]; then
@@ -54,6 +73,7 @@ golden disc-bdj 2
 golden disc-bdj-mixed 1
 golden_keys disc-bdj-menu arrows
 golden_keys disc-bdj-menu mouse
+golden_openings disc-bdj-store open 3
 golden_local A_NEW_ERA a_new_era.play
 golden_local A_NEW_ERA a_new_era.chapters
 golden_local RENTAL_FAMILY rental_family.play

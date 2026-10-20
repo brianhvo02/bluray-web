@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prints libbluray's BD-J native-call trace (JSONL) for <disc> on stdout; libbluray's log goes to stderr.
 #   run.sh <disc> [--until <call>[#<n>]] [--seconds N] [--jvm-option OPT]... [--planes] [--keys FILE] [--tail S] [--wait-timeout S]
-#          [--dump-planes DIR] [--name NAME] [--online]
+#          [--dump-planes DIR] [--name NAME] [--online] [--storage VOLUME]
 #   <disc>:        a folder name under fixtures/synthetic, or a path to a disc folder (the one holding BDMV/)
 #   --until CALL:  stop right after the first trace line for CALL (a JNI name without the Java_org_videolan_Libbluray_
 #                  prefix, e.g. selectPlaylistN); CALL#N stops after the N-th (selectPlaylistN#2)
@@ -14,6 +14,10 @@
 #                  with steps left (raise --seconds for key runs: the default 60 is often too short)
 #   --dump-planes DIR: also write DIR/<k>.png (the whole 1920x1080 plane) at flush k
 #   --name NAME:   the container's name (so a caller can `docker kill` it)
+#   --storage VOLUME: keep the BD-J storage (dvb.persistent.root, bluray.bindingunit.root) in the Docker volume VOLUME,
+#                  mounted at /storage (LIBBLURAY_PERSISTENT_ROOT=/storage/persistent/, LIBBLURAY_CACHE_ROOT=/storage/buda/),
+#                  so a later run with the same volume finds what this one saved, as a player keeps it between viewings.
+#                  Without it every run starts with empty storage (inside the container, removed with it)
 #   --online:      give the container a network. Runs are offline by default (`--network none`), as libbluray is on a
 #                  machine with no network: a disc's BD-Live attempts fail at once and never reach a real server. Nothing
 #                  in the repo passes --online; it is for a one-off comparison by hand
@@ -41,6 +45,9 @@ while [ $# -gt 0 ]; do
     --tail) HARNESS_ARGS+=(--tail "$2"); shift 2 ;;
     --name) NAME_ARGS=(--name "$2"); shift 2 ;;
     --online) NETWORK_ARGS=(); shift ;;
+    --storage)
+      MOUNTS+=(-v "$2:/storage")
+      ENV_ARGS+=(-e LIBBLURAY_PERSISTENT_ROOT=/storage/persistent/ -e LIBBLURAY_CACHE_ROOT=/storage/buda/); shift 2 ;;
     --wait-timeout) HARNESS_ARGS+=(--wait-timeout "$2"); shift 2 ;;
     --keys)
       [ -f "$2" ] || { echo "no such script: $2" >&2; exit 2; }

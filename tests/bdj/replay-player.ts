@@ -154,6 +154,8 @@ export async function replayPlayerBdj(
     memoryProfile?: MemoryProfileName;
     /** Called once the run has ended, before the player closes, with the player and the last BD-J worker started. */
     beforeClose?: (player: Player, worker: BdjWorkerHandle | null) => void | Promise<void>;
+    /** The disc's saved data (default: a new, empty one, as in a browser that never played it); a test passes one store to several runs as to several viewings. */
+    store?: BdjStore;
   },
 ): Promise<PlayerBdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
@@ -207,7 +209,7 @@ export async function replayPlayerBdj(
   };
 
   // the disc's saved data, empty at first as in a browser that never played it, and kept across its BD-J workers
-  const store = new MemoryBdjStore();
+  const store = opts.store ?? new MemoryBdjStore();
   const player = new Player({
     emit: (e) => events.push(e),
     videoCodecApi: fakeVideoCodecApi,

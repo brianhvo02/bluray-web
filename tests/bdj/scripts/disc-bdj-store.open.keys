@@ -1,0 +1,4 @@
+# disc-bdj-store: one opening. StoreXlet draws its count and the lines of its loose BUDA file ("count <c>  log <l>"),
+# saves the next count and a line more, and then plays playlist 00000. golden.sh runs it three times on one storage.
+wait playlist 0   # the save has happened
+wait menu 1000    # the count, drawn before the save (settled: a menu step, which needs no flush after the playlist)

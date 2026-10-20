@@ -38,6 +38,12 @@ javac -nowarn -source 1.3 -target 1.3 \
   -d "$T/xlets-menu" tests/bdj/xlets/src/bdjweb/menu/*.java
 cp tests/bdj/xlets/src/bdjweb/menu/logo.png tests/bdj/xlets/src/bdjweb/menu/bg.png "$T/xlets-menu/"
 $MK tests/bdj/xlets/menu.jar "$T/xlets-menu" -
+# the saved-data disc's xlet (disc-bdj-store), which counts its own openings under /persistent and /buda
+mkdir "$T/xlets-store"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets-store" tests/bdj/xlets/src/bdjweb/store/*.java
+$MK tests/bdj/xlets/store.jar "$T/xlets-store" -
 
 # the JVM conformance programs (package conformance) and HotSpot's stdout for each class with a main; every program runs
 # twice and the outputs must match

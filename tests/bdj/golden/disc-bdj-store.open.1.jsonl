@@ -1,0 +1,8 @@
+{"call":"setUOMaskN","args":[false,false],"ret":null}
+{"call":"setKeyInterestN","args":[0],"ret":null}
+{"call":"writeRegN","args":[1,4,65535,-1],"ret":0}
+{"call":"selectPlaylistN","args":[0,-1,-1,"-1"],"ret":1}
+{"call":"selectRateN","args":[1,1],"ret":1}
+{"script":"step","n":0,"step":"wait playlist 0"}
+{"script":"step","n":1,"step":"wait menu 1000","hash":"3a502b6a"}
+{"script":"end","hash":"3a502b6a"}
