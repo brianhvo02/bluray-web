@@ -78,16 +78,16 @@ async function serveFile(req: IncomingMessage, file: string): Promise<Response> 
   return serveBytes(req, size, (start, end) => createReadStream(file, { start, end }));
 }
 
-const ISO_TREES = 32;
+/** ISO discs whose parsed UDF trees are kept. */
+export const ISO_TREES = 32;
 
 /**
  * `GET /api/discs/<id>/manifest`, `GET|HEAD /api/discs/<id>/files/<path>` (a `Range` or the whole file) and
  * `GET|HEAD /api/discs/<id>/probe` (the first 4 MiB of the largest clip); `appHandlers` puts the token guard in front.
  * With `levels`, also the quality levels (`levelRoute`) and `DELETE /api/discs/<id>/viewing`; without, those are 404.
- * `level=original`, or no level, is the original disc.
+ * `level=original`, or no level, is the original disc. `isoTrees` is shared with the quality levels' disc sources.
  */
-export function discRoutes(library: Library, levels?: DiscLevels): Handler {
-  const isoTrees = new IsoTrees(ISO_TREES);
+export function discRoutes(library: Library, levels?: DiscLevels, isoTrees: IsoTrees = new IsoTrees(ISO_TREES)): Handler {
 
   /** The same three actions for an ISO disc, from its UDF tree (parsed once per disc id). */
   const isoRoute = async (req: IncomingMessage, disc: DiscEntry, action: string, encodedPath: string | undefined): Promise<Response> => {

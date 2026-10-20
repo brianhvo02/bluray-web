@@ -123,6 +123,20 @@ describe('disc routes', () => {
 
   const clip = (disc: string): Buffer => readFileSync(join(tmp, 'root', disc, 'BDMV/STREAM/00001.m2ts'));
 
+  it('reads ISO trees through the IsoTrees it is given (shared with the quality levels)', async () => {
+    const trees = new IsoTrees();
+    const get = vi.spyOn(trees, 'get');
+    const shared = createServer([discRoutes(library, undefined, trees)]);
+    await new Promise<void>((r) => shared.listen(0, r));
+    try {
+      const res = await fetch(`http://127.0.0.1:${(shared.address() as AddressInfo).port}/api/discs/${ids['disc.iso']}/manifest`);
+      expect(res.status).toBe(200);
+      expect(get).toHaveBeenCalled();
+    } finally {
+      await new Promise((r) => shared.close(r));
+    }
+  });
+
   it('serves the manifest', async () => {
     const res = await fetch(`${base}/${ids.menu}/manifest`);
     expect(res.status).toBe(200);

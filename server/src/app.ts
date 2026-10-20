@@ -3,6 +3,7 @@ import type { BdjStore } from './bdj-store';
 import type { CodeRegistrar } from './codes';
 import { json } from './http';
 import type { Handler } from './http';
+import type { IsoTrees } from './iso';
 import type { LevelService } from './levels/level-service';
 import type { Library } from './library';
 import { adminRoutes, bearerToken } from './routes/admin';
@@ -35,6 +36,8 @@ export interface AppOptions {
   lookupTimeoutMs?: number;
   /** The quality levels; without them (`LEVELS_BACKEND=off` or a failed GPU self-test) only the original is served. */
   levels?: LevelService;
+  /** The parsed ISO trees, shared with the quality levels' disc sources. */
+  isoTrees?: IsoTrees;
 }
 
 /** Answers 401 to any request without a valid token (`t=` query or `Authorization: Bearer`); lets the rest through. */
@@ -58,6 +61,6 @@ export function appHandlers(opts: AppOptions): Handler[] {
     }),
     libraryRoute(opts.library),
     ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay, opts.nasId ?? null, opts.levels !== undefined)] : []),
-    discRoutes(opts.library, opts.levels && { service: opts.levels, auth }),
+    discRoutes(opts.library, opts.levels && { service: opts.levels, auth }, opts.isoTrees),
   ];
 }
