@@ -733,7 +733,7 @@ describe('LevelService: fix round 1', () => {
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
     expect(await service.manifest(DISC_ID, 'h264-1080', 2, viewingIdOf('dev1', DISC_ID, 'h264-1080', 2))).not.toHaveProperty('busy');
     expect(fake.runs[0]!.child.killed).toBe(true);
-    await expect(zero).rejects.toThrow(/closed/);
+    expect(await zero).toEqual({ retryAfter: 1 }); // the runner closed: the read comes back
   });
 
   it('release() stops the viewing’s encoders and frees its lease (Minor 8)', async () => {
@@ -743,7 +743,7 @@ describe('LevelService: fix round 1', () => {
     service.release(VIEWING);
     expect(fake.runs[0]!.child.killed).toBe(true);
     expect(capacity.has(VIEWING)).toBe(false);
-    await expect(zero).rejects.toThrow(/closed/);
+    expect(await zero).toEqual({ retryAfter: 1 }); // the runner closed: the read comes back
   });
 
   it('counts the device’s own lease on the disc as free when listing levels (Minor 4)', async () => {
@@ -753,5 +753,23 @@ describe('LevelService: fix round 1', () => {
     const client = { hevc: true, hevc10: false, hdr: false };
     expect((await service.levels(DISC_ID, client))!.find((x) => x.level === 'hevc-1080')).toMatchObject({ available: false, reason: 'busy' });
     expect((await service.levels(DISC_ID, client, 'dev1'))!.find((x) => x.level === 'hevc-1080')).toMatchObject({ available: true });
+  });
+});
+
+describe('LevelService: for the routes', () => {
+  it('gives a file’s size at a level, null for a file or level it doesn’t have', async () => {
+    const manifest = await levelManifest();
+    for (const f of manifest.files) expect(await service.size(DISC_ID, 'h264-1080', 1, f.path.toLowerCase())).toBe(f.size);
+    expect(await service.size(DISC_ID, 'h264-1080', 1, 'BDMV/STREAM/99999.M2TS')).toBeNull();
+    expect(await service.size(DISC_ID, 'original', 1, M2TS_PATH)).toBeNull();
+    expect(await service.size('gone', 'h264-1080', 1, M2TS_PATH)).toBeNull();
+  });
+
+  it('says whether the disc’s original plays in the app', async () => {
+    expect(await service.originalPlayable(DISC_ID)).toBe(true);
+    expect(await service.originalPlayable('gone')).toBeNull();
+    const s = makeService({ discs: async (id) => folderDiscSource(join(SYNTHETIC, 'disc-mpeg2'), { id, name: 'Starfall Wanderer' }) });
+    expect(await s.originalPlayable('mpeg2')).toBe(false);
+    s.close();
   });
 });

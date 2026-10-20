@@ -27,6 +27,19 @@ export interface Config {
   titleLibrary: 'owners' | 'everyone';
   /** The WebRTC route, served while `rendezvousUrl` is set. */
   rtc: RtcConfig;
+  /** The quality levels' encoder (spec §6 of the lower-quality spec). */
+  levels: LevelsConfig;
+}
+
+export interface LevelsConfig {
+  /** `LEVELS_BACKEND`: `qsv` (Intel Quick Sync, the default), `x264` (software, for dev and CI) or `off` (Original only). */
+  backend: 'qsv' | 'x264' | 'off';
+  /** `TRANSCODE_CACHE_BYTES`: the segment cache's byte budget, 50 GB by default. */
+  cacheBytes: number;
+  /** `FFMPEG_PATH`, `ffmpeg` on the PATH by default. */
+  ffmpegPath: string;
+  /** `FFPROBE_PATH`, `ffprobe` on the PATH by default. */
+  ffprobePath: string;
 }
 
 export interface RtcConfig {
@@ -40,7 +53,7 @@ export interface RtcConfig {
 
 const DEFAULT_PUBLIC_BASE = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
 
-/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY`, `RENDEZVOUS_URL`, `TMDB_API_KEY`, `TITLE_LIBRARY`, `RTC_PORT`, `RTC_LAN_ADDRESS` and `RTC_ADVERTISE`. */
+/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY`, `RENDEZVOUS_URL`, `TMDB_API_KEY`, `TITLE_LIBRARY`, `RTC_PORT`, `RTC_LAN_ADDRESS`, `RTC_ADVERTISE`, `LEVELS_BACKEND`, `TRANSCODE_CACHE_BYTES`, `FFMPEG_PATH` and `FFPROBE_PATH`. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const roots = (env.LIBRARY_ROOTS ?? '')
     .split(',')
@@ -64,7 +77,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   for (const { group } of roots) {
     if (group !== undefined && seen.has(group)) throw new Error(`LIBRARY_ROOTS group "${group}" is also a root name`);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env) };
 }
 
 function parseRtc(env: Record<string, string | undefined>): RtcConfig {
@@ -87,6 +100,20 @@ function parseRtc(env: Record<string, string | undefined>): RtcConfig {
     });
   }
   return rtc;
+}
+
+const DEFAULT_TRANSCODE_CACHE_BYTES = 50_000_000_000;
+
+function parseLevels(env: Record<string, string | undefined>): LevelsConfig {
+  const backend = env.LEVELS_BACKEND === undefined || env.LEVELS_BACKEND === '' ? 'qsv' : env.LEVELS_BACKEND;
+  if (backend !== 'qsv' && backend !== 'x264' && backend !== 'off') throw new Error(`LEVELS_BACKEND "${backend}" is not qsv, x264 or off`);
+  let cacheBytes = DEFAULT_TRANSCODE_CACHE_BYTES;
+  const cache = env.TRANSCODE_CACHE_BYTES;
+  if (cache !== undefined && cache !== '') {
+    if (!/^\d+$/.test(cache) || !Number.isSafeInteger(Number(cache))) throw new Error(`TRANSCODE_CACHE_BYTES "${cache}" is not a number of bytes`);
+    cacheBytes = Number(cache);
+  }
+  return { backend, cacheBytes, ffmpegPath: env.FFMPEG_PATH || 'ffmpeg', ffprobePath: env.FFPROBE_PATH || 'ffprobe' };
 }
 
 function parsePort(value: string | undefined): number {

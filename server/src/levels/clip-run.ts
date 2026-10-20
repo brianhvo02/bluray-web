@@ -66,8 +66,8 @@ const VIDEO_LEAD_INTERVALS = 8;
 export const FAILURE_BACKOFF_MS = 5_000;
 
 /**
- * A read should be retried shortly: the encoder was restarted elsewhere for another read of the same viewing, or it is
- * backing off after a failure. The service answers it with `retryAfter`.
+ * A read should be retried shortly: the encoder was restarted elsewhere for another read of the same viewing, it is
+ * backing off after a failure, or the runner was closed. The service answers it with `retryAfter`.
  */
 export class RetryLater extends Error {
   constructor(message: string) {
@@ -155,7 +155,7 @@ export class ClipRunner {
   /** Interval `index`'s bytes at the level. Aborting `signal` stops this caller's wait; the encoder carries on. */
   interval(index: number, signal: AbortSignal): Promise<Buffer> {
     if (signal.aborted) return Promise.reject(signal.reason as Error);
-    if (this.closed) return Promise.reject(new Error('levels: the clip runner is closed'));
+    if (this.closed) return Promise.reject(new RetryLater('levels: the clip runner is closed'));
     const recent = this.recent.get(index);
     if (recent) return Promise.resolve(recent);
     let w = this.waiters.get(index);
@@ -190,13 +190,16 @@ export class ClipRunner {
     });
   }
 
-  /** Stops the encoder; waiting reads fail. */
+  /**
+   * Stops the encoder; waiting reads fail with `RetryLater` (the runner was closed by a moved lease, a rebuilt version, a
+   * release or idling; a retry finds the cache or a new runner).
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     if (this.idleTimer !== null) this.deps.clock.clearTimeout(this.idleTimer);
     this.stopRun();
-    this.rejectAll(new Error('levels: the clip runner was closed'));
+    this.rejectAll(new RetryLater('levels: the clip runner was closed'));
   }
 
   private idle(): void {

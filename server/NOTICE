@@ -49,6 +49,30 @@ which forbid hoarding or mass collection of its data and using it as a backup or
 storage service; requests are paced to 30 per minute, the limit AniList
 currently states (https://docs.anilist.co/guide/rate-limiting).
 
+ffmpeg in the server image (server/Dockerfile)
+----------------------------------------------
+
+The server image installs jellyfin-ffmpeg7 7.1.4-3-bookworm, Jellyfin's build of
+FFmpeg (https://github.com/jellyfin/jellyfin-ffmpeg, from Jellyfin's apt
+repository at https://repo.jellyfin.org/debian), for the quality levels
+(server/src/levels/). It is configured with --enable-gpl --enable-version3 and
+links libx264 and libx265, so the binaries are under the GNU General Public
+License, version 3 or later (GPL-3.0-or-later). Its copyright file is in the
+image at /usr/share/doc/jellyfin-ffmpeg7/copyright; the corresponding source is
+the tag v7.1.4-3 of the repository above.
+
+The package bundles, under /usr/lib/jellyfin-ffmpeg/lib, Intel's Media Driver
+for VAAPI (iHD, https://github.com/intel/media-driver) and its gmmlib, under the
+MIT License (with parts under BSD-3-Clause), Intel's oneVPL GPU runtime and
+dispatcher (libmfx-gen, libvpl; MIT), libva (MIT) and the other libraries FFmpeg
+links, each under its own licence as the copyright file lists.
+
+ffmpeg and ffprobe run as separate processes, spawned by the server
+(server/src/levels/encoder.ts, server/src/levels/backend-check.ts) and fed
+through pipes and command-line arguments. The server neither links nor bundles
+any of their code, so its own licence (LGPL-2.1-or-later, above) is unaffected;
+the image as a whole carries each component under its own licence.
+
 WebRTC (server/src/rtc/)
 ------------------------
 

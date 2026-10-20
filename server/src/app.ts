@@ -3,6 +3,7 @@ import type { BdjStore } from './bdj-store';
 import type { CodeRegistrar } from './codes';
 import { json } from './http';
 import type { Handler } from './http';
+import type { LevelService } from './levels/level-service';
 import type { Library } from './library';
 import { adminRoutes, bearerToken } from './routes/admin';
 import { bdjStoreRoutes } from './routes/bdj-store';
@@ -32,6 +33,8 @@ export interface AppOptions {
   nasId?: string | null;
   /** How long an owner's lookup may take. Default 10 s. */
   lookupTimeoutMs?: number;
+  /** The quality levels; without them (`LEVELS_BACKEND=off` or a failed GPU self-test) only the original is served. */
+  levels?: LevelService;
 }
 
 /** Answers 401 to any request without a valid token (`t=` query or `Authorization: Bearer`); lets the rest through. */
@@ -54,7 +57,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
       titles: opts.titles, relay: opts.relay, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
     }),
     libraryRoute(opts.library),
-    ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay, opts.nasId ?? null)] : []),
-    discRoutes(opts.library),
+    ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay, opts.nasId ?? null, opts.levels !== undefined)] : []),
+    discRoutes(opts.library, opts.levels && { service: opts.levels, auth }),
   ];
 }

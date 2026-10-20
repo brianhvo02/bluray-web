@@ -237,6 +237,20 @@ export class LevelService {
     return out;
   }
 
+  /** The size of a file of the disc at a level and audio stream, as its manifest gives it; null when there is none. */
+  async size(discId: string, level: string, audio: number, path: string): Promise<number | null> {
+    const version = await this.version(discId, level, audio);
+    return version?.sizes.get(path.toUpperCase()) ?? null;
+  }
+
+  /** Whether the disc's original plays in the app (its main title isn't MPEG-2 or VC-1); null when the disc is gone. */
+  async originalPlayable(discId: string): Promise<boolean | null> {
+    const source = await this.options.discs(discId);
+    if (!source) return null;
+    const { main } = await this.discInfo(discId, source);
+    return !main || levelsFor(main.video).includes('original');
+  }
+
   /** The viewing ended (the disc closed): its encoders stop and its lease is released. */
   release(viewingId: string): void {
     this.closeRunners((key) => key.startsWith(`${viewingId}|`));

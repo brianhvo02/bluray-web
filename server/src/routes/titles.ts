@@ -38,9 +38,10 @@ function decodeSegment(segment: string): string {
  * `GET /api/me`, `GET /api/titles`, `GET /api/titles/<id>` and `GET /api/art/<artId>?size=small|large`, behind the
  * token guard. While the gate is `owners`, a guest gets 404 from every title route, so the library's existence isn't
  * revealed (ruling T9c); `me` answers every paired device, with the relay's usage while the relay is on (else null)
- * and the NAS's rendezvous id (`nasId`, null without a rendezvous), so a pairing made before the WebRTC route learns it.
+ * and the NAS's rendezvous id (`nasId`, null without a rendezvous), so a pairing made before the WebRTC route learns it,
+ * and whether the NAS offers quality levels (`levels`: false when `LEVELS_BACKEND` is off or the GPU self-test failed).
  */
-export function titleRoutes(auth: Auth, library: TitleLibrary, relay?: RelayState, nasId: string | null = null): Handler {
+export function titleRoutes(auth: Auth, library: TitleLibrary, relay?: RelayState, nasId: string | null = null, levels = false): Handler {
   const { service } = library;
   return async (req, url) => {
     if (req.method !== 'GET') return null;
@@ -54,7 +55,7 @@ export function titleRoutes(auth: Auth, library: TitleLibrary, relay?: RelayStat
     const open = device.owner || service.gate() === 'everyone';
     if (isMe) {
       const usage = relay?.settings().enabled ? relay.usage() : null;
-      return json(200, { owner: device.owner, titleLibrary: open, personId: device.personId, personName: device.personName, relay: usage, nasId });
+      return json(200, { owner: device.owner, titleLibrary: open, personId: device.personId, personName: device.personName, relay: usage, nasId, levels });
     }
     if (!open) return notFound();
 

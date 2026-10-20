@@ -1,5 +1,7 @@
 /** A viewing needs its film's output frame rate times this, for a margin (spec §6.4). */
 export const NEED_MARGIN = 1.3;
+/** The NAS GPU's encoder output per codec alone, frames per second (spec §2's spike, rounded down). */
+export const GPU_BUDGETS = { h264: 190, hevc: 100 } as const;
 /** A lease no read has touched for this long is gone (spec §6.4). */
 export const LEASE_IDLE_MS = 120_000;
 

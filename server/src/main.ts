@@ -8,6 +8,11 @@ import { loadConfig } from './config';
 import type { Config } from './config';
 import { createServer } from './http';
 import type { Handler } from './http';
+import { levelsBackend } from './levels/backend-check';
+import { Capacity, GPU_BUDGETS } from './levels/capacity';
+import { probeScan } from './levels/encoder';
+import { LevelService, libraryDiscSources } from './levels/level-service';
+import { SegmentCache } from './levels/segment-cache';
 import { Library, nextNightly } from './library';
 import { RendezvousClient } from './rendezvous-client';
 import { RtcPeers } from './rtc/peer';
@@ -81,6 +86,24 @@ function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousC
   };
 }
 
+/**
+ * The quality levels (spec §5–§6): after the encoder's self-test at start, or none (Original only) when
+ * `LEVELS_BACKEND=off`, there is no GPU for `qsv`, or the self-test fails. Segments are cached under `/data/transcode`.
+ */
+async function levelService(config: Config, library: Library): Promise<LevelService | undefined> {
+  const backend = await levelsBackend(config.levels);
+  if (!backend) return undefined;
+  const { ffprobePath } = config.levels;
+  return new LevelService({
+    discs: libraryDiscSources(library),
+    cache: new SegmentCache(join(config.dataDir, 'transcode'), config.levels.cacheBytes),
+    capacity: new Capacity(GPU_BUDGETS),
+    backend,
+    probe: (input, options) => probeScan(input, { ...options, binary: ffprobePath }),
+    log: console.log,
+  });
+}
+
 async function serve(config: Config): Promise<void> {
   const trustProxy = await trustedProxy(config.trustedProxy);
   const library = new Library(config.roots, join(config.dataDir, 'library.json'), { scanPauseMs: config.scanPauseMs });
@@ -101,7 +124,8 @@ async function serve(config: Config): Promise<void> {
   const relay = new RelayState(config.dataDir, Date.now);
   // the key's thumbprint, read (or made) locally: `me` gives it to pairings made before the WebRTC route
   const nasId = rendezvous ? await rendezvous.localNasId() : null;
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId });
+  const levels = await levelService(config, library);
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, ...(levels ? { levels } : {}) });
   const server = createServer(handlers);
   const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 
@@ -127,6 +151,7 @@ async function serve(config: Config): Promise<void> {
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => {
       titles.close();
+      levels?.close();
       void stopRtc();
       server.close(() => process.exit(0));
       // Long disc streams would otherwise hold shutdown until Docker's SIGKILL.
