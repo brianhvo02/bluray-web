@@ -97,8 +97,10 @@ export class ScopeSync {
     this.vfs = vfs;
     const quota = this.deps.quotaBytes ?? SCOPE_QUOTA_BYTES;
     for (const s of this.states) {
+      // a loose-only scope's snapshot has no subfolders (they belong to the disc scopes)
+      if (s.scope.looseOnly) s.stored = { files: s.stored.files.filter((f) => !f.path.includes('/')) };
       vfs.importFiles(s.scope.dir, s.stored.files);
-      vfs.setQuota(s.scope.dir, quota);
+      vfs.setQuota(s.scope.dir, quota, s.scope.looseOnly === true);
     }
   }
 
@@ -208,7 +210,7 @@ export class ScopeSync {
 
   /** The scope's files now, a refused file as stored (or left out). */
   private snapshot(state: ScopeState): Snapshot {
-    const files: SnapshotFile[] = this.vfs!.exportFiles(state.scope.dir);
+    const files: SnapshotFile[] = this.vfs!.exportFiles(state.scope.dir, state.scope.looseOnly === true);
     if (state.refused.size === 0) return { files };
     const stored = new Map(state.stored.files.map((f) => [f.path, f]));
     const out = files.filter((f) => !state.refused.has(f.path));
@@ -219,14 +221,20 @@ export class ScopeSync {
     return { files: sortFiles(out) };
   }
 
-  /** The scope holding a canonical VFS path, and the path relative to it; null outside every scope (or the scope's own directory). */
+  /**
+   * The scope holding a canonical VFS path, and the path relative to it; null outside every scope. A path is in one
+   * scope at most: the innermost (a disc folder's scope before its organisation's loose files).
+   */
   private locate(path: string): { readonly state: ScopeState; readonly rel: string } | null {
+    let best: { readonly state: ScopeState; readonly rel: string } | null = null;
     for (const state of this.states) {
       const dir = state.scope.dir;
-      if (path.startsWith(`${dir}/`)) return { state, rel: path.slice(dir.length + 1) };
-      if (path === dir) return { state, rel: '' };
+      if (!path.startsWith(`${dir}/`) && path !== dir) continue;
+      const rel = path === dir ? '' : path.slice(dir.length + 1);
+      if (state.scope.looseOnly && rel.includes('/')) continue;
+      if (!best || dir.length > best.state.scope.dir.length) best = { state, rel };
     }
-    return null;
+    return best;
   }
 
   /** A file changed on /persistent/ or /buda/ outside the loaded scopes is not kept past the session: logged once. */

@@ -11,6 +11,8 @@ describe('scopesFor (BDJAppProxy.createStorage, BDJXletContext dvb.org.id)', () 
     const s = scopesFor({ orgId: 0x7fff0123 }, '88000000000000000000000000139561', 'unused');
     expect(s.persistent).toEqual({ key: 'persistent/7fff0123', dir: '/persistent/7fff0123' });
     expect(s.buda).toEqual({ key: 'buda/7fff0123/88000000000000000000000000139561', dir: '/buda/7fff0123/88000000000000000000000000139561' });
+    // the files beside the disc folders (ruling R14)
+    expect(s.budaOrg).toEqual({ key: 'buda/7fff0123', dir: '/buda/7fff0123', looseOnly: true });
   });
 
   it('keeps Integer.toHexString in Java\'s directories (no leading zeros; negative ints as 8 digits) and 8 digits in the keys', () => {
@@ -62,7 +64,10 @@ describe('discScopes', () => {
     const orgs = [...new Set(bdjos.flatMap((b) => b.apps.map((a) => a.orgId >>> 0)))];
     const scopes = await discScopes(source, null);
     const fp = await discFingerprint(source.paths().map((path) => ({ path, size: source.size(path) })));
-    expect(scopes).toEqual(orgs.sort((a, b) => a - b).flatMap((o) => [scopesFor({ orgId: o }, null, fp).persistent, scopesFor({ orgId: o }, null, fp).buda]));
+    expect(scopes).toEqual(orgs.sort((a, b) => a - b).flatMap((o) => {
+      const s = scopesFor({ orgId: o }, null, fp);
+      return [s.persistent, s.buda, s.budaOrg];
+    }));
     expect(scopes.every((s) => !s.key.includes(NO_DISC_ID))).toBe(true);
   });
 

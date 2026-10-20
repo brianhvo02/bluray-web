@@ -235,7 +235,7 @@ describe('runBdjWorker and the storage scopes', () => {
     }
   }
 
-  it('boots Libbluray only once both scopes are loaded, and saves what Java wrote before it answers a stop', async () => {
+  it('boots Libbluray only once its scopes are loaded, and saves what Java wrote before it answers a stop', async () => {
     const received: FromBdj[] = [];
     const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
     const store = new GatedStore();
@@ -255,7 +255,7 @@ describe('runBdjWorker and the storage scopes', () => {
       },
     });
     const scopes = await discScopes(syntheticSource(files), null);
-    expect(scopes.map((s) => s.key)).toEqual([expect.stringMatching(/^persistent\/[0-9a-f]{8}$/), expect.stringMatching(/^buda\/[0-9a-f]{8}\/[0-9a-f]{32}$/)]);
+    expect(scopes.map((s) => s.key)).toEqual([expect.stringMatching(/^persistent\/[0-9a-f]{8}$/), expect.stringMatching(/^buda\/[0-9a-f]{8}\/[0-9a-f]{32}$/), expect.stringMatching(/^buda\/[0-9a-f]{8}$/)]);
     await vi.waitFor(() => expect(store.loads).toEqual(scopes.map((s) => s.key)));
     expect(sources).toEqual(['local']);
     await vi.waitFor(() => expect(handle.runtime).not.toBeNull());

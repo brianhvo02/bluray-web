@@ -67,6 +67,8 @@ interface QuotaRoot {
   /** Canonical, without a trailing slash. */
   readonly dir: string;
   readonly limit: number;
+  /** Only the files directly in `dir` count, not those in its subdirectories. */
+  readonly looseOnly: boolean;
   used: number;
 }
 
@@ -396,11 +398,12 @@ export class Vfs {
 
   /**
    * Limits the files under `dir` (on a memory mount) to `limitBytes` of lengths together, beyond the memory mounts'
-   * limit: a write past it fails as on a full disk. Files already there count toward it at once.
+   * limit: a write past it fails as on a full disk. Files already there count toward it at once. `looseOnly`: only the
+   * files directly in `dir`. A file counts toward one quota at most: the innermost that holds it.
    */
-  setQuota(dir: string, limitBytes: number): void {
+  setQuota(dir: string, limitBytes: number, looseOnly = false): void {
     const canon = this.canonicalize(dir);
-    const root: QuotaRoot = { dir: canon, limit: limitBytes, used: 0 };
+    const root: QuotaRoot = { dir: canon, limit: limitBytes, looseOnly, used: 0 };
     this.quotas.push(root);
     const node = this.memNode(canon);
     if (!node) return;
@@ -422,7 +425,8 @@ export class Vfs {
   private quotaFor(canonPath: string): QuotaRoot | null {
     let best: QuotaRoot | null = null;
     for (const q of this.quotas) {
-      if ((canonPath === q.dir || canonPath.startsWith(`${q.dir}/`)) && (!best || q.dir.length > best.dir.length)) best = q;
+      if (!canonPath.startsWith(`${q.dir}/`) || (q.looseOnly && canonPath.indexOf('/', q.dir.length + 1) >= 0)) continue;
+      if (!best || q.dir.length > best.dir.length) best = q;
     }
     return best;
   }
@@ -474,17 +478,21 @@ export class Vfs {
   }
 
   /**
-   * The files under the memory directory `dir`, paths relative to it in order, without a copy: a file returned is not
-   * written in place again (as peek), so the bytes stay as they are. Empty when `dir` is missing.
+   * The files under the memory directory `dir` (`looseOnly`: only those directly in it), paths relative to it in
+   * order, without a copy: a file returned is not written in place again (as peek), so the bytes stay as they are.
+   * Empty when `dir` is missing.
    */
-  exportFiles(dir: string): VfsTreeFile[] {
+  exportFiles(dir: string, looseOnly = false): VfsTreeFile[] {
     const node = this.memNode(this.canonicalize(dir));
     if (node?.kind !== 'dir') return [];
     const out: VfsTreeFile[] = [];
-    this.visitFiles(node, '', (file, path) => {
+    const take = (file: MemFile, path: string): void => {
       file.shared = true;
-      out.push({ path: path.slice(1), mtime: file.mtimeMs, bytes: file.buf.subarray(0, file.len) });
-    });
+      out.push({ path, mtime: file.mtimeMs, bytes: file.buf.subarray(0, file.len) });
+    };
+    if (looseOnly) {
+      for (const [name, child] of node.children) if (child.kind === 'file') take(child, name);
+    } else this.visitFiles(node, '', (file, path) => take(file, path.slice(1)));
     return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 

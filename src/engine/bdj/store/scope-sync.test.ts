@@ -237,6 +237,57 @@ describe('ScopeSync', () => {
     expect(lines).toEqual(["BD-J storage: /persistent/stray.txt is outside the disc's storage scopes; it lasts until BD-J stops"]);
   });
 
+  describe('the organisation-level BUDA files (ruling R14)', () => {
+    const ORG: StoreScope = { key: 'buda/7fff0123', dir: '/buda/7fff0123', looseOnly: true };
+    const ALL = [PERSISTENT, BUDA, ORG];
+
+    it('keeps the files beside the disc folders in buda/<orgId>, apart from the disc scope and other folders', async () => {
+      const store = new MemoryStore();
+      const { vfs, sync, lines } = await setup(store, { scopes: ALL });
+      write(vfs, '/buda/7fff0123/38906394.log', 'log');
+      write(vfs, `${BUDA.dir}/resume`, 'disc');
+      write(vfs, '/buda/7fff0123/other-disc/x', 'other');
+      await sync.flush();
+      expect(store.text(ORG.key)).toEqual(['38906394.log=log']);
+      expect(store.text(BUDA.key)).toEqual(['resume=disc']);
+      expect(lines.filter((l) => l.includes('outside'))).toEqual(["BD-J storage: /buda/7fff0123/other-disc/x is outside the disc's storage scopes; it lasts until BD-J stops"]);
+    });
+
+    it('counts each file toward one scope only', async () => {
+      const store = new MemoryStore();
+      const { vfs } = await setup(store, { scopes: ALL, quotaBytes: 10 });
+      write(vfs, '/buda/7fff0123/a.log', '123456');
+      write(vfs, `${BUDA.dir}/b`, '1234567');
+      write(vfs, '/buda/7fff0123/other-disc/c', '12345678901');
+      expect(vfs.quotaUsed(ORG.dir)).toBe(6);
+      expect(vfs.quotaUsed(BUDA.dir)).toBe(7);
+      // each scope has its own 10 bytes: a loose file past the org's is refused while the disc scope has room
+      expect(write(vfs, '/buda/7fff0123/d.log', '12345')).toBe(false);
+      expect(write(vfs, `${BUDA.dir}/e`, '123')).toBe(true);
+    });
+
+    it('loads only loose files into it, whatever a stored snapshot holds', async () => {
+      const store = new MemoryStore();
+      store.put(ORG.key, [['x.log', 1000, 'kept'], [`${BUDA.dir.split('/').pop()}/resume`, 1000, 'not here']]);
+      const { vfs } = await setup(store, { scopes: ALL });
+      expect(read(vfs, '/buda/7fff0123/x.log')).toBe('kept');
+      expect(read(vfs, `${BUDA.dir}/resume`)).toBe('<missing>');
+    });
+
+    it('lasts into the next session with IndexedDB', async () => {
+      vi.useRealTimers();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const idb = new IDBFactory();
+      const first = await setup(new IdbBdjStore('local', idb), { scopes: ALL });
+      write(first.vfs, '/buda/7fff0123/38906394.log', 'line 1');
+      await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+      await vi.waitFor(() => expect(first.unsaved).toEqual([true, false]));
+      const next = await setup(new IdbBdjStore('local', idb), { scopes: ALL });
+      expect(read(next.vfs, '/buda/7fff0123/38906394.log')).toBe('line 1');
+      expect(next.vfs.exportFiles(BUDA.dir)).toEqual([]);
+    });
+  });
+
   it('with IndexedDB, a save lasts into the next session, and two sources keep their own', async () => {
     // fake-indexeddb schedules with setImmediate, which stays real here
     vi.useRealTimers();
