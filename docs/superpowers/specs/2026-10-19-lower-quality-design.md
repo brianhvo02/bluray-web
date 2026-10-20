@@ -1,7 +1,7 @@
 # Lower Quality on the NAS (Step 4) — Design Spec
 
 Date: 2026-10-19
-Status: Approved by the user 2026-10-19. Phase 1 (the NAS side, §5–§6) is built and checked locally with `scripts/verify-level.ts` on the x264 backend (2026-10-20); the NAS run (Quick Sync throughput, over-budget counts, the three-viewer load) is pending. Phase 2 (the client side, §7) waits for BD-J 5e's MPEG-2/VC-1 change.
+Status: Approved by the user 2026-10-19. Phase 1 (the NAS side) is deployed and checked on the NAS on 2026-10-20 with `verify-level`. Every rewritten EP entry was an IDR at its PTS, decoding was clean, and the bytes matched the manifest on: a 1080p H.264 film at h264-1080 (4.6× real time) and a music disc at phone-720 (7.3×), an MPEG-2 film at h264-1080 (4.5×), and a UHD HDR10 film at h264-1080-sdr (1.5×); three fresh viewings at once ran at 2.0–2.3× real time each. Two production fixes followed the first run: QSV rounds frame PTS to the grid, so PTS is restored from the source; and per-interval budgets now merge intervals under 2 s and scale with the stream mix (§5.2, no scan, the user's choice: no first-open wait). Phase 2 (§7, the UI) waits for BD-J 5e's MPEG-2/VC-1 merge.
 Parent spec: `2026-10-16-cross-browser-and-remote-design.md` §6 (step 4 sketch). Builds on `2026-10-18-webrtc-people-design.md` (people, the WebRTC route, buffer-first). Where this document and the parent disagree, this one wins for step 4.
 
 ## 1. Intent
