@@ -359,6 +359,8 @@ class Run {
   private encoderEnded = false;
   private busy = false;
   private stopped = false;
+  /** Aborted by `stop()`: stops an over-budget re-encode still running. */
+  private readonly stopping = new AbortController();
 
   constructor(
     private readonly from: number,
@@ -410,6 +412,7 @@ class Run {
 
   stop(): void {
     this.stopped = true;
+    this.stopping.abort();
     this.encoder?.stop();
     this.encoder = null;
     this.stream?.destroy();
@@ -520,7 +523,7 @@ class Run {
     if ('bytes' in first) return first.bytes;
     const options = this.options!;
     const rateBps = options.rateBps ?? options.level.targetBps;
-    const retried = await encodeIntervalAt(this.deps.backend, options, plan.index, { rateBps, overflowBytes: first.overflow }, (v) => remuxInterval(input(v)));
+    const retried = await encodeIntervalAt(this.deps.backend, options, plan.index, { rateBps, overflowBytes: first.overflow }, (v) => remuxInterval(input(v)), this.stopping.signal);
     this.deps.log(`levels: interval ${plan.index} overflowed its budget by ${first.overflow} bytes; re-encoded at ${retried.rateBps} bps`);
     return retried.bytes;
   }

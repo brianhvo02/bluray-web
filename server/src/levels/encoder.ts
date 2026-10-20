@@ -536,13 +536,28 @@ export const MIN_RETRY_RATE_BPS = 1_000_000;
 const RETRY_MARGIN = 0.95;
 
 /** Encodes one interval of a clip at `rateBps` (a run of that interval alone) and returns its video. */
-function encodeOne(backend: EncoderBackend, options: ClipEncoderOptions, index: number, rateBps: number): Promise<EncodedPes[]> {
+function encodeOne(backend: EncoderBackend, options: ClipEncoderOptions, index: number, rateBps: number, signal?: AbortSignal): Promise<EncodedPes[]> {
   return new Promise((resolve, reject) => {
+    const stopped = (): Error => new Error(`levels: the re-encode of interval ${index} was stopped`);
+    if (signal?.aborted) return reject(stopped());
     const encoder = new ClipEncoder(backend, { ...options, rateBps, maxIntervalsPerRun: 1 });
+    const onAbort = (): void => {
+      encoder.stop();
+      reject(stopped());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const settle = (): void => signal?.removeEventListener('abort', onAbort);
     let video: EncodedPes[] | null = null;
     encoder.on('interval', (_, v) => (video = v));
-    encoder.on('error', reject);
-    encoder.on('end', () => (video ? resolve(video) : reject(new Error(`levels: the encode ended without interval ${index}`))));
+    encoder.on('error', (err) => {
+      settle();
+      reject(err);
+    });
+    encoder.on('end', () => {
+      settle();
+      if (video) resolve(video);
+      else reject(new Error(`levels: the encode ended without interval ${index}`));
+    });
     encoder.start(index);
   });
 }
@@ -551,7 +566,7 @@ function encodeOne(backend: EncoderBackend, options: ClipEncoderOptions, index: 
  * The over-budget retry (Review Focus 1): re-encodes interval `index` at `rate × (budget ÷ actual) × 0.95`, where
  * `actual` is the re-muxed size the last try needed (budget + overflow), down to a floor of 1 Mbps, until `remux` fits
  * it into the plan's budget. One try is always made, at the floor at least. Throws when it doesn't fit at the floor: an
- * interval is never served truncated or oversized.
+ * interval is never served truncated or oversized. An abort of `signal` (its run stopped) kills the ffmpeg and rejects.
  */
 export async function encodeIntervalAt(
   backend: EncoderBackend,
@@ -559,6 +574,7 @@ export async function encodeIntervalAt(
   index: number,
   overflowed: { readonly rateBps: number; readonly overflowBytes: number },
   remux: (video: readonly EncodedPes[]) => { bytes: Uint8Array } | { overflow: number },
+  signal?: AbortSignal,
 ): Promise<{ bytes: Uint8Array; rateBps: number }> {
   const plan = options.intervals[index];
   if (!plan) throw new Error(`levels: the clip has no interval ${index}`);
@@ -567,7 +583,7 @@ export async function encodeIntervalAt(
   let overflow = overflowed.overflowBytes;
   do {
     rate = Math.max(MIN_RETRY_RATE_BPS, Math.round(((rate * budget) / (budget + overflow)) * RETRY_MARGIN));
-    const result = remux(await encodeOne(backend, options, index, rate));
+    const result = remux(await encodeOne(backend, options, index, rate, signal));
     if ('bytes' in result) return { bytes: result.bytes, rateBps: rate };
     overflow = result.overflow;
   } while (rate > MIN_RETRY_RATE_BPS);

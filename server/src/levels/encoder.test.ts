@@ -583,3 +583,32 @@ describe('probeScan: a stuck ffprobe', () => {
     expect(signals).toEqual(['SIGKILL']);
   });
 });
+
+describe('encodeIntervalAt: tied to its run', () => {
+  it('kills its ffmpeg and rejects when the run’s signal aborts', async () => {
+    const signals: (string | undefined)[] = [];
+    const spawn = (() => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        stdin: null,
+        kill: (signal?: string): boolean => {
+          signals.push(signal);
+          setImmediate(() => child.emit('close', null, signal));
+          return true;
+        },
+      });
+      return child;
+    }) as unknown as typeof nodeSpawn;
+    const intervals = intervalsOf('disc-levels');
+    const level = levelDefFor('h264-1080', { height: 1080 });
+    const options: ClipEncoderOptions = { input: { path: clipPath('disc-levels') }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, spawn };
+    const controller = new AbortController();
+    const encoding = encodeIntervalAt(x264Backend, options, 3, { rateBps: level.targetBps, overflowBytes: 1000 }, () => ({ overflow: 1 }), controller.signal);
+    const settled = encoding.catch((e: unknown) => e);
+    await new Promise((r) => setImmediate(r));
+    controller.abort();
+    expect(await settled).toBeInstanceOf(Error);
+    expect(signals).toContain('SIGKILL');
+  });
+});
