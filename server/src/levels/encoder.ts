@@ -84,15 +84,20 @@ const QSV_DECODERS = new Map<number, string>([
   [CodingType.VC1, 'vc1_qsv'],
 ]);
 
-/** The QSV video filter: scale (and P010 for HDR), deinterlace, or tone-map, as the level and source need. */
+/** Whether an HDR clip is tone-mapped: at every SDR level, not only the one made for it (a disc's other clips may be HDR). */
+const tonemaps = (input: EncoderArgsInput): boolean => input.hdr && !input.level.hdr;
+
+/**
+ * The QSV video filter: scale (and P010 for HDR; NV12 from HEVC, which may be 10-bit, to H.264), deinterlace, or
+ * tone-map, as the level and source need.
+ */
 function qsvFilter(input: EncoderArgsInput): string {
   const { level } = input;
   const size = `w=${level.width}:h=${level.height}`;
-  const tonemap = input.hdr && level.tonemap;
   const p010 = input.hdr && level.hdr;
   const deinterlace = input.interlaced ? 'deinterlace=2:' : '';
-  if (tonemap) return `vpp_qsv=${deinterlace}${size}:format=nv12:tonemap=1:out_color_matrix=bt709:out_color_primaries=bt709:out_color_transfer=bt709`;
-  const format = p010 ? ':format=p010' : '';
+  if (tonemaps(input)) return `vpp_qsv=${deinterlace}${size}:format=nv12:tonemap=1:out_color_matrix=bt709:out_color_primaries=bt709:out_color_transfer=bt709`;
+  const format = p010 ? ':format=p010' : level.codec === 'h264' && input.sourceCoding === CodingType.HEVC ? ':format=nv12' : '';
   if (input.interlaced) return `vpp_qsv=${deinterlace}${size}${format}`;
   return `scale_qsv=${size}${format}`;
 }
@@ -113,7 +118,7 @@ export const qsvBackend: EncoderBackend = {
     const preset = level.codec === 'h264' ? 'medium' : 'veryfast';
     const colour = hdr
       ? ['-color_primaries', 'bt2020', '-color_trc', 'smpte2084', '-colorspace', 'bt2020nc']
-      : input.hdr && level.tonemap
+      : tonemaps(input)
         ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
         : [];
     return [

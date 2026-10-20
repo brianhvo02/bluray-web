@@ -115,6 +115,23 @@ describe('qsvBackend arguments', () => {
     ]);
   });
 
+  it('tone-maps an HDR clip at any SDR level (one of a disc whose main clip is SDR), and tags it BT.709', () => {
+    const args = qsvBackend.args(argsInput(levelDefFor('h264-1080', { height: 1080 }), { hdr: true, sourceCoding: CodingType.HEVC }));
+    expect(args).toContain('vpp_qsv=w=1920:h=1080:format=nv12:tonemap=1:out_color_matrix=bt709:out_color_primaries=bt709:out_color_transfer=bt709');
+    expect(args.join(' ')).toContain('-color_primaries bt709 -color_trc bt709 -colorspace bt709');
+    expect(qsvBackend.args(argsInput(levelDefFor('hevc-1080', { height: 1080 }), { hdr: true, sourceCoding: CodingType.HEVC }))).toContain(
+      'vpp_qsv=w=1920:h=1080:format=nv12:tonemap=1:out_color_matrix=bt709:out_color_primaries=bt709:out_color_transfer=bt709',
+    );
+  });
+
+  it('asks for NV12 from an SDR HEVC source to H.264 (a 10-bit source would hand h264_qsv P010)', () => {
+    expect(qsvBackend.args(argsInput(levelDefFor('h264-1080', { height: 1080 }), { sourceCoding: CodingType.HEVC }))).toContain('scale_qsv=w=1920:h=1080:format=nv12');
+    expect(qsvBackend.args(argsInput(levelDefFor('h264-1080', { height: 1080 }), { sourceCoding: CodingType.HEVC, interlaced: true }))).toContain(
+      'vpp_qsv=deinterlace=2:w=1920:h=1080:format=nv12',
+    );
+    expect(qsvBackend.args(argsInput(levelDefFor('hevc-1080', { height: 1080 }), { sourceCoding: CodingType.HEVC }))).toContain('scale_qsv=w=1920:h=1080');
+  });
+
   it('names the QSV decoder of the source before the input', () => {
     const level = levelDefFor('h264-1080', { height: 1080 });
     const decoderOf = (sourceCoding: number): string | undefined => {
