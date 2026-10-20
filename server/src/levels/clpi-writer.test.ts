@@ -5,7 +5,7 @@ import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import { buildClpi } from '../../../tests/helpers/bdmv-builders';
 import { rewriteClpi } from './clpi-writer';
 import type { IntervalPlan } from './levels';
-import { LEVELS, planClip } from './levels';
+import { LEVELS, coreCoding, maxBudgetRate, planClip } from './levels';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(join(FIXTURES, path)));
@@ -16,7 +16,7 @@ describe('rewriteClpi', () => {
     const before = parseClpi(bytes);
     const level = LEVELS['h264-1080'];
     const plan = planClip(before, level, 448_000);
-    const out = rewriteClpi(bytes, { intervals: plan.intervals, level, keepPids: [0x1100], videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 4 });
+    const out = rewriteClpi(bytes, { intervals: plan.intervals, level, keepPids: [], audio: { pid: 0x1100, newCoding: 0x81 }, videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 4 });
     const after = parseClpi(out);
 
     const video = after.programs[0]!.streams.find((s) => s.pid === 0x1011)!;
@@ -28,7 +28,7 @@ describe('rewriteClpi', () => {
     expect(after.epMaps[0]!.entries.map((e) => e.spn)).toEqual(plan.intervals.map((iv) => iv.spnStart));
     expect(after.numSourcePackets).toBe(plan.sizeBytes / 192);
     expect(after.atcSequences).toEqual(before.atcSequences);
-    expect(after.recordingRate).toBe(before.recordingRate);
+    expect(after.programs[0]!.streams[1]).toEqual(before.programs[0]!.streams[1]); // AC-3 stays as it is
   });
 
   it('drops the commentary and picture-in-picture streams and keeps the PG streams (Review Focus 4)', () => {
@@ -36,12 +36,30 @@ describe('rewriteClpi', () => {
     const before = parseClpi(bytes);
     const level = LEVELS['phone-720'];
     const plan = planClip(before, level, 640_000);
-    const out = rewriteClpi(bytes, { intervals: plan.intervals, level, keepPids: [0x1100, 0x1200, 0x1201], videoPid: 0x1011, newCoding: 0x1b, newFormat: 5, newRate: 1 });
+    const out = rewriteClpi(bytes, { intervals: plan.intervals, level, keepPids: [0x1200, 0x1201], audio: { pid: 0x1100, newCoding: coreCoding(0x83) }, videoPid: 0x1011, newCoding: 0x1b, newFormat: 5, newRate: 1 });
     const streams = parseClpi(out).programs[0]!.streams;
     expect(streams.map((s) => s.pid)).toEqual([0x1011, 0x1100, 0x1200, 0x1201]);
     expect(streams.find((s) => s.pid === 0x1011)).toMatchObject({ codingType: 0x1b, format: 5, rate: 1 });
     const pg = before.programs[0]!.streams.filter((s) => s.codingType === 0x90);
     expect(streams.filter((s) => s.codingType === 0x90)).toEqual(pg);
+    // the TrueHD track travels as its AC-3 core: same channel layout and language, 48 kHz
+    const truehd = before.programs[0]!.streams.find((s) => s.pid === 0x1100)!;
+    expect(truehd.codingType).toBe(0x83);
+    expect(streams.find((s) => s.pid === 0x1100)).toEqual({ ...truehd, codingType: 0x81, rate: 1 });
+  });
+
+  it('sets the recording rate to the highest per-interval budget rate, in bytes per second', () => {
+    const bytes = read('disc-levels/BDMV/CLIPINF/00001.clpi');
+    const before = parseClpi(bytes);
+    const level = LEVELS['h264-1080'];
+    const plan = planClip(before, level, 640_000);
+    const out = parseClpi(rewriteClpi(bytes, { intervals: plan.intervals, level, keepPids: [], audio: { pid: 0x1100, newCoding: 0x81 }, videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 1 }));
+    const expected = Math.max(...plan.intervals.map((iv) => Math.ceil((iv.budgetBytes * 45_000) / (iv.endPts45 - iv.startPts45))));
+    expect(out.recordingRate).toBe(expected);
+    expect(maxBudgetRate(plan.intervals)).toBe(expected);
+    // at least the level's budget rate (peak + audio + graphics allowance), never the source's 48 MB/s
+    expect(out.recordingRate).toBeGreaterThanOrEqual((level.peakBps + 640_000 + 1_500_000) / 8);
+    expect(out.recordingRate).toBeLessThan(before.recordingRate);
   });
 
   it('is byte-identical at the original level', () => {
@@ -62,13 +80,16 @@ describe('rewriteClpi', () => {
       // the last interval ends at numSourcePackets, so the size is unchanged
       const video = c.programs[0]!.streams[0]!;
       const keepPids = c.programs[0]!.streams.map((s) => s.pid);
-      const out = rewriteClpi(bytes, { intervals, level: LEVELS['h264-1080'], keepPids, videoPid: video.pid, newCoding: video.codingType, newFormat: video.format, newRate: video.rate });
+      const audio = c.programs[0]!.streams.find((s) => s.pid === 0x1100)!;
+      const out = rewriteClpi(bytes, { intervals, level: LEVELS['h264-1080'], keepPids, audio: { pid: audio.pid, newCoding: audio.codingType }, videoPid: video.pid, newCoding: video.codingType, newFormat: video.format, newRate: video.rate });
       // the identity plan's first interval starts at its EP entry, not at packet 0, so only the
       // sequence and program starts (packet 0) move; everything else is the same bytes
       expect(out.length).toBe(bytes.length);
       expect(section(out, 16)).toEqual(section(bytes, 16));
       expect(section(out, 12).subarray(10)).toEqual(section(bytes, 12).subarray(10));
-      expect(out.subarray(0, u32(bytes, 8))).toEqual(bytes.subarray(0, u32(bytes, 8)));
+      // the header and ClipInfo match except TS_recording_rate (bytes 52–55), which the plan sets
+      expect(out.subarray(0, 52)).toEqual(bytes.subarray(0, 52));
+      expect(out.subarray(56, u32(bytes, 8))).toEqual(bytes.subarray(56, u32(bytes, 8)));
       expect(parseClpi(out).programs[0]!.spnProgramSequenceStart).toBe(entries[0]!.spn);
     }
   });
@@ -101,7 +122,7 @@ describe('rewriteClpi', () => {
       budgetBytes: ((newSpns[i + 1] ?? 0x4_0001 + 32) - newSpns[i]!) * 192,
       spnStart: newSpns[i]!,
     }));
-    const out = rewriteClpi(bytes, { intervals, level: LEVELS['h264-1080'], keepPids: [], videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 1 });
+    const out = rewriteClpi(bytes, { intervals, level: LEVELS['h264-1080'], keepPids: [], audio: { pid: 0x1100, newCoding: 0x81 }, videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 1 });
     const after = parseClpi(out);
     expect(after.epMaps[0]!.entries).toEqual(entries.map((e, i) => ({ pts: e.pts, spn: newSpns[i] })));
     expect(after.numSourcePackets).toBe(0x4_0001 + 32);
@@ -116,7 +137,7 @@ describe('rewriteClpi', () => {
     const c = parseClpi(withExt);
     const level = LEVELS['h264-1080'];
     const plan = planClip(c, level, 640_000);
-    const out = rewriteClpi(withExt, { intervals: plan.intervals, level, keepPids: [0x1100], videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 1 });
+    const out = rewriteClpi(withExt, { intervals: plan.intervals, level, keepPids: [], audio: { pid: 0x1100, newCoding: 0x81 }, videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 1 });
     const extAt = u32(out, 24);
     expect(extAt).toBeGreaterThan(0);
     expect(out[extAt + 11]).toBe(1); // one entry left

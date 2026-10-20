@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { parseMpls } from '../../../src/engine/bdmv/mpls-parser';
 import { buildMpls } from '../../../tests/helpers/bdmv-builders';
 import type { PlayItemSpec } from '../../../tests/helpers/bdmv-builders';
+import { coreCoding } from './levels';
 import { rewriteMpls } from './mpls-writer';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
@@ -14,7 +15,7 @@ describe('rewriteMpls', () => {
   it('keeps the chosen audio, both PG streams and no secondary video (Review Focus 4)', () => {
     const bytes = read('disc-levels/BDMV/PLAYLIST/00000.mpls');
     const before = parseMpls(bytes);
-    const out = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 2 }, H264_1080P));
+    const out = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 2, newCoding: 0x81 }, H264_1080P));
     const stn = out.playItems[0]!.stn;
     expect(stn.audio).toEqual([before.playItems[0]!.stn.audio[1]]);
     expect(stn.audio[0]!.pid).toBe(0x1101);
@@ -28,10 +29,18 @@ describe('rewriteMpls', () => {
     expect(out.uoMask).toEqual(before.uoMask);
   });
 
+  it('carries the TrueHD track as its AC-3 core, keeping its channel layout and language', () => {
+    const bytes = read('disc-levels/BDMV/PLAYLIST/00000.mpls');
+    const truehd = parseMpls(bytes).playItems[0]!.stn.audio[0]!;
+    expect(truehd.codingType).toBe(0x83);
+    const out = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 1, newCoding: coreCoding(0x83) }, H264_1080P));
+    expect(out.playItems[0]!.stn.audio).toEqual([{ ...truehd, codingType: 0x81, rate: 1 }]);
+  });
+
   it('rewrites MPEG-2 1080i as H.264 1080p 29.97 (Review Focus 3)', () => {
     const bytes = read('disc-mpeg2/BDMV/PLAYLIST/00000.mpls');
     const before = parseMpls(bytes);
-    const after = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 1 }, { newCoding: 0x1b, newFormat: 6, newRate: 4 }));
+    const after = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 1, newCoding: 0x81 }, { newCoding: 0x1b, newFormat: 6, newRate: 4 }));
     expect(before.playItems[0]!.stn.video[0]).toMatchObject({ codingType: 0x02, format: 4, rate: 4 });
     expect(after.playItems[0]!.stn.video[0]).toMatchObject({ codingType: 0x1b, format: 6, rate: 4 });
     expect(after.playItems[0]!.stn.audio).toEqual(before.playItems[0]!.stn.audio);
@@ -61,13 +70,13 @@ describe('rewriteMpls', () => {
       marks: [{ playItemRef: 0, time: 0 }, { playItemRef: 1, time: 1_000_000 }],
     });
     const before = parseMpls(bytes);
-    const after = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 1 }, H264_1080P));
+    const after = parseMpls(rewriteMpls(bytes, { audioStreamNumber: 1, newCoding: coreCoding(0x86) }, H264_1080P));
     expect(after.playItems).toHaveLength(2);
     after.playItems.forEach((pi, i) => {
       const b = before.playItems[i]!;
       expect({ ...pi, stn: undefined }).toEqual({ ...b, stn: undefined });
       expect(pi.stn.video[0]).toMatchObject({ codingType: 0x1b, format: 6, rate: 1 });
-      expect(pi.stn.audio.map((a) => a.pid)).toEqual([0x1100]);
+      expect(pi.stn.audio).toEqual([{ ...b.stn.audio[0]!, codingType: 0x82, rate: 1 }]); // DTS-HD MA as its DTS core
       expect(pi.stn.pg).toEqual(b.stn.pg);
       expect(pi.stn.pipPg).toEqual(b.stn.pipPg);
       expect(pi.stn.ig).toEqual(b.stn.ig);
@@ -83,15 +92,15 @@ describe('rewriteMpls', () => {
     // set dynamic_range_type and color_space on the HEVC entry (the byte after format/rate)
     const at = findVideoAttr(bytes);
     bytes[at + 2] = 0x12;
-    const h264 = rewriteMpls(bytes, { audioStreamNumber: 1 }, H264_1080P);
+    const h264 = rewriteMpls(bytes, { audioStreamNumber: 1, newCoding: 0x81 }, H264_1080P);
     expect(h264[findVideoAttr(h264) + 2]).toBe(0);
-    const hevc = rewriteMpls(bytes, { audioStreamNumber: 1 }, { newCoding: 0x24, newFormat: 6, newRate: 1 });
+    const hevc = rewriteMpls(bytes, { audioStreamNumber: 1, newCoding: 0x81 }, { newCoding: 0x24, newFormat: 6, newRate: 1 });
     expect(hevc[findVideoAttr(hevc) + 2]).toBe(0x12);
   });
 
   it('refuses an audio stream number the playlist does not have', () => {
     const bytes = read('disc-mpeg2/BDMV/PLAYLIST/00000.mpls');
-    expect(() => rewriteMpls(bytes, { audioStreamNumber: 2 }, H264_1080P)).toThrow(/audio stream 2/);
+    expect(() => rewriteMpls(bytes, { audioStreamNumber: 2, newCoding: 0x81 }, H264_1080P)).toThrow(/audio stream 2/);
   });
 });
 

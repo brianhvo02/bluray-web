@@ -61,6 +61,32 @@ export function videoAttrsFor(level: LevelDef, sourceRate: number): { newCoding:
   };
 }
 
+/**
+ * The coding type of what a level carries for a kept audio stream: TrueHD travels as its AC-3
+ * substream, DTS-HD as its DTS core; everything else as it is.
+ */
+export function coreCoding(codingType: number): number {
+  if (codingType === CodingType.TRUEHD) return CodingType.AC3;
+  if (codingType === CodingType.DTSHD || codingType === CodingType.DTSHD_MASTER) return CodingType.DTS;
+  return codingType;
+}
+
+/** BD audio sample-rate code for 48 kHz, the rate of every AC-3 and DTS core. */
+export const AUDIO_RATE_48K = 1;
+
+/**
+ * The level's TS_recording_rate, bytes per second: the highest rate any interval's budget
+ * stands for (budget ÷ duration), rounded up.
+ */
+export function maxBudgetRate(intervals: readonly IntervalPlan[]): number {
+  let max = 0;
+  for (const iv of intervals) {
+    const duration = iv.endPts45 - iv.startPts45;
+    if (duration > 0) max = Math.max(max, Math.ceil((iv.budgetBytes * PTS45_HZ) / duration));
+  }
+  return max;
+}
+
 /** One EP interval of a clip: the bytes from one video EP entry to the next, and its place at a level. */
 export interface IntervalPlan {
   readonly index: number;

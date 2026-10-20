@@ -10,7 +10,7 @@ import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import type { EpEntry } from '../../../src/engine/bdmv/clpi-parser';
 import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import type { IntervalPlan, LevelDef } from './levels';
-import { SOURCE_PACKET_BYTES, mapSpn, mapSpnDown } from './levels';
+import { AUDIO_RATE_48K, SOURCE_PACKET_BYTES, mapSpn, mapSpnDown, maxBudgetRate } from './levels';
 import { BeWriter, readU16, readU32, rebuildSections, sectionBytes, writeU32 } from './sections';
 
 export type ClpiRewrite =
@@ -20,6 +20,8 @@ export type ClpiRewrite =
       readonly level: LevelDef;
       /** The streams kept besides the video (the chosen audio, PG, IG). */
       readonly keepPids: readonly number[];
+      /** The kept audio stream and the coding it travels as (`coreCoding`). */
+      readonly audio: { readonly pid: number; readonly newCoding: number };
       readonly videoPid: number;
       readonly newCoding: number;
       readonly newFormat: number;
@@ -33,12 +35,13 @@ const CPI_AT = 16;
 const CLIP_MARK_AT = 20;
 const EXTENSION_AT = 24;
 /** ClipInfo's number_of_source_packets (ClipInfo starts at 40). */
+const RECORDING_RATE_AT = 52;
 const NUM_SOURCE_PACKETS_AT = 56;
 
 /**
  * The CLPI of a clip at a level: the video's EP map regenerated from the plan, dropped streams
- * gone from the program info, the video's coding, format and rate set, the source packet count
- * set, sequence and program starts moved to their new packets, and every section address fixed.
+ * gone from the program info, the video's coding, format and rate set, the kept audio's coding
+ * set to its core, the recording rate and source packet count set, sequence and program starts moved to their new packets, and every section address fixed.
  * At `original` it is the file unchanged.
  */
 export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array {
@@ -47,7 +50,7 @@ export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array
   if (intervals.length === 0) throw new Error('levels: an empty plan');
   const last = intervals.at(-1)!;
   const numSourcePackets = last.spnStart + last.budgetBytes / SOURCE_PACKET_BYTES;
-  const keep = new Set([videoPid, ...plan.keepPids]);
+  const keep = new Set([videoPid, plan.audio.pid, ...plan.keepPids]);
   const parsed = parseClpi(original);
 
   const replace = new Map<number, Uint8Array | null>();
@@ -75,6 +78,8 @@ export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array
   if (extAt) replace.set(EXTENSION_AT, rewriteExtension(sectionBytes(original, extAt)));
 
   const out = rebuildSections(original, [SEQUENCE_AT, PROGRAM_AT, CPI_AT, CLIP_MARK_AT, EXTENSION_AT], replace);
+  const recordingRate = maxBudgetRate(intervals);
+  if (recordingRate > 0) writeU32(out, RECORDING_RATE_AT, recordingRate);
   writeU32(out, NUM_SOURCE_PACKETS_AT, numSourcePackets);
   return out;
 }
@@ -106,7 +111,7 @@ function rewriteProgramInfo(
   section: Uint8Array,
   intervals: readonly IntervalPlan[],
   keep: ReadonlySet<number>,
-  plan: { videoPid: number; newCoding: number; newFormat: number; newRate: number },
+  plan: { videoPid: number; newCoding: number; newFormat: number; newRate: number; audio: { pid: number; newCoding: number } },
 ): Uint8Array {
   const w = new BeWriter();
   w.u32(0).bytes(section.subarray(4, 6)); // length, reserved
@@ -125,6 +130,7 @@ function rewriteProgramInfo(
       if (keep.has(pid)) {
         const entry = section.slice(at, end);
         if (pid === plan.videoPid) setVideoAttrs(entry.subarray(3), plan, true);
+        else if (pid === plan.audio.pid) setAudioCoding(entry.subarray(3), plan.audio.newCoding);
         w.bytes(entry);
         kept++;
       }
@@ -154,6 +160,17 @@ export function setVideoAttrs(attr: Uint8Array, video: { newCoding: number; newF
   } else {
     attr.fill(0, 2, Math.min(attr.length, 4));
   }
+}
+
+/**
+ * Sets an audio stream's coding type in its coding attributes (after the length byte), keeping
+ * the channel layout and language. A stream reduced to its core is 48 kHz, so its rate code
+ * changes with it.
+ */
+export function setAudioCoding(attr: Uint8Array, newCoding: number): void {
+  if (attr[0] === newCoding) return;
+  attr[0] = newCoding;
+  attr[1] = (attr[1]! & 0xf0) | AUDIO_RATE_48K;
 }
 
 /** The 4 leading bits (is_angle_change_point, I_end_position_offset) of each fine entry of a PID. */

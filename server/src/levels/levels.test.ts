@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { Clpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
-import { LEVELS, levelsFor, mapSpn, planClip, videoAttrsFor } from './levels';
+import { LEVELS, coreCoding, levelsFor, mapSpn, planClip, videoAttrsFor } from './levels';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
 
@@ -102,5 +102,14 @@ describe('videoAttrsFor', () => {
     expect(videoAttrsFor(LEVELS['h264-1080'], 4)).toEqual({ newCoding: 0x1b, newFormat: 6, newRate: 4 });
     expect(videoAttrsFor(LEVELS['phone-720'], 1)).toEqual({ newCoding: 0x1b, newFormat: 5, newRate: 1 });
     expect(videoAttrsFor(LEVELS['hevc-1080'], 3)).toEqual({ newCoding: 0x24, newFormat: 6, newRate: 3 });
+  });
+});
+
+describe('coreCoding', () => {
+  it('carries TrueHD as AC-3 and DTS-HD as DTS, and the rest as they are', () => {
+    expect(coreCoding(0x83)).toBe(0x81);
+    expect(coreCoding(0x85)).toBe(0x82);
+    expect(coreCoding(0x86)).toBe(0x82);
+    for (const c of [0x80, 0x81, 0x82, 0x84]) expect(coreCoding(c)).toBe(c);
   });
 });
