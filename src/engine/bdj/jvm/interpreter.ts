@@ -1438,6 +1438,12 @@ function run(jvm: Jvm, t: JThread, budget: number): ExitReason {
             if (o === null) throw new PendingThrow('java/lang/NullPointerException');
             jvm.threads.monitorExit(t, o);
             pc++;
+            if (jvm.threads.preempted) {
+              // the monitor passed to another thread, which runs first (Ruling R19)
+              f.pc = pc;
+              f.sp = sp;
+              return 'budget';
+            }
             break;
           }
           case 0xc4: { // wide

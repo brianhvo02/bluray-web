@@ -18,7 +18,7 @@ const BOOT = [
   jar('../../../bdj-classlib/rt-bdj.jar'),
 ];
 
-const ICONST_0 = 0x03, ICONST_1 = 0x04, BIPUSH = 0x10, SIPUSH = 0x11, LDC_W = 0x13, LDC2_W = 0x14;
+const ICONST_0 = 0x03, ICONST_1 = 0x04, ICONST_2 = 0x05, BIPUSH = 0x10, SIPUSH = 0x11, LDC_W = 0x13, LDC2_W = 0x14;
 const ILOAD_0 = 0x1a, ALOAD_0 = 0x2a, ALOAD_1 = 0x2b, ISTORE_0 = 0x3b, ASTORE_0 = 0x4b, ASTORE_1 = 0x4c;
 const POP = 0x57, DUP = 0x59, IADD = 0x60, IMUL = 0x68, IINC = 0x84, IFNE = 0x9a, IF_ICMPGE = 0xa2, GOTO = 0xa7;
 const IRETURN = 0xac, RETURN = 0xb1, GETSTATIC = 0xb2, PUTSTATIC = 0xb3, INVOKEVIRTUAL = 0xb6, INVOKESTATIC = 0xb8;
@@ -62,6 +62,34 @@ const T_METHODS: AsmMethod[] = [
       GETSTATIC, flag, IFNE, 0, 10, // 6
       ALOAD_0, INVOKEVIRTUAL, method('java/lang/Object', 'wait', '()V'), GOTO, 0xff, 0xf6, // 12
       ICONST_1, PUTSTATIC, done, ALOAD_0, MONITOREXIT, RETURN, // 19
+    ],
+  },
+  {
+    // waits until flag is set, then records n as it finds it (a MediaTracker waiter reading an image's status)
+    name: 'observer', desc: '()V', code: [
+      LDC_W, TCLASS, DUP, ASTORE_0, MONITORENTER, // 0
+      GETSTATIC, flag, IFNE, 0, 10, // 6
+      ALOAD_0, INVOKEVIRTUAL, method('java/lang/Object', 'wait', '()V'), GOTO, 0xff, 0xf6, // 12
+      GETSTATIC, n, PUTSTATIC, done, ALOAD_0, MONITOREXIT, RETURN, // 19
+    ],
+  },
+  {
+    // sets n to 1 and notifies under the monitor, then, released, goes on and sets n to 2 (an image fetcher reporting
+    // complete, then its late error)
+    name: 'producer', desc: '()V', code: [
+      LDC_W, TCLASS, DUP, ASTORE_0, MONITORENTER,
+      ICONST_1, PUTSTATIC, n, ICONST_1, PUTSTATIC, flag, ALOAD_0, INVOKEVIRTUAL, method('java/lang/Object', 'notifyAll', '()V'),
+      ALOAD_0, MONITOREXIT,
+      ICONST_2, PUTSTATIC, n, RETURN,
+    ],
+  },
+  {
+    // the same through a synchronized method: the monitor passes on at its return
+    name: 'producerSync', desc: '()V', code: [INVOKESTATIC, method('T', 'markSync', '()V'), ICONST_2, PUTSTATIC, n, RETURN],
+  },
+  {
+    name: 'markSync', desc: '()V', access: ACC_PUBLIC_STATIC | ACC_SYNCHRONIZED, code: [
+      ICONST_1, PUTSTATIC, n, ICONST_1, PUTSTATIC, flag, LDC_W, TCLASS, INVOKEVIRTUAL, method('java/lang/Object', 'notifyAll', '()V'), RETURN,
     ],
   },
   {
@@ -174,6 +202,19 @@ describe('yielding to the event loop', () => {
 });
 
 describe('monitors', () => {
+  it('a monitor hand-off lets the woken waiter run before the thread that released it goes on (Ruling R19)', async () => {
+    for (const producer of ['producer', 'producerSync']) {
+      const { jvm, clock, spawn, get } = setup();
+      const w = spawn('observer');
+      const p = spawn(producer);
+      expect(await runWithClock(jvm, clock)).toBe('idle');
+      expect([w.uncaught, p.uncaught]).toEqual([null, null]);
+      // the waiter sees the state the producer notified, as HotSpot's waiter, running in parallel, does
+      expect(get('done')).toBe(1);
+      expect(get('n')).toBe(2);
+    }
+  });
+
   it('two threads incrementing under the same monitor reach 20,000', async () => {
     const { jvm, clock, spawn, get } = setup();
     const a = spawn('blockLoop');
