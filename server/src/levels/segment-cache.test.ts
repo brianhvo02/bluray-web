@@ -26,6 +26,16 @@ describe('SegmentCache', () => {
     expect(files.some((f) => f.endsWith('.tmp'))).toBe(false);
   });
 
+  it('knows which intervals it holds, from this run and earlier ones', async () => {
+    const cache = new SegmentCache(dir, 1 << 20);
+    const key = cache.key('a1b2c3', 'h264-1080', 1, '00001', 1000, 5000);
+    expect(await cache.has(key, 2)).toBe(false);
+    await cache.put(key, 2, bytes(10, 1));
+    expect(await cache.has(key, 2)).toBe(true);
+    expect(await cache.has(key, 3)).toBe(false);
+    expect(await new SegmentCache(dir, 1 << 20).has(key, 2)).toBe(true);
+  });
+
   it('misses when the clip changed size or mtime', async () => {
     const cache = new SegmentCache(dir, 1 << 20);
     await cache.put(cache.key('a1b2c3', 'h264-1080', 1, '00001', 1000, 5000), 0, bytes(10, 1));

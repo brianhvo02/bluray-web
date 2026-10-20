@@ -43,6 +43,12 @@ export class SegmentCache {
     ].join('/');
   }
 
+  /** Whether an interval is stored, as far as the cache knows (a file removed behind its back reads as a miss in `get`). */
+  async has(key: string, index: number): Promise<boolean> {
+    await this.load();
+    return this.files.has(this.pathOf(key, index));
+  }
+
   async get(key: string, index: number): Promise<Buffer | null> {
     await this.load();
     const path = this.pathOf(key, index);
