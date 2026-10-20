@@ -1,4 +1,6 @@
 # Lives on the NAS as ~/bluray-server/compose.yaml; written by deploy.sh.
+# With the GPU (/dev/dri/renderD128) a manual restart must include the override, or the quality levels lose it:
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
 services:
   bluray-server:
     image: bluray-server:latest

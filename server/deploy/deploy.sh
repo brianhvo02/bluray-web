@@ -56,6 +56,9 @@ fi
 ssh "$HOST" "docker exec bluray-server sh -c 'test -f /data/auth.step2.json || ! test -f /data/auth.json || cp /data/auth.json /data/auth.step2.json'" \
   || echo "    (no running bluray-server: no rollback copy of auth.json made)"
 ssh "$HOST" "cd $REMOTE_DIR && docker compose $COMPOSE_FILES up -d"
+if [[ "$COMPOSE_FILES" == *compose.gpu.yaml* ]]; then
+  echo "    A manual restart must include the GPU override: cd $REMOTE_DIR && docker compose -f compose.yaml -f compose.gpu.yaml up -d"
+fi
 
 echo "==> Routing /bluray/* in Caddy"
 ssh "$HOST" 'bash -s' < server/deploy/caddy-route.sh
