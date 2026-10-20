@@ -21,6 +21,8 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0 # allowScripts in package.json needs npm 11.19
       - run: npm ci
+      # The NAS encoder's tests run ffmpeg with libx264 (server/src/levels/encoder.test.ts).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npm run typecheck
       - run: npm test
 
