@@ -5,8 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MuxConflict, stunIntegrityVerifies, UdpMux } from './udp-mux';
 import type { MuxOwner, MuxTransport } from './udp-mux';
 
-// Port 47990 is this file's own (the tests' range is 47990–47997).
-const PORT = 47990;
+// An ephemeral port (0): a fixed one could clash with the NAS E2E stand-in (47990) or another checkout's run.
 
 /** A STUN Binding request with USERNAME and a MESSAGE-INTEGRITY under `password` (corrupted when `forge`). */
 function bindingRequest(username: string, password: string, opts: { forge?: boolean; txid?: Buffer } = {}): Buffer {
@@ -51,7 +50,7 @@ async function sender(): Promise<{ socket: Socket; port: number; send(data: Buff
   return {
     socket,
     port: socket.address().port,
-    send: (data) => new Promise((r) => socket.send(data, PORT, '127.0.0.1', () => r())),
+    send: (data) => new Promise((r) => socket.send(data, mux.port, '127.0.0.1', () => r())),
   };
 }
 
@@ -66,7 +65,7 @@ function listen(owner: MuxOwner): { transport: MuxTransport; got: Buffer[] } {
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 50));
 
 beforeEach(async () => {
-  mux = await UdpMux.open(PORT);
+  mux = await UdpMux.open(0);
 });
 
 afterEach(async () => {
@@ -75,6 +74,10 @@ afterEach(async () => {
 });
 
 describe('UdpMux', () => {
+  it('reports the port it bound when opened on port 0', () => {
+    expect(mux.port).toBeGreaterThan(0);
+  });
+
   it('routes a verified check to its connection, then that address’s other packets; a stray datagram goes nowhere', async () => {
     const a = mux.owner();
     a.claim('nasA', 'devA', 'pwd-a-0123456789abcdef');
