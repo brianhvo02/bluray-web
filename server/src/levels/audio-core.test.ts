@@ -6,7 +6,7 @@ import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import { AudioFramer } from '../../../src/engine/decode/audio-frames';
 import { PesAssembler, type PesPacket } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
-import { KeptStreams, PesCoreFilter, mpegCrc32, nominalAudioBps, pmtFor, type KeptPacket } from './audio-core';
+import { KeptStreams, PesCoreFilter, fallbackAudioBps, mpegCrc32, nominalAudioBps, pmtFor, type KeptPacket } from './audio-core';
 import { LEVELS, planClip } from './levels';
 
 const DISC = join(import.meta.dirname, '../../../fixtures/synthetic/disc-levels/BDMV');
@@ -510,5 +510,19 @@ describe('nominalAudioBps', () => {
 
   it('throws on a frame it cannot read', () => {
     expect(() => nominalAudioBps(CodingType.AC3, new Uint8Array([1, 2, 3, 4, 5, 6]))).toThrow();
+  });
+});
+
+describe('fallbackAudioBps', () => {
+  it('gives each coding’s nominal rate when no frame could be read: AC-3 640k, DTS 1509k, LPCM from the CLPI, else 1.5 Mbps', () => {
+    expect(fallbackAudioBps(CodingType.AC3, null)).toBe(640_000);
+    expect(fallbackAudioBps(CodingType.TRUEHD, null)).toBe(640_000); // carried as its AC-3 core
+    expect(fallbackAudioBps(CodingType.DTS, null)).toBe(1_509_000);
+    expect(fallbackAudioBps(CodingType.DTSHD_MASTER, null)).toBe(1_509_000); // carried as its DTS core
+    expect(fallbackAudioBps(CodingType.EAC3, null)).toBe(1_500_000);
+    // LPCM: stereo (3) at 48 kHz (1), 24-bit; multi-channel (6) at 96 kHz (4) stored as 8 channels
+    expect(fallbackAudioBps(CodingType.LPCM, { format: 3, rate: 1 })).toBe(2 * 48_000 * 24);
+    expect(fallbackAudioBps(CodingType.LPCM, { format: 6, rate: 4 })).toBe(8 * 96_000 * 24);
+    expect(fallbackAudioBps(CodingType.LPCM, null)).toBe(8 * 48_000 * 24);
   });
 });

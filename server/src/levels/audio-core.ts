@@ -137,6 +137,29 @@ export function nominalAudioBps(codingType: number, firstFrame: Uint8Array): num
   }
 }
 
+/** Channels LPCM stores for a CLPI audio_presentation_type (multi-channel as 8, the most it may hold). */
+const LPCM_CHANNELS: Readonly<Record<number, number>> = { 1: 1, 3: 2, 6: 8, 12: 8 };
+/** Sample rates of a CLPI sampling_frequency code (the combined codes by their higher rate). */
+const LPCM_RATES: Readonly<Record<number, number>> = { 1: 48_000, 4: 96_000, 5: 192_000, 12: 192_000, 14: 96_000 };
+
+/**
+ * A nominal rate for a level's audio when no frame of it could be read at the clip's start: by the coding the level
+ * carries, AC-3 at 640 kb/s, DTS at 1509 kb/s, LPCM from the CLPI's channels and rate at 24 bits, anything else 1.5 Mb/s.
+ * Generous on purpose: an interval's budget must hold its audio.
+ */
+export function fallbackAudioBps(codingType: number, clpiStream: { readonly format: number; readonly rate: number } | null): number {
+  switch (coreCoding(codingType)) {
+    case CodingType.AC3:
+      return 640_000;
+    case CodingType.DTS:
+      return 1_509_000;
+    case CodingType.LPCM:
+      return (LPCM_CHANNELS[clpiStream?.format ?? 0] ?? 8) * (LPCM_RATES[clpiStream?.rate ?? 0] ?? 48_000) * 24;
+    default:
+      return 1_500_000;
+  }
+}
+
 /** MPEG-2 CRC-32 (polynomial 0x04C11DB7, no reflection), as PSI sections carry it. Over a whole section it is 0. */
 export function mpegCrc32(data: Uint8Array): number {
   let crc = 0xffffffff;

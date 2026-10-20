@@ -221,7 +221,7 @@ export class LevelService {
       ...(offered.includes('original') ? { available: true } : { available: false, reason: 'unplayable' as const }),
     });
     const audio = keptAudioFor(main.item, 1);
-    const audioBps = audio ? await audioBpsOf(disc, main, audio) : 0;
+    const audioBps = audio ? await audioBpsOf(disc, main, audio, this.log) : 0;
     const fps = fpsOf(main.video.rate);
     const replacing = deviceId === undefined ? [] : this.leasesOf(`${deviceId}:${discId}:`);
     for (const level of offered) {
@@ -392,6 +392,7 @@ export class LevelService {
           cache: this.options.cache,
           ...(this.options.spawn ? { spawn: this.options.spawn } : {}),
           ...(this.options.probe ? { probe: this.options.probe } : {}),
+          log: this.log,
         });
       })();
       version = built;

@@ -202,7 +202,7 @@ let service: LevelService;
 let capacity: Capacity;
 
 function makeService(
-  options: { readAheadMs?: number; waitFilmMs?: number; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
+  options: { readAheadMs?: number; waitFilmMs?: number; log?: (message: string) => void; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
 ): LevelService {
   capacity = new Capacity({ h264: 190, hevc: 100 }, clock.now);
   return new LevelService({
@@ -216,6 +216,7 @@ function makeService(
     ...(options.readAheadMs === undefined ? {} : { readAheadMs: options.readAheadMs }),
     ...(options.waitFilmMs === undefined ? {} : { waitFilmMs: options.waitFilmMs }),
     ...(options.codecs ? { codecs: options.codecs } : {}),
+    ...(options.log ? { log: options.log } : {}),
   });
 }
 
@@ -618,7 +619,7 @@ function discCopy(name = 'copy'): string {
   return dir;
 }
 
-function serviceOn(dir: string, options: { readAheadMs?: number } = {}): LevelService {
+function serviceOn(dir: string, options: { readAheadMs?: number; log?: (message: string) => void } = {}): LevelService {
   return makeService({ ...options, discs: async (id) => (id === DISC_ID ? folderDiscSource(dir, { id, name: 'Starfall Wanderer' }) : null) });
 }
 
@@ -777,6 +778,29 @@ describe('LevelService: fix round 1', () => {
     const client = { hevc: true, hevc10: false, hdr: false };
     expect((await service.levels(DISC_ID, client))!.find((x) => x.level === 'hevc-1080')).toMatchObject({ available: false, reason: 'busy' });
     expect((await service.levels(DISC_ID, client, 'dev1'))!.find((x) => x.level === 'hevc-1080')).toMatchObject({ available: true });
+  });
+});
+
+describe('LevelService: final review', () => {
+  it('falls back to the coding’s nominal audio rate, and logs it, when the kept audio has no readable frame at the clip’s start', async () => {
+    const dir = discCopy();
+    const m2ts = join(dir, 'BDMV/STREAM/00001.m2ts');
+    const bytes = readFileSync(m2ts);
+    for (let at = 0; at + 192 <= bytes.length; at += 192) {
+      if (bytes[at + 4] === 0x47 && (((bytes[at + 5]! & 0x1f) << 8) | bytes[at + 6]!) === TRUEHD) {
+        bytes[at + 5] = (bytes[at + 5]! & 0xe0) | 0x1f; // the TrueHD packets become null packets
+        bytes[at + 6] = 0xff;
+      }
+    }
+    writeFileSync(m2ts, bytes);
+    const logged: string[] = [];
+    service.close();
+    service = serviceOn(dir, { log: (m) => logged.push(m) });
+    const manifest = await levelManifest();
+    const clpi = parseClpi(fixtureBytes('CLIPINF/00001.clpi'));
+    const size = manifest.files.find((f) => f.path === M2TS_PATH)!.size;
+    expect(size).toBe(planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), 640_000).sizeBytes);
+    expect(logged.some((m) => m.includes('nominal'))).toBe(true);
   });
 });
 

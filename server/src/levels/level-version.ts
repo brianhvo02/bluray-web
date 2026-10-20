@@ -6,6 +6,7 @@ import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import type { DiscManifest } from '../../../src/engine/disc/nas-api';
 import type { EncoderCodec } from './capacity';
 import type { ClipRunPlan } from './clip-run';
+import { fallbackAudioBps } from './audio-core';
 import { clpiVideoIsHdr, rewriteClpi } from './clpi-writer';
 import { deinterlaces, probeScan, type ClipInput, type ScanInfo } from './encoder';
 import { firstAudioBps, type ClipSource, type LevelDiscSource } from './level-discs';
@@ -110,6 +111,7 @@ export interface VersionDeps {
   readonly cache: SegmentCache;
   readonly spawn?: typeof nodeSpawn;
   readonly probe?: (input: ClipInput, options: { readonly startByte: number; readonly videoPid: number }) => Promise<ScanInfo>;
+  readonly log?: (message: string) => void;
 }
 
 async function fileBytes(manifest: DiscManifest, source: LevelDiscSource, path: string): Promise<Uint8Array | null> {
@@ -169,15 +171,25 @@ export async function loadDisc(id: string, source: LevelDiscSource): Promise<Dis
   return { id, source, manifest, sizes, playlists, clips, main, audioBps: new Map(), scans: new Map() };
 }
 
-/** The kept audio's nominal rate, from its first frame in the clip (spec §5.2); one read per clip and PID. */
-export function audioBpsOf(disc: DiscInfo, info: ClipInfo, kept: KeptAudio): Promise<number> {
+/**
+ * The kept audio's nominal rate, from its first frame in the clip (spec §5.2); one read per clip and PID. With no
+ * readable frame in the clip's first 16 MiB, the coding's nominal rate (`fallbackAudioBps`), logged.
+ */
+export function audioBpsOf(disc: DiscInfo, info: ClipInfo, kept: KeptAudio, log: (message: string) => void = () => {}): Promise<number> {
   const key = `${info.id}:${kept.pid}`;
   let bps = disc.audioBps.get(key);
   if (!bps) {
     const reading = (async () => {
       const clip = await disc.source.clip(info.m2tsPath);
       if (!clip) throw new Error(`levels: ${info.m2tsPath} is missing`);
-      return firstAudioBps(clip.read(0, Math.min(clip.size, AUDIO_PROBE_BYTES)), kept.pid, kept.coding);
+      try {
+        return await firstAudioBps(clip.read(0, Math.min(clip.size, AUDIO_PROBE_BYTES)), kept.pid, kept.coding);
+      } catch (err) {
+        const stream = info.clpi.programs.flatMap((p) => p.streams).find((s) => s.pid === kept.pid) ?? null;
+        const bps = fallbackAudioBps(kept.coding, stream);
+        log(`levels: ${(err as Error).message} in ${info.m2tsPath}; using the nominal ${bps} b/s of coding 0x${kept.coding.toString(16)}`);
+        return bps;
+      }
     })();
     bps = reading;
     disc.audioBps.set(key, reading);
@@ -233,7 +245,7 @@ export async function buildVersion(key: string, disc: DiscInfo, level: EncodedLe
     if (!source) continue;
     const def = levelDefFor(level, info.video);
     const kept = keptAudioFor(info.item, audio);
-    const audioBps = kept ? await audioBpsOf(disc, info, kept) : 0;
+    const audioBps = kept ? await audioBpsOf(disc, info, kept, deps.log) : 0;
     const { intervals, sizeBytes } = planClip(info.clpi, def, audioBps);
     const streams = info.clpi.programs.flatMap((p) => p.streams);
     const graphics = [...new Set(streams.filter((s) => GRAPHICS_CODINGS.has(s.codingType)).map((s) => s.pid))];
