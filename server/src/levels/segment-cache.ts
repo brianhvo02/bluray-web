@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, readdir, rename, rmdir, stat, unlink, utimes } from 'node:fs/promises';
+import { link, mkdir, open, readFile, readdir, rmdir, stat, unlink, utimes, type FileHandle } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { isCode } from '../atomic-json';
 
@@ -14,9 +14,9 @@ function part(value: string | number, what: string): string {
 /**
  * Encoded, re-muxed EP intervals on disk (spec §6.3): `<dir>/<discId>/<level>/<audio>/<clip>/<size>-<mtimeMs>/<index>.seg`,
  * one file per interval. The clip's size and mtime are part of the key, so a replaced clip is a miss. Files are written
- * atomically (a synced temp file, then a rename and a directory sync). An LRU by total bytes: past `limitBytes`, the
- * least recently used whole files go (a read counts as a use, and is written to the file's mtime so the order outlives a
- * restart). A file's directories go with its last file.
+ * atomically (a synced temp file, hard-linked into place, then a directory sync), and the first writer wins. An LRU by
+ * total bytes: past `limitBytes`, the least recently used whole files go (a read counts as a use, and is written to the
+ * file's mtime so the order outlives a restart). A file's directories go with its last file.
  */
 export class SegmentCache {
   /** Path → bytes, least recently used first. */
@@ -61,29 +61,45 @@ export class SegmentCache {
     return bytes;
   }
 
+  /**
+   * Stores an interval's bytes. The first writer wins: a file already there stays (an interval's bytes at a key are
+   * always the same size, and a reader may be serving it), and the later bytes are dropped.
+   */
   async put(key: string, index: number, bytes: Uint8Array): Promise<void> {
     await this.load();
     const path = this.pathOf(key, index);
-    await mkdir(dirname(path), { recursive: true });
     const temp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-    const handle = await open(temp, 'w', 0o600);
+    let handle: FileHandle;
     try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
+      handle = await this.createTemp(temp);
+    } catch (err) {
+      // An eviction may have pruned the directory between mkdir and open: once more.
+      if (!isCode(err, 'ENOENT')) throw err;
+      handle = await this.createTemp(temp);
     }
     try {
-      await rename(temp, path);
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await link(temp, path);
     } catch (err) {
-      await unlink(temp).catch(() => {});
+      if (isCode(err, 'EEXIST')) return;
       throw err;
+    } finally {
+      await unlink(temp).catch(() => {});
     }
     await syncDir(dirname(path));
-    this.forget(path);
     this.files.set(path, bytes.length);
     this.total += bytes.length;
     await this.evict(path);
+  }
+
+  private async createTemp(temp: string): Promise<FileHandle> {
+    await mkdir(dirname(temp), { recursive: true });
+    return open(temp, 'wx', 0o600);
   }
 
   private pathOf(key: string, index: number): string {

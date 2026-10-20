@@ -82,6 +82,20 @@ describe('SegmentCache', () => {
     expect(existsSync(join(dir, 'd2'))).toBe(true);
   });
 
+  it('keeps the first of two concurrent writes to one interval, counted once', async () => {
+    const cache = new SegmentCache(dir, 1 << 20);
+    const key = cache.key('a1b2c3', 'h264-1080', 1, '00001', 1000, 5000);
+    await Promise.all([cache.put(key, 0, bytes(1000, 1)), cache.put(key, 0, bytes(1000, 2)), cache.put(key, 0, bytes(1000, 3))]);
+    const got = await cache.get(key, 0);
+    expect(got?.length).toBe(1000);
+    expect(new Set(got).size).toBe(1);
+    expect(cache.totalBytes).toBe(1000);
+    await cache.put(key, 0, bytes(1000, 9));
+    expect(await cache.get(key, 0)).toEqual(got);
+    expect(cache.totalBytes).toBe(1000);
+    expect(readdirSync(dir, { recursive: true, encoding: 'utf8' }).some((f) => f.endsWith('.tmp'))).toBe(false);
+  });
+
   it('refuses key parts that would leave its directory', () => {
     const cache = new SegmentCache(dir, 1000);
     expect(() => cache.key('..', 'h264-1080', 1, '00001', 1, 1)).toThrow();
