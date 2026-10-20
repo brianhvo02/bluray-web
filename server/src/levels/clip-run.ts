@@ -2,7 +2,7 @@ import type { Readable } from 'node:stream';
 import { KeptStreams, PesCoreFilter } from './audio-core';
 import { ClipEncoder, encodeIntervalAt, runWindow, MAX_INTERVALS_PER_RUN, type ClipEncoderOptions, type ClipReader, type EncoderBackend } from './encoder';
 import { SOURCE_PACKET_BYTES, type IntervalPlan } from './levels';
-import { IntervalCollector, remuxInterval, type EncodedPes, type IntervalSource, type RemuxInput } from './remux';
+import { IntervalCollector, remuxInterval, shedGraphics, type EncodedPes, type IntervalSource, type RemuxInput } from './remux';
 import type { SegmentCache } from './segment-cache';
 
 /** Time and timers, injectable for tests. */
@@ -30,7 +30,12 @@ export interface KeptConfig {
   readonly videoStreamType: number;
   /** The source's PCR PID (CLPI STC sequence). */
   readonly pcrPid: number;
+  /** The kept PG then IG PIDs by stream number: what the last resort drops, from the end (`shedGraphics`). */
+  readonly graphicsPids?: readonly number[];
 }
+
+/** Clips whose last resort was logged: once per clip. */
+const shedLogged = new WeakSet<ClipRunPlan>();
 
 /** One clip at one level and audio stream: its plan, where its bytes come from, and how it is encoded. */
 export interface ClipRunPlan {
@@ -532,7 +537,15 @@ class Run {
     if ('bytes' in first) return first.bytes;
     const options = this.options!;
     const rateBps = options.rateBps ?? options.level.targetBps;
-    const retried = await encodeIntervalAt(this.deps.backend, options, plan.index, { rateBps, overflowBytes: first.overflow }, (v) => remuxInterval(input(v)), this.stopping.signal);
+    const lastResort = (v: readonly EncodedPes[]): { bytes: Uint8Array } | null => {
+      const shed = shedGraphics(input(v), kept.graphicsPids ?? []);
+      if (shed && !shedLogged.has(this.plan)) {
+        shedLogged.add(this.plan);
+        this.deps.log(`levels: interval ${plan.index} didn't fit even with its video at the floor; dropped the PES of PIDs ${shed.dropped.map((p) => `0x${p.toString(16)}`).join(', ')} from it (logged once per clip)`);
+      }
+      return shed;
+    };
+    const retried = await encodeIntervalAt(this.deps.backend, options, plan.index, { rateBps, overflowBytes: first.overflow }, (v) => remuxInterval(input(v)), this.stopping.signal, lastResort);
     this.deps.log(`levels: interval ${plan.index} overflowed its budget by ${first.overflow} bytes; re-encoded at ${retried.rateBps} bps`);
     return retried.bytes;
   }

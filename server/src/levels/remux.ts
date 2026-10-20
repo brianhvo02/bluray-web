@@ -456,3 +456,32 @@ export class IntervalCollector {
     return source;
   }
 }
+
+/**
+ * The re-mux's last resort (spec §5.2), when an interval's kept packets don't fit its budget even with its video at the
+ * floor rate: drops whole PES of the graphics streams from the interval, one stream after another from the end of
+ * `graphicsPids` (ordered by stream number, PG then IG, so the highest numbers go first), until it fits. A dropped
+ * stream loses every PES that starts in the interval; the packets before its first PES start (the end of a PES that
+ * began in the interval before) stay. Video and the kept audio are never dropped. Null when it doesn't fit even with no
+ * graphics.
+ */
+export function shedGraphics(input: RemuxInput, graphicsPids: readonly number[]): { bytes: Uint8Array; dropped: number[] } | null {
+  const ordered = input.kept
+    .map((k, i) => ({ k, i }))
+    .sort((a, b) => a.k.spn - b.k.spn || a.i - b.i)
+    .map(({ k }) => k);
+  for (let n = 1; n <= graphicsPids.length; n++) {
+    const dropped = graphicsPids.slice(graphicsPids.length - n);
+    const shedding = new Set(dropped);
+    const started = new Set<number>();
+    const kept = ordered.filter((k) => {
+      const pid = pidOf(k.bytes);
+      if (!shedding.has(pid)) return true;
+      if (k.bytes[5]! & 0x40) started.add(pid); // payload_unit_start_indicator: a PES starts here
+      return !started.has(pid);
+    });
+    const result = remuxInterval({ ...input, kept });
+    if ('bytes' in result) return { bytes: result.bytes, dropped };
+  }
+  return null;
+}

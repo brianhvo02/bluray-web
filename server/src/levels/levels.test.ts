@@ -4,35 +4,51 @@ import { describe, expect, it } from 'vitest';
 import type { Clpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import type { PlayItem, StreamEntry } from '../../../src/engine/bdmv/mpls-parser';
-import { LEVELS, coreCoding, keptAudioFor, levelDefFor, levelsFor, mapSpn, planClip, videoAllowanceBytes, videoAttrsFor } from './levels';
+import { BUDGET_VERSION, LEVELS, MIN_INTERVAL_45, coreCoding, graphicsRoom, keptAudioFor, levelDefFor, levelsFor, mapSpn, planClip, videoAttrsFor } from './levels';
 
 const FIXTURES = join(import.meta.dirname, '../../../fixtures/synthetic');
 
-function clip(entries: Array<{ pts: number; spn: number }>, presentationEnd: number, numSourcePackets = 10_000): Clpi {
+function clip(entries: Array<{ pts: number; spn: number }>, presentationEnd: number, numSourcePackets = 10_000, graphics: { pg?: number; ig?: number } = {}): Clpi {
+  const stream = (pid: number, codingType: number) => ({ pid, codingType, format: 0, rate: 0, lang: 'eng', aspect: 0 });
   return {
     version: '0200',
     numSourcePackets,
     recordingRate: 6_000_000,
     atcSequences: [{ spnAtcStart: 0, offsetStcId: 0, stc: [{ pcrPid: 0x1001, spnStcStart: 0, presentationStart: entries[0]!.pts, presentationEnd }] }],
-    programs: [{ spnProgramSequenceStart: 0, programMapPid: 0x100, streams: [{ pid: 0x1011, codingType: 0x1b, format: 6, rate: 1, lang: '', aspect: 3 }] }],
+    programs: [
+      {
+        spnProgramSequenceStart: 0,
+        programMapPid: 0x100,
+        streams: [
+          { pid: 0x1011, codingType: 0x1b, format: 6, rate: 1, lang: '', aspect: 3 },
+          ...Array.from({ length: graphics.pg ?? 0 }, (_, i) => stream(0x1200 + i, 0x90)),
+          ...Array.from({ length: graphics.ig ?? 0 }, (_, i) => stream(0x1400 + i, 0x91)),
+        ],
+      },
+    ],
     epMaps: [{ pid: 0x1011, epStreamType: 1, entries }],
   };
 }
 
-/** ⌈seconds × bps ÷ 8 ÷ 6144⌉ × 6144. */
-const budget = (seconds: number, bps: number): number => Math.ceil((seconds * bps) / 8 / 6144) * 6144;
+/** Entries `durations` apart (45 kHz) from PTS 0, 1000 source packets apart, and the clip's presentation end. */
+function spaced(durations: readonly number[], graphics: { pg?: number; ig?: number } = {}): Clpi {
+  const entries = durations.map((_, i) => ({ pts: durations.slice(0, i).reduce((a, b) => a + b, 0), spn: i * 1000 }));
+  return clip(entries, durations.reduce((a, b) => a + b, 0), durations.length * 1000, graphics);
+}
+
+const aligned = (bytes: number): number => Math.ceil(bytes / 6144) * 6144;
 
 describe('planClip', () => {
   it('gives a 1.001 s interval its budget: ⌈duration × (peak + audio + 1.5 Mbps) ÷ 8 ÷ 6144⌉ × 6144', () => {
     const c = clip([{ pts: 450_000, spn: 0 }, { pts: 495_045, spn: 2000 }], 540_090);
-    const { intervals } = planClip(c, LEVELS['h264-1080'], 640_000);
+    const { intervals } = planClip(c, LEVELS['h264-1080'], 640_000, { minInterval45: 0 });
     expect(intervals[0]!.budgetBytes).toBe(Math.ceil((1.001 * (10e6 + 640e3 + 1.5e6)) / 8 / 6144) * 6144);
     expect(intervals[0]!.endPts45 - intervals[0]!.startPts45).toBe(45_045);
   });
 
   it('sums the budgets into the size, and places each interval at the running total ÷ 192', () => {
     const c = parseClpi(readFileSync(join(FIXTURES, 'disc-mpeg2/BDMV/CLIPINF/00001.clpi')));
-    const { intervals, sizeBytes } = planClip(c, LEVELS['phone-720'], 448_000);
+    const { intervals, sizeBytes } = planClip(c, LEVELS['phone-720'], 448_000, { minInterval45: 0 });
     const entries = c.epMaps[0]!.entries;
     expect(intervals).toHaveLength(entries.length);
     let total = 0;
@@ -51,47 +67,78 @@ describe('planClip', () => {
     expect(intervals.at(-1)!.endPts45).toBe(c.atcSequences[0]!.stc[0]!.presentationEnd);
   });
 
-  it('gives an interval at least its measured kept bytes plus its video’s room, rounded to an aligned unit', () => {
-    // The music disc's interval 198: 0.04 s, one frame. The rate part gave it 43 008 bytes at phone-720 against 25 728
-    // kept (the LPCM the source muxed among its own IDR) and a 15 KB IDR at the 1 Mbps floor.
-    const c = clip([{ pts: 450_000, spn: 0 }, { pts: 487_620, spn: 4000 }, { pts: 489_420, spn: 6000 }], 527_040);
-    const level = LEVELS['phone-720'];
-    const rate = planClip(c, level, 2_457_600).intervals;
-    expect(rate[1]!.budgetBytes).toBe(budget(0.04, 3_750_000 + 2_457_600 + 1_500_000));
-    const { intervals, sizeBytes } = planClip(c, level, 2_457_600, [200_000, 25_728, 1_000]);
-    expect(intervals[1]!.budgetBytes).toBe(Math.ceil((25_728 + videoAllowanceBytes(1_800, level)) / 6144) * 6144);
-    expect(intervals[1]!.budgetBytes - 25_728).toBeGreaterThanOrEqual(48 * 1024); // an IDR's room, however short the interval
-    // Where the rate part holds more, it stands: the kept bytes only ever raise a budget.
-    expect(intervals[0]!.budgetBytes).toBe(rate[0]!.budgetBytes);
-    expect(intervals[2]!.budgetBytes).toBe(rate[2]!.budgetBytes);
-    expect(intervals[2]!.spnStart).toBe((intervals[0]!.budgetBytes + intervals[1]!.budgetBytes) / 192);
-    expect(sizeBytes).toBe(intervals.reduce((n, iv) => n + iv.budgetBytes, 0));
+  it('merges an interval shorter than the threshold with the next ones, dropping their EP entries', () => {
+    // The music disc's one-frame interval (1800 ticks) between two of 0.836 s.
+    const c = spaced([37_620, 1_800, 37_620, 50_000]);
+    const { intervals } = planClip(c, LEVELS['phone-720'], 0, { minInterval45: 45_000 });
+    expect(intervals.map((iv) => [iv.startPts45, iv.endPts45 - iv.startPts45, iv.srcSpnStart, iv.srcSpnEnd])).toEqual([
+      [0, 77_040, 0, 3000],
+      [77_040, 50_000, 3000, 4000],
+    ]);
+    expect(intervals.map((iv) => iv.index)).toEqual([0, 1]);
+    expect(intervals[1]!.spnStart).toBe(intervals[0]!.budgetBytes / 192);
   });
 
-  it('gives a burst of subtitles its room on top of the video at the level’s peak', () => {
-    // 1 s with 768 KB of PG (a disc with 5 PG streams) and 230 KB of audio: the rate part's 1.5 Mb/s can't hold it.
-    const c = clip([{ pts: 450_000, spn: 0 }, { pts: 495_045, spn: 2000 }], 540_090);
-    const level = LEVELS['phone-720'];
-    const kept = 768_000 + 230_400 + 6_000;
-    const iv = planClip(c, level, 1_728_000, [kept, 0]).intervals[0]!;
-    expect(iv.budgetBytes).toBeGreaterThan(budget(1.001, 3_750_000 + 1_728_000 + 1_500_000));
-    expect(iv.budgetBytes - kept).toBeGreaterThanOrEqual((1.001 * level.peakBps) / 8);
+  it('merges a clip’s short last interval with the one before', () => {
+    const { intervals } = planClip(spaced([50_000, 50_000, 20_000]), LEVELS['phone-720'], 0, { minInterval45: 45_000 });
+    expect(intervals.map((iv) => [iv.startPts45, iv.endPts45 - iv.startPts45, iv.srcSpnEnd])).toEqual([
+      [0, 50_000, 1000],
+      [50_000, 70_000, 3000],
+    ]);
   });
 
-  it('refuses a scan of another clip (another count of intervals)', () => {
-    const c = clip([{ pts: 450_000, spn: 0 }, { pts: 495_045, spn: 2000 }], 540_090);
-    expect(() => planClip(c, LEVELS['phone-720'], 0, [1])).toThrow(/intervals/);
+  it('never merges across an STC sequence, and keeps a sequence’s only interval however short', () => {
+    const c: Clpi = {
+      ...spaced([50_000, 20_000, 10_000, 50_000]),
+      atcSequences: [
+        {
+          spnAtcStart: 0,
+          offsetStcId: 0,
+          stc: [
+            { pcrPid: 0x1001, spnStcStart: 0, presentationStart: 0, presentationEnd: 70_000 },
+            { pcrPid: 0x1001, spnStcStart: 2000, presentationStart: 70_000, presentationEnd: 80_000 },
+            { pcrPid: 0x1001, spnStcStart: 3000, presentationStart: 80_000, presentationEnd: 130_000 },
+          ],
+        },
+      ],
+    };
+    const { intervals } = planClip(c, LEVELS['phone-720'], 0, { minInterval45: 45_000 });
+    expect(intervals.map((iv) => [iv.startPts45, iv.endPts45 - iv.startPts45])).toEqual([
+      [0, 70_000],
+      [70_000, 10_000],
+      [80_000, 50_000],
+    ]);
+  });
+
+  it('merges by default below MIN_INTERVAL_45, and versions the formula', () => {
+    expect(MIN_INTERVAL_45).toBeGreaterThanOrEqual(45_000);
+    const { intervals } = planClip(spaced([37_620, 1_800, ...Array(10).fill(37_620)]), LEVELS['phone-720'], 0);
+    for (const iv of intervals.slice(0, -1)) expect(iv.endPts45 - iv.startPts45).toBeGreaterThanOrEqual(MIN_INTERVAL_45);
+    expect(BUDGET_VERSION).toBe(2);
+  });
+
+  it('gives an interval room for its video (at least an IDR), its audio and its graphics (at least a burst per stream)', () => {
+    const c = spaced([90_090, 90_090], { pg: 11 });
+    const room = graphicsRoom(c);
+    expect(room.bps).toBeGreaterThan(1_500_000 - 1);
+    expect(room.minBytes).toBeGreaterThan(0);
+    const level = LEVELS['phone-720'];
+    const iv = planClip(c, level, 1_728_000).intervals[0]!;
+    const s = 90_090 / 45_000;
+    expect(iv.budgetBytes).toBe(aligned(Math.max((s * level.peakBps) / 8, 48 * 1024) + (s * 1_728_000) / 8 + Math.max((s * room.bps) / 8, room.minBytes)));
+    // No graphics: 1.5 Mb/s and no minimum.
+    expect(graphicsRoom(spaced([90_090]))).toEqual({ bps: 1_500_000, minBytes: 0 });
   });
 
   it('carries a PTS wrap within one STC sequence', () => {
     const c = clip([{ pts: 2 ** 32 - 45_056, spn: 0 }, { pts: 0, spn: 3000 }], 45_056);
-    const { intervals } = planClip(c, LEVELS['h264-1080'], 0);
+    const { intervals } = planClip(c, LEVELS['h264-1080'], 0, { minInterval45: 0 });
     expect(intervals[0]!.endPts45 - intervals[0]!.startPts45).toBe(45_056);
   });
 
   it('maps a source SPN to the first interval starting at or after it', () => {
     const c = clip([{ pts: 450_000, spn: 10 }, { pts: 495_045, spn: 2000 }, { pts: 540_090, spn: 4000 }], 585_135);
-    const { intervals } = planClip(c, LEVELS['h264-1080'], 0);
+    const { intervals } = planClip(c, LEVELS['h264-1080'], 0, { minInterval45: 0 });
     expect(mapSpn(intervals, 0)).toBe(0);
     expect(mapSpn(intervals, 2000)).toBe(intervals[1]!.spnStart);
     expect(mapSpn(intervals, 2001)).toBe(intervals[2]!.spnStart);

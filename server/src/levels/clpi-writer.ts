@@ -71,10 +71,10 @@ export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array
         epStreamType: m.epStreamType,
         entries:
           m.pid === videoPid
-            ? planEntries(intervals, m.entries.length)
+            ? planEntries(intervals)
             : m.entries.map((e) => ({ pts: e.pts, spn: mapSpnDown(intervals, e.spn) })),
         // I_end_position_offset describes the source's pictures, so only angle change points stay on the video
-        flags: m.pid === videoPid ? fineFlags(cpi, m.pid).map((f) => f & ANGLE_CHANGE_POINT) : fineFlags(cpi, m.pid),
+        flags: m.pid === videoPid ? keptFlags(m.entries, intervals, fineFlags(cpi, m.pid)).map((f) => f & ANGLE_CHANGE_POINT) : fineFlags(cpi, m.pid),
       }));
     replace.set(CPI_AT, writeCpi(cpi, maps));
   }
@@ -88,8 +88,8 @@ export function rewriteClpi(original: Uint8Array, plan: ClpiRewrite): Uint8Array
   return out;
 }
 
-function planEntries(intervals: readonly IntervalPlan[], count: number): EpEntry[] {
-  if (intervals.length !== count) throw new Error(`levels: ${intervals.length} intervals for ${count} video EP entries`);
+/** The primary video's entries at the level: one per interval (the plan merges short intervals, so it may have fewer). */
+function planEntries(intervals: readonly IntervalPlan[]): EpEntry[] {
   return intervals.map((iv) => ({ pts: iv.startPts45, spn: iv.spnStart }));
 }
 
@@ -204,6 +204,15 @@ export function setAudioCoding(attr: Uint8Array, newCoding: number): void {
   if (attr[0] === newCoding) return;
   attr[0] = newCoding;
   attr[1] = (attr[1]! & 0xf0) | AUDIO_RATE_48K;
+}
+
+/** The fine-entry bits of the source entries the plan's intervals start at (it merges short intervals, dropping entries). */
+function keptFlags(entries: readonly EpEntry[], intervals: readonly IntervalPlan[], flags: readonly number[]): number[] {
+  let j = 0;
+  return intervals.map((iv, i) => {
+    while (j < entries.length && !(entries[j]!.pts === iv.startPts45 && (i === 0 || entries[j]!.spn === iv.srcSpnStart))) j++;
+    return flags[j] ?? 0;
+  });
 }
 
 /** The 4 leading bits (is_angle_change_point, I_end_position_offset) of each fine entry of a PID. */

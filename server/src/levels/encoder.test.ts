@@ -33,11 +33,14 @@ import { levelDefFor, planClip, type IntervalPlan, type LevelDef } from './level
 import { IntervalCollector, remuxInterval, type EncodedPes, type IntervalSource } from './remux';
 import { distortingBackend, flooredTo, shiftedBy } from './test-backends';
 
+/** The fixtures' EP intervals as they are: their GOPs are shorter than the plan's merge threshold. */
+const RAW_PLAN = { minInterval45: 0 };
+
 const VIDEO = 0x1011;
 const fixture = (disc: string): string => join(import.meta.dirname, '../../../fixtures/synthetic', disc, 'BDMV');
 const clipPath = (disc: string): string => join(fixture(disc), 'STREAM/00001.m2ts');
 const intervalsOf = (disc: string): IntervalPlan[] =>
-  planClip(parseClpi(readFileSync(join(fixture(disc), 'CLIPINF/00001.clpi'))), levelDefFor('h264-1080', { height: 1080 }), 192_000).intervals;
+  planClip(parseClpi(readFileSync(join(fixture(disc), 'CLIPINF/00001.clpi'))), levelDefFor('h264-1080', { height: 1080 }), 192_000, RAW_PLAN).intervals;
 
 const hasX264 = spawnSync('ffmpeg', ['-hide_banner', '-encoders'], { encoding: 'utf8' }).stdout?.includes('libx264') ?? false;
 /** CI installs ffmpeg: there, a missing libx264 fails these tests instead of skipping them. */
@@ -491,6 +494,21 @@ describe.skipIf(!runFfmpegTests)('encodeIntervalAt (libx264)', () => {
     await expect(encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux)).rejects.toThrow(/1 Mbps/);
     expect(rates).toEqual([1_000_000]);
   }, 60_000);
+
+  it('hands the floor’s video to the last resort when it still overflows, and serves what that gives', async () => {
+    const { options, rates, backend, remux } = setup(6144);
+    const seen: number[] = [];
+    const result = await encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux, undefined, (video) => {
+      seen.push(video.length);
+      return { bytes: new Uint8Array(6144) };
+    });
+    expect(rates).toEqual([1_000_000]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeGreaterThan(0);
+    expect(result).toEqual({ bytes: new Uint8Array(6144), rateBps: 1_000_000 });
+    // A last resort that can't fit it either: the interval is never served.
+    await expect(encodeIntervalAt(backend, options, 3, { rateBps: 900_000, overflowBytes: 100_000 }, remux, undefined, () => null)).rejects.toThrow(/1 Mbps/);
+  }, 60_000);
 });
 
 /**
@@ -537,7 +555,7 @@ function openGopClip(): { path: string; intervals: IntervalPlan[]; frames: Array
     if (packet?.pid === VIDEO && packet.payloadUnitStart) frames.push({ spn, pts: readTimestamp(packet.payload, 9) });
   }
   const clpi = parseClpi(readFileSync(join(root, 'BDMV/CLIPINF/00001.clpi')));
-  return { path, intervals: planClip(clpi, levelDefFor('phone-720', { height: 360 }), 0).intervals, frames };
+  return { path, intervals: planClip(clpi, levelDefFor('phone-720', { height: 360 }), 0, RAW_PLAN).intervals, frames };
 }
 
 describe.skipIf(!runFfmpegTests)('open GOPs (libx264)', () => {

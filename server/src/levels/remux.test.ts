@@ -7,7 +7,10 @@ import { PesAssembler, type PesPacket } from '../../../src/engine/demux/pes-asse
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
 import { KeptStreams, PesCoreFilter, mpegCrc32, pmtFor, type KeptPacket } from './audio-core';
 import { LEVELS, planClip, type IntervalPlan } from './levels';
-import { IntervalCollector, PCR_PERIOD_27, atsOf, remuxInterval, type EncodedPes, type IntervalSource, type RemuxInput } from './remux';
+import { IntervalCollector, PCR_PERIOD_27, atsOf, remuxInterval, shedGraphics, type EncodedPes, type IntervalSource, type RemuxInput } from './remux';
+
+/** The fixtures' EP intervals as they are: their GOPs are shorter than the plan's merge threshold. */
+const RAW_PLAN = { minInterval45: 0 };
 
 const PACKET = 192;
 const VIDEO = 0x1011;
@@ -150,7 +153,7 @@ for (const c of cases) {
     const m2ts = readFileSync(join(fixture(c.disc), 'STREAM/00001.m2ts'));
     const packets = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
     const clpi = parseClpi(readFileSync(join(fixture(c.disc), 'CLIPINF/00001.clpi')));
-    const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000);
+    const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000, RAW_PLAN);
     const sources = collectAll(packets, intervals, c.streams());
     const outputs = intervals.map((plan, k) => bytesOf(remuxInterval(inputFor(plan, sources[k]!, videoOf(packets, plan)))));
 
@@ -220,7 +223,7 @@ describe('remuxInterval budgets and PSI', () => {
   const m2ts = readFileSync(join(fixture('disc-levels'), 'STREAM/00001.m2ts'));
   const packets = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
   const clpi = parseClpi(readFileSync(join(fixture('disc-levels'), 'CLIPINF/00001.clpi')));
-  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000);
+  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000, RAW_PLAN);
   const sources = collectAll(packets, intervals, cases[0]!.streams());
 
   it('reports the bytes past the budget, and no bytes, when the content does not fit (Review Focus 1)', () => {
@@ -317,7 +320,7 @@ describe('remuxInterval with PCR on the video PID', () => {
   const m2ts = readFileSync(join(fixture('disc-levels'), 'STREAM/00001.m2ts'));
   const source = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
   const clpi = parseClpi(readFileSync(join(fixture('disc-levels'), 'CLIPINF/00001.clpi')));
-  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000);
+  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000, RAW_PLAN);
   const ticks = Math.floor(270_000_000 / source.length);
   const PCR0 = 600 * 27_000_000; // the STC at the clip's first packet
   let nextPcr = 0;
@@ -415,7 +418,7 @@ describe('IntervalCollector', () => {
   const m2ts = readFileSync(join(fixture('disc-levels'), 'STREAM/00001.m2ts'));
   const packets = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
   const clpi = parseClpi(readFileSync(join(fixture('disc-levels'), 'CLIPINF/00001.clpi')));
-  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000);
+  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000, RAW_PLAN);
 
   it('hands each interval exactly the kept packets assigned to it, waiting for the PES that start in it', () => {
     const all: KeptPacket[] = [];
@@ -515,85 +518,129 @@ function patSection(pmtPid: number): Uint8Array {
 }
 
 /**
- * The bytes an interval holds (production failure on a music disc at phone-720: interval 198 overflowed even at the
- * 1 Mbps floor, and the read failed with HTTP 500). The plan's budget must hold the kept packets the source muxed into
- * the interval plus the level's video. Numbers measured on the NAS.
+ * The production failure (an LPCM music disc at phone-720: interval 198, one frame of 0.04 s, overflowed even at the 1 Mbps
+ * floor and the read failed with HTTP 500) and the other overflows found on the NAS, against the plan alone: no scan.
+ * Byte counts measured on the NAS.
  */
-describe('an interval fits the budget its scan gives it', () => {
+describe('the plan holds what an interval keeps', () => {
   const AUDIO = 0x1100;
-  const packet = (pid: number, ats: number): Uint8Array => {
+  const packet = (pid: number, ats: number, start = false): Uint8Array => {
     const p = new Uint8Array(PACKET);
     p[0] = (ats >>> 24) & 0x3f;
     p[1] = (ats >>> 16) & 0xff;
     p[2] = (ats >>> 8) & 0xff;
     p[3] = ats & 0xff;
-    p.set([0x47, (pid >> 8) & 0x1f, pid & 0xff, 0x10], 4);
+    p.set([0x47, (start ? 0x40 : 0) | ((pid >> 8) & 0x1f), pid & 0xff, 0x10], 4);
     return p;
   };
-  /** `counts` packets per PID, one ATS tick apart, all assigned to the interval's first SPN. */
-  const keptOf = (plan: IntervalPlan, counts: ReadonlyArray<[pid: number, n: number]>): KeptPacket[] => {
+  /** `n` packets per PID, one ATS tick apart, a PES starting every `pes` packets, assigned to the interval's first SPN. */
+  const keptOf = (plan: IntervalPlan, counts: ReadonlyArray<[pid: number, n: number]>, pes = 8): KeptPacket[] => {
     const out: KeptPacket[] = [];
     let ats = 0;
-    for (const [pid, n] of counts) for (let i = 0; i < n; i++) out.push({ spn: plan.srcSpnStart, bytes: packet(pid, ats++) });
+    for (const [pid, n] of counts) for (let i = 0; i < n; i++) out.push({ spn: plan.srcSpnStart, bytes: packet(pid, ats++, i % pes === 0) });
     return out;
   };
-  /** A video PES of `size` bytes in all at `dts90`. */
   const pes = (size: number, dts90: number): EncodedPes => {
     const bytes = new Uint8Array(size);
     bytes.set([0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5]);
     return { pes: bytes, dts90 };
   };
-  const clpi = (durations45: readonly number[]) => ({
+  /** An IDR of `idr` bytes, then 23.976 frames sharing what's left of `seconds` at `bps`. */
+  const videoAt = (plan: IntervalPlan, bps: number, idr: number): EncodedPes[] => {
+    const seconds = (plan.endPts45 - plan.startPts45) / 45_000;
+    const n = Math.max(0, Math.floor(seconds * 23.976) - 1);
+    const rest = Math.max(0, (seconds * bps) / 8 - idr);
+    return [pes(idr, plan.startPts45 * 2), ...Array.from({ length: n }, (_, i) => pes(Math.max(64, Math.floor(rest / Math.max(1, n))), plan.startPts45 * 2 + (i + 1) * 3_754))];
+  };
+  const clpi = (durations45: readonly number[], pg = 0) => ({
     version: '0200',
-    numSourcePackets: 100_000,
+    numSourcePackets: durations45.length * 1000,
     recordingRate: 48_000_000,
     atcSequences: [{ spnAtcStart: 0, offsetStcId: 0, stc: [{ pcrPid: VIDEO, spnStcStart: 0, presentationStart: 0, presentationEnd: durations45.reduce((a, b) => a + b, 0) }] }],
-    programs: [{ spnProgramSequenceStart: 0, programMapPid: 0x100, streams: [{ pid: VIDEO, codingType: 0x1b, format: 6, rate: 1, lang: '', aspect: 3 }] }],
+    programs: [
+      {
+        spnProgramSequenceStart: 0,
+        programMapPid: 0x100,
+        streams: [
+          { pid: VIDEO, codingType: 0x1b, format: 6, rate: 1, lang: '', aspect: 3 },
+          ...Array.from({ length: pg }, (_, i) => ({ pid: 0x1200 + i, codingType: 0x90, format: 0, rate: 0, lang: 'eng', aspect: 0 })),
+        ],
+      },
+    ],
     epMaps: [{ pid: VIDEO, epStreamType: 1, entries: durations45.map((_, i) => ({ pts: durations45.slice(0, i).reduce((a, b) => a + b, 0), spn: i * 1000 })) }],
   });
-  const remuxed = (plan: IntervalPlan, kept: KeptPacket[], video: EncodedPes[], budgetBytes = plan.budgetBytes) =>
-    remuxInterval({ plan: { ...plan, budgetBytes }, kept, video, videoPid: VIDEO, videoTimeline: [{ dts90: plan.startPts45 * 2, ats: 0 }], pcr: null });
-  /** `n` frames of `bytes` each after an IDR of `idr` bytes, 23.976 fps from the interval's start. */
-  const frames = (plan: IntervalPlan, idr: number, n: number, bytes: number): EncodedPes[] => [
-    pes(idr, plan.startPts45 * 2),
-    ...Array.from({ length: n }, (_, i) => pes(bytes, plan.startPts45 * 2 + (i + 1) * 3_754)),
-  ];
+  const remuxed = (plan: IntervalPlan, kept: KeptPacket[], video: EncodedPes[], budgetBytes = plan.budgetBytes): RemuxInput => ({
+    plan: { ...plan, budgetBytes },
+    kept,
+    video,
+    videoPid: VIDEO,
+    videoTimeline: [{ dts90: plan.startPts45 * 2, ats: 0 }],
+    pcr: null,
+  });
+  /** The kept audio of `seconds` at `bps` in source packets. */
+  const audioPackets = (seconds: number, bps: number): number => Math.ceil((seconds * bps) / 8 / PACKET);
+  const fits = (input: RemuxInput): boolean => 'bytes' in remuxInterval(input);
 
-  it('holds a one-frame interval: its IDR and the 25 KB of LPCM the source muxed among its own IDR in 0.04 s', () => {
-    // 131 packets of 24-bit stereo LPCM and 3 of PAT and PMT.
-    const counts: Array<[number, number]> = [[0, 1], [0x100, 2], [AUDIO, 131]];
-    const keptBytes = [0, 134 * PACKET, 0];
-    const plan = planClip(clpi([37_620, 1_800, 37_620]), LEVELS['phone-720'], 2_457_600, keptBytes).intervals[1]!;
-    const kept = keptOf(plan, counts);
-    // The IDR at the 1 Mbps floor (15 036 bytes) overflowed the rate formula's 43 008 bytes, by 1 152: no rate fit.
-    expect(remuxed(plan, kept, [pes(15_036, plan.startPts45 * 2)], 43_008)).toEqual({ overflow: 1_152 });
-    expect('bytes' in remuxed(plan, kept, [pes(15_036, plan.startPts45 * 2)])).toBe(true);
-    // The IDR at the 3 Mbps target (43 151 bytes) fits too: no re-encode.
-    expect('bytes' in remuxed(plan, kept, [pes(43_151, plan.startPts45 * 2)])).toBe(true);
+  it('merges the one-frame interval away: its IDR and its 25 KB of LPCM fit, with the video at the target rate', () => {
+    // 0.836 s, then the 0.04 s interval (one frame), then more of 0.836 s.
+    const durations = [37_620, 1_800, ...Array(6).fill(37_620)];
+    const level = LEVELS['phone-720'];
+    const plan = planClip(clpi(durations), level, 2_457_600).intervals[0]!;
+    expect(plan.srcSpnEnd).toBeGreaterThan(2000); // interval 1's entry is gone: it lies inside interval 0
+    const seconds = (plan.endPts45 - plan.startPts45) / 45_000;
+    // The LPCM at 2.4576 Mb/s over the interval, plus the 131 packets the source muxed among the one-frame interval's IDR.
+    const kept = keptOf(plan, [[0, 3], [0x100, 6], [AUDIO, audioPackets(seconds, 2_457_600) + 131]]);
+    // The rate formula gave interval 1 alone 43 008 bytes, which its kept packets and a floor IDR overflowed by 1 152.
+    const alone = keptOf(plan, [[0, 1], [0x100, 2], [AUDIO, 131]]);
+    expect(remuxInterval(remuxed(plan, alone, [pes(15_036, plan.startPts45 * 2)], 43_008))).toEqual({ overflow: 1_152 });
+    expect(fits(remuxed(plan, kept, videoAt(plan, level.targetBps, 43_151)))).toBe(true);
   });
 
-  it('holds a burst of subtitles on a disc with 11 PG streams (377 KB in 0.63 s) with the video at the level’s peak', () => {
-    const counts: Array<[number, number]> = [[0, 11], [0x100, 22], [0x1200, 1962], [AUDIO, 804]];
-    const keptBytes = [0, (11 + 22 + 1962 + 804) * PACKET, 0];
-    const plan = planClip(clpi([45_045, 28_350, 45_045]), LEVELS['phone-720'], 1_728_000, keptBytes).intervals[1]!;
-    const kept = keptOf(plan, counts);
-    // The rate formula's budget (3.75 + 1.509 + 1.5 Mb/s): the kept packets alone overflowed it.
-    const before = Math.ceil((28_350 * 6_759_000) / (45_000 * 8 * 6144)) * 6144;
-    expect('overflow' in remuxed(plan, kept, [], before)).toBe(true);
-    // 0.63 s at the peak of 3.75 Mb/s: 295 KB in an IDR and 14 frames.
-    const peak = (0.63 * 3_750_000) / 8;
-    expect('bytes' in remuxed(plan, kept, frames(plan, 43_151, 14, Math.floor((peak - 43_151) / 14)))).toBe(true);
+  it('holds a burst of subtitles on a disc with 11 PG streams (377 KB in 0.63 s) with the video at the floor', () => {
+    const level = LEVELS['phone-720'];
+    const plan = planClip(clpi([28_350, ...Array(6).fill(45_045)], 11), level, 1_728_000).intervals[0]!;
+    const seconds = (plan.endPts45 - plan.startPts45) / 45_000;
+    const kept = keptOf(plan, [[0, 22], [0x100, 44], [0x1200, 1962], [AUDIO, audioPackets(seconds, 1_728_000)]]);
+    expect(fits(remuxed(plan, kept, videoAt(plan, 1_000_000, 18_000)))).toBe(true);
   });
 
-  it('holds a clip’s audio tail: the last interval keeps the audio muxed after the last picture', () => {
-    // 0.92 s, and 451 KB of DTS core (2.1 s of it) the source carried after its last video frame.
-    const keptBytes = [0, 0, 2352 * PACKET];
-    const plan = planClip(clpi([45_045, 45_045, 41_400]), LEVELS['phone-720'], 1_728_000, keptBytes).intervals[2]!;
-    const kept = keptOf(plan, [[AUDIO, 2352]]);
-    const peak = (0.92 * 3_750_000) / 8;
-    const video = frames(plan, 43_151, 21, Math.floor((peak - 43_151) / 21));
-    // The rate formula's budget held the tail only with the video squeezed to a third of the level's peak.
-    expect('overflow' in remuxed(plan, kept, video, Math.ceil((41_400 * 6_759_000) / (45_000 * 8 * 6144)) * 6144)).toBe(true);
-    expect('bytes' in remuxed(plan, kept, video)).toBe(true);
+  it('holds a 768 KB burst in 1 s on a disc with 5 PG streams with the video at the floor', () => {
+    const level = LEVELS['phone-720'];
+    const plan = planClip(clpi(Array(8).fill(45_045), 5), level, 1_728_000).intervals[0]!;
+    const seconds = (plan.endPts45 - plan.startPts45) / 45_000;
+    const kept = keptOf(plan, [[0, 22], [0x100, 44], [0x1200, 4000], [AUDIO, audioPackets(seconds, 1_728_000)]]);
+    expect(fits(remuxed(plan, kept, videoAt(plan, 1_000_000, 18_000)))).toBe(true);
+  });
+
+  it('merges a short last interval with the one before: the audio muxed after the last picture fits', () => {
+    // 0.92 s at the end, holding 451 KB of DTS core (2.1 s of it) after the last picture.
+    const level = LEVELS['phone-720'];
+    const plans = planClip(clpi([...Array(4).fill(45_045), 41_400]), level, 1_728_000).intervals;
+    const plan = plans.at(-1)!;
+    expect(plan.srcSpnEnd).toBe(5000);
+    expect(plan.srcSpnStart).toBeLessThan(4000);
+    const seconds = (plan.endPts45 - plan.startPts45) / 45_000;
+    const kept = keptOf(plan, [[0, 22], [0x100, 44], [AUDIO, audioPackets(seconds - 0.92, 1_728_000) + 2352]]);
+    expect(fits(remuxed(plan, kept, videoAt(plan, 1_000_000, 18_000)))).toBe(true);
+  });
+
+  it('drops whole PES of the highest-numbered graphics streams as a last resort, never the video or the audio', () => {
+    const level = LEVELS['phone-720'];
+    const plan = planClip(clpi(Array(3).fill(45_045), 3), level, 1_728_000, { minInterval45: 0 }).intervals[0]!;
+    // Far more subtitles than any budget holds: 2.5 MB on the third stream, 50 KB on the others.
+    const lead = { spn: plan.srcSpnStart, bytes: packet(0x1202, 0) }; // the tail of a PES begun in the interval before
+    const kept = [lead, ...keptOf(plan, [[0x1200, 260], [0x1201, 260], [0x1202, 13_000], [AUDIO, 300]])];
+    const video = videoAt(plan, 1_000_000, 18_000);
+    expect(fits(remuxed(plan, kept, video))).toBe(false);
+    const shed = shedGraphics(remuxed(plan, kept, video), [0x1200, 0x1201, 0x1202])!;
+    expect(shed.dropped).toEqual([0x1202]);
+    const pids = (bytes: Uint8Array): number[] => packetsOf(bytes).map(pidOf);
+    const out = pids(shed.bytes);
+    expect(out.filter((p) => p === 0x1202)).toHaveLength(1); // only the tail of the PES that began before
+    expect(out.filter((p) => p === AUDIO)).toHaveLength(300);
+    expect(out.filter((p) => p === 0x1200)).toHaveLength(260);
+    expect(out.filter((p) => p === VIDEO).length).toBeGreaterThan(0);
+    // Nothing left to drop that would make room: null.
+    expect(shedGraphics(remuxed(plan, keptOf(plan, [[AUDIO, 20_000]]), video), [0x1200])).toBeNull();
   });
 });

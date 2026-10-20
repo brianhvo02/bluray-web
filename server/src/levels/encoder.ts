@@ -861,8 +861,9 @@ function encodeOne(backend: EncoderBackend, options: ClipEncoderOptions, index: 
 /**
  * The over-budget retry (Review Focus 1): re-encodes interval `index` at `rate × (budget ÷ actual) × 0.95`, where
  * `actual` is the re-muxed size the last try needed (budget + overflow), down to a floor of 1 Mbps, until `remux` fits
- * it into the plan's budget. One try is always made, at the floor at least. Throws when it doesn't fit at the floor: an
- * interval is never served truncated or oversized. An abort of `signal` (its run stopped) kills the ffmpeg and rejects.
+ * it into the plan's budget. One try is always made, at the floor at least. When it doesn't fit at the floor, `lastResort`
+ * gets the floor's video (the re-mux drops subtitle and menu PES, `shedGraphics`); throws when that can't fit it either:
+ * an interval is never served truncated or oversized. An abort of `signal` (its run stopped) kills the ffmpeg and rejects.
  */
 export async function encodeIntervalAt(
   backend: EncoderBackend,
@@ -871,17 +872,22 @@ export async function encodeIntervalAt(
   overflowed: { readonly rateBps: number; readonly overflowBytes: number },
   remux: (video: readonly EncodedPes[]) => { bytes: Uint8Array } | { overflow: number },
   signal?: AbortSignal,
+  lastResort?: (video: readonly EncodedPes[]) => { bytes: Uint8Array } | null,
 ): Promise<{ bytes: Uint8Array; rateBps: number }> {
   const plan = options.intervals[index];
   if (!plan) throw new Error(`levels: the clip has no interval ${index}`);
   const budget = plan.budgetBytes;
   let rate = overflowed.rateBps;
   let overflow = overflowed.overflowBytes;
+  let video: readonly EncodedPes[];
   do {
     rate = Math.max(MIN_RETRY_RATE_BPS, Math.round(((rate * budget) / (budget + overflow)) * RETRY_MARGIN));
-    const result = remux(await encodeOne(backend, options, index, rate, signal));
+    video = await encodeOne(backend, options, index, rate, signal);
+    const result = remux(video);
     if ('bytes' in result) return { bytes: result.bytes, rateBps: rate };
     overflow = result.overflow;
   } while (rate > MIN_RETRY_RATE_BPS);
+  const shed = lastResort?.(video);
+  if (shed) return { bytes: shed.bytes, rateBps: rate };
   throw new Error(`levels: interval ${index} overflows its budget even at 1 Mbps`);
 }

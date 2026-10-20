@@ -24,7 +24,10 @@ describe('rewriteClpi', () => {
     expect(after.programs[0]!.streams.map((s) => s.pid)).toEqual([0x1011, 0x1100]);
     expect(after.epMaps).toHaveLength(1);
     expect(after.epMaps[0]!.pid).toBe(0x1011);
-    expect(after.epMaps[0]!.entries.map((e) => e.pts)).toEqual(before.epMaps[0]!.entries.map((e) => e.pts));
+    // One entry per interval: the entries the plan kept (it merges short intervals), at their own PTS.
+    expect(after.epMaps[0]!.entries.map((e) => e.pts)).toEqual(plan.intervals.map((iv) => iv.startPts45));
+    const original = new Set(before.epMaps[0]!.entries.map((e) => e.pts));
+    expect(after.epMaps[0]!.entries.every((e) => original.has(e.pts))).toBe(true);
     expect(after.epMaps[0]!.entries.map((e) => e.spn)).toEqual(plan.intervals.map((iv) => iv.spnStart));
     expect(after.numSourcePackets).toBe(plan.sizeBytes / 192);
     expect(after.atcSequences).toEqual(before.atcSequences);
@@ -84,11 +87,16 @@ describe('rewriteClpi', () => {
   it("keeps the angle change points but not the source's I_end_position_offset on the video's fine entries", () => {
     const bytes = read('disc-mpeg2/BDMV/CLIPINF/00001.clpi').slice();
     const fine = fineEntries(bytes);
-    fine.forEach((at, i) => (bytes[at] = (bytes[at]! & 0x0f) | (i % 2 ? 0xf0 : 0x70)));
+    fine.forEach((at, i) => (bytes[at] = (bytes[at]! & 0x0f) | (i % 4 === 2 ? 0xf0 : 0x70)));
     const level = LEVELS['h264-1080'];
     const plan = planClip(parseClpi(bytes), level, 0);
     const out = rewriteClpi(bytes, { intervals: plan.intervals, level, keepPids: [], audio: null, videoPid: 0x1011, newCoding: 0x1b, newFormat: 6, newRate: 4 });
-    expect(fineEntries(out).map((at) => out[at]! >> 4)).toEqual(fine.map((_, i) => (i % 2 ? 0x8 : 0)));
+    // The plan merges short intervals: each kept entry keeps its own source entry's angle change point.
+    const sourcePts = parseClpi(bytes).epMaps[0]!.entries.map((e) => e.pts);
+    const kept = plan.intervals.map((iv) => sourcePts.indexOf(iv.startPts45));
+    expect(fineEntries(out).map((at) => out[at]! >> 4)).toEqual(kept.map((i) => (i % 4 === 2 ? 0x8 : 0)));
+    expect(kept.some((i) => i % 4 === 2)).toBe(true);
+    expect(kept.length).toBeLessThan(sourcePts.length);
   });
 
   it('is byte-identical at the original level', () => {

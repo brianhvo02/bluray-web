@@ -10,8 +10,7 @@
  * with it as the app does (redeem, session challenge, token), mints more codes for that person when `--parallel` needs
  * more viewers, and removes that person (and so every device it paired) at the end.
  *
- * Each viewing fetches `discs/<id>/levels`, the manifest at the level (waiting out the 503s while the NAS scans a disc's
- * clips the first time, up to 30 minutes), then reads the main clip at the level in 2 MiB
+ * Each viewing fetches `discs/<id>/levels`, the manifest at the level, then reads the main clip at the level in 2 MiB
  * ranges (waiting out 503 Retry-After) and pipes the bytes into local ffprobe and ffmpeg. It checks that every EP entry
  * of the level's rewritten CLPI points at an IDR picture with the entry's PTS, that ffmpeg decodes the stream without
  * errors, and that the bytes read add up to the manifest's size; it prints the throughput as a multiple of real time.
@@ -34,8 +33,6 @@ const SOURCE_PACKET = 192;
 const SESSION_MARGIN_MS = 5 * 60_000;
 /** A read that keeps answering 503 Retry-After for this long fails the viewing. */
 const RETRY_GIVE_UP_MS = 10 * 60_000;
-/** The manifest's 503 while the NAS scans the disc's clips fails the viewing after this long. */
-const SCAN_GIVE_UP_MS = 30 * 60_000;
 /** How much of a video PES is kept to find its first picture's NAL unit type. */
 const PES_HEAD_BYTES = 256 * 1024;
 const LEVELS = ['h264-1080', 'phone-720', 'hevc-1080', 'hevc-1080-hdr', 'h264-1080-sdr'] as const;
@@ -384,17 +381,7 @@ async function checkViewing(v: Viewing, level: Level, maxBytes: number | null, l
   const offered = levels.find((l) => l.level === level);
   if (!offered?.available) return stop(`level ${level} is not available${offered ? ` (${offered.reason})` : ''}`);
 
-  // The first manifest of a disc at any level waits for the NAS's scan of its clips (a full read: minutes for a film).
-  const scanStarted = Date.now();
-  let manifestRes = await device.fetch(`discs/${disc}/manifest${query}`);
-  while (manifestRes.status === 503) {
-    const body = await manifestRes.text();
-    if (!body.includes('"retry"')) return stop(`manifest at ${level}: HTTP 503 ${body}`);
-    if (Date.now() - scanStarted > SCAN_GIVE_UP_MS) return stop(`manifest at ${level}: still scanning after ${SCAN_GIVE_UP_MS / 60_000} minutes`);
-    await sleep(Number(manifestRes.headers.get('Retry-After') ?? '1') * 1000);
-    manifestRes = await device.fetch(`discs/${disc}/manifest${query}`);
-  }
-  if (Date.now() - scanStarted > 2000) say(`the NAS scanned the disc's clips for ${((Date.now() - scanStarted) / 1000).toFixed(0)} s before the manifest`);
+  const manifestRes = await device.fetch(`discs/${disc}/manifest${query}`);
   if (!manifestRes.ok) return stop(`manifest at ${level}: HTTP ${manifestRes.status} ${await manifestRes.text()}`);
   lease.held = true;
   const manifest = (await manifestRes.json()) as DiscManifest;

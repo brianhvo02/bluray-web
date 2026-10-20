@@ -55,7 +55,9 @@ describe.skipIf(discs.length === 0)('local discs rewritten at a quality level', 
         expect(after.numSourcePackets).toBe(plan.sizeBytes / 192);
         expect(after.recordingRate).toBe(maxBudgetRate(plan.intervals));
         const afterMap = after.epMaps.find((m) => m.pid === map.pid)!;
-        expect(afterMap.entries.map((e) => e.pts)).toEqual(map.entries.map((e) => e.pts));
+        expect(afterMap.entries.map((e) => e.pts)).toEqual(plan.intervals.map((iv) => iv.startPts45));
+        const original = new Set(map.entries.map((e) => e.pts));
+        expect(afterMap.entries.every((e) => original.has(e.pts))).toBe(true);
         expect(afterMap.entries.map((e) => e.spn)).toEqual(plan.intervals.map((iv) => iv.spnStart));
         const streams = after.programs[0]!.streams;
         const kept = new Set([map.pid, ...(audio ? [audio.pid] : []), ...graphics.map((s) => s.pid)]);

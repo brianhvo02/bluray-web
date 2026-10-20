@@ -9,6 +9,9 @@ import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
 import { KeptStreams, PesCoreFilter, audioWireBps, fallbackAudioBps, mpegCrc32, nominalAudioBps, pmtFor, type KeptPacket } from './audio-core';
 import { LEVELS, planClip } from './levels';
 
+/** The fixtures' EP intervals as they are: their GOPs are shorter than the plan's merge threshold. */
+const RAW_PLAN = { minInterval45: 0 };
+
 const DISC = join(import.meta.dirname, '../../../fixtures/synthetic/disc-levels/BDMV');
 const PACKET = 192;
 
@@ -394,7 +397,7 @@ describe('KeptStreams intervals (ruling L-R4)', () => {
   const m2ts = readFileSync(join(DISC, 'STREAM/00001.m2ts'));
   const packets = packetsOf(new Uint8Array(m2ts.buffer, m2ts.byteOffset, m2ts.byteLength));
   const clpi = parseClpi(readFileSync(join(DISC, 'CLIPINF/00001.clpi')));
-  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000);
+  const { intervals } = planClip(clpi, LEVELS['h264-1080'], 192_000, RAW_PLAN);
   const k3 = intervals[3]!.srcSpnStart;
 
   // The fixture has no PSI: a PAT and a PMT go in front of each interval's first packet, fed at that packet's SPN.

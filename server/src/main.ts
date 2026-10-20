@@ -13,7 +13,6 @@ import { levelsBackend } from './levels/backend-check';
 import { Capacity, GPU_BUDGETS } from './levels/capacity';
 import { probeScan } from './levels/encoder';
 import { LevelService, libraryDiscSources } from './levels/level-service';
-import { FileNonVideoStore } from './levels/nonvideo-scan';
 import { SegmentCache } from './levels/segment-cache';
 import { Library, nextNightly } from './library';
 import { RendezvousClient } from './rendezvous-client';
@@ -104,7 +103,6 @@ async function levelService(config: Config, library: Library, isoTrees: IsoTrees
     backend: encoder.backend,
     codecs: encoder.codecs,
     probe: (input, options) => probeScan(input, { ...options, binary: ffprobePath }),
-    nonVideoStore: new FileNonVideoStore(join(config.dataDir, 'levels-scan')),
     log: console.log,
   });
 }

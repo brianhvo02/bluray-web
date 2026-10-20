@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { cpSync, createReadStream, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough, Readable } from 'node:stream';
+import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseClpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseMpls } from '../../../src/engine/bdmv/mpls-parser';
@@ -38,8 +38,10 @@ import { FAILURE_BACKOFF_MS } from './clip-run';
 import { ENCODER_VERSION, clipFrameTicks, loadDisc, planHash } from './level-version';
 import { keptAudioFor, levelDefFor, planClip, videoAttrsFor } from './levels';
 import { rewriteMpls } from './mpls-writer';
-import { FileNonVideoStore, nonVideoBytes, scanNonVideo } from './nonvideo-scan';
 import { SegmentCache } from './segment-cache';
+
+/** The fixtures' EP intervals as they are: their GOPs are shorter than the plan's merge threshold. */
+const RAW_PLAN = { minInterval45: 0 };
 
 const SYNTHETIC = join(import.meta.dirname, '../../../fixtures/synthetic');
 const DISC_DIR = join(SYNTHETIC, 'disc-levels');
@@ -222,15 +224,7 @@ let service: LevelService;
 let capacity: Capacity;
 
 function makeService(
-  options: {
-    readAheadMs?: number;
-    waitFilmMs?: number;
-    log?: (message: string) => void;
-    discs?: (id: string) => Promise<LevelDiscSource | null>;
-    backend?: EncoderBackend;
-    codecs?: ReadonlySet<'h264' | 'hevc'>;
-    nonVideoStore?: FileNonVideoStore;
-  } = {},
+  options: { readAheadMs?: number; waitFilmMs?: number; log?: (message: string) => void; discs?: (id: string) => Promise<LevelDiscSource | null>; backend?: EncoderBackend; codecs?: ReadonlySet<'h264' | 'hevc'> } = {},
 ): LevelService {
   capacity = new Capacity({ h264: 190, hevc: 100 }, clock.now);
   return new LevelService({
@@ -240,21 +234,20 @@ function makeService(
     backend: options.backend ?? fake.backend,
     ...(options.backend ? {} : { spawn: fake.spawn }),
     probe: async () => ({ interlaced: false, softPulldown: false }),
+    planTuning: RAW_PLAN,
     clock,
     ...(options.readAheadMs === undefined ? {} : { readAheadMs: options.readAheadMs }),
     ...(options.waitFilmMs === undefined ? {} : { waitFilmMs: options.waitFilmMs }),
     ...(options.codecs ? { codecs: options.codecs } : {}),
     ...(options.log ? { log: options.log } : {}),
-    ...(options.nonVideoStore ? { nonVideoStore: options.nonVideoStore } : {}),
   });
 }
 
-beforeEach(async () => {
+beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), 'level-service-'));
   clock = new ManualClock();
   fake = new FakeFfmpeg();
   service = makeService();
-  await ready();
 });
 
 afterEach(async () => {
@@ -266,23 +259,9 @@ afterEach(async () => {
 
 const never = new AbortController().signal;
 
-/**
- * Waits for the service's scan of the disc's clips (what they keep besides their video; a few milliseconds for the
- * fixtures), without leasing: until a level's file size is answered.
- */
-async function ready(s: LevelService = service, discId = DISC_ID): Promise<void> {
-  for (let i = 0; i < 1000; i++) {
-    const size = await s.size(discId, 'h264-1080', 1, CLPI_PATH);
-    if (size === null || typeof size === 'number') return;
-    await new Promise((r) => setTimeout(r, 2));
-  }
-  throw new Error('the scan never finished');
-}
-
 async function levelManifest(s: LevelService = service): Promise<DiscManifest> {
-  await ready(s);
   const m = await s.manifest(DISC_ID, 'h264-1080', 1, VIEWING);
-  if (!m || 'busy' in m || 'retryAfter' in m) throw new Error('no manifest');
+  if (!m || 'busy' in m) throw new Error('no manifest');
   return m;
 }
 
@@ -340,7 +319,7 @@ describe('LevelService: manifest', () => {
     expect(await firstAudioBps(createReadStream(join(DISC_DIR, 'BDMV/STREAM/00001.m2ts')), TRUEHD, CodingType.TRUEHD)).toBe(audioBps);
 
     const def = levelDefFor('h264-1080', { height: 1080 });
-    const plan = planClip(clpi, def, audioBps);
+    const plan = planClip(clpi, def, audioBps, RAW_PLAN);
     const rate = clpi.programs[0]!.streams.find((s) => s.pid === VIDEO)!.rate;
     const clpiLevel = rewriteClpi(clpiBytes, { intervals: plan.intervals, level: def, keepPids: PG, audio: kept, videoPid: VIDEO, ...videoAttrsFor(def, rate) });
     const mplsLevel = rewriteMpls(mplsBytes, { audioStreamNumber: 1 }, videoAttrsFor(def, rate));
@@ -389,7 +368,7 @@ describe('LevelService: levels', () => {
     ]);
     const manifest = await levelManifest();
     const film = (() => {
-      const { intervals } = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0);
+      const { intervals } = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0, RAW_PLAN);
       return intervals.reduce((n, iv) => n + iv.endPts45 - iv.startPts45, 0) / 45_000;
     })();
     const size = manifest.files.find((f) => f.path === M2TS_PATH)!.size;
@@ -402,7 +381,6 @@ describe('LevelService: levels', () => {
 
   it('never offers the original of an MPEG-2 disc', async () => {
     const s = makeService({ discs: async (id) => folderDiscSource(join(SYNTHETIC, 'disc-mpeg2'), { id, name: 'Starfall Wanderer' }) });
-    await ready(s, 'any');
     const levels = (await s.levels('mpeg2', { hevc: false, hevc10: false, hdr: false }))!;
     expect(levels[0]).toMatchObject({ level: 'original', available: false, reason: 'unplayable' });
     expect(levels.find((l) => l.level === 'h264-1080')).toMatchObject({ available: true });
@@ -442,7 +420,6 @@ describe('LevelService: reads', () => {
   it('restarts at a seek far ahead of the encoder, and a read back hits the cache (Review Focus 2)', async () => {
     service.close();
     service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
-    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -455,7 +432,7 @@ describe('LevelService: reads', () => {
     await vi.waitFor(() => expect(fake.runs.length).toBe(2));
     expect(fake.runs[0]!.child.killed).toBe(true);
     const seekRun = fake.runs[1]!;
-    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
+    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0, RAW_PLAN).intervals;
     expect(seekRun.args.startByte).toBe(plan[8]!.srcSpnStart * 192);
     seekRun.finish();
     expect(scan(await bytesOf(eight)).videoPts[0]).toBe(epFrame(l.pts45[8]!));
@@ -472,7 +449,6 @@ describe('LevelService: reads', () => {
   it('gives each viewing its own encoder: a viewer far ahead doesn’t restart another’s', async () => {
     service.close();
     service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
-    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -506,7 +482,6 @@ describe('LevelService: reads', () => {
     // Scaled down: the fixture has 10 s of film. A 120 s window with a 1 s wait distance stands for a seek 60 s ahead.
     service.close();
     service = makeService({ readAheadMs: 120_000, waitFilmMs: 1000 });
-    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -515,7 +490,7 @@ describe('LevelService: reads', () => {
     const six = readInterval(l, 6); // 4 s of film ahead: inside the window, past the wait distance
     await vi.waitFor(() => expect(fake.runs.length).toBe(2));
     expect(fake.runs[0]!.child.killed).toBe(true);
-    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
+    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0, RAW_PLAN).intervals;
     expect(fake.runs[1]!.args.startByte).toBe(plan[6]!.srcSpnStart * 192);
     fake.runs[1]!.finish();
     expect(scan(await bytesOf(six)).videoPts[0]).toBe(epFrame(l.pts45[6]!));
@@ -533,7 +508,7 @@ describe('LevelService: reads', () => {
       expect(scan(bytes).videoPts[0]).toBe(epFrame(l.pts45[i]!));
     }
     // The run, then interval 3 alone again.
-    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals;
+    const plan = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0, RAW_PLAN).intervals;
     expect(fake.runs.map((r) => r.args.startByte / 192)).toEqual([0, plan[3]!.srcSpnStart]);
     expect(fake.runs[1]!.args.keys).toEqual([epFrame(l.pts45[3]!), epFrame(l.pts45[4]!)]);
   });
@@ -623,6 +598,7 @@ describe.skipIf(!runFfmpegTests)('LevelService with libx264', () => {
         cache: new SegmentCache(join(scratch, 'transcode'), 1 << 30),
         capacity: new Capacity({ h264: 190, hevc: 100 }),
         backend,
+        planTuning: RAW_PLAN,
       });
       const manifest = await levelManifest();
       const l = layout(manifest);
@@ -698,7 +674,7 @@ describe('clipFrameTicks and the encoder version', () => {
 
   it('puts the encoder version in the plan hash: no segment of an earlier encoder is served', () => {
     const def = levelDefFor('h264-1080', { height: 1080 });
-    const { intervals } = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), def, 0);
+    const { intervals } = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), def, 0, RAW_PLAN);
     const encode = { backend: 'qsv', deinterlace: false };
     // The hash before version 2, which had no encoder version in it.
     const h = createHash('sha256');
@@ -719,7 +695,6 @@ describe('LevelService: fix round 1', () => {
     cpSync(join(disc1, 'PLAYLIST/00001.mpls'), join(dir, 'BDMV/PLAYLIST/00001.mpls'));
     service.close();
     service = serviceOn(dir);
-    await ready(service);
     const manifest = await levelManifest();
 
     const bpsOf = (m2ts: string, coding: number): Promise<number> => firstAudioBps(createReadStream(m2ts), TRUEHD, coding);
@@ -728,7 +703,7 @@ describe('LevelService: fix round 1', () => {
     expect(lpcm).not.toBe(truehd);
     const sizeOf = (clip: string, bps: number): number => {
       const clpi = parseClpi(new Uint8Array(readFileSync(join(dir, `BDMV/CLIPINF/${clip}.clpi`))));
-      return planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), bps).sizeBytes;
+      return planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), bps, RAW_PLAN).sizeBytes;
     };
     const size = (path: string): number => manifest.files.find((f) => f.path === path)!.size;
     expect(size('BDMV/STREAM/00001.M2TS')).toBe(sizeOf('00001', truehd));
@@ -743,13 +718,13 @@ describe('LevelService: fix round 1', () => {
     const kept = keptAudioFor(parseMpls(fixtureBytes('PLAYLIST/00000.mpls')).playItems[0]!, 1)!;
     const def = levelDefFor('h264-1080', { height: 1080 });
     const bps = await firstAudioBps(createReadStream(join(DISC_DIR, 'BDMV/STREAM/00001.m2ts')), TRUEHD, CodingType.TRUEHD);
-    const { intervals } = planClip(clpi, def, bps);
+    const { intervals } = planClip(clpi, def, bps, RAW_PLAN);
     const encode = { backend: 'fake', deinterlace: false };
     const hash = planHash(def, kept, intervals, encode);
     expect(hash).toMatch(/^[0-9a-f]{12}$/);
     await vi.waitFor(() => expect(readdirSync(join(scratch, 'transcode', DISC_ID, 'h264-1080', '1'))).toEqual([`00001.${hash}`]));
     // Another budget, another audio stream, another level, another backend or another deinterlace decision is another hash.
-    expect(planHash(def, kept, planClip(clpi, def, bps + 64_000).intervals, encode)).not.toBe(hash);
+    expect(planHash(def, kept, planClip(clpi, def, bps + 64_000, RAW_PLAN).intervals, encode)).not.toBe(hash);
     expect(planHash(def, { ...kept, pid: COMMENTARY }, intervals, encode)).not.toBe(hash);
     expect(planHash(levelDefFor('phone-720', { height: 1080 }), kept, intervals, encode)).not.toBe(hash);
     expect(planHash(def, kept, intervals, { ...encode, backend: 'x264' })).not.toBe(hash);
@@ -776,7 +751,6 @@ describe('LevelService: fix round 1', () => {
       const disc = await loadDisc(DISC_ID, folderDiscSource(dir, { id: DISC_ID, name: 'Starfall Wanderer' }));
       expect(disc.main!.video).toMatchObject({ codingType: CodingType.HEVC, height: 2160, hdr });
       const s = serviceOn(dir);
-      await ready(s);
       const levels = (await s.levels(DISC_ID, { hevc: true, hevc10: true, hdr: true }))!.map((x) => x.level);
       expect(levels).toEqual(hdr ? ['original', 'hevc-1080-hdr', 'h264-1080-sdr'] : ['original', 'h264-1080', 'hevc-1080', 'phone-720']);
       s.close();
@@ -789,7 +763,6 @@ describe('LevelService: fix round 1', () => {
     const dir = discCopy();
     service.close();
     service = serviceOn(dir);
-    await ready(service);
     const l = layout(await levelManifest());
     const zero = readInterval(l, 0);
     await vi.waitFor(() => expect(fake.runs.length).toBe(1));
@@ -798,12 +771,8 @@ describe('LevelService: fix round 1', () => {
     const m2ts = join(dir, 'BDMV/STREAM/00001.m2ts');
     writeFileSync(m2ts, readFileSync(m2ts)); // the same bytes, a new file
     utimesSync(m2ts, new Date(), new Date(Date.now() + 60_000));
-    // The read sees the change: the old encoder stops, the clip is scanned again (retryAfter meanwhile), and interval 0 is
-    // encoded again (the old bytes are never served).
+    // The read sees the change: the old encoder stops, and interval 0 is encoded again (the old bytes are never served).
     fake.auto = true;
-    expect(await readInterval(l, 0)).toEqual({ retryAfter: 1 });
-    expect(fake.runs[0]!.child.killed).toBe(true);
-    await ready(service);
     const again = await bytesOf(readInterval(l, 0));
     expect(fake.runs[0]!.child.killed).toBe(true);
     expect(fake.runs.length).toBe(2);
@@ -817,7 +786,6 @@ describe('LevelService: fix round 1', () => {
   it('answers a read the restarted encoder won’t reach with retryAfter, so two reads two windows apart both finish (Minor 1)', async () => {
     service.close();
     service = makeService({ readAheadMs: 3000, waitFilmMs: 3000 });
-    await ready(service);
     const l = layout(await levelManifest());
     const results: unknown[] = [];
     const a = readInterval(l, 0).then((r) => results.push(['a', r]));
@@ -878,58 +846,17 @@ describe('LevelService: fix round 1', () => {
   });
 });
 
-describe('LevelService: the scan of what each clip keeps besides its video', () => {
-  const storeOptions = (logged: string[]) => ({ nonVideoStore: new FileNonVideoStore(join(scratch, 'levels-scan')), log: (m: string) => logged.push(m) });
-
-  it('answers retryAfter until the disc’s clips are scanned, then sizes every interval with the scan', async () => {
-    service.close();
-    const logged: string[] = [];
-    service = makeService(storeOptions(logged));
-    expect(await service.manifest(DISC_ID, 'h264-1080', 1, VIEWING)).toEqual({ retryAfter: 1 });
-    expect(await service.size(DISC_ID, 'h264-1080', 1, M2TS_PATH)).toEqual({ retryAfter: 1 });
-    expect(await service.read(DISC_ID, 'h264-1080', 1, M2TS_PATH, 0, 192, VIEWING, never)).toEqual({ retryAfter: 1 });
-    expect(capacity.inUse().viewings).toEqual([]); // no lease while it scans
-    const manifest = await levelManifest();
-
-    const clpi = parseClpi(fixtureBytes('CLIPINF/00001.clpi'));
-    const def = levelDefFor('h264-1080', { height: 1080 });
-    const bps = await firstAudioBps(createReadStream(join(DISC_DIR, 'BDMV/STREAM/00001.m2ts')), TRUEHD, CodingType.TRUEHD);
-    const m2ts = fixtureBytes('STREAM/00001.m2ts');
-    const scan = await scanNonVideo((from) => Readable.from([Buffer.from(m2ts.subarray(from))]), clpi, VIDEO, planClip(clpi, def, 0).intervals);
-    expect(manifest.files.find((f) => f.path === M2TS_PATH)!.size).toBe(planClip(clpi, def, bps, nonVideoBytes(scan, TRUEHD)).sizeBytes);
-    expect(logged.filter((m) => m.startsWith('levels: scanned clip'))).toHaveLength(1);
-    // Stored: a restart answers at once, without reading the clip again.
-    service.close();
-    service = makeService(storeOptions(logged));
-    const again = await service.manifest(DISC_ID, 'h264-1080', 1, VIEWING);
-    expect(again && 'files' in again ? again.files : null).toEqual(manifest.files);
-    expect(logged.filter((m) => m.startsWith('levels: scanned clip'))).toHaveLength(1);
-  });
-
-  it('scans a replaced clip again', async () => {
-    const dir = discCopy();
-    service.close();
-    const logged: string[] = [];
-    service = serviceOn(dir, { log: (m) => logged.push(m) });
-    await levelManifest();
-    utimesSync(join(dir, 'BDMV/STREAM/00001.m2ts'), new Date(), new Date(Date.now() + 5_000));
-    expect(await service.manifest(DISC_ID, 'h264-1080', 1, VIEWING)).toEqual({ retryAfter: 1 });
-    await levelManifest();
-    expect(logged.filter((m) => m.startsWith('levels: scanned clip'))).toHaveLength(2);
-  });
-});
-
 describe('LevelService: final review', () => {
   it('prices the levels with the audio stream asked for', async () => {
     const client = { hevc: false, hevc10: false, hdr: false };
     const sizeAt = async (audio: number): Promise<number> => {
       const m = await service.manifest(DISC_ID, 'h264-1080', audio, viewingIdOf('dev-a', DISC_ID, 'h264-1080', audio));
-      if (!m || 'busy' in m || 'retryAfter' in m) throw new Error('no manifest');
+      if (!m || 'busy' in m) throw new Error('no manifest');
       return m.files.find((f) => f.path === M2TS_PATH)!.size;
     };
     const [one, two] = [await sizeAt(1), await sizeAt(2)];
     expect(two).not.toBe(one); // stream 2 (AC-3) travels at another rate than stream 1 (TrueHD's core)
-    const film = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0).intervals.reduce((n, iv) => n + iv.endPts45 - iv.startPts45, 0) / 45_000;
+    const film = planClip(parseClpi(fixtureBytes('CLIPINF/00001.clpi')), levelDefFor('h264-1080', { height: 1080 }), 0, RAW_PLAN).intervals.reduce((n, iv) => n + iv.endPts45 - iv.startPts45, 0) / 45_000;
     const at = async (audio?: number): Promise<number> => (await service.levels(DISC_ID, client, undefined, audio))!.find((l) => l.level === 'h264-1080')!.budgetMbps;
     expect(await at()).toBeCloseTo((one * 8) / film / 1e6, 1);
     expect(await at(2)).toBeCloseTo((two * 8) / film / 1e6, 1);
@@ -949,11 +876,10 @@ describe('LevelService: final review', () => {
     const logged: string[] = [];
     service.close();
     service = serviceOn(dir, { log: (m) => logged.push(m) });
-    await ready(service);
     const manifest = await levelManifest();
     const clpi = parseClpi(fixtureBytes('CLIPINF/00001.clpi'));
     const size = manifest.files.find((f) => f.path === M2TS_PATH)!.size;
-    expect(size).toBe(planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), fallbackAudioBps(CodingType.TRUEHD, null)).sizeBytes);
+    expect(size).toBe(planClip(clpi, levelDefFor('h264-1080', { height: 1080 }), fallbackAudioBps(CodingType.TRUEHD, null), RAW_PLAN).sizeBytes);
     expect(logged.some((m) => m.includes('fallback'))).toBe(true);
   });
 });
@@ -961,7 +887,6 @@ describe('LevelService: final review', () => {
 describe('LevelService: for the routes', () => {
   it('offers no level of a codec whose encoder failed its self-test (x264: H.264 only)', async () => {
     const s = makeService({ codecs: new Set(['h264']) });
-    await ready(s);
     const levels = (await s.levels(DISC_ID, { hevc: true, hevc10: true, hdr: true }))!;
     expect(levels.map((l) => [l.level, l.available, l.reason])).toEqual([
       ['original', true, undefined],
@@ -988,7 +913,6 @@ describe('LevelService: for the routes', () => {
     expect(await service.originalPlayable(DISC_ID)).toBe(true);
     expect(await service.originalPlayable('gone')).toBeNull();
     const s = makeService({ discs: async (id) => folderDiscSource(join(SYNTHETIC, 'disc-mpeg2'), { id, name: 'Starfall Wanderer' }) });
-    await ready(s, 'any');
     expect(await s.originalPlayable('mpeg2')).toBe(false);
     s.close();
   });

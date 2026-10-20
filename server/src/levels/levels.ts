@@ -158,26 +158,59 @@ export interface IntervalPlan {
 export const ALIGNED_UNIT_BYTES = 6144;
 export const SOURCE_PACKET_BYTES = 192;
 const TS_PACKET_BYTES = 188;
-const TS_PAYLOAD_BYTES = 184;
-/** Room for every PG and IG stream, which travel bit-exact, in the budget's rate part. */
+/** Room for the clip's graphics in every interval's budget: this much with one PG or IG stream (or none). */
 export const GRAPHICS_ALLOWANCE_BPS = 1_500_000;
+/**
+ * More room per PG stream beyond the first, since every language's subtitles change at once. With 2 s intervals, 11-PG
+ * discs (bursts of 420 KB in 0.75 s, a 5-PG film's 768 KB in 1 s) fit with at least 240 KB to spare at phone-720 across
+ * 12 sampled discs, and the video is squeezed below its peak in 0.13% of intervals (7.4% with no merge and 1.5 Mb/s).
+ */
+export const PG_EXTRA_BPS = 50_000;
+/** More room per IG stream (menu pages arrive in bursts). */
+export const IG_EXTRA_BPS = 1_000_000;
+/** The least room for graphics in any interval, per PG or IG stream: a display set arrives whole (binds only below 2 s). */
+export const GRAPHICS_BURST_BYTES = 32 * 1024;
+/**
+ * EP intervals shorter than this (2 s) are merged with the next ones (a clip's last with the one before), within one
+ * STC sequence: a one-frame interval can't hold an IDR, a short one can't hold the audio its source muxed among the
+ * source's IDR or a clip's audio tail, and over 2 s a burst of subtitles is a small part of the budget. The merged-away
+ * EP entries are dropped from the level's EP map (a seek lands on the entry before, at most 2 s earlier), and keyframes
+ * are forced only at the kept ones.
+ */
+export const MIN_INTERVAL_45 = 90_000;
 /** The rate an over-budget interval's video is re-encoded down to, at the least (`encodeIntervalAt`). */
 export const VIDEO_FLOOR_BPS = 1_000_000;
+/** The least room for an interval's video, an IDR at the floor rate with room (measured 4 to 18 KB on Quick Sync). */
+const IDR_ALLOWANCE_BYTES = 48 * 1024;
 /**
- * What an interval's video may need at the least, however short the interval: one IDR picture at the floor rate, with
- * room. Measured on the NAS's Quick Sync encoder at 1 Mbps: 6 to 18 KB at 720p, 4 to 11 KB at 1080p.
- */
-const IDR_ALLOWANCE_BYTES: Readonly<Record<'sd' | '720' | '1080', number>> = { sd: 32 * 1024, '720': 48 * 1024, '1080': 64 * 1024 };
-/** A PCR packet every 100 ms of the re-mux, at 45 kHz. */
-const PCR_PERIOD_45 = 4_500;
-/** The shortest frame time (60 fps) at 45 kHz: each frame's PES may end in a part-filled packet. */
-const MIN_FRAME_45 = 750;
-/**
- * Bumped whenever the budget formula changes, so no segment cached under an earlier plan is served (part of
- * `planHash`): 2 counts the audio at its packets' rate and gives each interval at least its measured kept bytes plus
- * the room its video needs.
+ * Bumped whenever the plan's formula changes, so no segment cached under an earlier plan is served (part of
+ * `planHash`): 2 merges short intervals, counts the audio at its packets' rate and sizes the graphics room by the clip's
+ * PG and IG streams.
  */
 export const BUDGET_VERSION = 2;
+
+/** The plan's knobs, for the real-disc simulation; production uses the constants above. */
+export interface PlanTuning {
+  readonly minInterval45: number;
+  readonly graphicsBps: number;
+  readonly graphicsMinBytes: number;
+}
+
+/** The clip's kept graphics streams (every PG, text subtitle and IG stream in its CLPI), by kind. */
+function graphicsCounts(clpi: Clpi): { pg: number; ig: number } {
+  const pids = (codings: readonly number[]): number =>
+    new Set(clpi.programs.flatMap((p) => p.streams).filter((s) => codings.includes(s.codingType)).map((s) => s.pid)).size;
+  return { pg: pids([CodingType.PG, CodingType.TEXT_SUBTITLE]), ig: pids([CodingType.IG]) };
+}
+
+/** The room a clip's graphics get: a rate over each interval, and a least number of bytes per interval. */
+export function graphicsRoom(clpi: Clpi): { bps: number; minBytes: number } {
+  const { pg, ig } = graphicsCounts(clpi);
+  return {
+    bps: GRAPHICS_ALLOWANCE_BPS + Math.max(0, pg - 1) * PG_EXTRA_BPS + ig * IG_EXTRA_BPS,
+    minBytes: (pg + ig) * GRAPHICS_BURST_BYTES,
+  };
+}
 const PTS45_WRAP = 2 ** 32;
 const PTS45_HZ = 45_000;
 
@@ -206,65 +239,88 @@ function stcEndAt(clpi: Clpi, spn: number): { index: number; end: number } | und
   return found;
 }
 
-/** Byte budget for `duration45` ticks at `bps`, rounded up to an aligned unit; never empty. */
-function budgetFor(duration45: number, bps: number): number {
-  const units = Math.ceil((duration45 * bps) / (PTS45_HZ * 8 * ALIGNED_UNIT_BYTES));
-  return Math.max(1, units) * ALIGNED_UNIT_BYTES;
+/** Bytes rounded up to an aligned unit; never empty. */
+function aligned(bytes: number): number {
+  return Math.max(1, Math.ceil(bytes / ALIGNED_UNIT_BYTES)) * ALIGNED_UNIT_BYTES;
+}
+
+/** One EP entry's stretch of the clip, before short ones are merged. */
+interface RawInterval {
+  readonly pts: number;
+  readonly duration: number;
+  readonly stc: number;
+  readonly srcSpnStart: number;
+  readonly srcSpnEnd: number;
 }
 
 /**
- * The bytes a level's video may take in an interval of `duration45` ticks without a re-encode: its peak rate over the
- * interval, or one IDR at the floor rate when that is more (a one-frame interval still holds a whole IDR), in the
- * re-mux's packets: 184 bytes of payload each, a part-filled last packet per frame, the 16-packet round-up of the
- * continuity counters and a PCR every 100 ms.
+ * Splits a clip into intervals at its video EP entries, merging any shorter than `MIN_INTERVAL_45` with the next one in
+ * its STC sequence (the sequence's last with the one before), and gives each a byte budget at the level:
+ * ⌈max(duration × video peak, an IDR) + duration × audio + max(duration × graphics rate, graphics minimum)⌉, in aligned
+ * units, where `audioBps` is the kept audio's rate in source packets (`audioWireBps`) and the graphics room comes from the
+ * clip's PG and IG streams (`graphicsRoom`). The budget holds the kept packets of a burst of subtitles or of the audio
+ * muxed among the source's IDR with the video at the floor rate at worst; what still doesn't fit is the re-mux's last
+ * resort (`shedGraphics`).
  */
-export function videoAllowanceBytes(duration45: number, level: LevelDef): number {
-  const idr = IDR_ALLOWANCE_BYTES[level.height >= 1080 ? '1080' : level.height >= 720 ? '720' : 'sd'];
-  const payload = Math.max((duration45 * level.peakBps) / (PTS45_HZ * 8), idr);
-  const packets = Math.ceil(payload / TS_PAYLOAD_BYTES) + Math.ceil(duration45 / MIN_FRAME_45) + 15 + Math.ceil(duration45 / PCR_PERIOD_45) + 1;
-  return packets * SOURCE_PACKET_BYTES;
-}
-
-/**
- * Splits a clip into EP intervals and gives each a byte budget at the level. The rate part is
- * ⌈duration × (video peak + audio + graphics allowance) ÷ 8 ÷ 6144⌉ × 6144 bytes, with the kept audio at its rate in
- * source packets (`audioWireBps`). `keptBytes`, when given, is what the clip's scan measured each interval keeps
- * besides its video (`nonVideoBytes`): an interval's budget is then never less than that plus `videoAllowanceBytes`, so
- * a burst of subtitles or menu pages, the audio muxed among the source's IDR, or a clip's audio tail always fits with the
- * video at the level's peak. Without it (a price before the clip was scanned) the budget is the rate part alone.
- */
-export function planClip(clpi: Clpi, level: LevelDef, audioBps: number, keptBytes?: readonly number[]): { intervals: IntervalPlan[]; sizeBytes: number } {
+export function planClip(clpi: Clpi, level: LevelDef, audioBps: number, tuning?: Partial<PlanTuning>): { intervals: IntervalPlan[]; sizeBytes: number } {
   const map = videoEpMap(clpi);
   if (!map || map.entries.length === 0) throw new Error('levels: the clip has no video EP map');
-  if (keptBytes && keptBytes.length !== map.entries.length) throw new Error(`levels: the scan has ${keptBytes.length} intervals, the clip ${map.entries.length}`);
-  const bps = level.peakBps + audioBps + GRAPHICS_ALLOWANCE_BPS;
+  const room = graphicsRoom(clpi);
+  const minInterval = tuning?.minInterval45 ?? MIN_INTERVAL_45;
+  const graphicsBps = tuning?.graphicsBps ?? room.bps;
+  const graphicsMin = tuning?.graphicsMinBytes ?? room.minBytes;
   const entries = map.entries;
-  const intervals: IntervalPlan[] = [];
-  let total = 0;
-  entries.forEach((e, i) => {
+  const raw: RawInterval[] = entries.map((e, i) => {
     const next = entries[i + 1];
     const stc = stcEndAt(clpi, e.spn);
     const nextStc = next ? stcEndAt(clpi, next.spn) : undefined;
     const endRaw = next && nextStc?.index === stc?.index ? next.pts : (stc?.end ?? e.pts);
-    const duration = (endRaw - e.pts + PTS45_WRAP) % PTS45_WRAP;
-    const kept = keptBytes?.[i];
-    const budgetBytes = Math.max(budgetFor(duration, bps), kept === undefined ? 0 : alignedUp(kept + videoAllowanceBytes(duration, level)));
-    intervals.push({
-      index: i,
-      startPts45: e.pts,
-      endPts45: e.pts + duration,
+    return {
+      pts: e.pts,
+      duration: (endRaw - e.pts + PTS45_WRAP) % PTS45_WRAP,
+      stc: stc?.index ?? -1,
       srcSpnStart: i === 0 ? 0 : e.spn,
       srcSpnEnd: next ? next.spn : clpi.numSourcePackets,
+    };
+  });
+  // Groups of consecutive raw intervals, each at least `minInterval` long where its STC sequence allows.
+  const groups: RawInterval[][] = [];
+  for (const r of raw) {
+    const open = groups.at(-1);
+    const openLength = open?.reduce((n, g) => n + g.duration, 0) ?? Infinity;
+    if (open && open[0]!.stc === r.stc && openLength < minInterval) open.push(r);
+    else groups.push([r]);
+  }
+  for (let g = groups.length - 1; g > 0; g--) {
+    const group = groups[g]!;
+    const before = groups[g - 1]!;
+    const isLastOfStc = g === groups.length - 1 || groups[g + 1]![0]!.stc !== group[0]!.stc;
+    if (isLastOfStc && before[0]!.stc === group[0]!.stc && group.reduce((n, r) => n + r.duration, 0) < minInterval) {
+      before.push(...group);
+      groups.splice(g, 1);
+    }
+  }
+  const intervals: IntervalPlan[] = [];
+  let total = 0;
+  groups.forEach((group, index) => {
+    const first = group[0]!;
+    const duration = group.reduce((n, r) => n + r.duration, 0);
+    const seconds = duration / PTS45_HZ;
+    const budgetBytes = aligned(
+      Math.max((seconds * level.peakBps) / 8, IDR_ALLOWANCE_BYTES) + (seconds * audioBps) / 8 + Math.max((seconds * graphicsBps) / 8, graphicsMin),
+    );
+    intervals.push({
+      index,
+      startPts45: first.pts,
+      endPts45: first.pts + duration,
+      srcSpnStart: first.srcSpnStart,
+      srcSpnEnd: group.at(-1)!.srcSpnEnd,
       budgetBytes,
       spnStart: total / SOURCE_PACKET_BYTES,
     });
     total += budgetBytes;
   });
   return { intervals, sizeBytes: total };
-}
-
-function alignedUp(bytes: number): number {
-  return Math.ceil(bytes / ALIGNED_UNIT_BYTES) * ALIGNED_UNIT_BYTES;
 }
 
 /**

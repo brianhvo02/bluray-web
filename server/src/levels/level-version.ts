@@ -24,9 +24,9 @@ import {
   type KeptAudio,
   type LevelDef,
   type LevelId,
+  type PlanTuning,
 } from './levels';
 import { rewriteMpls, type VideoAttrs } from './mpls-writer';
-import { nonVideoBytes, type NonVideoScan } from './nonvideo-scan';
 import type { SegmentCache } from './segment-cache';
 
 export type EncodedLevel = Exclude<LevelId, 'original'>;
@@ -118,11 +118,8 @@ export interface VersionDeps {
   readonly signal?: AbortSignal;
   /** The encoder backend's id, for the segment cache key. */
   readonly backendId: string;
-  /**
-   * A clip's scan of what it keeps besides its video (`scanNonVideo`), which sizes every interval's budget to hold its
-   * bursts. Without it, the budgets are the rate formula's alone (tests of other parts).
-   */
-  readonly nonVideo?: (info: ClipInfo, source: ClipSource) => Promise<NonVideoScan>;
+  /** Injectable for tests whose fixtures' intervals are short: the plan's knobs (`planClip`). */
+  readonly planTuning?: Partial<PlanTuning>;
 }
 
 async function fileBytes(manifest: DiscManifest, source: LevelDiscSource, path: string): Promise<Uint8Array | null> {
@@ -183,9 +180,9 @@ export async function loadDisc(id: string, source: LevelDiscSource): Promise<Dis
 }
 
 /**
- * The kept audio's rate in source packets (`audioWireBps`: its nominal rate, spec §5.2, plus what its packets add), from
- * its first frame in the clip; one read per clip and PID. With no readable frame in the clip's first 16 MiB, the
- * coding's fallback (`fallbackAudioBps`), logged.
+ * The kept audio's rate in source packets (`audioWireBps`: its nominal rate, spec §5.2, plus what its PES and TS packets
+ * add), from its first frame in the clip; one read per clip and PID. With no readable frame in the clip's first 16 MiB,
+ * the coding's fallback (`fallbackAudioBps`), logged.
  */
 export function audioBpsOf(disc: DiscInfo, info: ClipInfo, kept: KeptAudio, log: (message: string) => void = () => {}): Promise<number> {
   const key = `${info.id}:${kept.pid}`;
@@ -230,8 +227,7 @@ function scanOf(disc: DiscInfo, info: ClipInfo, clip: ClipSource, deps: VersionD
 
 /**
  * A short hash of what decides a clip's bytes at a level besides the clip itself: the level's definition, the kept
- * audio, every interval's place and budget (and the budget formula's version), the encoder backend and its version, and
- * whether the clip is deinterlaced. It is part of
+ * audio, every interval's place and budget, the encoder backend and its version, and whether the clip is deinterlaced. It is part of
  * the segment cache key, so a changed plan never reuses bytes made for another.
  */
 /**
@@ -279,8 +275,7 @@ export async function buildVersion(key: string, disc: DiscInfo, level: EncodedLe
     const def = levelDefFor(level, info.video);
     const kept = keptAudioFor(info.item, audio);
     const audioBps = kept ? await audioBpsOf(disc, info, kept, deps.log) : 0;
-    const keptBytes = deps.nonVideo ? nonVideoBytes(await deps.nonVideo(info, source), kept?.pid ?? null) : undefined;
-    const { intervals, sizeBytes } = planClip(info.clpi, def, audioBps, keptBytes);
+    const { intervals, sizeBytes } = planClip(info.clpi, def, audioBps, deps.planTuning);
     const streams = info.clpi.programs.flatMap((p) => p.streams);
     const graphics = [...new Set(streams.filter((s) => GRAPHICS_CODINGS.has(s.codingType)).map((s) => s.pid))];
     const video = videoAttrsFor(def, info.video.rate);
@@ -308,6 +303,14 @@ export async function buildVersion(key: string, disc: DiscInfo, level: EncodedLe
     inline,
   };
   return { key, disc, codec: levelDefFor(level, main.video).codec, fps: fpsOf(main.video.rate), manifest, sizes, rewritten, clips };
+}
+
+/** The clip's graphics PIDs by stream number, as the play item's STN lists them: PG, then IG, then any it doesn't list. */
+function graphicsByNumber(item: PlayItem, graphics: readonly number[]): number[] {
+  const kept = new Set(graphics);
+  const listed = [...item.stn.pg, ...item.stn.ig].map((s) => s.pid).filter((pid) => kept.has(pid));
+  const ordered = [...new Set(listed)];
+  return [...ordered, ...graphics.filter((pid) => !ordered.includes(pid))];
 }
 
 function clipRunPlan(
@@ -358,6 +361,7 @@ function clipRunPlan(
       pmtPids: [...new Set(clpi.programs.map((p) => p.programMapPid))],
       videoStreamType: def.codec === 'h264' ? CodingType.AVC : CodingType.HEVC,
       pcrPid: stcs[0]?.pcrPid ?? video.pid,
+      graphicsPids: graphicsByNumber(info.item, graphics),
     },
   };
 }
