@@ -233,7 +233,7 @@ export function buildMpls(spec: MplsSpec): Uint8Array<ArrayBuffer> {
 
 export interface ClpiSpec {
   numSourcePackets: number;
-  streams: Array<{ pid: number; codingType: number }>;
+  streams: Array<{ pid: number; codingType: number; format?: number; rate?: number }>;
   /** 45 kHz. */
   presentationStart: number;
   /** 45 kHz. */
@@ -287,7 +287,7 @@ export function buildClpi(spec: ClpiSpec): Uint8Array<ArrayBuffer> {
   w.u32(0).u16(0x0100).u8(spec.streams.length).u8(0);
   for (const s of spec.streams) {
     w.u16(s.pid);
-    writeCodingInfo(w, s.codingType);
+    writeCodingInfo(w, s.codingType, { format: s.format, rate: s.rate });
   }
   w.patchU32(progStart, w.position - progStart - 4);
 

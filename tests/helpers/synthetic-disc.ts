@@ -41,6 +41,15 @@ export interface SyntheticClipSpec {
   pts?: number[];
   /** Per-unit 90 kHz DTS in decode order. Default: equal to the PTS. */
   dts?: number[];
+  /** Video coding type in the CLPI and, by default, the STN (default AVC). */
+  videoCodingType?: number;
+  /** Video format and frame-rate codes of the CLPI and STN entries (default: the stream-attribute defaults, 1080p at 23.976). */
+  videoFormat?: number;
+  videoRate?: number;
+  /** 90 kHz ticks per frame (default: 24 fps, FRAME_TICKS_90K). */
+  frameTicks?: number;
+  /** PIDs of secondary video streams (AVC): listed in the CLPI and every play item's STN, with no packets. */
+  secondaryVideoPids?: number[];
   /** Audio coding type: LPCM gets a real 440 Hz tone, other types get dummy payloads. Omit for no audio. */
   audio?: number;
   /** Index of one LPCM PES whose header gets a reserved sample-rate code (a corrupt unit). */
@@ -148,14 +157,15 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
   const files = new Map<string, Uint8Array<ArrayBuffer>>();
   files.set('BDMV/index.bdmv', buildIndex(spec.index ?? { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 1 }, titles: [{ kind: 'hdmv', movieObjectId: 2 }] }));
   if (spec.movieObjects) files.set('BDMV/MovieObject.bdmv', spec.movieObjects);
-  const clips = new Map<string, { inTime: number; outTime: number; audio: StreamSpec[]; ig: StreamSpec[]; pg: StreamSpec[] }>();
+  const clips = new Map<string, { video: StreamSpec; secondaryVideo: StreamSpec[]; inTime: number; outTime: number; audio: StreamSpec[]; ig: StreamSpec[]; pg: StreamSpec[] }>();
 
   for (const clip of spec.clips) {
-    const endPts = (clip.pts ? Math.max(...clip.pts) : clip.startPts + (clip.videoAus.length - 1) * FRAME_TICKS_90K) + FRAME_TICKS_90K;
+    const frameTicks = clip.frameTicks ?? FRAME_TICKS_90K;
+    const endPts = (clip.pts ? Math.max(...clip.pts) : clip.startPts + (clip.videoAus.length - 1) * frameTicks) + frameTicks;
     const units: Array<MuxUnit & { videoIndex?: number }> = clip.videoAus.map((payload, i) => ({
       pid: VIDEO_PID,
       streamId: 0xe0,
-      pts: clip.pts?.[i] ?? clip.startPts + i * FRAME_TICKS_90K,
+      pts: clip.pts?.[i] ?? clip.startPts + i * frameTicks,
       dts: clip.dts?.[i],
       payload,
       videoIndex: i,
@@ -180,8 +190,11 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
       u.videoIndex !== undefined && keySet.has(u.videoIndex) ? [{ pts: Math.floor(u.pts / 2), spn: unitSpns[i] }] : [],
     );
     const audioSpecs = audioStreams.map((s) => ({ pid: s.pid, codingType: s.codingType, format: s.format, lang: s.lang }));
-    const streams: Array<{ pid: number; codingType: number }> = [
-      { pid: VIDEO_PID, codingType: CodingType.AVC },
+    const videoCodingType = clip.videoCodingType ?? CodingType.AVC;
+    const secondaryVideo = (clip.secondaryVideoPids ?? []).map((pid) => ({ pid, codingType: CodingType.AVC, format: clip.videoFormat, rate: clip.videoRate }));
+    const streams: Array<{ pid: number; codingType: number; format?: number; rate?: number }> = [
+      { pid: VIDEO_PID, codingType: videoCodingType, format: clip.videoFormat, rate: clip.videoRate },
+      ...secondaryVideo,
       ...audioSpecs.map(({ pid, codingType }) => ({ pid, codingType })),
       ...igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })),
       ...pgStreams.map((g) => ({ pid: g.pid, codingType: CodingType.PG })),
@@ -191,7 +204,7 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
       `BDMV/CLIPINF/${clip.clipId}.clpi`,
       buildClpi({ numSourcePackets: bytes.length / 192, streams, presentationStart: clip.startPts / 2, presentationEnd: endPts / 2, epMaps: [{ pid: VIDEO_PID, entries }] }),
     );
-    clips.set(clip.clipId, { inTime: clip.startPts / 2, outTime: endPts / 2, audio: audioSpecs, ig: igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })), pg: pgStreams.map((g) => ({ pid: g.pid, codingType: CodingType.PG, lang: g.lang })) });
+    clips.set(clip.clipId, { video: { pid: VIDEO_PID, codingType: videoCodingType, format: clip.videoFormat, rate: clip.videoRate }, secondaryVideo, inTime: clip.startPts / 2, outTime: endPts / 2, audio: audioSpecs, ig: igStreams.map((g) => ({ pid: g.pid, codingType: CodingType.IG })), pg: pgStreams.map((g) => ({ pid: g.pid, codingType: CodingType.PG, lang: g.lang })) });
   }
 
   const subIg = spec.subPathIg;
@@ -220,7 +233,8 @@ export function buildSyntheticDisc(spec: SyntheticDiscSpec): Map<string, Uint8Ar
         connectionCondition: index === 0 ? 1 : 5,
         stillMode: playlist.stills?.[index]?.mode,
         stillTime: playlist.stills?.[index]?.time,
-        video: [{ pid: VIDEO_PID, codingType: playlist.videoCodingType ?? CodingType.AVC }],
+        video: [{ ...clip.video, codingType: playlist.videoCodingType ?? clip.video.codingType }],
+        secondaryVideo: clip.secondaryVideo.map((stream) => ({ stream, secondaryAudioRefs: [], pipPgRefs: [] })),
         audio: clip.audio,
         pg: clip.pg,
         ig: subIg ? [{ pid: subIgPid, codingType: CodingType.IG, streamType: 2, subPathId: 0, subClipId: 0 }] : clip.ig,
