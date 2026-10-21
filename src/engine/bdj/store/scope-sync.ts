@@ -22,7 +22,7 @@ export const LOAD_TIMEOUT_MS = 3000;
 /** A save that keeps meeting newer snapshots gives up after this many tries (until the next write). */
 const SAVE_ATTEMPTS = 3;
 
-export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 'stat'>;
+export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 'stat'> & Partial<Pick<Vfs, 'setQuotaLimit' | 'quotaUsed'>>;
 
 export interface ScopeSyncDeps {
   readonly store: BdjStore;
@@ -141,6 +141,20 @@ export class ScopeSync {
     if (!at) return;
     at.state.refused.add(at.rel);
     this.markDirty(at.state);
+  }
+
+  /**
+   * The store has no room for the scope `key` (the NAS's 507), or has room again (`full` false). While full, Java's
+   * writes that need more room than the scope holds now fail as on a full disk (IOException "No space left on
+   * device"); the files already written stay.
+   */
+  full(key: string, full: boolean): void {
+    const state = this.states.find((s) => s.scope.key === key);
+    const vfs = this.vfs;
+    if (!state || !vfs?.setQuotaLimit || !vfs.quotaUsed) return;
+    const dir = state.scope.dir;
+    vfs.setQuotaLimit(dir, full ? vfs.quotaUsed(dir) : (this.deps.quotaBytes ?? SCOPE_QUOTA_BYTES));
+    this.deps.log(full ? `BD-J storage: ${key} is full: writes that need more room fail (No space left on device)` : `BD-J storage: ${key} has room again`);
   }
 
   /** Saves every dirty scope now (after any save under way); resolves once they are stored or have failed. */

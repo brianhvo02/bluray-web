@@ -1,6 +1,7 @@
 /*
  * Original code for bluray-web: the browser's BD-J store, in IndexedDB. Discs from a picked folder keep their saved
- * data here; NAS discs too until the NAS store takes them over (Task 8 migrates per source, which each record names).
+ * data here, and so do discs on a server without a per-person store (`nas:<discId>`); a NAS disc keeps its write-ahead
+ * copy here (nas-store.ts, source `nas-person:<personId>`), into which the `nas:<discId>` records move once.
  *
  * Copyright (C) 2026  bluray-web contributors
  *
@@ -26,7 +27,7 @@ export const IDB_SAVE_DEBOUNCE_MS = 100;
 
 /** One scope's snapshot as IndexedDB keeps it. */
 export interface ScopeRecord {
-  /** `nas:<nasDiscId>` or `local` (scopes.ts storeSource). */
+  /** `local`, `nas:<nasDiscId>` (scopes.ts storeSource) or `nas-person:<personId>` (nas-store.ts). */
   readonly source: string;
   /** `persistent/<orgId>` or `buda/<orgId>/<discId>`. */
   readonly scope: string;
@@ -36,6 +37,18 @@ export interface ScopeRecord {
   readonly bytes: number;
   /** Epoch ms of the save. */
   readonly savedAt: number;
+  /**
+   * A NAS disc's write-ahead copy (ruling R17, source `nas-person:<personId>`): true while the snapshot is not yet on
+   * the NAS. Absent on the browser-only sources.
+   */
+  readonly pending?: boolean;
+  /** A browser-only NAS disc record (`nas:<discId>`) merged into this person's write-ahead copy, to go once the NAS has it. */
+  readonly migratedTo?: string;
+}
+
+/** What a save marks on the record (IdbBdjStore.save). */
+export interface RecordMarks {
+  readonly pending?: boolean;
 }
 
 export function recordKey(source: string, scope: string): string {
@@ -79,7 +92,14 @@ export class IdbBdjStore implements BdjStore {
     return rec ? { files: rec.files, etag: rec.etag } : { files: [], etag: null };
   }
 
-  async save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult> {
+  /** The scope's record as stored, or null. */
+  async loadRecord(scope: string): Promise<ScopeRecord | null> {
+    const db = await this.open();
+    const tx = db.transaction(SCOPES_STORE, 'readonly');
+    return ((await request(tx.objectStore(SCOPES_STORE).get(recordKey(this.source, scope)))) as ScopeRecord | undefined) ?? null;
+  }
+
+  async save(scope: string, snapshot: Snapshot, etag: string | null, marks: RecordMarks = {}): Promise<SaveResult> {
     const bytes = snapshotBytes(snapshot);
     if (bytes > this.quotaBytes) throw new ScopeQuotaError(scope, bytes, this.quotaBytes);
     const db = await this.open();
@@ -106,10 +126,43 @@ export class IdbBdjStore implements BdjStore {
       files: snapshot.files.map((f) => ({ path: f.path, mtime: f.mtime, bytes: wholeBuffer(f.bytes) ? f.bytes : f.bytes.slice() })),
       bytes,
       savedAt: this.nowMs(),
+      ...(marks.pending !== undefined ? { pending: marks.pending } : {}),
     };
     store.put(record, key);
     await done;
     return { etag: record.etag };
+  }
+
+  /**
+   * Changes the record of `scope` in place when its version is still `etag`, keeping that version (its files are
+   * untouched): true when it did. The write-ahead copy is marked as on the NAS, a migrated record as merged.
+   */
+  async mark(scope: string, etag: string, change: (r: ScopeRecord) => ScopeRecord): Promise<boolean> {
+    return this.update(scope, (current) => (current?.etag === etag ? change(current) : undefined));
+  }
+
+  /** Removes the record of `scope` when its version is still `etag`: true when it did. */
+  async remove(scope: string, etag: string): Promise<boolean> {
+    return this.update(scope, (current) => (current?.etag === etag ? null : undefined));
+  }
+
+  /** One readwrite transaction over a record: `change` answers the new record, null to delete it, undefined to leave it. */
+  private async update(scope: string, change: (current: ScopeRecord | undefined) => ScopeRecord | null | undefined): Promise<boolean> {
+    const db = await this.open();
+    const tx = db.transaction(SCOPES_STORE, 'readwrite', { durability: 'strict' });
+    const done = new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
+    });
+    done.catch(() => undefined); // awaited below
+    const store = tx.objectStore(SCOPES_STORE);
+    const key = recordKey(this.source, scope);
+    const next = change((await request(store.get(key))) as ScopeRecord | undefined);
+    if (next === null) store.delete(key);
+    else if (next !== undefined) store.put(next, key);
+    await done;
+    return next !== undefined;
   }
 
   /** The scopes this source keeps (Task 8's migration). */

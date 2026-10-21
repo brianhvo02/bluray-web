@@ -337,6 +337,21 @@ describe('BdjSession rules', () => {
     expect(f.sent.length).toBe(sent);
   });
 
+  it('asks a worker with storage scopes to flush when the page is shown again (a NAS disc\'s write-ahead copy, ruling R17)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 1 });
+    h.session.setHidden(true);
+    h.session.setHidden(false);
+    expect(f.sent.map((m) => m.type)).toEqual(['boot']); // no scopes: nothing to flush
+    f.emit({ type: 'unsaved', unsaved: false });
+    h.session.setHidden(true);
+    h.session.setHidden(false);
+    h.session.setHidden(false); // no change: nothing more
+    expect(f.sent.map((m) => m.type)).toEqual(['boot', 'flush']);
+  });
+
   it('with unsaved storage changes, a stop lets the worker save them (stop, stopped) before it is terminated', async () => {
     const f = fakeWorker();
     const h = session(f.worker);

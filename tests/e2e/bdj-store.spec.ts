@@ -1,10 +1,15 @@
 /// <reference types="node" />
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, test, type Page } from '@playwright/test';
+import { join } from 'node:path';
+import { expect, test, type BrowserContext, type Page } from '@playwright/test';
+import { readTar } from '../../src/engine/bdj/store/tar';
+import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { createDiscHandler, servedDiscBase } from '../../tools/disc-server/server';
 import { settlesOn } from './bdj-support';
+import { NAS_E2E_DIR, NAS_ENV, NAS_PORT, SERVER } from './nas-server';
 import { setFolder, skipWithoutH264 } from './support';
 
 // fixtures/synthetic/disc-bdj-store (scripts/make-bdj-store-disc.ts): StoreXlet counts its own openings. It reads
@@ -72,10 +77,10 @@ interface StoredFile {
  * it was saved; null when there is none. Never creates the database (an upgrade is aborted), so the engine's own open
  * still makes it with its object store.
  */
-async function storedScope(page: Page, source: string, scope: string): Promise<{ savedAt: number; files: StoredFile[] } | null> {
+async function storedScope(page: Page, source: string, scope: string): Promise<{ savedAt: number; pending?: boolean; files: StoredFile[] } | null> {
   return page.evaluate(
     ({ key }) =>
-      new Promise<{ savedAt: number; files: StoredFile[] } | null>((resolve, reject) => {
+      new Promise<{ savedAt: number; pending?: boolean; files: StoredFile[] } | null>((resolve, reject) => {
         const r = indexedDB.open('bdj-store');
         r.onupgradeneeded = () => r.transaction!.abort(); // no database yet: leave it so
         r.onerror = (e) => {
@@ -93,8 +98,8 @@ async function storedScope(page: Page, source: string, scope: string): Promise<{
           get.onerror = () => reject(get.error);
           get.onsuccess = () => {
             db.close();
-            const rec = get.result as { savedAt: number; files: { path: string; mtime: number; bytes: Uint8Array }[] } | undefined;
-            resolve(rec ? { savedAt: rec.savedAt, files: rec.files.map((f) => ({ path: f.path, mtime: f.mtime, text: new TextDecoder().decode(f.bytes) })) } : null);
+            const rec = get.result as { savedAt: number; pending?: boolean; files: { path: string; mtime: number; bytes: Uint8Array }[] } | undefined;
+            resolve(rec ? { savedAt: rec.savedAt, pending: rec.pending, files:rec.files.map((f) => ({ path: f.path, mtime: f.mtime, text: new TextDecoder().decode(f.bytes) })) } : null);
           };
         };
       }),
@@ -216,5 +221,161 @@ test.describe('saved data per source (disc-bdj-store on the dev disc server)', (
     await settlesOn(page, OPENED[2]!, 30_000);
     await stored(page, nas, 3);
     await stored(page, 'local', 2);
+  });
+});
+
+test.describe('saved data per person on the NAS (disc-bdj-store, tests/e2e/nas-server.ts)', () => {
+  // The NAS is the real server that tests/e2e/nas-server.ts runs over a copy of fixtures/synthetic. Each person is made
+  // by the server's `owner-code --person <name>` (an owner, so the title library and its folder browser are always open
+  // to them), under a name unique to the run and the browser: the browsers' projects share the server.
+  const CODE_LOCK = join(NAS_E2E_DIR, 'owner-code.lock');
+  const NAS_API = `http://localhost:${NAS_PORT}/api/`;
+
+  /** Runs `fn` while no other test worker mints a code (nas.spec.ts takes the same lock). */
+  function exclusively<T>(fn: () => T): T {
+    for (let tries = 0; ; tries++) {
+      try {
+        mkdirSync(CODE_LOCK);
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || tries > 600) throw err;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      rmSync(CODE_LOCK, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * A fresh code for the owner person named `person` (made by its first code), or the first owner, as
+   * `node server.mjs owner-code` mints it; each under a new rendezvous key, as nas.spec.ts does (the rendezvous holds
+   * 5 live codes per NAS).
+   */
+  function codeFor(person?: string): string {
+    const out = exclusively(() => {
+      rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true });
+      return execFileSync(process.execPath, [SERVER, 'owner-code', ...(person ? ['--person', person] : [])], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
+    });
+    expect(out).toContain('Rendezvous: registered');
+    return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
+  }
+
+  /** Waits for the server's first scan and title run (until then the folder listing is empty), as an owner device. */
+  async function libraryReady(): Promise<void> {
+    const post = async (path: string, body: unknown): Promise<Record<string, string>> => {
+      const res = await fetch(`${NAS_API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      expect(res.status, `POST ${path}`).toBe(200);
+      return (await res.json()) as Record<string, string>;
+    };
+    const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+    const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', key.publicKey);
+    const { deviceId } = await post('pair/redeem', { code: normalizeCode(codeFor())!, deviceName: 'E2E store API', publicKeyJwk: { kty, crv, x, y } });
+    const { challenge } = await post('session/challenge', { deviceId });
+    const signature = Buffer.from(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key.privateKey, new TextEncoder().encode(challenge!))).toString('base64url');
+    const { token } = await post('session', { deviceId, challenge, signature });
+    await expect
+      .poll(
+        async () => {
+          const res = await fetch(`${NAS_API}admin/metadata/status`, { headers: { Authorization: `Bearer ${token}` } });
+          const status = (await res.json()) as { running: boolean; lastRunAt: number | null; filed: number };
+          return !status.running && status.lastRunAt !== null ? status.filed : 0;
+        },
+        { timeout: 30_000 },
+      )
+      .toBeGreaterThanOrEqual(3);
+  }
+
+  /** The person's id, from the server's auth.json (the CLI prints only the name). */
+  function personId(name: string): string {
+    const auth = JSON.parse(readFileSync(join(NAS_ENV.DATA_DIR!, 'auth.json'), 'utf8')) as { people: { id: string; name: string }[] };
+    return auth.people.find((p) => p.name === name)!.id;
+  }
+
+  /** The app's count in the person's NAS store (its ustar file on the server), or null. */
+  function nasCount(person: string): string | null {
+    const file = join(NAS_ENV.DATA_DIR!, 'users', personId(person), 'bdj', 'persistent', `${ORG}.tar`);
+    if (!existsSync(file)) return null;
+    const count = readTar(new Uint8Array(readFileSync(file))).find((f) => f.path === '4001/count');
+    return count ? new TextDecoder().decode(count.bytes) : null;
+  }
+
+  async function nasHas(person: string, want: number): Promise<void> {
+    await expect.poll(() => nasCount(person), { timeout: 20_000 }).toBe(String(want));
+  }
+
+  /** A page of a browser of its own (another device), paired as `person` with a fresh code. */
+  async function device(context: BrowserContext, browserName: string, person: string): Promise<Page> {
+    if (browserName === 'chromium') await context.grantPermissions(['local-network-access']);
+    const page = await context.newPage();
+    const code = codeFor(person);
+    await page.goto(`/?pair=${code}&telemetry=1`);
+    await expect(page.getByTestId('pair-code')).toHaveValue(code);
+    await page.getByTestId('pair-button').click();
+    await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    return page;
+  }
+
+  /** From the landing screen of a paired page: the NAS's folder browser, disc-bdj-store's pre-flight, Play. */
+  async function openFromNas(page: Page): Promise<void> {
+    await page.getByTestId('nas-open').click();
+    await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId('browse-folders').click();
+    await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+    await page.locator('[data-testid="nas-disc"][data-name="disc-bdj-store"]').click();
+    await expect(page.getByTestId('nas-preflight')).toBeVisible();
+    await page.getByTestId('nas-play').click();
+  }
+
+  test("one person's devices share the count, a page closed before the NAS put loses nothing, and another person's devices do not see it", async ({ browser, browserName }, testInfo) => {
+    test.skip(testInfo.project.name === 'mobile-chromium', 'the NAS screens are tested on the desktop projects (nas.spec.ts)');
+    test.setTimeout(240_000);
+    await libraryReady();
+    const run = `${testInfo.project.name} ${Date.now().toString(36)}`;
+    const aki = `Store Aki ${run}`;
+    const ren = `Store Ren ${run}`;
+    const contexts: BrowserContext[] = [];
+    const context = async (): Promise<BrowserContext> => {
+      const c = await browser.newContext();
+      contexts.push(c);
+      return c;
+    };
+    try {
+      // Aki's phone: the first viewing writes 1, and the page goes 0.5 s later, inside the NAS put's 2 s debounce
+      const phone = await context();
+      const first = await device(phone, browserName, aki);
+      await skipWithoutH264(first);
+      await openFromNas(first);
+      const at = await written(first);
+      await first.waitForTimeout(Math.max(0, at + 500 - Date.now()));
+      const next = await phone.newPage();
+      await first.close();
+      // ruling R17: the write-ahead copy kept it; the next opening on the phone starts from 1 and the NAS gets it
+      await next.goto('/?telemetry=1');
+      await expect(next.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+      await openFromNas(next);
+      await settlesOn(next, OPENED[1]!, 30_000);
+      await nasHas(aki, 2);
+      const source = `nas-person:${personId(aki)}`;
+      await expect.poll(async () => (await storedScope(next, source, `persistent/${ORG}`))?.pending, { timeout: 15_000 }).toBe(false);
+
+      // Aki's tablet, a browser that never opened the disc: it starts from the NAS's 2
+      const tablet = await device(await context(), browserName, aki);
+      await openFromNas(tablet);
+      await settlesOn(tablet, OPENED[2]!, 30_000);
+      await nasHas(aki, 3);
+
+      // Ren's phone starts from nothing, and Aki's count stays
+      const rens = await device(await context(), browserName, ren);
+      await openFromNas(rens);
+      await settlesOn(rens, OPENED[0]!, 30_000);
+      await nasHas(ren, 1);
+      expect(nasCount(aki)).toBe('3');
+      expect(await storedScope(rens, source, `persistent/${ORG}`)).toBeNull();
+    } finally {
+      for (const c of contexts) await c.close();
+    }
   });
 });

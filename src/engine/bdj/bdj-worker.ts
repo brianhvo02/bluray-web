@@ -21,6 +21,7 @@ import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
 import type { BdjStore } from './store/bdj-store';
+import { NasBdjStore, NasDiscStore, storeApiBase } from './store/nas-store';
 import { ScopeSync } from './store/scope-sync';
 import { discScopes, storeSource } from './store/scopes';
 import { WorkerBdjHost } from './worker-host';
@@ -103,6 +104,12 @@ export interface BdjWorkerOptions {
    * storeSource); without it (or with null) it lasts until BD-J stops, as before.
    */
   readonly createStore?: (source: string) => BdjStore | null;
+  /**
+   * The browser's IndexedDB, for a disc opened from a server (the backend choice): its saved data goes to the person's
+   * NAS store with a write-ahead copy here (nas-store.ts NasDiscStore, ruling R17), or stays here on a server that
+   * keeps no people. Without it such a disc takes `createStore`, as a picked folder does.
+   */
+  readonly indexedDB?: IDBFactory;
 }
 
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
@@ -139,6 +146,14 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
 
   /** The storage scopes once loaded and in the VFS. */
   let sync: ScopeSync | null = null;
+  /** Where they are kept, and a NAS disc's store client (it takes the fresh tokens too). */
+  let store: BdjStore | null = null;
+  let nasStore: NasBdjStore | null = null;
+  /** Saves what Java changed, then has the store pass on what it holds (a NAS disc's write-ahead copy). */
+  const flushStorage = async (): Promise<void> => {
+    await sync?.flush();
+    await store?.flush?.();
+  };
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
@@ -246,7 +261,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         return model;
       };
       // the storage scopes load while the JDK starts up too: Libbluray.init (and so every xlet) waits for them
-      const store = options.createStore?.(storeSource(m.disc)) ?? null;
+      store = createStore(m, fetchFn);
       const storeLoading = store ? loadScopes(store, disc, m.discId) : Promise.resolve(null);
       planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
@@ -312,6 +327,25 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     for (const w of waiting.splice(0)) deliver(w);
   };
 
+  /** The disc's store, by where it comes from: a server's (NAS) or a picked folder's (this browser). */
+  const createStore = (m: BootMessage, fetchFn: typeof fetch): BdjStore | null => {
+    const apiBase = m.disc.kind === 'remote' ? storeApiBase(m.disc.base) : null;
+    if (m.disc.kind !== 'remote' || !options.indexedDB || apiBase === null) return options.createStore?.(storeSource(m.disc)) ?? null;
+    nasStore = new NasBdjStore(apiBase, { fetch: fetchFn, token: latestToken ?? m.disc.token, refreshToken: () => tokens.request() });
+    return new NasDiscStore({
+      nas: nasStore,
+      idb: options.indexedDB,
+      discId: m.disc.manifest.discId,
+      setTimer: (ms, fn) => {
+        const id = setTimeout(fn, ms);
+        return () => clearTimeout(id);
+      },
+      // straight to the engine, as ScopeSync's: puts still run after a stop or a failure has ended the session
+      log: (line, error) => port.postMessage({ type: 'log', line, error: error ?? false }),
+      onFull: (scope, full) => sync?.full(scope, full),
+    });
+  };
+
   /** The disc's storage scopes from `store`; null (saved data lasts the session only) when they cannot be worked out. */
   const loadScopes = async (store: BdjStore, disc: Parameters<typeof discScopes>[0], discId: string | null): Promise<ScopeSync | null> => {
     try {
@@ -337,8 +371,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     driving?.abort();
     rt?.jvm.threads.halt();
     // the snapshot is what Java left when it halted, possibly in the middle of a write (a file half written stays so,
-    // as after a power cut)
-    await sync?.flush();
+    // as after a power cut); a NAS disc's write-ahead copy is put on the NAS too, while the engine waits (else at the
+    // next open)
+    await flushStorage();
     port.postMessage({ type: 'stopped' });
   };
 
@@ -375,12 +410,13 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   port.onmessage = ({ data: m }) => {
     // a stop and a flush come after a failure too: what Java wrote before it is still saved
     if (m.type === 'stop') return void stop();
-    if (m.type === 'flush') return void sync?.flush();
+    if (m.type === 'flush') return void flushStorage();
     if (ended) return;
     switch (m.type) {
       case 'remoteToken':
         latestToken = m.token;
         remote?.setToken(m.token);
+        nasStore?.setToken(m.token);
         tokens.deliver(m.token);
         break;
       case 'boot':

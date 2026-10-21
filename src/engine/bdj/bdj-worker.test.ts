@@ -6,7 +6,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { createDiscHandler, discApiBase, findDiscs } from '../../../tools/disc-server/server';
 import { BDJ_REMOTE_CHUNK_BYTES, BDJ_REMOTE_IN_FLIGHT } from '../disc/disc-spec';
 import type { DiscManifest } from '../disc/nas-api';
-import { fakeNas } from '../../../tests/helpers/fake-nas';
+import { IDBFactory } from 'fake-indexeddb';
+import { listTar } from '../../../server/src/tar';
+import { FAKE_NAS_BASE, fakeNas } from '../../../tests/helpers/fake-nas';
+import { startStoreNas } from '../../../tests/helpers/store-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries, syntheticSource } from '../../../tests/helpers/synthetic-disc';
 import type { BdjStore, LoadedSnapshot, SaveResult, Snapshot } from './store/bdj-store';
@@ -318,4 +321,73 @@ describe('runBdjWorker and the storage scopes', () => {
     await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
     expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone)`, error: false });
   }, 90_000);
+
+  it("keeps a NAS disc's saved data in the person's NAS store: their other device sees it, another person does not", async () => {
+    const nas = await startStoreNas();
+    try {
+      const files = fixtureDiscFiles('disc-bdj-store');
+      const storeApi = FAKE_NAS_BASE.replace(/discs\/[^/]+\/$/, '');
+      /** One viewing on a device (its own IndexedDB): StoreXlet reads its count, writes it plus one, then plays. */
+      const view = async (token: string, idb: IDBFactory): Promise<FromBdj[]> => {
+        const disc = fakeNas(files, token);
+        const fetch = ((input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          return url.startsWith(storeApi) && !url.startsWith(FAKE_NAS_BASE) ? nas.fetch(nas.api + url.slice(storeApi.length), init) : disc.fetch(input, init);
+        }) as typeof globalThis.fetch;
+        const received: FromBdj[] = [];
+        const port: BdjPort = {
+          onmessage: null,
+          postMessage: (m) => {
+            received.push(m);
+            if (m.type === 'call') setTimeout(() => port.onmessage!({ data: { type: 'reply', id: m.id, value: 0 } }), 0);
+          },
+        };
+        runBdjWorker(port, { fetch, indexedDB: idb, createStore: () => null });
+        port.onmessage!({
+          data: {
+            type: 'boot',
+            registers: createRegisterBuffer(),
+            status: createStatusBlock(),
+            plane: createGraphicsPlane(),
+            disc: disc.spec,
+            readAheadBytes: 1024 * 1024,
+            discId: null,
+            classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+          },
+        });
+        await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+        port.onmessage!({ data: { type: 'start', title: 0xffff } });
+        await vi.waitFor(() => expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(true), { timeout: 60_000 });
+        port.onmessage!({ data: { type: 'stop' } });
+        await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }), { timeout: 10_000 });
+        return received;
+      };
+      const count = (personId: string): string | null => {
+        const { body } = nas.stored(personId, 'persistent/7fff0002');
+        const entries = listTar(body);
+        let at = 0;
+        for (const e of entries) {
+          at += 512;
+          if (e.path === '4001/count') return body.subarray(at, at + e.size).toString();
+          at += Math.ceil(e.size / 512) * 512;
+        }
+        return null;
+      };
+      const aki = await nas.person('Aki');
+      const akisTablet = await nas.device(aki.personId, 'tablet');
+      const ren = await nas.person('Ren');
+      const logs = await view(aki.token, new IDBFactory());
+      expect(count(aki.personId)).toBe('1');
+      expect(logs).toContainEqual({ type: 'log', line: 'BD-J storage: persistent/7fff0002 is on the NAS (1 files, 1 bytes)', error: false });
+      await view(akisTablet, new IDBFactory()); // the same person's other device starts from 1
+      expect(count(aki.personId)).toBe('2');
+      await view(ren.token, new IDBFactory()); // another person starts from nothing
+      expect(count(ren.personId)).toBe('1');
+      expect(count(aki.personId)).toBe('2');
+      // only the scope routes and `me` went to the store; each through the person's own token
+      expect(nas.requests.filter((r) => !r.startsWith('GET /api/me') && !r.includes('/api/bdj-store/'))).toEqual([]);
+    } finally {
+      await nas.close();
+    }
+  }, 180_000);
 });

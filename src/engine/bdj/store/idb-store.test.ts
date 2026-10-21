@@ -110,4 +110,18 @@ describe('IdbBdjStore', () => {
     expect(kept.files.map((f) => [f.path, [...f.bytes]])).toEqual([['a', [7]]]);
     expect(await store.save(SCOPE, snap([['a', 3000, new Uint8Array(SCOPE_QUOTA_BYTES)]]), kept.etag)).toEqual({ etag: expect.any(String) });
   });
+
+  it('marks a record (pending) in place, keeping its version, and removes it, each only at the version named', async () => {
+    const store = new IdbBdjStore('nas-person:p1', new IDBFactory());
+    const saved = await store.save(SCOPE, snap([['a', 1000, bytes(1)]]), null, { pending: true });
+    const etag = 'etag' in saved ? saved.etag : '';
+    expect((await store.loadRecord(SCOPE))?.pending).toBe(true);
+    expect(await store.mark(SCOPE, 'other', (r) => ({ ...r, pending: false }))).toBe(false);
+    expect(await store.mark(SCOPE, etag, (r) => ({ ...r, pending: false }))).toBe(true);
+    const rec = await store.loadRecord(SCOPE);
+    expect([rec?.pending, rec?.etag]).toEqual([false, etag]);
+    expect(await store.remove(SCOPE, 'other')).toBe(false);
+    expect(await store.remove(SCOPE, etag)).toBe(true);
+    expect(await store.loadRecord(SCOPE)).toBeNull();
+  });
 });

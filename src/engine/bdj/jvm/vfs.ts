@@ -66,7 +66,8 @@ export interface VfsTreeFile {
 interface QuotaRoot {
   /** Canonical, without a trailing slash. */
   readonly dir: string;
-  readonly limit: number;
+  /** setQuotaLimit changes it (the NAS out of room). */
+  limit: number;
   /** Only the files directly in `dir` count, not those in its subdirectories. */
   readonly looseOnly: boolean;
   used: number;
@@ -413,6 +414,18 @@ export class Vfs {
       file.quota = root;
       root.used += file.len;
     });
+  }
+
+  /**
+   * Changes the limit of the quota of `dir` (setQuota): false without one. A limit at or below what its files hold now
+   * refuses every write that needs more room, as a full disk does; the files already there stay.
+   */
+  setQuotaLimit(dir: string, limitBytes: number): boolean {
+    const canon = this.canonicalize(dir);
+    const root = this.quotas.find((q) => q.dir === canon);
+    if (!root) return false;
+    root.limit = limitBytes;
+    return true;
   }
 
   /** The lengths of the files that count toward the quota of `dir` (setQuota); 0 without one. */

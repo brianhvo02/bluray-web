@@ -105,4 +105,14 @@ describe('Java and the storage scopes', () => {
     await sync.flush();
     expect(store.stored.files.map((f) => [f.path, f.bytes.length])).toEqual([['4001/save', 3], ['4001/small', 10]]);
   });
+
+  it('gets an IOException (no space) for a write that needs more room once the NAS is full (its 507), and room again after', async () => {
+    sync.full('persistent/7fff0123', true);
+    const message = await call<JObject | null>('fill', '(Ljava/lang/String;I)Ljava/lang/String;', '/persistent/7fff0123/4001/more', 1);
+    expect(message && jvm.heap.jsString(message)).toBe('No space left on device');
+    // what is there stays readable
+    expect(await call<number>('first', '(Ljava/lang/String;)I', '/persistent/7fff0123/4001/save')).toBe(42);
+    sync.full('persistent/7fff0123', false);
+    expect(await call<JObject | null>('fill', '(Ljava/lang/String;I)Ljava/lang/String;', '/persistent/7fff0123/4001/more', 1)).toBeNull();
+  });
 });

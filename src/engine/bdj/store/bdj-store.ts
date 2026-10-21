@@ -1,6 +1,6 @@
 /*
  * Original code for bluray-web: where BD-J's saved data lives between viewings (spec §4.4). A scope (scopes.ts) is
- * read and written whole, as a snapshot, through a BdjStore: the browser's (idb-store.ts) or, later, the NAS's.
+ * read and written whole, as a snapshot, through a BdjStore: the browser's (idb-store.ts) or the NAS's (nas-store.ts).
  *
  * Copyright (C) 2026  bluray-web contributors
  *
@@ -44,6 +44,12 @@ export interface BdjStore {
   readonly saveDebounceMs?: number;
   load(scope: string): Promise<LoadedSnapshot>;
   save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult>;
+  /**
+   * Sends on what the store holds but has not passed on yet (a NAS disc's write-ahead copy, nas-store.ts) now, rather
+   * than at its own debounce: at the engine's flush (the page hidden or shown again) and at the stop. Settles once
+   * that is done or has failed (logged).
+   */
+  flush?(): Promise<void>;
 }
 
 /** Agreed with the NAS session: 16 MB per scope (the NAS also has 256 MB per person). */
@@ -58,6 +64,21 @@ export class ScopeQuotaError extends Error {
   ) {
     super(`${scope}: ${bytes} bytes is over the quota of ${limitBytes} bytes (No space left on device)`);
     this.name = 'ScopeQuotaError';
+  }
+}
+
+/** The NAS's 507: over the scope's 16 MB or the person's 256 MB (the NAS store contract). */
+export const PERSON_QUOTA_BYTES = 256 * 1024 * 1024;
+
+export class NasQuotaError extends ScopeQuotaError {
+  constructor(
+    scope: string,
+    bytes: number,
+    readonly limit: 'scope' | 'person',
+  ) {
+    super(scope, bytes, limit === 'person' ? PERSON_QUOTA_BYTES : SCOPE_QUOTA_BYTES);
+    this.name = 'NasQuotaError';
+    this.message = `${scope}: the NAS has no room for ${bytes} bytes (over the ${limit === 'person' ? "person's" : "scope's"} quota of ${this.limitBytes} bytes; No space left on device)`;
   }
 }
 

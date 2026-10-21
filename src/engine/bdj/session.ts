@@ -206,6 +206,8 @@ export class BdjSession {
    */
   setHidden(hidden: boolean): void {
     if (hidden === this.hidden) return;
+    // shown again: a NAS disc's write-ahead copy goes to the NAS now (ruling R17), as the hide's flush may not have got it there
+    if (!hidden) this.flush();
     if (!this.ticking || this.stopped) {
       this.hidden = hidden;
       return;
@@ -252,7 +254,7 @@ export class BdjSession {
     return this.activityCount;
   }
 
-  /** The page is going away (pagehide): the worker saves its storage changes now. */
+  /** The page is going away (pagehide) or is shown again: the worker saves its storage changes now. */
   flush(): void {
     if (!this.stopped && this.storage) this.post({ type: 'flush' });
   }
