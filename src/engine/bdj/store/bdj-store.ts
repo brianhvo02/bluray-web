@@ -123,6 +123,24 @@ export function mergeSnapshots(local: Snapshot, remote: Snapshot): { readonly me
   return { merged: { files: sortFiles([...byPath.values()]) }, fromRemote };
 }
 
+/**
+ * The merge of a copy written without seeing `remote` (ruling R29: a write-ahead copy kept after a boot that missed the
+ * NAS): `remote`'s file wins at every path on both sides, whatever the mtimes, and only the paths `remote` lacks come
+ * from `local`, so a fresh file Java wrote with no saved data in sight never replaces real saved data. `dropped`: the
+ * paths on both sides whose local file differed from the remote one (left out).
+ */
+export function mergeKeepingRemote(local: Snapshot, remote: Snapshot): { readonly merged: Snapshot; readonly dropped: number } {
+  const byPath = new Map<string, SnapshotFile>();
+  for (const f of remote.files) byPath.set(f.path, f);
+  let dropped = 0;
+  for (const f of local.files) {
+    const theirs = byPath.get(f.path);
+    if (!theirs) byPath.set(f.path, f);
+    else if (!sameSnapshot({ files: [theirs] }, { files: [f] })) dropped++;
+  }
+  return { merged: { files: sortFiles([...byPath.values()]) }, dropped };
+}
+
 export function sortFiles(files: SnapshotFile[]): SnapshotFile[] {
   return files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }

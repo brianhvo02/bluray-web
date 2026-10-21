@@ -321,10 +321,45 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     await again.store.save(BUDA, { files: [file('resume', 7_000, 'r')] }, null);
     const rec = await again.local.loadRecord(BUDA);
     expect([rec?.pending, rec?.unmerged]).toEqual([true, true]);
-    await again.store.flush(); // the NAS answers again: read, merged, put
+    await again.store.flush(); // the NAS answers again, but a copy written without its files waits for the next boot (R29)
+    expect(nas.stored(personId, BUDA).etag).toBeNull();
+    expect(again.logs.at(-1)).toEqual([`BD-J storage: ${BUDA} is kept in this browser and merged with the NAS's copy at the next open (the NAS's files win)`, false]);
+    const next = session(personId, token, idb);
+    expect(view(await next.store.load(BUDA))).toEqual([['resume', 7_000, 'r']]);
+    await timers.advance(0);
     expect(onNas(personId, BUDA)).toEqual([['resume', 7]]);
-    const after = await again.local.loadRecord(BUDA);
+    const after = await next.local.loadRecord(BUDA);
     expect([after?.pending, after?.unmerged]).toEqual([false, undefined]);
+  });
+
+  it("merges a copy kept after a missed boot with the NAS's files winning on every path both have (ruling R29)", async () => {
+    const { personId, token } = await nas.person('Mika');
+    const tablet = await nas.device(personId, 'tablet');
+    await client(tablet).save(SCOPE, { files: [file('save.dat', 1_000_000, 'real progress')] }, null);
+    const idb = new IDBFactory();
+    // what a session that missed the NAS wrote: a fresh save.dat (newer) and a file of its own
+    await new IdbBdjStore(personSource(personId), idb).save(SCOPE, { files: [file('new.dat', 3_000_000, 'n'), file('save.dat', 2_000_000, 'fresh')] }, null, { pending: true, unmerged: true });
+    const d = session(personId, token, idb);
+    expect(view(await d.store.load(SCOPE))).toEqual([['new.dat', 3_000_000, 'n'], ['save.dat', 1_000_000, 'real progress']]);
+    expect(d.logs.filter(([l]) => l.includes('dropped for the NAS'))).toEqual([
+      [`BD-J storage: ${SCOPE}: 1 files saved here while the NAS did not answer are dropped for the NAS's own (ruling R29); only the files the NAS lacks are added`, false],
+    ]);
+    await timers.advance(0);
+    expect(onNas(personId)).toEqual([['new.dat', 3_000], ['save.dat', 1_000]]);
+    expect(view(await client(token).load(SCOPE)).map(([p, , t]) => [p, t])).toEqual([['new.dat', 'n'], ['save.dat', 'real progress']]);
+  });
+
+  it('still merges a plain pending copy by mtime: its newer file wins (ruling R29 leaves R17 as it was)', async () => {
+    const { personId, token } = await nas.person('Mika');
+    const tablet = await nas.device(personId, 'tablet');
+    await client(tablet).save(SCOPE, { files: [file('save.dat', 1_000_000, 'older')] }, null);
+    const idb = new IDBFactory();
+    await new IdbBdjStore(personSource(personId), idb).save(SCOPE, { files: [file('new.dat', 3_000_000, 'n'), file('save.dat', 2_000_000, 'newer')] }, null, { pending: true });
+    const d = session(personId, token, idb);
+    expect(view(await d.store.load(SCOPE))).toEqual([['new.dat', 3_000_000, 'n'], ['save.dat', 2_000_000, 'newer']]);
+    await timers.advance(0);
+    expect(onNas(personId)).toEqual([['new.dat', 3_000], ['save.dat', 2_000]]);
+    expect(d.logs.some(([l]) => l.includes('dropped for the NAS'))).toBe(false);
   });
 
   it('tells Java the scope is full on a 507 (onFull), and has room again once the NAS takes it', async () => {

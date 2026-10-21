@@ -46,8 +46,8 @@ export interface ScopeRecord {
   readonly migratedTo?: string;
   /**
    * A pending write-ahead copy that was never merged with the NAS's (ruling R28): written in a session whose boot got
-   * no answer from the NAS in time and had no copy here, so Java started with none. The next put or boot merges it
-   * per file by mtime, as any pending copy; the flag only says so in the log. Absent once merged.
+   * no answer from the NAS in time and had no copy here, so Java started with none. It is not put in that session;
+   * the next boot merges it with the NAS's files winning at every path both have (ruling R29). Absent once merged.
    */
   readonly unmerged?: boolean;
 }

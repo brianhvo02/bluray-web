@@ -414,10 +414,12 @@ what would change that decision.
     GET and the person check after it (three requests one after another, so about 4 s each); the wait counts as I/O
     for the start-up timer, whose 120 s ceiling bounds it. A slow link is not a dead one: each of the disc's own
     reads may wait 30 s or more (above), so a boot can go on while the store misses its budget. A scope the NAS
-    doesn't answer in time loads this browser's copy. With none, the disc starts with no saved data, and what it saves is kept here as a pending
-    copy marked `unmerged`, merged per file by mtime with the NAS's at the next put or boot (logged as an error at the
-    miss). A file the disc writes afresh in that session (it saw none) is newer than the NAS's, so it wins that merge:
-    on a disc that keeps its progress in one file, that session's file replaces the NAS's.
+    doesn't answer in time loads this browser's copy. With none, the disc starts with no saved data, and what it saves
+    is kept here as a pending copy marked `unmerged` (logged as an error at the miss). That copy is not put on the NAS
+    in the same session; the next boot merges it with the NAS's files winning at every path both have (ruling R29),
+    so only the files the NAS lacks are added, and logs how many of this browser's files it dropped. Java wrote it
+    without seeing the saved data, so a fresh progress or settings file never replaces real saved progress; what
+    Java changed in such a file that session is lost. An ordinary pending copy still merges newest-wins.
   - **`GET me` not answering at boot.** What the session saves is kept apart (`nas-unconfirmed:<person>`), under the
     person the NAS last named for this device in this browser (`nas-device`, by API base), and goes into that
     person's copy only at a boot where the NAS names the same person again; a boot that names another person leaves it

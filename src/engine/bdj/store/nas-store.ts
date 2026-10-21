@@ -11,7 +11,7 @@
  */
 
 import {
-  NasQuotaError, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles,
+  NasQuotaError, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeKeepingRemote, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles,
   type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot, type SnapshotFile,
 } from './bdj-store';
 import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore, type ScopeRecord } from './idb-store';
@@ -389,8 +389,8 @@ interface WriteAheadScope {
  * pending, then to the NAS 2 s after the last one (at most 10 s after the first; at once on flush). A copy still
  * pending at the next load is merged per file by mtime with the NAS's, as on a 412, and put on the NAS straight away.
  * A load the NAS does not answer uses this browser's copy, when there is one; with none, Java starts with nothing and
- * what it writes is kept here as a pending copy marked unmerged, merged with the NAS's like any pending copy once the
- * NAS answers (ruling R28). A failed put is tried again later and at the next open. Nothing is lost on this device when
+ * what it writes is kept here as a pending copy marked unmerged, merged at the next boot with the NAS's files winning
+ * on every path both have (rulings R28, R29). A failed put is tried again later and at the next open. Nothing is lost on this device when
  * the page goes before the NAS has it.
  */
 export class WriteAheadNasStore implements BdjStore {
@@ -403,6 +403,7 @@ export class WriteAheadNasStore implements BdjStore {
   private cancelMaxWait: (() => void) | null = null;
   private cancelRetry: (() => void) | null = null;
   private readonly tooLongLogged = new Set<string>();
+  private readonly unmergedLogged = new Set<string>();
 
   constructor(private readonly deps: WriteAheadDeps) {}
 
@@ -479,8 +480,12 @@ export class WriteAheadNasStore implements BdjStore {
     }
     state.nasEtag = remote.etag;
     if (pending) {
-      // the last session's changes the NAS did not get: merged as on a 412 (newer mtime wins, ties ours) and put now
-      const merged = mergeSnapshots(state.local, remote).merged;
+      // the last session's changes the NAS did not get: merged as on a 412 (newer mtime wins, ties ours) and put now;
+      // a copy written without seeing the NAS's (unmerged) only adds the paths the NAS lacks (ruling R29)
+      const mergeWith = (mine: Snapshot): { merged: Snapshot; dropped: number } =>
+        unmerged ? mergeKeepingRemote(mine, remote) : { merged: mergeSnapshots(mine, remote).merged, dropped: 0 };
+      const { merged, dropped } = mergeWith(state.local);
+      if (dropped > 0) log(`BD-J storage: ${scope}: ${dropped} files saved here while the NAS did not answer are dropped for the NAS's own (ruling R29); only the files the NAS lacks are added`);
       state.unmerged = false; // merged with the NAS's now
       if (!sameSnapshot(merged, state.local)) {
         // the write-ahead copy holds the merge before anything marks it as on the NAS
@@ -494,7 +499,7 @@ export class WriteAheadNasStore implements BdjStore {
           etag = result.conflict.etag;
           // no version to mark: the record holds less than what is put, so it stays pending until ScopeSync saves
           state.localEtag = null;
-          state.local = mergeSnapshots(result.conflict, remote).merged;
+          state.local = mergeWith(result.conflict).merged;
         }
       }
       log(`BD-J storage: ${scope} has changes from this browser the NAS does not have yet${unmerged ? ' (saved while the NAS did not answer, never merged with its copy)' : ''}: merged, and put on the NAS now`);
@@ -638,6 +643,15 @@ export class WriteAheadNasStore implements BdjStore {
 
   private async push(scope: string, state: WriteAheadScope): Promise<void> {
     if (!state.pending) return;
+    if (state.unmerged) {
+      // written without seeing the NAS's copy: merged only at the next boot, where the NAS's files win (ruling R29),
+      // never put in this session, where Java would write its own again over them
+      if (!this.unmergedLogged.has(scope)) {
+        this.unmergedLogged.add(scope);
+        this.deps.log(`BD-J storage: ${scope} is kept in this browser and merged with the NAS's copy at the next open (the NAS's files win)`);
+      }
+      return;
+    }
     const { nas, local, log } = this.deps;
     const gen = state.gen;
     const pushed = this.forNas(scope, state.local);
