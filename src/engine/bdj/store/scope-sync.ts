@@ -36,7 +36,7 @@ export const LOAD_TIMEOUT_MS = 3000;
 /** A save that keeps meeting newer snapshots gives up after this many tries (until the next write). */
 const SAVE_ATTEMPTS = 3;
 
-export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 'stat'> & Partial<Pick<Vfs, 'setQuotaLimit' | 'quotaUsed' | 'writing'>>;
+export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 'stat'> & Partial<Pick<Vfs, 'setQuotaLimit' | 'quotaUsed'>>;
 
 export interface ScopeSyncDeps {
   readonly store: BdjStore;
@@ -256,9 +256,9 @@ export class ScopeSync {
         // (a loose-only scope takes none of the stored subfolder paths: they belong to the disc scopes)
         const remote = state.scope.looseOnly ? { files: result.conflict.files.filter((f) => !f.path.includes('/')) } : result.conflict;
         const { merged, fromRemote } = mergeSnapshots(snapshot, remote);
-        // a file Java is writing now (a handle open on it, or changed since this snapshot) is newer than the stored one
-        // and is not replaced under it (its data would go to an unlinked file): Java's stays, in the VFS and in the save
-        const busy = new Set(fromRemote.filter((f) => this.busy(state, f.path, snapshot)).map((f) => f.path));
+        // a file Java changed since this snapshot (or one newer than the stored one) stays Java's, in the VFS and in the
+        // save; any other is replaced, in place under an open handle (Vfs.importFiles), so a write through it is kept
+        const busy = new Set(fromRemote.filter((f) => this.busy(state, f, snapshot)).map((f) => f.path));
         this.vfs.importFiles(state.scope.dir, busy.size === 0 ? fromRemote : fromRemote.filter((f) => !busy.has(f.path)));
         state.etag = result.conflict.etag;
         state.stored = remote;
@@ -281,18 +281,18 @@ export class ScopeSync {
   }
 
   /**
-   * Whether Java is writing the file at `rel` now: a writable handle is open on it, or it changed (or went, or came)
-   * since `snapshot` was taken.
+   * Whether Java's file at `remote`'s path is to stay over `remote` (review minor 3, N7): it changed (or went, or came)
+   * since `snapshot` was taken, a write under way, or it is newer than `remote` (whole seconds, as merges compare). An
+   * open handle alone does not keep it: a file a disc keeps open all session would then never take another device's.
    */
-  private busy(state: ScopeState, rel: string, snapshot: Snapshot): boolean {
-    const path = `${state.scope.dir}/${rel}`;
-    if (this.vfs!.writing?.(path)) return true;
+  private busy(state: ScopeState, remote: SnapshotFile, snapshot: Snapshot): boolean {
+    const rel = remote.path;
     // a file refused for room is saved as stored (snapshot), not as the VFS has it: the stored one may replace it
     if (state.refused.has(rel)) return false;
-    const now = this.vfs!.stat(path);
+    const now = this.vfs!.stat(`${state.scope.dir}/${rel}`);
     const then = snapshot.files.find((f) => f.path === rel);
-    if (!then) return now !== null;
-    return now?.kind !== 'file' || now.mtimeMs !== then.mtime || now.size !== then.bytes.length;
+    const changed = then ? now?.kind !== 'file' || now.mtimeMs !== then.mtime || now.size !== then.bytes.length : now !== null;
+    return changed || (now?.kind === 'file' && Math.floor(now.mtimeMs / 1000) > Math.floor(remote.mtime / 1000));
   }
 
   /** The scope's files now, a refused file as stored (or left out). */

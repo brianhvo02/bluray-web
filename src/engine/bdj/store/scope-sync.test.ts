@@ -400,7 +400,7 @@ describe('ScopeSync: slow loads, writes under a merge, retries (5e final review)
     expect(lines).toEqual([`BD-J storage: ${PERSISTENT.key} could not be loaded (no answer within 12500 ms); what is written there lasts until BD-J stops`]);
   });
 
-  it('imports no stored file over one Java is writing (a handle open, or changed since the snapshot): Java\'s stays and is saved (review minor 3)', async () => {
+  it('keeps Java\'s file only where it changed since the snapshot; a newer stored file goes in under an open handle, in place (review minor 3, N7)', async () => {
     const store = new MemoryStore();
     const { vfs, sync, clock } = await setup(store);
     clock.t = 5_000_000;
@@ -420,17 +420,18 @@ describe('ScopeSync: slow loads, writes under a merge, retries (5e final review)
       return save(scope, snapshot, etag);
     };
     await sync.flush();
-    expect(read(vfs, '/persistent/7fff0123/open')).toBe('mine');
+    // `open` was not written since the snapshot and the stored one is newer: it goes in; `changed` stays Java's
+    expect(read(vfs, '/persistent/7fff0123/open')).toBe('theirs');
     expect(read(vfs, '/persistent/7fff0123/changed')).toBe('mine again');
     expect(read(vfs, '/persistent/7fff0123/other')).toBe('theirs');
-    expect(store.text(PERSISTENT.key)).toEqual(['changed=mine', 'open=mine', 'other=theirs']);
-    // the write through the open handle reaches the file Java holds, and the next save takes it
+    expect(store.text(PERSISTENT.key)).toEqual(['changed=mine', 'open=theirs', 'other=theirs']);
+    // the open handle writes to the file as it is now (replaced in place, not unlinked), and the next save takes it
     const more = enc.encode(' and more');
     expect(vfs.write(h, more, 0, more.length)).toBe(true);
     vfs.close(h);
     expect(vfs.writing('/persistent/7fff0123/open')).toBe(false);
     await sync.flush();
-    expect(store.text(PERSISTENT.key)).toEqual(['changed=mine again', 'open=mine and more', 'other=theirs']);
+    expect(store.text(PERSISTENT.key)).toEqual(['changed=mine again', 'open=theirs and more', 'other=theirs']);
   });
 
   it('tries a save that gave up after three conflicts again later, without another write (review minor 4)', async () => {

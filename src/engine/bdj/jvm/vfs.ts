@@ -479,8 +479,8 @@ export class Vfs {
   }
 
   /**
-   * Puts `files` under the memory directory `dir` (created as needed), replacing files of the same path: a stored
-   * snapshot. They count toward the limit and the quotas (even beyond them) but are no change for onChange. The bytes
+   * Puts `files` under the memory directory `dir` (created as needed), replacing files of the same path (in place when
+   * a writable handle is open on one): a stored snapshot. They count toward the limit and the quotas (even beyond them) but are no change for onChange. The bytes
    * are kept without a copy and never written in place: a write goes to a copy.
    */
   importFiles(dir: string, files: Iterable<VfsTreeFile>): void {
@@ -504,6 +504,17 @@ export class Vfs {
       const name = parts[parts.length - 1]!;
       const old = parent?.children.get(name);
       if (!parent || old?.kind === 'dir') continue;
+      if (old && (this.writers.get(old)?.size ?? 0) > 0) {
+        // a file with a writable handle open is replaced in place, so that handle writes to the file as it is now
+        // rather than to an unlinked one
+        this.unlink(old);
+        old.buf = f.bytes;
+        old.len = f.bytes.length;
+        old.mtimeMs = f.mtime;
+        old.shared = true;
+        this.link(old, path);
+        continue;
+      }
       if (old) this.unlink(old);
       const file: MemFile = { kind: 'file', buf: f.bytes, len: f.bytes.length, mtimeMs: f.mtime, shared: true, linked: false, quota: null };
       this.link(file, path);
