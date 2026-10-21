@@ -113,3 +113,15 @@ export interface PlaybackPlace {
 }
 /** One person's places in one disc: by playlist id, with the settings of the latest put as `defaults`. */
 export interface DiscPlaces { readonly defaults: PlaceSettings | null; readonly places: Readonly<Record<string, PlaybackPlace>> }
+
+/** One card of the Continue watching row. `up-next` is the episode after a finished one, to start from the beginning. */
+export interface ContinueItem {
+  readonly kind: 'resume' | 'up-next';
+  readonly discKey: string; readonly discId: string; readonly playlistId: string;
+  readonly timeUs: number; readonly durationUs: number;
+  readonly titleId: string | null; readonly titleName: string | null; readonly poster: string | null;
+  readonly seasonId: string | null; readonly seasonNumber: number | null; readonly episode: number | null;
+  readonly kindOfTitle: TitleKind | null; readonly updatedAt: number; readonly deviceName: string;
+}
+
+export interface PlaylistProgress { readonly timeUs: number; readonly durationUs: number; readonly finished: boolean }

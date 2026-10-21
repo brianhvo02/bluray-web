@@ -11,6 +11,9 @@ import { Auth } from '../auth';
 import { BdjStore } from '../bdj-store';
 import { createServer } from '../http';
 import { Library } from '../library';
+import type { TitleLibrary } from './titles';
+import type { Catalogue } from '../titles/catalogue';
+import type { DiscEvidence } from '../titles/evidence';
 import { PlaybackStore } from '../playback-store';
 import { Store } from '../store';
 
@@ -170,5 +173,60 @@ describe('playback routes', () => {
     expect(results.map((r) => r.status)).toEqual([204, 204]);
     const got = (await (await call('GET', KEY, token)).json()) as { places: Record<string, PlaybackPlace> };
     expect(Object.keys(got.places).sort()).toEqual(['00001', '00002']);
+  });
+});
+
+describe('Continue watching routes', () => {
+  const summary = { id: 'star', kind: 'series', names: { english: 'Starfall Wanderer', romaji: null, native: null, synonyms: [], display: null }, poster: 'art1', year: null, seasons: 1, discs: 1, addedAt: 0, own: false };
+  const ep = (number: number, playlistId: string) => ({ number, name: null, runtimeMin: 24, discId: 'disc1', playlistId });
+  const detail = {
+    title: summary, banner: null, related: [], extras: [],
+    seasons: [{ id: 's1', label: '', number: 1, discs: [{ number: 1, label: 'Disc 1', copies: [{ discId: 'disc1', root: 'r', folder: 'f', displayName: null }] }], episodes: [ep(1, '00001'), ep(2, '00002')], extras: [] }],
+  };
+  const catalogue = { titles: [summary], detail: (id: string) => (id === 'star' ? detail : null), unsorted: [], hidden: [], art: () => null, provisional: [] } as unknown as Catalogue;
+  let gate: 'owners' | 'everyone' = 'everyone';
+  const titles = { service: { gate: () => gate, catalogue: () => catalogue }, owner: {} } as unknown as TitleLibrary;
+  let url = '';
+  let stop: (() => void) | undefined;
+
+  beforeEach(async () => {
+    gate = 'everyone';
+    const library = { evidence: () => [{ discId: 'disc1', fingerprint: 'B'.repeat(32) }] as unknown as DiscEvidence[] } as unknown as Library;
+    const server = createServer(appHandlers({ auth, library, bdjStore: new BdjStore(data), playbackStore: new PlaybackStore(data), publicBase: 'https://nas.example/bluray/api/', titles }));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    stop = () => { server.close(); server.closeAllConnections(); };
+  });
+  afterEach(() => stop?.());
+
+  const get = (path: string, token: string | null): Promise<Response> => fetch(`${url}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+
+  it('lists resume and up-next cards and answers a title\'s progress', async () => {
+    const { token } = await tokenFor('Mika', false);
+    expect((await get('/api/me/playback', null)).status).toBe(401);
+    expect(await (await get('/api/me/playback', token)).json()).toEqual([]);
+    await call('PUT', `${KEY}/00001`, token, place({ finished: true, updatedAt: 2000 }));
+    const list = (await (await get('/api/me/playback', token)).json()) as { kind: string; discKey: string; playlistId: string; titleName: string }[];
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ kind: 'up-next', discKey: KEY, playlistId: '00002', titleName: 'Starfall Wanderer' });
+    await call('PUT', `${KEY}/00002`, token, place({ playlistId: '00002', updatedAt: 3000 }));
+    const after = (await (await get('/api/me/playback', token)).json()) as { kind: string }[];
+    expect(after.map((i) => i.kind)).toEqual(['resume']);
+    const progress = await (await get('/api/me/playback/title/star', token)).json();
+    expect(progress).toEqual({ disc1: { '00001': { timeUs: 5_000_000, durationUs: 60_000_000, finished: true }, '00002': { timeUs: 5_000_000, durationUs: 60_000_000, finished: false } } });
+    expect((await get('/api/me/playback/title/nope', token)).status).toBe(404);
+  });
+
+  it('hides the catalogue from a guest while the gate is owners', async () => {
+    gate = 'owners';
+    const guest = await tokenFor('Mika', false);
+    const owner = await tokenFor('Hana', true);
+    await call('PUT', `${KEY}/00001`, guest.token, place({ finished: true }));
+    await call('PUT', `${KEY}/00002`, guest.token, place({ playlistId: '00002', updatedAt: 500 }));
+    expect((await get('/api/me/playback/title/star', guest.token)).status).toBe(404);
+    const list = (await (await get('/api/me/playback', guest.token)).json()) as { kind: string; titleId: string | null }[];
+    expect(list).toEqual([expect.objectContaining({ kind: 'resume', titleId: null })]);
+    await call('PUT', `${KEY}/00001`, owner.token, place({ finished: true }));
+    expect((await get('/api/me/playback/title/star', owner.token)).status).toBe(200);
   });
 });

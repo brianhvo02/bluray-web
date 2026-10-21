@@ -59,7 +59,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
     pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false), registrar: opts.registrar }),
     requireToken(auth),
     bdjStoreRoutes(auth, opts.bdjStore),
-    ...(opts.playbackStore ? [playbackRoutes(auth, opts.playbackStore)] : []),
+    ...(opts.playbackStore ? [playbackRoutes(auth, opts.playbackStore, { titles: opts.titles, library: opts.library })] : []),
     adminRoutes(auth, {
       library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
       titles: opts.titles, relay: opts.relay, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
