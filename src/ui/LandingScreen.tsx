@@ -99,6 +99,12 @@ export function LandingScreen({ controller, snapshot, nas, history, pairCode }: 
       () => setAccess((a) => (a === 'checking' ? { titles: false, owner: false } : a)),
     );
   }, [needsAccess, access, pairingKnown, nas]);
+  // A guest behind the closed gate on the library's path: the folder browser's own path, so Back from a folder it
+  // opens has an entry of its own to land on.
+  const guestOnLibrary = route?.kind === 'library' && typeof access === 'object' && access !== null && !access.titles;
+  useEffect(() => {
+    if (guestOnLibrary) history.replace({ kind: 'folders', path: rememberedFolder() });
+  }, [guestOnLibrary, history]);
   /** The title routes answered 404: the gate closed since `me` answered, so the folder browser, as for any guest. */
   const gateClosed = useCallback(() => setAccess({ titles: false, owner: false }), []);
   /** Ask `me` again (this device may no longer be an owner). */

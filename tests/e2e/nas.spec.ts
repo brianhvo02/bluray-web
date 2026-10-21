@@ -449,11 +449,18 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
         // A guest: the listing is up, and there is no way into the settings.
         await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
         await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
+        // The guest's folders are in the address bar too: a folder, then the browser's Back, is the top again.
+        expect(new URL(mika.url()).pathname).toBe('/nas/folders');
+        await mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+        await expect(mika.getByTestId('nas-crumbs')).not.toHaveText('NAS');
+        await mika.goBack();
+        await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
 
-        // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts (the
-        // address bar kept the library's path, so the reload opens it).
+        // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
         await setGate('everyone');
-        await mika.reload();
+        await mika.goto('/');
+        await mika.getByTestId('nas-open').click();
         await expect(mika.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
         await expect(mika.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
         await expect(mika.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
@@ -696,6 +703,13 @@ test('library screens are in the address bar, and Back and Forward move between 
   await page.locator('[data-testid="title-shelf"][data-shelf="movie"]').click();
   await expect(page.getByTestId('title-card')).toHaveCount(1);
   expect(pathOf(page)).toBe('/nas?shelf=movie');
+
+  // A search reaches the address bar once typing pauses, and a reload shows it.
+  await page.getByTestId('title-search').fill('moonlit');
+  await expect.poll(() => pathOf(page)).toBe('/nas?shelf=movie&q=moonlit');
+  await page.reload();
+  await expect(page.getByTestId('title-search')).toHaveValue('moonlit', { timeout: 15_000 });
+  await expect(page.getByTestId('title-row')).toHaveAttribute('data-name', 'Moonlit Harbor');
 });
 
 test('a library path opens straight onto its screen after a reload', async ({ page, browserName }) => {
@@ -866,6 +880,20 @@ test('an owner files a disc differently from its season, into Music, and out of 
       await expect(row).toHaveCount(0);
       const hidden = (await (await ownerApi('admin/hidden')).json()) as { discs: { discId: string }[] };
       expect(hidden.discs.map((d) => d.discId)).toContain(id);
+
+      // Filed under the series again, in the same visit: the series that went away opens again.
+      await clearChoices([id]);
+      await shelfChip(page, 'unsorted').click();
+      const again = unsortedCard(page, first);
+      await again.locator(`[data-testid="title-option"][data-name="${name}"]`).click();
+      await again.getByTestId('unsorted-disc').fill('1');
+      await again.getByTestId('unsorted-file').click();
+      await expect(page.getByTestId('unsorted-notice')).toContainText(`Filed under ${name}.`);
+      await page.getByRole('button', { name: 'Back to the library' }).click();
+      await shelfChip(page, 'music').click(); // the Music shelf was picked: unpick it, back to the whole library
+      await page.locator(`[data-testid="title-card"][data-name="${name}"]`).click();
+      await expect(page.getByTestId('series-name')).toHaveText(name);
+      await expect(page.getByTestId('season-row')).toHaveCount(1);
     } finally {
       await clearChoices([id]);
     }

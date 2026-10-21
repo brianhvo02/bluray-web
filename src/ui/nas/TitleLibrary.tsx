@@ -34,6 +34,8 @@ type Shelf = TitleKind | 'unsorted';
 
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 const HEADING = '[data-focus-heading]';
+/** The search goes into the address bar this long after the last keystroke. */
+const SEARCH_WRITE_DELAY_MS = 300;
 const byAttr = (name: string, value: string): string => `[${name}="${CSS.escape(value)}"]`;
 
 /** The item on the screen below `route` that opens it, which takes focus when going back from it. */
@@ -161,6 +163,23 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
   const route: NasRoute = routed === null || routed.kind === 'play' || routed.kind === 'folders' ? LIBRARY : routed;
   const routeKey = nasRoutePath(route);
   const query = route.kind === 'library' ? route.q : '';
+  /**
+   * The search field's text. The route takes it 300 ms after the last keystroke, or when the field loses focus: Safari
+   * refuses more than about 100 history changes in 30 s, so not every keystroke can be one.
+   */
+  const [draft, setDraft] = useState(query);
+  useEffect(() => setDraft(query), [query]);
+  const searchTimer = useRef<number | null>(null);
+  const cancelSearchWrite = (): void => {
+    if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
+    searchTimer.current = null;
+  };
+  useEffect(() => cancelSearchWrite, []);
+  /** Puts `q` in the address bar, if the library is still the screen shown. */
+  const writeSearch = (q: string, shelf: TitleKind | null): void => {
+    cancelSearchWrite();
+    if (history.route()?.kind === 'library') history.replace({ kind: 'library', shelf, q });
+  };
   const picked = route.kind === 'library' ? route.shelf : null;
   /** The open title, and its open season, or 'extras' for its own extras. */
   const openId = route.kind === 'title' || route.kind === 'season' || route.kind === 'extras' ? route.titleId : null;
@@ -234,6 +253,8 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
 
   const changed = useCallback(() => {
     forgetTitles(nas);
+    // A title that went may be back after this change.
+    setGone(null);
     setVersion((v) => v + 1);
   }, [nas]);
 
@@ -262,7 +283,10 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
     let live = true;
     loadTitle(nas, openId).then(
       (d) => {
-        if (live) setLoaded({ id: openId, detail: d });
+        if (!live) return;
+        setLoaded({ id: openId, detail: d });
+        // Filed again since it went: it opens.
+        setGone((g) => (g === openId ? null : g));
       },
       (err: unknown) => {
         if (!live) return;
@@ -277,7 +301,7 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
     return () => {
       live = false;
     };
-  }, [nas, openId, onGateClosed, version, owner, history]);
+  }, [nas, openId, onGateClosed, version, owner]);
   useEffect(() => {
     if (openId !== null && openId === gone) history.back(LIBRARY);
   }, [routeKey, openId, gone, history]);
@@ -389,8 +413,8 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
     music: titles ? shelf(titles, 'music').length : null,
     unsorted,
   };
-  const searching = query.trim() !== '';
-  const results = titles && searching ? searchTitles(titles, query) : [];
+  const searching = draft.trim() !== '';
+  const results = titles && searching ? searchTitles(titles, draft) : [];
 
   return (
     <section className="titles title-library" data-testid="title-library">
@@ -413,9 +437,17 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
         data-testid="title-search"
         placeholder="Search in English, romaji or Japanese"
         aria-label="Search titles"
-        value={query}
+        value={draft}
         // The shelf stays picked under a search, as before paths: clearing the search shows it again.
-        onChange={(e) => history.replace({ kind: 'library', shelf: picked, q: e.target.value })}
+        onChange={(e) => {
+          const q = e.target.value;
+          setDraft(q);
+          cancelSearchWrite();
+          searchTimer.current = window.setTimeout(() => writeSearch(q, picked), SEARCH_WRITE_DELAY_MS);
+        }}
+        onBlur={() => {
+          if (searchTimer.current !== null) writeSearch(draft, picked);
+        }}
       />
       <div className="title-shelves" role="group" aria-label="Shelves">
         {SHELVES.filter((s) => s.id !== 'unsorted' || owner).map((s) => (
@@ -429,7 +461,10 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
             onClick={() => {
               const id = s.id;
               if (id === 'unsorted') history.push({ kind: 'unsorted' });
-              else history.push({ kind: 'library', shelf: picked === id ? null : id, q: query });
+              else {
+                cancelSearchWrite();
+                history.push({ kind: 'library', shelf: picked === id ? null : id, q: draft });
+              }
             }}
           >
             {s.label}
@@ -446,7 +481,7 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
         !error && <p className="status">Loading…</p>
       ) : searching ? (
         results.length === 0 ? (
-          <p className="status">No titles match “{query.trim()}”.</p>
+          <p className="status">No titles match “{draft.trim()}”.</p>
         ) : (
           <ul className="title-list" data-testid="title-results">
             {results.map((t) => (
