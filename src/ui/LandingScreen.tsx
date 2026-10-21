@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
+import { NasNotFound } from './nas/NasNotFound';
 import { LibraryScreen, rememberedFolder } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import { useNasRoute, type NasHistory } from './nas/nas-history';
-import type { NasRoute } from './nas/nas-route';
+import { nasRoutePath, type NasRoute } from './nas/nas-route';
 import type { PlayingRoute } from './nas/playing-route';
 import { Preflight } from './nas/Preflight';
 import type { NasPairing } from './nas/nas-store';
@@ -30,13 +31,14 @@ interface PlayLinkProps {
   readonly history: NasHistory;
   readonly playingRoute: PlayingRoute;
   readonly route: PlayRoute;
+  readonly onPair: () => void;
 }
 
 /**
  * A play link opened here (a link, a reload during playback, Back or Forward onto one): its disc's pre-flight, with
  * the link's playlist and time. Play needs the tap, which starts audio.
  */
-function PlayLink({ nas, controller, history, playingRoute, route }: PlayLinkProps): ReactElement {
+function PlayLink({ nas, controller, history, playingRoute, route, onPair }: PlayLinkProps): ReactElement {
   /** undefined while resolving; null when the NAS has no such disc; a string when the NAS couldn't be asked. */
   const [found, setFound] = useState<DiscEntry | null | string | undefined>(undefined);
   useEffect(() => {
@@ -52,10 +54,11 @@ function PlayLink({ nas, controller, history, playingRoute, route }: PlayLinkPro
   }, [nas, route.discKey]);
   const back = useCallback(() => history.back(LIBRARY), [history]);
   if (found === undefined) return <p className="status">Loading…</p>;
-  if (found === null || typeof found === 'string') {
+  if (found === null) return <NasNotFound onPair={onPair} />;
+  if (typeof found === 'string') {
     return (
       <div className="error-banner" role="alert" data-testid="nas-error">
-        {found ?? "This link's disc isn't on the NAS."}
+        {found}
       </div>
     );
   }
@@ -198,6 +201,18 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
       }),
     [nas, history],
   );
+  /** A link's not-found screen: leave its path and show the pair screen. */
+  const pairFromNotFound = (): void => {
+    history.replace(null);
+    setPairRequested(true);
+  };
+  /** The path of a title link whose title the NAS doesn't have (a link, not a step within the app). */
+  const [missingTitle, setMissingTitle] = useState<string | null>(null);
+  const routePath = route === null ? null : nasRoutePath(route);
+  const titleMissing = routePath !== null && missingTitle === routePath;
+  const onTitleMissing = useCallback(() => setMissingTitle(history.route() === null ? null : nasRoutePath(history.route()!)), [history]);
+  const guestOnTitleRoute =
+    shown !== null && (shown.kind === 'title' || shown.kind === 'season' || shown.kind === 'extras') && typeof access === 'object' && access !== null && !access.titles;
   const forgetNas = (): void => {
     setPairRequested(false);
     onPairCodeSpent?.();
@@ -389,7 +404,9 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
           )}
         </div>
       )}
+      {pairing === null && browsing && !pairRequested && <NasNotFound onPair={pairFromNotFound} />}
       {pairing !== undefined &&
+        !(pairing === null && browsing && !pairRequested) &&
         (pairing === null || pairRequested ? (
           <PairScreen
             client={nas}
@@ -421,8 +438,10 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
             </button>
           </p>
         ))}
-      {paired && playLink !== null && <PlayLink nas={nas} controller={controller} history={history} playingRoute={playingRoute} route={playLink} />}
-      {paired && shown !== null && playLink === null && (shown.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
+      {paired && playLink !== null && <PlayLink nas={nas} controller={controller} history={history} playingRoute={playingRoute} route={playLink} onPair={pairFromNotFound} />}
+      {paired && shown !== null && playLink === null && guestOnTitleRoute && <NasNotFound onPair={pairFromNotFound} />}
+      {paired && shown !== null && playLink === null && titleMissing && !guestOnTitleRoute && <NasNotFound onPair={pairFromNotFound} />}
+      {paired && shown !== null && playLink === null && !guestOnTitleRoute && !titleMissing && (shown.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
         // A guest behind the closed gate on any other route: the folders where it browsed last.
         <LibraryScreen
           nas={nas}
@@ -434,8 +453,8 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
           onClose={closeNas}
         />
       )}
-      {paired && shown !== null && playLink === null && shown.kind !== 'folders' && (access === null || access === 'checking') && <p className="status">Loading…</p>}
-      {paired && shown !== null && playLink === null && shown.kind !== 'folders' && typeof access === 'object' && access?.titles && (
+      {paired && shown !== null && playLink === null && !titleMissing && shown.kind !== 'folders' && (access === null || access === 'checking') && <p className="status">Loading…</p>}
+      {paired && shown !== null && playLink === null && !titleMissing && shown.kind !== 'folders' && typeof access === 'object' && access?.titles && (
         <TitleLibrary
           nas={nas}
           controller={controller}
@@ -445,6 +464,7 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
           owner={access.owner}
           onOwnerLost={recheckAccess}
           onGateClosed={gateClosed}
+          onTitleMissing={onTitleMissing}
           onClose={closeNas}
         />
       )}

@@ -1280,3 +1280,59 @@ test('NAS settings list own titles, to rename, change seasons and delete after a
     }
   });
 });
+
+const NOT_FOUND_COPY = "This link is for a NAS this device isn't paired with. Ask its owner to send you an invite.";
+
+test('a NAS link on an unpaired device asks for an invite', async ({ page }) => {
+  await page.goto('/nas/title/anilist%3A1');
+  await expect(page.getByTestId('nas-not-found')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY);
+  await expect(page.getByTestId('pair-screen')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Pair with a NAS' }).click();
+  await expect(page.getByTestId('pair-screen')).toBeVisible();
+  await expect(page.getByTestId('nas-not-found')).toHaveCount(0);
+  expect(pathOf(page)).toBe('/');
+});
+
+test('a link to something the NAS does not have shows the same screen', async ({ page, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  await page.goto('/nas/play/d.0000000000000000');
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+  await page.goto('/nas/title/anilist%3A999999999');
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+});
+
+test('a guest behind the closed title gate gets not-found for a title link', async ({ page, browser, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  const res = await ownerApi('admin/codes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPerson: { name: 'Noor', owner: false }, invite: true }),
+  });
+  expect(res.status).toBe(200);
+  const { code } = (await res.json()) as { code: string };
+  const guestContext = await browser.newContext();
+  try {
+    const guest = await guestContext.newPage();
+    await allowLocalNetwork(guest, browserName);
+    await guest.goto('/');
+    await guest.getByTestId('pair-code').fill(code);
+    await guest.getByTestId('pair-button').click();
+    await expect(guest.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await exclusivelyAsync('gate', async () => {
+      await setGate('owners');
+      await guest.goto('/nas/title/anilist%3A1');
+      await expect(guest.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+      await expect(guest.getByTestId('nas-crumbs')).toHaveCount(0);
+      await guest.goto('/nas');
+      await expect(guest.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 15_000 });
+      await expect(guest.getByTestId('nas-not-found')).toHaveCount(0);
+    });
+  } finally {
+    await guestContext.close();
+  }
+});

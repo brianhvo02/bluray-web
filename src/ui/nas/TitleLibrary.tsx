@@ -32,6 +32,8 @@ interface TitleLibraryProps {
   readonly onOwnerLost?: () => void;
   /** The title routes answered 404 to this guest (the gate closed since `me` answered): the caller shows the folders. */
   readonly onGateClosed: () => void;
+  /** The open title answered 404 on a link (no app entry behind it): the caller shows its not-found screen. */
+  readonly onTitleMissing: () => void;
   readonly onClose: () => void;
 }
 
@@ -162,7 +164,7 @@ function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
 }
 
 /** The NAS by title (spec §14, mockups 1–3): search, shelves, recently added and A–Z, then a title's seasons and discs. */
-export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch, owner, onOwnerLost, onGateClosed, onClose }: TitleLibraryProps): ReactElement {
+export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch, owner, onOwnerLost, onGateClosed, onTitleMissing, onClose }: TitleLibraryProps): ReactElement {
   const routed = useNasRoute(history);
   // The play route a pre-flight here pushed keeps the screen it was opened on (and the pre-flight on it).
   const beforePlay = useRef<NasRoute>(LIBRARY);
@@ -298,7 +300,8 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
       },
       (err: unknown) => {
         if (!live) return;
-        if (isGateClosed(err)) {
+        if (isGateClosed(err) && history.depth() === 0) onTitleMissing();
+        else if (isGateClosed(err)) {
           // An owner's title is gone, its last disc filed differently (ruling F3): back to where it was opened from.
           if (owner) setGone(openId);
           // As for the list: the gate closed meanwhile, so the folder browser, with no raw error.
@@ -309,7 +312,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
     return () => {
       live = false;
     };
-  }, [nas, openId, onGateClosed, version, owner]);
+  }, [nas, openId, onGateClosed, onTitleMissing, history, version, owner]);
   useEffect(() => {
     if (openId !== null && openId === gone) history.back(LIBRARY);
   }, [routeKey, openId, gone, history]);
