@@ -100,3 +100,16 @@ export interface OwnTitle { readonly id: string; readonly kind: TitleKind; reado
  */
 export interface UnsortedSuggestion extends TitleSummary { readonly seasonHint: number | null }
 export interface UnsortedItem { readonly discId: string; readonly path: string; readonly discTitles: readonly { readonly lang: string; readonly name: string }[]; readonly reason: UnsortedReason; readonly suggestions: readonly UnsortedSuggestion[]; readonly catalogueNumber: string | null; readonly group: string; readonly groupSize: number }
+
+/** The player settings a place carries, so resuming on another device sounds and looks the same. */
+export interface PlaceSettings { readonly audioLanguage: string | null; readonly psr1: number; readonly psr2: number; readonly psr3: number; readonly textOn: boolean; readonly textScale: number; readonly shaderSet: string | null; readonly volume: number; readonly muted: boolean }
+/** Where one person stopped in one playlist of a disc (spec: resume). `finished` places stay for Up next, and go first when the store is full. */
+export interface PlaybackPlace {
+  readonly discKey: string; readonly discId: string; readonly playlistId: string;
+  readonly timeUs: number; readonly durationUs: number; readonly finished: boolean;
+  readonly mode: 'hdmv' | 'bdj' | 'none'; readonly title: number | null;
+  readonly psrs: readonly number[]; readonly gprs: Readonly<Record<number, number>> | null;
+  readonly settings: PlaceSettings; readonly updatedAt: number; readonly deviceName: string;
+}
+/** One person's places in one disc: by playlist id, with the settings of the latest put as `defaults`. */
+export interface DiscPlaces { readonly defaults: PlaceSettings | null; readonly places: Readonly<Record<string, PlaybackPlace>> }

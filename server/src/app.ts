@@ -1,5 +1,7 @@
 import type { Auth } from './auth';
 import type { BdjStore } from './bdj-store';
+import type { PlaybackStore } from './playback-store';
+import { playbackRoutes } from './routes/playback';
 import type { CodeRegistrar } from './codes';
 import { json } from './http';
 import type { Handler } from './http';
@@ -20,6 +22,8 @@ export interface AppOptions {
   library: Library;
   /** Each person's BD-J saved data (spec §5). */
   bdjStore: BdjStore;
+  /** Absent in tests that never touch places. */
+  playbackStore?: PlaybackStore;
   publicBase: string;
   registrar?: CodeRegistrar;
   registrarDeadlineMs?: number;
@@ -55,6 +59,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
     pairRoutes(auth, { now: opts.now ?? Date.now, trustProxy: opts.trustProxy ?? (() => false), registrar: opts.registrar }),
     requireToken(auth),
     bdjStoreRoutes(auth, opts.bdjStore),
+    ...(opts.playbackStore ? [playbackRoutes(auth, opts.playbackStore)] : []),
     adminRoutes(auth, {
       library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
       titles: opts.titles, relay: opts.relay, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
