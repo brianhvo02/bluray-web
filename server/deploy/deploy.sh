@@ -39,13 +39,26 @@ docker buildx build --platform linux/amd64 --load \
 echo "==> Shipping the image to $HOST"
 docker save "bluray-server:$TAG" bluray-server:latest | gzip | ssh "$HOST" 'gunzip | docker load'
 
-echo "==> Writing $REMOTE_DIR/compose.yaml and starting the service"
+echo "==> Writing $REMOTE_DIR/compose.yaml and compose.gpu.yaml and starting the service"
 ssh "$HOST" "mkdir -p $REMOTE_DIR && cat > $REMOTE_DIR/compose.yaml" < server/deploy/compose.yaml
+ssh "$HOST" "cat > $REMOTE_DIR/compose.gpu.yaml" < server/deploy/compose.gpu.yaml
+# The GPU override only when the render node exists: a missing device would stop the container from starting, while
+# without it the server's self-test offers only Original.
+if ssh "$HOST" "test -e /dev/dri/renderD128"; then
+  COMPOSE_FILES="-f compose.yaml -f compose.gpu.yaml"
+  echo "    /dev/dri/renderD128 found: with compose.gpu.yaml (quality levels on the GPU)"
+else
+  COMPOSE_FILES="-f compose.yaml"
+  echo "    no /dev/dri/renderD128: without compose.gpu.yaml (Original only)"
+fi
 # Keep the step-2 auth.json (before people) beside the migrated one, so the step-2 image can be rolled back to. Run in
 # the old container, which holds the data volume; when it isn't running there is nothing to copy from, so carry on.
 ssh "$HOST" "docker exec bluray-server sh -c 'test -f /data/auth.step2.json || ! test -f /data/auth.json || cp /data/auth.json /data/auth.step2.json'" \
   || echo "    (no running bluray-server: no rollback copy of auth.json made)"
-ssh "$HOST" "cd $REMOTE_DIR && docker compose up -d"
+ssh "$HOST" "cd $REMOTE_DIR && docker compose $COMPOSE_FILES up -d"
+if [[ "$COMPOSE_FILES" == *compose.gpu.yaml* ]]; then
+  echo "    A manual restart must include the GPU override: cd $REMOTE_DIR && docker compose -f compose.yaml -f compose.gpu.yaml up -d"
+fi
 
 echo "==> Routing /bluray/* in Caddy"
 ssh "$HOST" 'bash -s' < server/deploy/caddy-route.sh

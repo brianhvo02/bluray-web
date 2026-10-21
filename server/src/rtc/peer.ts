@@ -41,7 +41,7 @@ export class RtcRefused extends Error {
 export interface RtcPeersOptions {
   handlers: readonly Handler[];
   auth: Auth;
-  /** The one UDP port ICE uses (47998). */
+  /** The one UDP port ICE uses (47998); 0 binds one the system picks, which the answers advertise (tests). */
   port: number;
   /** The addresses the answer advertises as host candidates on `port`. */
   advertise: () => string[];
@@ -269,6 +269,7 @@ export class RtcPeers {
   private readonly turnServers = new Map<string, { ips: string[]; since: number }>();
   private readonly limits: PeerLimits;
   private muxing: Promise<UdpMux> | undefined;
+  private bound: UdpMux | null = null;
 
   constructor(private readonly opts: RtcPeersOptions) {
     this.limits = { ...DEFAULT_LIMITS, ...opts.limits };
@@ -279,13 +280,18 @@ export class RtcPeers {
     return this.peers.size;
   }
 
+  /** The UDP port ICE is on once the first offer opened it (the one bound when `port` is 0), else null. */
+  get udpPort(): number | null {
+    return this.bound?.port ?? null;
+  }
+
   async answer(sid: string, offer: string): Promise<{ answer: string }> {
     this.countOffer(sid);
     this.admit(sid);
     const mux = await this.mux();
     const iceServers = stunOnly(await this.opts.iceServers());
     this.admit(sid); // again: another offer may have come in while this one waited
-    const { port } = this.opts;
+    const { port } = mux; // the bound one: `opts.port` may be 0
     const create = this.opts.createPeerConnection ?? ((config: Partial<PeerConfig>) => new RTCPeerConnection(config));
     const pc = create({
       iceServers,
@@ -386,6 +392,7 @@ export class RtcPeers {
     for (const peer of [...this.peers.values()]) this.drop(peer);
     const muxing = this.muxing;
     this.muxing = undefined;
+    this.bound = null;
     const mux = await muxing?.catch(() => undefined);
     await mux?.close();
   }
@@ -407,10 +414,13 @@ export class RtcPeers {
   }
 
   private mux(): Promise<UdpMux> {
-    this.muxing ??= UdpMux.open(this.opts.port).catch((err: unknown) => {
-      this.muxing = undefined;
-      throw err;
-    });
+    this.muxing ??= UdpMux.open(this.opts.port).then(
+      (mux) => (this.bound = mux),
+      (err: unknown) => {
+        this.muxing = undefined;
+        throw err;
+      },
+    );
     return this.muxing;
   }
 

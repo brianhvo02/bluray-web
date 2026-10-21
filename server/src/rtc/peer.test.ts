@@ -13,7 +13,7 @@ import { Library, SETTLE_MS } from '../library';
 import { Store } from '../store';
 import { answerWithCandidates, isMdnsCandidate, relayAddresses, RelayTracker, RtcPeers, RtcRefused, stunOnly, wireChannelOf, withoutMdnsCandidates } from './peer';
 
-// Every name here is made up. Ports 47990–47997 are the tests' own, so a real NAS on 47998 never clashes.
+// Every name here is made up. Each RtcPeers binds an ephemeral UDP port (0), so no run clashes with another's or the E2E's.
 
 const INDEX = Buffer.from(Array.from({ length: 300_000 }, (_, i) => (i * 37 + 11) & 0xff));
 
@@ -104,7 +104,7 @@ const candidateLines = (sdp: string): string[] => sdp.split(/\r?\n/).filter((l) 
 
 describe('RtcPeers', () => {
   it('serves the api channel over a real connection: a session, then a disc range byte-exact', { timeout: 30_000 }, async () => {
-    const peers = peersOn(47991);
+    const peers = peersOn(0);
     const { client } = await connect(peers, 'sid-aaaaaaaaaaaaaaaaaaa');
     const { deviceId, token } = await sessionOver(client);
     const bytes = await readRange(client, token, 1000, 250_999);
@@ -115,7 +115,7 @@ describe('RtcPeers', () => {
   it('classes a session relayed when the relay candidate arrives late, notes the route and counts its earlier bytes', { timeout: 30_000 }, async () => {
     let relayed = 0;
     const peers = new RtcPeers({
-      handlers, auth, port: 47997, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now, sampleMs: 50,
+      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now, sampleMs: 50,
       onRelayedBytes: (n) => (relayed += n),
     });
     open.push({ close: () => peers.closeAll() });
@@ -136,7 +136,7 @@ describe('RtcPeers', () => {
   });
 
   it('classes a session relayed when the device comes from a TURN server it was handed, relay candidates hidden', { timeout: 30_000 }, async () => {
-    const peers = new RtcPeers({ handlers, auth, port: 47996, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now });
+    const peers = new RtcPeers({ handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now });
     open.push({ close: () => peers.closeAll() });
     const sid = 'sid-lllllllllllllllllll';
     const { pc, client } = await connect(peers, sid);
@@ -147,18 +147,20 @@ describe('RtcPeers', () => {
   });
 
   it('answers with only the advertised host candidates on its port', { timeout: 30_000 }, async () => {
-    const peers = peersOn(47992);
+    const peers = peersOn(0);
     const { answer } = await connect(peers, 'sid-bbbbbbbbbbbbbbbbbbb');
     const lines = candidateLines(answer);
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^a=candidate:\S+ 1 udp \d+ 127\.0\.0\.1 47992 typ host/);
+    // the port the mux bound, not the 0 it was asked for
+    expect(peers.udpPort).toBeGreaterThan(0);
+    expect(lines[0]).toMatch(new RegExp(`^a=candidate:\\S+ 1 udp \\d+ 127\\.0\\.0\\.1 ${peers.udpPort} typ host`));
     expect(answer).toContain('a=end-of-candidates');
     expect(answer).not.toMatch(/(^|[\s:])172\.(1[6-9]|2\d|3[01])\./m);
     expect(answer).not.toMatch(/(^|[\s:])100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./m);
   });
 
   it('serves two devices at once on the one UDP port', { timeout: 30_000 }, async () => {
-    const peers = peersOn(47993);
+    const peers = peersOn(0);
     const a = await connect(peers, 'sid-ccccccccccccccccccc');
     const b = await connect(peers, 'sid-ddddddddddddddddddd');
     const [sa, sb] = await Promise.all([sessionOver(a.client), sessionOver(b.client)]);
@@ -169,7 +171,7 @@ describe('RtcPeers', () => {
   });
 
   it('cleans a peer up when its channel closes', { timeout: 30_000 }, async () => {
-    const peers = peersOn(47994);
+    const peers = peersOn(0);
     const { dc } = await connect(peers, 'sid-eeeeeeeeeeeeeeeeeee');
     expect(peers.size).toBe(1);
     dc.close();
@@ -177,7 +179,7 @@ describe('RtcPeers', () => {
   });
 
   it('refuses a fifth offer from one sid and a peer over the limit, and drops one whose channel never opens', { timeout: 30_000 }, async () => {
-    const peers = peersOn(47995, { peers: 3, unopenedMs: 300 });
+    const peers = peersOn(0, { peers: 3, unopenedMs: 300 });
     const device = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
     open.push({ close: () => device.close() });
     device.createDataChannel('api');
@@ -253,7 +255,7 @@ describe('mDNS candidates', () => {
     const remote: string[] = [];
     const added: string[] = [];
     const peers = new RtcPeers({
-      handlers, auth, port: 47995, advertise: () => ['127.0.0.1'], now: Date.now, iceServers: async () => [],
+      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], now: Date.now, iceServers: async () => [],
       createPeerConnection: (config) => {
         const pc = new RTCPeerConnection(config);
         const setRemote = pc.setRemoteDescription.bind(pc);
@@ -290,7 +292,7 @@ describe('the NAS peer', () => {
   it('is built with STUN servers only, whatever it is given', { timeout: 30_000 }, async () => {
     const configs: unknown[] = [];
     const peers = new RtcPeers({
-      handlers, auth, port: 47996, advertise: () => ['127.0.0.1'], now: Date.now,
+      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], now: Date.now,
       iceServers: async () => [{ urls: 'stun:stun.example:3478' }, { urls: ['turn:turn.example:3478', 'stun:stun2.example:3478'], username: 'u', credential: 'c' }],
       createPeerConnection: (config) => {
         configs.push(config.iceServers);

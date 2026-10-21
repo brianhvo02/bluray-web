@@ -8,7 +8,7 @@ import { encodeMpeg2TestVideo } from './mpeg2-video';
 
 const outDir = process.argv[2];
 if (!outDir) {
-  console.error('usage: tsx scripts/make-mpeg2-disc.ts <outDir>');
+  console.error('usage: tsx scripts/make-mpeg2-disc.ts <outDir>  (fixtures/synthetic/disc-mpeg2-menu)');
   process.exit(1);
 }
 

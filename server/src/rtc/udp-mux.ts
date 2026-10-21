@@ -193,7 +193,10 @@ export class UdpMux {
     socket.on('error', (err) => console.error('rtc udp socket', err));
   }
 
-  /** Binds `port` on every IPv4 interface, after checking that werift's sockets can be muxed at all. */
+  /**
+   * Binds `port` on every IPv4 interface (0: one the system picks; `port` then reports it), after checking that
+   * werift's sockets can be muxed at all.
+   */
   static async open(port: number): Promise<UdpMux> {
     installMux();
     const socket = createSocket('udp4');
@@ -204,7 +207,7 @@ export class UdpMux {
         resolve();
       });
     });
-    const mux = new UdpMux(socket, port);
+    const mux = new UdpMux(socket, socket.address().port);
     try {
       await mux.selfCheck();
     } catch (err) {

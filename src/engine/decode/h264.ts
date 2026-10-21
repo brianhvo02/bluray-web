@@ -5,6 +5,8 @@ export interface AccessUnitInfo {
   readonly key: boolean;
   readonly idr: boolean;
   readonly sps: Uint8Array | null;
+  /** The PPS NAL units the access unit carries. */
+  readonly pps: readonly Uint8Array[];
   /** The access unit to decode (MVC NAL units removed for AVC). */
   readonly data: Uint8Array;
 }
@@ -12,6 +14,7 @@ export interface AccessUnitInfo {
 const NAL_IDR = 5;
 const NAL_SEI = 6;
 const NAL_SPS = 7;
+const NAL_PPS = 8;
 /** Prefix NAL, subset SPS, coded slice extension: MVC dependent-view data that a 2D decoder must not see. */
 const MVC_TYPES = new Set([14, 15, 20]);
 const SEI_RECOVERY_POINT = 6;
@@ -67,6 +70,16 @@ export function avcIsInterlaced(sps: Uint8Array): boolean {
   }
 }
 
+/** pic_parameter_set_id of a PPS NAL unit, or null when it is too short to hold one. */
+export function avcPpsId(pps: Uint8Array): number | null {
+  try {
+    return new ExpGolomb(unescapeRbsp(pps.subarray(1))).ue();
+  } catch (err) {
+    if (err instanceof ParseError) return null;
+    throw err;
+  }
+}
+
 function skipScalingList(r: ExpGolomb, size: number): void {
   let last = 8;
   let next = 8;
@@ -110,6 +123,7 @@ export function analyzeAvc(data: Uint8Array): AccessUnitInfo {
   let idr = false;
   let recovery = false;
   let sps: Uint8Array | null = null;
+  const pps: Uint8Array[] = [];
   let hasMvc = false;
   for (const nal of nals) {
     const type = nal[0] & 0x1f;
@@ -119,12 +133,14 @@ export function analyzeAvc(data: Uint8Array): AccessUnitInfo {
       idr = true;
     } else if (type === NAL_SPS) {
       sps ??= nal;
+    } else if (type === NAL_PPS) {
+      pps.push(nal);
     } else if (type === NAL_SEI && seiHasRecoveryPoint(nal)) {
       recovery = true;
     }
   }
   const out = hasMvc ? joinAnnexB(nals.filter((n) => !MVC_TYPES.has(n[0] & 0x1f))) : data;
-  return { key: idr || recovery, idr, sps, data: out };
+  return { key: idr || recovery, idr, sps, pps, data: out };
 }
 
 function seiHasRecoveryPoint(nal: Uint8Array): boolean {

@@ -4,9 +4,9 @@ import { setFolder } from './support';
 // Video the browser can't decode (MPEG-2, VC-1) plays without a picture, as libbluray opens such playlists: audio,
 // subtitles, menus and the clock run, and a notice says so once per disc.
 //
-// fixtures/synthetic/disc-mpeg2 (scripts/make-mpeg2-disc.ts): real MPEG-2 video. First Play loops the top menu (playlist
+// fixtures/synthetic/disc-mpeg2-menu (scripts/make-mpeg2-disc.ts): real MPEG-2 video. First Play loops the top menu (playlist
 // 00001, an always-on IG menu whose button 1 jumps to title 1); title 1 plays 00000 with PG subtitles on.
-const MPEG2_DISC = 'fixtures/synthetic/disc-mpeg2';
+const MPEG2_DISC = 'fixtures/synthetic/disc-mpeg2-menu';
 /** fixtures/synthetic/vc1-disc (scripts/make-error-fixtures.ts): no disc program, one playlist declaring VC-1 video. */
 const VC1_DISC = 'fixtures/synthetic/vc1-disc';
 const NOTICE = "This disc's video can't be played here yet, so it will play without a picture.";

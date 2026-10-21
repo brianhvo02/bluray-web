@@ -17,6 +17,7 @@ describe('loadConfig', () => {
       tmdbApiKey: null,
       titleLibrary: 'owners',
       rtc: { port: 47998 },
+      levels: { backend: 'qsv', cacheBytes: 50_000_000_000, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' },
     });
   });
 
@@ -32,6 +33,7 @@ describe('loadConfig', () => {
       tmdbApiKey: null,
       titleLibrary: 'owners',
       rtc: { port: 47998 },
+      levels: { backend: 'qsv', cacheBytes: 50_000_000_000, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' },
     });
   });
 
@@ -118,5 +120,18 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ RTC_LAN_ADDRESS: 'nas.local' })).toThrow('RTC_LAN_ADDRESS');
     expect(() => loadConfig({ RTC_LAN_ADDRESS: '127.0.0.1' })).toThrow('RTC_LAN_ADDRESS');
     expect(loadConfig({ RTC_LAN_ADDRESS: '10.0.0.8' }).rtc.lanAddress).toBe('10.0.0.8');
+  });
+
+  it('reads the quality levels’ encoder settings', () => {
+    expect(loadConfig({ LEVELS_BACKEND: 'x264', TRANSCODE_CACHE_BYTES: '1000000', FFMPEG_PATH: '/usr/lib/jellyfin-ffmpeg/ffmpeg', FFPROBE_PATH: '/usr/lib/jellyfin-ffmpeg/ffprobe' }).levels).toEqual({
+      backend: 'x264',
+      cacheBytes: 1_000_000,
+      ffmpegPath: '/usr/lib/jellyfin-ffmpeg/ffmpeg',
+      ffprobePath: '/usr/lib/jellyfin-ffmpeg/ffprobe',
+    });
+    expect(loadConfig({ LEVELS_BACKEND: 'off' }).levels.backend).toBe('off');
+    expect(loadConfig({ LEVELS_BACKEND: '' }).levels.backend).toBe('qsv');
+    expect(() => loadConfig({ LEVELS_BACKEND: 'nvenc' })).toThrow('LEVELS_BACKEND "nvenc" is not qsv, x264 or off');
+    expect(() => loadConfig({ TRANSCODE_CACHE_BYTES: '50GB' })).toThrow('TRANSCODE_CACHE_BYTES');
   });
 });

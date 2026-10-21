@@ -49,6 +49,47 @@ which forbid hoarding or mass collection of its data and using it as a backup or
 storage service; requests are paced to 30 per minute, the limit AniList
 currently states (https://docs.anilist.co/guide/rate-limiting).
 
+ffmpeg in the server image (server/Dockerfile)
+----------------------------------------------
+
+The server image is built for the owner's private use on their own NAS
+(server/deploy/deploy.sh builds it and copies it there over ssh). It is not
+published, and it is not to be redistributed: see libfdk-aac below.
+
+The image installs jellyfin-ffmpeg7 7.1.4-3-bookworm, Jellyfin's build of FFmpeg
+(https://github.com/jellyfin/jellyfin-ffmpeg, from Jellyfin's apt repository at
+https://repo.jellyfin.org/debian), for the quality levels (server/src/levels/).
+It is configured with --enable-gpl --enable-version3 and links libx264 and
+libx265, so FFmpeg itself is under the GNU General Public License, version 3 or
+later (GPL-3.0-or-later). The corresponding source is the tag v7.1.4-3 of the
+repository above.
+
+The build is also configured with --enable-libfdk-aac and bundles
+libfdk-aac 2.0.2 (Fraunhofer FDK AAC Codec Library for Android), under the
+"Software License for The Fraunhofer FDK AAC Codec Library for Android", which
+the Free Software Foundation considers incompatible with the GPL. A binary that
+combines the two may not be redistributable; that is why this image stays on
+the owner's NAS. The server never uses the AAC encoder or decoder.
+
+The package bundles, under /usr/lib/jellyfin-ffmpeg/lib, and among others:
+  Intel Media Driver for VAAPI (iHD) and gmmlib  MIT (parts BSD-3-Clause)
+  Intel Media SDK (libmfxhw64) and oneVPL (libvpl, libmfx-gen)  MIT
+  libva, libdrm                                   MIT
+  Mesa (Vulkan drivers and layers)                MIT
+  SVT-AV1                                         BSD-3-Clause-Clear (with the AOM patent licence)
+  libass                                          ISC
+  chromaprint                                     LGPL-2.1-or-later
+  libplacebo, dav1d, zimg, HarfBuzz, FreeType, FriBidi, fontconfig, libxml2,
+  zlib, FFTW (GPL-2.0-or-later), shaderc, Vulkan loader, libiconv, libunibreak
+Each is under its own licence. The package's copyright file, in the image at
+/usr/share/doc/jellyfin-ffmpeg7/copyright, lists FFmpeg's; the others are
+listed in the jellyfin-ffmpeg repository's build scripts and their upstreams.
+
+ffmpeg and ffprobe run as separate processes, spawned by the server
+(server/src/levels/encoder.ts, server/src/levels/backend-check.ts) and fed
+through pipes and command-line arguments. The server neither links nor bundles
+any of their code, so its own licence (LGPL-2.1-or-later, above) is unaffected.
+
 WebRTC (server/src/rtc/)
 ------------------------
 

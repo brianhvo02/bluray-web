@@ -25,14 +25,16 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('parseScope', () => {
-  it('accepts the two scope shapes', () => {
+  it('accepts the three scope shapes', () => {
     expect(parseScope(`persistent/${ORG}`)).toBe(`persistent/${ORG}`);
     expect(parseScope(`buda/${ORG}/${DISC}`)).toBe(`buda/${ORG}/${DISC}`);
+    expect(parseScope(`buda/${ORG}`)).toBe(`buda/${ORG}`);
   });
   it.each([
     'persistent/0A1B2C3D',
     'persistent/0a1b2c3',
-    `buda/${ORG}`,
+    'buda/0a1b2c3',
+    `buda/${ORG}/`,
     `persistent/${ORG}/x`,
     '../',
     `buda/${ORG}/${'F'.repeat(32)}`,
@@ -41,6 +43,18 @@ describe('parseScope', () => {
 });
 
 describe('BdjStore', () => {
+  it("keeps an org's loose BUDA files apart from its discs' scopes", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bdj-org-'));
+    const store = new BdjStore(dir);
+    const org = writeTar([{ path: '1.log', data: Buffer.from('org'), mtime: 1 }]);
+    const disc = writeTar([{ path: 'a.dat', data: Buffer.from('disc'), mtime: 1 }]);
+    store.put('p1', `buda/${ORG}`, org, { ifNoneMatch: true });
+    store.put('p1', `buda/${ORG}/${DISC}`, disc, { ifNoneMatch: true });
+    expect(store.get('p1', `buda/${ORG}`).body.equals(org)).toBe(true);
+    expect(store.get('p1', `buda/${ORG}/${DISC}`).body.equals(disc)).toBe(true);
+    expect(store.usage('p1')).toBe(org.length + disc.length);
+  });
+
   const scope = `persistent/${ORG}`;
 
   it('starts empty', () => {

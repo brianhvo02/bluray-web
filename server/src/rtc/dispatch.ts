@@ -121,7 +121,7 @@ function standIn(wire: WireRequest, remoteAddress: string): IncomingMessage {
   body.on('error', () => {}); // a reader sees the failure; nobody reading must not crash the server
   const req = Object.assign(body, { method: wire.method, url: wire.path, headers: peerHeaders(wire.headers), socket: { remoteAddress } });
   const stand = req as unknown as IncomingMessage;
-  markChannelRequest(stand);
+  markChannelRequest(stand, wire.signal);
   return stand;
 }
 

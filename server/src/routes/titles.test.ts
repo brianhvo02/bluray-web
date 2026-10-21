@@ -199,10 +199,10 @@ describe('title routes', () => {
   it('reports both flags and the person on GET /api/me', async () => {
     await start();
     const person = expect.any(String);
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest', relay: null, nasId: null });
-    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner', relay: null, nasId: null });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: false, personId: person, personName: 'Guest', relay: null, nasId: null, levels: false });
+    expect(await (await get('/api/me', await token(true))).json()).toEqual({ owner: true, titleLibrary: true, personId: auth.firstOwnerPerson().id, personName: 'Owner', relay: null, nasId: null, levels: false });
     owner.setGate('everyone');
-    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest', relay: null, nasId: null });
+    expect(await (await get('/api/me', await token(false))).json()).toEqual({ owner: false, titleLibrary: true, personId: person, personName: 'Guest', relay: null, nasId: null, levels: false });
     expect((await fetch(`${base}/api/me`)).status).toBe(401);
   });
 

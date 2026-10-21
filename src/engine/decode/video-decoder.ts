@@ -1,6 +1,6 @@
 import { CodingType, codingName } from '../bdmv/stream-types';
 import { DecoderError, UnsupportedCodecError, type Decoder, type StreamConfig } from './decoder';
-import { analyzeAvc, avcCodecString, avcIsInterlaced, type AccessUnitInfo } from './h264';
+import { analyzeAvc, avcCodecString, avcIsInterlaced, avcPpsId, type AccessUnitInfo } from './h264';
 import { analyzeHevc, hevcCodecStrings } from './hevc';
 
 export interface VideoUnit {
@@ -38,10 +38,15 @@ interface CodecOps {
   codecStrings(sps: Uint8Array): readonly string[];
   /** Chrome's hardware decoders reject interlaced streams ("Decoding error"); its software decoder handles them. */
   needsSoftware?(sps: Uint8Array): boolean;
+  /**
+   * The id of a PPS NAL unit. With it, a PPS id redefined with other content switches to software decoding: Chrome's
+   * hardware decoders on macOS fail on such streams now and then ("Decoding error"), which its software decoder doesn't.
+   */
+  ppsId?(pps: Uint8Array): number | null;
 }
 
 const CODECS: ReadonlyMap<number, CodecOps> = new Map<number, CodecOps>([
-  [CodingType.AVC, { analyze: analyzeAvc, codecStrings: (sps) => [avcCodecString(sps)], needsSoftware: avcIsInterlaced }],
+  [CodingType.AVC, { analyze: analyzeAvc, codecStrings: (sps) => [avcCodecString(sps)], needsSoftware: avcIsInterlaced, ppsId: avcPpsId }],
   [CodingType.HEVC, { analyze: analyzeHevc, codecStrings: hevcCodecStrings }],
 ]);
 
@@ -87,6 +92,10 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
   private readonly pending = new Map<number, boolean>();
   private openGopStarts = 0;
   private leadingSkipped = 0;
+  /** The last PPS seen under each id since configure(). */
+  private readonly ppsById = new Map<number, Uint8Array>();
+  /** The switch to software decoding was tried since configure(). */
+  private softwareTried = false;
 
   constructor(private readonly api: VideoCodecApi = browserVideoCodecApi) {}
 
@@ -136,6 +145,8 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     this.consecutiveErrors = 0;
     this.hasOutput = false;
     this.requireIdr = false;
+    this.ppsById.clear();
+    this.softwareTried = false;
     this.lastKeyWasIdr = true;
     this.open();
   }
@@ -145,6 +156,7 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     const ops = this.ops;
     if (!decoder || !ops || decoder.state !== 'configured') return;
     const info = ops.analyze(unit.data);
+    this.watchPps(info.pps);
     const startsSequence = this.needKey;
     if (startsSequence) {
       if (!info.key || (this.requireIdr && !info.idr)) return;
@@ -207,6 +219,39 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     this.pending.clear();
   }
 
+  /** Switches to software decoding once a PPS id comes back with other content (CodecOps.ppsId). */
+  private watchPps(pps: readonly Uint8Array[]): void {
+    const ppsId = this.ops?.ppsId;
+    if (!ppsId || this.softwareTried || this.config?.hardwareAcceleration === 'prefer-software') return;
+    for (const nal of pps) {
+      const id = ppsId(nal);
+      if (id === null) continue;
+      const seen = this.ppsById.get(id);
+      this.ppsById.set(id, nal.slice());
+      if (seen && !sameBytes(seen, nal)) {
+        this.switchToSoftware();
+        return;
+      }
+    }
+  }
+
+  /** Reopens the decoder with software decoding when the browser has it; decoding resumes at the next key unit. */
+  private switchToSoftware(): void {
+    const config = this.config;
+    if (!config) return;
+    this.softwareTried = true;
+    const software: VideoDecoderConfig = { ...config, hardwareAcceleration: 'prefer-software' };
+    void this.api
+      .isConfigSupported(software)
+      .catch(() => ({ supported: false }))
+      .then((support) => {
+        // closed, reconfigured or failed for good meanwhile: nothing to switch
+        if (!support.supported || this.closed || this.config !== config || !this.decoder) return;
+        this.config = software;
+        this.open();
+      });
+  }
+
   private open(): void {
     const config = this.config;
     if (!config) return;
@@ -260,4 +305,10 @@ export class WebCodecsVideoDecoder implements Decoder<VideoUnit, VideoFrame> {
     this.open();
     this.onError(new DecoderError(`Video decoder error, recovering at the next keyframe: ${err.message}`, false));
   }
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }

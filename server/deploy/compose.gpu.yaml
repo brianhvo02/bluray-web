@@ -1,0 +1,9 @@
+# Lives on the NAS as ~/bluray-server/compose.gpu.yaml; written by deploy.sh, and used with compose.yaml only when the
+# NAS has /dev/dri/renderD128 (a hard `devices:` entry for a missing node would stop the service from starting).
+services:
+  bluray-server:
+    # The GPU's render node for Quick Sync, and its group (render, GID 993 on the NAS) so the `node` user may open it.
+    devices:
+      - "/dev/dri/renderD128:/dev/dri/renderD128"
+    group_add:
+      - "993"

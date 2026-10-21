@@ -1,4 +1,6 @@
 # Lives on the NAS as ~/bluray-server/compose.yaml; written by deploy.sh.
+# With the GPU (/dev/dri/renderD128) a manual restart must include the override, or the quality levels lose it:
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
 services:
   bluray-server:
     image: bluray-server:latest
@@ -22,6 +24,10 @@ services:
       # the home gateway. The NAS advertises its public IPv4 (from STUN) and this LAN address, never Docker's or
       # Tailscale's.
       RTC_LAN_ADDRESS: 192.168.1.98
+      # Quality levels: re-encoding on the GPU through Intel Quick Sync (jellyfin-ffmpeg in the image). The render node
+      # comes from compose.gpu.yaml, which deploy.sh adds only when the NAS has one; without it, or when the self-test at
+      # start fails, only Original is offered. Segments are cached in /data/transcode (50 GB by default).
+      LEVELS_BACKEND: qsv
     env_file:
       - path: .env
         required: false

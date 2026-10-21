@@ -111,7 +111,7 @@ describe('bdj-store routes', () => {
 
   it('answers 400 to a bad scope or a bad archive', async () => {
     const token = await tokenFor('Mika');
-    for (const scope of ['persistent/0A1B2C3D', `buda/${ORG}`, 'persistent/../x', '', `persistent/${ORG}/extra`, 'other/0a1b2c3d']) {
+    for (const scope of ['persistent/0A1B2C3D', `buda/${ORG}/`, `buda/${ORG}/x`, 'persistent/../x', '', `persistent/${ORG}/extra`, 'other/0a1b2c3d']) {
       expect((await call('GET', scope, token)).status, scope).toBe(400);
     }
     const bad = await call('PUT', SCOPE, token, { 'If-None-Match': '*' }, Buffer.alloc(700, 7));
