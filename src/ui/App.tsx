@@ -4,6 +4,7 @@ import type { PlayerController } from '../player/player-controller';
 import { PlatformSession } from '../player/platform-session';
 import { LandingScreen } from './LandingScreen';
 import { NasClient } from './nas/nas-client';
+import { getNasHistory, useNasRoute } from './nas/nas-history';
 import { idbNasStore } from './nas/nas-store';
 import { PlayerScreen } from './PlayerScreen';
 import { idbShaderLibrary } from './shader-library';
@@ -110,6 +111,9 @@ export function App(): ReactElement {
   const [controller] = useState(getController);
   const [nas] = useState(getNasClient);
   const [pairCode] = useState(takePairCode);
+  const [history] = useState(getNasHistory);
+  // Kept subscribed for the app's life, so the history sees every popstate (its direction drives focus).
+  useNasRoute(history);
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useEffect(() => {
     const session = new PlatformSession(
@@ -129,7 +133,7 @@ export function App(): ReactElement {
     <div className="app" data-testid="app">
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 ? (
-        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} pairCode={pairCode} />
+        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} history={history} pairCode={pairCode} />
       ) : (
         <PlayerScreen controller={controller} snapshot={snapshot} shaderModel={shaders} shaderState={shaderState} nas={nas} />
       )}

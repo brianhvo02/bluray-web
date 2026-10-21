@@ -3,8 +3,11 @@ import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../e
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
 import { HiddenScreen } from './HiddenScreen';
+import { rememberedFolder } from './LibraryScreen';
 import { MusicScreen } from './MusicScreen';
 import { NasHttpError, type NasClient } from './nas-client';
+import { useNasRoute, type NasHistory } from './nas-history';
+import { nasRoutePath, seasonIdOf, seasonKeyOf, type NasRoute } from './nas-route';
 import { Poster } from './Poster';
 import { Preflight, type PreflightDisc } from './Preflight';
 import { SeasonScreen } from './SeasonScreen';
@@ -16,16 +19,42 @@ import { UnsortedScreen } from './UnsortedScreen';
 interface TitleLibraryProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
+  /** The screen shown is the address bar's route; every move goes through it. */
+  readonly history: NasHistory;
   /** From `GET me`: owners get the settings and the Unsorted shelf. */
   readonly owner: boolean;
   /** This device is no longer an owner (the NAS refused the settings): the caller asks `me` again. */
   readonly onOwnerLost?: () => void;
-  /** "Browse by folder instead": the folder browser. */
-  readonly onFolders: () => void;
+  /** The title routes answered 404 to this guest (the gate closed since `me` answered): the caller shows the folders. */
+  readonly onGateClosed: () => void;
   readonly onClose: () => void;
 }
 
 type Shelf = TitleKind | 'unsorted';
+
+const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
+const HEADING = '[data-focus-heading]';
+const byAttr = (name: string, value: string): string => `[${name}="${CSS.escape(value)}"]`;
+
+/** The item on the screen below `route` that opens it, which takes focus when going back from it. */
+function openerOf(route: NasRoute): string | null {
+  switch (route.kind) {
+    case 'title':
+      return byAttr('data-title-id', route.titleId);
+    case 'season':
+      return byAttr('data-season-id', seasonIdOf(route.titleId, route.seasonKey));
+    case 'extras':
+      return '[data-testid="extras-row"]';
+    case 'unsorted':
+      return '[data-shelf="unsorted"]';
+    case 'hidden':
+      return '[data-testid="open-hidden"]';
+    case 'settings':
+      return '[data-testid="nas-settings"]';
+    default:
+      return null;
+  }
+}
 
 const SHELVES: readonly { readonly id: Shelf; readonly label: string }[] = [
   { id: 'series', label: 'Series' },
@@ -126,29 +155,38 @@ function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
 }
 
 /** The NAS by title (spec §14, mockups 1–3): search, shelves, recently added and A–Z, then a title's seasons and discs. */
-export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, onClose }: TitleLibraryProps): ReactElement {
+export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onGateClosed, onClose }: TitleLibraryProps): ReactElement {
+  const routed = useNasRoute(history);
+  // A play route has no screen of its own yet: the library, with the address bar left as it is.
+  const route: NasRoute = routed === null || routed.kind === 'play' || routed.kind === 'folders' ? LIBRARY : routed;
+  const routeKey = nasRoutePath(route);
+  const query = route.kind === 'library' ? route.q : '';
+  const picked = route.kind === 'library' ? route.shelf : null;
+  /** The open title, and its open season, or 'extras' for its own extras. */
+  const openId = route.kind === 'title' || route.kind === 'season' || route.kind === 'extras' ? route.titleId : null;
+  const seasonKey = route.kind === 'season' ? route.seasonKey : route.kind === 'extras' ? 'extras' : null;
+  const ownerOnly = route.kind === 'unsorted' || route.kind === 'hidden' || route.kind === 'settings';
   const [titles, setTitles] = useState<TitleSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
-  const [picked, setPicked] = useState<TitleKind | null>(null);
   const [unsorted, setUnsorted] = useState<number | null>(null);
   /** Whether the NAS has a TMDB key (owners' searches skip TMDB without one). */
   const [tmdb, setTmdb] = useState(false);
   /** The matching run's progress, for an owner's empty library (ruling F4). */
   const [progress, setProgress] = useState<{ running: boolean; groupsDone: number; groupsTotal: number; filed: number; music: number } | null>(null);
-  /** The owner screens: Unsorted, and Hidden from it. */
-  const [ownerScreen, setOwnerScreen] = useState<'unsorted' | 'hidden' | null>(null);
   /** Bumped after an owner change, so the titles and the Unsorted count are fetched again. */
   const [version, setVersion] = useState(0);
-  /** The titles opened, innermost last (a series, then a movie related to it). */
-  const [stack, setStack] = useState<string[]>([]);
-  const [detail, setDetail] = useState<TitleDetail | null>(null);
+  /** The open title's detail, with the id it was fetched for. */
+  const [loaded, setLoaded] = useState<{ id: string; detail: TitleDetail } | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  /** The open season of the innermost title, or 'extras' for its own extras. */
-  const [seasonId, setSeasonId] = useState<string | null>(null);
+  /** An owner's title that answered 404 (its last disc filed differently): its screens are left, back to the library. */
+  const [gone, setGone] = useState<string | null>(null);
   const [selected, setSelected] = useState<{ disc: PreflightDisc; playlistId?: string } | null>(null);
-  const [settings, setSettings] = useState(false);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+
+  // The owner screens are an owner's: anyone else on their paths gets the library.
+  useEffect(() => {
+    if (ownerOnly && !owner) history.replace(LIBRARY);
+  }, [ownerOnly, owner, history]);
 
   useEffect(() => {
     let live = true;
@@ -162,14 +200,14 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
       (err: unknown) => {
         if (!live) return;
         // The gate closed since `me` answered: the folder browser, as for any guest.
-        if (isGateClosed(err)) onFolders();
+        if (isGateClosed(err)) onGateClosed();
         else setError(message(err));
       },
     );
     return () => {
       live = false;
     };
-  }, [nas, onFolders, version]);
+  }, [nas, onGateClosed, version]);
 
   useEffect(() => {
     if (!owner) return;
@@ -217,86 +255,88 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
   }, [nas, owner, empty, progress?.running, changed]);
   const loadDetail = useCallback((id: string) => loadTitle(nas, id), [nas]);
 
-  const openId = stack.at(-1) ?? null;
   useEffect(() => {
-    setDetail(null);
+    setLoaded(null);
     setDetailError(null);
     if (openId === null) return;
     let live = true;
     loadTitle(nas, openId).then(
       (d) => {
-        if (live) setDetail(d);
+        if (live) setLoaded({ id: openId, detail: d });
       },
       (err: unknown) => {
         if (!live) return;
         if (isGateClosed(err)) {
           // An owner's title is gone, its last disc filed differently (ruling F3): back to where it was opened from.
-          if (owner) {
-            setSeasonId(null);
-            setStack((s) => s.slice(0, -1));
-          } else {
-            // As for the list: the gate closed meanwhile, so the folder browser, with no raw error.
-            onFolders();
-          }
+          if (owner) setGone(openId);
+          // As for the list: the gate closed meanwhile, so the folder browser, with no raw error.
+          else onGateClosed();
         } else setDetailError(message(err));
       },
     );
     return () => {
       live = false;
     };
-  }, [nas, openId, onFolders, version, owner]);
+  }, [nas, openId, onGateClosed, version, owner, history]);
+  useEffect(() => {
+    if (openId !== null && openId === gone) history.back(LIBRARY);
+  }, [routeKey, openId, gone, history]);
+  const detail = loaded !== null && loaded.id === openId && openId !== gone ? loaded.detail : null;
+
+  // A pre-flight belongs to the screen it was opened on: any move (Back, Forward) closes it.
+  useEffect(() => setSelected(null), [routeKey]);
 
   /**
-   * Focus follows the screens: an opened title or season focuses its heading, and going back focuses the item that
-   * opened it (the button that had focus is gone with its screen). `focusNext` is applied once its element renders.
+   * Focus follows the screens: a screen opened in the app focuses its heading, and going back focuses the item that
+   * opened the screen left (the button that had focus is gone with its screen); going forward through the browser's
+   * history focuses the heading. `focusNext` holds the selectors to try, applied once one of them renders.
    */
-  const focusNext = useRef<string | null>(null);
-  const returnFocus = useRef<string[]>([]);
+  const shownRoute = useRef(route);
+  const focusNext = useRef<string[] | null>(null);
   useEffect(() => {
-    if (focusNext.current === null) return;
-    const el = document.querySelector<HTMLElement>(focusNext.current);
-    if (!el) return; // not rendered yet (a title still loading)
-    focusNext.current = null;
-    el.focus();
+    const from = shownRoute.current;
+    shownRoute.current = route;
+    if (nasRoutePath(from) === routeKey) return;
+    const move = history.lastMove();
+    const opener = openerOf(from);
+    if (move === 'push') focusNext.current = route.kind === 'library' ? null : [HEADING];
+    else if (move === 'pop') focusNext.current = opener ? [opener, HEADING] : [HEADING];
+    else focusNext.current = opener ? [opener] : null;
+  }, [routeKey, history]); // `route` is a new object each render; `routeKey` is its identity
+  useEffect(() => {
+    const next = focusNext.current;
+    if (next === null) return;
+    for (const selector of next) {
+      const el = document.querySelector<HTMLElement>(selector);
+      if (el) {
+        focusNext.current = null;
+        el.focus();
+        return;
+      }
+    }
+    // not rendered yet (a title still loading)
   });
-  const forward = (opener: string): void => {
-    returnFocus.current.push(opener);
-    focusNext.current = '[data-focus-heading]';
-  };
-  const backward = (): void => {
-    focusNext.current = returnFocus.current.pop() ?? null;
-  };
-  const byAttr = (name: string, value: string): string => `[${name}="${CSS.escape(value)}"]`;
 
-  const openTitle = useCallback((id: string) => {
-    forward(byAttr('data-title-id', id));
-    setSeasonId(null);
-    setStack((s) => [...s, id]);
-  }, []);
-  const back = (): void => {
-    backward();
-    setSeasonId(null);
-    setStack((s) => s.slice(0, -1));
-  };
+  const openTitle = useCallback((id: string) => history.push({ kind: 'title', titleId: id }), [history]);
+  const back = (): void => history.back(LIBRARY);
   const openSeason = (id: string): void => {
-    forward(id === 'extras' ? '[data-testid="extras-row"]' : byAttr('data-season-id', id));
-    setSeasonId(id);
+    if (openId === null) return;
+    history.push(id === 'extras' ? { kind: 'extras', titleId: openId } : { kind: 'season', titleId: openId, seasonKey: seasonKeyOf(id) });
   };
   const closeSeason = (): void => {
-    backward();
-    setSeasonId(null);
+    if (openId !== null) history.back({ kind: 'title', titleId: openId });
   };
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
   const filing: OwnerFiling | undefined = owner ? { nas, tmdb, onChanged: changed } : undefined;
 
-  if (settings) {
+  if (owner && route.kind === 'settings') {
     return (
       <AdminScreen
         nas={nas}
         thisDeviceId={deviceId}
-        onClose={() => setSettings(false)}
+        onClose={() => history.back(LIBRARY)}
         onAccessLost={() => {
-          setSettings(false);
+          history.back(LIBRARY);
           onOwnerLost?.();
         }}
         onTitlesChanged={changed}
@@ -304,23 +344,11 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
     );
   }
 
-  if (ownerScreen === 'hidden') {
-    const toUnsorted = (): void => {
-      backward();
-      setOwnerScreen('unsorted');
-    };
-    return <HiddenScreen nas={nas} tmdb={tmdb} onBack={toUnsorted} onChanged={changed} />;
+  if (owner && route.kind === 'hidden') {
+    return <HiddenScreen nas={nas} tmdb={tmdb} onBack={() => history.back({ kind: 'unsorted' })} onChanged={changed} />;
   }
-  if (ownerScreen === 'unsorted') {
-    const toLibrary = (): void => {
-      backward();
-      setOwnerScreen(null);
-    };
-    const toHidden = (): void => {
-      forward('[data-testid="open-hidden"]');
-      setOwnerScreen('hidden');
-    };
-    return <UnsortedScreen nas={nas} tmdb={tmdb} onBack={toLibrary} onHidden={toHidden} onChanged={changed} />;
+  if (owner && route.kind === 'unsorted') {
+    return <UnsortedScreen nas={nas} tmdb={tmdb} onBack={() => history.back(LIBRARY)} onHidden={() => history.push({ kind: 'hidden' })} onChanged={changed} />;
   }
 
   if (selected) {
@@ -348,7 +376,7 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
         </section>
       );
     }
-    const season = seasonId === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => s.id === seasonId);
+    const season = seasonKey === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => seasonKey !== null && seasonKeyOf(s.id) === seasonKey);
     if (season) {
       return <SeasonScreen seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} owner={filing} />;
     }
@@ -370,7 +398,7 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
         <h2>Library</h2>
         <div className="titles-actions">
           {owner && (
-            <button type="button" className="title-icon-button" data-testid="nas-settings" aria-label="NAS settings" onClick={() => setSettings(true)}>
+            <button type="button" className="title-icon-button" data-testid="nas-settings" aria-label="NAS settings" onClick={() => history.push({ kind: 'settings' })}>
               <span aria-hidden="true">⚙</span>
             </button>
           )}
@@ -386,7 +414,8 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
         placeholder="Search in English, romaji or Japanese"
         aria-label="Search titles"
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        // The shelf stays picked under a search, as before paths: clearing the search shows it again.
+        onChange={(e) => history.replace({ kind: 'library', shelf: picked, q: e.target.value })}
       />
       <div className="title-shelves" role="group" aria-label="Shelves">
         {SHELVES.filter((s) => s.id !== 'unsorted' || owner).map((s) => (
@@ -399,10 +428,8 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
             data-shelf={s.id}
             onClick={() => {
               const id = s.id;
-              if (id === 'unsorted') {
-                forward('[data-shelf="unsorted"]');
-                setOwnerScreen('unsorted');
-              } else setPicked((p) => (p === id ? null : id));
+              if (id === 'unsorted') history.push({ kind: 'unsorted' });
+              else history.push({ kind: 'library', shelf: picked === id ? null : id, q: query });
             }}
           >
             {s.label}
@@ -469,7 +496,7 @@ export function TitleLibrary({ nas, controller, owner, onOwnerLost, onFolders, o
           )}
         </>
       )}
-      <button type="button" className="title-link" data-testid="browse-folders" onClick={onFolders}>
+      <button type="button" className="title-link" data-testid="browse-folders" onClick={() => history.push({ kind: 'folders', path: rememberedFolder() })}>
         Browse by folder instead
       </button>
     </section>

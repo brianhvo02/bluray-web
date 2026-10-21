@@ -4,12 +4,16 @@ import type { PlayerController } from '../../player/player-controller';
 import { breadcrumbs, discBadges, folderMemory, formatSize, sortRows, type DiscFacts, type LibraryRow } from './library-model';
 import { AdminScreen } from './AdminScreen';
 import { NasHttpError, type NasClient } from './nas-client';
+import type { NasHistory } from './nas-history';
 import type { NasPairing } from './nas-store';
 import { Preflight } from './Preflight';
 
 interface LibraryScreenProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
+  readonly history: NasHistory;
+  /** The folder shown, from the address bar. */
+  readonly path: string;
   readonly onClose: () => void;
 }
 
@@ -21,13 +25,15 @@ const storage = (): Storage | undefined => {
   }
 };
 
+/** The folder the browser showed last, where "Browse by folder instead" opens it. */
+export const rememberedFolder = (): string => folderMemory(storage()).get();
+
 /** Which discs turned out to be UHD (from their manifests), kept for the session so their rows show it. */
 const uhdDiscs = new Map<string, boolean>();
 
 /** The NAS's folders and discs: breadcrumbs, folders first, then discs with size and badges; a disc opens its pre-flight. */
-export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps): ReactElement {
+export function LibraryScreen({ nas, controller, history, path, onClose }: LibraryScreenProps): ReactElement {
   const [memory] = useState(() => folderMemory(storage()));
-  const [path, setPath] = useState(() => memory.get());
   const [rows, setRows] = useState<LibraryRow[] | null>(null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,14 +72,17 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
       (err: unknown) => {
         if (!live) return;
         // A remembered folder that is gone (renamed, or its drive removed): start from the top.
-        if (err instanceof NasHttpError && err.status === 404 && path !== '') setPath('');
+        if (err instanceof NasHttpError && err.status === 404 && path !== '') history.replace({ kind: 'folders', path: '' });
         else setError(err instanceof Error ? err.message : String(err));
       },
     );
     return () => {
       live = false;
     };
-  }, [nas, path, memory, reload]);
+  }, [nas, path, memory, reload, history]);
+
+  // The pre-flight belongs to the folder it was opened in: another folder (Back, Forward) closes it.
+  useEffect(() => setSelected(null), [path]);
 
   const onFacts = useCallback((discId: string, facts: DiscFacts) => {
     if (uhdDiscs.get(discId) === facts.uhd) return;
@@ -83,7 +92,7 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
 
   const open = (folder: string): void => {
     setSelected(null);
-    setPath(folder);
+    history.push({ kind: 'folders', path: folder });
   };
 
   if (settings) {

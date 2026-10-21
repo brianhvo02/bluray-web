@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
-import { LibraryScreen } from './nas/LibraryScreen';
+import { LibraryScreen, rememberedFolder } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
+import { useNasRoute, type NasHistory } from './nas/nas-history';
+import type { NasRoute } from './nas/nas-route';
 import type { NasPairing } from './nas/nas-store';
 import { pairedAs } from './nas/people-model';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
+
+const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 
 /** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
 const COPY_NOTICE_DELAY_MS = 1500;
@@ -19,11 +23,13 @@ interface LandingScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
   readonly nas: NasClient;
+  readonly history: NasHistory;
   /** A code from a `?pair=` link: the pair screen opens with it filled in. */
   readonly pairCode?: string;
 }
 
-export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingScreenProps): ReactElement {
+export function LandingScreen({ controller, snapshot, nas, history, pairCode }: LandingScreenProps): ReactElement {
+  const route = useNasRoute(history);
   const [capabilities] = useState(() => checkCapabilities());
   const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
@@ -69,29 +75,35 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
   const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
   /**
-   * The NAS view: closed, asking `me` whether the title library is open to this device, the library (with whether this
-   * device is an owner), or the folder browser. A guest while the gate is closed gets the folders, with no notice.
+   * The NAS view follows the address bar: no NAS route is closed, a folder route the folder browser, any other route
+   * asks `me` whether the title library is open to this device (and whether it is an owner) first. A guest while the
+   * gate is closed gets the folders, with no notice. null until `me` is asked for this visit to the NAS.
    */
-  const [nasView, setNasView] = useState<{ kind: 'closed' | 'checking' | 'folders' } | { kind: 'titles'; owner: boolean }>({ kind: 'closed' });
-  const browsing = nasView.kind !== 'closed';
-  const setBrowsing = (open: boolean): void => {
-    if (!open) {
-      setNasView({ kind: 'closed' });
-      return;
-    }
-    setNasView({ kind: 'checking' });
+  const [access, setAccess] = useState<{ titles: boolean; owner: boolean } | 'checking' | null>(null);
+  const browsing = route !== null;
+  const needsAccess = route !== null && route.kind !== 'folders';
+  const pairingKnown = pairing !== undefined && pairing !== null;
+  useEffect(() => {
+    if (!browsing) setAccess(null);
+  }, [browsing]);
+  useEffect(() => {
+    if (!needsAccess || access !== null || !pairingKnown) return;
+    setAccess('checking');
     nas.me().then(
       (me) => {
-        setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' }));
+        setAccess((a) => (a === 'checking' ? { titles: me.titleLibrary, owner: me.owner } : a));
         // `me` may have brought this device's person name up to date.
         loadPairing();
       },
       // an older NAS without `me`, or any failure: the folder browser shows what is wrong, if anything
-      () => setNasView((v) => (v.kind === 'checking' ? { kind: 'folders' } : v)),
+      () => setAccess((a) => (a === 'checking' ? { titles: false, owner: false } : a)),
     );
-  };
-  const showFolders = useCallback(() => setNasView({ kind: 'folders' }), []);
-  const closeNas = useCallback(() => setNasView({ kind: 'closed' }), []);
+  }, [needsAccess, access, pairingKnown, nas]);
+  /** The title routes answered 404: the gate closed since `me` answered, so the folder browser, as for any guest. */
+  const gateClosed = useCallback(() => setAccess({ titles: false, owner: false }), []);
+  /** Ask `me` again (this device may no longer be an owner). */
+  const recheckAccess = useCallback(() => setAccess(null), []);
+  const closeNas = useCallback(() => history.push(null), [history]);
   const loadPairing = (): void => {
     nas.pairing().then(setPairing, () => setPairing(null));
   };
@@ -100,15 +112,15 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   useEffect(
     () =>
       nas.onUnpaired(() => {
-        setBrowsing(false);
+        history.replace(null);
         setLocalError(NAS_MESSAGES.unpaired);
         loadPairing();
       }),
-    [nas],
+    [nas, history],
   );
   const forgetNas = (): void => {
     setPairRequested(false);
-    setBrowsing(false);
+    history.replace(null);
     nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
 
@@ -316,7 +328,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
                 data-testid="nas-open"
                 onClick={() => {
                   setLocalError(null);
-                  setBrowsing(true);
+                  history.push(LIBRARY);
                 }}
               >
                 Open from NAS
@@ -327,9 +339,14 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
             </button>
           </p>
         ))}
-      {paired && nasView.kind === 'checking' && <p className="status">Loading…</p>}
-      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onOwnerLost={() => setBrowsing(true)} onFolders={showFolders} onClose={closeNas} />}
-      {paired && nasView.kind === 'folders' && <LibraryScreen nas={nas} controller={controller} onClose={closeNas} />}
+      {paired && route !== null && (route.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
+        // A guest behind the closed gate on any other route: the folders where it browsed last.
+        <LibraryScreen nas={nas} controller={controller} history={history} path={route.kind === 'folders' ? route.path : rememberedFolder()} onClose={closeNas} />
+      )}
+      {paired && route !== null && route.kind !== 'folders' && (access === null || access === 'checking') && <p className="status">Loading…</p>}
+      {paired && route !== null && route.kind !== 'folders' && typeof access === 'object' && access?.titles && (
+        <TitleLibrary nas={nas} controller={controller} history={history} owner={access.owner} onOwnerLost={recheckAccess} onGateClosed={gateClosed} onClose={closeNas} />
+      )}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>

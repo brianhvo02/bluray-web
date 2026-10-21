@@ -323,9 +323,10 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await expect(page.getByTestId('relay-badge')).toContainText('Relayed'); // ?rtcrelayed=1 makes the connection count as relayed
   expect(await channelBytes(page)).toBeGreaterThan(1_000_000); // most of disc1's first 1.3 MB clip, over the channel
 
-  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once.
+  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once. The address bar kept the
+  // folder browser's path, so the load opens it.
   await page.reload();
-  await browse();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 30_000 });
   await playFromNas(page, 'disc-bdj');
   await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 45_000 });
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
@@ -449,10 +450,10 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
         await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
         await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
 
-        // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
+        // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts (the
+        // address bar kept the library's path, so the reload opens it).
         await setGate('everyone');
         await mika.reload();
-        await mika.getByTestId('nas-open').click();
         await expect(mika.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
         await expect(mika.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
         await expect(mika.locator('[data-testid="title-shelf"][data-shelf="unsorted"]')).toHaveCount(0);
@@ -656,6 +657,107 @@ test('the title screens move focus to the new heading, and back to the opener', 
   await expect(season).toBeFocused();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(card).toBeFocused();
+});
+
+/** The page's path and query, without the origin. */
+const pathOf = (page: Page): string => {
+  const url = new URL(page.url());
+  return url.pathname + url.search;
+};
+
+test('library screens are in the address bar, and Back and Forward move between them', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  expect(pathOf(page)).toBe('/nas');
+  const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
+  const titleId = (await card.getAttribute('data-title-id'))!;
+  await card.click();
+  await expect(page.getByTestId('series-name')).toHaveText('Starfall Wanderer');
+  expect(pathOf(page)).toBe(`/nas/title/${encodeURIComponent(titleId)}`);
+  const season = page.locator('[data-testid="season-row"][data-label="Season 1"]');
+  // The season's key in the path is its catalogue id after the '#'.
+  const seasonId = (await season.getAttribute('data-season-id'))!;
+  const seasonPath = `/nas/title/${encodeURIComponent(titleId)}/season/${encodeURIComponent(seasonId.slice(seasonId.indexOf('#') + 1))}`;
+  await season.click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath);
+
+  await page.goBack();
+  await expect(page.getByTestId('series-screen')).toBeVisible();
+  await expect(page.getByTestId('season-screen')).toHaveCount(0);
+  await expect(season).toBeFocused();
+  await page.goForward();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath);
+
+  await page.goBack();
+  await page.goBack();
+  await expect(card).toBeFocused();
+  expect(pathOf(page)).toBe('/nas');
+  await page.locator('[data-testid="title-shelf"][data-shelf="movie"]').click();
+  await expect(page.getByTestId('title-card')).toHaveCount(1);
+  expect(pathOf(page)).toBe('/nas?shelf=movie');
+});
+
+test('a library path opens straight onto its screen after a reload', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  const seasonPath = pathOf(page);
+  // Notes whether the library's own screen (its search field) ever shows during the reload.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __librarySeen: boolean };
+    w.__librarySeen = false;
+    new MutationObserver(() => {
+      if (document.querySelector('[data-testid="title-search"]')) w.__librarySeen = true;
+    }).observe(document, { childList: true, subtree: true });
+  });
+  await page.reload();
+  await expect(page.getByTestId('season-screen').locator('h2')).toHaveText('Season 1', { timeout: 15_000 });
+  expect(pathOf(page)).toBe(seasonPath);
+  expect(await page.evaluate(() => (window as unknown as { __librarySeen: boolean }).__librarySeen)).toBe(false);
+  // In-app Back from a screen opened by a reload (no app entry behind it) goes to its parent in place.
+  await page.getByRole('button', { name: 'Back to Starfall Wanderer' }).click();
+  await expect(page.getByTestId('series-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath.slice(0, seasonPath.lastIndexOf('/season/')));
+});
+
+test('the folder browser has its folder in the address bar', async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  expect(pathOf(page)).toBe('/nas/folders');
+  await page.locator('[data-testid="nas-folder"][data-name="Anime"]').click();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS › syn › Anime');
+  expect(pathOf(page)).toBe('/nas/folders/syn/Anime');
+  await expect(page.locator('[data-testid="nas-folder"][data-name^="Starfall Wanderer"]')).toBeVisible();
+  const folders = await page.getByTestId('nas-folder').allTextContents();
+  await page.reload();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS › syn › Anime', { timeout: 15_000 });
+  await expect(page.getByTestId('nas-folder')).toHaveText(folders);
+  await page.goBack();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+  expect(pathOf(page)).toBe('/nas/folders');
+});
+
+test('a device unpaired while on a NAS path goes back to the landing page', async ({ page, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  const redeemed = page.waitForResponse((r) => r.url().endsWith('/api/pair/redeem') && r.request().method() === 'POST');
+  await pairByLink(page);
+  const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
+  await page.getByTestId('nas-open').click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  expect(pathOf(page)).toBe('/nas');
+
+  const res = await ownerApi(`admin/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+  expect(res.status).toBe(204);
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await expect(page.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
+  await expect(page.getByTestId('pair-screen')).toBeVisible();
+  expect(pathOf(page)).toBe('/');
+  await page.reload();
+  await expect(page.getByTestId('pair-screen')).toBeVisible({ timeout: 15_000 });
+  expect(pathOf(page)).toBe('/');
+  await expect(page.getByTestId('title-library')).toHaveCount(0);
 });
 
 // The owner screens. Each browser files its own discs (nas-server.ts `ownerDiscs`); the tests that change the catalogue

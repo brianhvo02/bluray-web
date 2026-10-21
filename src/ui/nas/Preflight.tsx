@@ -27,8 +27,11 @@ interface PreflightProps {
 const message = (err: unknown): string =>
   err instanceof NasHttpError && err.code === 'disc-changed' ? DISC_CHANGED_MESSAGE : err instanceof Error ? err.message : String(err);
 
-/** ?bufferask=1 is test-only (E2E): every wait asks first (no silent buffering), so `ask` shows with a short synthetic disc. */
-const askEveryWait = (): boolean => new URLSearchParams(globalThis.location?.search ?? '').get('bufferask') === '1';
+/**
+ * ?bufferask=1 is test-only (E2E): every wait asks first (no silent buffering), so `ask` shows with a short synthetic disc.
+ * Read once at load, from the address the app opened with: the NAS screens' paths leave the query behind.
+ */
+const ASK_EVERY_WAIT = new URLSearchParams(globalThis.location?.search ?? '').get('bufferask') === '1';
 
 /**
  * Before a NAS disc plays: its manifest, this connection's throughput against the disc's peak rate, and Play. When the
@@ -116,7 +119,7 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
   const estimating = need !== null && !keepsUp && !cannotBuffer && quota === undefined;
   /** null while unknown (or when the device can't buffer): Play then plays at once, as without a measurement. */
   const plan: BufferPlan | null =
-    need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : cannotBuffer || quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(askEveryWait() ? { silentBelowS: 0 } : {}) });
+    need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : cannotBuffer || quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(ASK_EVERY_WAIT ? { silentBelowS: 0 } : {}) });
 
   /** `hold`: the disc opens once the cache holds the target (Wait); otherwise at once, its fill going on behind it. */
   const play = (bufferFirst?: BufferRequest, hold = true): void => {
