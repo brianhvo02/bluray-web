@@ -7,7 +7,7 @@ import { buildPlace, isFinished, placeMinDurationUs, promptLines, qualifies, res
 const S = 1e6;
 const MIN = 300 * S;
 
-const settings: PlaceSettings = { audioLanguage: 'jpn', psr1: 2, psr2: (0x80000000 | 3) >>> 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 0.8, muted: false };
+const settings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: 'eng', textFiles: [], psr1: 2, psr2: (0x80000000 | 3) >>> 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 0.8, muted: false };
 const place = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
   discKey: 'k', discId: 'd', playlistId: '00001', timeUs: 754 * S, durationUs: 1440 * S, finished: false,
   mode: 'none', title: null, psrs: [], gprs: null, settings, updatedAt: 0, deviceName: 'Living room TV', ...over,
@@ -69,16 +69,21 @@ describe('buildPlace', () => {
   const snapshot = {
     engineState: 'playing', currentPlaylistId: '00002', durationUs: 1440 * S, timeUs: 600 * S, chapters: [{ index: 1, startUs: 0 }],
     audioTracks: [track(1, 'eng'), track(2, 'jpn')], selectedAudio: 2, volume: 0.5, muted: true,
-    subtitles: { pg: [], text: null, selected: 'text', scale: 1.5 },
+    subtitles: { pg: [{ index: 3, language: 'eng' }], text: { files: [{ name: 'ep03.en.ass', format: 'ass', cues: 9, startUs: 0, offsetMs: 400 }], missingFonts: [], episodeStarts: [] }, selected: 'text', scale: 1.5 },
   } as unknown as PlayerSnapshot;
   it('takes the registers from the place state and the rest from the snapshot', () => {
     const psrs = new Array<number>(128).fill(0);
     psrs[1] = 2; psrs[2] = 0x80000001; psrs[3] = 1;
-    const p = buildPlace({ discKey: 'k', discId: 'd', snapshot, place: { mode: 'hdmv', title: 4, psrs, gprs: { 3: 7 } }, shaderSet: 'a4k', deviceName: 'Phone', nowMs: 99 });
+    const p = buildPlace({ discKey: 'k', discId: 'd', snapshot, place: { mode: 'hdmv', title: 4, psrs, gprs: { 3: 7 } }, shaderSet: 'a4k', deviceName: 'Phone', nowMs: 99, textFileSizes: { 'ep03.en.ass': 1234 } });
     expect(p).toMatchObject({
       playlistId: '00002', timeUs: 600 * S, durationUs: 1440 * S, finished: false, mode: 'hdmv', title: 4, gprs: { 3: 7 }, updatedAt: 99, deviceName: 'Phone',
-      settings: { audioLanguage: 'jpn', psr1: 2, psr2: 0x80000001, psr3: 1, textOn: true, textScale: 1.5, shaderSet: 'a4k', volume: 0.5, muted: true },
+      settings: { audioLanguage: 'jpn', pgLanguage: null, textFiles: [{ name: 'ep03.en.ass', size: 1234, startUs: 0, offsetMs: 400 }], psr1: 2, psr2: 0x80000001, psr3: 1, textOn: true, textScale: 1.5, shaderSet: 'a4k', volume: 0.5, muted: true },
     });
+  });
+  it('records the PG language of a selected PG stream', () => {
+    const sn = { ...snapshot, subtitles: { pg: [{ index: 3, language: 'eng' }], text: null, selected: { pg: 3 }, scale: 1 } } as unknown as PlayerSnapshot;
+    const p = buildPlace({ discKey: 'k', discId: 'd', snapshot: sn, place: { mode: 'none', title: null, psrs: [], gprs: null }, shaderSet: null, deviceName: 'x', nowMs: 1 });
+    expect(p.settings).toMatchObject({ pgLanguage: 'eng', textFiles: [], psr2: 0x80000003 });
   });
   it('falls back to the snapshot when there are no PSRs', () => {
     const p = buildPlace({ discKey: 'k', discId: 'd', snapshot, place: { mode: 'none', title: null, psrs: [], gprs: null }, shaderSet: null, deviceName: 'x', nowMs: 1 });
@@ -89,23 +94,23 @@ describe('buildPlace', () => {
 
 describe('settingsForUpNext', () => {
   it('picks the same-language track on a disc numbered differently', () => {
-    const next = settingsForUpNext(settings, [track(1, 'jpn'), track(2, 'eng')]);
+    const next = settingsForUpNext(settings, [track(1, 'jpn'), track(2, 'eng')], []);
     expect(next.psr1).toBe(1);
     expect(next.audioLanguage).toBe('jpn');
     expect(next.volume).toBe(0.8);
   });
   it('skips an unplayable track of that language', () => {
-    expect(settingsForUpNext(settings, [track(1, 'jpn', false), track(2, 'eng'), track(3, 'jpn')]).psr1).toBe(3);
+    expect(settingsForUpNext(settings, [track(1, 'jpn', false), track(2, 'eng'), track(3, 'jpn')], []).psr1).toBe(3);
   });
   it('falls back to the first playable track when the language is absent', () => {
-    expect(settingsForUpNext(settings, [track(1, 'eng', false), track(2, 'eng')]).psr1).toBe(2);
+    expect(settingsForUpNext(settings, [track(1, 'eng', false), track(2, 'eng')], []).psr1).toBe(2);
   });
   it('maps PG by language and keeps the display flag', () => {
-    const next = settingsForUpNext(settings, [track(1, 'jpn')], { language: 'eng', pg: [{ index: 1, language: 'fra' }, { index: 2, language: 'eng' }] });
+    const next = settingsForUpNext(settings, [track(1, 'jpn')], [{ index: 1, language: 'fra' }, { index: 2, language: 'eng' }]);
     expect(next.psr2).toBe(((0x80000000 | 2) >>> 0));
   });
   it('turns PG off when the language is missing on the new disc', () => {
-    expect(settingsForUpNext(settings, [], { language: 'eng', pg: [{ index: 1, language: 'fra' }] }).psr2).toBe(0xfff);
+    expect(settingsForUpNext(settings, [], [{ index: 1, language: 'fra' }]).psr2).toBe(0xfff);
   });
 });
 
@@ -155,9 +160,9 @@ describe('promptLines', () => {
     expect(at(4 * 86_400_000).line).toMatch(/, 2026-10-17\.$/);
   });
   it('formats an hour or more as h:mm:ss and lists text subtitles and a shader', () => {
-    const p = at(0, { timeUs: 3725 * S, durationUs: 7200 * S, settings: { ...settings, textOn: true, shaderSet: 'Anime4K A', audioLanguage: null } });
+    const p = at(0, { timeUs: 3725 * S, durationUs: 7200 * S, settings: { ...settings, textOn: true, textFiles: [{ name: 'ep03.en.ass', size: 1, startUs: 0, offsetMs: -400 }], shaderSet: 'Anime4K A', audioLanguage: null } });
     expect(p.resumeLabel).toBe('Resume at 1:02:05');
     expect(p.line).toContain('of 2:00:00');
-    expect(p.details).toBe('Subtitles: text file · Shader: Anime4K A');
+    expect(p.details).toBe('Subtitles: ep03.en.ass -0.4 s · Shader: Anime4K A');
   });
 });

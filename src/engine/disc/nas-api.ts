@@ -102,7 +102,9 @@ export interface UnsortedSuggestion extends TitleSummary { readonly seasonHint: 
 export interface UnsortedItem { readonly discId: string; readonly path: string; readonly discTitles: readonly { readonly lang: string; readonly name: string }[]; readonly reason: UnsortedReason; readonly suggestions: readonly UnsortedSuggestion[]; readonly catalogueNumber: string | null; readonly group: string; readonly groupSize: number }
 
 /** The player settings a place carries, so resuming on another device sounds and looks the same. */
-export interface PlaceSettings { readonly audioLanguage: string | null; readonly psr1: number; readonly psr2: number; readonly psr3: number; readonly textOn: boolean; readonly textScale: number; readonly shaderSet: string | null; readonly volume: number; readonly muted: boolean }
+/** A text subtitle file of a place: identified by name and size (its bytes stay on the device). */
+export interface PlaceTextFile { readonly name: string; readonly size: number; readonly startUs: number | null; readonly offsetMs: number }
+export interface PlaceSettings { readonly audioLanguage: string | null; readonly pgLanguage: string | null; readonly textFiles: readonly PlaceTextFile[]; readonly psr1: number; readonly psr2: number; readonly psr3: number; readonly textOn: boolean; readonly textScale: number; readonly shaderSet: string | null; readonly volume: number; readonly muted: boolean }
 /** Where one person stopped in one playlist of a disc (spec: resume). `finished` places stay for Up next, and go first when the store is full. */
 export interface PlaybackPlace {
   readonly discKey: string; readonly discId: string; readonly playlistId: string;

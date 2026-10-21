@@ -1,4 +1,4 @@
-import type { PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
+import type { PlaceSettings, PlaybackPlace, PlaceTextFile } from '../engine/disc/nas-api';
 import type { AudioTrack, PgTrack, PlaceState, StartPoint } from '../engine/protocol';
 import type { PlayerSnapshot } from '../player/player-controller';
 import { formatTime } from './format';
@@ -45,6 +45,8 @@ export function isFinished(s: {
 export function buildPlace(input: {
   readonly discKey: string; readonly discId: string; readonly snapshot: PlayerSnapshot; readonly place: PlaceState;
   readonly shaderSet: string | null; readonly deviceName: string; readonly nowMs: number;
+  /** Byte sizes of the text subtitle files by name (the snapshot lacks them). */
+  readonly textFileSizes?: Readonly<Record<string, number>>;
 }): PlaybackPlace {
   const { snapshot: s, place } = input;
   const audio = s.audioTracks.find((t) => t.index === s.selectedAudio);
@@ -52,6 +54,8 @@ export function buildPlace(input: {
   const psr = (i: number): number | undefined => (place.psrs.length > i ? place.psrs[i] : undefined);
   const psr2Fallback = typeof sel === 'object' ? ((PG_DISPLAY_FLAG | sel.pg) >>> 0) : 0;
   const settings: PlaceSettings = {
+    pgLanguage: typeof sel === 'object' ? (s.subtitles?.pg.find((t) => t.index === sel.pg)?.language || null) : null,
+    textFiles: (s.subtitles?.text?.files ?? []).map((f): PlaceTextFile => ({ name: f.name, size: input.textFileSizes?.[f.name] ?? 0, startUs: f.startUs, offsetMs: f.offsetMs })),
     audioLanguage: audio && audio.language !== '' ? audio.language : null,
     psr1: psr(1) ?? s.selectedAudio ?? 0,
     psr2: psr(2) ?? psr2Fallback,
@@ -72,25 +76,19 @@ export function buildPlace(input: {
 
 /**
  * The settings an Up next card carries to the next episode: audio and PG by language (numbering differs between
- * discs), the rest as is. The first playable track with the language, else the first playable one (the disc's default).
- * `subs` names the previous PG language and the new disc's PG tracks; without it PSR2 is kept.
+ * discs), the rest as is (text files too: Task 8 decides whether they apply). The first playable audio track with the
+ * language, else the first playable one (the disc's default); PG off when the new disc has no stream in the language.
  */
-export function settingsForUpNext(
-  prev: PlaceSettings,
-  tracks: readonly AudioTrack[],
-  subs?: { readonly language: string | null; readonly pg: readonly PgTrack[] },
-): PlaceSettings {
+export function settingsForUpNext(prev: PlaceSettings, tracks: readonly AudioTrack[], pgTracks: readonly PgTrack[]): PlaceSettings {
   let psr1 = prev.psr1;
-  if (tracks.length > 0) {
-    const match = prev.audioLanguage ? tracks.find((t) => t.playable && t.language === prev.audioLanguage) : undefined;
-    const first = match ?? (prev.audioLanguage ? tracks.find((t) => t.playable) : undefined);
+  if (tracks.length > 0 && prev.audioLanguage) {
+    const first = tracks.find((t) => t.playable && t.language === prev.audioLanguage) ?? tracks.find((t) => t.playable);
     if (first) psr1 = first.index;
   }
   let psr2 = prev.psr2;
-  if (subs && subs.language) {
-    const flag = prev.psr2 & PG_DISPLAY_FLAG;
-    const match = subs.pg.find((t) => t.language === subs.language);
-    psr2 = match ? ((flag | match.index) >>> 0) : 0xfff;
+  if (prev.pgLanguage) {
+    const match = pgTracks.find((t) => t.language === prev.pgLanguage);
+    psr2 = match ? (((prev.psr2 & PG_DISPLAY_FLAG) | match.index) >>> 0) : 0xfff;
   }
   return { ...prev, psr1, psr2 };
 }
@@ -135,7 +133,11 @@ export function promptLines(place: PlaybackPlace, nowMs: number): { heading: str
   const parts: string[] = [];
   if (s.audioLanguage) parts.push(`Audio: ${s.audioLanguage}`);
   const stream = s.psr2 & 0xfff;
-  if (s.textOn) parts.push('Subtitles: text file');
+  if (s.textOn) {
+    const f = s.textFiles[0];
+    const off = f && f.offsetMs !== 0 ? ` ${f.offsetMs > 0 ? '+' : '-'}${(Math.abs(f.offsetMs) / 1000).toFixed(1)} s` : '';
+    parts.push(f ? `Subtitles: ${f.name}${off}` : 'Subtitles: text file');
+  }
   else if ((s.psr2 & PG_DISPLAY_FLAG) !== 0 && stream !== 0 && stream !== 0xfff) parts.push(`Subtitles: track ${stream}`);
   if (s.shaderSet) parts.push(`Shader: ${s.shaderSet}`);
   return {

@@ -34,7 +34,7 @@ const catalogue: Catalogue = {
   unsorted: [], hidden: [], art: () => null, provisional: [],
 };
 
-const settings = { audioLanguage: null, psr1: 1, psr2: 2, psr3: 3, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
+const settings = { pgLanguage: null, textFiles: [], audioLanguage: null, psr1: 1, psr2: 2, psr3: 3, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
 const place = (discId: string, playlistId: string, over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
   discKey: `d.${discId.padEnd(16, '0')}`, discId, playlistId, timeUs: 5_000_000, durationUs: 60_000_000, finished: false, mode: 'none', title: null,
   psrs: [], gprs: null, settings, updatedAt: 1000, deviceName: 'Phone', ...over,

@@ -19,8 +19,10 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const strOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string';
 
+const isTextFile = (f: unknown): boolean => isObject(f) && typeof f.name === 'string' && f.name.length <= 512 && num(f.size) && (f.startUs === null || num(f.startUs)) && num(f.offsetMs);
+
 function isSettings(v: unknown): v is PlaceSettings {
-  return isObject(v) && strOrNull(v.audioLanguage) && num(v.psr1) && num(v.psr2) && num(v.psr3) && typeof v.textOn === 'boolean'
+  return isObject(v) && strOrNull(v.audioLanguage) && strOrNull(v.pgLanguage) && Array.isArray(v.textFiles) && v.textFiles.length <= 64 && v.textFiles.every(isTextFile) && num(v.psr1) && num(v.psr2) && num(v.psr3) && typeof v.textOn === 'boolean'
     && num(v.textScale) && strOrNull(v.shaderSet) && num(v.volume) && typeof v.muted === 'boolean';
 }
 

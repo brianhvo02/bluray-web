@@ -60,7 +60,7 @@ async function tokenFor(name: string, owner: boolean): Promise<{ token: string; 
 const place = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
   discKey: KEY, discId: 'disc1', playlistId: '00001', timeUs: 5_000_000, durationUs: 60_000_000, finished: false,
   mode: 'none', title: null, psrs: [1, 2], gprs: null,
-  settings: { audioLanguage: null, psr1: 1, psr2: 2, psr3: 3, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false },
+  settings: { pgLanguage: null, textFiles: [], audioLanguage: null, psr1: 1, psr2: 2, psr3: 3, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false },
   updatedAt: 1000, deviceName: 'Phone', ...over,
 });
 
