@@ -650,6 +650,37 @@ test("an episode whose playlist isn't on its disc opens the disc normally, with 
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
 
+test('on a phone the alphabet bars sit clear of the list and answer a tap', async ({ browser, browserName }) => {
+  // a touch phone's layout: coarse pointer, so every button gets its 44 px minimum
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, ...(browserName === 'firefox' ? {} : { isMobile: true }) });
+  try {
+    const page = await phone.newPage();
+    await openTitles(page, browserName);
+    const left = page.getByTestId('alphabet-rail-left');
+    const right = page.getByTestId('alphabet-rail-right');
+    const list = page.locator('.titles-body');
+    await expect(left).toBeVisible();
+    const [l, r, body] = await Promise.all([left.boundingBox(), right.boundingBox(), list.boundingBox()]);
+    // each bar's keys stay inside it, and the bars keep their distance from the list
+    for (const [rail, box] of [[left, l!], [right, r!]] as const) {
+      const key = await rail.locator('[data-rail-key]').first().boundingBox();
+      expect(key!.x).toBeGreaterThanOrEqual(box.x - 0.5);
+      expect(key!.x + key!.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
+    }
+    expect(body!.x - (l!.x + l!.width)).toBeGreaterThanOrEqual(8);
+    expect(r!.x - (body!.x + body!.width)).toBeGreaterThanOrEqual(8);
+    expect(r!.x + r!.width).toBeLessThanOrEqual(390);
+    // Starfall Wanderer reads ほしふり: a tap on は re-sorts by reading, a tap on S back to A–Z
+    const heading = page.locator('.title-section', { hasText: /^Series / });
+    await right.locator('[data-rail-key="は"]').tap();
+    await expect(heading).toHaveText('Series 五十音順');
+    await left.locator('[data-rail-key="S"]').tap();
+    await expect(heading).toHaveText('Series A–Z');
+  } finally {
+    await phone.close();
+  }
+});
+
 test('the title screens move focus to the new heading, and back to the opener', async ({ page, browserName }) => {
   await openTitles(page, browserName);
   const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');

@@ -102,14 +102,21 @@ a { color: #6ea8ff; }
 .titles { display: flex; flex-direction: column; gap: 16px; }
 .titles h2 { margin: 0; }
 .titles-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+/* the title library takes a wider column than the landing page, with more posters a row and its lists in columns */
+.landing:has(> .title-library) { max-width: 1440px; }
+@media (min-width: 1000px) {
+  .title-library .title-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 24px 20px; }
+  .title-library .title-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 8px 12px; }
+}
 /* the library's heading, search and shelves stay at the top while the titles scroll under them */
 .titles-sticky { position: sticky; top: 0; z-index: 5; display: flex; flex-direction: column; gap: 16px; padding: max(8px, env(safe-area-inset-top)) 0 12px; background: #0b0b0d; }
 .titles-main { display: flex; flex-direction: column; }
-.titles-main.indexed { flex-direction: row; align-items: flex-start; gap: 6px; }
+.titles-main.indexed { flex-direction: row; align-items: flex-start; gap: 10px; }
 .titles-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 /* the alphabet bars: A–Z on the left, the gojūon rows on the right, held under the sticky header */
 .alphabet-rail { position: sticky; top: calc(var(--titles-sticky-h, 0px) + 4px); flex: none; width: 22px; height: calc(100dvh - var(--titles-sticky-h, 0px) - 16px); max-height: 720px; display: flex; flex-direction: column; touch-action: none; user-select: none; -webkit-user-select: none; }
-.alphabet-rail-key { flex: 1 1 0; min-height: 0; padding: 0; background: none; border: none; border-radius: 4px; font-size: 11px; line-height: 1; color: #8a8a96; }
+/* min-width and min-height 0: the touch rule gives every button 44 px, which would push the keys out over the list */
+.alphabet-rail-key { flex: 1 1 0; min-width: 0; min-height: 0; padding: 0; background: none; border: none; border-radius: 4px; font-size: 11px; line-height: 1; color: #8a8a96; }
 /* a tap leaves :hover on touch screens, and a global button hover would paint the key: only a real pointer gets one */
 .alphabet-rail-key:where(:hover) { background: none; border: none; }
 @media (hover: hover) { .alphabet-rail-key:where(:hover:not([aria-disabled='true'])) { background: #26262c; color: #e8e8ea; } }
@@ -322,6 +329,7 @@ a { color: #6ea8ff; }
 }
 @media (pointer: coarse) {
   button, .audio-menu-list button { min-width: 44px; min-height: 44px; }
+  .alphabet-rail { width: 26px; }
   .audio-menu-list .subtitle-adjust button { min-width: 44px; } /* beats the 32 px desktop rule's specificity */
   .seek-bar input { height: 44px; margin: 0; }
   .control-row input[data-role='volume'] { display: none; } /* phones have hardware volume buttons */
