@@ -505,7 +505,35 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     expect(d.logs.filter(([l, e]) => e && l.includes('the NAS refused the write'))).toHaveLength(1);
   });
 
-  it('sends X-Bdj-Person on each write, and that write again without it when it cannot leave (an older server\'s CORS)', async () => {
+  it('never sends a write without X-Bdj-Person once the NAS has taken one with it (ruling R25): a failure is then the network\'s', async () => {
+    const mika = await nas.person('Mika');
+    const sent: (string | null)[] = [];
+    let down = false;
+    const flaky = ((input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET').toUpperCase() === 'PUT') {
+        sent.push(new Headers(init?.headers).get(PERSON_HEADER));
+        if (down) return Promise.reject(new TypeError('Failed to fetch'));
+      }
+      return nas.fetch(input, init);
+    }) as typeof fetch;
+    // the API base as another NAS (the acceptance is kept per NAS for the session)
+    const api = nas.api.replace('127.0.0.1', 'localhost');
+    const store = new NasBdjStore(api, { fetch: flaky, token: mika.token });
+    store.setPerson(mika.personId);
+    const first = await store.save(SCOPE, { files: [file('a', 1_000, '1')] }, null);
+    expect(sent).toEqual([mika.personId]);
+    down = true;
+    await expect(store.save(SCOPE, { files: [file('a', 2_000, '2')] }, 'etag' in first ? first.etag : null)).rejects.toMatchObject({ status: null });
+    expect(sent).toEqual([mika.personId, mika.personId]); // no write without it
+    // another client of the same NAS in this session knows it too
+    const again = new NasBdjStore(api, { fetch: flaky, token: mika.token });
+    again.setPerson(mika.personId);
+    await expect(again.save(SCOPE, { files: [file('a', 3_000, '3')] }, 'etag' in first ? first.etag : null)).rejects.toMatchObject({ status: null });
+    expect(sent).toEqual([mika.personId, mika.personId, mika.personId]);
+    expect(onNas(mika.personId)).toEqual([['a', 1]]);
+  });
+
+  it('sends X-Bdj-Person on each write, and before the NAS has taken one, that write again without it when it cannot leave (an older server\'s CORS)', async () => {
     const mika = await nas.person('Mika');
     const sent: (string | null)[] = [];
     const corsOfOldServer = ((input: string | URL | Request, init?: RequestInit) => {

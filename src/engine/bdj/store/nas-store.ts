@@ -63,6 +63,16 @@ export class PersonChangedError extends NasStoreError {
 /** The request header naming the person a write is for (the NAS store contract's X-Bdj-Person guard). */
 export const PERSON_HEADER = 'X-Bdj-Person';
 
+/**
+ * The NAS APIs (by API base) that have answered a write carrying X-Bdj-Person (ruling R25): their CORS takes it, so a
+ * write there that cannot leave is a network failure, never sent again without the header. Kept for the worker's
+ * life (one BD-J session); see NasBdjStore.write.
+ */
+const personHeaderAccepted = new Set<string>();
+
+/** Answers that prove a write carrying the header reached the server (its CORS let it through). */
+const REACHED = (status: number): boolean => (status >= 200 && status < 300) || status === 409 || status === 412 || status === 507;
+
 /** Per write, before each PUT is sent (503 retries included): throws (PersonChangedError) to send nothing. */
 export interface SaveOptions {
   readonly beforePut?: () => Promise<void>;
@@ -225,9 +235,14 @@ export class NasBdjStore implements BdjStore {
   private async write(method: 'GET' | 'PUT', path: string, token: string, headers: Record<string, string>, body?: Uint8Array<ArrayBuffer>): Promise<Response> {
     if (method === 'GET' || this.person === null) return this.request(method, path, token, headers, body);
     try {
-      return await this.request(method, path, token, { ...headers, [PERSON_HEADER]: this.person }, body);
+      const res = await this.request(method, path, token, { ...headers, [PERSON_HEADER]: this.person }, body);
+      if (REACHED(res.status)) personHeaderAccepted.add(this.apiBase);
+      return res;
     } catch (e) {
       if (!(e instanceof NasStoreError) || e.status !== null) throw e;
+      // this NAS has taken the header before: a write that cannot leave is the network's, kept pending and tried again
+      // later with the header (ruling R25), never sent without it
+      if (personHeaderAccepted.has(this.apiBase)) throw e;
       // unreachable with the header: a server from before the guard refuses it in CORS (the browser then sends nothing),
       // which a page cannot tell from a network failure. This one write goes again without it, right after the caller's
       // own check of whose device this is (beforePut); the next write tries the header first again, so a server with
