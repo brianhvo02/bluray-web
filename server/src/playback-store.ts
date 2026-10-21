@@ -3,12 +3,14 @@ import { join } from 'node:path';
 import { parseDiscKey } from '../../src/engine/disc/disc-key';
 import type { DiscPlaces, PlaceSettings, PlaybackPlace } from '../../src/engine/disc/nas-api';
 import { isCode, lockFile, replaceAtomically } from './atomic-json';
+import { PERSON_RE } from './bdj-store';
 
 export const MAX_PLACES = 500;
 /** The largest body a place is accepted in. */
 export const PLACE_LIMIT_BYTES = 256 * 1024;
 
-const PERSON_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** How far ahead of the server's clock a device's `updatedAt` is believed (a fast clock must not pin a place as newest). */
+const MAX_AHEAD_MS = 5 * 60_000;
 const PLAYLIST_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export const isPlaylistId = (id: string): boolean => PLAYLIST_RE.test(id);
@@ -37,9 +39,11 @@ export function isPlaybackPlace(v: unknown): v is PlaybackPlace {
 /** Each person's places, one file per disc under `users/<personId>/playback/<discKey>.json`. */
 export class PlaybackStore {
   private readonly maxPlaces: number;
+  private readonly now: () => number;
 
-  constructor(private readonly dataDir: string, opts: { maxPlaces?: number } = {}) {
+  constructor(private readonly dataDir: string, opts: { maxPlaces?: number; now?: () => number } = {}) {
     this.maxPlaces = opts.maxPlaces ?? MAX_PLACES;
+    this.now = opts.now ?? Date.now;
   }
 
   private dir(personId: string): string {
@@ -86,7 +90,8 @@ export class PlaybackStore {
     return this.read(this.file(personId, discKey));
   }
 
-  put(personId: string, place: PlaybackPlace): 'stored' | 'stale' {
+  put(personId: string, sent: PlaybackPlace): 'stored' | 'stale' {
+    const place = { ...sent, updatedAt: Math.min(sent.updatedAt, this.now() + MAX_AHEAD_MS) };
     const result = this.edit(personId, place.discKey, (cur) => {
       if ((cur?.places[place.playlistId]?.updatedAt ?? -Infinity) > place.updatedAt) return { next: null, result: 'stale' as const };
       return { next: { defaults: place.settings, places: { ...cur?.places, [place.playlistId]: place } }, result: 'stored' as const };

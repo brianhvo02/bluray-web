@@ -76,6 +76,16 @@ describe('PlaybackStore', () => {
     expect(existsSync(join(tmp, 'users', 'mika', 'playback', `${OTHER}.json`))).toBe(false);
   });
 
+  it('clamps a far-future updatedAt to the server clock plus five minutes', () => {
+    let now = 1_000_000;
+    const store = new PlaybackStore(tmp, { now: () => now });
+    store.put('mika', place({ updatedAt: now + 3_600_000 }));
+    expect(store.get('mika', KEY)!.places['00001']!.updatedAt).toBe(now + 300_000);
+    now += 6 * 60_000;
+    expect(store.put('mika', place({ timeUs: 7, updatedAt: now + 3_600_000 }))).toBe('stored');
+    expect(store.get('mika', KEY)!.places['00001']!.timeUs).toBe(7);
+  });
+
   it('rejects a bad disc key or person', () => {
     const store = new PlaybackStore(tmp);
     expect(() => store.get('mika', '../x')).toThrow();

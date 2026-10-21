@@ -1,10 +1,12 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PlaybackPlace } from '../../../src/engine/disc/nas-api';
 import { appHandlers } from '../app';
+import { lockFile } from '../atomic-json';
 import { Auth } from '../auth';
 import { BdjStore } from '../bdj-store';
 import { createServer } from '../http';
@@ -129,5 +131,44 @@ describe('playback routes', () => {
     expect(res.status).toBe(204);
     expect(existsSync(dir)).toBe(false);
     expect((await call('GET', KEY, guest.token)).status).toBe(404);
+  });
+
+  it('answers 413 for an over-limit body streamed without a Content-Length', async () => {
+    const { token } = await tokenFor('Mika', false);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(`${base}/api/me/playback/${KEY}/00001`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      for (let i = 0; i < 6; i++) req.write(Buffer.alloc(64 * 1024, 0x20));
+      req.end();
+    });
+    expect(status).toBe(413);
+  });
+
+  it('answers 503 with Retry-After while the disc file is locked', async () => {
+    const { token, personId } = await tokenFor('Mika', false);
+    const dir = join(data, 'users', personId, 'playback');
+    mkdirSync(dir, { recursive: true });
+    const unlock = lockFile(join(dir, `${KEY}.json`));
+    try {
+      const res = await call('PUT', `${KEY}/00001`, token, place());
+      expect(res.status).toBe(503);
+      expect(res.headers.get('retry-after')).toBe('1');
+    } finally {
+      unlock();
+    }
+  }, 15_000);
+
+  it('keeps both of two puts to different playlists of one disc', async () => {
+    const { token } = await tokenFor('Mika', false);
+    const results = await Promise.all([
+      call('PUT', `${KEY}/00001`, token, place()),
+      call('PUT', `${KEY}/00002`, token, place({ playlistId: '00002' })),
+    ]);
+    expect(results.map((r) => r.status)).toEqual([204, 204]);
+    const got = (await (await call('GET', KEY, token)).json()) as { places: Record<string, PlaybackPlace> };
+    expect(Object.keys(got.places).sort()).toEqual(['00001', '00002']);
   });
 });
