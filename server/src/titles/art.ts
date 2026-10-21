@@ -1,5 +1,5 @@
 /**
- * Posters and banners, fetched from the sources' own image sizes (AniList medium/large, TMDB w185/w500; no resizing,
+ * Posters and banners, fetched from the sources' own image sizes (AniList large/extraLarge, 230 and 460 wide; TMDB w342/w780; no resizing,
  * as the server has no native dependencies) and kept in `<dir>/<artId>-<size>`, within a byte budget that drops the
  * least recently used files. Original code.
  */

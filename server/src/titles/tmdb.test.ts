@@ -44,7 +44,7 @@ describe('createTmdb', () => {
         runtimeMin: null,
         seasons: [],
         relations: [],
-        poster: { small: 'https://image.tmdb.org/t/p/w185/pStarfallPoster.jpg', large: 'https://image.tmdb.org/t/p/w500/pStarfallPoster.jpg' },
+        poster: { small: 'https://image.tmdb.org/t/p/w342/pStarfallPoster.jpg', large: 'https://image.tmdb.org/t/p/w780/pStarfallPoster.jpg' },
         banner: 'https://image.tmdb.org/t/p/w1280/qXbAckdropStarfall.jpg',
       },
     ]);
@@ -61,7 +61,7 @@ describe('createTmdb', () => {
     const { fetch } = fakeTmdb({ '/3/search/multi': () => json(fixture('tmdb-search-multi.json')) });
     const entries = await createTmdb(fetch, pacer(), KEY).search('Lanternfall');
     expect(entries.map((e) => [e.id, e.kind, e.year, e.poster?.small ?? null, e.banner])).toEqual([
-      ['tmdb-movie:990201', 'movie', 2019, 'https://image.tmdb.org/t/p/w185/pLanternfall.jpg', null],
+      ['tmdb-movie:990201', 'movie', 2019, 'https://image.tmdb.org/t/p/w342/pLanternfall.jpg', null],
       ['tmdb-tv:990202', 'series', null, null, 'https://image.tmdb.org/t/p/w1280/bLanternfallTv.jpg'],
     ]);
   });
@@ -80,7 +80,7 @@ describe('createTmdb', () => {
         { number: 1, episodes: 24, runtimeMin: 24 },
         { number: 2, episodes: 13, runtimeMin: 24 },
       ],
-      poster: { small: 'https://image.tmdb.org/t/p/w185/pStarfallPoster.jpg', large: 'https://image.tmdb.org/t/p/w500/pStarfallPoster.jpg' },
+      poster: { small: 'https://image.tmdb.org/t/p/w342/pStarfallPoster.jpg', large: 'https://image.tmdb.org/t/p/w780/pStarfallPoster.jpg' },
     });
   });
 

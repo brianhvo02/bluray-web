@@ -21,7 +21,7 @@ import { CIRCUIT_BREAKER, groupKey, MATCH_RULES_VERSION, matchDiscs } from './ma
 import type { DiscMatch, MatchResult } from './match';
 import type { OwnerStore } from './owner-store';
 import { parseName } from './parse-name';
-import { SourceUnavailable } from './sources';
+import { SourceUnavailable, withSharperPoster } from './sources';
 import type { Entry, MetadataSource } from './sources';
 
 const DAY_MS = 86_400_000;
@@ -618,8 +618,9 @@ export class TitleService {
       return;
     }
     this.matches = new Map(data.matches.map((m) => [m.discId, m]));
-    this.entries = new Map(Object.entries(data.entries));
-    this.cache = new Map(Object.entries(data.cache).map(([k, d]) => [k, { at: d.at, value: d.value.map((id) => data.pool[id]!) }]));
+    // posters stored before the sizes went up are asked for at the new sizes, with no lookup
+    this.entries = new Map(Object.entries(data.entries).map(([k, d]) => [k, { at: d.at, value: withSharperPoster(d.value) }]));
+    this.cache = new Map(Object.entries(data.cache).map(([k, d]) => [k, { at: d.at, value: d.value.map((id) => withSharperPoster(data.pool[id]!)) }]));
     this.discs = new Map(Object.entries(data.discs));
     for (const [id, at] of Object.entries(data.firstSeen)) this.firstSeen.set(id, at);
     this.lastRunAt = data.lastRunAt;

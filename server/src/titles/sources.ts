@@ -49,3 +49,28 @@ export function retryAfterMs(header: string | null): number | null {
   if (header === null || !/^\s*\d+(\.\d+)?\s*$/.test(header)) return null;
   return Math.round(Number(header) * 1000);
 }
+
+type Poster = NonNullable<Entry['poster']>;
+
+/**
+ * A poster stored before the sizes went up (2026-10-21) at the sizes asked for now: AniList's small and medium cover
+ * files (its `medium` and `large`) become medium and large (`large` and `extraLarge`), TMDB's w185 and w500 become
+ * w342 and w780. Each source names the size in the URL's path, so no lookup is needed; a poster already at the new
+ * sizes, or from anywhere else, comes back as it is.
+ */
+export function sharperPoster(poster: Poster): Poster {
+  const small = poster.small
+    .replace(/^(https:\/\/s4\.anilist\.co\/file\/anilistcdn\/media\/[a-z]+\/cover\/)small\//, '$1medium/')
+    .replace(/^(https:\/\/image\.tmdb\.org\/t\/p\/)w185\//, '$1w342/');
+  const large = poster.large
+    .replace(/^(https:\/\/s4\.anilist\.co\/file\/anilistcdn\/media\/[a-z]+\/cover\/)medium\//, '$1large/')
+    .replace(/^(https:\/\/image\.tmdb\.org\/t\/p\/)w500\//, '$1w780/');
+  return small === poster.small && large === poster.large ? poster : { small, large };
+}
+
+/** `entry` with its poster at the sizes asked for now (`sharperPoster`); the same object when nothing changes. */
+export function withSharperPoster(entry: Entry): Entry {
+  if (entry.poster === null) return entry;
+  const poster = sharperPoster(entry.poster);
+  return poster === entry.poster ? entry : { ...entry, poster };
+}

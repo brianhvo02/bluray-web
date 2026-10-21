@@ -130,7 +130,7 @@ function TitleCard({ nas, title, onOpen }: TitleCardProps): ReactElement {
   return (
     <li>
       <button type="button" className="title-card" data-testid="title-card" data-name={name} data-title-id={title.id} onClick={() => onOpen(title.id)}>
-        <Poster nas={nas} artId={title.poster} name={name} size="small" className="title-poster" />
+        <Poster nas={nas} artId={title.poster} name={name} size="large" className="title-poster" />
         <span className="title-card-name">{name}</span>
         {native && (
           <span className="title-muted title-card-native" lang="ja">
