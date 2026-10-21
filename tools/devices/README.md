@@ -141,6 +141,43 @@ Two notes on the drivers:
 - Safari on the Mac needs Develop → Allow Remote Automation and an unlocked screen, because safaridriver delivers no input while the screen is locked. The gate checks for a locked screen and stops with a message. It also brings Safari to the front after each navigation.
 - On a real iPhone or iPad (`ios:<udid>`), the gate uses plain `safaridriver` with the device as the target, not Appium. Web Inspector and Remote Automation must be on. iPadOS 27 has two quirks: an element click never lifts the finger, and several taps in one action list merge into one. So every tap is its own touch pointer action, followed by `DELETE /actions`.
 
+## The 5e live check (`live-check.ts`)
+
+This check runs on real devices against the live NAS, on a **preview** origin of the player only. The script refuses the production origin. It makes two made-up test people and pairs their devices, checks that BD-J saved data follows a person and never crosses to another, and opens the library discs the library check left unconfirmed. It deletes both people at the end, even when the run fails or is stopped with Ctrl-C.
+
+1. **People.**
+   - "Mika (test)" is made by the NAS's owner tooling over ssh (`server/deploy/deploy.sh --owner-code --person`), with a headless controller device paired the way `scripts/verify-level.ts` pairs.
+   - "Sora (test)" is made by that controller's owner session (`POST admin/codes {newPerson}`), and gets a controller of its own.
+   - Each browser pairs through the app's own pairing screen with a fresh code (`POST admin/codes {personId}`).
+   - A browser already paired on that origin as anyone but a test person stops the run. It is never re-paired.
+2. **Store** (`fixtures/synthetic/disc-bdj-store`, opened from the NAS library). Each device's count is read from the plane hash, which is libbluray's hash for that opening. Each person's NAS count is read back by that person's controller.
+   - Mika's phone shows 0, and the NAS then holds 1.
+   - Mika's tablet shows 1 (2 on the NAS).
+   - Sora's first browser shows 0 (Sora's NAS holds 1; Mika's stays 2).
+   - Sora's second browser shows 1, never Mika's 2.
+
+   `--store-disc auto` (the default) looks for the disc in the top three levels of the library and skips the store check when the disc isn't there. `--rehearse-store <library path or library-check id>` runs the same steps on another disc without expecting counts, as a dry run.
+3. **Library** (`--library`, Mika's phone). Each id (by default the 14 unconfirmed ones; or `--disc <id>`):
+   - goes through `$BDJ_LIBRARY_DIR/map.tsv` and the roots in `server/deploy/compose.yaml` to its NAS library disc;
+   - is opened from the NAS;
+   - is driven with `tools/bdj-library/generic.keys` through the on-screen remote. The remote is opened with a tap off the picture, so the disc never sees the tap.
+
+   A screenshot is saved after every step, to `<out>/<id>/`.
+4. **Clean-up.**
+   - Each browser forgets its test pairing and the test people's write-ahead records before it closes.
+   - Sora, then Mika, is deleted with `DELETE admin/people/<id>`, which also clears their saved data on the NAS.
+   - The NAS's people file is then read over ssh to confirm that no test person, device or saved data is left and that the other people are as before.
+
+```sh
+npx tsx tools/devices/live-check.ts --origin https://<branch>.bluray-web.pages.dev --out <dir outside the repo> \
+  --mika-phone ios:<iPhone udid> --mika-tablet ios:<iPad udid> --library
+# dry run: Simulators for Mika, Chrome for Sora, another disc for the store steps
+npx tsx tools/devices/live-check.ts --origin https://<branch>.bluray-web.pages.dev --out <dir> \
+  --mika-phone "sim:iPhone 17" --mika-tablet "sim:iPad Air 11-inch (M4)" --rehearse-store <library-check id> --library
+```
+
+Sora's browsers default to `chrome-profile` (installed Chrome with a fresh temporary profile) and `chrome` (a second Chrome with its own context). Use `--sora-a`/`--sora-b` to change them, or `none` to leave one out. Real devices go through safaridriver on `--wd-ports` (default `4211,4212`; ports above 4200 only, never 4191/4192). Simulators go through Appium. `--out` must lie outside the repository, because the screenshots show real discs. Results (`live-check.json`) name devices by role, and pairing codes and tokens are never printed or written. The NAS host for ssh is `$BLURAY_NAS_HOST` (default `mediaserver`).
+
 ## Not here
 
 Device UDIDs, Apple IDs, team IDs, certificates and tokens stay out of the repository: pass them on the command line or in the environment.
