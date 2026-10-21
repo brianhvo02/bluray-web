@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
+import { ContinueRow } from './ContinueRow';
 import { HiddenScreen } from './HiddenScreen';
 import { rememberedFolder } from './LibraryScreen';
 import { MusicScreen } from './MusicScreen';
@@ -437,7 +438,9 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
     }
     const season = seasonKey === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => seasonKey !== null && seasonKeyOf(s.id) === seasonKey);
     if (season) {
-      return <SeasonScreen seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} owner={filing} />;
+      return (
+        <SeasonScreen nas={nas} titleId={detail.title.id} seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} owner={filing} />
+      );
     }
     return <SeriesScreen nas={nas} detail={detail} onBack={back} onSeason={openSeason} onExtras={() => openSeason('extras')} onTitle={openTitle} onOpen={openDisc} owner={filing} />;
   }
@@ -548,6 +551,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
         </p>
       ) : (
         <>
+          <ContinueRow nas={nas} history={history} />
           <h3 className="title-section">Recently added</h3>
           <ul className="title-grid">
             {recentlyAdded(titles).map((t) => (

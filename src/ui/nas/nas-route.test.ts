@@ -18,10 +18,11 @@ const ROUTES: NasRoute[] = [
   { kind: 'unsorted' },
   { kind: 'hidden' },
   { kind: 'settings' },
-  { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: null },
-  { kind: 'play', discKey: 'd.abc123', playlistId: '00001', timeS: null },
-  { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: 90 },
-  { kind: 'play', discKey: 'f.abc123', playlistId: '00001', timeS: 0 },
+  { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: null, resume: false },
+  { kind: 'play', discKey: 'd.abc123', playlistId: '00001', timeS: null, resume: false },
+  { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: 90, resume: false },
+  { kind: 'play', discKey: 'f.abc123', playlistId: '00001', timeS: 0, resume: false },
+  { kind: 'play', discKey: 'f.abc123', playlistId: '00001', timeS: 754, resume: true },
 ];
 
 describe('nas route', () => {
@@ -37,9 +38,10 @@ describe('nas route', () => {
     expect(nasRoutePath({ kind: 'title', titleId: 'anilist:21' })).toBe('/nas/title/anilist%3A21');
     expect(nasRoutePath({ kind: 'extras', titleId: 'x' })).toBe('/nas/title/x/extras');
     expect(nasRoutePath({ kind: 'folders', path: 'a/b' })).toBe('/nas/folders/a/b');
-    expect(nasRoutePath({ kind: 'play', discKey: 'f.1', playlistId: '2', timeS: 3.9 })).toBe(
+    expect(nasRoutePath({ kind: 'play', discKey: 'f.1', playlistId: '2', timeS: 3.9, resume: false })).toBe(
       '/nas/play/f.1?pl=2&t=3',
     );
+    expect(nasRoutePath({ kind: 'play', discKey: 'f.1', playlistId: '2', timeS: 60, resume: true })).toBe('/nas/play/f.1?pl=2&t=60&resume=1');
   });
 
   it('treats /nas and /nas/ as the library', () => {

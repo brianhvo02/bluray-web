@@ -53,7 +53,7 @@ export class PlayingRoute {
     if (this.history.route()?.kind !== 'play' || s.currentPlaylistId === null) return;
     this.lastReplaceMs = now;
     this.lastWriteMs = now;
-    this.history.replace({ kind: 'play', discKey: key, playlistId: s.currentPlaylistId, timeS: Math.floor(s.timeUs / 1e6) });
+    this.history.replace({ kind: 'play', discKey: key, playlistId: s.currentPlaylistId, timeS: Math.floor(s.timeUs / 1e6), resume: false });
   }
 
   update(s: PlayingState): void {

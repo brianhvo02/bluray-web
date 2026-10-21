@@ -9,7 +9,8 @@ export type NasRoute =
   | { kind: 'unsorted' }
   | { kind: 'hidden' }
   | { kind: 'settings' }
-  | { kind: 'play'; discKey: string; playlistId: string | null; timeS: number | null };
+  /** `resume`: from a Continue watching card, which resumes the place without asking (`&resume=1`). */
+  | { kind: 'play'; discKey: string; playlistId: string | null; timeS: number | null; resume: boolean };
 
 const SHELVES: readonly string[] = ['series', 'movie', 'music'];
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
@@ -49,7 +50,7 @@ export function parseNasRoute(url: URL): NasRoute | null {
   } else if (seg.length === 1 && (head === 'unsorted' || head === 'hidden' || head === 'settings')) {
     return { kind: head };
   } else if (head === 'play' && a && seg.length === 2) {
-    return { kind: 'play', discKey: a, playlistId: params.get('pl') || null, timeS: timeOf(params.get('t')) };
+    return { kind: 'play', discKey: a, playlistId: params.get('pl') || null, timeS: timeOf(params.get('t')), resume: params.get('resume') === '1' };
   }
   return LIBRARY;
 }
@@ -82,6 +83,7 @@ export function nasRoutePath(route: NasRoute): string {
       const p = new URLSearchParams();
       if (route.playlistId) p.set('pl', route.playlistId);
       if (route.timeS !== null) p.set('t', String(Math.floor(route.timeS)));
+      if (route.resume) p.set('resume', '1');
       const s = p.toString();
       return `/nas/play/${enc(route.discKey)}${s ? `?${s}` : ''}`;
     }

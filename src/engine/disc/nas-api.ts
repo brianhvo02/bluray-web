@@ -124,6 +124,8 @@ export interface ContinueItem {
   readonly titleId: string | null; readonly titleName: string | null; readonly poster: string | null;
   readonly seasonId: string | null; readonly seasonNumber: number | null; readonly episode: number | null;
   readonly kindOfTitle: TitleKind | null; readonly updatedAt: number; readonly deviceName: string;
+  /** An Up next card's: the finished episode's settings, which carry on to the next (by language, spec §6.6); null on a resume card. */
+  readonly settings: PlaceSettings | null;
 }
 
 export interface PlaylistProgress { readonly timeUs: number; readonly durationUs: number; readonly finished: boolean }

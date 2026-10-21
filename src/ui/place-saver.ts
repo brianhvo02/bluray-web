@@ -1,6 +1,6 @@
-import type { PlaybackPlace } from '../engine/disc/nas-api';
+import type { PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
 import type { PlaceState } from '../engine/protocol';
-import { FONT_EXTENSIONS, splitPick } from '../player/drop-files';
+import { isFontName, splitPick } from '../player/drop-files';
 import type { PlayerSnapshot } from '../player/player-controller';
 import { NasHttpError, type NasClient } from './nas/nas-client';
 import { buildPlace, PLACE_MIN_DURATION_US, qualifies } from './place-model';
@@ -32,6 +32,19 @@ export interface PlaceTarget {
   readonly deviceName: string;
   /** `pairingKey` of the pairing a NAS disc was opened through (its places go to that pairing only); null otherwise. */
   readonly pairing: string | null;
+}
+
+/**
+ * Settings a launch hands to the player, applied once the disc has opened: a resumed place's (or Start from
+ * beginning's), an Up next card's, or the disc's defaults (spec 2026-10-20 §6.1, §6.3, §6.6).
+ */
+export interface LaunchSettings {
+  readonly settings: PlaceSettings;
+  /**
+   * Audio and PG chosen by language (`settingsForUpNext`): the settings are another playlist's. False when the launch's
+   * start already set them (PSR 1–3 or the saved registers).
+   */
+  readonly byLanguage: boolean;
 }
 
 export interface PlaceSaverDeps {
@@ -99,8 +112,6 @@ function failure(err: unknown): 'drop' | 'wait' | 'refused' {
 
 const TRANSIENT = new Set([404, 429, 502, 503, 504]);
 
-const isFontName = (name: string): boolean => FONT_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext));
-
 /**
  * Saves the open disc's place (spec 2026-10-20 §6.2): every 10 s while playing and at once on a pause, seek, track,
  * offset or shader change, or when the playlist changes (the one that stopped, where it stopped). Only a qualifying
@@ -121,6 +132,8 @@ export class PlaceSaver {
   /** `pairingKey` of the NAS pairing as last read (null: none; undefined: not read yet), for a send that can't wait. */
   private pairingNow: string | null | undefined = undefined;
   private readonly minUs: number;
+  /** The launch's settings until the player takes them, for the open they were given with. */
+  private launch: (LaunchSettings & { readonly discKey: string; readonly opens: number }) | null = null;
 
   constructor(private readonly deps: PlaceSaverDeps) {
     this.minUs = deps.minDurationUs ?? PLACE_MIN_DURATION_US;
@@ -130,8 +143,9 @@ export class PlaceSaver {
    * Starts saving for the disc just opened (call it right after the controller's open). A local disc without a
    * fingerprint (`d.` key, not remote) has nothing to be found by later, so nothing is saved for it.
    */
-  begin(target: PlaceTarget): void {
+  begin(target: PlaceTarget, launch?: LaunchSettings): void {
     this.end();
+    this.launch = launch ? { ...launch, discKey: target.discKey, opens: this.deps.discOpens() } : null;
     if (!target.remote && target.discKey.startsWith('d.')) return;
     this.target = { ...target, opens: this.deps.discOpens() };
     void this.currentPairing().catch(() => undefined); // known before a page-hide flush needs it
@@ -140,11 +154,24 @@ export class PlaceSaver {
 
   /** Stops saving (the disc closes); saves already started still land. */
   end(): void {
+    this.launch = null;
     this.stopTimer();
     this.target = null;
     this.seen = null;
     this.cached = null;
     this.sizes = {};
+  }
+
+  /** The launch's settings (once), while the disc they were given with is the one open; null otherwise. */
+  takeLaunchSettings(): (LaunchSettings & { readonly discKey: string }) | null {
+    const launch = this.launch;
+    this.launch = null;
+    return launch && launch.opens === this.deps.discOpens() ? { settings: launch.settings, byLanguage: launch.byLanguage, discKey: launch.discKey } : null;
+  }
+
+  /** The subtitle and font files kept on this device for a disc. */
+  storedTextFiles(discKey: string): Promise<StoredTextFile[]> {
+    return this.deps.store.textFiles(discKey);
   }
 
   /** Each snapshot of the player, with the shader set chosen. */

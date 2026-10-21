@@ -94,7 +94,7 @@ export function continueWatching(
     if (!place.finished) {
       items.push({
         kind: 'resume', discKey: place.discKey, discId: place.discId, playlistId: place.playlistId, timeUs: place.timeUs, durationUs: place.durationUs,
-        ...(slot ? catalogueFields(slot) : NO_CATALOGUE), updatedAt: place.updatedAt, deviceName: place.deviceName,
+        ...(slot ? catalogueFields(slot) : NO_CATALOGUE), updatedAt: place.updatedAt, deviceName: place.deviceName, settings: null,
       });
       continue;
     }
@@ -112,7 +112,7 @@ export function continueWatching(
     if (hasPlace) continue;
     items.push({
       kind: 'up-next', discKey: discKeyOf(ep.discId), discId: ep.discId, playlistId: ep.playlistId, timeUs: 0, durationUs: (ep.runtimeMin ?? 0) * 60_000_000,
-      ...catalogueFields(next), updatedAt: place.updatedAt, deviceName: place.deviceName,
+      ...catalogueFields(next), updatedAt: place.updatedAt, deviceName: place.deviceName, settings: place.settings,
     });
   }
   return items.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, CONTINUE_LIMIT);

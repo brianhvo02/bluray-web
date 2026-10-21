@@ -92,6 +92,7 @@ function PlayLink({ nas, places, controller, history, playingRoute, route, onLib
         disc={found}
         playlistId={route.playlistId ?? undefined}
         startTimeS={route.timeS ?? undefined}
+        resume={route.resume}
         history={history}
         playingRoute={playingRoute}
         places={places}

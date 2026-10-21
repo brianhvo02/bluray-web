@@ -5,6 +5,7 @@ import type { NasClient } from './nas/nas-client';
 import type { NasHistory } from './nas/nas-history';
 import type { NasRoute } from './nas/nas-route';
 import type { PlaceSaver } from './place-saver';
+import { LaunchSettingsApplier } from './place-apply';
 import type { PlayingRoute } from './nas/playing-route';
 import { RelayBadge } from './nas/RelayBadge';
 import type { ShaderModel, ShaderModelState } from './shader-model';
@@ -117,6 +118,22 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   // Each snapshot may save the place (spec 2026-10-20 §6.2).
   const shaderSet = shaderState.selected;
   useEffect(() => places.observe(snapshot, shaderSet), [places, snapshot, shaderSet]);
+  // A resumed (or carried-over) launch's settings, once the disc plays: volume, shader, tracks and subtitle files.
+  const shaderStateRef = useRef(shaderState);
+  shaderStateRef.current = shaderState;
+  const [launchSettings] = useState(
+    () =>
+      new LaunchSettingsApplier({
+        controller,
+        places,
+        // a set this device doesn't have stays unchosen, rather than chosen and missing
+        selectShader: (name) => {
+          if (name === null || shaderStateRef.current.sets.some((set) => set.name === name && set.available)) void shaderModel.select(name);
+        },
+        log: (message, err) => console.warn(message, err),
+      }),
+  );
+  useEffect(() => launchSettings.observe(snapshot, shaderSet), [launchSettings, snapshot, shaderSet]);
   /** The place is saved before the disc closes: its registers are read while it is still open. */
   const savePlaceAndEnd = useCallback((): void => {
     void places.flushNow({ keepalive: false });

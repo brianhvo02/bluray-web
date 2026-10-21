@@ -67,6 +67,12 @@ describe('continueWatching', () => {
     expect(item).toMatchObject({ kind: 'up-next', discId: 'dC', playlistId: '00001', seasonId: 's2', seasonNumber: 2, episode: 1 });
   });
 
+  it("carries the finished episode's settings on an Up next card, and none on a resume card", () => {
+    const chosen = { ...settings, audioLanguage: 'jpn', shaderSet: 'Mode A', volume: 0.5 };
+    const items = run([place('dB', '00001', { finished: true, settings: chosen, updatedAt: 2000 }), place('dZ', '00009')]);
+    expect(items.map((i) => [i.kind, i.settings])).toEqual([['up-next', chosen], ['resume', null]]);
+  });
+
   it('drops a series whose last episode is finished', () => {
     expect(run([place('dC', '00001', { finished: true })])).toEqual([]);
   });

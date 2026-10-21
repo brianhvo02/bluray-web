@@ -261,6 +261,23 @@ describe('PlaceSaver', () => {
     expect(local.store.queued.size).toBe(0);
   });
 
+  it("hands a launch's settings to the player once, only while the disc they came with is open", () => {
+    const t = setup();
+    const settings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 2, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: 'Mode A', volume: 0.5, muted: false };
+    const target: PlaceTarget = { discKey: KEY, discId: 'x', remote: true, chosen: '00001', mainPlaylistId: null, deviceName: 'iPad', pairing: KEY_A };
+    t.saver.begin(target, { settings, byLanguage: true });
+    expect(t.saver.takeLaunchSettings()).toEqual({ settings, byLanguage: true, discKey: KEY });
+    expect(t.saver.takeLaunchSettings()).toBeNull();
+    t.saver.begin(target, { settings, byLanguage: false });
+    t.setOpens(2); // another disc opened before the player took them
+    expect(t.saver.takeLaunchSettings()).toBeNull();
+    t.saver.begin({ ...target, remote: false, discKey: 'd.0123456789abcdef' }, { settings, byLanguage: false });
+    expect(t.saver.takeLaunchSettings()).toMatchObject({ discKey: 'd.0123456789abcdef' }); // applied even where nothing is saved
+    t.saver.begin(target, { settings, byLanguage: false });
+    t.saver.end();
+    expect(t.saver.takeLaunchSettings()).toBeNull();
+  });
+
   it('saves nothing for a local disc without a fingerprint', async () => {
     const t = setup({ remote: false, target: { discKey: 'd.0123456789abcdef' } });
     await t.play(20_000);

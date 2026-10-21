@@ -5,7 +5,7 @@ import { PlayingRoute } from './playing-route';
 const KEY = 'f.0123456789ABCDEF0123456789ABCDEF';
 
 /** The history's route and what was put in its place. */
-function fakeHistory(initial: NasRoute | null = { kind: 'play', discKey: KEY, playlistId: null, timeS: null }) {
+function fakeHistory(initial: NasRoute | null = { kind: 'play', discKey: KEY, playlistId: null, timeS: null, resume: false }) {
   const h = {
     current: initial,
     replaced: [] as NasRoute[],
@@ -56,7 +56,7 @@ describe('PlayingRoute', () => {
     expect(h.replaced).toEqual([]);
     at(5000);
     route.update(playing(5_900_000));
-    expect(h.replaced).toEqual([{ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 5 }]);
+    expect(h.replaced).toEqual([{ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 5, resume: false }]);
     at(5500);
     route.update(playing(6_400_000));
     at(10_000);
@@ -91,7 +91,7 @@ describe('PlayingRoute', () => {
   });
 
   it("leaves a link's time in place while its playlist starts, then writes the link's seek", () => {
-    const { h, route, at } = make({ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 600 });
+    const { h, route, at } = make({ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 600, resume: false });
     route.start(KEY);
     route.update(playing(0));
     expect(h.replaced).toEqual([]);
