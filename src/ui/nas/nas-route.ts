@@ -1,0 +1,98 @@
+import type { TitleKind } from '../../engine/disc/nas-api';
+
+export type NasRoute =
+  | { kind: 'library'; shelf: TitleKind | null; q: string }
+  | { kind: 'title'; titleId: string }
+  | { kind: 'season'; titleId: string; seasonKey: string }
+  | { kind: 'extras'; titleId: string }
+  | { kind: 'folders'; path: string }
+  | { kind: 'unsorted' }
+  | { kind: 'hidden' }
+  | { kind: 'settings' }
+  | { kind: 'play'; discKey: string; playlistId: string | null; timeS: number | null };
+
+const SHELVES: readonly string[] = ['series', 'movie', 'music'];
+const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
+
+function shelfOf(value: string | null): TitleKind | null {
+  return value !== null && SHELVES.includes(value) ? (value as TitleKind) : null;
+}
+
+function timeOf(value: string | null): number | null {
+  if (value === null || value.trim() === '') return null;
+  const n = Math.floor(Number(value));
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+/** The route a URL names; null when it is not under /nas. */
+export function parseNasRoute(url: URL): NasRoute | null {
+  const raw = url.pathname.split('/');
+  if (raw[0] !== '' || raw[1] !== 'nas') return null;
+  let seg: string[];
+  try {
+    seg = raw.slice(2).map(decodeURIComponent);
+  } catch {
+    return LIBRARY;
+  }
+  if (seg.length > 0 && seg[seg.length - 1] === '') seg.pop();
+  const params = url.searchParams;
+  const [head, a, b, c] = seg;
+  if (seg.length === 0) {
+    return { kind: 'library', shelf: shelfOf(params.get('shelf')), q: params.get('q') ?? '' };
+  }
+  if (head === 'title' && a) {
+    if (seg.length === 2) return { kind: 'title', titleId: a };
+    if (seg.length === 3 && b === 'extras') return { kind: 'extras', titleId: a };
+    if (seg.length === 4 && b === 'season' && c) return { kind: 'season', titleId: a, seasonKey: c };
+  } else if (head === 'folders') {
+    return { kind: 'folders', path: seg.slice(1).join('/') };
+  } else if (seg.length === 1 && (head === 'unsorted' || head === 'hidden' || head === 'settings')) {
+    return { kind: head };
+  } else if (head === 'play' && a && seg.length === 2) {
+    return { kind: 'play', discKey: a, playlistId: params.get('pl') || null, timeS: timeOf(params.get('t')) };
+  }
+  return LIBRARY;
+}
+
+const enc = (s: string): string => encodeURIComponent(s);
+
+/** Path and search for a route, without an origin. */
+export function nasRoutePath(route: NasRoute): string {
+  switch (route.kind) {
+    case 'library': {
+      const p = new URLSearchParams();
+      if (route.shelf) p.set('shelf', route.shelf);
+      if (route.q) p.set('q', route.q);
+      const s = p.toString();
+      return s ? `/nas?${s}` : '/nas';
+    }
+    case 'title':
+      return `/nas/title/${enc(route.titleId)}`;
+    case 'season':
+      return `/nas/title/${enc(route.titleId)}/season/${enc(route.seasonKey)}`;
+    case 'extras':
+      return `/nas/title/${enc(route.titleId)}/extras`;
+    case 'folders':
+      return route.path === '' ? '/nas/folders' : `/nas/folders/${route.path.split('/').map(enc).join('/')}`;
+    case 'unsorted':
+    case 'hidden':
+    case 'settings':
+      return `/nas/${route.kind}`;
+    case 'play': {
+      const p = new URLSearchParams();
+      if (route.playlistId) p.set('pl', route.playlistId);
+      if (route.timeS !== null) p.set('t', String(Math.floor(route.timeS)));
+      const s = p.toString();
+      return `/nas/play/${enc(route.discKey)}${s ? `?${s}` : ''}`;
+    }
+  }
+}
+
+/** The text after the first '#' of a catalogue season id. */
+export function seasonKeyOf(seasonId: string): string {
+  return seasonId.slice(seasonId.indexOf('#') + 1);
+}
+
+export function seasonIdOf(titleId: string, seasonKey: string): string {
+  return `${titleId}#${seasonKey}`;
+}
