@@ -12,6 +12,9 @@ Third-party code among those classes:
   GPLv2 with the Classpath Exception.
 - org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain
   notice (SAX_NOTICE).
+- sun/text/normalizer/** (behind java/text/Normalizer): derived from ICU4J, (C) Copyright IBM Corp. and others,
+  GPLv2 with the Classpath Exception in OpenJDK; the JDK's notice for ICU, with its permission notice, is
+  THIRD_PARTY_ICU (from the JDK's THIRD_PARTY_README).
 
 How classes.txt is collected: from HotSpot's -verbose:class in the libbluray harness (tools/bdj-classlib/collect.sh),
 run with no network, over the synthetic and local BD-J discs, the JVM conformance programs and, with the library

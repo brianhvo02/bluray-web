@@ -120,6 +120,12 @@ awk '/^%% This notice is provided with respect to the following which may be/ { 
      on && /^--- end of LICENSE ---$/ { exit }' "$JAVA_HOME/THIRD_PARTY_README" > $OUT/THIRD_PARTY_APACHE
 grep -q '^  Apache Xerces Java ' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache Xerces section" >&2; exit 1; }
 grep -q 'Apache License' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache License text" >&2; exit 1; }
+# the JDK's notice for ICU4J, which sun/text/normalizer (behind java.text.Normalizer) derives from: its section of
+# THIRD_PARTY_README, from its "%%" line to the end of its license text
+awk '/^%% This notice is provided with respect to ICU4C / { on = 1 }
+     on { print }
+     on && /^--- end of LICENSE ---$/ { exit }' "$JAVA_HOME/THIRD_PARTY_README" > $OUT/THIRD_PARTY_ICU
+grep -q 'International Business Machines Corporation' $OUT/THIRD_PARTY_ICU || { echo "THIRD_PARTY_README: no ICU section" >&2; exit 1; }
 cat > $OUT/SAX_NOTICE <<'EOF'
 The org/xml/sax classes in rt-bdj.jar are OpenJDK's copies of SAX (http://www.saxproject.org), which carry Oracle's
 GPLv2 with the Classpath Exception header and, below it, the SAX project's own notice, for example in
@@ -148,6 +154,9 @@ SNAPSHOT=20261015T000000Z
   echo "  GPLv2 with the Classpath Exception."
   echo "- org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain"
   echo "  notice (SAX_NOTICE)."
+  echo "- sun/text/normalizer/** (behind java/text/Normalizer): derived from ICU4J, (C) Copyright IBM Corp. and others,"
+  echo "  GPLv2 with the Classpath Exception in OpenJDK; the JDK's notice for ICU, with its permission notice, is"
+  echo "  THIRD_PARTY_ICU (from the JDK's THIRD_PARTY_README)."
   echo
   echo "How classes.txt is collected: from HotSpot's -verbose:class in the libbluray harness (tools/bdj-classlib/collect.sh),"
   echo "run with no network, over the synthetic and local BD-J discs, the JVM conformance programs and, with the library"
