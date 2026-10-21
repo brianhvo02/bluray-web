@@ -268,6 +268,14 @@ what would change that decision.
   through (`pointer-events: none`). The gate's fallback (tap Remote when the first tap opens nothing) tapped an
   idled-out control bar, so the tap fell through to the picture; it now shows the controls first and records what lay
   under the first tap (`firstTap.tapTarget`).
+- **Replays across a host sleep (5e, Task 7e).** Node's clock on macOS counts the time the machine sleeps. A replay
+  (`replayPlayerBdj`, the local menu tests, the library check's runs) that the host slept through found every wait
+  and timeout expired when it woke, and failed as a step or run timeout after about 1,000 s. That caused the ~1,100 s
+  A_NEW_ERA runs and the four local tests that failed at ~1,000 s during 5e Tasks 7b and 7c: each run's wall time
+  matches a lid-closed sleep in `pmset -g log`, and 120 loaded runs (76 of them jittered) never stalled. A turn of the
+  replay loop over 20 s (`LOOP_GAP_MS`) now ends the run at once as void, naming the gap and the CPU used in it; a busy
+  gap is reported as a blocked event loop instead. Keep the machine awake (`caffeinate -i`, lid open) for long local
+  runs.
 - **BD-J worker slow-read log (Task 14b).** The BD-J worker logs a slow disc read only at RemoteSource's waiting threshold (`WAITING_AFTER_MS`, 3 s), with how long it waited; reads from picked files (FileSource) are not timed.
 
 ## Audio

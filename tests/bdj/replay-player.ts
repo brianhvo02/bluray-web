@@ -29,6 +29,31 @@ const MENU_ANIMATED_MS = 30_000;
 /** One virtual-clock step: 5 render quanta of 128 frames at 48 kHz. */
 const STEP_MS = 640 / 48;
 
+/**
+ * A turn of the replay loop takes milliseconds; one this long means the run did not go on as it measures it. Node's
+ * clock on macOS counts the time the host is asleep, so after a sleep every wait and timeout in the run has expired at
+ * once (Task 7e: the ~1,000 s "hangs" were lid-closed sleeps). Under heavy load the longest turn seen was far below this.
+ */
+export const LOOP_GAP_MS = 20_000;
+
+/**
+ * Why a gap of `gapMs` between two turns of the replay loop, in which the process used `cpuMs` of CPU, voids the run;
+ * null for a gap under LOOP_GAP_MS. Little CPU: the process did not run (host sleep, or starved); busy: our own code
+ * held the event loop, which is a bug.
+ */
+export function loopGap(gapMs: number, cpuMs: number): string | null {
+  if (gapMs < LOOP_GAP_MS) return null;
+  const s = (ms: number, digits: number): string => (ms / 1000).toFixed(digits);
+  return cpuMs < gapMs / 2
+    ? `the process did not run for ${s(gapMs, 0)} s (${s(cpuMs, 2)} s of CPU): the host slept or was starved; the run is void`
+    : `the event loop was blocked for ${s(gapMs, 0)} s (${s(cpuMs, 1)} s of CPU): synchronous work held it`;
+}
+
+const cpuMsSince = (from: NodeJS.CpuUsage): number => {
+  const u = process.cpuUsage(from);
+  return (u.user + u.system) / 1000;
+};
+
 export interface PlayerBdjReplay {
   /** Java's calls that the engine answered, in reply order, in trace.patch's format. */
   readonly trace: TraceEntry[];
@@ -319,7 +344,12 @@ export async function replayPlayerBdj(
     stepFrom = { events: 0, flushes: 0, at: t0 };
     await player.handle({ type: 'open', disc: { kind: 'files', entries: await directoryEntries(dir) } });
     let tailFrom: number | null = null;
+    let turn = { at: performance.now(), cpu: process.cpuUsage() };
     for (;;) {
+      // before any wait or timeout is judged: after a host sleep they have all expired, and none of them is the cause
+      const gap = loopGap(performance.now() - turn.at, cpuMsSince(turn.cpu));
+      if (gap) throw fail(gap);
+      turn = { at: performance.now(), cpu: process.cpuUsage() };
       if (done && stepIdx >= script.length) {
         tailFrom ??= performance.now();
         if (performance.now() - tailFrom >= (opts.tailMs ?? 0)) break;
