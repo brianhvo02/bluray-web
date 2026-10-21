@@ -792,7 +792,12 @@ test('a device unpaired while on a NAS path goes back to the landing page', asyn
 
 /** The `f.` link key of disc1 (and its copies), as the app works it out from a manifest (whose paths are upper-case). */
 function disc1Key(): string {
-  const dir = join(REPO_ROOT, 'fixtures/synthetic/disc1/BDMV/STREAM');
+  return syntheticDiscKey('disc1');
+}
+
+/** The `f.` link key of a synthetic disc, worked out as `disc1Key` is. */
+function syntheticDiscKey(name: string): string {
+  const dir = join(REPO_ROOT, 'fixtures/synthetic', name, 'BDMV/STREAM');
   const files = readdirSync(dir).map((name) => ({ path: `BDMV/STREAM/${name.toUpperCase()}`, size: statSync(join(dir, name)).size }));
   const key = discKeyOf('0000000000000000', files);
   expect(key).toMatch(/^f\.[0-9A-F]{32}$/);
@@ -919,6 +924,18 @@ test("Back while a play link's disc opens closes it, and the screen Back went to
   await expect(playerState(page)).toHaveCount(0);
   await expect(page.getByTestId('season-screen')).toBeVisible();
   expect(pathOf(page)).toBe(seasonPath);
+});
+
+test('a play link starts at its time even when First Play plays something first', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  // disc-menu's First Play runs its top menu (playlist 00001); the link names the feature, 00000.
+  await page.goto(`/nas/play/${syntheticDiscKey('disc-menu')}?pl=00000&t=2&telemetry=1`);
+  await page.getByTestId('nas-play').click({ timeout: 15_000 });
+  await waitForPlaying(page);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 1_000, intervals: [100] }).toBeGreaterThanOrEqual(2_000_000);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
 });
 
 test('a play link with a bad time or playlist opens the disc without seeking', async ({ page, browserName }) => {
