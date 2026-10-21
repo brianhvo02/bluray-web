@@ -323,6 +323,13 @@ a { color: #6ea8ff; }
 @media (max-width: 600px) {
   .landing { padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
   .title-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 16px 12px; }
+  /* a compact pinned header: tighter rows, a smaller heading, and the shelves on one row that swipes sideways */
+  .titles-sticky { gap: 8px; padding-bottom: 8px; }
+  .titles-sticky h2 { font-size: 1.15em; }
+  .titles-sticky .title-search { padding-top: 6px; padding-bottom: 6px; }
+  .title-shelves { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; }
+  .title-shelves::-webkit-scrollbar { display: none; }
+  .title-shelves .title-chip { flex: none; }
   .series-poster { width: 96px; }
   .series-banner:has(.series-banner-art) + .series-head { margin-top: -48px; padding-left: 12px; }
   .owner-card { padding: 12px; }

@@ -650,7 +650,7 @@ test("an episode whose playlist isn't on its disc opens the disc normally, with 
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
 
-test('on a phone the alphabet bars sit clear of the list and answer a tap', async ({ browser, browserName }) => {
+test('on a phone the header is compact, and the alphabet bars sit clear of the list and answer a tap', async ({ browser, browserName }) => {
   // a touch phone's layout: coarse pointer, so every button gets its 44 px minimum
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, ...(browserName === 'firefox' ? {} : { isMobile: true }) });
   try {
@@ -670,6 +670,11 @@ test('on a phone the alphabet bars sit clear of the list and answer a tap', asyn
     expect(body!.x - (l!.x + l!.width)).toBeGreaterThanOrEqual(8);
     expect(r!.x - (body!.x + body!.width)).toBeGreaterThanOrEqual(8);
     expect(r!.x + r!.width).toBeLessThanOrEqual(390);
+    // the pinned header stays compact: heading, search and one row of shelves that swipes sideways
+    const header = (await page.getByTestId('titles-sticky').boundingBox())!;
+    expect(header.height).toBeLessThanOrEqual(170);
+    const shelves = await page.locator('.title-shelves [data-testid="title-shelf"]').evaluateAll((chips) => new Set(chips.map((c) => Math.round(c.getBoundingClientRect().top))).size);
+    expect(shelves).toBe(1);
     // Starfall Wanderer reads ほしふり: a tap on は re-sorts by reading, a tap on S back to A–Z
     const heading = page.locator('.title-section', { hasText: /^Series / });
     await right.locator('[data-rail-key="は"]').tap();
