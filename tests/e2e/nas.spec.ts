@@ -176,19 +176,20 @@ async function allowLocalNetwork(page: Page, browserName: string): Promise<void>
   if (browserName === 'chromium') await page.context().grantPermissions(['local-network-access']);
 }
 
-async function pairByLink(page: Page): Promise<void> {
+/** `query`: more of the app's flags (`&placemin=1`), read as it loads. */
+async function pairByLink(page: Page, query = ''): Promise<void> {
   const code = ownerCode();
-  await page.goto(`/?pair=${code}&telemetry=1`);
+  await page.goto(`/?pair=${code}&telemetry=1${query}`);
   await expect(page.getByTestId('pair-code')).toHaveValue(code);
   await page.getByTestId('pair-button').click();
   await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
 }
 
 /** Pairs, then opens the title library (an owner always has it). */
-async function openTitles(page: Page, browserName: string): Promise<void> {
+async function openTitles(page: Page, browserName: string, query = ''): Promise<void> {
   await libraryReady();
   await allowLocalNetwork(page, browserName);
-  await pairByLink(page);
+  await pairByLink(page, query);
   await page.getByTestId('nas-open').click();
   await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
 }
@@ -838,6 +839,29 @@ test('playing a NAS episode keeps a play link in the address bar', async ({ page
   await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
   await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(2);
   expect(playLinkOf(page).pl).toBe('00001');
+});
+
+test('watching a NAS episode saves its place on the NAS', async ({ page, browserName }) => {
+  await openTitles(page, browserName, '&placemin=1');
+  await skipWithoutH264(page);
+  const key = disc1Key();
+  await ownerApi(`me/playback/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(2_000_000);
+  await page.getByTestId('video-canvas').click(); // a pause saves at once
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  const place = async (): Promise<{ timeUs: number; deviceName: string; playlistId: string } | null> => {
+    const res = await ownerApi(`me/playback/${encodeURIComponent(key)}`);
+    if (res.status === 404) return null;
+    return ((await res.json()) as { places: Record<string, { timeUs: number; deviceName: string; playlistId: string }> }).places['00001'] ?? null;
+  };
+  await expect.poll(async () => (await place())?.timeUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(2_000_000);
+  expect(await place()).toMatchObject({ playlistId: '00001', deviceName: expect.any(String) });
+  await ownerApi(`me/playback/${encodeURIComponent(key)}`, { method: 'DELETE' });
 });
 
 test('a play link opens the pre-flight, then plays from its time', async ({ page, browserName }) => {

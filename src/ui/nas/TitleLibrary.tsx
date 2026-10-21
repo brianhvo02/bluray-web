@@ -10,6 +10,7 @@ import { useNasRoute, type NasHistory } from './nas-history';
 import { nasRoutePath, seasonIdOf, seasonKeyOf, type NasRoute } from './nas-route';
 import { Poster } from './Poster';
 import type { PlayingRoute } from './playing-route';
+import type { PlaceSaver } from '../place-saver';
 import { Preflight, type PreflightDisc } from './Preflight';
 import { SeasonScreen } from './SeasonScreen';
 import { SeriesScreen } from './SeriesScreen';
@@ -24,6 +25,8 @@ interface TitleLibraryProps {
   readonly history: NasHistory;
   /** Kept current by playback once a pre-flight here launches a disc. */
   readonly playingRoute: PlayingRoute;
+  /** Saves the place of the disc Play opens. */
+  readonly places: PlaceSaver;
   /** A pre-flight here is launching its disc: its play route is about to be pushed, with this screen still shown. */
   readonly onLaunch: () => void;
   /** From `GET me`: owners get the settings and the Unsorted shelf. */
@@ -164,7 +167,7 @@ function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
 }
 
 /** The NAS by title (spec §14, mockups 1–3): search, shelves, recently added and A–Z, then a title's seasons and discs. */
-export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch, owner, onOwnerLost, onGateClosed, onTitleMissing, onClose }: TitleLibraryProps): ReactElement {
+export function TitleLibrary({ nas, controller, history, playingRoute, places, onLaunch, owner, onOwnerLost, onGateClosed, onTitleMissing, onClose }: TitleLibraryProps): ReactElement {
   const routed = useNasRoute(history);
   // The play route a pre-flight here pushed keeps the screen it was opened on (and the pre-flight on it).
   const beforePlay = useRef<NasRoute>(LIBRARY);
@@ -406,6 +409,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
           playlistId={selected.playlistId}
           history={history}
           playingRoute={playingRoute}
+          places={places}
           onLaunch={onLaunch}
           onFacts={() => {}}
           onCancel={() => setSelected(null)}

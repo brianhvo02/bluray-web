@@ -18,8 +18,9 @@ import { RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
 import type { Library } from '../../../server/src/library';
 import { BdjStore } from '../../../server/src/bdj-store';
+import { PlaybackStore } from '../../../server/src/playback-store';
 import { Store } from '../../../server/src/store';
-import type { CodeLookup, CodeRoutes } from '../../engine/disc/nas-api';
+import type { CodeLookup, CodeRoutes, PlaceSettings, PlaybackPlace } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
 import { NAS_MESSAGES, NasClient, NasLostError, defaultDeviceName, groupCodeInput } from './nas-client';
 import type { NasClientDeps } from './nas-client';
@@ -92,8 +93,9 @@ function fakeServer(): FakeServer {
       listed.push(path);
       return { folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [] };
     },
+    evidence: () => [],
   } as unknown as Library;
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), publicBase: BASE, now });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), playbackStore: new PlaybackStore(tmp, { now }), publicBase: BASE, now });
   /** `GET /api/me` (the title routes need a title service), behind the token like the rest. */
   const me: Handler = async (_req, url) => {
     if (url.pathname === '/api/me') return json(200, { owner: true, titleLibrary: true, personName: 'Owner' });
@@ -758,6 +760,28 @@ function fakeObjectUrls(): NonNullable<NasClientDeps['objectUrls']> & { live: Se
 }
 
 describe('NasClient over WebRTC', () => {
+
+  it('sends places over the connection, without keepalive', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const inits: (RequestInit | undefined)[] = [];
+    const openRtc = async (o: RtcOpenOptions): Promise<RtcLink> => {
+      const link = await world.openRtc(o);
+      const inner = link.fetch;
+      const watching = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).includes('/me/playback/')) inits.push(init);
+        return inner(input, init);
+      }) as typeof fetch;
+      return Object.assign(Object.create(link) as RtcLink, { fetch: watching });
+    };
+    const nas = rtcClient(server, { openRtc });
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(await nas.putPlace(playbackPlace(), { keepalive: true })).toBe('stored');
+    expect(inits).toHaveLength(1);
+    expect(inits[0]?.keepalive).toBeUndefined();
+    expect((await nas.playbackPlaces(PLACE_KEY))?.places['00001']?.timeUs).toBe(5e6);
+    expect(Object.keys(server.hits)).toEqual([]); // nothing went over HTTPS
+  });
   it('pairs over WebRTC when the lookup has no HTTPS route, then reads me and the library on a new connection', async () => {
     const server = fakeServer();
     const world = rtcWorld(server);
@@ -969,6 +993,72 @@ describe('NasClient over WebRTC', () => {
       turnProofMessage({ sid, ts: Number(proof.ts) }),
     );
     expect(ok).toBe(true);
+  });
+});
+
+const PLACE_KEY = `f.${'C'.repeat(32)}`;
+const placeSettings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
+const playbackPlace = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
+  discKey: PLACE_KEY, discId: '0123456789abcdef', playlistId: '00001', timeUs: 5e6, durationUs: 1440e6, finished: false,
+  mode: 'none', title: null, psrs: [0, 1], gprs: null, settings: placeSettings, updatedAt: clock - 1000, deviceName: 'iPad', ...over,
+});
+
+describe('NasClient places', () => {
+  it("stores this person's places on the NAS, answers stale for an older one, and reads and deletes them", async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    expect(await nas.playbackPlaces(PLACE_KEY)).toBeNull();
+    expect(await nas.putPlace(playbackPlace())).toBe('stored');
+    expect(await nas.putPlace(playbackPlace({ playlistId: '00002', updatedAt: clock - 500 }))).toBe('stored');
+    expect(await nas.putPlace(playbackPlace({ timeUs: 1e6, updatedAt: clock - 2000 }))).toBe('stale');
+    const places = await nas.playbackPlaces(PLACE_KEY);
+    expect(places?.places['00001']?.timeUs).toBe(5e6);
+    expect(Object.keys(places!.places).sort()).toEqual(['00001', '00002']);
+    expect((await nas.continueWatching()).map((c) => [c.kind, c.playlistId])).toEqual([['resume', '00002'], ['resume', '00001']]);
+    await nas.deletePlace(PLACE_KEY, '00002');
+    expect(Object.keys((await nas.playbackPlaces(PLACE_KEY))!.places)).toEqual(['00001']);
+    await nas.deletePlace(PLACE_KEY);
+    expect(await nas.playbackPlaces(PLACE_KEY)).toBeNull();
+    expect(await nas.titleProgress('anilist:1')).toBeNull(); // no title library on this NAS
+  });
+
+  it('refuses a malformed place with the error the NAS gives', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await expect(nas.putPlace(playbackPlace({ playlistId: 'a/b' }))).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('sends a place with keepalive over HTTPS when asked, never one too large for it', async () => {
+    const server = fakeServer();
+    const sent: (boolean | undefined)[] = [];
+    const watching = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/me/playback/')) sent.push(init?.keepalive);
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    const nas2 = new NasClient({ fetch: watching, subtle: crypto.subtle, store: memoryStore(), now, rendezvousUrl: RENDEZVOUS });
+    await nas2.pair(await server.code(), 'iPad');
+    expect(await nas2.putPlace(playbackPlace(), { keepalive: true })).toBe('stored');
+    expect(await nas2.putPlace(playbackPlace({ updatedAt: clock - 900 }))).toBe('stored');
+    const gprs = Object.fromEntries(Array.from({ length: 4096 }, (_, i) => [i, 0x7fffffff]));
+    expect(await nas2.putPlace(playbackPlace({ updatedAt: clock - 800, mode: 'hdmv', title: 1, gprs }), { keepalive: true })).toBe('stored');
+    expect(sent).toEqual([true, undefined, undefined]);
+  });
+
+  it('tells its listeners when a session starts, so places waiting on the device can go', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const started = vi.fn();
+    const off = nas.onSession(started);
+    await nas.session();
+    await nas.session(); // reused: no new session
+    expect(started).toHaveBeenCalledTimes(1);
+    off();
+    clock += 56 * MINUTE;
+    await nas.session();
+    expect(started).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -5,13 +5,14 @@ import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { BufferRequest, StartPoint } from '../../engine/protocol';
 import type { PlayerController } from '../../player/player-controller';
 import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, storageRoom, tooBigCopy, waitCopy, watchBufferFailure, type BufferPlan } from './buffer-model';
-import { discBadges, discFacts, formatSize, mainPlaylist, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
+import { discBadges, discFacts, formatSize, mainPlaylist, mainPlaylistId, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
 import { NasHttpError, type NasClient } from './nas-client';
 import { useNasRoute, type NasHistory } from './nas-history';
 import type { NasRoute } from './nas-route';
 import { noticeMissingStart } from './missing-start-notice';
 import type { PlayingRoute } from './playing-route';
+import { LOCAL_DEVICE_NAME, type PlaceSaver } from '../place-saver';
 
 /** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
 export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
@@ -27,6 +28,8 @@ interface PreflightProps {
   /** Play goes into the address bar as the disc's play route, which `playingRoute` then keeps current. */
   readonly history: NasHistory;
   readonly playingRoute: PlayingRoute;
+  /** Saves the launched disc's place, here and on the NAS. */
+  readonly places: PlaceSaver;
   /** Play is about to push the play route: the screen holding this pre-flight keeps it shown on that route. */
   readonly onLaunch?: () => void;
   /** Whether the disc is UHD, once its manifest has shown it (for the row's badge). */
@@ -51,7 +54,7 @@ const ASK_EVERY_WAIT = new URLSearchParams(globalThis.location?.search ?? '').ge
  * connection is slower than the main title (buffer first), Play buffers ahead first: silently for a short wait, else
  * after asking (Wait, or Play now with pauses); a device that can't hold the wait offers pauses.
  */
-export function Preflight({ nas, controller, disc, playlistId, startTimeS, history, playingRoute, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
+export function Preflight({ nas, controller, disc, playlistId, startTimeS, history, playingRoute, places, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
   const route = useNasRoute(history);
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
   /** The disc's link key, from its manifest: `f.<fingerprint>`, else `d.<disc id>`. */
@@ -200,8 +203,8 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
       history.push({ kind: 'play', discKey, playlistId: playlistId ?? null, timeS: null });
     }
     const id = ++launch.current;
-    Promise.all([nas.discBase(disc.id), nas.session()]).then(
-      ([base, session]) => {
+    Promise.all([nas.discBase(disc.id), nas.session(), nas.pairing()]).then(
+      ([base, session, pairing]) => {
         if (id !== launch.current) return;
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
@@ -209,6 +212,10 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
         // A playlist (an episode, a play link) opens the disc there, in the engine: First Play never runs first.
         const start: StartPoint | undefined = playlistId === undefined ? undefined : { playlistId, timeUs: (startTimeS ?? 0) * 1e6, hdmv: null, playback: null };
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst, start);
+        places.begin({
+          discKey, discId: disc.id, remote: true, chosen: playlistId ?? null, mainPlaylistId: mainPlaylistId(manifest),
+          deviceName: pairing?.deviceName ?? LOCAL_DEVICE_NAME,
+        });
         if (bufferFirst && !hold) controller.cancelBuffer(); // play now: the queued open doesn't wait for its fill
         releaseWait.current?.();
         releaseWait.current = start === undefined ? null : noticeMissingStart(controller);
