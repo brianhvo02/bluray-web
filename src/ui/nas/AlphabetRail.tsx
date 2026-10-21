@@ -1,4 +1,5 @@
 import { useRef, type PointerEvent, type ReactElement } from 'react';
+import { RAIL_PICK_EVENT, TOUCH_LOG } from '../TouchLog';
 
 interface AlphabetRailProps {
   /** Every key, in order; those not in `present` show dimmed and do nothing. */
@@ -12,6 +13,9 @@ interface AlphabetRailProps {
   readonly onPick: (key: string) => void;
 }
 
+/** How long after a pointer pick the same tap's click may arrive. */
+const CLICK_AFTER_POINTER_MS = 700;
+
 /**
  * A bar of index keys down one side of the library: a tap jumps to a key, and a finger or pointer dragged along the bar
  * jumps through the keys it passes, as on a phone's contacts list.
@@ -19,6 +23,12 @@ interface AlphabetRailProps {
 export function AlphabetRail({ keys, present, active, side, label, lang, onPick }: AlphabetRailProps): ReactElement {
   /** The key the current drag last jumped to, so a drag within one key jumps once. */
   const last = useRef<string | null>(null);
+  /** When a pointer last picked a key: the click that follows the same tap is not a second pick. */
+  const pickedAt = useRef(-Infinity);
+  const jump = (key: string): void => {
+    if (TOUCH_LOG) window.dispatchEvent(new CustomEvent(RAIL_PICK_EVENT, { detail: key }));
+    onPick(key);
+  };
 
   const keyAt = (e: PointerEvent): string | null => {
     const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-rail-key]');
@@ -28,7 +38,8 @@ export function AlphabetRail({ keys, present, active, side, label, lang, onPick 
   const pick = (key: string | null): void => {
     if (key === null || key === last.current) return;
     last.current = key;
-    onPick(key);
+    pickedAt.current = performance.now();
+    jump(key);
   };
 
   return (
@@ -60,9 +71,10 @@ export function AlphabetRail({ keys, present, active, side, label, lang, onPick 
           aria-disabled={!present.has(key)}
           tabIndex={present.has(key) ? 0 : -1}
           aria-label={`Jump to ${key}`}
-          // pointer taps jump on pointerdown; a click from the keyboard (Enter, Space) has no pointer before it
-          onClick={(e) => {
-            if (e.detail === 0 && present.has(key)) onPick(key);
+          // a tap jumps on pointerdown; its click jumps only when no pointer event came first (Enter or Space, or a
+          // browser that delivers a tap's click without its pointer events)
+          onClick={() => {
+            if (present.has(key) && performance.now() - pickedAt.current > CLICK_AFTER_POINTER_MS) jump(key);
           }}
         >
           {key}

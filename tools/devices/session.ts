@@ -245,11 +245,11 @@ export class DeviceSession {
   }
 
   /**
-   * A native touch at page (CSS viewport) coordinates. Safari's toolbars move the page on screen, so each tap first
-   * calibrates: a probe element fixed at the viewport's corner is found in the accessibility tree, which gives the
-   * page's offset and scale on screen.
+   * Runs `touch` in the native context with a function from page (CSS viewport) coordinates to screen points. Safari's
+   * toolbars move the page on screen, so it first calibrates: a probe element fixed at the viewport's corner is found
+   * in the accessibility tree, which gives the page's offset and scale on screen.
    */
-  async tap(x: number, y: number): Promise<void> {
+  private async onScreen(touch: (at: (x: number, y: number) => { x: number; y: number }) => Promise<void>): Promise<void> {
     const id = `devices-calibrate-${Date.now()}`;
     await this.evaluate(
       `(() => { const e = document.createElement('div'); e.id = ${JSON.stringify(id)}; e.setAttribute('role', 'button'); e.setAttribute('aria-label', ${JSON.stringify(id)});` +
@@ -268,12 +268,30 @@ export class DeviceSession {
         }
       }
       if (!rect) throw new Error('could not find the calibration element on screen');
-      const scale = rect.width / 100;
-      await this.call('POST', '/execute/sync', { script: 'mobile: tap', args: [{ x: rect.x + x * scale, y: rect.y + y * scale }] });
+      const found = rect;
+      const scale = found.width / 100;
+      await touch((x, y) => ({ x: found.x + x * scale, y: found.y + y * scale }));
     } finally {
       await this.enterWebview();
       await this.evaluate(`(document.getElementById(${JSON.stringify(id)})?.remove(), true)`).catch(() => undefined);
     }
+  }
+
+  /** A native touch at page (CSS viewport) coordinates. */
+  async tap(x: number, y: number): Promise<void> {
+    await this.onScreen((at) => this.call('POST', '/execute/sync', { script: 'mobile: tap', args: [at(x, y)] }));
+  }
+
+  /**
+   * A native finger drag from one page point to another over `ms`, as a person scrolls: Safari scrolls the page itself
+   * (outside the page's script), unlike `scrollTo`.
+   */
+  async swipe(from: { x: number; y: number }, to: { x: number; y: number }, ms = 300): Promise<void> {
+    await this.onScreen(async (at) => {
+      const a = at(from.x, from.y);
+      const b = at(to.x, to.y);
+      await this.call('POST', '/execute/sync', { script: 'mobile: dragFromToForDuration', args: [{ fromX: a.x, fromY: a.y, toX: b.x, toY: b.y, duration: ms / 1000 }] });
+    });
   }
 
   /** The centre (page coordinates) of the first visible element `selector` matches. */

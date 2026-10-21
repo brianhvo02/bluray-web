@@ -9,6 +9,7 @@
  *   --until <js-expression>   poll until the expression is truthy (--timeout ms applies; default 60000)
  *   --tap x,y                 tap at page (CSS viewport) coordinates, as a real touch (it counts as a user gesture)
  *   --tap-on <css selector>   tap the centre of the first visible element the selector matches
+ *   --swipe x1,y1,x2,y2       drag a finger between two page points over 300 ms, as a person scrolls
  *   --wait <ms>               sleep
  *   --screenshot <out.png>    the device screen
  *   --telemetry <out.json>    window.__blurayTelemetry (the page needs ?telemetry=1)
@@ -114,7 +115,7 @@ export function safariCaps(target: DeviceTarget): Record<string, unknown> {
   return caps;
 }
 
-type Step = { kind: 'until' | 'tap' | 'tap-on' | 'wait' | 'screenshot' | 'telemetry' | 'eval'; arg: string };
+type Step = { kind: 'until' | 'tap' | 'tap-on' | 'swipe' | 'wait' | 'screenshot' | 'telemetry' | 'eval'; arg: string };
 
 export interface Options {
   device: string;
@@ -125,10 +126,10 @@ export interface Options {
   steps: Step[];
 }
 
-const STEP_FLAGS = new Set(['until', 'tap', 'tap-on', 'wait', 'screenshot', 'telemetry', 'eval']);
+const STEP_FLAGS = new Set(['until', 'tap', 'tap-on', 'swipe', 'wait', 'screenshot', 'telemetry', 'eval']);
 const OPTION_FLAGS = new Set(['device', 'url', 'timeout', 'call-timeout', 'console']);
 const USAGE =
-  'usage: run.ts --device <udid|"sim:<name>"> --url <url> [--until js] [--tap x,y] [--tap-on selector] [--wait ms] [--screenshot out.png] [--telemetry out.json] [--eval js] [--console out.txt] [--timeout ms] [--call-timeout ms]';
+  'usage: run.ts --device <udid|"sim:<name>"> --url <url> [--until js] [--tap x,y] [--tap-on selector] [--swipe x1,y1,x2,y2] [--wait ms] [--screenshot out.png] [--telemetry out.json] [--eval js] [--console out.txt] [--timeout ms] [--call-timeout ms]';
 
 /** A positive whole number of milliseconds, or an error naming the flag. */
 export function parseMs(flag: string, value: string): number {
@@ -174,6 +175,11 @@ async function runStep(session: DeviceSession, step: Step, timeoutMs: number): P
     case 'tap-on': {
       const p = await session.locate(step.arg);
       await session.tap(p.x, p.y);
+      return;
+    }
+    case 'swipe': {
+      const [x1, y1, x2, y2] = step.arg.split(',').map(Number);
+      await session.swipe({ x: x1!, y: y1! }, { x: x2!, y: y2! });
       return;
     }
     case 'wait':

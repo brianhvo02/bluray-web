@@ -8,6 +8,7 @@ import { getNasHistory, useNasRoute } from './nas/nas-history';
 import { idbNasStore } from './nas/nas-store';
 import { PlayingRoute } from './nas/playing-route';
 import { PlayerScreen } from './PlayerScreen';
+import { TOUCH_LOG, TouchLog } from './TouchLog';
 import { idbShaderLibrary } from './shader-library';
 import { ShaderModel } from './shader-model';
 import { isWaitingWorker, reloadAction, shouldPromptUpdate } from './update-prompt';
@@ -135,6 +136,7 @@ export function App(): ReactElement {
   const waitingWorker = useWaitingWorker();
   return (
     <div className="app" data-testid="app">
+      {TOUCH_LOG && <TouchLog />}
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 ? (
         <LandingScreen controller={controller} snapshot={snapshot} nas={nas} history={history} playingRoute={playingRoute} pairCode={pairCode} onPairCodeSpent={spendPairCode} />

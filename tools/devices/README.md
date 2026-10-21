@@ -43,6 +43,7 @@ npx tsx tools/devices/run.ts --device "sim:iPhone 17" \
 - `--until <js>` polls until the expression is truthy. `--timeout <ms>` sets how long it waits (default 60000).
 - `--tap x,y` taps at page coordinates, in the CSS pixels of `clientX`/`clientY`.
 - `--tap-on <css selector>` taps the centre of the first visible match.
+- `--swipe x1,y1,x2,y2` drags a finger between two page points over 300 ms. Safari scrolls the page itself, as for a person, unlike a scripted `scrollTo`.
 - `--wait <ms>` sleeps.
 - `--screenshot <png>` saves the device screen.
 - `--telemetry <json>` saves `window.__blurayTelemetry`; the URL needs `?telemetry=1`.

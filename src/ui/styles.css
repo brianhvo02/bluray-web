@@ -122,6 +122,8 @@ a { color: #6ea8ff; }
 @media (hover: hover) { .alphabet-rail-key:where(:hover:not([aria-disabled='true'])) { background: #26262c; color: #e8e8ea; } }
 .alphabet-rail.active .alphabet-rail-key:not([aria-disabled='true']) { color: #6ea8ff; }
 .alphabet-rail-key[aria-disabled='true'] { opacity: 0.3; cursor: default; }
+/* test-only (?touchlog=1): the touch log over the page, taking no input */
+.touch-log { position: fixed; z-index: 100; left: 8px; right: 8px; bottom: calc(96px + env(safe-area-inset-bottom)); margin: 0; padding: 6px 8px; font: 11px/1.35 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: #9fe89f; background: rgba(0, 0, 0, 0.82); border-radius: 6px; pointer-events: none; }
 .titles-actions { display: flex; gap: 8px; }
 .title-icon-button { flex: none; min-width: 36px; }
 .title-search { box-sizing: border-box; width: 100%; padding: 8px 14px; border-radius: 999px; }
