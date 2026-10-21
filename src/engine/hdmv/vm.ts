@@ -582,6 +582,20 @@ export class HdmvVm {
     return this.resumeFromPlayPl();
   }
 
+  /**
+   * Not in libbluray: puts the VM where it would be had movie object `object` just executed the PLAY_PL* at `pc`, so
+   * that the end of the playlist (resume()) continues at `pc + 1`. Used to resume a title at a saved place.
+   */
+  resumeInto(object: number, pc: number): void {
+    const target = this.movieObjects.objects[object];
+    if (!target) return;
+    this.freeIgObject();
+    this.suspendedObject = null;
+    this.object = null;
+    this.playingObject = target;
+    this.playingPc = pc;
+  }
+
   /** hdmv_vm_suspend_pl */
   suspendPlaylist(): number {
     if (this.object || this.igObject) return -1;

@@ -17,6 +17,18 @@ export const PSR = {
   REGION: 20, OUTPUT_PREFER: 21, '3D_STATUS': 22, PROFILE_VERSION: 31,
 } as const;
 
+/** The player-setting PSRs that bd_psr_write refuses: 13, 15-21, 23-31 and 48-61. */
+export const SETTING_PSRS: ReadonlySet<number> = new Set([
+  13, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+  48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
+]);
+
+/** Every register's value: all PSRs, and the GPRs that are not zero. */
+export interface RegisterSnapshot {
+  readonly psrs: readonly number[];
+  readonly gprs: Readonly<Record<number, number>>;
+}
+
 export type PsrEventType = 'save' | 'write' | 'change' | 'restore';
 export interface PsrEvent { readonly type: PsrEventType; readonly psr: number; readonly oldValue: number; readonly newValue: number }
 export interface RegisterWrite { readonly kind: 'gpr' | 'psr'; readonly index: number; readonly value: number }
@@ -120,7 +132,7 @@ export class RegisterFile {
 
   /** bd_psr_write: refuses the player-setting registers. */
   psrWrite(i: number, v: number): number {
-    if (i === 13 || (i >= 15 && i <= 21) || (i >= 23 && i <= 31) || (i >= 48 && i <= 61)) return -2;
+    if (SETTING_PSRS.has(i)) return -2;
     return this.psrSettingWrite(i, v);
   }
 
@@ -156,6 +168,30 @@ export class RegisterFile {
   private profileUpgradable(): boolean {
     const profile = this.psrRead(PSR.PROFILE_VERSION);
     return (profile & PROFILE_VERSION_MASK) < 0x0300 && !(profile & PROFILE_3D_FLAG);
+  }
+
+  /** Not in libbluray: every PSR, and the non-zero GPRs, for resuming a disc later. */
+  snapshot(): { psrs: number[]; gprs: Record<number, number> } {
+    const gprs: Record<number, number> = {};
+    for (let i = 0; i < GPR_COUNT; i++) if (this.gpr[i] !== 0) gprs[i] = this.gpr[i]!;
+    return { psrs: Array.from(this.psr), gprs };
+  }
+
+  /**
+   * Not in libbluray: writes a snapshot back. Every PSR not in `skip` goes through psrSettingWrite and every GPR that
+   * the snapshot sets, or that must become zero, through gprWrite, so listeners, the trace hook and the shared mirror
+   * see the usual writes.
+   */
+  load(s: RegisterSnapshot, skip: ReadonlySet<number>): void {
+    for (let i = 0; i < PSR_COUNT; i++) {
+      const v = s.psrs[i];
+      if (v !== undefined && !skip.has(i)) this.psrSettingWrite(i, v >>> 0);
+    }
+    for (let i = 0; i < GPR_COUNT; i++) {
+      const v = s.gprs[i];
+      if (v !== undefined) this.gprWrite(i, v >>> 0);
+      else if (this.gpr[i] !== 0) this.gprWrite(i, 0);
+    }
   }
 
   /** bd_psr_save_state: PSR4-8 to PSR36-40, PSR10-12 to PSR42-44. */
