@@ -1289,6 +1289,8 @@ test('NAS settings list own titles, to rename, change seasons and delete after a
 });
 
 const NOT_FOUND_COPY = "This link is for a NAS this device isn't paired with. Ask its owner to send you an invite.";
+const MISSING_COPY = "Your NAS doesn't have what this link points to. It may have been removed or renamed, or the link may be for a different NAS.";
+const CLOSED_COPY = "The NAS owner hasn't opened the title library to this device, so this link can't open here. You can still browse the NAS by folder.";
 
 test('a NAS link on an unpaired device asks for an invite', async ({ page }) => {
   await page.goto('/nas/title/anilist%3A1');
@@ -1301,14 +1303,14 @@ test('a NAS link on an unpaired device asks for an invite', async ({ page }) => 
   expect(pathOf(page)).toBe('/');
 });
 
-test('a link to something the NAS does not have shows the same screen', async ({ page, browserName }) => {
+test('a link to something the NAS does not have says so, and leads back to the library', async ({ page, browserName }) => {
   await libraryReady();
   await allowLocalNetwork(page, browserName);
   await pairByLink(page);
   await page.goto('/nas/play/d.0000000000000000');
-  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(MISSING_COPY, { timeout: 15_000 });
   await page.goto('/nas/title/anilist%3A999999999');
-  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(MISSING_COPY, { timeout: 15_000 });
   // Paired, the button leads back to the library instead of the pair screen.
   await page.getByRole('button', { name: 'Back to the library' }).click();
   await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
@@ -1338,9 +1340,9 @@ test('a guest behind the closed title gate gets not-found for a title link', asy
     await exclusivelyAsync('gate', async () => {
       await setGate('owners');
       await guest.goto('/nas/title/anilist%3A1');
-      await expect(guest.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+      await expect(guest.getByTestId('nas-not-found').locator('p')).toHaveText(CLOSED_COPY, { timeout: 15_000 });
       await expect(guest.getByTestId('nas-crumbs')).toHaveCount(0);
-      await guest.getByRole('button', { name: 'Back to the library' }).click();
+      await guest.getByRole('button', { name: 'Browse by folder' }).click();
       await expect(guest.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 15_000 });
       expect(new URL(guest.url()).pathname).toBe('/nas/folders');
       await guest.goto('/nas');

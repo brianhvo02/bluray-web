@@ -55,7 +55,7 @@ function PlayLink({ nas, controller, history, playingRoute, route, onLibrary }: 
   }, [nas, route.discKey, attempt]);
   const back = useCallback(() => history.back(LIBRARY), [history]);
   if (found === undefined) return <p className="status">Loading…</p>;
-  if (found === null) return <NasNotFound paired onPair={onLibrary} />;
+  if (found === null) return <NasNotFound reason="missing" onLeave={onLibrary} />;
   if (typeof found === 'string') {
     return (
       <div className="error-banner" role="alert" data-testid="nas-error">
@@ -429,7 +429,7 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
           )}
         </div>
       )}
-      {pairing === null && browsing && !pairRequested && <NasNotFound paired={false} onPair={pairFromNotFound} />}
+      {pairing === null && browsing && !pairRequested && <NasNotFound reason="unpaired" onLeave={pairFromNotFound} />}
       {pairing !== undefined &&
         !(pairing === null && browsing && !pairRequested) &&
         (pairing === null || pairRequested ? (
@@ -464,8 +464,8 @@ export function LandingScreen({ controller, snapshot, nas, history, playingRoute
           </p>
         ))}
       {paired && playLink !== null && <PlayLink nas={nas} controller={controller} history={history} playingRoute={playingRoute} route={playLink} onLibrary={libraryFromNotFound} />}
-      {paired && shown !== null && playLink === null && guestOnTitleRoute && <NasNotFound paired onPair={libraryFromNotFound} />}
-      {paired && shown !== null && playLink === null && titleMissing && !guestOnTitleRoute && <NasNotFound paired onPair={libraryFromNotFound} />}
+      {paired && shown !== null && playLink === null && guestOnTitleRoute && <NasNotFound reason="closed" onLeave={libraryFromNotFound} />}
+      {paired && shown !== null && playLink === null && titleMissing && !guestOnTitleRoute && <NasNotFound reason="missing" onLeave={libraryFromNotFound} />}
       {paired && shown !== null && playLink === null && !guestOnTitleRoute && !titleMissing && (shown.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
         // A guest behind the closed gate on any other route: the folders where it browsed last.
         <LibraryScreen
