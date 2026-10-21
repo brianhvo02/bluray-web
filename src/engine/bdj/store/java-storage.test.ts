@@ -42,6 +42,8 @@ const PROBE = assembleClass('StoreProbe', [
 ]);
 
 class OneScopeStore implements BdjStore {
+  // counted as the NAS counts it (ruling R24): a new file needs room for its tar header
+  readonly quotaAccounting = 'tar';
   stored: Snapshot = { files: [{ path: '4001/save', mtime: 1_600_000_000_000, bytes: new Uint8Array([42, 1, 2]) }] };
   etag = 'e0';
   saves = 0;
@@ -108,8 +110,12 @@ describe('Java and the storage scopes', () => {
 
   it('gets an IOException (no space) for a write that needs more room once the NAS is full (its 507), and room again after', async () => {
     sync.full('persistent/7fff0123', true);
+    // a new file: refused at its open, for its tar header (a FileNotFoundException naming a full disk, as open(2) does)
     const message = await call<JObject | null>('fill', '(Ljava/lang/String;I)Ljava/lang/String;', '/persistent/7fff0123/4001/more', 1);
-    expect(message && jvm.heap.jsString(message)).toBe('No space left on device');
+    expect(message && jvm.heap.jsString(message)).toBe('/persistent/7fff0123/4001/more (No space left on device)');
+    // a file there already: refused at the write that needs another block
+    const grow = await call<JObject | null>('fill', '(Ljava/lang/String;I)Ljava/lang/String;', '/persistent/7fff0123/4001/small', 600);
+    expect(grow && jvm.heap.jsString(grow)).toBe('No space left on device');
     // what is there stays readable
     expect(await call<number>('first', '(Ljava/lang/String;)I', '/persistent/7fff0123/4001/save')).toBe(42);
     sync.full('persistent/7fff0123', false);

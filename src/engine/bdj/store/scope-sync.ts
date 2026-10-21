@@ -52,6 +52,26 @@ interface ScopeState {
   readonly refused: Set<string>;
 }
 
+/**
+ * The store's "full" (or "room again") per scope, passed to ScopeSync.full: a 507 of the boot's put can come before
+ * the scopes are in the VFS, so it is kept until `attach`.
+ */
+export class FullRelay {
+  private sync: Pick<ScopeSync, 'full'> | null = null;
+  private readonly early = new Map<string, boolean>();
+
+  full(scope: string, full: boolean): void {
+    if (this.sync) this.sync.full(scope, full);
+    else this.early.set(scope, full);
+  }
+
+  attach(sync: Pick<ScopeSync, 'full'>): void {
+    this.sync = sync;
+    for (const [scope, full] of this.early) sync.full(scope, full);
+    this.early.clear();
+  }
+}
+
 export class ScopeSync {
   private readonly states: ScopeState[];
   private vfs: ScopeVfs | null = null;
@@ -272,6 +292,6 @@ export class ScopeSync {
   private outside(path: string): void {
     if (this.outsideLogged || !(path.startsWith('/persistent/') || path.startsWith('/buda/'))) return;
     this.outsideLogged = true;
-    this.deps.log(`BD-J storage: ${path} is outside the disc's storage scopes; it lasts until BD-J stops`);
+    this.deps.log(`BD-J storage: ${path} is outside the disc's storage scopes; it lasts until BD-J stops`, true);
   }
 }

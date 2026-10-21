@@ -441,7 +441,13 @@ export class Vfs {
     return true;
   }
 
-  /** The lengths of the files that count toward the quota of `dir` (setQuota); 0 without one. */
+  /** Whether a quota (setQuota) has no room for a new, empty file at `path` (its tar header): a full disk's ENOSPC. */
+  quotaRefusesNewFile(path: string): boolean {
+    const q = this.quotaFor(this.canonicalize(path));
+    return q !== null && q.used + q.cost(0) > q.limit;
+  }
+
+  /** What the files that count toward the quota of `dir` (setQuota) add up to, as it counts them; 0 without one. */
   quotaUsed(dir: string): number {
     const canon = this.canonicalize(dir);
     return this.quotas.find((q) => q.dir === canon)?.used ?? 0;

@@ -10,6 +10,8 @@ import { IDBFactory } from 'fake-indexeddb';
 import { listTar } from '../../../server/src/tar';
 import { FAKE_NAS_BASE, fakeNas } from '../../../tests/helpers/fake-nas';
 import { startStoreNas } from '../../../tests/helpers/store-nas';
+import { IdbBdjStore } from './store/idb-store';
+import { personSource } from './store/nas-store';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries, syntheticSource } from '../../../tests/helpers/synthetic-disc';
 import type { BdjStore, LoadedSnapshot, SaveResult, Snapshot } from './store/bdj-store';
@@ -390,4 +392,49 @@ describe('runBdjWorker and the storage scopes', () => {
       await nas.close();
     }
   }, 180_000);
+
+  it("makes Java's scope full on a 507 from the boot's put", async () => {
+    const nas = await startStoreNas({ scopeLimit: 64 * 1024 });
+    try {
+      const files = fixtureDiscFiles('disc-bdj-store');
+      const storeApi = FAKE_NAS_BASE.replace(/discs\/[^/]+\/$/, '');
+      const mika = await nas.person('Mika');
+      const disc = fakeNas(files, mika.token);
+      const fetch = ((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        return url.startsWith(storeApi) && !url.startsWith(FAKE_NAS_BASE) ? nas.fetch(nas.api + url.slice(storeApi.length), init) : disc.fetch(input, init);
+      }) as typeof globalThis.fetch;
+      // the last session left a pending copy too big for the NAS's scope: the boot merges it and puts it at once (507)
+      const idb = new IDBFactory();
+      await new IdbBdjStore(personSource(mika.personId), idb).save('persistent/7fff0002', { files: [{ path: '4001/big', mtime: 1_000, bytes: new Uint8Array(70 * 1024) }] }, null, { pending: true });
+      const received: FromBdj[] = [];
+      const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+      runBdjWorker(port, { fetch, indexedDB: idb, createStore: () => null });
+      port.onmessage!({
+        data: {
+          type: 'boot',
+          registers: createRegisterBuffer(),
+          status: createStatusBlock(),
+          plane: createGraphicsPlane(),
+          disc: disc.spec,
+          readAheadBytes: 1024 * 1024,
+          discId: null,
+          classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+        },
+      });
+      await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      const at = (pred: (m: FromBdj) => boolean): number => received.findIndex(pred);
+      const refused = at((m) => m.type === 'log' && m.line.startsWith('BD-J storage: persistent/7fff0002 was not put on the NAS') && m.error);
+      const attached = at((m) => m.type === 'unsaved');
+      const full = at((m) => m.type === 'log' && m.line.startsWith('BD-J storage: persistent/7fff0002 is full') && m.error);
+      // (whether the 507 came before the scopes were attached depends on how fast the JDK starts: FullRelay's own test
+      // pins the early case)
+      expect(refused).toBeGreaterThanOrEqual(0);
+      expect(full).toBeGreaterThan(Math.max(attached, refused));
+      port.onmessage!({ data: { type: 'stop' } });
+      await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }), { timeout: 10_000 });
+    } finally {
+      await nas.close();
+    }
+  }, 90_000);
 });

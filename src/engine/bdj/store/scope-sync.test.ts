@@ -6,7 +6,7 @@ import { Vfs } from '../jvm/vfs';
 import { ZipArchive } from '../jvm/zip';
 import { ScopeQuotaError, type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot } from './bdj-store';
 import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore } from './idb-store';
-import { SAVE_DEBOUNCE_MS, ScopeSync } from './scope-sync';
+import { FullRelay, SAVE_DEBOUNCE_MS, ScopeSync } from './scope-sync';
 import type { StoreScope } from './scopes';
 
 const rtBdj = ZipArchive.open(readFileSync(fileURLToPath(new URL('../../../bdj-classlib/rt-bdj.jar', import.meta.url))));
@@ -59,10 +59,13 @@ interface Setup {
   readonly lines: string[];
   readonly unsaved: boolean[];
   readonly clock: { t: number };
+  /** The lines logged as errors. */
+  readonly errors: string[];
 }
 
 async function setup(store: BdjStore, opts: { quotaBytes?: number; scopes?: StoreScope[]; memLimitBytes?: number } = {}): Promise<Setup> {
   const lines: string[] = [];
+  const errors: string[] = [];
   const unsaved: boolean[] = [];
   const clock = { t: 1_700_000_000_000 };
   const sync = await ScopeSync.load(opts.scopes ?? [PERSISTENT, BUDA], {
@@ -71,7 +74,10 @@ async function setup(store: BdjStore, opts: { quotaBytes?: number; scopes?: Stor
       const id = setTimeout(fn, ms);
       return () => clearTimeout(id);
     },
-    log: (l) => lines.push(l),
+    log: (l, error) => {
+      lines.push(l);
+      if (error) errors.push(l);
+    },
     onUnsaved: (u) => unsaved.push(u),
     ...(opts.quotaBytes !== undefined ? { quotaBytes: opts.quotaBytes } : {}),
   });
@@ -86,7 +92,7 @@ async function setup(store: BdjStore, opts: { quotaBytes?: number; scopes?: Stor
   });
   sync.attach(vfs);
   s = sync;
-  return { vfs, sync, lines, unsaved, clock };
+  return { vfs, sync, lines, unsaved, clock, errors };
 }
 
 function write(vfs: Vfs, path: string, text: string): boolean {
@@ -238,13 +244,14 @@ describe('ScopeSync', () => {
 
   it('logs once a write outside the scopes, which lasts the session only', async () => {
     const store = new MemoryStore();
-    const { vfs, sync, lines } = await setup(store);
+    const { vfs, sync, lines, errors } = await setup(store);
     write(vfs, '/persistent/stray.txt', '1');
     write(vfs, '/buda/1234/x', '1');
     write(vfs, '/tmp/x', '1');
     await sync.flush();
     expect(store.saves).toEqual([]);
     expect(lines).toEqual(["BD-J storage: /persistent/stray.txt is outside the disc's storage scopes; it lasts until BD-J stops"]);
+    expect(errors).toEqual(lines); // not kept: an error
   });
 
   it('saves again after its stored record disappears: the retry creates it, and later saves go on', async () => {
@@ -361,5 +368,18 @@ describe('ScopeSync', () => {
     expect(read(next.vfs, '/persistent/7fff0123/4001/count')).toBe('1');
     const nas = await setup(new IdbBdjStore('nas:abc', idb));
     expect(read(nas.vfs, '/persistent/7fff0123/4001/count')).toBe('<missing>');
+  });
+});
+
+describe('FullRelay (a 507 heard during the boot)', () => {
+  it('keeps the full state of a scope until the scopes are attached, then passes it on, and later ones at once', () => {
+    const relay = new FullRelay();
+    const calls: [string, boolean][] = [];
+    relay.full('persistent/7fff0123', true); // the boot's put, before ScopeSync exists
+    expect(calls).toEqual([]);
+    relay.attach({ full: (scope, full) => void calls.push([scope, full]) });
+    expect(calls).toEqual([['persistent/7fff0123', true]]);
+    relay.full('persistent/7fff0123', false);
+    expect(calls).toEqual([['persistent/7fff0123', true], ['persistent/7fff0123', false]]);
   });
 });

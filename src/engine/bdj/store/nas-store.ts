@@ -49,6 +49,25 @@ export class NasStoreError extends Error {
   }
 }
 
+/**
+ * The device is no longer the person a write was meant for (the NAS session's X-Bdj-Person guard answered 409
+ * `person-changed`, or `GET me` named someone else before the write): nothing was written.
+ */
+export class PersonChangedError extends NasStoreError {
+  constructor(message = 'this device now belongs to another person on the NAS') {
+    super(409, message);
+    this.name = 'PersonChangedError';
+  }
+}
+
+/** The request header naming the person a write is for (the NAS store contract's X-Bdj-Person guard). */
+export const PERSON_HEADER = 'X-Bdj-Person';
+
+/** Per write, before each PUT is sent (503 retries included): throws (PersonChangedError) to send nothing. */
+export interface SaveOptions {
+  readonly beforePut?: () => Promise<void>;
+}
+
 /** The NAS API base (`…/api/`) of a disc's base (`…/api/discs/<id>/`, RemoteDiscSpec.base); null for another shape. */
 export function storeApiBase(discBase: string): string | null {
   const m = /^(.*\/)discs\/[^/]+\/$/.exec(discBase);
@@ -65,6 +84,7 @@ export interface NasBdjStoreDeps {
   /** Waits out a 503's Retry-After; setTimeout by default. */
   readonly sleep?: (ms: number) => Promise<void>;
   readonly timeoutMs?: number;
+  readonly log?: (line: string, error?: boolean) => void;
 }
 
 /**
@@ -78,6 +98,10 @@ export class NasBdjStore implements BdjStore {
   readonly quotaAccounting = 'tar';
   private token: string;
   private refreshing: Promise<string> | null = null;
+  /** Sent as X-Bdj-Person on every write once known (setPerson). */
+  private person: string | null = null;
+  /** The fallback without X-Bdj-Person was logged (once). */
+  private headerFallbackLogged = false;
 
   constructor(
     readonly apiBase: string,
@@ -88,6 +112,11 @@ export class NasBdjStore implements BdjStore {
 
   setToken(token: string): void {
     this.token = token;
+  }
+
+  /** The person every write is for (X-Bdj-Person): a NAS with the guard refuses it (409) once the token is someone else's. */
+  setPerson(personId: string): void {
+    this.person = personId;
   }
 
   /** Whose device this is: null when the server keeps no people (the dev disc server, an older NAS). */
@@ -108,14 +137,14 @@ export class NasBdjStore implements BdjStore {
     return { files: sortFiles(files), etag: etag ?? null };
   }
 
-  async save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult> {
+  async save(scope: string, snapshot: Snapshot, etag: string | null, opts: SaveOptions = {}): Promise<SaveResult> {
     const body = writeTar(snapshot.files);
     // the NAS refuses an archive over 16 MB (`>`, so exactly 16 MB is taken): refused here, without the 507's round trip
     if (body.length > SCOPE_QUOTA_BYTES) throw new NasQuotaError(scope, body.length, 'scope');
     const res = await this.send('PUT', `bdj-store/${scope}`, {
       'Content-Type': 'application/x-tar',
       ...(etag !== null ? { 'If-Match': etag } : { 'If-None-Match': '*' }),
-    }, body);
+    }, body, opts.beforePut);
     switch (res.status) {
       case 200: {
         const next = res.headers.get('ETag');
@@ -128,6 +157,16 @@ export class NasBdjStore implements BdjStore {
         await discard(res, null);
         const now = await this.load(scope);
         return { conflict: now };
+      }
+      case 409: {
+        let error: unknown = null;
+        try {
+          error = ((await res.json()) as { error?: unknown }).error;
+        } catch {
+          // no JSON body
+        }
+        if (error === 'person-changed') throw new PersonChangedError(`${scope}: the NAS refused the write: this device now belongs to another person`);
+        throw new NasStoreError(409, `${scope}: HTTP 409${typeof error === 'string' ? `: ${error}` : ''}`);
       }
       case 507: {
         let limit: 'scope' | 'person' = 'scope';
@@ -144,11 +183,18 @@ export class NasBdjStore implements BdjStore {
   }
 
   /** One request, with a fresh token after a 401 (once) and again after a 503's Retry-After. */
-  private async send(method: 'GET' | 'PUT', path: string, headers: Record<string, string> = {}, body?: Uint8Array<ArrayBuffer>): Promise<Response> {
+  private async send(
+    method: 'GET' | 'PUT',
+    path: string,
+    headers: Record<string, string> = {},
+    body?: Uint8Array<ArrayBuffer>,
+    beforePut?: () => Promise<void>,
+  ): Promise<Response> {
     let refreshed = false;
     for (let busy = 0; ; ) {
       const token = this.token;
-      const res = await this.request(method, path, token, headers, body);
+      if (method === 'PUT') await beforePut?.();
+      const res = await this.write(method, path, token, headers, body);
       if (res.status === 401) {
         await discard(res, null);
         if (refreshed || !this.deps.refreshToken) throw new NasStoreError(401, 'this device is no longer paired with the NAS');
@@ -170,6 +216,26 @@ export class NasBdjStore implements BdjStore {
         await discard(res, null);
         await (this.deps.sleep ?? sleep)(Number.isFinite(seconds) && seconds >= 0 && res.headers.has('Retry-After') ? seconds * 1000 : 1000);
         continue;
+      }
+      return res;
+    }
+  }
+
+  /** A request, a write carrying X-Bdj-Person while the server takes it. */
+  private async write(method: 'GET' | 'PUT', path: string, token: string, headers: Record<string, string>, body?: Uint8Array<ArrayBuffer>): Promise<Response> {
+    if (method === 'GET' || this.person === null) return this.request(method, path, token, headers, body);
+    try {
+      return await this.request(method, path, token, { ...headers, [PERSON_HEADER]: this.person }, body);
+    } catch (e) {
+      if (!(e instanceof NasStoreError) || e.status !== null) throw e;
+      // unreachable with the header: a server from before the guard refuses it in CORS (the browser then sends nothing),
+      // which a page cannot tell from a network failure. This one write goes again without it, right after the caller's
+      // own check of whose device this is (beforePut); the next write tries the header first again, so a server with
+      // the guard keeps it for every write that reaches it
+      const res = await this.request(method, path, token, headers, body);
+      if (!this.headerFallbackLogged) {
+        this.headerFallbackLogged = true;
+        this.deps.log?.(`BD-J storage: a write with the ${PERSON_HEADER} header did not reach the NAS, and went without it (a server from before its guard)`, true);
       }
       return res;
     }
@@ -230,7 +296,7 @@ export function personSource(personId: string): string {
 }
 
 export interface WriteAheadDeps {
-  readonly nas: Pick<NasBdjStore, 'load' | 'save'>;
+  readonly nas: Pick<NasBdjStore, 'load'> & { save(scope: string, snapshot: Snapshot, etag: string | null, opts?: SaveOptions): Promise<SaveResult> };
   /** This person's write-ahead copies (personSource). */
   readonly local: IdbBdjStore;
   /** The disc's browser-only records from before (`nas:<discId>`, scopes.ts storeSource), moved to the NAS once. */
@@ -330,6 +396,12 @@ export class WriteAheadNasStore implements BdjStore {
       if (pending) this.retryLater();
       return { files: state.local.files, etag };
     }
+    // the GET went with the token as it is now: if the device moved to another person since the boot asked, that is
+    // their snapshot, never merged into this person's copy
+    if (!(await this.samePerson())) {
+      if (!this.moved && rec === null && legacyEtag === null) throw new NasStoreError(null, `${scope}: whose device this is could not be checked, and this browser has no copy`);
+      return { files: state.local.files, etag };
+    }
     state.nasEtag = remote.etag;
     if (pending) {
       // the last session's changes the NAS did not get: merged as on a 412 (newer mtime wins, ties ours) and put now
@@ -410,14 +482,25 @@ export class WriteAheadNasStore implements BdjStore {
       return false;
     }
     if (now === this.deps.personId) return true;
-    if (!this.moved) {
-      this.moved = true;
-      this.deps.log(
-        `BD-J storage: this device now belongs to another person on the NAS; this session's saved data stays in this browser for the person it was written for, and is not put on the NAS`,
-        true,
-      );
-    }
+    this.personMoved();
     return false;
+  }
+
+  /** samePerson for a PUT about to go: throws PersonChangedError (or the check's failure) instead of answering false. */
+  private async assertSamePerson(): Promise<void> {
+    if (this.moved) throw new PersonChangedError();
+    if (!this.deps.whoAmI) return;
+    if ((await this.deps.whoAmI()) !== this.deps.personId) throw new PersonChangedError();
+  }
+
+  /** Nothing more goes to the NAS this session (logged as an error once). */
+  private personMoved(detail?: string): void {
+    if (this.moved) return;
+    this.moved = true;
+    this.deps.log(
+      `BD-J storage: this device now belongs to another person on the NAS${detail ? ` (${detail})` : ''}; this session's saved data stays in this browser for the person it was written for, and is not put on the NAS`,
+      true,
+    );
   }
 
   private state(scope: string): WriteAheadScope {
@@ -487,7 +570,8 @@ export class WriteAheadNasStore implements BdjStore {
         snapshot = mergeSnapshots(snapshot, remote).merged;
       }
       for (let attempt = 1; ; attempt++) {
-        const result = await nas.save(scope, snapshot, state.nasEtag);
+        // right before each PUT (503 retries too): still this person's device
+        const result = await nas.save(scope, snapshot, state.nasEtag, { beforePut: () => this.assertSamePerson() });
         if ('etag' in result) {
           state.nasEtag = result.etag;
           break;
@@ -501,6 +585,11 @@ export class WriteAheadNasStore implements BdjStore {
         if (attempt >= PUSH_ATTEMPTS) throw new Error(`still changed elsewhere after ${attempt} tries`);
       }
     } catch (e) {
+      if (e instanceof PersonChangedError) {
+        // kept pending under the person it was written for; never marked as on the NAS
+        this.personMoved(e.message);
+        return;
+      }
       if (e instanceof ScopeQuotaError) {
         // not retried on a timer: room comes back only when Java frees some (the next save) or elsewhere (the next
         // flush or boot puts it again)
@@ -519,6 +608,8 @@ export class WriteAheadNasStore implements BdjStore {
       state.full = false;
       this.deps.onFull?.(scope, false);
     }
+    // a move between the last check and the PUT (a NAS without the guard takes it): not marked as on this person's NAS
+    if (!(await this.samePerson())) return;
     log(`BD-J storage: ${scope} is on the NAS (${snapshot.files.length} files, ${snapshotBytes(snapshot)} bytes)`);
     try {
       if (state.gen === gen && state.localEtag !== null) {
@@ -622,6 +713,7 @@ export class NasDiscStore implements BdjStore {
       log('BD-J storage: the disc server keeps no saved data per person; this browser keeps it');
       return legacy;
     }
+    nas.setPerson(me.personId);
     return new WriteAheadNasStore({
       nas,
       local: new IdbBdjStore(personSource(me.personId), idb),

@@ -22,7 +22,7 @@ import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
 import type { BdjStore } from './store/bdj-store';
 import { NasBdjStore, NasDiscStore, storeApiBase } from './store/nas-store';
-import { ScopeSync } from './store/scope-sync';
+import { FullRelay, ScopeSync } from './store/scope-sync';
 import { discScopes, storeSource } from './store/scopes';
 import { WorkerBdjHost } from './worker-host';
 import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
@@ -150,7 +150,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let store: BdjStore | null = null;
   let nasStore: NasBdjStore | null = null;
   /** The NAS's full or not full per scope, heard before `sync` was there (applied once it is). */
-  const fullBeforeSync = new Map<string, boolean>();
+  const fullRelay = new FullRelay();
   /** Saves what Java changed, then has the store pass on what it holds (a NAS disc's write-ahead copy). */
   const flushStorage = async (): Promise<void> => {
     await sync?.flush();
@@ -315,8 +315,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       if (ended) return;
       scopes?.attach(rt.jvm.opts.vfs!);
       sync = scopes;
-      for (const [scope, full] of fullBeforeSync) scopes?.full(scope, full);
-      fullBeforeSync.clear();
+      if (scopes) fullRelay.attach(scopes);
       // the engine hears that this session has scopes: its stop then always waits for the save (`stop`, `stopped`)
       if (scopes) port.postMessage({ type: 'unsaved', unsaved: false });
       await rt.boot();
@@ -335,7 +334,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const createStore = (m: BootMessage, fetchFn: typeof fetch): BdjStore | null => {
     const apiBase = m.disc.kind === 'remote' ? storeApiBase(m.disc.base) : null;
     if (m.disc.kind !== 'remote' || !options.indexedDB || apiBase === null) return options.createStore?.(storeSource(m.disc)) ?? null;
-    nasStore = new NasBdjStore(apiBase, { fetch: fetchFn, token: latestToken ?? m.disc.token, refreshToken: () => tokens.request() });
+    const log = (line: string, error?: boolean): void => port.postMessage({ type: 'log', line, error: error ?? false });
+    nasStore = new NasBdjStore(apiBase, { fetch: fetchFn, token: latestToken ?? m.disc.token, refreshToken: () => tokens.request(), log });
     return new NasDiscStore({
       nas: nasStore,
       idb: options.indexedDB,
@@ -345,9 +345,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         return () => clearTimeout(id);
       },
       // straight to the engine, as ScopeSync's: puts still run after a stop or a failure has ended the session
-      log: (line, error) => port.postMessage({ type: 'log', line, error: error ?? false }),
+      log,
       // a 507 of the boot's put can come before the scopes are in the VFS: kept until they are
-      onFull: (scope, full) => (sync ? sync.full(scope, full) : fullBeforeSync.set(scope, full)),
+      onFull: (scope, full) => fullRelay.full(scope, full),
     });
   };
 
