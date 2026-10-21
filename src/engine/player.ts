@@ -2358,11 +2358,13 @@ export class Player {
     const audioType = s.audioActive ? this.audioCodingTypeAt(s, t) : null;
     if (audioType !== null) {
       // The decoder may take a while to load (first WASM compile): stop the old audio and clock and show buffering meanwhile.
+      // The clock holds at the target, as libbluray's position moves at once in _seek_internal and _open_playlist: ticks
+      // meanwhile (paused, as a BD-J playlist opens) must not report marks or a position of the old place or playlist.
       this.wantPlaying = false;
       this.setState(autoplay ? 'buffering' : 'paused');
       this.presenter.clear();
       this.ring?.setPlaying(false);
-      this.clock.useWall(this.clock.nowUs(), false);
+      this.clock.useWall(t, false);
       try {
         await this.loadAudioDecoder(s, audioType);
       } catch (err) {

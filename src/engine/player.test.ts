@@ -1430,6 +1430,31 @@ describe('Player with HDMV navigation', () => {
     }
   });
 
+  it('reads the new position while a seek waits for its audio decoder: no mark of the old position (_seek_internal)', async () => {
+    let gate: Promise<void> = Promise.resolve();
+    const reached = vi.spyOn(Navigator.prototype, 'markReached');
+    try {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], {
+        audioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4)],
+        createAudioDecoder: (codingType) => fakeAudioFactory(undefined, gate)(codingType),
+      });
+      await untilPlaying(h);
+      await h.play(3300);
+      await h.player.handle({ type: 'pause' });
+      let open: () => void = () => undefined;
+      gate = new Promise<void>((r) => (open = r));
+      reached.mockClear();
+      const seeking = h.player.handle({ type: 'seek', timeUs: 500_000 });
+      await h.play(100); // paused, its decoder still loading: the navigator is told about the new position only
+      expect(reached).not.toHaveBeenCalled();
+      expect((h.player as unknown as { clock: { nowUs(): number } }).clock.nowUs()).toBe(500_000);
+      open();
+      await seeking;
+    } finally {
+      reached.mockRestore();
+    }
+  });
+
   const twoLanguages = [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })];
 
   it('routes a user audio change through PSR1', async () => {
