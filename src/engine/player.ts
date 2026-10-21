@@ -103,6 +103,8 @@ export interface PlayerDeps {
   readonly loadClassLibrary?: () => Promise<ClassLibrarySource>;
   /** One-shot timer, cancelled by the returned function (the BD-J first-playlist timeout); setTimeout by default. */
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
+  /** The wall clock the BD-J start-up timeout counts on, through a host sleep (ruling R22); Date.now by default. */
+  readonly wallMs?: () => number;
   /** The BD-J runtime's log lines (Java's System.out and uncaught exceptions). */
   readonly bdjLog?: (line: string, error: boolean) => void;
   /** bd_set_player_setting_str's languages and country, written to the program's registers when a BD-J title is entered. */
@@ -421,6 +423,8 @@ export class Player {
   private bdj: BdjTitle | null = null;
   /** Taps on a BD-J menu that brought no reaction (telemetry). */
   private bdjTapsIgnored = 0;
+  /** The page is hidden (the `visibility` command): a BD-J session's start-up timeout is paused. */
+  private pageHidden = false;
   /** The open disc's no-picture notice: not sent yet, shown, or cleared by a playlist with a picture (never sent again). */
   private noPictureNotice: 'unsent' | 'shown' | 'cleared' = 'unsent';
   /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
@@ -504,6 +508,12 @@ export class Player {
       this.bdj?.session.flush();
       return Promise.resolve();
     }
+    // a hidden page pauses the BD-J start-up timeout at once, whatever the queue holds (ruling R22)
+    if (cmd.type === 'visibility') {
+      this.pageHidden = cmd.hidden;
+      this.bdj?.session.setHidden(cmd.hidden);
+      return Promise.resolve();
+    }
     // a bufferFirst open waits for its fill: cancelling can't wait in the queue behind it
     if (cmd.type === 'cancelBuffer') {
       const hold = this.openHold;
@@ -541,6 +551,7 @@ export class Player {
         case 'remoteToken':
         case 'cancelBuffer':
         case 'flushSaves':
+        case 'visibility':
           break; // handled at once
         case 'bufferAhead':
           await this.fill(cmd, false);
@@ -1228,6 +1239,8 @@ export class Player {
       },
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,
+      ...(this.deps.wallMs ? { wallMs: this.deps.wallMs } : {}),
+      hidden: this.pageHidden,
       memory: this.bdjBudgets(),
       ...(this.deps.memoryTelemetry
         ? {

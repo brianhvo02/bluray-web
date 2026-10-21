@@ -670,6 +670,11 @@ export class PlayerController {
     this.post({ type: 'flushSaves' });
   }
 
+  /** The page was hidden or shown (document.hidden): a BD-J title's start-up timeout counts only visible time. */
+  setVisibility(hidden: boolean): void {
+    this.post({ type: 'visibility', hidden });
+  }
+
   /** Tells the engine which memory limits to use (sent once, before a disc opens). */
   setMemoryProfile(profile: MemoryProfileName): void {
     this.post({ type: 'setMemoryProfile', profile });

@@ -276,6 +276,15 @@ what would change that decision.
   replay loop over 20 s (`LOOP_GAP_MS`) now ends the run at once as void, naming the gap and the CPU used in it; a busy
   gap is reported as a blocked event loop instead. Keep the machine awake (`caffeinate -i`, lid open) for long local
   runs.
+- **The BD-J start-up timeout counts only visible, awake time (5e, Task 7f, ruling R22).** The 20 s timeout (ruling
+  R7: no playlist selected, no visible plane and no background still since the boot) is spent in ticks of at most 1 s
+  (`STARTUP_TICK_MS`, `session.ts`) on the wall clock (`PlayerDeps.wallMs`, `Date.now`). While the page is hidden
+  (the `visibility` command, sent at start and on every `visibilitychange`) no time is counted and no tick runs; a page
+  shown again sets a fresh tick, since browsers throttle a hidden page's timers. A tick that comes 5 s or more later
+  than it was set for (`STARTUP_SLEEP_GAP_MS`: the host slept, or the engine worker did not run) restarts the 20 s and
+  logs `BD-J start-up timeout restarted`. A hang while visible and awake still falls back at 20 s, after the thread
+  dump. *Revisit if* a blocked engine worker (not a sleep) turns out to hold a hung boot past 20 s for long: each
+  restart needs a 5 s gap, so only a worker that keeps stalling for 5 s at a time would delay the fallback.
 - **A context passed to doPrivileged is always honoured (5e, Ruling R20).** Our `doPrivileged(action, context)` keeps a
   caller-supplied `AccessControlContext` as the privileged context whoever made it. HotSpot honours one that is not
   authorized only when the caller's domain implies `SecurityPermission "createAccessControlContext"`; otherwise it

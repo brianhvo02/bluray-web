@@ -88,6 +88,8 @@ interface HarnessOptions {
   /** A worker the test drives by hand instead of the in-process one. */
   readonly worker?: WorkerLike;
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
+  /** PlayerDeps.wallMs: the BD-J start-up timeout's clock (a VirtualClock's nowMs with its setTimer). */
+  readonly wallMs?: () => number;
   readonly playerSettings?: PlayerSettings;
   readonly compositor?: CompositorLike;
   readonly decodeImage?: DecodeImage;
@@ -131,6 +133,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
     createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
     setTimer: opts.setTimer ?? (() => () => undefined),
+    ...(opts.wallMs ? { wallMs: opts.wallMs } : {}),
     createBdjWorker: () => {
       workers++;
       if (opts.worker) return opts.worker;
@@ -522,7 +525,7 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
   it('falls back with a timeout bdj-failed 20,000 ms after a boot that never completes', async () => {
     const clock = new VirtualClock();
     const w = handWorker();
-    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer });
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, wallMs: clock.nowMs });
     await vi.waitFor(() => expect(w.sent.map((m) => m.type)).toEqual(['boot']));
     clock.advance(19_999);
     expect(notices(h)).not.toContain('bdj-failed');
@@ -538,11 +541,27 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(w.terminated()).toBe(true);
   });
 
+  it('a hidden page pauses the start-up timeout (the visibility command, ruling R22), before and after the open', async () => {
+    const clock = new VirtualClock();
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, wallMs: clock.nowMs });
+    await vi.waitFor(() => expect(w.sent.map((m) => m.type)).toEqual(['boot']));
+    clock.advance(10_000);
+    await h.player.handle({ type: 'visibility', hidden: true });
+    clock.advance(120_000);
+    expect(w.sent.some((m) => m.type === 'dump')).toBe(false);
+    await h.player.handle({ type: 'visibility', hidden: false });
+    clock.advance(9_999);
+    expect(w.sent.some((m) => m.type === 'dump')).toBe(false);
+    clock.advance(1);
+    expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
   /** A booted hand-driven title on a virtual timer clock, and its plane's writer. */
   async function bootedOnClock(): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; clock: VirtualClock; writer: GraphicsPlaneWriter }> {
     const clock = new VirtualClock();
     const w = handWorker();
-    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap });
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, wallMs: clock.nowMs, decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap });
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
     const boot = w.sent.find((m) => m.type === 'boot')!;
     if (boot.type !== 'boot') throw new Error('no boot');

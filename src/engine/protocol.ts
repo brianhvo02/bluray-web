@@ -210,7 +210,12 @@ export type EngineCommand =
    * The page is going away (pagehide, or hidden): a BD-J title saves what its disc wrote under /persistent/ and /buda/
    * now rather than at the end of its 2 s debounce. Handled at once, not queued.
    */
-  | { readonly type: 'flushSaves' };
+  | { readonly type: 'flushSaves' }
+  /**
+   * The page was hidden or shown again (document.hidden; sent at start and on every visibilitychange). A BD-J title's
+   * start-up timeout counts only visible time (ruling R22). Handled at once, not queued.
+   */
+  | { readonly type: 'visibility'; readonly hidden: boolean };
 
 export type EngineEvent =
   /** `bdjSupported`: this engine runs BD-J titles. */

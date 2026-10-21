@@ -82,7 +82,7 @@ afterEach(() => {
   for (const s of sessions.splice(0)) s.stop();
 });
 
-function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) => GOLDEN_RETURNS[c.name] ?? 0, time45 = 0n): Harness {
+function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) => GOLDEN_RETURNS[c.name] ?? 0, time45 = 0n, extra: { readonly hidden?: boolean } = {}): Harness {
   const calls: Call[] = [];
   const failures: [BdjFailureCode, string][] = [];
   const logs: string[] = [];
@@ -103,7 +103,9 @@ function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) 
     onFailed: (code, message) => void failures.push([code, message]),
     onLog: (line) => void logs.push(line),
     nowMs: clock.nowMs,
+    wallMs: clock.nowMs,
     setTimer: clock.setTimer,
+    ...extra,
   });
   sessions.push(s);
   return { session: s, calls, failures, logs, clock, status: new StatusBlockReader(statusBuf) };
@@ -196,6 +198,59 @@ describe('BdjSession rules', () => {
     f.emit({ type: 'dumped' });
     expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
     expect(f.terminated()).toBe(true);
+  });
+
+  it('counts only visible time: hidden for 60 s mid-boot, no fallback; then 20 s of visible time in all (ruling R22)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(5_000);
+    h.session.setHidden(true);
+    h.clock.advance(60_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.session.setHidden(false);
+    h.clock.advance(14_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+  });
+
+  it('a session made while the page is hidden waits for it to be shown', () => {
+    const f = fakeWorker();
+    const h = session(f.worker, undefined, 0n, { hidden: true });
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(120_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.session.setHidden(false);
+    h.clock.advance(20_000);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it('a host sleep (a wall-clock gap of 5 s beyond a tick) restarts the budget instead of firing (ruling R22)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(15_000);
+    h.clock.sleep(1_000_000); // the clock moves on, no timer fires until the host wakes
+    h.clock.advance(0);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    expect(h.logs).toContain('BD-J start-up timeout restarted: the host did not run for 1000 s');
+    h.clock.advance(19_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    // a gap under 5 s beyond the tick is ordinary lateness and counts
+    const g = fakeWorker();
+    const k = session(g.worker);
+    void k.session.boot(DISC, 0, null, CLASSES);
+    k.clock.advance(15_000);
+    k.clock.sleep(4_000); // 3 s late beyond its 1 s tick
+    k.clock.advance(0);
+    expect(g.sent.some((m) => m.type === 'dump')).toBe(false);
+    k.clock.advance(1_000);
+    expect(g.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
   });
 
   it('fails with timeout 20,000 ms after a boot that never completes', async () => {

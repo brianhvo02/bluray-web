@@ -42,9 +42,16 @@ export interface BdjSessionDeps {
   /** The worker's NAS reads got a 401: a fresh token is wanted (setToken delivers it). */
   readonly onTokenNeeded?: () => void;
   readonly nowMs: () => number;
+  /**
+   * The wall clock the start-up timeout is counted on (default Date.now): it goes on while the host sleeps, which is
+   * how a sleep shows (ruling R22).
+   */
+  readonly wallMs?: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** How long after boot (or the first start) Java has to select a playlist, show a menu or show a background still. */
   readonly selectTimeoutMs?: number;
+  /** The page is hidden as the session starts (setHidden changes it): the start-up timeout waits for it to be shown. */
+  readonly hidden?: boolean;
   /** The memory profile's BD-J budgets, for the boot message. */
   readonly memory?: BdjMemoryBudgets;
   /** Asks the worker for its memory stats every this many ms (telemetry), which arrive here. */
@@ -59,6 +66,18 @@ export interface BdjSessionDeps {
  */
 export const SELECT_PLAYLIST_TIMEOUT_MS = 20_000;
 
+/**
+ * Ruling R22: the start-up timeout counts only time the page is visible and the host awake. It is spent in ticks of at
+ * most this long; a hidden page spends nothing.
+ */
+export const STARTUP_TICK_MS = 1_000;
+
+/**
+ * A tick that comes this much later than it was set for means the host slept (or the engine did not run): the
+ * timeout starts over rather than firing at the wake for time Java never had.
+ */
+export const STARTUP_SLEEP_GAP_MS = 5_000;
+
 /** At the start-up timeout, how long the worker has to log its thread dump before it is stopped. */
 export const DUMP_WAIT_MS = 1_000;
 
@@ -69,7 +88,13 @@ export class BdjSession {
   private stopped = false;
   private bootDone: (() => void) | null = null;
   private startedAt: number | null = null;
+  /** The pending start-up tick (null: the timeout is not running, or it has fired or been cancelled). */
   private cancelTimeout: (() => void) | null = null;
+  /** What is left of the start-up timeout, and when it was last counted. */
+  private budget = { left: 0, at: 0, interval: 0 };
+  /** The start-up timeout is running: armed, and neither fired nor cancelled (it sets no tick while hidden). */
+  private ticking = false;
+  private hidden: boolean;
   /** The call whose synchronous handling is under way. */
   private callInHand: number | null = null;
   /** Starts (and what follows them) wait for the reply to this call. */
@@ -85,6 +110,7 @@ export class BdjSession {
   private stopping: Promise<void> | null = null;
 
   constructor(private readonly deps: BdjSessionDeps) {
+    this.hidden = deps.hidden ?? false;
     deps.worker.onmessage = (e) => this.receive(e.data);
     deps.worker.onerror = (e) => this.fail('internal', `the BD-J worker failed: ${e.message}`);
   }
@@ -127,8 +153,68 @@ export class BdjSession {
   private armTimeout(): void {
     if (this.startedAt !== null) return;
     this.startedAt = this.deps.nowMs();
-    const ms = this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
-    this.cancelTimeout = this.deps.setTimer(ms, () => this.timeout(`no playlist was selected and nothing was shown within ${ms / 1000} s`));
+    this.budget = { left: this.timeoutMs, at: this.wallMs(), interval: 0 };
+    this.ticking = true;
+    this.tick();
+  }
+
+  private wallMs(): number {
+    return (this.deps.wallMs ?? Date.now)();
+  }
+
+  private get timeoutMs(): number {
+    return this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
+  }
+
+  /**
+   * Counts the time since the budget was last counted (ruling R22): none while hidden, and none across a host sleep,
+   * found as a wall-clock gap of STARTUP_SLEEP_GAP_MS or more beyond the tick's interval, which restarts the budget.
+   */
+  private count(): void {
+    const now = this.wallMs();
+    const elapsed = Math.max(0, now - this.budget.at); // a wall clock set back counts nothing
+    this.budget.at = now;
+    if (this.hidden) return;
+    if (elapsed - this.budget.interval >= STARTUP_SLEEP_GAP_MS) {
+      this.budget.left = this.timeoutMs;
+      this.deps.onLog?.(`BD-J start-up timeout restarted: the host did not run for ${Math.round(elapsed / 1000)} s`, false);
+    } else {
+      this.budget.left -= elapsed;
+    }
+  }
+
+  /** Fires the start-up timeout once the budget is spent; otherwise sets the next tick (none while hidden). */
+  private tick(): void {
+    this.cancelTimeout = null;
+    if (this.budget.left <= 0) {
+      this.ticking = false;
+      this.timeout(`no playlist was selected and nothing was shown within ${this.timeoutMs / 1000} s`);
+      return;
+    }
+    if (this.hidden) return; // setHidden(false) sets the next tick
+    const ms = Math.min(STARTUP_TICK_MS, this.budget.left);
+    this.budget.interval = ms;
+    this.cancelTimeout = this.deps.setTimer(ms, () => {
+      this.count();
+      this.tick();
+    });
+  }
+
+  /**
+   * The page was hidden or shown (the engine's `visibility` command). Hidden time is not counted, and a shown page
+   * sets a fresh tick at once, since browsers throttle a hidden page's timers.
+   */
+  setHidden(hidden: boolean): void {
+    if (hidden === this.hidden) return;
+    if (!this.ticking || this.stopped) {
+      this.hidden = hidden;
+      return;
+    }
+    this.cancelTimeout?.();
+    this.count(); // the time up to now counts as the state it was spent in
+    this.budget.interval = 0;
+    this.hidden = hidden;
+    this.tick();
   }
 
   /** The start-up timeout: the engine's side and the worker's thread dump go to the log, then the session fails. */
@@ -179,6 +265,7 @@ export class BdjSession {
   stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
+    this.ticking = false;
     this.cancelTimeout?.();
     this.cancelTimeout = null;
     this.bootDone?.();
@@ -296,8 +383,9 @@ export class BdjSession {
 
   /** Java showed it runs: the start-up timeout is cancelled, once. */
   private alive(what: string): void {
-    if (this.startedAt === null || this.cancelTimeout === null) return;
-    this.cancelTimeout();
+    if (!this.ticking || this.startedAt === null) return;
+    this.ticking = false;
+    this.cancelTimeout?.();
     this.cancelTimeout = null;
     this.deps.onLog?.(`BD-J ${what} ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot`, false);
   }

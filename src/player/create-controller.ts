@@ -20,8 +20,10 @@ export function createController(): PlayerController {
   }));
   // what a BD-J disc saved in its last seconds is stored before the page goes (iOS often skips pagehide: hidden too)
   addEventListener('pagehide', () => controller.flushSaves());
+  controller.setVisibility(document.hidden);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') controller.flushSaves();
+    controller.setVisibility(document.hidden);
   });
   if (params.has('telemetry')) {
     const target = window as unknown as { __blurayTelemetry?: Telemetry | null };
