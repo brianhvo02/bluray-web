@@ -7,6 +7,9 @@ import { NasClient } from './nas/nas-client';
 import { getNasHistory, useNasRoute } from './nas/nas-history';
 import { idbNasStore } from './nas/nas-store';
 import { PlayingRoute } from './nas/playing-route';
+import { PlaceSaver } from './place-saver';
+import { placeMinDurationUs } from './place-model';
+import { idbPlaceStore } from './place-store';
 import { PlayerScreen } from './PlayerScreen';
 import { TOUCH_LOG, TouchLog } from './TouchLog';
 import { idbShaderLibrary } from './shader-library';
@@ -31,6 +34,23 @@ function getNasClient(): NasClient {
     rendezvousUrl: import.meta.env.VITE_RENDEZVOUS_URL as string | undefined,
   });
   return sharedNas;
+}
+
+let sharedPlaces: PlaceSaver | null = null;
+
+function getPlaceSaver(controller: PlayerController, nas: NasClient): PlaceSaver {
+  sharedPlaces ??= new PlaceSaver({
+    store: idbPlaceStore(),
+    nas,
+    readPlace: () => controller.readPlace(),
+    discOpens: () => controller.discOpens,
+    nowMs: Date.now,
+    setTimer: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimer: (handle) => window.clearTimeout(handle as number),
+    // ?placemin=<seconds> is test-only: shorter playlists make places
+    minDurationUs: placeMinDurationUs(window.location.search),
+  });
+  return sharedPlaces;
 }
 
 let pairCodeTaken = false;
@@ -127,6 +147,26 @@ export function App(): ReactElement {
     );
     return () => session.dispose();
   }, [controller]);
+  const [places] = useState(() => getPlaceSaver(controller, nas));
+  useEffect(() => {
+    // Spec §6.2: the place is saved as the page is hidden or goes away (over HTTPS with keepalive), and places
+    // waiting on this device go out whenever the NAS answers again.
+    const hidden = (): void => {
+      if (document.visibilityState === 'hidden') void places.flushNow({ keepalive: true });
+    };
+    const leaving = (): void => void places.flushNow({ keepalive: true });
+    document.addEventListener('visibilitychange', hidden);
+    window.addEventListener('pagehide', leaving);
+    const offSession = nas.onSession(() => void places.drainOutbox());
+    // a new pairing (another NAS or person), a forgotten one, or one the NAS revoked: what waits isn't theirs
+    const offPairing = nas.onPairingChange(() => void places.pairingChanged());
+    return () => {
+      document.removeEventListener('visibilitychange', hidden);
+      window.removeEventListener('pagehide', leaving);
+      offSession();
+      offPairing();
+    };
+  }, [places, nas]);
   const [shaders] = useState(() => getShaderModel(controller));
   const shaderState = useSyncExternalStore(shaders.subscribe, shaders.getSnapshot);
   useEffect(() => {
@@ -139,7 +179,7 @@ export function App(): ReactElement {
       {TOUCH_LOG && <TouchLog />}
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 ? (
-        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} history={history} playingRoute={playingRoute} pairCode={pairCode} onPairCodeSpent={spendPairCode} />
+        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} places={places} history={history} playingRoute={playingRoute} pairCode={pairCode} onPairCodeSpent={spendPairCode} />
       ) : (
         <PlayerScreen
           controller={controller}
@@ -147,6 +187,7 @@ export function App(): ReactElement {
           shaderModel={shaders}
           shaderState={shaderState}
           nas={nas}
+          places={places}
           history={history}
           playingRoute={playingRoute}
         />

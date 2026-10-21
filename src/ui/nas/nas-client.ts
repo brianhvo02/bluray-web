@@ -1,4 +1,4 @@
-import type { CodeLookup, DiscEntry, DiscManifest, DiscRef, FolderEntry, OwnerChoice, OwnTitle, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
+import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, FolderEntry, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 import { codeHashOf, isNasId, turnProofMessage } from '../../../rendezvous/src/protocol';
@@ -168,6 +168,16 @@ function base64url(bytes: Uint8Array): string {
 /** A disc's routes, relative to the NAS base. */
 const discPath = (discId: string): string => `discs/${encodeURIComponent(discId)}/`;
 
+/** A disc's places (and, with a playlist, one place) of the token's person. */
+const placePath = (discKey: string, playlistId?: string): string =>
+  `me/playback/${encodeURIComponent(discKey)}${playlistId === undefined ? '' : `/${encodeURIComponent(playlistId)}`}`;
+/** Browsers refuse a keepalive request whose body passes 64 KiB; a larger place goes as an ordinary request. */
+const KEEPALIVE_MAX_BYTES = 60_000;
+/** A place's PUT gives up (as the NAS being unreachable) after this long, so a stalled request can't hold the outbox. */
+export const PLACE_TIMEOUT_MS = 15_000;
+/** A pre-flight waits this long for the places before it offers Play without them. */
+export const PLACES_READ_TIMEOUT_MS = 3_000;
+
 const jsonBody = (method: string, body: unknown): RequestInit => ({
   method,
   headers: { 'Content-Type': 'application/json' },
@@ -238,6 +248,8 @@ export class NasClient {
   /** Bumped whenever the pairing changes, so work begun for an older pairing can't touch the new one. */
   private generation = 0;
   private readonly unpairedListeners = new Set<() => void>();
+  private readonly sessionListeners = new Set<() => void>();
+  private readonly pairingListeners = new Set<() => void>();
   /** The route chosen per NAS (`chooseRoute`), for the page's life. */
   private readonly routes = new Map<string, Promise<Route>>();
   /** Open WebRTC connections by NAS id; `rtc://<nasId>/` URLs go through them. */
@@ -334,6 +346,25 @@ export class NasClient {
     this.unpairedListeners.add(listener);
     return () => {
       this.unpairedListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Calls `listener` whenever a session starts: the NAS answered again (at first use, after a reconnect, or an hourly
+   * renewal). Returns the unsubscribe function.
+   */
+  onSession(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => {
+      this.sessionListeners.delete(listener);
+    };
+  }
+
+  /** Calls `listener` whenever the pairing changes: a new one, forgotten, or found unpaired. Returns the unsubscribe function. */
+  onPairingChange(listener: () => void): () => void {
+    this.pairingListeners.add(listener);
+    return () => {
+      this.pairingListeners.delete(listener);
     };
   }
 
@@ -585,6 +616,47 @@ export class NasClient {
     return { mbps: (bytes * 8) / 1e6 / seconds };
   }
 
+  /** This person's places in a disc, or null when there are none. */
+  async playbackPlaces(discKey: string, opts: { readonly timeoutMs?: number } = {}): Promise<DiscPlaces | null> {
+    const res = await this.authed(placePath(discKey), {}, false, opts.timeoutMs);
+    if (res.status === 404) return null;
+    if (!res.ok) throw await httpError(res);
+    return (await res.json()) as DiscPlaces;
+  }
+
+  /**
+   * Stores a place; 'stale' when the NAS holds a newer one. `keepalive` (for a page being hidden or closed) applies
+   * over HTTPS only, and only to a body small enough for it: a WebRTC connection closes with the page.
+   */
+  async putPlace(place: PlaybackPlace, opts: { readonly keepalive?: boolean } = {}): Promise<'stored' | 'stale'> {
+    const init = jsonBody('PUT', place);
+    const keepalive = opts.keepalive === true && (init.body as string).length <= KEEPALIVE_MAX_BYTES;
+    const res = await this.authed(placePath(place.discKey, place.playlistId), keepalive ? { ...init, keepalive } : init, false, PLACE_TIMEOUT_MS);
+    if (res.status === 409 && (await errorCode(res)) === 'stale') return 'stale';
+    if (!res.ok) throw await httpError(res);
+    return 'stored';
+  }
+
+  /** Deletes a disc's places, or one playlist's. */
+  async deletePlace(discKey: string, playlistId?: string): Promise<void> {
+    await this.ok(placePath(discKey, playlistId), { method: 'DELETE' });
+  }
+
+  /** The Continue watching row: unfinished places and Up next cards, newest first. */
+  async continueWatching(opts: { readonly timeoutMs?: number } = {}): Promise<ContinueItem[]> {
+    const res = await this.authed('me/playback', {}, false, opts.timeoutMs);
+    if (!res.ok) throw await httpError(res);
+    return (await res.json()) as ContinueItem[];
+  }
+
+  /** A title's progress by disc id and playlist id; null when the title isn't open to this device (or unknown). */
+  async titleProgress(titleId: string): Promise<Record<string, Record<string, PlaylistProgress>> | null> {
+    const res = await this.authed(`me/playback/title/${encodeURIComponent(titleId)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw await httpError(res);
+    return (await res.json()) as Record<string, Record<string, PlaylistProgress>>;
+  }
+
   private async loadPairing(): Promise<NasPairing | null> {
     const generation = this.generation;
     const stored = await this.deps.store.get();
@@ -606,6 +678,8 @@ export class NasClient {
     this.links.clear();
     for (const url of this.artUrls.values()) this.objectUrls.revoke(url);
     this.artUrls.clear();
+    // last, so a listener's `pairing()` already gives the new pairing
+    for (const listener of this.pairingListeners) listener();
   }
 
   private get objectUrls(): { create(blob: Blob): string; revoke(url: string): void } {
@@ -689,7 +763,10 @@ export class NasClient {
     if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
     const session = (await res.json()) as NasSession;
     if (link) this.sessionLinks.set(session, link);
-    if (generation === this.generation) this.cached = session;
+    if (generation === this.generation) {
+      this.cached = session;
+      for (const listener of this.sessionListeners) listener();
+    }
     return session;
   }
 
@@ -709,7 +786,7 @@ export class NasClient {
    * Over WebRTC the session must have been started on the connection in use: when the connection changes under a
    * request (a drop and a reconnect), it starts again, and a 401 from the new connection isn't counted.
    */
-  private async authed(path: string, init: RequestInit = {}, viaQuery = false): Promise<Response> {
+  private async authed(path: string, init: RequestInit = {}, viaQuery = false, timeoutMs?: number): Promise<Response> {
     let refused = 0;
     for (let attempt = 0; attempt < AUTHED_TRIES; attempt++) {
       const generation = this.generation;
@@ -727,7 +804,7 @@ export class NasClient {
       const url = viaQuery ? `${base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${base}${path}`;
       const headers = new Headers(init.headers);
       if (!viaQuery) headers.set('Authorization', `Bearer ${token}`);
-      const res = await this.request(url, { ...init, headers });
+      const res = await this.request(url, { ...init, headers }, timeoutMs);
       if (res.status !== 401) return res;
       if (this.cached?.token === token) this.cached = null;
       if (this.linkFor(base) !== link || link?.closed) continue; // the connection changed: not a revocation
@@ -761,11 +838,14 @@ export class NasClient {
     const rtc = /^rtc:\/\/([^/]+)\//.exec(url);
     const link = rtc ? this.links.get(rtc[1]) : undefined;
     if (rtc && !link) throw new NasLostError();
-    const doFetch = link ? link.fetch : this.deps.fetch;
     const controller = new AbortController();
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await doFetch(url, { ...init, signal: controller.signal });
+      if (link) {
+        const { keepalive: _https, ...rest } = init; // the connection closes with the page: keepalive means nothing there
+        return await link.fetch(url, { ...rest, signal: controller.signal });
+      }
+      return await this.deps.fetch(url, { ...init, signal: controller.signal });
     } catch (err) {
       if (link) throw link.closed ? new NasLostError() : new Error(RTC_UNREACHABLE);
       if (err instanceof TypeError || controller.signal.aborted) {

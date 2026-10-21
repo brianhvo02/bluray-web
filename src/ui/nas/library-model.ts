@@ -75,6 +75,15 @@ function inlined(manifest: DiscManifest, path: string): Uint8Array | null {
  * among the playlists with video whose clips are all on the disc; null when there is none or it can't be read.
  */
 export function mainPlaylist(manifest: DiscManifest): Mpls | null {
+  return mainTitle(manifest)?.mpls ?? null;
+}
+
+/** The main title's playlist id (as `mainPlaylist` chooses it), e.g. '00001'. */
+export function mainPlaylistId(manifest: DiscManifest): string | null {
+  return mainTitle(manifest)?.id ?? null;
+}
+
+function mainTitle(manifest: DiscManifest): MainTitleCandidate | null {
   try {
     const files = new Set(manifest.files.map((f) => f.path));
     const candidates: MainTitleCandidate[] = [];
@@ -93,7 +102,7 @@ export function mainPlaylist(manifest: DiscManifest): Mpls | null {
       if (hasVideo && complete) candidates.push({ id: m[1]!, mpls });
     }
     const mainId = chooseMainTitle(candidates);
-    return candidates.find((c) => c.id === mainId)?.mpls ?? null;
+    return candidates.find((c) => c.id === mainId) ?? null;
   } catch {
     return null;
   }

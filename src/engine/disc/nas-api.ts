@@ -100,3 +100,32 @@ export interface OwnTitle { readonly id: string; readonly kind: TitleKind; reado
  */
 export interface UnsortedSuggestion extends TitleSummary { readonly seasonHint: number | null }
 export interface UnsortedItem { readonly discId: string; readonly path: string; readonly discTitles: readonly { readonly lang: string; readonly name: string }[]; readonly reason: UnsortedReason; readonly suggestions: readonly UnsortedSuggestion[]; readonly catalogueNumber: string | null; readonly group: string; readonly groupSize: number }
+
+/** The player settings a place carries, so resuming on another device sounds and looks the same. */
+/** A text subtitle file of a place: identified by name and size (its bytes stay on the device). */
+export interface PlaceTextFile { readonly name: string; readonly size: number; readonly startUs: number | null; readonly offsetMs: number }
+export interface PlaceSettings { readonly audioLanguage: string | null; readonly pgLanguage: string | null; readonly textFiles: readonly PlaceTextFile[]; readonly psr1: number; readonly psr2: number; readonly psr3: number; readonly textOn: boolean; readonly textScale: number; readonly shaderSet: string | null; readonly volume: number; readonly muted: boolean }
+/** Where one person stopped in one playlist of a disc (spec: resume). `finished` places stay for Up next, and go first when the store is full. */
+export interface PlaybackPlace {
+  readonly discKey: string; readonly discId: string; readonly playlistId: string;
+  readonly timeUs: number; readonly durationUs: number; readonly finished: boolean;
+  readonly mode: 'hdmv' | 'bdj' | 'none'; readonly title: number | null;
+  readonly psrs: readonly number[]; readonly gprs: Readonly<Record<number, number>> | null;
+  readonly settings: PlaceSettings; readonly updatedAt: number; readonly deviceName: string;
+}
+/** One person's places in one disc: by playlist id, with the settings of the latest put as `defaults`. */
+export interface DiscPlaces { readonly defaults: PlaceSettings | null; readonly places: Readonly<Record<string, PlaybackPlace>> }
+
+/** One card of the Continue watching row. `up-next` is the episode after a finished one, to start from the beginning. */
+export interface ContinueItem {
+  readonly kind: 'resume' | 'up-next';
+  readonly discKey: string; readonly discId: string; readonly playlistId: string;
+  readonly timeUs: number; readonly durationUs: number;
+  readonly titleId: string | null; readonly titleName: string | null; readonly poster: string | null;
+  readonly seasonId: string | null; readonly seasonNumber: number | null; readonly episode: number | null;
+  readonly kindOfTitle: TitleKind | null; readonly updatedAt: number; readonly deviceName: string;
+  /** An Up next card's: the finished episode's settings, which carry on to the next (by language, spec §6.6); null on a resume card. */
+  readonly settings: PlaceSettings | null;
+}
+
+export interface PlaylistProgress { readonly timeUs: number; readonly durationUs: number; readonly finished: boolean }

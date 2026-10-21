@@ -181,6 +181,31 @@ a { color: #6ea8ff; }
 .disc-copy-folder { overflow-wrap: anywhere; }
 .disc-copy-owned, .owner-refile { display: flex; flex-direction: column; gap: 6px; }
 
+/* resume (spec 2026-10-20 mockups 1-3): the prompt, Continue watching, an episode's progress */
+.resume-prompt { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; background: #18181d; border: 1px solid #2a2a30; border-radius: 10px; }
+.resume-heading { margin: 0; font-size: 1.05em; font-weight: 600; }
+.resume-line, .resume-details { margin: 0; }
+.resume-changed { margin: 0; color: #ffcf7a; }
+.resume-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.resume-primary { font-weight: 600; color: #fff; background: #2d5bd6; border-color: #2d5bd6; }
+.resume-primary:hover:not(:disabled) { background: #3b69e6; border-color: #3b69e6; }
+.continue-row { list-style: none; margin: 0; padding: 0 0 6px; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 240px); gap: 16px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; }
+.continue-row > li { scroll-snap-align: start; }
+.continue-card { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 4px; padding: 0; background: none; border: none; border-radius: 8px; text-align: left; }
+.continue-card:hover:not(:disabled) { background: none; }
+.continue-art { position: relative; display: block; margin-bottom: 4px; overflow: hidden; border-radius: 8px; background: #1f1f25; transition: transform 0.15s, box-shadow 0.15s; }
+.continue-card:hover .continue-art { transform: translateY(-2px); box-shadow: 0 0 0 2px #6ea8ff; }
+.continue-poster { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.continue-poster.poster-placeholder { display: flex; font-size: 1.6em; }
+.continue-progress, .episode-progress { display: block; height: 4px; background: rgba(255, 255, 255, 0.18); }
+.continue-progress { position: absolute; left: 0; right: 0; bottom: 0; }
+.continue-progress > i, .episode-progress > i { display: block; height: 100%; background: #6ea8ff; }
+.continue-title { font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.continue-line { line-height: 1.3; }
+.episode-row { position: relative; }
+.episode-row:has(.episode-progress) { padding-bottom: 14px; }
+.episode-progress { position: absolute; left: 12px; right: 12px; bottom: 4px; height: 3px; border-radius: 2px; overflow: hidden; }
+
 /* Owner screens: Unsorted, Hidden, Music renames, "File differently…" */
 .owner-cards { display: flex; flex-direction: column; gap: 12px; }
 .owner-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; background: #18181d; border: 1px solid #2a2a30; border-radius: 10px; }
@@ -330,6 +355,7 @@ a { color: #6ea8ff; }
   .title-shelves { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; }
   .title-shelves::-webkit-scrollbar { display: none; }
   .title-shelves .title-chip { flex: none; }
+  .continue-row { grid-auto-columns: minmax(170px, 72vw); gap: 12px; }
   .series-poster { width: 96px; }
   .series-banner:has(.series-banner-art) + .series-head { margin-top: -48px; padding-left: 12px; }
   .owner-card { padding: 12px; }

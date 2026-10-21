@@ -4,6 +4,8 @@ import { ControlBar } from './ControlBar';
 import type { NasClient } from './nas/nas-client';
 import type { NasHistory } from './nas/nas-history';
 import type { NasRoute } from './nas/nas-route';
+import type { PlaceSaver } from './place-saver';
+import { LaunchSettingsApplier } from './place-apply';
 import type { PlayingRoute } from './nas/playing-route';
 import { RelayBadge } from './nas/RelayBadge';
 import type { ShaderModel, ShaderModelState } from './shader-model';
@@ -42,6 +44,8 @@ interface PlayerScreenProps {
   readonly shaderState: ShaderModelState;
   /** For the "Relayed" badge of a NAS disc; absent where there is no NAS. */
   readonly nas?: NasClient;
+  /** Saves the open disc's place (begun by the screen that opened it). */
+  readonly places: PlaceSaver;
   /** A NAS disc's playback is in the address bar (playingRoute, once its pre-flight started it); Back closes it. */
   readonly history: NasHistory;
   readonly playingRoute: PlayingRoute;
@@ -67,7 +71,7 @@ function Notice({ message, onDismiss, testId }: { message: string; onDismiss(): 
   );
 }
 
-export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, nas, history, playingRoute }: PlayerScreenProps): ReactElement {
+export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, nas, places, history, playingRoute }: PlayerScreenProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -111,22 +115,56 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   // The address bar follows a NAS disc's playlist and time (a local or disc-server disc never started playingRoute).
   const { currentPlaylistId, timeUs, engineState } = snapshot;
   useEffect(() => playingRoute.update({ currentPlaylistId, timeUs, engineState }), [playingRoute, currentPlaylistId, timeUs, engineState]);
+  // Each snapshot may save the place (spec 2026-10-20 §6.2).
+  const shaderSet = shaderState.selected;
+  useEffect(() => places.observe(snapshot, shaderSet), [places, snapshot, shaderSet]);
+  // A resumed (or carried-over) launch's settings, once the disc plays: volume, shader, tracks and subtitle files.
+  const shaderStateRef = useRef(shaderState);
+  shaderStateRef.current = shaderState;
+  const [launchSettings] = useState(
+    () =>
+      new LaunchSettingsApplier({
+        controller,
+        places,
+        // a set this device doesn't have stays unchosen, rather than chosen and missing
+        selectShader: (name) => {
+          if (name === null || shaderStateRef.current.sets.some((set) => set.name === name && set.available)) void shaderModel.select(name);
+        },
+        log: (message, err) => console.warn(message, err),
+      }),
+  );
+  useEffect(() => launchSettings.observe(snapshot, shaderSet), [launchSettings, snapshot, shaderSet]);
+  /** The place is saved before the disc closes: its registers are read while it is still open. */
+  const savePlaceAndEnd = useCallback((): void => {
+    void places.flushNow({ keepalive: false });
+    places.end();
+  }, [places]);
   // Back (or Forward) off the play route closes the NAS disc; the landing screen then shows where it went.
   useEffect(
     () =>
       history.subscribe(() => {
         if (playingRoute.discKey === null || history.route()?.kind === 'play') return;
         playingRoute.stop();
+        savePlaceAndEnd();
         controller.closeDisc();
       }),
-    [history, playingRoute, controller],
+    [history, playingRoute, controller, savePlaceAndEnd],
   );
   /** The player's own close: a NAS disc's play route goes back to where Play was pressed (else the library). */
   const closeDisc = (): void => {
     const nasPlayback = playingRoute.discKey !== null;
     playingRoute.stop();
+    savePlaceAndEnd();
     controller.closeDisc();
     if (nasPlayback) history.back(LIBRARY);
+  };
+  /** Subtitle files the user adds go to the engine, and are kept on this device for a resume here. */
+  const loadSubtitleFiles = (files: readonly File[]): void => {
+    void controller.loadSubtitleFiles(files);
+    rememberSubtitleFiles(files);
+  };
+  const rememberSubtitleFiles = (files: readonly File[]): void => {
+    places.addTextFiles(files).catch((err: unknown) => console.warn('keeping the subtitle files failed', err));
   };
 
   useEffect(() => {
@@ -263,7 +301,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
     // read synchronously: the item list is unusable once the event returns
     void collectDroppedFiles(e.dataTransfer.items).then((files) => {
       const { subtitles, fonts } = splitPick(files);
-      if (subtitles.length || fonts.length) void controller.loadSubtitleFiles([...subtitles, ...fonts]);
+      if (subtitles.length || fonts.length) loadSubtitleFiles([...subtitles, ...fonts]);
     });
   };
 
@@ -587,6 +625,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
         remoteOpen={remoteOpen}
         onToggleRemote={() => setRemoteOpen((o) => !o)}
         onMenuOpenChange={setMenuOpen}
+        onSubtitleFiles={rememberSubtitleFiles}
       />
     </div>
   );

@@ -14,6 +14,15 @@ export interface NasPairing {
   readonly key: CryptoKeyPair;
 }
 
+/**
+ * What tells one pairing from another (another NAS, or this device paired again as another person): the device id
+ * the NAS gave, with the HTTPS base it was paired at, or its NAS id when paired over WebRTC only. Both stay fixed for
+ * a pairing's life (`me` may add a NAS id to a pairing made over HTTPS, which keeps its base).
+ */
+export function pairingKey(pairing: Pick<NasPairing, 'deviceId' | 'base' | 'nasId'>): string {
+  return `${pairing.deviceId}@${pairing.base || pairing.nasId || ''}`;
+}
+
 export interface NasStore {
   get(): Promise<NasPairing | null>;
   put(pairing: NasPairing): Promise<void>;

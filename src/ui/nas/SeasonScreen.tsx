@@ -1,6 +1,8 @@
-import { useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
-import type { DiscRef, DiscSlot, EpisodeRef, SeasonDetail } from '../../engine/disc/nas-api';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
+import type { DiscRef, DiscSlot, EpisodeRef, PlaylistProgress, SeasonDetail } from '../../engine/disc/nas-api';
 import { FileDifferently, type OwnerFiling } from './FileDifferently';
+import type { NasClient } from './nas-client';
+import { episodeProgress } from './resume-model';
 import type { PreflightDisc } from './Preflight';
 import { copiesLabel, discHeading, episodeMeta } from './title-model';
 
@@ -60,6 +62,9 @@ export function DiscList({ season, discs, onOpen, owner }: DiscListProps): React
 }
 
 interface SeasonScreenProps {
+  /** For this person's progress through the title's episodes. */
+  readonly nas: Pick<NasClient, 'titleProgress'>;
+  readonly titleId: string;
   readonly seriesName: string;
   /** 'Season 2', 'Extras', … */
   readonly heading: string;
@@ -74,8 +79,21 @@ type Tab = 'episodes' | 'discs';
 const TABS: readonly Tab[] = ['episodes', 'discs'];
 
 /** A season: Episodes and Discs tabs, or the discs alone when its episodes aren't known. */
-export function SeasonScreen({ seriesName, heading, season, onBack, onOpen, owner }: SeasonScreenProps): ReactElement {
+export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack, onOpen, owner }: SeasonScreenProps): ReactElement {
   const episodes = season.episodes;
+  /** Places by disc id and playlist id; null until known (or when the NAS has none to give). */
+  const [progress, setProgress] = useState<Readonly<Record<string, Readonly<Record<string, PlaylistProgress>>>> | null>(null);
+  useEffect(() => {
+    if (!episodes) return;
+    let live = true;
+    nas.titleProgress(titleId).then(
+      (p) => live && setProgress(p),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [nas, titleId, episodes]);
   const [tab, setTab] = useState<Tab>(episodes ? 'episodes' : 'discs');
   const ids = useId();
   const tabId = (t: Tab): string => `${ids}-tab-${t}`;
@@ -137,20 +155,28 @@ export function SeasonScreen({ seriesName, heading, season, onBack, onOpen, owne
       )}
       {episodes && (
         <ul className="title-list" role="tabpanel" id={panelId('episodes')} aria-labelledby={tabId('episodes')} hidden={tab !== 'episodes'}>
-          {episodes.map((e) => (
-            <li key={`${e.discId}:${e.playlistId}`}>
-              <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} onClick={() => playEpisode(e)}>
-                <span className="episode-number">{e.number}</span>
-                <span className="title-row-text">
-                  <span className="title-row-name">
-                    Episode {e.number}
-                    {e.name && <span className="title-muted"> · {e.name}</span>}
+          {episodes.map((e) => {
+            const percent = episodeProgress(progress, e.discId, e.playlistId);
+            return (
+              <li key={`${e.discId}:${e.playlistId}`}>
+                <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} onClick={() => playEpisode(e)}>
+                  <span className="episode-number">{e.number}</span>
+                  <span className="title-row-text">
+                    <span className="title-row-name">
+                      Episode {e.number}
+                      {e.name && <span className="title-muted"> · {e.name}</span>}
+                    </span>
+                    <span className="title-muted">{episodeMeta(season, e)}</span>
                   </span>
-                  <span className="title-muted">{episodeMeta(season, e)}</span>
-                </span>
-              </button>
-            </li>
-          ))}
+                  {percent !== null && (
+                    <span className="episode-progress" data-testid="episode-progress" role="img" aria-label={`${percent}% watched`}>
+                      <i style={{ width: `${percent}%` }} />
+                    </span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       <div {...(episodes ? { role: 'tabpanel', id: panelId('discs'), 'aria-labelledby': tabId('discs'), hidden: tab !== 'discs' } : {})}>

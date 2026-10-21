@@ -1,17 +1,21 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { discKeyOf } from '../../engine/disc/disc-key';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
-import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
-import type { BufferRequest } from '../../engine/protocol';
+import type { ContinueItem, DiscEntry, DiscManifest, DiscPlaces } from '../../engine/disc/nas-api';
+import type { BufferRequest, StartPoint } from '../../engine/protocol';
 import type { PlayerController } from '../../player/player-controller';
 import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, storageRoom, tooBigCopy, waitCopy, watchBufferFailure, type BufferPlan } from './buffer-model';
-import { discBadges, discFacts, formatSize, mainPlaylist, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
+import { discBadges, discFacts, formatSize, mainPlaylist, mainPlaylistId, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
-import { NasHttpError, type NasClient } from './nas-client';
+import { NasHttpError, PLACES_READ_TIMEOUT_MS, type NasClient } from './nas-client';
 import { useNasRoute, type NasHistory } from './nas-history';
 import type { NasRoute } from './nas-route';
-import { playOnceOpen } from './play-once-open';
+import { noticeMissingStart } from './missing-start-notice';
 import type { PlayingRoute } from './playing-route';
+import { LOCAL_DEVICE_NAME, type LaunchSettings, type PlaceSaver } from '../place-saver';
+import { pairingKey } from './nas-store';
+import { ResumePrompt } from './ResumePrompt';
+import { carriedSettings, playlistsOf, resumeOffer, startOver, within, type ResumeOffer } from './resume-model';
 
 /** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
 export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
@@ -20,13 +24,17 @@ interface PreflightProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
   readonly disc: PreflightDisc;
-  /** An episode's playlist, started once the engine has read the disc (its 'titles' event). */
+  /** An episode's playlist: the disc opens playing it (StartPoint), without running First Play. */
   readonly playlistId?: string;
-  /** A play link's time in the playlist, sought to once it plays (ignored past its end, or without a playlist). */
+  /** A play link's time in the playlist, where it starts (from the beginning past its end, ignored without a playlist). */
   readonly startTimeS?: number;
+  /** From a Continue watching card: the place resumes without the question (Resume is the one way on). */
+  readonly resume?: boolean;
   /** Play goes into the address bar as the disc's play route, which `playingRoute` then keeps current. */
   readonly history: NasHistory;
   readonly playingRoute: PlayingRoute;
+  /** Saves the launched disc's place, here and on the NAS. */
+  readonly places: PlaceSaver;
   /** Play is about to push the play route: the screen holding this pre-flight keeps it shown on that route. */
   readonly onLaunch?: () => void;
   /** Whether the disc is UHD, once its manifest has shown it (for the row's badge). */
@@ -35,6 +43,13 @@ interface PreflightProps {
 }
 
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
+const NO_OFFER: ResumeOffer = { kind: 'none' };
+
+/** Where a launch opens the disc (undefined: as the disc starts), and the settings the player applies once it plays. */
+interface Launch {
+  readonly start: StartPoint | undefined;
+  readonly settings: LaunchSettings | undefined;
+}
 
 /** A disc gone (or replaced) since its folder was listed answers 404 disc-changed. */
 const message = (err: unknown): string =>
@@ -51,7 +66,7 @@ const ASK_EVERY_WAIT = new URLSearchParams(globalThis.location?.search ?? '').ge
  * connection is slower than the main title (buffer first), Play buffers ahead first: silently for a short wait, else
  * after asking (Wait, or Play now with pauses); a device that can't hold the wait offers pauses.
  */
-export function Preflight({ nas, controller, disc, playlistId, startTimeS, history, playingRoute, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
+export function Preflight({ nas, controller, disc, playlistId, startTimeS, resume = false, history, playingRoute, places, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
   const route = useNasRoute(history);
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
   /** The disc's link key, from its manifest: `f.<fingerprint>`, else `d.<disc id>`. */
@@ -59,6 +74,10 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
   /** Whether the address bar is this disc's play route (a link, or Play pressed here). */
   const onPlayRoute = route?.kind === 'play' && (route.discKey === discKey || route.discKey === `d.${disc.id}`);
   const [facts, setFacts] = useState<DiscFacts | null>(null);
+  /** This person's places on the disc, from the NAS (never this device's store: a shared device has others'); undefined while asked. */
+  const [stored, setStored] = useState<DiscPlaces | null | undefined>(undefined);
+  /** The Continue watching list, asked only for a playlist with no place of its own (an Up next card's settings); undefined while asked. */
+  const [items, setItems] = useState<readonly ContinueItem[] | null | undefined>(undefined);
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
   const [mbps, setMbps] = useState<number | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -72,9 +91,9 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const engineFailed = openFailed(snapshot);
   /**
-   * Releases the wait for this open's playlists (playOnceOpen). The wait outlives this pre-flight, which unmounts as
-   * the disc's playlists arrive, before the playlist (and a link's seek) starts; it is let go when the launch is
-   * abandoned, and playOnceOpen lets go by itself when another disc opens or this one closes.
+   * Releases the wait for this open's start result (noticeMissingStart). The wait outlives this pre-flight, which
+   * unmounts as the disc's playlists arrive, before the engine reports whether it could start there; it is let go when the launch is
+   * abandoned, and noticeMissingStart lets go by itself when another disc opens or this one closes.
    */
   const releaseWait = useRef<(() => void) | null>(null);
   /** Bumped when a launch is abandoned, so its pending open (discBase, session) is dropped. */
@@ -154,16 +173,49 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
     // The probe runs once per disc opened here; onFacts is left out on purpose (a new callback is no new disc).
   }, [nas, disc.id]);
 
+  // The places once the disc's key is known. A failed or stalled request is no place: Play waits 3 s for it at most.
+  useEffect(() => {
+    if (discKey === null) return;
+    let live = true;
+    setStored(undefined);
+    void within(nas.playbackPlaces(discKey, { timeoutMs: PLACES_READ_TIMEOUT_MS }), PLACES_READ_TIMEOUT_MS, null).then((p) => live && setStored(p));
+    return () => {
+      live = false;
+    };
+  }, [nas, discKey]);
+  /** A play link's own time names where to play: no question then, unless it comes from a Continue watching card. */
+  const offers = startTimeS === undefined || resume;
+  const playlists = useMemo(() => (manifest ? playlistsOf(manifest) : null), [manifest]);
+  const offer: ResumeOffer = useMemo(
+    () => (offers && stored !== undefined && playlists !== null ? resumeOffer(stored, playlistId ?? null, playlists) : NO_OFFER),
+    [offers, stored, playlistId, playlists],
+  );
+  /** A playlist with no place to resume starts with settings carried over: an Up next card's, else the disc's defaults. */
+  const wantsCarried = playlistId !== undefined && stored !== undefined && offer.kind === 'none';
+  /** Play's own button: no place to ask about (none, or one near its start). */
+  const playButton = offer.kind === 'none' || offer.kind === 'short';
+  useEffect(() => {
+    if (!wantsCarried) return;
+    let live = true;
+    void within<readonly ContinueItem[] | null>(nas.continueWatching({ timeoutMs: PLACES_READ_TIMEOUT_MS }), PLACES_READ_TIMEOUT_MS, null).then((list) => live && setItems(list));
+    return () => {
+      live = false;
+    };
+  }, [nas, wantsCarried]);
+  const placesReady = stored !== undefined && (!wantsCarried || items !== undefined);
+  /** What plays: the requested playlist, else the place offered. */
+  const launchPlaylist = playlistId ?? (offer.kind === 'none' || (offer.kind === 'short' && offer.start === null) ? undefined : offer.place.playlistId);
+
   /**
    * The length and bytes of what plays (the episode's playlist, else the main title's) against this connection; null
    * until both are known (or with no playlist).
    */
   const need = useMemo(() => {
-    const playlist = manifest && ((playlistId !== undefined ? playlistOf(manifest, playlistId) : null) ?? mainPlaylist(manifest));
+    const playlist = manifest && ((launchPlaylist !== undefined ? playlistOf(manifest, launchPlaylist) : null) ?? mainPlaylist(manifest));
     if (!playlist || typeof mbps !== 'number') return null;
     const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
     return { ...playlistFacts(playlist.playItems, sizes), connectionMbps: mbps };
-  }, [manifest, mbps, playlistId]);
+  }, [manifest, mbps, launchPlaylist]);
   /** Whether the connection keeps up, before the storage is asked for (persist() can prompt). */
   const keepsUp = need !== null && bufferPlan({ ...need, quotaBytes: Infinity }).kind === 'play';
   /** The connection is slower, and this device can't keep a read-ahead cache (the engine said at its start). */
@@ -186,9 +238,25 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
   const plan: BufferPlan | null =
     need === null ? (mbps === null ? { kind: 'play' } : null) : keepsUp ? { kind: 'play' } : cannotBuffer || quota === undefined ? null : bufferPlan({ ...need, quotaBytes: quota, ...(ASK_EVERY_WAIT ? { silentBelowS: 0 } : {}) });
 
+  /** Play: the requested playlist (at a link's time) or the disc as it starts, with any settings carried over. */
+  const plainLaunch = (): Launch => {
+    // A playlist (an episode, a play link) opens the disc there, in the engine: First Play never runs first.
+    const start: StartPoint | undefined = playlistId === undefined ? undefined : { playlistId, timeUs: (startTimeS ?? 0) * 1e6, hdmv: null, playback: null };
+    const carried = playlistId === undefined ? null : carriedSettings(items ?? null, disc.id, playlistId, stored ?? null);
+    return { start, settings: carried ? { settings: carried, byLanguage: true } : undefined };
+  };
+  /** Resume at: the place's own playlist, time and registers (resumeStart), with its settings. */
+  const resumeLaunch = (): Launch => (offer.kind === 'ask' ? { start: offer.start, settings: { settings: offer.place.settings, byLanguage: false } } : plainLaunch());
+  /** Start from beginning: the place's playlist from 0, with the same settings. */
+  const startOverLaunch = (): Launch => (offer.kind === 'none' ? plainLaunch() : { start: startOver(offer.place), settings: { settings: offer.place.settings, byLanguage: false } });
+  /** Play: as the disc starts, or for a place near its start, its playlist from 0 with its settings. */
+  const playLaunch = (): Launch =>
+    offer.kind === 'short' && offer.start !== null ? { start: offer.start, settings: { settings: offer.place.settings, byLanguage: false } } : plainLaunch();
+
   /** `hold`: the disc opens once the cache holds the target (Wait); otherwise at once, its fill going on behind it. */
-  const play = (bufferFirst?: BufferRequest, hold = true): void => {
+  const play = (launchWith: Launch, bufferFirst?: BufferRequest, hold = true): void => {
     if (!manifest || discKey === null) return;
+    const { start } = launchWith;
     controller.startAudio(); // inside the click gesture
     setOpening('starting');
     setError(null);
@@ -197,19 +265,26 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
     launched.current = true;
     if (!onPlayRoute) {
       onLaunch?.();
-      history.push({ kind: 'play', discKey, playlistId: playlistId ?? null, timeS: null });
+      history.push({ kind: 'play', discKey, playlistId: start?.playlistId ?? null, timeS: null, resume: false });
     }
     const id = ++launch.current;
-    Promise.all([nas.discBase(disc.id), nas.session()]).then(
-      ([base, session]) => {
+    Promise.all([nas.discBase(disc.id), nas.session(), nas.pairing()]).then(
+      ([base, session, pairing]) => {
         if (id !== launch.current) return;
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
         const { spec, release } = nasDiscSpec(base, token, manifest, nas.discFetch);
-        controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst);
+        controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst, start);
+        places.begin(
+          {
+            discKey, discId: disc.id, remote: true, chosen: start?.playlistId ?? null, mainPlaylistId: mainPlaylistId(manifest),
+            deviceName: pairing?.deviceName ?? LOCAL_DEVICE_NAME, pairing: pairing ? pairingKey(pairing) : null,
+          },
+          launchWith.settings,
+        );
         if (bufferFirst && !hold) controller.cancelBuffer(); // play now: the queued open doesn't wait for its fill
         releaseWait.current?.();
-        releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId, startTimeS === undefined ? undefined : startTimeS * 1e6);
+        releaseWait.current = start === undefined ? null : noticeMissingStart(controller);
         if (bufferFirst) watchBufferFailure(controller); // for as long as this disc is open, past this screen
         setOpening(bufferFirst && hold ? 'buffering' : 'launched');
       },
@@ -222,18 +297,24 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
     });
   };
 
-  /** Buffer first: the bytes the plan holds ahead, from the start of what plays. */
-  const request = (bytes: number): BufferRequest => ({ fromSeconds: 0, targetBytes: Math.ceil(bytes), ...(playlistId !== undefined ? { playlistId } : {}) });
-  const waitFor = (bytes: number): void => play(request(bytes));
+  /** Buffer first: the bytes the plan holds ahead, from where what plays starts. */
+  const request = (bytes: number, launchWith: Launch): BufferRequest => {
+    const start = launchWith.start;
+    return { fromSeconds: start ? Math.floor(start.timeUs / 1e6) : 0, targetBytes: Math.ceil(bytes), ...(start ? { playlistId: start.playlistId } : {}) };
+  };
+  const waitFor = (bytes: number, launchWith: Launch): void => play(launchWith, request(bytes, launchWith));
   /**
    * Play now with pauses: at once, with a fill ahead of playback (capped at the plan's lead, or what the device can
    * hold) for fewer pauses; without a cache, as before.
    */
-  const playWithPauses = (): void => {
+  const playWithPauses = (launchWith: Launch): void => {
     const lead = plan?.kind === 'ask' ? plan.bytes : plan?.kind === 'too-big' ? plan.canHoldBytes : 0;
-    if (lead > 0) play(request(lead), false);
-    else play();
+    if (lead > 0) play(launchWith, request(lead, launchWith), false);
+    else play(launchWith);
   };
+  /** Play (or Resume, or Start from beginning) as the buffer plan says: silently buffered, with pauses, or at once. */
+  const go = (launchWith: Launch): void =>
+    plan?.kind === 'silent' ? waitFor(plan.bytes, launchWith) : plan?.kind === 'ask' || plan?.kind === 'too-big' ? playWithPauses(launchWith) : play(launchWith);
   const stopWaiting = (): void => {
     abandon(); // the engine drops the disc unopened
     setOpening('idle');
@@ -289,6 +370,17 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
         </>
       ) : (
         <>
+          {!playButton && (
+            <ResumePrompt
+              place={offer.place}
+              changed={offer.kind === 'changed'}
+              resumeOnly={resume}
+              disabled={!manifest || opening !== 'idle' || estimating}
+              nowMs={Date.now()}
+              onResume={() => go(resumeLaunch())}
+              onStartOver={() => go(startOverLaunch())}
+            />
+          )}
           {plan?.kind === 'ask' && (
             <p className="status" data-testid="nas-buffer-wait">
               {waitCopy(plan.waitS)}
@@ -306,18 +398,20 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
           )}
           <div className="preflight-actions">
             {plan?.kind === 'ask' && (
-              <button type="button" data-testid="nas-wait" disabled={!manifest || opening !== 'idle'} onClick={() => waitFor(plan.bytes)}>
+              <button type="button" data-testid="nas-wait" disabled={!manifest || opening !== 'idle' || !placesReady} onClick={() => waitFor(plan.bytes, offer.kind === 'ask' ? resumeLaunch() : offer.kind === 'changed' ? startOverLaunch() : playLaunch())}>
                 Wait
               </button>
             )}
-            <button
-              type="button"
-              data-testid="nas-play"
-              disabled={!manifest || opening !== 'idle' || estimating}
-              onClick={() => (plan?.kind === 'silent' ? waitFor(plan.bytes) : plan?.kind === 'ask' || plan?.kind === 'too-big' ? playWithPauses() : play())}
-            >
-              {plan?.kind === 'ask' || plan?.kind === 'too-big' || cannotBuffer ? 'Play now with pauses' : 'Play'}
-            </button>
+            {playButton && (
+              <button
+                type="button"
+                data-testid="nas-play"
+                disabled={!manifest || opening !== 'idle' || estimating || !placesReady}
+                onClick={() => go(playLaunch())}
+              >
+                {plan?.kind === 'ask' || plan?.kind === 'too-big' || cannotBuffer ? 'Play now with pauses' : 'Play'}
+              </button>
+            )}
             {plan?.kind === 'ask' && (
               <button type="button" disabled>
                 Lower quality (coming later)

@@ -160,6 +160,43 @@ describe('Navigator startTitle (after a raw playlist pick stopped it)', () => {
   });
 });
 
+describe('Navigator resumeTitle', () => {
+  it('resumes a title at a playlist and time, continuing its program after it', async () => {
+    const { nav, port, regs, events } = setup({
+      objects: [
+        idle, idle,
+        { cmds: [asm.playPl(imm(0)), asm.set('move', reg(3), imm(1)), asm.playPl(reg(3)), asm.playPl(imm(0))] },
+        idle,
+      ],
+      playlists: { '00000': { items: [item()] }, '00001': { items: [item(), item()] } },
+    });
+    port.onOpen = (id, at) => nav.playlistStarted(id, at.item ?? 0);
+    regs.gprWrite(3, 1);
+    expect(nav.resumeTitle(1, 1, { item: 1, clipTime45: 45000 })).toBe(true);
+    await flush();
+    expect(port.calls).toEqual(['play 00001 1 -']);
+    expect(port.lastAt).toEqual({ item: 1, clipTime45: 45000 });
+    expect(regs.psrRead(PSR.TITLE_NUMBER)).toBe(1);
+    expect(events).toContainEqual({ type: 'title', title: 1 });
+    nav.playlistEnded();
+    await flush();
+    expect(port.calls).toEqual(['play 00001 1 -', 'play 00000 - -']);
+  });
+
+  it('refuses a title that never plays that playlist', async () => {
+    const { nav, port, regs, events } = setup({
+      objects: [idle, idle, { cmds: [asm.playPl(imm(0)), asm.playPl(reg(3))] }, idle],
+    });
+    regs.gprWrite(3, 0);
+    expect(nav.resumeTitle(1, 1, { item: 0, clipTime45: 0 })).toBe(false);
+    expect(nav.resumeTitle(9, 1, { item: 0, clipTime45: 0 })).toBe(false);
+    await flush();
+    expect(port.calls).toEqual([]);
+    expect(events).toEqual([]);
+    expect(regs.psrRead(PSR.TITLE_NUMBER)).toBe(0xffff);
+  });
+});
+
 describe('Navigator playlists', () => {
   it('resumes the program at the end of the playlist', () => {
     const { nav, port } = setup({ objects: [{ cmds: [asm.playPl(imm(0)), asm.playPl(imm(1))] }] });

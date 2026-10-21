@@ -25,6 +25,15 @@ describe('recent discs', () => {
     expect(paths).toEqual(['/Movies/A/BDMV', '/Movies/B/BDMV']);
   });
 
+  it('keeps the disc key, and a reopened disc takes the new one', async () => {
+    const factory = new IDBFactory();
+    await saveRecentDisc(handle('A'), 1, factory, samePath, 'f.0123456789ABCDEF0123456789ABCDEF');
+    await saveRecentDisc(handle('B'), 2, factory, samePath);
+    expect((await listRecentDiscs(factory)).map((d) => [d.name, d.discKey])).toEqual([['B', null], ['A', 'f.0123456789ABCDEF0123456789ABCDEF']]);
+    await saveRecentDisc(handle('A'), 3, factory, samePath, 'f.FEDCBA9876543210FEDCBA9876543210');
+    expect((await listRecentDiscs(factory))[0]!.discKey).toBe('f.FEDCBA9876543210FEDCBA9876543210');
+  });
+
   it('removes a disc by id', async () => {
     const factory = new IDBFactory();
     await saveRecentDisc(handle('A'), 1, factory, samePath);
@@ -43,7 +52,7 @@ describe('recent discs', () => {
     await expect(reopenRecentDisc(disc)).resolves.toBeNull();
   });
 
-  it('upgrades a version 2 database to 4, keeping its recent discs', async () => {
+  it('upgrades a version 2 database to 6, keeping its recent discs', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve, reject) => {
       const req = factory.open('bluray-web', 2);
@@ -65,12 +74,12 @@ describe('recent discs', () => {
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
-    expect(db.version).toBe(4);
-    expect([...db.objectStoreNames].sort()).toEqual(['nas', 'recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
+    expect(db.version).toBe(6);
+    expect([...db.objectStoreNames].sort()).toEqual(['local-text-files', 'nas', 'place-outbox', 'places', 'recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
     db.close();
   });
 
-  it('upgrades a version 1 database (legacy store only) to 4, dropping the legacy store', async () => {
+  it('upgrades a version 1 database (legacy store only) to 6, dropping the legacy store', async () => {
     const factory = new IDBFactory();
     await new Promise<void>((resolve, reject) => {
       const req = factory.open('bluray-web', 1);
@@ -87,7 +96,7 @@ describe('recent discs', () => {
       r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
-    expect([...db.objectStoreNames].sort()).toEqual(['nas', 'recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
+    expect([...db.objectStoreNames].sort()).toEqual(['local-text-files', 'nas', 'place-outbox', 'places', 'recent-discs-v2', 'settings', 'shader-files', 'shader-sets']);
     db.close();
   });
 });

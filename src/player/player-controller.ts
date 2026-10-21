@@ -4,7 +4,7 @@ import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { MemoryProfileName } from '../engine/memory-profile';
-import type { AudioTrack, BufferRequest, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaybackState, ShaderSetData, ShaderState, SubtitleChoice, Telemetry } from '../engine/protocol';
+import type { AudioTrack, BufferRequest, EngineCommand, EngineEvent, ErrorCode, MenuKey, PlaceState, PlaybackState, ShaderSetData, ShaderState, StartPoint, SubtitleChoice, Telemetry } from '../engine/protocol';
 import { trackLabel } from './language';
 import { DROP_WARN_RATE, DropMeter } from './drop-meter';
 
@@ -73,7 +73,11 @@ export interface PlayerSnapshot {
   readonly buffer: { readonly bytes: number; readonly targetBytes: number; readonly mbps: number; readonly stopped?: 'failed' | 'no-cache' } | null;
   /** Whether this device can keep a read-ahead cache (the engine says at its start; null until then). Kept across discs. */
   readonly readAheadCache: boolean | null;
+  /** Why the open's start point could not be used (startFailed); null otherwise, and again on every open. */
+  readonly startFailed: 'no-playlist' | 'past-end' | null;
 }
+
+export type { PlaceState, StartPoint };
 
 /** The engine's last 'subtitles' event. */
 export type SubtitlesState = Omit<Extract<EngineEvent, { type: 'subtitles' }>, 'type'>;
@@ -137,6 +141,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   shaderDropWarning: null,
   buffer: null,
   readAheadCache: null,
+  startFailed: null,
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -202,6 +207,10 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, buffer: { bytes: e.bytes, targetBytes: e.targetBytes, mbps: e.mbps, ...(e.stopped ? { stopped: e.stopped } : {}) } };
     case 'readAheadCache':
       return { ...s, readAheadCache: e.available };
+    case 'startFailed':
+      return { ...s, startFailed: e.reason };
+    case 'placeState':
+      return s; // answers readPlace
     case 'shaderStatus':
       return { ...s, shaders: { state: e.state, set: e.set, error: e.error }, shaderDropWarning: e.state === 'active' ? s.shaderDropWarning : null };
   }
@@ -277,6 +286,10 @@ export class PlayerController {
    */
   private readonly servings: Array<{ release: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }> = [];
   private opens = 0;
+  /** readPlace calls waiting for the engine's next placeState. */
+  private placeWaiters: Array<{ resolve: (place: PlaceState) => void; reject: (err: Error) => void }> = [];
+  /** The worker failed (reportInternalError): it will answer nothing more. */
+  private engineFailed: Error | null = null;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -294,6 +307,7 @@ export class PlayerController {
       else if (e.type === 'soundEffect') audio.playEffect(e.id);
       else if (e.type === 'remoteTokenNeeded') this.answerTokenRequest();
       else if (e.type === 'fetchPortClosed') this.fetchPortClosed();
+      else if (e.type === 'placeState') this.placeState(e);
       else this.update(this.withDropWarning(reduceEvent(this.snapshot, e), e));
     };
     worker.onerror = (event) => this.reportInternalError(`The player engine stopped unexpectedly: ${event.message || 'unknown error'}`);
@@ -340,6 +354,10 @@ export class PlayerController {
 
   /** Surfaces a failure of the engine worker itself (it can no longer report through events). */
   reportInternalError(message: string): void {
+    this.engineFailed = new Error(message);
+    const waiters = this.placeWaiters;
+    this.placeWaiters = [];
+    for (const w of waiters) w.reject(this.engineFailed);
     const s = reduceEvent(this.snapshot, { type: 'error', code: 'internal', message, paths: [] });
     this.update({ ...s, engineState: 'error' }); // the engine can't report its own state any more
   }
@@ -385,18 +403,39 @@ export class PlayerController {
     return this.opens;
   }
 
+  /**
+   * The registers a saved place needs, as the engine reads them now (its next placeState). The engine answers at once,
+   * in command order, so a read made before an open or a close describes the disc that was open when it was made (a
+   * save just before switching discs), and resolves; it rejects only once the engine worker has failed.
+   */
+  readPlace(): Promise<PlaceState> {
+    if (this.engineFailed) return Promise.reject(this.engineFailed);
+    return new Promise((resolve, reject) => {
+      this.placeWaiters.push({ resolve, reject });
+      this.post({ type: 'readPlace' });
+    });
+  }
+
+  private placeState(e: Extract<EngineEvent, { type: 'placeState' }>): void {
+    const { type: _type, ...place } = e;
+    const waiters = this.placeWaiters;
+    this.placeWaiters = [];
+    for (const w of waiters) w.resolve(place);
+  }
+
   /** A notice from the UI itself (the engine's arrive as events), replacing any with the same code. */
   showNotice(code: string, message: string): void {
     this.update(withNotice(this.snapshot, { code, message }));
   }
 
-  open(entries: ReadonlyArray<readonly [string, File]>): void {
+  /** `start`: open at that place instead of running the disc's First Play (startFailed when it can't). */
+  open(entries: ReadonlyArray<readonly [string, File]>, start?: StartPoint): void {
     this.opens++;
     this.refreshToken = null;
     this.supersedeServings();
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading' });
-    this.post({ type: 'open', disc: { kind: 'files', entries } });
+    this.post({ type: 'open', disc: { kind: 'files', entries }, ...(start ? { start } : {}) });
   }
 
   /**
@@ -404,9 +443,9 @@ export class PlayerController {
    * refreshed on schedule goes to the engine through setRemoteToken. A spec's fetch port (the WebRTC route) is
    * transferred to the engine, and `release` (what serves it) runs once the engine has closed that port, after another disc
    * opened or this one closed (or failed to open), so no read of it fails early. With `bufferFirst` the engine fills the
-   * disc's read-ahead cache (bufferProgress) before it opens the disc; cancelBuffer opens it at once.
+   * disc's read-ahead cache (bufferProgress) before it opens the disc; cancelBuffer opens it at once. `start`: as open's.
    */
-  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>, release?: () => void, bufferFirst?: BufferRequest): void {
+  openRemote(spec: RemoteDiscSpec, refreshToken?: () => Promise<string>, release?: () => void, bufferFirst?: BufferRequest, start?: StartPoint): void {
     this.opens++;
     this.supersedeServings();
     this.refreshToken = refreshToken ?? null;
@@ -414,7 +453,7 @@ export class PlayerController {
     else release?.(); // nothing crosses to the engine to serve
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading', remoteDisc: true, rtcDisc: spec.base.startsWith('rtc://') });
-    this.post(bufferFirst ? { type: 'open', disc: spec, bufferFirst } : { type: 'open', disc: spec }, spec.fetchPort ? [spec.fetchPort] : []);
+    this.post({ type: 'open', disc: spec, ...(bufferFirst ? { bufferFirst } : {}), ...(start ? { start } : {}) }, spec.fetchPort ? [spec.fetchPort] : []);
   }
 
   /** Fetches the open NAS disc's main playlist from `fromSeconds` on into its read-ahead cache, `targetBytes` of it. */

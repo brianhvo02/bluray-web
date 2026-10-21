@@ -26,7 +26,7 @@ export function requestDevice(auth: Auth, authorization: string | undefined, url
   return token === null ? null : auth.verify(token);
 }
 
-function decodeSegment(segment: string): string {
+export function decodeSegment(segment: string): string {
   try {
     return decodeURIComponent(segment);
   } catch {
