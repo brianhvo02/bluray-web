@@ -123,6 +123,8 @@ describe('NasBdjStore (the NAS store API)', () => {
     const third = store.save(`buda/${ORG}`, big(60 * 1024), null);
     await expect(third).rejects.toBeInstanceOf(NasQuotaError);
     await expect(third).rejects.toMatchObject({ limit: 'person', message: expect.stringContaining('No space left on device') });
+    // the size the NAS counted: the archive's, not the file's (review minor 5)
+    await expect(third).rejects.toMatchObject({ bytes: writeTar(big(60 * 1024).files).length });
   });
 
   it('tries a busy scope again (503, Retry-After: 1), and a stale token once with a fresh one (401)', async () => {

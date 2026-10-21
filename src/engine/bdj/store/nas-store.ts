@@ -189,7 +189,8 @@ export class NasBdjStore implements BdjStore {
         } catch {
           // the scope's, when the body does not say
         }
-        throw new NasQuotaError(scope, snapshotBytes(snapshot), limit);
+        // the archive's size, as the NAS counts it (ruling R24)
+        throw new NasQuotaError(scope, body.length, limit);
       }
       default:
         throw await failure(res, scope);

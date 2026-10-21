@@ -256,8 +256,10 @@ export type EngineEvent =
   | { readonly type: 'state'; readonly state: PlaybackState }
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
-  /** The condition behind a notice is over (nas-waiting: the read landed). */
-  /** The notice of that code is no longer true ('no-picture': once a playlist with a picture starts). */
+  /**
+   * The condition behind a notice of that code is over: 'nas-waiting' once the read landed, 'no-picture' once a
+   * playlist with a picture starts.
+   */
   | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
   /**
    * The read-ahead cache's fill: bytes held from the start position on, out of `targetBytes` (the request's, or all
