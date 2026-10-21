@@ -2593,6 +2593,35 @@ describe('Player opening at a place (resume)', () => {
     expect(place.psrs.slice(1, 4)).toEqual([2, 0x80000002, 1]);
   });
 
+  it('an HDMV resume whose playlist fails to open, and whose program then ends, leaves the player idle', async () => {
+    const h = await harness(CodingType.LPCM, {
+      playlists: [{ id: '00000', clipIds: ['00001'], chapterEverySeconds: 1 }, { id: '00001', clipIds: ['00002'], chapterEverySeconds: 1 }],
+      movieObjects: buildMovieObjects([{ cmds: [] }, { cmds: [] }, { cmds: [asm.playPl(imm(1))] }]),
+      dropFiles: ['BDMV/STREAM/00002.m2ts'],
+      noOpen: true,
+    });
+    const psrs = new RegisterFile().snapshot().psrs;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries }, start: { playlistId: '00001', timeUs: 0, hdmv: { title: 1, psrs, gprs: {} }, playback: null } });
+    await vi.waitFor(async () => {
+      await h.play(20);
+      expect(h.events.some((e) => e.type === 'error')).toBe(true); // the missing clip
+      expect(lastState(h)).toBe('idle');
+    }, { timeout: 5000 });
+    expect(chapterIds(h)).toEqual([]);
+  });
+
+  it('a later open drops an open at a place: only the second disc emits titles, and nothing plays', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    const first = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') }, start: { playlistId: '00001', timeUs: 1e6, hdmv: null, playback: null } });
+    const second = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc3') } });
+    await first;
+    await second;
+    const titles = h.events.flatMap((e) => (e.type === 'titles' ? [e.playlists.map((p) => p.id)] : []));
+    expect(titles).toEqual([['00000']]);
+    expect(chapterIds(h)).toEqual([]);
+    expect(startFailures(h)).toEqual([]);
+  });
+
   it('drops a superseded open: only the second disc emits titles', async () => {
     const h = await harness(undefined, { noOpen: true });
     const first = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') } });

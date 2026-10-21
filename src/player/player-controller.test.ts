@@ -887,6 +887,32 @@ describe('opening at a place', () => {
     await expect(third).resolves.toEqual({ mode: 'none', title: null, psrs: [], gprs: null });
   });
 
+  it('readPlace rejects pending and later reads once the engine worker fails', async () => {
+    for (const fail of [(w: FakeWorker) => w.onerror?.({ message: 'boom' } as ErrorEvent), (w: FakeWorker) => w.onmessageerror?.({} as MessageEvent)]) {
+      const worker = new FakeWorker();
+      const c = new PlayerController(worker, new FakeAudio());
+      const pending = c.readPlace();
+      fail(worker);
+      await expect(pending).rejects.toThrow(/player engine/);
+      await expect(c.readPlace()).rejects.toThrow(/player engine/);
+      expect(worker.posted.filter((m) => (m as { type: string }).type === 'readPlace')).toHaveLength(1);
+    }
+  });
+
+  it('a read made before an open or a close resolves with the answer, which describes the disc open when it was made', async () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const beforeOpen = c.readPlace();
+    c.open([], start);
+    const beforeClose = c.readPlace();
+    c.closeDisc();
+    // the engine handles readPlace at once, in command order: its answer comes for the read posted before the open
+    expect(worker.posted.map((m) => (m as { type: string }).type)).toEqual(['readPlace', 'open', 'readPlace', 'close']);
+    worker.emit({ type: 'placeState', mode: 'hdmv', title: 1, psrs: [], gprs: {} });
+    await expect(beforeOpen).resolves.toMatchObject({ mode: 'hdmv', title: 1 });
+    await expect(beforeClose).resolves.toMatchObject({ mode: 'hdmv', title: 1 });
+  });
+
   it('records startFailed, and forgets it on the next open', () => {
     expect(INITIAL_SNAPSHOT.startFailed).toBeNull();
     expect(reduceEvent(INITIAL_SNAPSHOT, { type: 'startFailed', reason: 'past-end' }).startFailed).toBe('past-end');

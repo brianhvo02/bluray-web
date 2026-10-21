@@ -287,7 +287,9 @@ export class PlayerController {
   private readonly servings: Array<{ release: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }> = [];
   private opens = 0;
   /** readPlace calls waiting for the engine's next placeState. */
-  private placeWaiters: Array<(place: PlaceState) => void> = [];
+  private placeWaiters: Array<{ resolve: (place: PlaceState) => void; reject: (err: Error) => void }> = [];
+  /** The worker failed (reportInternalError): it will answer nothing more. */
+  private engineFailed: Error | null = null;
 
   constructor(
     private readonly worker: WorkerLike,
@@ -352,6 +354,10 @@ export class PlayerController {
 
   /** Surfaces a failure of the engine worker itself (it can no longer report through events). */
   reportInternalError(message: string): void {
+    this.engineFailed = new Error(message);
+    const waiters = this.placeWaiters;
+    this.placeWaiters = [];
+    for (const w of waiters) w.reject(this.engineFailed);
     const s = reduceEvent(this.snapshot, { type: 'error', code: 'internal', message, paths: [] });
     this.update({ ...s, engineState: 'error' }); // the engine can't report its own state any more
   }
@@ -397,10 +403,15 @@ export class PlayerController {
     return this.opens;
   }
 
-  /** The registers a saved place needs, as the engine reads them now (its next placeState). */
+  /**
+   * The registers a saved place needs, as the engine reads them now (its next placeState). The engine answers at once,
+   * in command order, so a read made before an open or a close describes the disc that was open when it was made (a
+   * save just before switching discs), and resolves; it rejects only once the engine worker has failed.
+   */
   readPlace(): Promise<PlaceState> {
-    return new Promise((resolve) => {
-      this.placeWaiters.push(resolve);
+    if (this.engineFailed) return Promise.reject(this.engineFailed);
+    return new Promise((resolve, reject) => {
+      this.placeWaiters.push({ resolve, reject });
       this.post({ type: 'readPlace' });
     });
   }
@@ -409,7 +420,7 @@ export class PlayerController {
     const { type: _type, ...place } = e;
     const waiters = this.placeWaiters;
     this.placeWaiters = [];
-    for (const resolve of waiters) resolve(place);
+    for (const w of waiters) w.resolve(place);
   }
 
   /** A notice from the UI itself (the engine's arrive as events), replacing any with the same code. */

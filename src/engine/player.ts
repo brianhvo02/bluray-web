@@ -829,8 +829,7 @@ export class Player {
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
     if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', this.bdjUnsupported('disc'));
     if (start) {
-      this.dropEarlyBdj();
-      await this.openAt(disc, start);
+      await this.openAt(disc, start); // no early BD-J worker was started for it
       return;
     }
     // bdjActive goes out before 'idle', so the UI never shows the picker in between
@@ -868,6 +867,8 @@ export class Player {
     const { hdmv } = start;
     if (hdmv && disc.movieObjects) {
       // loaded before the navigator and PG subscribe, so no listener sees half-loaded registers
+      // idle first, as before First Play: a program that ends without a playlist leaves the picker, not 'loading'
+      this.setState('idle');
       const regs = this.newProgramRegs(disc.index, disc.usesBdj);
       regs.load({ psrs: hdmv.psrs, gprs: hdmv.gprs }, SETTING_PSRS);
       this.navigator = this.createNavigator(disc, regs);
