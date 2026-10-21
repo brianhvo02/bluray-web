@@ -3,9 +3,10 @@ import { EPISODE_MISSING_NOTICE, playOnceOpen, type OpeningController } from './
 
 /** A controller stand-in: a snapshot, its listeners, and what the pre-flight asked of it. */
 interface FakeController extends OpeningController {
-  snapshot: { playlists: { id: string }[]; engineState: string; error: unknown };
+  snapshot: { playlists: { id: string }[]; engineState: string; error: unknown; currentPlaylistId: string | null; durationUs: number };
   discOpens: number;
   readonly played: string[];
+  readonly seeks: number[];
   readonly notices: { code: string; message: string }[];
   readonly listeners: Set<() => void>;
   set(next: Partial<FakeController['snapshot']>): void;
@@ -14,9 +15,10 @@ interface FakeController extends OpeningController {
 function fakeController(): FakeController {
   const listeners = new Set<() => void>();
   const c: FakeController = {
-    snapshot: { playlists: [] as { id: string }[], engineState: 'loading', error: null as unknown },
+    snapshot: { playlists: [] as { id: string }[], engineState: 'loading', error: null as unknown, currentPlaylistId: null, durationUs: 0 },
     discOpens: 1,
     played: [] as string[],
+    seeks: [] as number[],
     notices: [] as { code: string; message: string }[],
     subscribe: (l: () => void) => {
       listeners.add(l);
@@ -27,6 +29,9 @@ function fakeController(): FakeController {
     getSnapshot: () => c.snapshot,
     playPlaylist: (id: string) => {
       c.played.push(id);
+    },
+    seek: (timeUs: number) => {
+      c.seeks.push(timeUs);
     },
     showNotice: (code: string, message: string) => {
       c.notices.push({ code, message });
@@ -87,5 +92,64 @@ describe('playOnceOpen', () => {
     c.set({ playlists: [{ id: '00001' }] });
     expect(c.played).toEqual([]);
     expect(c.listeners.size).toBe(0);
+  });
+
+  it('seeks to the start time once the playlist is playing', () => {
+    const c = fakeController();
+    playOnceOpen(c, '00001', 30e6);
+    c.set({ playlists: [{ id: '00000' }, { id: '00001' }] });
+    expect(c.played).toEqual(['00001']);
+    expect(c.seeks).toEqual([]);
+    c.set({ engineState: 'buffering' });
+    expect(c.seeks).toEqual([]);
+    c.set({ currentPlaylistId: '00001', durationUs: 120e6, engineState: 'playing' });
+    c.set({ engineState: 'playing' });
+    expect(c.seeks).toEqual([30e6]);
+    expect(c.listeners.size).toBe(0);
+  });
+
+  it('does not seek past the end', () => {
+    const c = fakeController();
+    playOnceOpen(c, '00001', 200e6);
+    c.set({ playlists: [{ id: '00001' }] });
+    c.set({ currentPlaylistId: '00001', durationUs: 120e6 });
+    expect(c.played).toEqual(['00001']);
+    expect(c.seeks).toEqual([]);
+    expect(c.listeners.size).toBe(0);
+  });
+
+  it('does not seek when another disc opened meanwhile', () => {
+    const c = fakeController();
+    playOnceOpen(c, '00001', 30e6);
+    c.set({ playlists: [{ id: '00001' }] });
+    c.discOpens++;
+    c.set({ currentPlaylistId: '00001', durationUs: 120e6 });
+    expect(c.seeks).toEqual([]);
+    expect(c.listeners.size).toBe(0);
+  });
+
+  it('lets go without seeking when another playlist starts first', () => {
+    const c = fakeController();
+    playOnceOpen(c, '00001', 30e6);
+    c.set({ playlists: [{ id: '00000' }, { id: '00001' }] });
+    c.set({ currentPlaylistId: '00000', durationUs: 120e6 });
+    expect(c.listeners.size).toBe(0);
+    // picked later on: it plays from its start
+    c.set({ currentPlaylistId: '00001', durationUs: 60e6 });
+    expect(c.seeks).toEqual([]);
+  });
+
+  it('plays once when playPlaylist notifies its listeners at once, as the controller does', () => {
+    for (const startUs of [undefined, 30e6]) {
+      const c = fakeController();
+      const play = c.playPlaylist;
+      c.playPlaylist = (id: string) => {
+        play(id);
+        c.set({});
+      };
+      playOnceOpen(c, '00001', startUs);
+      c.set({ playlists: [{ id: '00001' }] });
+      expect(c.played).toEqual(['00001']);
+    }
   });
 });

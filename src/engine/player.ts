@@ -495,14 +495,14 @@ export class Player {
       }
       return Promise.resolve();
     }
-    // a disc buffering before it opens (or queued to) is dropped unopened by what comes after it
+    // a disc opening (buffering first, reading its metadata, or queued to) is dropped unopened by what comes after it
     if ((cmd.type === 'open' || cmd.type === 'close') && this.openHold) {
       this.openHold.abandoned = true;
       this.openHold.release();
       this.openHold = null;
       this.stopFill();
     }
-    if (cmd.type === 'open' && cmd.bufferFirst) {
+    if (cmd.type === 'open') {
       const hold = openHold();
       this.holds.set(cmd, hold);
       this.openHold = hold;
@@ -795,6 +795,7 @@ export class Player {
     } catch (err) {
       this.dropEarlyBdj();
       this.dropRemote(); // its read-ahead would otherwise go on fetching
+      if (hold?.abandoned) return; // closed meanwhile: nobody waits for this open's error
       throw err;
     }
     this.source = source;
@@ -804,16 +805,11 @@ export class Player {
       const fill = await this.fill(bufferFirst, true);
       if (fill && !hold.cancelled) await Promise.race([fill.reached, hold.released]);
     }
-    if (hold?.abandoned) {
-      // a close or another open came while it filled: the disc is dropped without being opened
-      this.dropRemote();
-      this.source = null;
-      this.disc = null;
-      return;
-    }
+    if (hold?.abandoned) return this.dropUnopened();
     this.soundsPlayed = 0;
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
+    if (hold?.abandoned) return this.dropUnopened();
     this.pgRegs = new RegisterFile();
     this.initRegs(this.pgRegs, disc.index);
     this.bindPg(this.pgRegs);
@@ -832,6 +828,14 @@ export class Player {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
+  }
+
+  /** A close or another open came while the disc opened (read its metadata, or filled): it is dropped unopened. */
+  private dropUnopened(): void {
+    this.dropEarlyBdj();
+    this.dropRemote();
+    this.source = null;
+    this.disc = null;
   }
 
   /** The disc's bytes; a NAS disc's waits show a notice, and its 401s ask the controller for a fresh token. */

@@ -125,6 +125,12 @@ async function isRelayed(pc: RTCPeerConnection): Promise<boolean> {
   }
 }
 
+/**
+ * ?rtcrelayed=1 is test-only (E2E): the connection counts as relayed, so the badge can be seen without a relay. Read once
+ * at load, from the address the app opened with: the NAS screens' paths leave the query behind.
+ */
+const COUNT_AS_RELAYED = new URLSearchParams(globalThis.location?.search ?? '').get('rtcrelayed') === '1';
+
 /** A WebRTC connection to the NAS: requests over its `api` data channel, as `fetch`. */
 export class RtcConnection implements RtcLink {
   readonly fetch: typeof fetch;
@@ -147,8 +153,7 @@ export class RtcConnection implements RtcLink {
   }
 
   get relayed(): boolean {
-    // ?rtcrelayed=1 is test-only (E2E): the connection counts as relayed, so the badge can be seen without a relay.
-    return this.isRelayed || new URLSearchParams(globalThis.location?.search ?? '').get('rtcrelayed') === '1';
+    return this.isRelayed || COUNT_AS_RELAYED;
   }
 
   /**

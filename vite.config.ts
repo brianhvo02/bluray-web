@@ -2,6 +2,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -12,8 +13,30 @@ const crossOriginIsolation = {
   'Cross-Origin-Embedder-Policy': 'require-corp',
 };
 
+/**
+ * The isolation headers on every response, 304s too: `server.headers`/`preview.headers` reach only full responses (sirv
+ * leaves them off a 304), and WebKit refuses a worker whose revalidated script answers 304 without COEP, so a second
+ * page load in a tab (a reload, or a link opened after the app) got no engine worker.
+ */
+const isolateEveryResponse: Plugin = {
+  name: 'isolate-every-response',
+  configureServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      for (const [name, value] of Object.entries(crossOriginIsolation)) res.setHeader(name, value);
+      next();
+    });
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use((_req, res, next) => {
+      for (const [name, value] of Object.entries(crossOriginIsolation)) res.setHeader(name, value);
+      next();
+    });
+  },
+};
+
 export default defineConfig({
   plugins: [
+    isolateEveryResponse,
     react(),
     VitePWA({
       strategies: 'injectManifest',

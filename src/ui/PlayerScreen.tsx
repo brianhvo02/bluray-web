@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEve
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
 import type { NasClient } from './nas/nas-client';
+import type { NasHistory } from './nas/nas-history';
+import type { NasRoute } from './nas/nas-route';
+import type { PlayingRoute } from './nas/playing-route';
 import { RelayBadge } from './nas/RelayBadge';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { collectDroppedFiles, splitPick } from '../player/drop-files';
@@ -18,6 +21,7 @@ import type { MenuKey } from '../engine/protocol';
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
 const TAP_NOTICE_MS = 6000;
+const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 
 
 /** A touch held on the video over a disc menu: where and when it went down, and whether it moved or showed the controls. */
@@ -38,6 +42,9 @@ interface PlayerScreenProps {
   readonly shaderState: ShaderModelState;
   /** For the "Relayed" badge of a NAS disc; absent where there is no NAS. */
   readonly nas?: NasClient;
+  /** A NAS disc's playback is in the address bar (playingRoute, once its pre-flight started it); Back closes it. */
+  readonly history: NasHistory;
+  readonly playingRoute: PlayingRoute;
 }
 
 /**
@@ -60,7 +67,7 @@ function Notice({ message, onDismiss, testId }: { message: string; onDismiss(): 
   );
 }
 
-export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, nas }: PlayerScreenProps): ReactElement {
+export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, nas, history, playingRoute }: PlayerScreenProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -100,6 +107,27 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
     },
     [],
   );
+
+  // The address bar follows a NAS disc's playlist and time (a local or disc-server disc never started playingRoute).
+  const { currentPlaylistId, timeUs, engineState } = snapshot;
+  useEffect(() => playingRoute.update({ currentPlaylistId, timeUs, engineState }), [playingRoute, currentPlaylistId, timeUs, engineState]);
+  // Back (or Forward) off the play route closes the NAS disc; the landing screen then shows where it went.
+  useEffect(
+    () =>
+      history.subscribe(() => {
+        if (playingRoute.discKey === null || history.route()?.kind === 'play') return;
+        playingRoute.stop();
+        controller.closeDisc();
+      }),
+    [history, playingRoute, controller],
+  );
+  /** The player's own close: a NAS disc's play route goes back to where Play was pressed (else the library). */
+  const closeDisc = (): void => {
+    const nasPlayback = playingRoute.discKey !== null;
+    playingRoute.stop();
+    controller.closeDisc();
+    if (nasPlayback) history.back(LIBRARY);
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -536,7 +564,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
             controller.playPlaylist(id);
           }}
           onClose={snapshot.currentPlaylistId === null && !snapshot.bdjActive ? undefined : () => setPickerOpen(false)}
-          onCloseDisc={() => controller.closeDisc()}
+          onCloseDisc={closeDisc}
         />
       )}
       {remoteOpen && controlsVisible && (snapshot.indexTitles || snapshot.bdjActive) && <RemotePad onKey={sendMenuKey} />}

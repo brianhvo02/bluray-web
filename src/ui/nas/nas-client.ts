@@ -563,6 +563,14 @@ export class NasClient {
     }
   };
 
+  /** The disc a link's key names, or null when the NAS has none. */
+  async resolveDisc(key: string): Promise<DiscEntry | null> {
+    const res = await this.authed(`discs/resolve/${encodeURIComponent(key)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw await httpError(res);
+    return ((await res.json()) as { disc: DiscEntry }).disc;
+  }
+
   async manifest(discId: string): Promise<DiscManifest> {
     return (await this.json(`${discPath(discId)}manifest`)) as DiscManifest;
   }

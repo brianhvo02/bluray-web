@@ -158,3 +158,5 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .admin-owner input { width: 24px; height: 24px; }
 }
 .relay-badge { align-self: flex-start; background: rgba(0, 0, 0, 0.6); border-radius: 6px; padding: 2px 8px; font-size: 0.85em; pointer-events: none; }
+.nas-not-found { background: #1b1b20; border: 1px solid #2a2a30; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.nas-not-found p { margin: 0; }
