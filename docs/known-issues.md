@@ -419,13 +419,23 @@ what would change that decision.
     in the same session; the next boot merges it with the NAS's files winning at every path both have (ruling R29),
     so only the files the NAS lacks are added, and logs how many of this browser's files it dropped. Java wrote it
     without seeing the saved data, so a fresh progress or settings file never replaces real saved progress; what
-    Java changed in such a file that session is lost. An ordinary pending copy still merges newest-wins.
-  - **`GET me` not answering at boot.** What the session saves is kept apart (`nas-unconfirmed:<person>`), under the
-    person the NAS last named for this device in this browser (`nas-device`, by API base), and goes into that
-    person's copy only at a boot where the NAS names the same person again; a boot that names another person leaves it
-    there. A device never confirmed in this browser (or on that route: HTTPS and WebRTC have their own API bases)
-    keeps that session's saved data in memory only. A device moved away and back again around such a session gives
-    its saves to the person it is back with.
+    Java changed in such a file that session is lost. An ordinary pending copy still merges newest-wins. A flush
+    asks the NAS nothing for such a copy (no `GET me`), so a dead link logs only the miss.
+  - **`GET me` not answering at boot (rulings R28, R30).** The disc starts with no saved data, never with what earlier
+    such sessions kept, and the session only adds to a copy kept apart (`nas-unconfirmed:<API base>#<person>`) under
+    the person the NAS last named for this device in this browser (`nas-device`, by API base). That copy goes into
+    the person's own (onto an empty base when theirs is already on the NAS, so files deleted elsewhere don't come back)
+    only at a boot where the NAS names the same person again, and then merges with the NAS's files winning (R29). A
+    boot that names another person removes this NAS's copies kept for anyone else, and any such copy older than 30
+    days is removed at boot: those saves are lost, never given to someone else. If the device moves and its new
+    person's first boot also misses `GET me`, their saves are added to the copy kept for the previous person, and go
+    to that person only if the NAS names them again before it names anyone else. A device never confirmed in this
+    browser (or on that route: HTTPS and WebRTC have their own API bases) keeps that session's saved data in memory
+    only.
+  - **A conflict's merge keeps Java's file only where Java changed it (review N7).** When a save meets a newer stored
+    version, the stored file replaces Java's unless Java changed that file since the snapshot being saved (or Java's
+    is newer). Under an open writable handle it is replaced in place, so the handle writes on into the live file; a
+    write past the replaced length extends it, and one inside it overwrites part of the stored file.
   - **The stop waits 3 s for the save (`STOP_SAVE_WAIT_MS`).** On a stop (a title change, the disc closed) the engine
     waits at most 3 s for the BD-J worker's `stopped`, then terminates it (logged). The write-ahead copy in IndexedDB
     normally lands well within that, so a stop past 3 s usually loses only the NAS put of that last save, which goes

@@ -195,6 +195,39 @@ export class IdbBdjStore implements BdjStore {
     return next !== undefined;
   }
 
+  /**
+   * Removes every record of a source that starts with `prefix` (any source, not only this one's) for which `drop`
+   * answers true, in one readwrite transaction: how many went (nas-store.ts, the copies kept apart).
+   */
+  async prune(prefix: string, drop: (r: ScopeRecord) => boolean): Promise<number> {
+    const db = await this.open();
+    const tx = db.transaction(SCOPES_STORE, 'readwrite', { durability: 'strict' });
+    const done = new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'));
+      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
+    });
+    done.catch(() => undefined); // awaited below
+    let gone = 0;
+    // every record, in source order (a few per disc): no IDBKeyRange, which a test's fake IndexedDB keeps elsewhere
+    const cursor = tx.objectStore(SCOPES_STORE).index(SOURCE_INDEX).openCursor();
+    await new Promise<void>((resolve, reject) => {
+      cursor.onsuccess = () => {
+        const c = cursor.result;
+        if (!c) return resolve();
+        const r = c.value as ScopeRecord;
+        if (typeof r.source === 'string' && r.source.startsWith(prefix) && typeof r.savedAt === 'number' && drop(r)) {
+          c.delete();
+          gone++;
+        }
+        c.continue();
+      };
+      cursor.onerror = () => reject(cursor.error ?? new Error('IndexedDB cursor failed'));
+    });
+    await done;
+    return gone;
+  }
+
   /** The scopes this source keeps (Task 8's migration). */
   async scopes(): Promise<string[]> {
     const db = await this.open();
