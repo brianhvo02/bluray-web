@@ -320,8 +320,8 @@ what would change that decision.
   that matters: Java's disc reads could go ahead of the engine's clip read-ahead on NAS sources.
   - **No single timeout bounds a wait.** One HTTP read can take about 70 s or more: 30 s (`REQUEST_TIMEOUT_MS`), then a
     401 and a token refresh of up to 10 s, then another 30 s, and a 503 can add one more request. Each scope load
-    can take 3 s. The FreeType wait includes compiling it. Java may also retry a read that keeps failing, or read in
-    a loop as its way of hanging.
+    can take 3 s (12.5 s on a NAS disc, ruling R28). The FreeType wait includes compiling it. Java may also retry a
+    read that keeps failing, or read in a loop as its way of hanging.
   - **The ceiling is the real bound (ruling R26).** Waiting on I/O pauses the timeout for at most 120 s in all per
     boot (`IO_PAUSE_CEILING_MS`, `session.ts`). Past that it counts as usual and is logged once, so such a disc
     falls back 20 s of counted time later, with the thread dump. The legitimate waits measured on the NAS were
@@ -410,8 +410,25 @@ what would change that decision.
   - **Quotas.** 16 MB per scope is counted as the NAS counts it, the ustar archive with headers and padding (ruling
     R24), so the write that crosses it fails in Java at once. The NAS's 256 MB per person is only seen as a 507 after
     the put, so Java gets the IOException on its next write; the write-ahead copy is kept.
-  - **`GET me` failing at boot** keeps that session's saved data in memory only (logged as an error); in practice
-    the disc's own reads fail too then.
+  - **A slow or silent NAS at boot (ruling R28).** A NAS disc's boot gives the NAS 12 s for `GET me`, each scope's
+    GET and the person check after it (three requests one after another, so about 4 s each); the wait counts as I/O
+    for the start-up timer, whose 120 s ceiling bounds it. A slow link is not a dead one: each of the disc's own
+    reads may wait 30 s or more (above), so a boot can go on while the store misses its budget. A scope the NAS
+    doesn't answer in time loads this browser's copy. With none, the disc starts with no saved data, and what it saves is kept here as a pending
+    copy marked `unmerged`, merged per file by mtime with the NAS's at the next put or boot (logged as an error at the
+    miss). A file the disc writes afresh in that session (it saw none) is newer than the NAS's, so it wins that merge:
+    on a disc that keeps its progress in one file, that session's file replaces the NAS's.
+  - **`GET me` not answering at boot.** What the session saves is kept apart (`nas-unconfirmed:<person>`), under the
+    person the NAS last named for this device in this browser (`nas-device`, by API base), and goes into that
+    person's copy only at a boot where the NAS names the same person again; a boot that names another person leaves it
+    there. A device never confirmed in this browser (or on that route: HTTPS and WebRTC have their own API bases)
+    keeps that session's saved data in memory only. A device moved away and back again around such a session gives
+    its saves to the person it is back with.
+  - **The stop waits 3 s for the save (`STOP_SAVE_WAIT_MS`).** On a stop (a title change, the disc closed) the engine
+    waits at most 3 s for the BD-J worker's `stopped`, then terminates it (logged). The write-ahead copy in IndexedDB
+    normally lands well within that, so a stop past 3 s usually loses only the NAS put of that last save, which goes
+    at the next open (the copy is pending). Only if IndexedDB itself takes longer, as a strict commit on a busy iPhone
+    might, are the writes since the last 100 ms save lost.
   - **A disc without a disc ID** keys its BUDA scope by a fingerprint of its BDMV file list (ruling R15), so a
     re-ripped copy with other files starts with an empty BUDA scope.
 

@@ -44,11 +44,26 @@ export interface ScopeRecord {
   readonly pending?: boolean;
   /** A browser-only NAS disc record (`nas:<discId>`) merged into this person's write-ahead copy, to go once the NAS has it. */
   readonly migratedTo?: string;
+  /**
+   * A pending write-ahead copy that was never merged with the NAS's (ruling R28): written in a session whose boot got
+   * no answer from the NAS in time and had no copy here, so Java started with none. The next put or boot merges it
+   * per file by mtime, as any pending copy; the flag only says so in the log. Absent once merged.
+   */
+  readonly unmerged?: boolean;
 }
 
 /** What a save marks on the record (IdbBdjStore.save). */
 export interface RecordMarks {
   readonly pending?: boolean;
+  /** ScopeRecord.unmerged; left out (false) otherwise. */
+  readonly unmerged?: boolean;
+}
+
+/** A short value kept beside the scope records under a source of its own (IdbBdjStore.loadNote). */
+interface NoteRecord {
+  readonly source: string;
+  readonly scope: string;
+  readonly note: string;
 }
 
 export function recordKey(source: string, scope: string): string {
@@ -127,6 +142,7 @@ export class IdbBdjStore implements BdjStore {
       bytes,
       savedAt: this.nowMs(),
       ...(marks.pending !== undefined ? { pending: marks.pending } : {}),
+      ...(marks.unmerged === true ? { unmerged: true } : {}),
     };
     store.put(record, key);
     await done;
@@ -144,6 +160,20 @@ export class IdbBdjStore implements BdjStore {
   /** Removes the record of `scope` when its version is still `etag`: true when it did. */
   async remove(scope: string, etag: string): Promise<boolean> {
     return this.update(scope, (current) => (current?.etag === etag ? null : undefined));
+  }
+
+  /**
+   * A short value under `key` in this source, or null; not a scope (nas-store.ts keeps the person a device was last
+   * confirmed as here, source `nas-device`).
+   */
+  async loadNote(key: string): Promise<string | null> {
+    const rec = (await this.loadRecord(key)) as Partial<NoteRecord> | null;
+    return typeof rec?.note === 'string' ? rec.note : null;
+  }
+
+  /** Keeps `note` under `key` (loadNote). */
+  async saveNote(key: string, note: string): Promise<void> {
+    await this.update(key, (current) => ((current as Partial<NoteRecord> | undefined)?.note === note ? undefined : ({ source: this.source, scope: key, note } as NoteRecord as unknown as ScopeRecord)));
   }
 
   /** One readwrite transaction over a record: `change` answers the new record, null to delete it, undefined to leave it. */

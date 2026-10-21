@@ -8,7 +8,7 @@ import { createDiscHandler, discApiBase, findDiscs } from '../../../../tools/dis
 import { startStoreNas, type StoreNas } from '../../../../tests/helpers/store-nas';
 import { NasQuotaError, SCOPE_QUOTA_BYTES, type Snapshot, type SnapshotFile } from './bdj-store';
 import { IdbBdjStore } from './idb-store';
-import { NAS_PUSH_DEBOUNCE_MS, NAS_PUSH_RETRY_MS, PERSON_HEADER, NasBdjStore, NasDiscStore, WriteAheadNasStore, personSource, storeApiBase } from './nas-store';
+import { NAS_PUSH_DEBOUNCE_MS, NAS_PUSH_RETRY_MS, PERSON_HEADER, NasBdjStore, NasDiscStore, WriteAheadNasStore, personSource, storeApiBase, unconfirmedSource } from './nas-store';
 import { readTar, tarPathFits, writeTar } from './tar';
 
 // Every name here is made up.
@@ -300,7 +300,7 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     expect(onNas(personId)).toEqual([['a', 5]]);
   });
 
-  it("loads this browser's copy when the NAS does not answer, and nothing when there is none", async () => {
+  it("loads this browser's copy when the NAS does not answer, and with none starts empty but keeps what is saved (ruling R28)", async () => {
     const { personId, token } = await nas.person('Mika');
     const idb = new IDBFactory();
     const d = session(personId, token, idb);
@@ -311,8 +311,18 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     const again = session(personId, token, idb);
     expect(view(await again.store.load(SCOPE))).toEqual([['a', 5_000, '1']]);
     expect(again.logs[0]![1]).toBe(true);
-    await expect(again.store.load(BUDA)).rejects.toThrow('could not be reached');
-    expect(again.logs.at(-1)).toEqual([`BD-J storage: ${BUDA} could not be loaded from the NAS (the NAS could not be reached (fetch failed)), and this browser has no copy`, true]);
+    expect(await again.store.load(BUDA)).toEqual({ files: [], etag: null });
+    expect(again.logs.at(-1)).toEqual([
+      `BD-J storage: ${BUDA} could not be loaded from the NAS (the NAS could not be reached (fetch failed)), and this browser has no copy: the disc starts with no saved data, and what it saves is kept in this browser and merged with the NAS's copy (per file, the newer wins) once the NAS answers`,
+      true,
+    ]);
+    await again.store.save(BUDA, { files: [file('resume', 7_000, 'r')] }, null);
+    const rec = await again.local.loadRecord(BUDA);
+    expect([rec?.pending, rec?.unmerged]).toEqual([true, true]);
+    await again.store.flush(); // the NAS answers again: read, merged, put
+    expect(onNas(personId, BUDA)).toEqual([['resume', 7]]);
+    const after = await again.local.loadRecord(BUDA);
+    expect([after?.pending, after?.unmerged]).toEqual([false, undefined]);
   });
 
   it('tells Java the scope is full on a 507 (onFull), and has room again once the NAS takes it', async () => {
@@ -628,6 +638,7 @@ describe('NasDiscStore (the backend of a disc from a server)', () => {
 
   const discStore = (nasStore: NasBdjStore, idb: IDBFactory, timers: Timers, logs: string[] = []): NasDiscStore =>
     new NasDiscStore({ nas: nasStore, idb, discId: 'disc1', setTimer: timers.setTimer, log: (line) => logs.push(line) });
+  const onNasPaths = (personId: string, scope = SCOPE): string[] => listTar(nas.stored(personId, scope).body).map((e) => e.path);
 
   it("keeps a NAS disc's saved data in the person's store, with the write-ahead copy under the person", async () => {
     const { personId, token } = await nas.person('Mika');
@@ -683,8 +694,142 @@ describe('NasDiscStore (the backend of a disc from a server)', () => {
     const store = discStore(slow, idb, timers, logs);
     const loading = store.load(SCOPE);
     await settle();
-    await timers.advance(2500);
+    await timers.advance(12_000);
     expect(view(await loading)).toEqual([['a', 1_000, 'here']]);
-    expect(logs.at(-1)).toContain("could not be loaded from the NAS (the NAS did not answer within 2.5 s); this browser's copy is used");
+    expect(logs.at(-1)).toContain("could not be loaded from the NAS (the NAS did not answer within 12 s); this browser's copy is used");
+    expect(store.loadTimeoutMs).toBe(12_500); // ScopeSync's wait: after the budget, so the fallback answers first
+  });
+
+  /** The NAS over a slow link: each request waits `delay(method, path, n)` ms (n counts that path's requests). */
+  const slowLink = (timers: Timers, delay: (method: string, path: string, n: number) => number, down?: () => boolean): typeof fetch => {
+    const counts = new Map<string, number>();
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      const path = new URL(String(input)).pathname;
+      const n = (counts.get(`${method} ${path}`) ?? 0) + 1;
+      counts.set(`${method} ${path}`, n);
+      const ms = delay(method, path, n);
+      if (ms > 0) await new Promise<void>((resolve) => timers.setTimer(ms, resolve));
+      if (down?.()) throw new TypeError('fetch failed');
+      return nas.fetch(input, init);
+    }) as typeof fetch;
+  };
+
+  it('loads over a slow link within the 12 s budget: GET me 5 s, the scope 5 s, the check after it 1.5 s (ruling R28)', async () => {
+    const { token } = await nas.person('Mika');
+    await client(token).save(SCOPE, { files: [file('a', 1_000, 'on the NAS')] }, null);
+    const timers = new Timers();
+    let mes = 0;
+    const fetchSlow = slowLink(timers, (method, path) => (path.endsWith('/me') ? (++mes === 1 ? 5_000 : 1_500) : method === 'GET' ? 5_000 : 0));
+    const logs: string[] = [];
+    const store = discStore(new NasBdjStore(nas.api, { fetch: fetchSlow, token }), new IDBFactory(), timers, logs);
+    let loaded: { files: readonly SnapshotFile[] } | null = null;
+    void store.load(SCOPE).then((l) => (loaded = l));
+    await timers.advance(11_500);
+    expect(loaded).not.toBeNull();
+    expect(view(loaded!)).toEqual([['a', 1_000, 'on the NAS']]);
+    expect(logs.filter((l) => l.includes('could not'))).toEqual([]);
+  });
+
+  it("keeps a session's saves when the NAS missed the budget and this browser had no copy, and the next boot merges them to the NAS", async () => {
+    const { personId, token } = await nas.person('Mika');
+    const tablet = await nas.device(personId, 'tablet');
+    await client(tablet).save(SCOPE, { files: [file('tablet', 1_000_000, 't')] }, null);
+    const idb = new IDBFactory();
+    let timers = new Timers();
+    let down = false;
+    // the scope's GET never answers within the budget; then the NAS is gone for the rest of the session
+    const fetchSlow = slowLink(timers, (method, path) => (method === 'GET' && path.includes('/bdj-store/') ? 20_000 : 0), () => down);
+    const logs: string[] = [];
+    const first = discStore(new NasBdjStore(nas.api, { fetch: fetchSlow, token, timeoutMs: 60_000 }), idb, timers, logs);
+    const loading = first.load(SCOPE);
+    await settle(); // `GET me` answers at once
+    await timers.advance(12_000);
+    expect(await loading).toEqual({ files: [], etag: null });
+    down = true;
+    await first.save(SCOPE, { files: [file('phone', 2_000_000, 'p')] }, null);
+    await first.flush();
+    const rec = await new IdbBdjStore(personSource(personId), idb).loadRecord(SCOPE);
+    expect([rec?.pending, rec?.unmerged, rec?.files.map((f) => f.path)]).toEqual([true, true, ['phone']]);
+    expect(onNasPaths(personId)).toEqual(['tablet']);
+
+    timers = new Timers();
+    const nextLogs: string[] = [];
+    const next = discStore(client(token), idb, timers, nextLogs);
+    expect(view(await next.load(SCOPE)).map(([p]) => p)).toEqual(['phone', 'tablet']);
+    expect(nextLogs).toContain(`BD-J storage: ${SCOPE} has changes from this browser the NAS does not have yet (saved while the NAS did not answer, never merged with its copy): merged, and put on the NAS now`);
+    await timers.advance(0);
+    expect(onNasPaths(personId)).toEqual(['phone', 'tablet']);
+    const after = await new IdbBdjStore(personSource(personId), idb).loadRecord(SCOPE);
+    expect([after?.pending, after?.unmerged]).toEqual([false, undefined]);
+  });
+
+  it("keeps what is saved while GET me does not answer apart, and gives it only to the person the device was last confirmed as (ruling R28)", async () => {
+    const mika = await nas.person('Mika');
+    const sora = await nas.person('Sora');
+    const idb = new IDBFactory();
+    // a boot that heard whose device this is: noted
+    const s0 = discStore(client(mika.token), idb, new Timers());
+    await s0.load(SCOPE);
+    // a boot where `GET me` does not answer: the disc starts empty, its saves are kept apart
+    nas.fail('unreachable');
+    const logs: string[] = [];
+    const s1 = discStore(client(mika.token), idb, new Timers(), logs);
+    expect(await s1.load(SCOPE)).toEqual({ files: [], etag: null });
+    expect(logs.at(-1)).toContain('what it saves is kept in this browser until a later open where the NAS names the same person as before');
+    await s1.save(SCOPE, { files: [file('kept', 3_000_000, 'k')] }, null);
+    await s1.flush();
+    expect(nas.stored(mika.personId, SCOPE).etag).toBeNull();
+
+    // the device moves to Sora: Sora never gets it, in this browser or on the NAS
+    nas.move(mika.deviceId, sora.personId);
+    const s2 = discStore(client(mika.token), idb, new Timers());
+    expect(await s2.load(SCOPE)).toEqual({ files: [], etag: null });
+    await s2.save(SCOPE, { files: [file('sora', 4_000_000, 's')] }, null);
+    await s2.flush();
+    expect(onNasPaths(sora.personId)).toEqual(['sora']);
+    expect((await new IdbBdjStore(personSource(sora.personId), idb).loadRecord(SCOPE))?.files.map((f) => f.path)).toEqual(['sora']);
+    expect((await new IdbBdjStore(unconfirmedSource(mika.personId), idb).loadRecord(SCOPE))?.files.map((f) => f.path)).toEqual(['kept']);
+
+    // a boot where `GET me` fails now goes under Sora (the last confirmed), still apart from Mika's
+    nas.fail('unreachable');
+    const s3 = discStore(client(mika.token), idb, new Timers());
+    expect(await s3.load(SCOPE)).toEqual({ files: [], etag: null });
+
+    // back to Mika: merged into Mika's copy and put on Mika's NAS store, then removed
+    nas.move(mika.deviceId, mika.personId);
+    const timers = new Timers();
+    const s4 = discStore(client(mika.token), idb, timers);
+    expect(view(await s4.load(SCOPE)).map(([p]) => p)).toEqual(['kept']);
+    await timers.advance(0);
+    expect(onNasPaths(mika.personId)).toEqual(['kept']);
+    expect(onNasPaths(sora.personId)).toEqual(['sora']);
+    expect(await new IdbBdjStore(unconfirmedSource(mika.personId), idb).loadRecord(SCOPE)).toBeNull();
+  });
+
+  it("keeps a missed boot's saves under the person it was for when the device then moves: never put in the other person's store", async () => {
+    const mika = await nas.person('Mika');
+    const sora = await nas.person('Sora');
+    const idb = new IDBFactory();
+    const timers = new Timers();
+    const fetchSlow = slowLink(timers, (method, path) => (method === 'GET' && path.includes('/bdj-store/') ? 20_000 : 0), () => down);
+    let down = false;
+    const s1 = discStore(new NasBdjStore(nas.api, { fetch: fetchSlow, token: mika.token, timeoutMs: 60_000 }), idb, timers);
+    const loading = s1.load(SCOPE);
+    await settle();
+    await timers.advance(12_000);
+    expect(await loading).toEqual({ files: [], etag: null });
+    down = true;
+    await s1.save(SCOPE, { files: [file('mika', 2_000_000, 'm')] }, null);
+    await s1.flush();
+    nas.move(mika.deviceId, sora.personId);
+    const s2Timers = new Timers();
+    const s2 = discStore(client(mika.token), idb, s2Timers);
+    expect(await s2.load(SCOPE)).toEqual({ files: [], etag: null });
+    await s2Timers.advance(NAS_PUSH_RETRY_MS);
+    expect(nas.stored(sora.personId, SCOPE).etag).toBeNull();
+    expect(nas.stored(mika.personId, SCOPE).etag).toBeNull();
+    const rec = await new IdbBdjStore(personSource(mika.personId), idb).loadRecord(SCOPE);
+    expect([rec?.pending, rec?.files.map((f) => f.path)]).toEqual([true, ['mika']]);
   });
 });

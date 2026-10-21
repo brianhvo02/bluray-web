@@ -28,10 +28,14 @@ export const NAS_PUSH_MAX_WAIT_MS = 10_000;
 /** After a put that failed (the NAS unreachable), the next try, while BD-J runs. */
 export const NAS_PUSH_RETRY_MS = 30_000;
 /**
- * The NAS's part of the boot: whose device this is and each scope's snapshot, within this long from the store's
- * creation (inside ScopeSync's LOAD_TIMEOUT_MS of 3 s), or the scope loads from this browser's copy.
+ * The NAS's part of the boot: whose device this is, each scope's snapshot and the check of whose device it is after
+ * that GET, within this long from the store's creation, or the scope loads from this browser's copy (ruling R28: in
+ * line with the disc's own reads on a slow link, the WebRTC route's; the load counts as I/O for the start-up timer,
+ * whose 120 s ceiling bounds it, ruling R26). The three requests go one after another, so each has about 4 s.
  */
-export const NAS_LOAD_BUDGET_MS = 2500;
+export const NAS_LOAD_BUDGET_MS = 12_000;
+/** ScopeSync waits this much longer than the budget (BdjStore.loadTimeoutMs), so the store's own fallback answers first. */
+export const NAS_LOAD_MARGIN_MS = 500;
 /** A save that keeps meeting newer snapshots on the NAS gives up after this many tries (until the next push). */
 const PUSH_ATTEMPTS = 3;
 
@@ -307,7 +311,9 @@ function within<T>(p: Promise<T>, budget: Promise<never>): Promise<T> {
 
 /** The record marked as on the NAS (and merged with it), its files and version as they are. */
 function settled(r: ScopeRecord): ScopeRecord {
-  return { ...r, pending: false };
+  const { unmerged, ...rest } = r;
+  void unmerged;
+  return { ...rest, pending: false };
 }
 
 /** The write-ahead copies of one person's scopes, in this browser: the IndexedDB source of a NAS person. */
@@ -315,12 +321,26 @@ export function personSource(personId: string): string {
   return `nas-person:${personId}`;
 }
 
+/**
+ * The copies saved in a session whose `GET me` did not answer (ruling R28), on a device last confirmed as `personId`
+ * (DEVICE_SOURCE): the next boot whose `GET me` names that same person merges them into the person's write-ahead
+ * copy; a boot that names another person leaves them (never another person's).
+ */
+export function unconfirmedSource(personId: string): string {
+  return `nas-unconfirmed:${personId}`;
+}
+
+/** Notes (IdbBdjStore.loadNote, keyed by API base) of the person each NAS last said this device is. */
+export const DEVICE_SOURCE = 'nas-device';
+
 export interface WriteAheadDeps {
   readonly nas: Pick<NasBdjStore, 'load'> & { save(scope: string, snapshot: Snapshot, etag: string | null, opts?: SaveOptions): Promise<SaveResult> };
   /** This person's write-ahead copies (personSource). */
   readonly local: IdbBdjStore;
   /** The disc's browser-only records from before (`nas:<discId>`, scopes.ts storeSource), moved to the NAS once. */
   readonly legacy?: IdbBdjStore | null;
+  /** This person's copies from sessions whose `GET me` did not answer (unconfirmedSource), merged in at the load. */
+  readonly unconfirmed?: IdbBdjStore | null;
   readonly personId: string;
   /**
    * Whose device this is now (`GET me`'s personId; null when the server keeps no people), asked before each put and
@@ -357,6 +377,8 @@ interface WriteAheadScope {
   legacyEtag: string | null;
   /** The NAS refused it for room (onFull). */
   full: boolean;
+  /** The copy was never merged with the NAS's (ScopeRecord.unmerged): the boot had none here and no answer there. */
+  unmerged: boolean;
   /** Puts of this scope, one after another. */
   pushing: Promise<void>;
 }
@@ -365,8 +387,10 @@ interface WriteAheadScope {
  * Ruling R17. A NAS disc's saves go to this browser's IndexedDB first, within 100 ms (saveDebounceMs) and marked
  * pending, then to the NAS 2 s after the last one (at most 10 s after the first; at once on flush). A copy still
  * pending at the next load is merged per file by mtime with the NAS's, as on a 412, and put on the NAS straight away.
- * A load the NAS does not answer uses this browser's copy, when there is one; a failed put is tried again later and
- * at the next open. Nothing is lost on this device when the page goes before the NAS has it.
+ * A load the NAS does not answer uses this browser's copy, when there is one; with none, Java starts with nothing and
+ * what it writes is kept here as a pending copy marked unmerged, merged with the NAS's like any pending copy once the
+ * NAS answers (ruling R28). A failed put is tried again later and at the next open. Nothing is lost on this device when
+ * the page goes before the NAS has it.
  */
 export class WriteAheadNasStore implements BdjStore {
   readonly saveDebounceMs = IDB_SAVE_DEBOUNCE_MS;
@@ -382,18 +406,26 @@ export class WriteAheadNasStore implements BdjStore {
   constructor(private readonly deps: WriteAheadDeps) {}
 
   async load(scope: string): Promise<LoadedSnapshot> {
-    const { local, legacy, personId, log } = this.deps;
-    const fromNas = this.deps.budget ? within(this.deps.nas.load(scope), this.deps.budget) : this.deps.nas.load(scope);
+    const { local, legacy, unconfirmed, personId, log } = this.deps;
+    const fromNas = this.withinBudget(this.deps.nas.load(scope));
     fromNas.catch(() => undefined); // awaited below
-    const [rec, old] = await Promise.all([local.loadRecord(scope), legacy ? legacy.loadRecord(scope) : Promise.resolve(null)]);
+    const [rec, old, unc] = await Promise.all([
+      local.loadRecord(scope),
+      legacy ? legacy.loadRecord(scope) : Promise.resolve(null),
+      unconfirmed ? unconfirmed.loadRecord(scope) : Promise.resolve(null),
+    ]);
     let files: readonly SnapshotFile[] = rec?.files ?? [];
     let etag = rec?.etag ?? null;
     let pending = rec?.pending === true;
+    let unmerged = pending && rec?.unmerged === true;
     let legacyEtag: string | null = null;
     if (old && legacy) {
       if (old.migratedTo === undefined) {
         // the disc's saves from before the NAS kept them: into this person's copy, once (ruling R15's keys, unchanged)
-        const moved = await this.migrate(scope, old, files, etag);
+        const moved = await this.absorb(scope, old.files, files, etag, unmerged);
+        // marked, not removed: it goes only once the NAS has it
+        await legacy.mark(scope, old.etag, (r) => ({ ...r, migratedTo: personId }));
+        log(`BD-J storage: ${scope}: this browser's saved data for the disc (${old.files.length} files) moves to the NAS`);
         files = moved.files;
         etag = moved.etag;
         pending = true;
@@ -402,30 +434,53 @@ export class WriteAheadNasStore implements BdjStore {
         legacyEtag = old.etag; // merged before; removed once the NAS has it
       }
     }
-    const state: WriteAheadScope = { nasEtag: undefined, localEtag: etag, local: { files: sortFiles([...files]) }, pending, gen: 0, legacyEtag, full: false, pushing: Promise.resolve() };
+    if (unc && unconfirmed) {
+      // saved on this device while the NAS did not say whose it was; it was this person's before, and is again now
+      const taken = await this.absorb(scope, unc.files, files, etag, true);
+      files = taken.files;
+      etag = taken.etag;
+      pending = true;
+      unmerged = true;
+      log(`BD-J storage: ${scope}: what this device saved while the NAS did not say whose device it was (${unc.files.length} files) is merged into this person's copy`);
+      try {
+        await unconfirmed.remove(scope, unc.etag);
+      } catch (e) {
+        // merged again at the next boot (a merge of the same files changes nothing)
+        log(`BD-J storage: ${scope}: the copy saved while the NAS did not say whose device this was could not be removed (${messageOf(e)})`, true);
+      }
+    }
+    const hadCopy = rec !== null || legacyEtag !== null || unc !== null;
+    const state: WriteAheadScope = { nasEtag: undefined, localEtag: etag, local: { files: sortFiles([...files]) }, pending, gen: 0, legacyEtag, full: false, unmerged, pushing: Promise.resolve() };
     this.scopes.set(scope, state);
     let remote: LoadedSnapshot;
     try {
       remote = await fromNas;
+      // the GET went with the token as it is now: if the device moved to another person since the boot asked, that is
+      // their snapshot, never merged into this person's copy (checked within the boot's budget too)
+      if (!(await this.withinBudget(this.samePerson()))) {
+        if (this.moved) {
+          // this session's saves stay here, pending, for this person (never put while the device is another's)
+          if (!hadCopy) state.unmerged = true;
+          return { files: state.local.files, etag };
+        }
+        throw new NasStoreError(null, 'whose device this is could not be checked after the GET');
+      }
     } catch (e) {
-      if (rec === null && legacyEtag === null) {
-        log(`BD-J storage: ${scope} could not be loaded from the NAS (${messageOf(e)}), and this browser has no copy`, true);
-        throw e;
+      if (!hadCopy) {
+        // nothing to show Java, but what it writes is kept: a pending copy, merged with the NAS's when it answers
+        state.unmerged = true;
+        log(`BD-J storage: ${scope} could not be loaded from the NAS (${messageOf(e)}), and this browser has no copy: the disc starts with no saved data, and what it saves is kept in this browser and merged with the NAS's copy (per file, the newer wins) once the NAS answers`, true);
+        return { files: [], etag: null };
       }
       log(`BD-J storage: ${scope} could not be loaded from the NAS (${messageOf(e)}); this browser's copy is used${pending ? ', and put on the NAS once it answers' : ''}`, true);
       if (pending) this.retryLater();
-      return { files: state.local.files, etag };
-    }
-    // the GET went with the token as it is now: if the device moved to another person since the boot asked, that is
-    // their snapshot, never merged into this person's copy
-    if (!(await this.samePerson())) {
-      if (!this.moved && rec === null && legacyEtag === null) throw new NasStoreError(null, `${scope}: whose device this is could not be checked, and this browser has no copy`);
       return { files: state.local.files, etag };
     }
     state.nasEtag = remote.etag;
     if (pending) {
       // the last session's changes the NAS did not get: merged as on a 412 (newer mtime wins, ties ours) and put now
       const merged = mergeSnapshots(state.local, remote).merged;
+      state.unmerged = false; // merged with the NAS's now
       if (!sameSnapshot(merged, state.local)) {
         // the write-ahead copy holds the merge before anything marks it as on the NAS
         const result = await local.save(scope, merged, etag, { pending: true });
@@ -441,7 +496,7 @@ export class WriteAheadNasStore implements BdjStore {
           state.local = mergeSnapshots(result.conflict, remote).merged;
         }
       }
-      log(`BD-J storage: ${scope} has changes from this browser the NAS does not have yet: merged, and put on the NAS now`);
+      log(`BD-J storage: ${scope} has changes from this browser the NAS does not have yet${unmerged ? ' (saved while the NAS did not answer, never merged with its copy)' : ''}: merged, and put on the NAS now`);
       this.soon();
       return { files: state.local.files, etag };
     }
@@ -451,9 +506,9 @@ export class WriteAheadNasStore implements BdjStore {
   }
 
   async save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult> {
-    const result = await this.deps.local.save(scope, snapshot, etag, { pending: true });
-    if ('conflict' in result) return result;
     const state = this.state(scope);
+    const result = await this.deps.local.save(scope, snapshot, etag, { pending: true, unmerged: state.unmerged });
+    if ('conflict' in result) return result;
     state.localEtag = result.etag;
     state.local = snapshot;
     state.pending = true;
@@ -526,26 +581,24 @@ export class WriteAheadNasStore implements BdjStore {
   private state(scope: string): WriteAheadScope {
     let state = this.scopes.get(scope);
     if (!state) {
-      state = { nasEtag: undefined, localEtag: null, local: { files: [] }, pending: false, gen: 0, legacyEtag: null, full: false, pushing: Promise.resolve() };
+      state = { nasEtag: undefined, localEtag: null, local: { files: [] }, pending: false, gen: 0, legacyEtag: null, full: false, unmerged: false, pushing: Promise.resolve() };
       this.scopes.set(scope, state);
     }
     return state;
   }
 
-  private async migrate(scope: string, old: ScopeRecord, files: readonly SnapshotFile[], etag: string | null): Promise<{ files: readonly SnapshotFile[]; etag: string }> {
-    const { local, legacy, personId, log } = this.deps;
+  /**
+   * Merges `extra` (an older record's files) into this person's copy (`files` at `etag`) and saves it pending; again
+   * on a conflict, over what is stored then.
+   */
+  private async absorb(scope: string, extra: readonly SnapshotFile[], files: readonly SnapshotFile[], etag: string | null, unmerged: boolean): Promise<{ files: readonly SnapshotFile[]; etag: string }> {
     let mine: Snapshot = { files };
     let at = etag;
     for (let attempt = 1; ; attempt++) {
-      const merged = mergeSnapshots(mine, { files: old.files }).merged;
-      const result = await local.save(scope, merged, at, { pending: true });
-      if ('etag' in result) {
-        // marked, not removed: it goes only once the NAS has it
-        await legacy!.mark(scope, old.etag, (r) => ({ ...r, migratedTo: personId }));
-        log(`BD-J storage: ${scope}: this browser's saved data for the disc (${old.files.length} files) moves to the NAS`);
-        return { files: merged.files, etag: result.etag };
-      }
-      if (attempt >= PUSH_ATTEMPTS) throw new Error(`${scope}: the copy in this browser kept changing while its old saves moved into it`);
+      const merged = mergeSnapshots(mine, { files: extra }).merged;
+      const result = await this.deps.local.save(scope, merged, at, { pending: true, unmerged });
+      if ('etag' in result) return { files: merged.files, etag: result.etag };
+      if (attempt >= PUSH_ATTEMPTS) throw new Error(`${scope}: the copy in this browser kept changing while older saves moved into it`);
       mine = result.conflict;
       at = result.conflict.etag;
     }
@@ -560,6 +613,11 @@ export class WriteAheadNasStore implements BdjStore {
     } catch (e) {
       this.deps.log(`BD-J storage: ${scope}: the old copy in this browser could not be removed (${messageOf(e)})`, true);
     }
+  }
+
+  /** `p`, failed when the NAS's part of the boot runs out of time first (deps.budget). */
+  private withinBudget<T>(p: Promise<T>): Promise<T> {
+    return this.deps.budget ? within(p, this.deps.budget) : p;
   }
 
   /** The snapshot as the NAS can hold it: a path too long for a ustar header stays in this browser only (logged once). */
@@ -639,8 +697,9 @@ export class WriteAheadNasStore implements BdjStore {
     try {
       if (taken.length === 0) {
         // the write-ahead copy is what the NAS has now: marked (no new version), unless a save came meanwhile
-        if (state.gen === gen && state.localEtag !== null && (await local.mark(scope, state.localEtag, (r) => settled(r)))) {
+        if (state.gen === gen && state.localEtag !== null && (await local.mark(scope, state.localEtag, settled))) {
           state.pending = false;
+          state.unmerged = false;
         }
       } else if (await this.samePerson()) {
         await this.takeFromNas(scope, state, taken, gen);
@@ -671,15 +730,17 @@ export class WriteAheadNasStore implements BdjStore {
           // the copy has them already (a newer save took them, or newer files)
           if (current && (await local.mark(scope, rec.etag, settled))) {
             state.pending = false;
+            state.unmerged = false;
           }
           return;
         }
-        const result = await local.save(scope, merged, rec?.etag ?? null, current ? { pending: false } : { pending: true });
+        const result = await local.save(scope, merged, rec?.etag ?? null, current ? { pending: false } : { pending: true, unmerged: state.unmerged });
         if ('etag' in result) {
           state.localEtag = result.etag;
           state.local = merged;
           if (current) {
             state.pending = false;
+            state.unmerged = false;
           } else {
             state.pending = true;
             this.schedule();
@@ -750,11 +811,14 @@ export class NasDiscStore implements BdjStore {
    * browser (the same discs move to a NAS later); a picked folder counts file lengths (IdbBdjStore).
    */
   readonly quotaAccounting = 'tar';
+  /** ScopeSync's wait for a load: the NAS's budget and a little (NAS_LOAD_MARGIN_MS), so the fallback comes first. */
+  readonly loadTimeoutMs: number;
   private readonly backend: Promise<BdjStore>;
   private readonly budget: Promise<never>;
 
   constructor(private readonly deps: NasDiscStoreDeps) {
     const ms = deps.loadBudgetMs ?? NAS_LOAD_BUDGET_MS;
+    this.loadTimeoutMs = ms + NAS_LOAD_MARGIN_MS;
     this.budget = new Promise<never>((_, reject) => deps.setTimer(ms, () => reject(new NasStoreError(null, `the NAS did not answer within ${ms / 1000} s`))));
     this.budget.catch(() => undefined);
     this.backend = this.choose();
@@ -763,23 +827,43 @@ export class NasDiscStore implements BdjStore {
 
   private async choose(): Promise<BdjStore> {
     const { nas, idb, discId, setTimer, log, onFull } = this.deps;
+    const devices = new IdbBdjStore(DEVICE_SOURCE, idb);
     let me: Awaited<ReturnType<NasBdjStore['me']>>;
     try {
       me = await within(nas.me(), this.budget);
     } catch (e) {
-      log(`BD-J storage: the NAS did not say whose device this is (${messageOf(e)}); saved data lasts until BD-J stops`, true);
-      throw e;
+      // whose device this is now is unknown: what is saved is kept apart, under the person the NAS last said it is, and
+      // becomes theirs only at a boot where the NAS says so again (never another person's); with no such person, the
+      // session's saved data is not kept
+      let last: string | null = null;
+      try {
+        last = await devices.loadNote(nas.apiBase);
+      } catch {
+        // none known
+      }
+      if (last === null) {
+        log(`BD-J storage: the NAS did not say whose device this is (${messageOf(e)}); saved data lasts until BD-J stops`, true);
+        throw e;
+      }
+      log(`BD-J storage: the NAS did not say whose device this is (${messageOf(e)}); the disc starts with no saved data from the NAS, and what it saves is kept in this browser until a later open where the NAS names the same person as before`, true);
+      return new IdbBdjStore(unconfirmedSource(last), idb);
     }
     const legacy = new IdbBdjStore(`nas:${discId}`, idb);
     if (me === null) {
       log('BD-J storage: the disc server keeps no saved data per person; this browser keeps it');
       return legacy;
     }
+    try {
+      await devices.saveNote(nas.apiBase, me.personId);
+    } catch (e) {
+      log(`BD-J storage: whose device this is could not be noted in this browser (${messageOf(e)})`, true);
+    }
     nas.setPerson(me.personId);
     return new WriteAheadNasStore({
       nas,
       local: new IdbBdjStore(personSource(me.personId), idb),
       legacy,
+      unconfirmed: new IdbBdjStore(unconfirmedSource(me.personId), idb),
       personId: me.personId,
       whoAmI: async () => (await nas.me())?.personId ?? null,
       setTimer,
