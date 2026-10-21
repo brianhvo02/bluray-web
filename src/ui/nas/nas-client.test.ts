@@ -219,7 +219,7 @@ describe('NasClient', () => {
     const nas = client(server);
     await nas.pair(await server.code(), 'iPad');
     const disc = { id: '0123456789abcdef', name: 'Disc', path: 'drv5/Disc', kind: 'folder' };
-    const session = await nas.session();
+    await nas.session();
     server.nas = async (url) => {
       const route = url.pathname.slice(new URL(BASE).pathname.length);
       return route === 'discs/resolve/d.0123456789abcdef' ? Response.json({ disc }) : Response.json({ error: 'not-found' }, { status: 404 });
