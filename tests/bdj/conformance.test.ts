@@ -323,6 +323,18 @@ describe('I/O and zip on the JDK class path alone', () => {
   }, 60_000);
 });
 
+// Ruling R20: AccessController.checkPermission under the JDK's policy file, as libbluray's BDJSecurityManager falls back
+// on it. The program installs a security manager, so it has a JVM of its own.
+describe('access control under a security manager', () => {
+  it('Security prints what HotSpot prints', async () => {
+    const io = { out: '', err: '' };
+    const jvm = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT, file('./conformance.jar')]);
+    await jvm.boot();
+    await runCapturing(jvm, io, 'conformance/Security');
+    expect(io.out).toBe(new TextDecoder().decode(file('./conformance/Security.out')));
+  }, 60_000);
+});
+
 // Green threads switch only between bytecodes, but they do switch inside java.util.concurrent's read-then-CAS loops,
 // so a CAS can lose to another thread as on HotSpot. A one-bytecode slice runs the putters in lockstep, which makes
 // ConcurrentHashMap.addCount lose its baseCount CAS every time and take the counter-cell path (fullAddCount), which

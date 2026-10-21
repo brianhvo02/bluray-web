@@ -5,6 +5,7 @@ lib/content-types.properties
 lib/logging.properties
 lib/net.properties
 lib/security/java.security
+lib/security/java.policy
 lib/security/blacklisted.certs
 lib/security/cacerts
 lib/flavormap.properties
