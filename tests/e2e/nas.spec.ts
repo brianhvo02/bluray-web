@@ -768,9 +768,12 @@ test('a device unpaired while on a NAS path goes back to the landing page', asyn
   await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
   expect(pathOf(page)).toBe('/nas');
 
+  // The library's own requests are answered before the device is revoked, so the click is what finds it revoked.
+  const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
+  await expect(card).toBeVisible();
   const res = await ownerApi(`admin/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
   expect(res.status).toBe(204);
-  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await card.click();
   await expect(page.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
   await expect(page.getByTestId('pair-screen')).toBeVisible();
   expect(pathOf(page)).toBe('/');
@@ -829,18 +832,21 @@ test('a play link opens the pre-flight, then plays from its time', async ({ page
   await openTitles(page, browserName);
   await skipWithoutH264(page);
   const key = disc1Key();
-  await page.goto(`/nas/play/${key}?pl=00000&t=3&telemetry=1`);
+  await page.goto(`/nas/play/${key}?pl=00000&t=5&telemetry=1`);
   await expect(page.getByTestId('nas-preflight').locator('h3')).toHaveText(await resolvedName(key), { timeout: 15_000 });
   await page.getByTestId('nas-play').click();
   await waitForPlaying(page);
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
-  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(3_000_000);
+  // 5 s into the 8 s playlist within 2 s of playing: only the link's seek gets there that soon.
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 2_000, intervals: [100] }).toBeGreaterThanOrEqual(5_000_000);
+  // The link's time stays in the address bar while the playlist starts, then the seek writes it.
+  expect(playLinkOf(page).t).toBeGreaterThanOrEqual(5);
 
   // Paused a little later, the address bar has the time; a reload lands on the pre-flight with it, not on playback.
-  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(4_500_000);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(6_000_000);
   await page.getByTestId('video-canvas').click();
   await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
-  await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(4);
+  await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(6);
   const last = playLinkOf(page);
   expect(last).toMatchObject({ path: `/nas/play/${key}`, pl: '00000' });
   await page.reload();
@@ -873,6 +879,39 @@ test('Back during NAS playback closes the disc and returns to the season', async
   await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
   await expect(playerState(page)).toHaveCount(0);
   expect(pathOf(page)).toBe('/nas');
+});
+
+test("Back while a play link's disc opens closes it, and the screen Back went to stays", async ({ page, context, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  const seasonPath = pathOf(page);
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  // Forward onto the play link: its own pre-flight, in the same page.
+  await page.goForward();
+  await expect(page.getByTestId('nas-play-link')).toBeVisible({ timeout: 15_000 });
+  // The disc's reads are held, so the open is still in flight when Back comes.
+  const held: Route[] = [];
+  await context.route(/\/api\/discs\/[^/]+\/files\//, (route) => void held.push(route));
+  await page.getByTestId('nas-play').click();
+  await expect(page.getByText('Reading disc…')).toBeVisible();
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  expect(pathOf(page)).toBe(seasonPath);
+  await context.unroute(/\/api\/discs\/[^/]+\/files\//);
+  for (const route of held) await route.continue().catch(() => {});
+  // Nothing comes of the abandoned open, and the address bar stays where Back went.
+  await page.waitForTimeout(3000);
+  await expect(playerState(page)).toHaveCount(0);
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath);
 });
 
 test('a play link with a bad time or playlist opens the disc without seeking', async ({ page, browserName }) => {

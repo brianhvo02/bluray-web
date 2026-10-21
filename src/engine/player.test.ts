@@ -2313,6 +2313,20 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     expect(lastState(h)).toBe('idle');
   });
 
+  it('a close while a plain open still reads the disc drops the disc without opening it', async () => {
+    const { h, log, spec } = await setup({ noOpen: true });
+    log.limit('*', 0); // every read waits: the open is stuck in the disc's metadata
+    const opening = h.player.handle({ type: 'open', disc: spec });
+    await vi.waitFor(() => expect(log.reads.length).toBeGreaterThan(0));
+    const closing = h.player.handle({ type: 'close' });
+    log.gate(false);
+    await opening;
+    await closing;
+    expect(h.events.some((e) => e.type === 'titles')).toBe(false);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    expect(lastState(h)).toBe('idle');
+  });
+
   it('opened with bufferFirst, a close sent while the open is still queued drops it, and a queued cancel opens it', async () => {
     const dropped = await setup({ noOpen: true });
     const opening = dropped.h.player.handle({ type: 'open', disc: dropped.spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });

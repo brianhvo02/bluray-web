@@ -36,6 +36,8 @@ describe('PlayingRoute', () => {
     expect(h.replaced).toEqual([]);
     route.start(KEY);
     route.update(playing(2e6));
+    at(2500);
+    route.update(playing(2.5e6, 'paused'));
     expect(h.replaced).toHaveLength(1);
     route.stop();
     at(10_000);
@@ -47,17 +49,19 @@ describe('PlayingRoute', () => {
     const { h, route, at } = make();
     route.start(KEY);
     route.update(playing(0));
-    expect(h.replaced).toEqual([{ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 0 }]);
     for (let ms = 500; ms < 5000; ms += 500) {
       at(ms);
       route.update(playing(ms * 1000));
     }
-    expect(h.replaced).toHaveLength(1);
+    expect(h.replaced).toEqual([]);
     at(5000);
     route.update(playing(5_900_000));
+    expect(h.replaced).toEqual([{ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 5 }]);
     at(5500);
     route.update(playing(6_400_000));
-    expect(times(h)).toEqual([0, 5]);
+    at(10_000);
+    route.update(playing(10_900_000));
+    expect(times(h)).toEqual([5, 10]);
   });
 
   it('replaces at once on pause', () => {
@@ -68,11 +72,11 @@ describe('PlayingRoute', () => {
     route.update(playing(1_200_000));
     at(1300);
     route.update(playing(1_300_000, 'paused'));
-    expect(times(h)).toEqual([0, 1]);
+    expect(times(h)).toEqual([1]);
     // still paused: no more replaces than the throttle allows
     at(1400);
     route.update(playing(1_300_000, 'paused'));
-    expect(times(h)).toEqual([0, 1]);
+    expect(times(h)).toEqual([1]);
   });
 
   it('replaces at once on a 10 s jump (a seek)', () => {
@@ -83,7 +87,17 @@ describe('PlayingRoute', () => {
     route.update(playing(1_000_000));
     at(1500);
     route.update(playing(11_500_000));
-    expect(times(h)).toEqual([0, 11]);
+    expect(times(h)).toEqual([11]);
+  });
+
+  it("leaves a link's time in place while its playlist starts, then writes the link's seek", () => {
+    const { h, route, at } = make({ kind: 'play', discKey: KEY, playlistId: '00001', timeS: 600 });
+    route.start(KEY);
+    route.update(playing(0));
+    expect(h.replaced).toEqual([]);
+    at(300);
+    route.update(playing(600_000_000));
+    expect(times(h)).toEqual([600]);
   });
 
   it('leaves a screen Back went to alone', () => {

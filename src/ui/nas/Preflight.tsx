@@ -71,13 +71,43 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
   const [opening, setOpening] = useState<'idle' | 'starting' | 'buffering' | 'launched'>('idle');
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const engineFailed = openFailed(snapshot);
-  /** Releases the wait for this open's playlists (playOnceOpen); this pre-flight going away ends it too. */
+  /**
+   * Releases the wait for this open's playlists (playOnceOpen). The wait outlives this pre-flight, which unmounts as
+   * the disc's playlists arrive, before the playlist (and a link's seek) starts; it is let go when the launch is
+   * abandoned, and playOnceOpen lets go by itself when another disc opens or this one closes.
+   */
   const releaseWait = useRef<(() => void) | null>(null);
-  useEffect(() => () => releaseWait.current?.(), []);
   /** Bumped when a launch is abandoned, so its pending open (discBase, session) is dropped. */
   const launch = useRef(0);
+  /** A launch from Play until it is abandoned or fails: the disc is opening, or open, on this play route. */
+  const launched = useRef(false);
+  /** Gives up this launch: its pending open, its playlist wait, the address bar's following, and the disc. */
+  const abandon = (): void => {
+    if (!launched.current) return;
+    launched.current = false;
+    launch.current++;
+    releaseWait.current?.();
+    releaseWait.current = null;
+    playingRoute.stop();
+    controller.closeDisc();
+  };
+  const abandonRef = useRef(abandon);
+  abandonRef.current = abandon;
+  /** The keys of this disc's play route, for a check at unmount. */
+  const routeKeys = useRef<readonly string[]>([]);
+  routeKeys.current = discKey === null ? [`d.${disc.id}`] : [discKey, `d.${disc.id}`];
+  // Unmounted while launched: the disc's playlists arrived (the address bar still on its play route), which keeps it;
+  // or Back went elsewhere while it opened (a link's pre-flight unmounts with its route), which gives it up.
+  useEffect(
+    () => () => {
+      const r = history.route();
+      if (r?.kind !== 'play' || !routeKeys.current.includes(r.discKey)) abandonRef.current();
+    },
+    [history],
+  );
   useEffect(() => {
     if ((opening === 'launched' || opening === 'buffering') && engineFailed) {
+      launched.current = false;
       setOpening('idle');
       playingRoute.stop();
     }
@@ -86,16 +116,14 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
   useEffect(() => {
     if (route?.kind === 'play' && discKey !== null && route.discKey === `d.${disc.id}` && route.discKey !== discKey) history.replace({ ...route, discKey });
   }, [route, discKey, disc.id, history]);
-  // Back (or Forward) off the play route while the disc opens: it is closed, and this pre-flight with it.
+  // Back (or Forward) off the play route while the disc opens: it is closed. The screen holding this pre-flight closes
+  // it on leaving the play route (and a link's pre-flight unmounts with it), so nothing navigates again here.
   const leftRoute = opening !== 'idle' && !onPlayRoute;
   useEffect(() => {
     if (!leftRoute) return;
-    launch.current++;
-    playingRoute.stop();
-    controller.closeDisc();
+    abandonRef.current();
     setOpening('idle');
-    onCancel();
-  }, [leftRoute, playingRoute, controller, onCancel]);
+  }, [leftRoute]);
 
   useEffect(() => {
     let live = true;
@@ -166,6 +194,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
     setError(null);
     // The play route: pushed from a title or folder, so Back returns there; a link is already on it.
     playingRoute.start(discKey);
+    launched.current = true;
     if (!onPlayRoute) {
       onLaunch?.();
       history.push({ kind: 'play', discKey, playlistId: playlistId ?? null, timeS: null });
@@ -186,6 +215,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
       },
     ).catch((err: unknown) => {
       if (id !== launch.current) return;
+      launched.current = false;
       playingRoute.stop();
       setOpening('idle');
       setError(message(err));
@@ -205,9 +235,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
     else play();
   };
   const stopWaiting = (): void => {
-    launch.current++;
-    playingRoute.stop();
-    controller.closeDisc(); // the engine drops the disc unopened
+    abandon(); // the engine drops the disc unopened
     setOpening('idle');
   };
   /** Back: off the play route through the history (to the screen Play came from, else the library), else closed here. */

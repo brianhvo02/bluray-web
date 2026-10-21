@@ -22,13 +22,14 @@ export interface OpeningController {
 
 /**
  * Starts `playlistId` once the engine has read the disc just opened (its 'titles' event), and with `startUs` (a link's
- * time) seeks there once that playlist plays and its length is known, unless the time is past its end. A plain
- * subscription rather than an effect: the landing screen, and the pre-flight with it, unmounts as soon as the disc's
- * playlists arrive.
+ * time) seeks there once that playlist plays and its length is known, unless the time is past its end or another
+ * playlist started first. A plain subscription rather than an effect: the landing screen, and the pre-flight with it,
+ * unmounts as soon as the disc's playlists arrive, before the playlist starts.
  *
  * It is scoped to that one open (ruling T10g): it lets go once it has acted, when the open fails, when another disc is
- * opened or this one closed, and when the returned function is called (the pre-flight unmounting first). A disc that
- * hasn't the playlist is left as it opened (its menu or title list, the same as opening it without one) with a notice.
+ * opened or this one closed, and when the returned function is called (the pre-flight abandoning its launch). A disc
+ * that hasn't the playlist is left as it opened (its menu or title list, the same as opening it without one) with a
+ * notice.
  */
 export function playOnceOpen(controller: OpeningController, playlistId: string, startUs?: number): () => void {
   const open = controller.discOpens;
@@ -46,9 +47,11 @@ export function playOnceOpen(controller: OpeningController, playlistId: string, 
       return;
     }
     if (started) {
-      if (snapshot.currentPlaylistId !== playlistId || snapshot.durationUs <= 0) return;
+      // The first playlist to start after the pick decides: another one (first play, a BD-J title, the user's pick)
+      // took over, and a pick of this playlist later on must not jump to the link's time.
+      if (snapshot.currentPlaylistId === null || snapshot.durationUs <= 0) return;
       release();
-      if (seekTo < snapshot.durationUs) controller.seek(seekTo);
+      if (snapshot.currentPlaylistId === playlistId && seekTo < snapshot.durationUs) controller.seek(seekTo);
       return;
     }
     if (snapshot.playlists.length === 0) return;

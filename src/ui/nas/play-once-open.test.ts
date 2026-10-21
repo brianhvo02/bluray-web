@@ -128,14 +128,15 @@ describe('playOnceOpen', () => {
     expect(c.listeners.size).toBe(0);
   });
 
-  it('waits for its own playlist, not one another pick started', () => {
+  it('lets go without seeking when another playlist starts first', () => {
     const c = fakeController();
     playOnceOpen(c, '00001', 30e6);
     c.set({ playlists: [{ id: '00000' }, { id: '00001' }] });
     c.set({ currentPlaylistId: '00000', durationUs: 120e6 });
-    expect(c.seeks).toEqual([]);
+    expect(c.listeners.size).toBe(0);
+    // picked later on: it plays from its start
     c.set({ currentPlaylistId: '00001', durationUs: 60e6 });
-    expect(c.seeks).toEqual([30e6]);
+    expect(c.seeks).toEqual([]);
   });
 
   it('plays once when playPlaylist notifies its listeners at once, as the controller does', () => {

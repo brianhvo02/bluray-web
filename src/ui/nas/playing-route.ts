@@ -43,10 +43,16 @@ export class PlayingRoute {
     const now = this.nowMs();
     const last = this.last;
     this.last = { state: s, atMs: now };
-    const expectedUs = last === null ? s.timeUs : last.state.timeUs + (last.state.engineState === 'playing' ? (now - last.atMs) * 1000 : 0);
-    const paused = s.engineState === 'paused' && last?.state.engineState !== 'paused';
+    // The first playlist's start doesn't write: a link's own time is in the address bar until playback moves on (the
+    // link's seek, a pause, or the first 5 s).
+    if (last === null) {
+      this.lastReplaceMs = now;
+      return;
+    }
+    const expectedUs = last.state.timeUs + (last.state.engineState === 'playing' ? (now - last.atMs) * 1000 : 0);
+    const paused = s.engineState === 'paused' && last.state.engineState !== 'paused';
     const jumped = Math.abs(s.timeUs - expectedUs) > JUMP_US;
-    const otherPlaylist = last !== null && last.state.currentPlaylistId !== s.currentPlaylistId;
+    const otherPlaylist = last.state.currentPlaylistId !== s.currentPlaylistId;
     if (now - this.lastReplaceMs < REPLACE_EVERY_MS && !paused && !jumped && !otherPlaylist) return;
     if (this.history.route()?.kind !== 'play') return;
     this.lastReplaceMs = now;
