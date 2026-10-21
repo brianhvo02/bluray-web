@@ -13,6 +13,16 @@ const CLOSE = { Connection: 'close' };
 
 const quota = (limit: 'scope' | 'person', headers: Record<string, string> = {}): Response => json(507, { error: 'quota', limit }, headers);
 const precondition = (): Response => json(412, { error: 'precondition-failed' });
+const personChanged = (headers: Record<string, string> = {}): Response => json(409, { error: 'person-changed' }, headers);
+
+/**
+ * `X-Bdj-Person`: the person the client means to write for. Null when absent (no check). A device moved to another
+ * person between the client's `GET me` and its write is refused instead of landing one person's saves in another's.
+ */
+function expectedPerson(req: IncomingMessage): string | null {
+  const raw = req.headers['x-bdj-person'];
+  return typeof raw === 'string' ? raw.trim() : null;
+}
 
 /** `If-Match`: `*`, or one quoted etag (its bare value); null when absent; undefined when malformed. */
 function ifMatch(req: IncomingMessage): string | null | undefined {
@@ -112,6 +122,8 @@ export function bdjStoreRoutes(auth: Auth, store: BdjStore): Handler {
     const scope = parseScope(path.slice(PREFIX.length));
     if (scope === null) return json(400, { error: 'bad-scope' }, method === 'PUT' ? CLOSE : {});
     const person = device.personId;
+    const expected = method === 'GET' ? null : expectedPerson(req);
+    if (expected !== null && expected !== person) return personChanged(method === 'PUT' ? CLOSE : {});
 
     if (method === 'GET') {
       const { etag, body } = store.get(person, scope);
@@ -148,6 +160,8 @@ export function bdjStoreRoutes(auth: Auth, store: BdjStore): Handler {
     if (match === null && !noneMatch) return json(428, { error: 'precondition-required' }, CLOSE);
     const body = await readBody(req, store.scopeLimit);
     if (body === null) return quota('scope', CLOSE);
+    // the device may have moved while the body arrived: from here to the write nothing yields
+    if (expected !== null && requestDevice(auth, req.headers.authorization, url)?.personId !== expected) return personChanged();
     let cond: { ifMatch?: string; ifNoneMatch?: boolean };
     if (match !== null) {
       const etag = resolve(match);

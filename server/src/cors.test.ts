@@ -77,7 +77,7 @@ describe('createServer', () => {
       headers: { Origin: 'https://bluray-web.pages.dev', 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'if-match' },
     });
     const allowed = pre.headers.get('access-control-allow-headers')!.split(',').map((h) => h.trim().toLowerCase());
-    expect(allowed).toEqual(expect.arrayContaining(['authorization', 'content-type', 'range', 'if-match', 'if-none-match']));
+    expect(allowed).toEqual(expect.arrayContaining(['authorization', 'content-type', 'range', 'if-match', 'if-none-match', 'x-bdj-person']));
     const res = await fetch(`${base}/api/health`, { headers: { Origin: 'https://bluray-web.pages.dev' } });
     expect(res.headers.get('access-control-expose-headers')).toBe('ETag, Retry-After');
   });
