@@ -14,7 +14,7 @@ import {
   NasQuotaError, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeKeepingRemote, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles,
   type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot, type SnapshotFile,
 } from './bdj-store';
-import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore, type ScopeRecord } from './idb-store';
+import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore, recordKey, type ScopeRecord } from './idb-store';
 import { readTar, tarPathFits, writeTar } from './tar';
 
 /** A store request that has not answered after this long has failed (the write-ahead copy keeps the data). */
@@ -333,6 +333,9 @@ export function unconfirmedSource(apiBase: string, personId: string): string {
 
 /** The start of every unconfirmedSource. */
 export const UNCONFIRMED_PREFIX = 'nas-unconfirmed:';
+
+/** Notes (IdbBdjStore.loadNote, keyed by the copy's record key) of when each copy kept apart was last saved. */
+export const UNCONFIRMED_AGE_SOURCE = 'nas-unconfirmed-age';
 
 /** Notes (IdbBdjStore.loadNote, keyed by API base) of the person each NAS last said this device is. */
 export const DEVICE_SOURCE = 'nas-device';
@@ -848,7 +851,12 @@ export class UnconfirmedStore implements BdjStore {
   private readonly scopes = new Map<string, { before: readonly SnapshotFile[]; etag: string | null; mine: Set<string> }>();
   private n = 0;
 
-  constructor(private readonly idb: IdbBdjStore) {}
+  constructor(
+    private readonly idb: IdbBdjStore,
+    /** When each save was made (UNCONFIRMED_AGE_SOURCE), for the cleanup, which reads no files. */
+    private readonly ages?: IdbBdjStore,
+    private readonly nowMs: () => number = Date.now,
+  ) {}
 
   async load(scope: string): Promise<LoadedSnapshot> {
     const rec = await this.idb.loadRecord(scope);
@@ -866,6 +874,11 @@ export class UnconfirmedStore implements BdjStore {
       if ('etag' in result) {
         s.etag = result.etag;
         s.mine = new Set(snapshot.files.map((f) => f.path));
+        try {
+          await this.ages?.saveNote(recordKey(this.idb.source, scope), String(this.nowMs()));
+        } catch {
+          // the cleanup then notes it at its next run
+        }
         // ScopeSync's own versions: this session is the only writer it knows of
         return { etag: `u${++this.n}` };
       }
@@ -925,8 +938,9 @@ export class NasDiscStore implements BdjStore {
         throw e;
       }
       log(`BD-J storage: the NAS did not say whose device this is (${messageOf(e)}); the disc starts with no saved data from the NAS, and what it saves is kept in this browser until a later open where the NAS names the same person as before`, true);
-      await this.prune(devices, null);
-      return new UnconfirmedStore(new IdbBdjStore(unconfirmedSource(nas.apiBase, last), idb));
+      const source = unconfirmedSource(nas.apiBase, last);
+      this.prune(devices, null, source);
+      return new UnconfirmedStore(new IdbBdjStore(source, idb), new IdbBdjStore(UNCONFIRMED_AGE_SOURCE, idb), this.deps.nowMs);
     }
     const legacy = new IdbBdjStore(`nas:${discId}`, idb);
     if (me === null) {
@@ -938,7 +952,9 @@ export class NasDiscStore implements BdjStore {
     } catch (e) {
       log(`BD-J storage: whose device this is could not be noted in this browser (${messageOf(e)})`, true);
     }
-    await this.prune(devices, me.personId);
+    // not awaited: the cleanup reads keys and age notes only, and never removes this person's own copy kept apart,
+    // which the loads attach (round 2, M1 and M3)
+    this.prune(devices, me.personId, unconfirmedSource(nas.apiBase, me.personId));
     nas.setPerson(me.personId);
     return new WriteAheadNasStore({
       nas,
@@ -955,22 +971,23 @@ export class NasDiscStore implements BdjStore {
   }
 
   /**
-   * Removes the copies kept apart while `GET me` did not answer (review N5) that are older than
-   * UNCONFIRMED_MAX_AGE_MS, and, once the NAS has named this device's person (`confirmed`), this NAS's ones of any
-   * other person: the device is no longer theirs. A failure is logged; the copies then go at a later boot.
+   * Removes, in the background, the copies kept apart while `GET me` did not answer (review N5) that were last saved
+   * more than UNCONFIRMED_MAX_AGE_MS ago, and, once the NAS has named this device's person (`confirmed`), this NAS's
+   * ones of any other person: the device is no longer theirs. `inUse` (the confirmed person's own copy, which the
+   * loads attach, or the copy this session adds to) is never removed (round 2, M1). Keys and age notes only, no files
+   * (M3). A failure is logged; the copies then go at a later boot.
    */
-  private async prune(store: IdbBdjStore, confirmed: string | null): Promise<void> {
+  private prune(store: IdbBdjStore, confirmed: string | null, inUse: string): void {
     const { nas, log } = this.deps;
-    const now = (this.deps.nowMs ?? Date.now)();
     const mine = unconfirmedSource(nas.apiBase, '');
-    try {
-      const gone = await store.prune(UNCONFIRMED_PREFIX, (r) =>
-        now - r.savedAt > UNCONFIRMED_MAX_AGE_MS || (confirmed !== null && r.source.startsWith(mine) && r.source !== `${mine}${confirmed}`),
-      );
-      if (gone > 0) log(`BD-J storage: ${gone} copies saved while the NAS did not say whose device this was are removed (older than 30 days, or this device is another person's now)`);
-    } catch (e) {
-      log(`BD-J storage: the copies saved while the NAS did not say whose device this was could not be cleaned up (${messageOf(e)})`, true);
-    }
+    const drop = (source: string, ageMs: number | null): boolean =>
+      source !== inUse && ((confirmed !== null && source.startsWith(mine)) || (ageMs !== null && ageMs > UNCONFIRMED_MAX_AGE_MS));
+    store.pruneByKey(UNCONFIRMED_PREFIX, UNCONFIRMED_AGE_SOURCE, (this.deps.nowMs ?? Date.now)(), drop).then(
+      (gone) => {
+        if (gone > 0) log(`BD-J storage: ${gone} copies saved while the NAS did not say whose device this was are removed (older than 30 days, or this device is another person's now)`);
+      },
+      (e: unknown) => log(`BD-J storage: the copies saved while the NAS did not say whose device this was could not be cleaned up (${messageOf(e)})`, true),
+    );
   }
 
   async load(scope: string): Promise<LoadedSnapshot> {

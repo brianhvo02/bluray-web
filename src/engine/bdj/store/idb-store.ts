@@ -196,10 +196,12 @@ export class IdbBdjStore implements BdjStore {
   }
 
   /**
-   * Removes every record of a source that starts with `prefix` (any source, not only this one's) for which `drop`
-   * answers true, in one readwrite transaction: how many went (nas-store.ts, the copies kept apart).
+   * Removes the records whose source starts with `prefix` (any source, not only this one's) for which `drop` answers
+   * true, reading keys only, never a record's files: a record's age comes from its note under `ageSource` (keyed by
+   * the record's key, epoch ms; null when it has none, and one is written with `nowMs` then). Notes whose record is
+   * gone are removed too. One readwrite transaction; answers how many records went (nas-store.ts, copies kept apart).
    */
-  async prune(prefix: string, drop: (r: ScopeRecord) => boolean): Promise<number> {
+  async pruneByKey(prefix: string, ageSource: string, nowMs: number, drop: (source: string, ageMs: number | null) => boolean): Promise<number> {
     const db = await this.open();
     const tx = db.transaction(SCOPES_STORE, 'readwrite', { durability: 'strict' });
     const done = new Promise<void>((resolve, reject) => {
@@ -208,22 +210,33 @@ export class IdbBdjStore implements BdjStore {
       tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'));
     });
     done.catch(() => undefined); // awaited below
+    const store = tx.objectStore(SCOPES_STORE);
+    // every key (a few per disc), no values; no IDBKeyRange, which a test's fake IndexedDB keeps elsewhere
+    const keys = ((await request(store.getAllKeys())) as IDBValidKey[]).filter((k): k is string => typeof k === 'string');
+    const notePrefix = `${ageSource}|`;
+    const records = keys.filter((k) => k.startsWith(prefix));
+    const noted = new Set(keys.filter((k) => k.startsWith(notePrefix)).map((k) => k.slice(notePrefix.length)));
     let gone = 0;
-    // every record, in source order (a few per disc): no IDBKeyRange, which a test's fake IndexedDB keeps elsewhere
-    const cursor = tx.objectStore(SCOPES_STORE).index(SOURCE_INDEX).openCursor();
-    await new Promise<void>((resolve, reject) => {
-      cursor.onsuccess = () => {
-        const c = cursor.result;
-        if (!c) return resolve();
-        const r = c.value as ScopeRecord;
-        if (typeof r.source === 'string' && r.source.startsWith(prefix) && typeof r.savedAt === 'number' && drop(r)) {
-          c.delete();
-          gone++;
-        }
-        c.continue();
-      };
-      cursor.onerror = () => reject(cursor.error ?? new Error('IndexedDB cursor failed'));
-    });
+    for (const key of records) {
+      const source = key.slice(0, key.lastIndexOf('|'));
+      const noteKey = recordKey(ageSource, key);
+      let age: number | null = null;
+      if (noted.has(key)) {
+        const note = (await request(store.get(noteKey))) as Partial<NoteRecord> | undefined;
+        const at = Number(note?.note);
+        if (Number.isFinite(at)) age = nowMs - at;
+      }
+      if (drop(source, age)) {
+        store.delete(key);
+        store.delete(noteKey);
+        gone++;
+      } else if (age === null) {
+        store.put({ source: ageSource, scope: key, note: String(nowMs) } satisfies NoteRecord, noteKey);
+      }
+      noted.delete(key);
+    }
+    // notes of records gone (attached, removed elsewhere)
+    for (const key of noted) store.delete(recordKey(ageSource, key));
     await done;
     return gone;
   }

@@ -7,8 +7,8 @@ import { listTar, writeTar as serverWriteTar } from '../../../../server/src/tar'
 import { createDiscHandler, discApiBase, findDiscs } from '../../../../tools/disc-server/server';
 import { startStoreNas, type StoreNas } from '../../../../tests/helpers/store-nas';
 import { NasQuotaError, SCOPE_QUOTA_BYTES, type Snapshot, type SnapshotFile } from './bdj-store';
-import { IdbBdjStore } from './idb-store';
-import { NAS_PUSH_DEBOUNCE_MS, NAS_PUSH_RETRY_MS, PERSON_HEADER, NasBdjStore, NasDiscStore, NasStoreError, WriteAheadNasStore, personSource, storeApiBase, unconfirmedSource } from './nas-store';
+import { IdbBdjStore, recordKey } from './idb-store';
+import { NAS_PUSH_DEBOUNCE_MS, NAS_PUSH_RETRY_MS, PERSON_HEADER, NasBdjStore, NasDiscStore, NasStoreError, UNCONFIRMED_AGE_SOURCE, WriteAheadNasStore, personSource, storeApiBase, unconfirmedSource } from './nas-store';
 import { readTar, tarPathFits, writeTar } from './tar';
 
 // Every name here is made up.
@@ -938,22 +938,30 @@ describe('NasDiscStore (the backend of a disc from a server)', () => {
     expect(await new IdbBdjStore(personSource(sora.personId), idb).loadRecord(SCOPE)).toBeNull();
   });
 
-  it('removes copies kept apart for more than 30 days at boot, unattached (ruling R30, N5)', async () => {
+  it("attaches the confirmed person's copy kept apart however old, and removes others' older than 30 days, by key and age note only (R30 N5, round 2 M1 and M3)", async () => {
     const mika = await nas.person('Mika');
     const idb = new IDBFactory();
     const day = 24 * 3600 * 1000;
-    await new IdbBdjStore(unconfirmedSource(nas.api, mika.personId), idb, undefined, () => Date.now() - 31 * day).save(SCOPE, { files: [file('old', 1_000, 'o')] }, null);
-    await new IdbBdjStore(unconfirmedSource(nas.api, mika.personId), idb, undefined, () => Date.now() - 29 * day).save(BUDA, { files: [file('recent', 1_000, 'r')] }, null);
-    await new IdbBdjStore(unconfirmedSource('https://other.example/api/', 'p1'), idb, undefined, () => Date.now() - 31 * day).save(SCOPE, { files: [file('elsewhere', 1_000, 'e')] }, null);
+    const keep = async (source: string, scope: string, ageDays: number | null, name: string): Promise<void> => {
+      await new IdbBdjStore(source, idb, undefined, () => Date.now() - (ageDays ?? 0) * day).save(scope, { files: [file(name, 1_000_000, name)] }, null);
+      if (ageDays !== null) await new IdbBdjStore(UNCONFIRMED_AGE_SOURCE, idb).saveNote(recordKey(source, scope), String(Date.now() - ageDays * day));
+    };
+    const elsewhere = unconfirmedSource('https://other.example/api/', 'p1');
+    await keep(unconfirmedSource(nas.api, mika.personId), SCOPE, 31, 'mine-old'); // Mika's own: attached, never aged out
+    await keep(elsewhere, SCOPE, 31, 'elsewhere-old'); // another NAS's, over 30 days: removed
+    await keep(elsewhere, BUDA, 29, 'elsewhere-recent'); // kept
+    await keep(elsewhere, `buda/${ORG}`, null, 'elsewhere-no-note'); // no age note yet: noted now, kept
     const timers = new Timers();
     const store = discStore(client(mika.token), idb, timers);
-    expect(await store.load(SCOPE)).toEqual({ files: [], etag: null });
-    expect(view(await store.load(BUDA)).map(([p]) => p)).toEqual(['recent']);
+    expect(view(await store.load(SCOPE)).map(([p]) => p)).toEqual(['mine-old']);
     await timers.advance(0);
-    expect(nas.stored(mika.personId, SCOPE).etag).toBeNull();
-    expect(onNasPaths(mika.personId, BUDA)).toEqual(['recent']);
-    expect(await new IdbBdjStore(unconfirmedSource(nas.api, mika.personId), idb).loadRecord(SCOPE)).toBeNull();
-    expect(await new IdbBdjStore(unconfirmedSource('https://other.example/api/', 'p1'), idb).loadRecord(SCOPE)).toBeNull();
+    expect(onNasPaths(mika.personId)).toEqual(['mine-old']);
+    const other = new IdbBdjStore(elsewhere, idb);
+    expect(await other.loadRecord(SCOPE)).toBeNull();
+    expect(await new IdbBdjStore(UNCONFIRMED_AGE_SOURCE, idb).loadNote(recordKey(elsewhere, SCOPE))).toBeNull();
+    expect((await other.loadRecord(BUDA))?.files.map((f) => f.path)).toEqual(['elsewhere-recent']);
+    expect((await other.loadRecord(`buda/${ORG}`))?.files.map((f) => f.path)).toEqual(['elsewhere-no-note']);
+    expect(await new IdbBdjStore(UNCONFIRMED_AGE_SOURCE, idb).loadNote(recordKey(elsewhere, `buda/${ORG}`))).not.toBeNull();
   });
 
   it("attaches a copy kept apart onto an empty base when the person's own copy is settled: a file deleted elsewhere does not come back (ruling R30, N4)", async () => {

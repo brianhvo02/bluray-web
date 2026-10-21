@@ -426,12 +426,16 @@ what would change that decision.
     the person the NAS last named for this device in this browser (`nas-device`, by API base). That copy goes into
     the person's own (onto an empty base when theirs is already on the NAS, so files deleted elsewhere don't come back)
     only at a boot where the NAS names the same person again, and then merges with the NAS's files winning (R29). A
-    boot that names another person removes this NAS's copies kept for anyone else, and any such copy older than 30
-    days is removed at boot: those saves are lost, never given to someone else. If the device moves and its new
-    person's first boot also misses `GET me`, their saves are added to the copy kept for the previous person, and go
-    to that person only if the NAS names them again before it names anyone else. A device never confirmed in this
-    browser (or on that route: HTTPS and WebRTC have their own API bases) keeps that session's saved data in memory
-    only.
+    boot that names another person removes this NAS's copies kept for anyone else, and any other such copy last saved
+    more than 30 days ago is removed at boot (the confirmed person's own is attached however old): those saves are
+    lost, never given to someone else. The cleanup runs in the background and reads only keys and the age notes
+    (`nas-unconfirmed-age`), never the files. If the device moves and its new person's first boot also misses `GET
+    me`, their saves are added to the copy kept for the previous person, and go to that person only if the NAS names
+    them again before it names anyone else. A device never confirmed in this browser (or on that route: HTTPS and
+    WebRTC have their own API bases) keeps that session's saved data in memory only. After an attach onto an empty
+    base, the person's copy in this browser holds only the attached files, so if that same boot's GET then misses,
+    Java sees only those, not the older picture of the NAS (round 2, M2; the NAS loses nothing, and the next boot's
+    merge restores what Java sees).
   - **A conflict's merge keeps Java's file only where Java changed it (review N7).** When a save meets a newer stored
     version, the stored file replaces Java's unless Java changed that file since the snapshot being saved (or Java's
     is newer). Under an open writable handle it is replaced in place, so the handle writes on into the live file; a
