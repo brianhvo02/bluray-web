@@ -1302,6 +1302,11 @@ test('a link to something the NAS does not have shows the same screen', async ({
   await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
   await page.goto('/nas/title/anilist%3A999999999');
   await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
+  // Paired, the button leads back to the library instead of the pair screen.
+  await page.getByRole('button', { name: 'Back to the library' }).click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('nas-paired')).toBeVisible();
+  expect(pathOf(page)).toBe('/nas');
 });
 
 test('a guest behind the closed title gate gets not-found for a title link', async ({ page, browser, browserName }) => {
@@ -1328,6 +1333,9 @@ test('a guest behind the closed title gate gets not-found for a title link', asy
       await guest.goto('/nas/title/anilist%3A1');
       await expect(guest.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY, { timeout: 15_000 });
       await expect(guest.getByTestId('nas-crumbs')).toHaveCount(0);
+      await guest.getByRole('button', { name: 'Back to the library' }).click();
+      await expect(guest.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 15_000 });
+      expect(new URL(guest.url()).pathname).toBe('/nas/folders');
       await guest.goto('/nas');
       await expect(guest.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 15_000 });
       await expect(guest.getByTestId('nas-not-found')).toHaveCount(0);

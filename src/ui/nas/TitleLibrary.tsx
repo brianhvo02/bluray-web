@@ -33,7 +33,7 @@ interface TitleLibraryProps {
   /** The title routes answered 404 to this guest (the gate closed since `me` answered): the caller shows the folders. */
   readonly onGateClosed: () => void;
   /** The open title answered 404 on a link (no app entry behind it): the caller shows its not-found screen. */
-  readonly onTitleMissing: () => void;
+  readonly onTitleMissing: (path: string) => void;
   readonly onClose: () => void;
 }
 
@@ -291,6 +291,8 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
     setDetailError(null);
     if (openId === null) return;
     let live = true;
+    const route = history.route();
+    const requestPath = route === null ? '' : nasRoutePath(route);
     loadTitle(nas, openId).then(
       (d) => {
         if (!live) return;
@@ -300,7 +302,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
       },
       (err: unknown) => {
         if (!live) return;
-        if (isGateClosed(err) && history.depth() === 0) onTitleMissing();
+        if (isGateClosed(err) && history.depth() === 0) onTitleMissing(requestPath);
         else if (isGateClosed(err)) {
           // An owner's title is gone, its last disc filed differently (ruling F3): back to where it was opened from.
           if (owner) setGone(openId);
