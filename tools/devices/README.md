@@ -156,7 +156,12 @@ This check runs on real devices against the live NAS, on a **preview** origin of
    - Sora's first browser shows 0 (Sora's NAS holds 1; Mika's stays 2).
    - Sora's second browser shows 1, never Mika's 2.
 
-   `--store-disc auto` (the default) looks for the disc in the top three levels of the library and skips the store check when the disc isn't there. `--rehearse-store <library path or library-check id>` runs the same steps on another disc without expecting counts, as a dry run.
+   `--store-disc place` (the default) places the disc on the NAS for the run:
+   - It copies the fixture (668 KB) over ssh into a new folder of its own, `<root>/zz-live-check-<run id>/disc-bdj-store`. `--place-root` picks the root and defaults to `drv8`, the one with free space. `mkdir` without `-p`, so the folder is always new.
+   - It rescans through the owner route (`POST admin/rescan`) and waits until the library lists the disc.
+   - The clean-up deletes only that folder. It checks the path against the run id and the roots, and that the folder holds nothing but the disc. It then confirms the folder is gone and rescans. It waits until the disc is unlisted and the title matcher's filed and unsorted counts are back to where they were.
+
+   `--store-disc auto` looks for a disc already in the library instead. `--rehearse-store <library path or library-check id>` runs the same steps on another disc without expecting counts, as a dry run.
 3. **Library** (`--library`, Mika's phone). Each id (by default the 14 unconfirmed ones; or `--disc <id>`):
    - goes through `$BDJ_LIBRARY_DIR/map.tsv` and the roots in `server/deploy/compose.yaml` to its NAS library disc;
    - is opened from the NAS;

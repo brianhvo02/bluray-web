@@ -32,8 +32,8 @@
  * printed or written. Results go to --out, which must lie outside the repository.
  */
 
-import { execFile } from 'node:child_process';
-import { webcrypto } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { randomBytes, webcrypto } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -135,6 +135,22 @@ export function libraryPath(hostPath: string, roots: readonly LibraryRoot[]): st
 }
 
 /** map.tsv: library-check id → host path. */
+/** The folder a run places its test disc in: `<root>/zz-live-check-<run id>` (run id: 8 lowercase hex digits). */
+export function testDiscFolder(root: LibraryRoot, runId: string): { hostDir: string; libraryPath: string } {
+  if (!/^[0-9a-f]{8}$/.test(runId)) throw new Error(`bad run id ${runId}`);
+  if (!/^\/mnt\/drv\d+\/[A-Za-z]+$/.test(root.hostDir)) throw new Error(`root ${root.name} is not a /mnt/drv<n>/<folder> root`);
+  return { hostDir: `${root.hostDir}/zz-live-check-${runId}`, libraryPath: `${root.name}/zz-live-check-${runId}/${STORE_DISC_NAME}` };
+}
+
+/**
+ * Whether `dir` is exactly the folder this run placed (the only path the clean-up may delete): one of the roots, then
+ * `zz-live-check-<this run's id>`, nothing above or below it, no quotes or other characters a shell would read.
+ */
+export function ownTestFolder(dir: string, runId: string, roots: readonly LibraryRoot[]): boolean {
+  if (!/^[0-9a-f]{8}$/.test(runId)) return false;
+  return roots.some((r) => /^\/mnt\/drv\d+\/[A-Za-z]+$/.test(r.hostDir) && dir === `${r.hostDir}/zz-live-check-${runId}`);
+}
+
 export function parseMap(tsv: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const line of tsv.split('\n').slice(1)) {
@@ -155,7 +171,10 @@ export interface Options {
   soraA: string | null;
   soraB: string | null;
   /** 'auto' (look for disc-bdj-store in the library), a library path, or null (no store check). */
+  /** 'place' (copy disc-bdj-store into a folder of its own under --place-root, removed at the end), 'auto', a library path, or null. */
   storeDisc: string | null;
+  /** The library root (LIBRARY_ROOTS name) the test disc is placed under. */
+  placeRoot: string;
   rehearseStore: string | null;
   library: boolean;
   discs: string[];
@@ -167,11 +186,11 @@ export interface Options {
 
 const USAGE =
   'usage: live-check.ts --origin <preview origin> --out <dir> [--nas <api base>] [--mika-phone <target>] [--mika-tablet <target>] [--sora-a chrome-profile] [--sora-b chrome] ' +
-  '[--store-disc auto|<library path>|none] [--rehearse-store <library path>] [--library] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
+  '[--store-disc place|auto|<library path>|none] [--place-root drv8] [--rehearse-store <library path>|<id>] [--library] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
 
 export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Options {
   const o: Options = {
-    origin: '', nas: DEFAULT_NAS, out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'auto', rehearseStore: null,
+    origin: '', nas: DEFAULT_NAS, out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'drv8', rehearseStore: null,
     library: false, discs: [], libraryDir: env.BDJ_LIBRARY_DIR ?? join(homedir(), '.cache/bluray-web/bdj-library'), wdPorts: [4211, 4212], headless: false, callTimeoutMs: 120_000,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -189,6 +208,7 @@ export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = 
       case '--sora-a': o.soraA = v === 'none' ? null : v; break;
       case '--sora-b': o.soraB = v === 'none' ? null : v; break;
       case '--store-disc': o.storeDisc = v === 'none' ? null : v; break;
+      case '--place-root': o.placeRoot = v; break;
       case '--rehearse-store': o.rehearseStore = v; break;
       case '--disc': o.discs.push(v); break;
       case '--library-dir': o.libraryDir = v; break;
@@ -427,6 +447,156 @@ class People {
   }
 }
 
+interface MetadataStatus {
+  running: boolean;
+  filed: number;
+  unsorted: number;
+  music: number;
+  lastRunAt: number | null;
+}
+
+/** Pipes a local tar of `fixtures/synthetic/disc-bdj-store` into `script` run over ssh on the NAS host. */
+function sshUntar(script: string): Promise<void> {
+  const host = process.env.BLURAY_NAS_HOST ?? 'mediaserver';
+  return new Promise((res, rej) => {
+    // no AppleDouble files or macOS extended attributes: the NAS gets the fixture's files and nothing else
+    const tar = spawn('tar', ['--no-mac-metadata', '--no-xattrs', '-C', join(REPO, 'fixtures/synthetic'), '-cf', '-', STORE_DISC_NAME], { env: { ...process.env, COPYFILE_DISABLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const ssh = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', host, script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let err = '';
+    tar.stderr.on('data', (d: Buffer) => (err += d.toString()));
+    ssh.stderr.on('data', (d: Buffer) => (err += d.toString()));
+    tar.stdout.pipe(ssh.stdin);
+    const timer = setTimeout(() => ssh.kill('SIGKILL'), 120_000);
+    ssh.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) res();
+      else rej(new Error(`copying the test disc: ssh exit ${code}: ${err.slice(0, 300)}`));
+    });
+  });
+}
+
+/**
+ * disc-bdj-store placed on the NAS for one run, in a folder of its own (`<root>/zz-live-check-<run id>/`), and removed
+ * at the end; the library is rescanned both times through the owner route (POST admin/rescan).
+ */
+class TestDisc {
+  readonly runId = randomBytes(4).toString('hex');
+  readonly hostDir: string;
+  readonly libraryPath: string;
+  private readonly roots: LibraryRoot[];
+  /** Set once the folder exists on the NAS (made by this run): only then may the clean-up remove it. */
+  created = false;
+  removed = false;
+  /** The title matcher's counts before the disc was placed. */
+  statusBefore: MetadataStatus | null = null;
+  readonly report: { placed?: boolean; listedAfterMs?: number; removed?: boolean; gone?: boolean; unlisted?: boolean; countsRestored?: boolean; detail: string[] } = { detail: [] };
+
+  constructor(rootName: string, private readonly log: (m: string) => void) {
+    this.roots = parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'));
+    const root = this.roots.find((r) => r.name === rootName);
+    if (!root) throw new Error(`--place-root ${rootName}: not a library root (${this.roots.map((r) => r.name).join(', ')})`);
+    ({ hostDir: this.hostDir, libraryPath: this.libraryPath } = testDiscFolder(root, this.runId));
+  }
+
+  private async listed(c: Controller): Promise<boolean> {
+    const parent = parentOf(this.libraryPath);
+    const l = await c.json<LibraryListing>(`library?path=${encodeURIComponent(parent)}`).catch(() => null);
+    return !!l?.discs.some((d) => d.path === this.libraryPath);
+  }
+
+  private async rescan(c: Controller): Promise<number> {
+    const at = Date.now();
+    const r = await c.fetch('admin/rescan', { method: 'POST' });
+    if (r.status !== 202) throw new HttpError(r.status, await r.text(), 'admin/rescan');
+    return at;
+  }
+
+  private status(c: Controller): Promise<MetadataStatus> {
+    return c.json<MetadataStatus>('admin/metadata/status');
+  }
+
+  /** Copies the disc into a new folder (mkdir fails if it exists), rescans, and waits until the library lists it. */
+  async place(c: Controller): Promise<void> {
+    if (!ownTestFolder(this.hostDir, this.runId, this.roots)) throw new Error('refusing a test folder path this run did not make');
+    this.statusBefore = await this.status(c);
+    // mkdir without -p: the folder must be new, so the clean-up only ever removes what this run made
+    await sshRead(`mkdir -- '${this.hostDir}'`);
+    this.created = true; // from here on the clean-up removes it, even when the copy below fails
+    await sshUntar(`tar -C '${this.hostDir}' -xf -`);
+    const files = Number((await sshRead(`find '${this.hostDir}' -type f | wc -l`)).trim());
+    const listing = await new Promise<string>((res, rej) => execFile('find', [join(REPO, 'fixtures/synthetic', STORE_DISC_NAME), '-type', 'f'], (e, out) => (e ? rej(e) : res(String(out)))));
+    const want = listing.trim().split('\n').length;
+    if (files !== want) throw new Error(`the NAS copy has ${files} files, the fixture ${want}`);
+    this.report.placed = true;
+    this.log(`test disc placed at ${this.libraryPath}`);
+    const at = await this.rescan(c);
+    const deadline = at + 20 * 60_000;
+    while (!(await this.listed(c))) {
+      if (Date.now() > deadline) throw new Error('the rescan did not list the test disc in 20 minutes');
+      await sleep(3000);
+    }
+    this.report.listedAfterMs = Date.now() - at;
+    this.log(`test disc listed ${Math.round(this.report.listedAfterMs / 1000)} s after the rescan`);
+  }
+
+  /**
+   * Removes exactly this run's folder (checked against the run id and the roots, and that it holds only the test disc),
+   * checks it is gone, rescans, and waits until the disc is unlisted and the matcher's counts are back.
+   */
+  async remove(c: Controller | null): Promise<void> {
+    if (!this.created || this.removed) return;
+    const d = this.hostDir;
+    if (!ownTestFolder(d, this.runId, this.roots)) {
+      this.report.detail.push(`refused to delete ${d}: not this run's folder`);
+      return;
+    }
+    const contents = (await sshRead(`find '${d}' -mindepth 1 -maxdepth 1 -printf '%f\\n'`).catch((e: unknown) => `ERROR ${(e as Error).message}`)).trim();
+    // what this run put there: the disc's folder, or nothing yet when the copy failed
+    if (contents !== STORE_DISC_NAME && contents !== '') {
+      this.report.detail.push(`left ${d} in place: it holds "${contents}", not only ${STORE_DISC_NAME}`);
+      return;
+    }
+    await sshRead(`rm -r -- '${d}'`);
+    this.removed = true;
+    this.report.removed = true;
+    const left = (await sshRead(`test -e '${d}' && echo present || echo gone`)).trim();
+    this.report.gone = left === 'gone';
+    if (!this.report.gone) this.report.detail.push(`${d} is still there after rm`);
+    this.log(`test folder removed (${left})`);
+    if (!c) {
+      this.report.detail.push('no owner session for the rescan: the nightly scan will drop the disc');
+      return;
+    }
+    const at = await this.rescan(c);
+    const deadline = at + 20 * 60_000;
+    while (await this.listed(c)) {
+      if (Date.now() > deadline) {
+        this.report.detail.push('the rescan still lists the test disc after 20 minutes');
+        return;
+      }
+      await sleep(3000);
+    }
+    this.report.unlisted = true;
+    // the title run that follows the scan: filed/unsorted/music back to where they were before the disc came
+    const before = this.statusBefore;
+    while (Date.now() < deadline) {
+      const s = await this.status(c);
+      if (!s.running && (s.lastRunAt ?? 0) >= at) {
+        this.report.countsRestored = !before || (s.filed === before.filed && s.unsorted === before.unsorted && s.music === before.music);
+        if (!this.report.countsRestored) this.report.detail.push(`matcher counts now filed ${s.filed} / unsorted ${s.unsorted} / music ${s.music}, before ${before!.filed} / ${before!.unsorted} / ${before!.music}`);
+        break;
+      }
+      await sleep(3000);
+    }
+    if (this.report.countsRestored === undefined) this.report.detail.push('no title run after the rescan within 20 minutes');
+    this.log(`library rescanned: test disc unlisted; matcher counts ${this.report.countsRestored ? 'as before' : 'NOT as before'}`);
+  }
+
+  get clean(): boolean {
+    return !this.created || (!!this.report.gone && !!this.report.unlisted && this.report.countsRestored !== false);
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Browsers
 
@@ -589,6 +759,7 @@ interface Result {
   pairings: Array<{ role: string; person: string; ok: boolean; error?: string }>;
   store: { ran: boolean; mode: 'check' | 'rehearsal' | null; skipped?: string; disc?: string; steps: StoreStep[]; pass?: boolean };
   library: { ran: boolean; skipped?: string; discs: LibraryDisc[] };
+  testDisc?: { libraryPath: string; clean: boolean; placed?: boolean; listedAfterMs?: number; removed?: boolean; gone?: boolean; unlisted?: boolean; countsRestored?: boolean; detail: string[] };
   environment: Record<string, unknown>;
   errors: string[];
 }
@@ -601,6 +772,8 @@ class LiveCheck {
   private readonly hashes = storeHashes();
   /** Set on Ctrl-C: no further device step starts while the clean-up runs. */
   aborted = false;
+  /** disc-bdj-store placed on the NAS for this run (--store-disc place). */
+  testDisc: TestDisc | null = null;
 
   constructor(private readonly o: Options) {
     this.people = new People(o.nas, (m) => this.log(m));
@@ -761,6 +934,7 @@ class LiveCheck {
       const path = host ? libraryPath(host, parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'))) : null;
       return path ? this.discAt(path) : null;
     }
+    if (spec === 'place') return this.testDisc ? this.discAt(this.testDisc.libraryPath) : null;
     if (spec !== 'auto') return this.discAt(spec);
     // auto: disc-bdj-store anywhere in the top three levels of the library
     const queue: Array<{ path: string; depth: number }> = [{ path: '', depth: 0 }];
@@ -1001,6 +1175,13 @@ async function main(): Promise<void> {
   const cleanUp = (): Promise<void> =>
     (cleaning ??= (async () => {
       await check.stopAll();
+      // the test disc first: its rescan needs Mika's owner session, which goes with Mika
+      const disc = check.testDisc;
+      if (disc) {
+        await disc.remove(check.people.mika).catch((e: unknown) => disc.report.detail.push(`removing the test disc: ${(e as Error).message}`));
+        check.r.testDisc = { libraryPath: disc.libraryPath, clean: disc.clean, ...disc.report };
+        check.log(`test disc: ${disc.clean ? 'removed and unlisted' : `NOT CLEAN: ${disc.report.detail.join('; ')}`}`);
+      }
       const c = await check.people.cleanUp().catch((e: unknown) => ({ confirmed: false, detail: `clean-up failed: ${(e as Error).message}` }));
       check.r.people.deleted = check.people.deleted;
       check.r.people.cleanupConfirmed = c.confirmed;
@@ -1020,6 +1201,10 @@ async function main(): Promise<void> {
   try {
     await check.people.setUp();
     check.r.people.created = true;
+    if (o.storeDisc === 'place' && o.rehearseStore === null) {
+      check.testDisc = new TestDisc(o.placeRoot, (m) => check.log(m));
+      await check.testDisc.place(check.people.mika!);
+    }
     await check.store();
     await check.library();
   } catch (err) {
@@ -1033,9 +1218,9 @@ async function main(): Promise<void> {
   console.error(
     `store: ${r.store.ran ? (r.store.mode === 'rehearsal' ? `rehearsed (${r.store.steps.filter((s) => s.ok).length}/${r.store.steps.length} planes read)` : r.store.pass ? 'PASS' : 'FAIL') : `skipped (${r.store.skipped})`}; ` +
       `library: ${r.library.ran ? `${r.library.discs.filter((d) => d.opened).length}/${r.library.discs.length} opened` : `skipped (${r.library.skipped})`}; ` +
-      `people deleted: ${r.people.cleanupConfirmed ? 'confirmed' : 'NOT CONFIRMED'} → ${join(o.out, 'live-check.json')}`,
+      `${r.testDisc ? `test disc: ${r.testDisc.clean ? 'removed' : 'NOT CLEAN'}; ` : ''}people deleted: ${r.people.cleanupConfirmed ? 'confirmed' : 'NOT CONFIRMED'} → ${join(o.out, 'live-check.json')}`,
   );
-  process.exit(failed || !r.people.cleanupConfirmed || (r.store.ran && r.store.mode === 'check' && !r.store.pass) ? 1 : 0);
+  process.exit(failed || !r.people.cleanupConfirmed || (r.testDisc && !r.testDisc.clean) || (r.store.ran && r.store.mode === 'check' && !r.store.pass) ? 1 : 0);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

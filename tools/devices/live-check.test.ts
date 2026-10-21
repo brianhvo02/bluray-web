@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkOrigin, countOf, libraryPath, parseLiveArgs, parseMap, parseOwnerCode, parseRoots, storeHashes, UNCONFIRMED } from './live-check';
+import { checkOrigin, countOf, libraryPath, ownTestFolder, parseLiveArgs, parseMap, parseOwnerCode, parseRoots, storeHashes, testDiscFolder, UNCONFIRMED } from './live-check';
 
 const COMPOSE = `
     environment:
@@ -26,6 +26,20 @@ describe('live-check', () => {
     expect(libraryPath('/mnt/drv0/Downloads/A Set/DISC1', roots)).toBe('drv0-dl/A Set/DISC1');
     expect(libraryPath('/mnt/drv9/BDMVs/Elsewhere', roots)).toBeNull();
     expect(libraryPath('/mnt/drv0/BDMVsX/Not a root', roots)).toBeNull();
+  });
+
+  it('places the test disc in a folder of its own and deletes only that folder', () => {
+    const roots = parseRoots(COMPOSE);
+    const f = testDiscFolder(roots[0]!, '0a1b2c3d');
+    expect(f).toEqual({ hostDir: '/mnt/drv0/BDMVs/zz-live-check-0a1b2c3d', libraryPath: 'drv0/zz-live-check-0a1b2c3d/disc-bdj-store' });
+    expect(() => testDiscFolder(roots[0]!, "x'; rm -rf /")).toThrow();
+    expect(() => testDiscFolder({ name: 'odd', hostDir: '/srv/x y' }, '0a1b2c3d')).toThrow();
+    expect(ownTestFolder(f.hostDir, '0a1b2c3d', roots)).toBe(true);
+    expect(ownTestFolder(f.hostDir, 'ffffffff', roots)).toBe(false); // another run's folder
+    expect(ownTestFolder('/mnt/drv0/BDMVs', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/drv0/BDMVs/zz-live-check-0a1b2c3d/disc-bdj-store', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/drv0/BDMVs/zz-live-check-0a1b2c3d/..', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/drv9/BDMVs/zz-live-check-0a1b2c3d', '0a1b2c3d', roots)).toBe(false);
   });
 
   it('reads map.tsv', () => {
