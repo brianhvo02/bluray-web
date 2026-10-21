@@ -280,6 +280,16 @@ describe('disc server (the NAS disc API)', () => {
     expect((await get('/../secret.txt')).status).toBe(400);
   });
 
+  it('answers a deep app path with index.html', async () => {
+    const r = await get('/nas/title/anilist%3A21', auth);
+    expect(r.status).toBe(200);
+    expect(r.body.toString()).toBe('<!doctype html><title>player</title>');
+    expect(r.headers['content-type']).toMatch(/^text\/html/);
+    expect(r.headers['cross-origin-opener-policy']).toBe('same-origin');
+    expect(r.headers['cross-origin-embedder-policy']).toBe('require-corp');
+    expect((await get('/nas/missing.js', auth)).status).toBe(404);
+  });
+
   it('answers a CORS preflight without the token, and only for the API', async () => {
     const base = await bigDisc();
     const r = await get(`${base}manifest`, { origin: 'http://localhost:5173', 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization' }, 'OPTIONS');

@@ -373,8 +373,14 @@ export function createDiscHandler(options: DiscHandlerOptions): RequestListener 
 
 function serveApp(req: IncomingMessage, res: ServerResponse, distDir: string | null, segments: readonly string[]): void {
   if (!distDir) return plain(res, 404, 'The player is not built: run npm run build, or pass --dist.');
-  const rel = segments.length === 0 ? 'index.html' : segments.join('/');
-  const stat = containedStat(distDir, rel);
+  let rel = segments.length === 0 ? 'index.html' : segments.join('/');
+  let stat = containedStat(distDir, rel);
+  // A deep path such as /nas/title/… is the app's own route, not a file: it loads the shell, as the Vite dev and preview
+  // servers and Cloudflare Pages do. A path with an extension that is not a file is still a 404.
+  if (!stat?.isFile() && extname(rel) === '') {
+    rel = 'index.html';
+    stat = containedStat(distDir, rel);
+  }
   if (!stat?.isFile()) return plain(res, 404, 'Not found.');
   // no-cache: a rebuild shows up on reload (the service worker precaches by revision anyway)
   sendFile(req, res, join(distDir, rel), stat.size, {
