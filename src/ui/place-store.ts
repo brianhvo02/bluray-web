@@ -7,6 +7,17 @@ export interface StoredTextFile {
   readonly bytes: Uint8Array;
 }
 
+/** A place the NAS hasn't taken yet: the pairing it was saved under, and how often the NAS refused it so far. */
+export interface OutboxEntry {
+  readonly place: PlaybackPlace;
+  /** `pairingKey` of the pairing the place was saved under: it goes to that pairing's NAS and person only. */
+  readonly pairing: string;
+  readonly attempts: number;
+}
+
+/** A place the NAS refuses this many times (an error answer, not an unreachable NAS) leaves the outbox. */
+export const MAX_SEND_ATTEMPTS = 5;
+
 /** A file larger than this is not kept. */
 export const MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024;
 /** A disc's files together past this are not kept at all. */
@@ -22,11 +33,15 @@ export interface PlaceStore {
   /** A disc's places by playlist id, with the newest place's settings as the disc's defaults. */
   get(discKey: string): Promise<DiscPlaces>;
   /** The places waiting for the NAS, one per disc and playlist. */
-  outbox(): Promise<PlaybackPlace[]>;
-  /** Puts a place in the outbox, replacing an older one for its disc and playlist. */
-  queue(place: PlaybackPlace): Promise<void>;
+  outbox(): Promise<OutboxEntry[]>;
+  /** Puts a place saved under `pairing` in the outbox, replacing an older one for its disc and playlist. */
+  queue(place: PlaybackPlace, pairing: string): Promise<void>;
   /** The NAS took (or refused for good) the place `key` saved at `updatedAt`: out of the outbox unless a newer one came. */
   sent(key: string, updatedAt: number): Promise<void>;
+  /** The NAS refused the place `key` saved at `updatedAt` once more; at MAX_SEND_ATTEMPTS it leaves the outbox. */
+  failed(key: string, updatedAt: number): Promise<void>;
+  /** Empties the outbox (the pairing changed: nothing in it may go to the new one). */
+  clearOutbox(): Promise<void>;
   /** Replaces a disc's files; a file over 5 MB is left out, and a set over 50 MB is not stored. */
   putTextFiles(discKey: string, files: readonly StoredTextFile[]): Promise<void>;
   textFiles(discKey: string): Promise<StoredTextFile[]>;
@@ -37,6 +52,10 @@ interface PlaceRecord {
   readonly place: PlaybackPlace;
 }
 
+interface OutboxRecord extends OutboxEntry {
+  readonly key: string;
+}
+
 interface TextFilesRecord {
   readonly key: string;
   readonly files: readonly StoredTextFile[];
@@ -45,13 +64,22 @@ interface TextFilesRecord {
 /** `<discKey>/<playlistId>`: a place's key on this device. */
 export const placeKey = (place: Pick<PlaybackPlace, 'discKey' | 'playlistId'>): string => `${place.discKey}/${place.playlistId}`;
 
-/** Writes `place` unless the store holds a newer one under its key. */
-function putNewer(factory: IDBFactory, store: string, place: PlaybackPlace): Promise<unknown> {
-  const key = placeKey(place);
+/** Writes `record` unless the store holds a newer place under its key. */
+function putNewer<T extends PlaceRecord>(factory: IDBFactory, store: string, record: T): Promise<unknown> {
   return withStore(factory, store, 'readwrite', (s) => {
-    const req = s.get(key) as IDBRequest<PlaceRecord | undefined>;
+    const req = s.get(record.key) as IDBRequest<PlaceRecord | undefined>;
     req.onsuccess = () => {
-      if (!req.result || req.result.place.updatedAt <= place.updatedAt) s.put({ key, place } satisfies PlaceRecord);
+      if (!req.result || req.result.place.updatedAt <= record.place.updatedAt) s.put(record);
+    };
+  });
+}
+
+/** Runs `change` on the outbox record `key` if it holds the place saved at `updatedAt` or an older one. */
+function withQueued(factory: IDBFactory, key: string, updatedAt: number, change: (s: IDBObjectStore, record: OutboxRecord) => void): Promise<unknown> {
+  return withStore(factory, STORES.placeOutbox, 'readwrite', (s) => {
+    const req = s.get(key) as IDBRequest<OutboxRecord | undefined>;
+    req.onsuccess = () => {
+      if (req.result && req.result.place.updatedAt <= updatedAt) change(s, req.result);
     };
   });
 }
@@ -60,7 +88,7 @@ function putNewer(factory: IDBFactory, store: string, place: PlaybackPlace): Pro
 export function idbPlaceStore(factory: IDBFactory = indexedDB, keyRange: typeof IDBKeyRange = IDBKeyRange): PlaceStore {
   return {
     async put(place) {
-      await putNewer(factory, STORES.places, place);
+      await putNewer(factory, STORES.places, { key: placeKey(place), place });
     },
     async get(discKey) {
       const range = keyRange.bound(`${discKey}/`, `${discKey}/￿`);
@@ -74,18 +102,24 @@ export function idbPlaceStore(factory: IDBFactory = indexedDB, keyRange: typeof 
       return { defaults: newest?.settings ?? null, places };
     },
     async outbox() {
-      const records = (await withStore(factory, STORES.placeOutbox, 'readonly', (s) => s.getAll() as IDBRequest<PlaceRecord[]>)) ?? [];
-      return records.map((r) => r.place);
+      const records = (await withStore(factory, STORES.placeOutbox, 'readonly', (s) => s.getAll() as IDBRequest<OutboxRecord[]>)) ?? [];
+      return records.map(({ place, pairing, attempts }) => ({ place, pairing, attempts }));
     },
-    async queue(place) {
-      await putNewer(factory, STORES.placeOutbox, place);
+    async queue(place, pairing) {
+      await putNewer(factory, STORES.placeOutbox, { key: placeKey(place), place, pairing, attempts: 0 } satisfies OutboxRecord);
     },
     async sent(key, updatedAt) {
+      await withQueued(factory, key, updatedAt, (s) => s.delete(key));
+    },
+    async failed(key, updatedAt) {
+      await withQueued(factory, key, updatedAt, (s, record) => {
+        if (record.attempts + 1 >= MAX_SEND_ATTEMPTS) s.delete(key);
+        else s.put({ ...record, attempts: record.attempts + 1 } satisfies OutboxRecord);
+      });
+    },
+    async clearOutbox() {
       await withStore(factory, STORES.placeOutbox, 'readwrite', (s) => {
-        const req = s.get(key) as IDBRequest<PlaceRecord | undefined>;
-        req.onsuccess = () => {
-          if (req.result && req.result.place.updatedAt <= updatedAt) s.delete(key);
-        };
+        s.clear();
       });
     },
     async putTextFiles(discKey, files) {

@@ -82,7 +82,8 @@ export function playbackRoutes(auth: Auth, store: PlaybackStore, catalogue: Play
       return detail ? json(200, titleProgress(store.all(person), detail, discsOf), { 'Cache-Control': 'no-store' }) : json(404, { error: 'not found' });
     }
     const [discKey, playlistId, ...rest] = url.pathname.slice(PREFIX.length).split('/');
-    if (rest.length > 0 || parseDiscKey(discKey!) === null || (playlistId !== undefined && !isPlaylistId(playlistId))) return json(404, { error: 'not found' }, method === 'PUT' ? { Connection: 'close' } : {});
+    // `bad-key`: the app drops a place answered so, where a 404 from a NAS without these routes keeps it for later
+    if (rest.length > 0 || parseDiscKey(discKey!) === null || (playlistId !== undefined && !isPlaylistId(playlistId))) return json(404, { error: 'bad-key' }, method === 'PUT' ? { Connection: 'close' } : {});
     try {
       if (method === 'GET') {
         if (playlistId !== undefined) return json(405, { error: 'method not allowed' }, { Allow: 'PUT, DELETE' });

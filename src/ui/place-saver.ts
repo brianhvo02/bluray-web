@@ -1,10 +1,11 @@
 import type { PlaybackPlace } from '../engine/disc/nas-api';
 import type { PlaceState } from '../engine/protocol';
-import { splitPick } from '../player/drop-files';
+import { FONT_EXTENSIONS, splitPick } from '../player/drop-files';
 import type { PlayerSnapshot } from '../player/player-controller';
 import { NasHttpError, type NasClient } from './nas/nas-client';
 import { buildPlace, PLACE_MIN_DURATION_US, qualifies } from './place-model';
-import { placeKey, type PlaceStore, type StoredTextFile } from './place-store';
+import { pairingKey } from './nas/nas-store';
+import { MAX_TEXT_FILE_BYTES, MAX_TEXT_FILES_BYTES, placeKey, type PlaceStore, type StoredTextFile } from './place-store';
 
 /** A local disc's places name their device this way ("Stopped at 3:12 of 24:00 on this device"). */
 export const LOCAL_DEVICE_NAME = 'this device';
@@ -29,12 +30,14 @@ export interface PlaceTarget {
   /** The disc's main title, which makes a place at any length. */
   readonly mainPlaylistId: string | null;
   readonly deviceName: string;
+  /** `pairingKey` of the pairing a NAS disc was opened through (its places go to that pairing only); null otherwise. */
+  readonly pairing: string | null;
 }
 
 export interface PlaceSaverDeps {
   readonly store: PlaceStore;
   /** Where a NAS disc's places go; null with no NAS paired. */
-  readonly nas: Pick<NasClient, 'putPlace'> | null;
+  readonly nas: Pick<NasClient, 'putPlace' | 'pairing'> | null;
   /** The engine's registers (PlayerController.readPlace): answered in command order. */
   readonly readPlace: () => Promise<PlaceState>;
   /** PlayerController.discOpens: a read made under another open is not this disc's. */
@@ -82,8 +85,18 @@ function savesAtOnce(prev: Seen, next: Seen): boolean {
   return settingsOf(prev) !== settingsOf(next);
 }
 
-/** Refused for good: sending it again can't help. */
-const refusedForGood = (err: unknown): boolean => err instanceof NasHttpError && (err.status === 400 || err.status === 404 || err.status === 413);
+/**
+ * What a failed send means for an outbox place: `drop` (refused for good: a bad place, too large, a bad key), `wait`
+ * (the NAS is unreachable, or doesn't have the place routes yet: a plain 404; try everything later), or `refused`
+ * (another error answer: counted, and the place is dropped after MAX_SEND_ATTEMPTS).
+ */
+function failure(err: unknown): 'drop' | 'wait' | 'refused' {
+  if (!(err instanceof NasHttpError)) return 'wait';
+  if (err.status === 400 || err.status === 413 || (err.status === 404 && err.code === 'bad-key')) return 'drop';
+  return err.status === 404 ? 'wait' : 'refused';
+}
+
+const isFontName = (name: string): boolean => FONT_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext));
 
 /**
  * Saves the open disc's place (spec 2026-10-20 §6.2): every 10 s while playing and at once on a pause, seek, track,
@@ -168,23 +181,33 @@ export class PlaceSaver {
       this.drainAgain = true;
       return this.draining;
     }
+    // `draining` is let go in the same step as the last check of `drainAgain`, so a call in between is never lost
     const run = async (): Promise<void> => {
-      do {
-        this.drainAgain = false;
-        await this.sendOutbox();
-      } while (this.drainAgain);
-    };
-    this.draining = run()
-      .catch((err: unknown) => this.log('sending saved places failed', err))
-      .finally(() => {
+      try {
+        do {
+          this.drainAgain = false;
+          await this.sendOutbox();
+        } while (this.drainAgain);
+      } catch (err) {
+        this.log('sending saved places failed', err);
+      } finally {
         this.draining = null;
-      });
+      }
+    };
+    this.draining = run();
     return this.draining;
+  }
+
+  /** Empties the outbox: the pairing changed, so nothing in it may go to the new one. */
+  clearOutbox(): Promise<void> {
+    return this.deps.store.clearOutbox().catch((err: unknown) => this.log('clearing saved places failed', err));
   }
 
   /**
    * Subtitle files the user added (a pick or a drop, as `loadSubtitleFiles` got them): their sizes go into places, and
-   * their bytes are kept on this device for a resume here. A pick of fonts alone adds them to the kept set.
+   * their bytes are kept on this device for a resume here. A pick with subtitle files replaces the kept subtitle files
+   * (fonts kept before stay); a pick of fonts alone adds them. A file of the same name replaces the kept one; files
+   * over the store's limits are never read.
    */
   async addTextFiles(files: readonly File[]): Promise<void> {
     const t = this.target;
@@ -193,9 +216,14 @@ export class PlaceSaver {
     // as the controller does: nothing recognised by name means the files are subtitles
     const subtitles = split.subtitles.length || split.fonts.length ? split.subtitles : files;
     for (const f of subtitles) this.sizes[f.name] = f.size;
-    const read = (list: readonly File[]): Promise<StoredTextFile[]> => Promise.all(list.map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) })));
-    const kept = subtitles.length ? [] : await this.deps.store.textFiles(t.discKey);
-    await this.deps.store.putTextFiles(t.discKey, [...kept, ...(await read([...subtitles, ...split.fonts]))]);
+    const picked = [...subtitles, ...split.fonts].filter((f) => f.size <= MAX_TEXT_FILE_BYTES);
+    const names = new Set(picked.map((f) => f.name));
+    const before = await this.deps.store.textFiles(t.discKey);
+    const kept = before.filter((f) => !names.has(f.name) && (subtitles.length === 0 || isFontName(f.name)));
+    const total = kept.reduce((sum, f) => sum + f.bytes.byteLength, 0) + picked.reduce((sum, f) => sum + f.size, 0);
+    if (total > MAX_TEXT_FILES_BYTES) return;
+    const read: StoredTextFile[] = await Promise.all(picked.map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) })));
+    await this.deps.store.putTextFiles(t.discKey, [...kept, ...read]);
   }
 
   private qualifies(t: Active, seen: Seen): boolean {
@@ -238,33 +266,67 @@ export class PlaceSaver {
       await store.put(place);
       return;
     }
-    if (keepalive) {
-      // the request leaves before the page can go; the outbox keeps the place should it not arrive
-      const sending = nas.putPlace(place, { keepalive: true }).then(
-        () => true,
-        (err: unknown) => refusedForGood(err),
-      );
+    // A keepalive request leaves before the page can go; the outbox keeps the place should it not arrive.
+    const sending = keepalive ? this.send(place, true) : null;
+    try {
       await store.put(place);
-      await store.queue(place);
-      if (await sending) await store.sent(placeKey(place), place.updatedAt);
-      return;
+    } catch (err) {
+      this.log('saving the place on this device failed', err);
     }
-    await store.put(place);
-    await store.queue(place);
-    await this.drainOutbox();
+    let queued = false;
+    if (t.pairing !== null) {
+      try {
+        await store.queue(place, t.pairing);
+        queued = true;
+      } catch (err) {
+        this.log('queueing the place failed', err);
+      }
+    }
+    // Nothing here waits on the NAS: a stalled request must not hold up the device's next writes.
+    if (sending) {
+      void sending.then((done) => (done && queued ? store.sent(placeKey(place), place.updatedAt) : undefined)).catch((err: unknown) => this.log('saving the place failed', err));
+    } else if (queued) void this.drainOutbox();
+    else void this.send(place, false); // the device's store failed: straight to the NAS, best effort
   }
 
+  /** One place to the NAS, outside the outbox; true once it needn't be sent again. */
+  private async send(place: PlaybackPlace, keepalive: boolean): Promise<boolean> {
+    try {
+      await this.deps.nas?.putPlace(place, { keepalive });
+      return true;
+    } catch (err) {
+      return failure(err) === 'drop';
+    }
+  }
+
+  /**
+   * The outbox, oldest first, to the pairing it was saved under (places of another pairing are dropped). An unreachable
+   * NAS stops the round; a place the NAS refuses is counted and skipped.
+   */
   private async sendOutbox(): Promise<void> {
     const { store, nas } = this.deps;
     if (!nas) return;
-    for (const place of await store.outbox()) {
+    const pairing = await nas.pairing();
+    if (!pairing) return;
+    const current = pairingKey(pairing);
+    for (const { place, pairing: savedUnder } of await store.outbox()) {
+      const key = placeKey(place);
+      if (savedUnder !== current) {
+        await store.sent(key, place.updatedAt);
+        continue;
+      }
       try {
         await nas.putPlace(place); // 'stale': the NAS holds a newer one, which stays
       } catch (err) {
-        if (!refusedForGood(err)) return; // unreachable: the outbox waits for the next save or connection
+        const what = failure(err);
+        if (what === 'wait') return; // the outbox waits for the next save or connection
         this.log('the NAS refused a saved place', err);
+        if (what === 'refused') {
+          await store.failed(key, place.updatedAt);
+          continue;
+        }
       }
-      await store.sent(placeKey(place), place.updatedAt);
+      await store.sent(key, place.updatedAt);
     }
   }
 

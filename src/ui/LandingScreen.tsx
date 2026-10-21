@@ -283,7 +283,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     } catch {
       return; // not a disc: the engine says why
     }
-    places.begin({ discKey, discId: null, remote: false, chosen: null, mainPlaylistId: null, deviceName: LOCAL_DEVICE_NAME });
+    places.begin({ discKey, discId: null, remote: false, chosen: null, mainPlaylistId: null, deviceName: LOCAL_DEVICE_NAME, pairing: null });
   };
 
   const openHandle = async (handle: FileSystemDirectoryHandle): Promise<void> => {
@@ -362,7 +362,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     setLocalError(null);
     controller.openRemote(spec); // starts audio inside the tap; the server's token lasts the run, so there is no refresh
     // a disc-server disc's place stays on this device, as a folder's does
-    places.begin({ discKey: discKeyOf('local', spec.manifest.files), discId: null, remote: false, chosen: null, mainPlaylistId: mainPlaylistId(spec.manifest), deviceName: LOCAL_DEVICE_NAME });
+    places.begin({ discKey: discKeyOf('local', spec.manifest.files), discId: null, remote: false, chosen: null, mainPlaylistId: mainPlaylistId(spec.manifest), deviceName: LOCAL_DEVICE_NAME, pairing: null });
   };
 
   const error = localError ?? snapshot.error?.message ?? null;

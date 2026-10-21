@@ -13,6 +13,7 @@ import type { NasRoute } from './nas-route';
 import { noticeMissingStart } from './missing-start-notice';
 import type { PlayingRoute } from './playing-route';
 import { LOCAL_DEVICE_NAME, type PlaceSaver } from '../place-saver';
+import { pairingKey } from './nas-store';
 
 /** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
 export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
@@ -214,7 +215,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, histo
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst, start);
         places.begin({
           discKey, discId: disc.id, remote: true, chosen: playlistId ?? null, mainPlaylistId: mainPlaylistId(manifest),
-          deviceName: pairing?.deviceName ?? LOCAL_DEVICE_NAME,
+          deviceName: pairing?.deviceName ?? LOCAL_DEVICE_NAME, pairing: pairing ? pairingKey(pairing) : null,
         });
         if (bufferFirst && !hold) controller.cancelBuffer(); // play now: the queued open doesn't wait for its fill
         releaseWait.current?.();

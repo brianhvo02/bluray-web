@@ -22,7 +22,7 @@ import { PlaybackStore } from '../../../server/src/playback-store';
 import { Store } from '../../../server/src/store';
 import type { CodeLookup, CodeRoutes, PlaceSettings, PlaybackPlace } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
-import { NAS_MESSAGES, NasClient, NasLostError, defaultDeviceName, groupCodeInput } from './nas-client';
+import { NAS_MESSAGES, NasClient, NasLostError, PLACE_TIMEOUT_MS, defaultDeviceName, groupCodeInput } from './nas-client';
 import type { NasClientDeps } from './nas-client';
 import type { NasPairing, NasStore } from './nas-store';
 
@@ -1044,6 +1044,31 @@ describe('NasClient places', () => {
     const gprs = Object.fromEntries(Array.from({ length: 4096 }, (_, i) => [i, 0x7fffffff]));
     expect(await nas2.putPlace(playbackPlace({ updatedAt: clock - 800, mode: 'hdmv', title: 1, gprs }), { keepalive: true })).toBe('stored');
     expect(sent).toEqual([true, undefined, undefined]);
+  });
+
+  it('gives up on a place whose request stalls, as the NAS being unreachable', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await nas.session();
+    server.nas = async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const put = nas.putPlace(playbackPlace());
+    const outcome = expect(put).rejects.toThrow(NAS_MESSAGES.unreachable);
+    await vi.advanceTimersByTimeAsync(PLACE_TIMEOUT_MS);
+    await outcome;
+  });
+
+  it('tells its listeners when the pairing changes: paired, forgotten', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    const changed = vi.fn();
+    nas.onPairingChange(changed);
+    await nas.pair(await server.code(), 'iPad');
+    expect(changed).toHaveBeenCalledTimes(1);
+    await nas.forget();
+    expect(changed).toHaveBeenCalledTimes(2);
   });
 
   it('tells its listeners when a session starts, so places waiting on the device can go', async () => {

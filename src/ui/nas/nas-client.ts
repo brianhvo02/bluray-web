@@ -173,6 +173,8 @@ const placePath = (discKey: string, playlistId?: string): string =>
   `me/playback/${encodeURIComponent(discKey)}${playlistId === undefined ? '' : `/${encodeURIComponent(playlistId)}`}`;
 /** Browsers refuse a keepalive request whose body passes 64 KiB; a larger place goes as an ordinary request. */
 const KEEPALIVE_MAX_BYTES = 60_000;
+/** A place's PUT gives up (as the NAS being unreachable) after this long, so a stalled request can't hold the outbox. */
+export const PLACE_TIMEOUT_MS = 15_000;
 
 const jsonBody = (method: string, body: unknown): RequestInit => ({
   method,
@@ -245,6 +247,7 @@ export class NasClient {
   private generation = 0;
   private readonly unpairedListeners = new Set<() => void>();
   private readonly sessionListeners = new Set<() => void>();
+  private readonly pairingListeners = new Set<() => void>();
   /** The route chosen per NAS (`chooseRoute`), for the page's life. */
   private readonly routes = new Map<string, Promise<Route>>();
   /** Open WebRTC connections by NAS id; `rtc://<nasId>/` URLs go through them. */
@@ -352,6 +355,14 @@ export class NasClient {
     this.sessionListeners.add(listener);
     return () => {
       this.sessionListeners.delete(listener);
+    };
+  }
+
+  /** Calls `listener` whenever the pairing changes: a new one, forgotten, or found unpaired. Returns the unsubscribe function. */
+  onPairingChange(listener: () => void): () => void {
+    this.pairingListeners.add(listener);
+    return () => {
+      this.pairingListeners.delete(listener);
     };
   }
 
@@ -618,7 +629,7 @@ export class NasClient {
   async putPlace(place: PlaybackPlace, opts: { readonly keepalive?: boolean } = {}): Promise<'stored' | 'stale'> {
     const init = jsonBody('PUT', place);
     const keepalive = opts.keepalive === true && (init.body as string).length <= KEEPALIVE_MAX_BYTES;
-    const res = await this.authed(placePath(place.discKey, place.playlistId), keepalive ? { ...init, keepalive } : init);
+    const res = await this.authed(placePath(place.discKey, place.playlistId), keepalive ? { ...init, keepalive } : init, false, PLACE_TIMEOUT_MS);
     if (res.status === 409 && (await errorCode(res)) === 'stale') return 'stale';
     if (!res.ok) throw await httpError(res);
     return 'stored';
@@ -655,6 +666,7 @@ export class NasClient {
 
   private reset(pairing: NasPairing | null): void {
     this.generation++;
+    for (const listener of this.pairingListeners) listener();
     this.current = pairing;
     this.cached = null;
     this.pending = null;
@@ -769,7 +781,7 @@ export class NasClient {
    * Over WebRTC the session must have been started on the connection in use: when the connection changes under a
    * request (a drop and a reconnect), it starts again, and a 401 from the new connection isn't counted.
    */
-  private async authed(path: string, init: RequestInit = {}, viaQuery = false): Promise<Response> {
+  private async authed(path: string, init: RequestInit = {}, viaQuery = false, timeoutMs?: number): Promise<Response> {
     let refused = 0;
     for (let attempt = 0; attempt < AUTHED_TRIES; attempt++) {
       const generation = this.generation;
@@ -787,7 +799,7 @@ export class NasClient {
       const url = viaQuery ? `${base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${base}${path}`;
       const headers = new Headers(init.headers);
       if (!viaQuery) headers.set('Authorization', `Bearer ${token}`);
-      const res = await this.request(url, { ...init, headers });
+      const res = await this.request(url, { ...init, headers }, timeoutMs);
       if (res.status !== 401) return res;
       if (this.cached?.token === token) this.cached = null;
       if (this.linkFor(base) !== link || link?.closed) continue; // the connection changed: not a revocation

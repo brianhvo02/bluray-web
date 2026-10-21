@@ -156,11 +156,14 @@ export function App(): ReactElement {
     const leaving = (): void => void places.flushNow({ keepalive: true });
     document.addEventListener('visibilitychange', hidden);
     window.addEventListener('pagehide', leaving);
-    const off = nas.onSession(() => void places.drainOutbox());
+    const offSession = nas.onSession(() => void places.drainOutbox());
+    // a new pairing (another NAS or person), a forgotten one, or one the NAS revoked: what waits isn't theirs
+    const offPairing = nas.onPairingChange(() => void places.clearOutbox());
     return () => {
       document.removeEventListener('visibilitychange', hidden);
       window.removeEventListener('pagehide', leaving);
-      off();
+      offSession();
+      offPairing();
     };
   }, [places, nas]);
   const [shaders] = useState(() => getShaderModel(controller));

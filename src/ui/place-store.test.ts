@@ -1,7 +1,7 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { describe, expect, it } from 'vitest';
 import type { PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
-import { idbPlaceStore, MAX_TEXT_FILE_BYTES, MAX_TEXT_FILES_BYTES } from './place-store';
+import { idbPlaceStore, MAX_SEND_ATTEMPTS, MAX_TEXT_FILE_BYTES, MAX_TEXT_FILES_BYTES } from './place-store';
 
 const KEY = `f.${'A'.repeat(32)}`;
 const settings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
@@ -32,18 +32,33 @@ describe('idbPlaceStore', () => {
     expect((await store.get(KEY)).places['00001']!.timeUs).toBe(7e6);
   });
 
-  it('keeps the newest unsent place per key in the outbox until it is sent', async () => {
+  it('keeps the newest unsent place per key in the outbox, with its pairing, until it is sent', async () => {
     const store = idbPlaceStore(new IDBFactory(), IDBKeyRange);
-    await store.queue(place({ updatedAt: 1000 }));
-    await store.queue(place({ playlistId: '00002', updatedAt: 1500 }));
-    await store.queue(place({ updatedAt: 2000, timeUs: 8e6 }));
+    await store.queue(place({ updatedAt: 1000 }), 'dev1@https://nas/');
+    await store.queue(place({ playlistId: '00002', updatedAt: 1500 }), 'dev1@https://nas/');
+    await store.queue(place({ updatedAt: 2000, timeUs: 8e6 }), 'dev1@https://nas/');
     const out = await store.outbox();
-    expect(out.map((p) => [p.playlistId, p.updatedAt])).toEqual([['00001', 2000], ['00002', 1500]]);
+    expect(out.map((e) => [e.place.playlistId, e.place.updatedAt, e.pairing, e.attempts])).toEqual([['00001', 2000, 'dev1@https://nas/', 0], ['00002', 1500, 'dev1@https://nas/', 0]]);
     // the send of an older copy doesn't take a newer one out
     await store.sent(`${KEY}/00001`, 1000);
-    expect((await store.outbox()).map((p) => p.updatedAt)).toEqual([2000, 1500]);
+    expect((await store.outbox()).map((e) => e.place.updatedAt)).toEqual([2000, 1500]);
     await store.sent(`${KEY}/00001`, 2000);
     await store.sent(`${KEY}/00002`, 1500);
+    expect(await store.outbox()).toEqual([]);
+  });
+
+  it('counts refusals and lets a place go after the fifth; clears the outbox on demand', async () => {
+    const store = idbPlaceStore(new IDBFactory(), IDBKeyRange);
+    await store.queue(place(), 'p');
+    for (let i = 1; i < MAX_SEND_ATTEMPTS; i++) {
+      await store.failed(`${KEY}/00001`, 1000);
+      expect((await store.outbox()).map((e) => e.attempts)).toEqual([i]);
+    }
+    await store.failed(`${KEY}/00001`, 1000);
+    expect(await store.outbox()).toEqual([]);
+    await store.queue(place(), 'p');
+    await store.queue(place({ playlistId: '00002' }), 'p');
+    await store.clearOutbox();
     expect(await store.outbox()).toEqual([]);
   });
 

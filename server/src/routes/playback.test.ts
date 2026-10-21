@@ -122,6 +122,9 @@ describe('playback routes', () => {
     expect((await call('GET', '..%2Fx', token)).status).toBe(404);
     expect((await call('GET', 'f.zz', token)).status).toBe(404);
     expect((await call('GET', `${KEY}/00001/x`, token)).status).toBe(404);
+    // a bad key says so, unlike a NAS without these routes
+    const bad = await call('PUT', `${KEY}/a.b`, token, place());
+    expect([bad.status, await bad.json()]).toEqual([404, { error: 'bad-key' }]);
   });
 
   it('is cleared with the person\'s saved data', async () => {

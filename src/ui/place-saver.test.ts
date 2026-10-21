@@ -4,15 +4,16 @@ import type { PlaceState, TextFileInfo } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../player/player-controller';
 import { NasHttpError } from './nas/nas-client';
 import { PlaceSaver, type PlaceTarget } from './place-saver';
-import { placeKey, type PlaceStore, type StoredTextFile } from './place-store';
+import { MAX_SEND_ATTEMPTS, MAX_TEXT_FILE_BYTES, placeKey, type OutboxEntry, type PlaceStore, type StoredTextFile } from './place-store';
+import type { NasPairing } from './nas/nas-store';
 
 const S = 1e6;
 const KEY = `f.${'A'.repeat(32)}`;
 
 /** The store in memory, with what was put, in order. */
-function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; queued: Map<string, PlaybackPlace>; files: Map<string, StoredTextFile[]> } {
+function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; queued: Map<string, OutboxEntry>; files: Map<string, StoredTextFile[]> } {
   const places = new Map<string, PlaybackPlace>();
-  const queued = new Map<string, PlaybackPlace>();
+  const queued = new Map<string, OutboxEntry>();
   const files = new Map<string, StoredTextFile[]>();
   const puts: PlaybackPlace[] = [];
   return {
@@ -30,11 +31,20 @@ function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; queued: Map<string
     async outbox() {
       return [...queued.values()];
     },
-    async queue(p) {
-      queued.set(placeKey(p), p);
+    async queue(p, pairing) {
+      queued.set(placeKey(p), { place: p, pairing, attempts: 0 });
     },
     async sent(key, updatedAt) {
-      if ((queued.get(key)?.updatedAt ?? Infinity) <= updatedAt) queued.delete(key);
+      if ((queued.get(key)?.place.updatedAt ?? Infinity) <= updatedAt) queued.delete(key);
+    },
+    async failed(key, updatedAt) {
+      const e = queued.get(key);
+      if (!e || e.place.updatedAt > updatedAt) return;
+      if (e.attempts + 1 >= MAX_SEND_ATTEMPTS) queued.delete(key);
+      else queued.set(key, { ...e, attempts: e.attempts + 1 });
+    },
+    async clearOutbox() {
+      queued.clear();
     },
     async putTextFiles(discKey, list) {
       files.set(discKey, [...list]);
@@ -45,17 +55,27 @@ function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; queued: Map<string
   };
 }
 
-type Answer = 'stored' | 'stale' | Error;
+type Answer = 'stored' | 'stale' | 'hang' | Error | ((place: PlaybackPlace) => 'stored' | Error);
 
-/** The NAS: answers each put with `answer` (stored by default), recording what it was sent. */
-function fakeNas(): { putPlace: (p: PlaybackPlace, opts?: { keepalive?: boolean }) => Promise<'stored' | 'stale'>; sent: { place: PlaybackPlace; keepalive: boolean }[]; answer: Answer } {
+const PAIRING_A = { deviceId: 'devA', base: 'https://nas.example/bluray/api/' } as NasPairing;
+const PAIRING_B = { deviceId: 'devB', base: 'https://nas.example/bluray/api/' } as NasPairing;
+const KEY_A = 'devA@https://nas.example/bluray/api/';
+
+/** The NAS: answers each put with `answer` (stored by default), recording what it was sent; paired as `paired`. */
+function fakeNas() {
   const nas = {
     sent: [] as { place: PlaybackPlace; keepalive: boolean }[],
     answer: 'stored' as Answer,
-    async putPlace(place: PlaybackPlace, opts: { keepalive?: boolean } = {}) {
+    paired: PAIRING_A as NasPairing | null,
+    async pairing() {
+      return nas.paired;
+    },
+    async putPlace(place: PlaybackPlace, opts: { keepalive?: boolean } = {}): Promise<'stored' | 'stale'> {
       nas.sent.push({ place, keepalive: opts.keepalive === true });
-      if (nas.answer instanceof Error) throw nas.answer;
-      return nas.answer;
+      const answer = typeof nas.answer === 'function' ? nas.answer(place) : nas.answer;
+      if (answer === 'hang') return new Promise(() => {});
+      if (answer instanceof Error) throw answer;
+      return answer;
     },
   };
   return nas;
@@ -63,18 +83,19 @@ function fakeNas(): { putPlace: (p: PlaybackPlace, opts?: { keepalive?: boolean 
 
 const placeState = (title = 1): PlaceState => ({ mode: 'hdmv', title, psrs: Array.from({ length: 128 }, (_, i) => (i === 4 ? title : 0)), gprs: { 7: 42 } });
 
-function setup(opts: { remote?: boolean; target?: Partial<PlaceTarget>; minUs?: number } = {}) {
+function setup(opts: { remote?: boolean; target?: Partial<PlaceTarget>; minUs?: number; store?: PlaceStore; log?: (message: string) => void } = {}) {
   let clock = 1_800_000_000_000;
   let opens = 1;
   const timers = new Map<number, { fn: () => void; at: number }>();
   let nextTimer = 0;
   const store = memoryStore();
+  const saverStore = opts.store ?? store;
   const nas = fakeNas();
   let registers = placeState();
   let shader: string | null = null;
   const reads: number[] = [];
   const saver = new PlaceSaver({
-    store,
+    store: saverStore,
     nas,
     readPlace: async () => {
       reads.push(opens);
@@ -88,8 +109,9 @@ function setup(opts: { remote?: boolean; target?: Partial<PlaceTarget>; minUs?: 
     },
     clearTimer: (id) => timers.delete(id as number),
     minDurationUs: opts.minUs ?? 300 * S,
+    ...(opts.log ? { log: opts.log } : {}),
   });
-  saver.begin({ discKey: KEY, discId: '0123456789abcdef', remote: opts.remote ?? true, chosen: '00001', mainPlaylistId: null, deviceName: 'iPad', ...opts.target });
+  saver.begin({ discKey: KEY, discId: '0123456789abcdef', remote: opts.remote ?? true, chosen: '00001', mainPlaylistId: null, deviceName: 'iPad', pairing: KEY_A, ...opts.target });
   let snap: PlayerSnapshot = { ...INITIAL_SNAPSHOT, playlists: [], currentPlaylistId: '00001', durationUs: 1440 * S, timeUs: 0, engineState: 'playing', selectedAudio: 1 };
   const t = {
     saver,
@@ -207,7 +229,7 @@ describe('PlaceSaver', () => {
     t.nas.answer = new Error("Couldn't reach the NAS.");
     await t.play(10_000);
     expect(t.store.puts).toHaveLength(1); // on the device all the same
-    expect([...t.store.queued.values()].map((p) => p.timeUs)).toEqual([10 * S]);
+    expect([...t.store.queued.values()].map((e) => [e.place.timeUs, e.pairing])).toEqual([[10 * S, KEY_A]]);
     t.nas.answer = 'stored';
     await t.saver.drainOutbox();
     expect(t.store.queued.size).toBe(0);
@@ -264,6 +286,84 @@ describe('PlaceSaver', () => {
     await settle();
     expect(u.reads).toEqual([]);
     expect(u.store.puts).toHaveLength(0);
+  });
+
+  it('sends nothing queued under one pairing to another, and empties the outbox when asked', async () => {
+    const t = setup();
+    t.nas.answer = new Error("Couldn't reach the NAS.");
+    await t.play(10_000);
+    expect(t.store.queued.size).toBe(1);
+    t.nas.answer = 'stored';
+    t.nas.paired = PAIRING_B; // paired again, as another person
+    const before = t.nas.sent.length;
+    await t.saver.drainOutbox();
+    expect(t.nas.sent).toHaveLength(before);
+    expect(t.store.queued.size).toBe(0);
+
+    const u = setup();
+    u.nas.answer = new Error("Couldn't reach the NAS.");
+    await u.play(10_000);
+    await u.saver.clearOutbox(); // forgotten
+    expect(u.store.queued.size).toBe(0);
+  });
+
+  it('never holds the device writes behind a NAS request that hangs', async () => {
+    const t = setup();
+    t.nas.answer = 'hang';
+    await t.play(10_000);
+    t.show({ engineState: 'paused' });
+    await settle();
+    expect(t.store.puts.map((p) => p.timeUs)).toEqual([10 * S, 10 * S]);
+    await t.saver.flushNow({ keepalive: true });
+    expect(t.store.puts).toHaveLength(3);
+  });
+
+  it("still sends the place to the NAS when the device's store fails", async () => {
+    const failing = memoryStore();
+    const broken: PlaceStore = { ...failing, put: () => Promise.reject(new Error('QuotaExceededError')), queue: () => Promise.reject(new Error('QuotaExceededError')) };
+    const logged: string[] = [];
+    const t = setup({ store: broken, log: (m) => logged.push(m) });
+    await t.play(10_000);
+    expect(t.nas.sent.map((s) => s.place.timeUs)).toEqual([10 * S]);
+    expect(logged).toContain('saving the place on this device failed');
+  });
+
+  it('skips a place the NAS keeps refusing, and drops it after the fifth refusal', async () => {
+    const t = setup();
+    t.nas.answer = new Error("Couldn't reach the NAS.");
+    await t.play(10_000); // 00001 waits
+    t.show({ currentPlaylistId: '00002', durationUs: 1440 * S, timeUs: 0 }); // another episode
+    await t.play(10_000); // 00002 waits
+    expect(t.store.queued.size).toBe(2);
+    t.nas.answer = (p) => (p.playlistId === '00001' ? new NasHttpError(500, null) : 'stored');
+    await t.saver.drainOutbox();
+    expect([...t.store.queued.values()].map((e) => [e.place.playlistId, e.attempts])).toEqual([['00001', 1]]);
+    for (let i = 1; i < MAX_SEND_ATTEMPTS; i++) await t.saver.drainOutbox();
+    expect(t.store.queued.size).toBe(0);
+  });
+
+  it("keeps places a NAS without the place routes answers 404 to, and drops one it calls a bad key", async () => {
+    const t = setup();
+    t.nas.answer = new NasHttpError(404, 'not found');
+    await t.play(10_000);
+    await t.saver.drainOutbox();
+    expect([...t.store.queued.values()].map((e) => e.attempts)).toEqual([0]);
+    t.nas.answer = new NasHttpError(404, 'bad-key');
+    await t.saver.drainOutbox();
+    expect(t.store.queued.size).toBe(0);
+  });
+
+  it('never reads a file over the limit, keeps one copy of a font, and keeps fonts through a new subtitle pick', async () => {
+    const t = setup();
+    const huge = new File([], 'huge.ttf');
+    Object.defineProperty(huge, 'size', { value: MAX_TEXT_FILE_BYTES + 1 });
+    huge.arrayBuffer = () => Promise.reject(new Error('read'));
+    await t.saver.addTextFiles([new File(['a'], 'ep1.ass'), new File([new Uint8Array(8)], 'font.ttf'), huge]);
+    expect(t.store.files.get(KEY)?.map((f) => f.name)).toEqual(['ep1.ass', 'font.ttf']);
+    await t.saver.addTextFiles([new File([new Uint8Array(9)], 'font.ttf')]);
+    expect(t.store.files.get(KEY)?.map((f) => [f.name, f.bytes.byteLength])).toEqual([['ep1.ass', 1], ['font.ttf', 9]]);
+    await t.saver.addTextFiles([new File(['b'], 'ep2.ass')]);
+    expect(t.store.files.get(KEY)?.map((f) => f.name)).toEqual(['font.ttf', 'ep2.ass']);
   });
 
   it("gives text files their sizes, keeps their bytes for this device, and sends at most 64", async () => {
