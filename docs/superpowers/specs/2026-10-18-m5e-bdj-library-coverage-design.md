@@ -1,7 +1,7 @@
 # Milestone 5e: every BD-J disc in the library — design
 
 Date: 2026-10-18
-Status: Draft (awaiting the user's approval)
+Status: Implemented on branch `spec/bdj-5e` (approved 2026-10-18); the check on a real iPhone and iPad is pending (§9, R27), and the merge waits for it
 Builds on: `2026-10-17-m5d-bdj-menus-design.md` (5d, merged as PR #7), `2026-10-16-m5c-bdj-playback-design.md`, `2026-10-15-m5b-bdj-jvm-core-design.md`. Parent: `2026-10-12-bluray-web-player-design.md`. Depends in part on the NAS session's step 3 (people and a per-person store; `2026-10-17-nas-server-design.md` and its step-3 successor).
 
 ## 1. Intent
@@ -113,3 +113,40 @@ Anti-goals:
 - How classes are collected (harness runs per disc vs whole packages), within §4.1's size and licence rules.
 - The exact notice wording for MPEG-2/VC-1, the IndexedDB layout, and the merge on a 412.
 - Order of work, except: §4.4's NAS backend waits for the NAS session's API (the plan's last phase; everything else proceeds first, and the branch is not merged before that phase passes); the MPEG-2/VC-1 change lands before NAS step 4 touches playback (tell the NAS session when it has merged).
+
+## 9. Deviations
+
+Where the build departs from this spec or from its plan (`docs/superpowers/plans/2026-10-18-m5e-bdj-library-coverage.md`). The rulings are numbered as in the build's ledger.
+
+**The library check (§5).**
+1. **Stub streams, with real menu video where they can't decide (R4).** The check runs from copied start-up files, with a stub clip per clip. For the discs whose menu the stubs can't show (libbluray-fails-too, stall, unconfirmed, diverges), `bdj-library:sync --video` copied the real clips of the playlists Java selected up to its menu: about 43 GB, read once, sequentially, under `ionice`, at most 2 GB a disc. Four discs whose menu playlist is the feature stay on stubs.
+2. **How a step is judged (R2, R3, R5).** The script's first wait is `wait menu` (a visible plane that has stopped flushing, or one that keeps animating for 30 s, whose hash is then not compared), and each key is followed by `wait quiet`, so a key that changes nothing still moves the script on. Steps compare settled planes and the set of calls that start something, not register writes, rates or call counts, which move with stub timing. A key neither player reacts to counts as agreement.
+3. **A seventh verdict, `unconfirmed` (R6).** A disc whose menu shows and agrees with libbluray wherever both ran, but where a key step was never compared (libbluray stopped first) and ours showed no reaction, is neither `works` nor a failure: it is listed for the check by hand. 14 discs end there.
+4. **The harness runs offline (R7).** libbluray's harness had network access during the first collection and checks, so disc xlets reached real BD-Live servers. It now runs with `--network none` by default, the classes were collected again offline, and the discs that tried the network were re-checked.
+
+**The class library (§4.1) and network (§4.3).**
+5. **No HTTPS (R13).** JSSE (about 267 classes, +25% jar) was left out for the one disc that asks for an `https:` URL; its BD-Live client catches the failure and carries on. The check doesn't count a class lookup that platform code catches and survives (`caughtGaps`).
+6. **Thread hand-off and access control, beyond the spec (R19, R20).** Two causes outside the class library held discs back: at a monitor hand-off that wakes a waiter the releasing green thread now yields (closer to HotSpot's parallel threads), and `AccessController` walks the interpreter's frames against the protection domains and the JDK's `java.policy`, so the denials HotSpot makes under libbluray's security manager happen here too. Both were gated on the goldens, the A_NEW_ERA start-up bar and a full library check.
+
+**MPEG-2 and VC-1 (§4.2).**
+7. **A playlist with nothing playable still plays (R12).** The plan kept `UnsupportedCodecError` for a playlist with undecodable video and nothing else to play; it now runs silent and black on the wall clock to its end, as libbluray does and as some HDMV programs expect. `UnsupportedCodecError` is left for a decoder that fails to configure.
+8. **Pacing and end (R8, R10, R11).** A no-picture playlist's reads are paced by the clock on the data delivered, through the clip's EP map, never faster than real time; it ends at EOF once what was delivered has played, or at its duration.
+9. **The notice once per disc (R9).** It shows at the first playlist without a picture and clears for good when a playlist with a picture starts.
+
+**Saved data (§4.4).**
+10. **A third scope, `buda/<orgId>` (R14).** Some discs write files directly under `/buda/<orgId>/`, outside any disc folder; libbluray keeps them, so they are a scope of their own (only the loose files). The NAS session added it to its store.
+11. **A disc without a disc ID (R15).** Its BUDA scope is keyed by a fingerprint of its BDMV file list, so two such discs of one organisation don't share it; Java still sees libbluray's 32 zeros.
+12. **The browser saves after 100 ms, not 2 s (R16).** Chrome and Safari drop both the worker's pagehide flush and IndexedDB work started in pagehide, so the debounce is the only reliable path; the NAS keeps 2 s.
+13. **No `keepalive` put on pagehide; a write-ahead copy instead (R17).** The spec's pagehide flush to the NAS is replaced: a NAS disc's writes go to IndexedDB first, marked pending, then to the NAS on the 2 s debounce, on stop and when the page is shown again, and a pending copy is merged and put at the next boot. A page closed early loses nothing on that device; another device may miss the last seconds until it opens again.
+14. **The quota is counted as the NAS counts it (R24).** 16 MB per scope is the size of the scope's ustar archive (headers and padding included), so the write that crosses it is an IOException at once instead of a later 507.
+15. **The person guard (R25).** Every NAS write carries `X-Bdj-Person` (the NAS answers 409 when the device now belongs to someone else) and `GET me` is checked before each put. Against a server without the guard's CORS header a write falls back once, without it, after a person check; once the header has worked the session never falls back. The flag is per session, not persisted.
+16. **Where the backend is chosen.** In the BD-J worker (`nas-store.ts`, `NasDiscStore`), from the disc's source; the browser's `nas:<discId>` records from before move into the person's scopes once, and a server with no people (the dev disc server) keeps them in the browser.
+
+**Player behaviour outside the spec.**
+17. **Player settings at disc open (the user, 2026-10-20; f08eb01).** The 5c rule wrote the locale's player settings only on BD-J entry. One library disc's HDMV First Play copies the menu language into a register its BD-J menu reads, so the settings are now written when a disc whose index names a BD-J object opens, as libbluray does at `bd_open`; discs without BD-J keep the defaults.
+18. **The start-up timeout counts active time only (R22, R26).** The 20 s fallback (5d R7) now counts only while the page is visible and the host awake (1 s ticks; a tick 5 s late restarts the budget), and not while the BD-J worker waits on its own reads, for at most 120 s of such waits per boot. A cold first open over the NAS spent most of its 20 s waiting on JAR and resource reads and fell back with nothing hung.
+19. **The clock holds at the target while audio loads (Task 7d).** A stale clock from the previous playlist fired marks early after a seek or open; it now holds at the seek or open target, which also changes paused seeks on HDMV discs (vm-trace goldens unchanged).
+
+**Finish line (§3, §5, §6).**
+20. **The device check is deferred (R27).** The user could not run the iPhone and iPad when the rest was done, so the check by hand of library discs on the iPhone over the NAS, and the two-person saved-data check on the live NAS, are the last gate before the merge. `tools/devices/live-check.ts` passed the same run on the iOS Simulator and Mac Safari with two made-up test people on two devices each (each person's count kept apart and shared by their own devices), and opened all 14 unconfirmed discs.
+21. **The result is not "every disc works".** The latest full check: works 134, unconfirmed 14, libbluray-fails-too 18, missing-class 0, unsupported-video 0, stall 0, diverges 0, error 0, of 166. The libbluray-fails-too discs show no menu in libbluray's harness either (§5's own exception); the unconfirmed ones wait for the check by hand. `docs/known-issues.md` (BD-J) groups them by cause.
