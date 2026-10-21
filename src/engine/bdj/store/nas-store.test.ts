@@ -419,6 +419,71 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     const rec = await next.local.loadRecord(SCOPE);
     expect([rec?.pending, rec?.etag, rec?.files.map((f) => f.path)]).toEqual([false, loaded.etag, ['phone', 'tablet']]);
   });
+  /** A fetch that runs `during` (once) as the `nth` PUT leaves, before the server sees it. */
+  const duringPut = (nth: number, during: () => Promise<void>): typeof fetch => {
+    let puts = 0;
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method ?? 'GET').toUpperCase() === 'PUT' && ++puts === nth) await during();
+      return nas.fetch(input, init);
+    }) as typeof fetch;
+  };
+
+  it("keeps another device's file that a 412 merged in when a save lands during the merged PUT (review Important 1)", async () => {
+    const { personId, token } = await nas.person('Mika');
+    const tablet = await nas.device(personId, 'tablet');
+    let phone: Device | null = null;
+    let etag: string | null = null;
+    // the second PUT is the merged one (the first met the 412): ScopeSync's save of {a, b} lands while it is out
+    const hook = duringPut(2, async () => {
+      const saved = await phone!.store.save(SCOPE, { files: [file('a', 2_000_000, 'phone'), file('b', 3_000_000, 'phone')] }, etag);
+      expect(saved).toHaveProperty('etag');
+      etag = 'etag' in saved ? saved.etag : null;
+    });
+    phone = session(personId, token, new IDBFactory(), undefined, hook);
+    const loaded = await phone.store.load(SCOPE);
+    expect(loaded.files).toEqual([]);
+    // the tablet stores x; the phone saves a, and its flush meets a 412 and merges x
+    await client(tablet).save(SCOPE, { files: [file('x', 1_000_000, 'tablet')] }, null);
+    const first = await phone.store.save(SCOPE, { files: [file('a', 2_000_000, 'phone')] }, loaded.etag);
+    etag = 'etag' in first ? first.etag : null;
+    await phone.store.flush();
+    await timers.advance(NAS_PUSH_DEBOUNCE_MS); // the save during the PUT is put too
+    await phone.store.flush();
+    expect(onNas(personId)).toEqual([['a', 2_000], ['b', 3_000], ['x', 1_000]]);
+    // the write-ahead copy took x: a new version, so ScopeSync's next save meets it and gives x to Java
+    const rec = await phone.local.loadRecord(SCOPE);
+    expect(rec?.files.map((f) => [f.path, f.mtime])).toEqual([['a', 2_000_000], ['b', 3_000_000], ['x', 1_000_000]]);
+    expect(rec?.etag).not.toBe(etag);
+    expect(rec?.pending).toBe(false);
+    const next = await phone.store.save(SCOPE, { files: [file('a', 2_000_000, 'phone'), file('b', 3_000_000, 'phone')] }, etag);
+    expect('conflict' in next && next.conflict.files.map((f) => f.path)).toEqual(['a', 'b', 'x']);
+  });
+
+  it("keeps the NAS's files on the first push after a boot that used this browser's copy, with a save during the PUT", async () => {
+    const { personId, token } = await nas.person('Mika');
+    const tablet = await nas.device(personId, 'tablet');
+    const idb = new IDBFactory();
+    await new IdbBdjStore(personSource(personId), idb).save(SCOPE, { files: [file('a', 1_000_000, 'phone')] }, null, { pending: false });
+    await client(tablet).save(SCOPE, { files: [file('a', 1_000_000, 'phone'), file('x', 2_000_000, 'tablet')] }, null);
+    let phone: Device | null = null;
+    let etag: string | null = null;
+    const hook = duringPut(1, async () => {
+      const saved = await phone!.store.save(SCOPE, { files: [file('a', 1_000_000, 'phone'), file('b', 4_000_000, 'phone'), file('c', 3_000_000, 'phone')] }, etag);
+      etag = 'etag' in saved ? saved.etag : null;
+    });
+    phone = session(personId, token, idb, undefined, hook);
+    nas.fail('unreachable'); // the boot's GET: this browser's copy is used, the NAS's version unknown
+    const loaded = await phone.store.load(SCOPE);
+    expect(view(loaded).map(([p]) => p)).toEqual(['a']);
+    const first = await phone.store.save(SCOPE, { files: [file('a', 1_000_000, 'phone'), file('c', 3_000_000, 'phone')] }, loaded.etag);
+    etag = 'etag' in first ? first.etag : null;
+    await phone.store.flush(); // GET, merge x, PUT (the save of b lands during it)
+    await timers.advance(NAS_PUSH_DEBOUNCE_MS);
+    await phone.store.flush();
+    expect(onNas(personId)).toEqual([['a', 1_000], ['b', 4_000], ['c', 3_000], ['x', 2_000]]);
+    expect((await phone.local.loadRecord(SCOPE))?.files.map((f) => f.path)).toEqual(['a', 'b', 'c', 'x']);
+  });
+
   /** A fetch that moves the device (to `to`) as the next PUT leaves: after the check before it, before the server sees it. */
   const moveOnPut = (deviceId: string, to: () => string): { fetch: typeof fetch; armed: { on: boolean } } => {
     const armed = { on: false };

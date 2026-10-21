@@ -305,6 +305,11 @@ function within<T>(p: Promise<T>, budget: Promise<never>): Promise<T> {
   return Promise.race([p, budget]);
 }
 
+/** The record marked as on the NAS (and merged with it), its files and version as they are. */
+function settled(r: ScopeRecord): ScopeRecord {
+  return { ...r, pending: false };
+}
+
 /** The write-ahead copies of one person's scopes, in this browser: the IndexedDB source of a NAS person. */
 export function personSource(personId: string): string {
   return `nas-person:${personId}`;
@@ -576,7 +581,8 @@ export class WriteAheadNasStore implements BdjStore {
     if (!state.pending) return;
     const { nas, local, log } = this.deps;
     const gen = state.gen;
-    let snapshot = this.forNas(scope, state.local);
+    const pushed = this.forNas(scope, state.local);
+    let snapshot = pushed;
     try {
       if (state.nasEtag === undefined) {
         const remote = await nas.load(scope);
@@ -626,27 +632,68 @@ export class WriteAheadNasStore implements BdjStore {
     // a move between the last check and the PUT (a NAS without the guard takes it): not marked as on this person's NAS
     if (!(await this.samePerson())) return;
     log(`BD-J storage: ${scope} is on the NAS (${snapshot.files.length} files, ${snapshotBytes(snapshot)} bytes)`);
+    // the files the put took from the NAS (a 412's merge, or the merge when the NAS's version was unknown): another
+    // device's, which this browser's copy must hold too, or the next put (If-Match on this version) drops them
+    const sent = new Map(pushed.files.map((f) => [f.path, f]));
+    const taken = snapshot.files.filter((f) => sent.get(f.path) !== f);
     try {
-      if (state.gen === gen && state.localEtag !== null) {
-        // the write-ahead copy as the NAS has it now: marked (no new version) when the merge added nothing to it
-        const toLocal = mergeSnapshots(state.local, snapshot).merged;
-        if (sameSnapshot(toLocal, state.local)) {
-          if (await local.mark(scope, state.localEtag, (r) => ({ ...r, pending: false }))) state.pending = false;
-        } else if (await this.samePerson()) {
-          // the NAS had files this session has not seen: this browser's copy takes them (ScopeSync's next save meets the
-          // new version, merges and gives them to Java)
-          const result = await local.save(scope, toLocal, state.localEtag, { pending: false });
-          if ('etag' in result) {
-            state.localEtag = result.etag;
-            state.local = toLocal;
-            state.pending = false;
-          }
+      if (taken.length === 0) {
+        // the write-ahead copy is what the NAS has now: marked (no new version), unless a save came meanwhile
+        if (state.gen === gen && state.localEtag !== null && (await local.mark(scope, state.localEtag, (r) => settled(r)))) {
+          state.pending = false;
         }
+      } else if (await this.samePerson()) {
+        await this.takeFromNas(scope, state, taken, gen);
       }
     } catch (e) {
       log(`BD-J storage: ${scope} is on the NAS, but this browser's copy could not be marked so (${messageOf(e)}); it is put again at the next open`, true);
     }
     await this.dropLegacy(scope, state);
+  }
+
+  /**
+   * Folds the files a put took from the NAS (`taken`) into this browser's copy, whatever was saved while the put ran
+   * (review Important 1): the record is read again, merged per file (newer mtime wins, ties the copy's) and saved,
+   * again on an IndexedDB conflict. It is marked as on the NAS only when no save came during the put (`gen`) and the
+   * record is the one the put started from; else it stays pending, so the newer save goes to the NAS with these files.
+   * The new version makes ScopeSync's next save meet a conflict and give the files to Java. If the copy cannot take
+   * them, the NAS's version is forgotten: the next put reads the NAS and merges again, so they are not dropped there.
+   */
+  private async takeFromNas(scope: string, state: WriteAheadScope, taken: readonly SnapshotFile[], gen: number): Promise<void> {
+    const { local, log } = this.deps;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        const rec = await local.loadRecord(scope);
+        const base: Snapshot = { files: rec?.files ?? [] };
+        const merged = mergeSnapshots(base, { files: taken }).merged;
+        const current = rec !== null && state.gen === gen && rec.etag === state.localEtag;
+        if (sameSnapshot(merged, base)) {
+          // the copy has them already (a newer save took them, or newer files)
+          if (current && (await local.mark(scope, rec.etag, settled))) {
+            state.pending = false;
+          }
+          return;
+        }
+        const result = await local.save(scope, merged, rec?.etag ?? null, current ? { pending: false } : { pending: true });
+        if ('etag' in result) {
+          state.localEtag = result.etag;
+          state.local = merged;
+          if (current) {
+            state.pending = false;
+          } else {
+            state.pending = true;
+            this.schedule();
+          }
+          return;
+        }
+        if (attempt >= PUSH_ATTEMPTS) throw new Error(`this browser's copy kept changing after ${attempt} tries`);
+      }
+    } catch (e) {
+      state.nasEtag = undefined;
+      state.pending = true;
+      this.schedule();
+      log(`BD-J storage: ${scope}: this browser's copy could not take the NAS's files (${messageOf(e)}); the next put reads the NAS and merges again`, true);
+    }
   }
 
   /** A put of every pending scope NAS_PUSH_DEBOUNCE_MS after the last save (NAS_PUSH_MAX_WAIT_MS after the first). */
