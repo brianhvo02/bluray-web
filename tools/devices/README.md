@@ -174,6 +174,7 @@ This check runs on real devices against the live NAS, on a **preview** origin of
    - The NAS's people file is then read over ssh to confirm that no test person, device or saved data is left and that the other people are as before.
 
 ```sh
+export LIVE_CHECK_NAS=https://<nas host>/bluray/api/   # or --nas <api base>; there is no default
 npx tsx tools/devices/live-check.ts --origin https://<branch>.bluray-web.pages.dev --out <dir outside the repo> \
   --mika-phone ios:<iPhone udid> --mika-tablet ios:<iPad udid> --library
 # dry run: Simulators for Mika, Chrome for Sora, another disc for the store steps
@@ -181,7 +182,7 @@ npx tsx tools/devices/live-check.ts --origin https://<branch>.bluray-web.pages.d
   --mika-phone "sim:iPhone 17" --mika-tablet "sim:iPad Air 11-inch (M4)" --rehearse-store <library-check id> --library
 ```
 
-Sora's browsers default to `chrome-profile` (installed Chrome with a fresh temporary profile) and `chrome` (a second Chrome with its own context). Use `--sora-a`/`--sora-b` to change them, or `none` to leave one out. Real devices go through safaridriver on `--wd-ports` (default `4211,4212`; ports above 4200 only, never 4191/4192). Simulators go through Appium. `--out` must lie outside the repository, because the screenshots show real discs. Results (`live-check.json`) name devices by role, and pairing codes and tokens are never printed or written. The NAS host for ssh is `$BLURAY_NAS_HOST` (default `mediaserver`).
+Sora's browsers default to `chrome-profile` (installed Chrome with a fresh temporary profile) and `chrome` (a second Chrome with its own context). Use `--sora-a`/`--sora-b` to change them, or `none` to leave one out. Real devices go through safaridriver on `--wd-ports` (default `4211,4212`; ports above 4200 only, never 4191/4192). Simulators go through Appium. `--out` must lie outside the repository, because the screenshots show real discs. Results (`live-check.json`) name devices by role, and pairing codes and tokens are never printed or written. The NAS's API base comes from `--nas` or `$LIVE_CHECK_NAS`, with no default: the run stops at once when neither is given. The NAS host for ssh is `$BLURAY_NAS_HOST` (default `mediaserver`).
 
 ## Not here
 

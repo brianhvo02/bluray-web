@@ -61,15 +61,23 @@ describe('live-check', () => {
   });
 
   it('keeps results out of the repository and safaridriver off the stand-in ports', () => {
-    const base = ['--origin', 'https://spec-x.bluray-web.pages.dev'];
-    expect(() => parseLiveArgs([...base, '--out', 'tools/devices/out'])).toThrow(/outside the repository/);
-    expect(() => parseLiveArgs([...base, '--out', '/tmp/lc', '--wd-ports', '4191,4211'])).toThrow(/4191/);
-    expect(() => parseLiveArgs([...base, '--out', '/tmp/lc', '--wd-ports', '4100,4211'])).toThrow();
-    const o = parseLiveArgs([...base, '--out', '/tmp/lc', '--mika-phone', 'sim:iPhone 17', '--library']);
+    const base = ['--origin', 'https://spec-x.bluray-web.pages.dev', '--nas', 'https://nas.example/bluray/api'];
+    expect(() => parseLiveArgs([...base, '--out', 'tools/devices/out'], {})).toThrow(/outside the repository/);
+    expect(() => parseLiveArgs([...base, '--out', '/tmp/lc', '--wd-ports', '4191,4211'], {})).toThrow(/4191/);
+    expect(() => parseLiveArgs([...base, '--out', '/tmp/lc', '--wd-ports', '4100,4211'], {})).toThrow();
+    const o = parseLiveArgs([...base, '--out', '/tmp/lc', '--mika-phone', 'sim:iPhone 17', '--library'], {});
     expect(o.discs).toEqual([...UNCONFIRMED]);
     expect(o.discs).toHaveLength(14);
     expect(o.wdPorts).toEqual([4211, 4212]);
-    expect(() => parseLiveArgs([...base, '--out', '/tmp/lc', '--mika-phone', 'iphone'])).toThrow(/unknown target/);
+    expect(o.nas).toBe('https://nas.example/bluray/api/');
+    expect(() => parseLiveArgs([...base, '--out', '/tmp/lc', '--mika-phone', 'iphone'], {})).toThrow(/unknown target/);
+  });
+
+  it('takes the NAS from --nas or LIVE_CHECK_NAS, with no default (review minor 9)', () => {
+    const base = ['--origin', 'https://spec-x.bluray-web.pages.dev', '--out', '/tmp/lc'];
+    expect(() => parseLiveArgs(base, {})).toThrow(/no NAS given: pass --nas <api base> or set LIVE_CHECK_NAS/);
+    expect(parseLiveArgs(base, { LIVE_CHECK_NAS: 'https://nas.example/bluray/api/' }).nas).toBe('https://nas.example/bluray/api/');
+    expect(parseLiveArgs([...base, '--nas', 'https://other.example/api'], { LIVE_CHECK_NAS: 'https://nas.example/bluray/api/' }).nas).toBe('https://other.example/api/');
   });
 
   it('reads the count from the plane hash', () => {

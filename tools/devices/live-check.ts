@@ -54,7 +54,6 @@ const TEST_NAMES: readonly string[] = [MIKA, SORA];
 const CONTROLLER_NAME = 'live-check controller';
 /** The production player: its storage is never touched. */
 export const PRODUCTION_ORIGIN = 'https://bluray-web.pages.dev';
-export const DEFAULT_NAS = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
 /** The library check's unconfirmed discs (ledger, Task 7 and 7b). */
 export const UNCONFIRMED = [
   '085018d8d8', '14ac0689d3', '1f2a950e80', '52c889f003', '5a26f0e0a5', '5b2a44a1ad', '67e6e09cab',
@@ -185,12 +184,12 @@ export interface Options {
 }
 
 const USAGE =
-  'usage: live-check.ts --origin <preview origin> --out <dir> [--nas <api base>] [--mika-phone <target>] [--mika-tablet <target>] [--sora-a chrome-profile] [--sora-b chrome] ' +
+  'usage: live-check.ts --origin <preview origin> --out <dir> --nas <api base> (or $LIVE_CHECK_NAS) [--mika-phone <target>] [--mika-tablet <target>] [--sora-a chrome-profile] [--sora-b chrome] ' +
   '[--store-disc place|auto|<library path>|none] [--place-root drv8] [--rehearse-store <library path>|<id>] [--library] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
 
 export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Options {
   const o: Options = {
-    origin: '', nas: DEFAULT_NAS, out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'drv8', rehearseStore: null,
+    origin: '', nas: env.LIVE_CHECK_NAS ?? '', out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'drv8', rehearseStore: null,
     library: false, discs: [], libraryDir: env.BDJ_LIBRARY_DIR ?? join(homedir(), '.cache/bluray-web/bdj-library'), wdPorts: [4211, 4212], headless: false, callTimeoutMs: 120_000,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -201,7 +200,7 @@ export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = 
     if (v === undefined) throw new Error(`${flag} needs a value\n${USAGE}`);
     switch (flag) {
       case '--origin': o.origin = v; break;
-      case '--nas': o.nas = v.endsWith('/') ? v : `${v}/`; break;
+      case '--nas': o.nas = v; break;
       case '--out': o.out = v; break;
       case '--mika-phone': o.mikaPhone = v; break;
       case '--mika-tablet': o.mikaTablet = v; break;
@@ -223,6 +222,9 @@ export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = 
     }
   }
   if (!o.origin || !o.out) throw new Error(USAGE);
+  // no default: the NAS is the caller's to name
+  if (!o.nas) throw new Error(`no NAS given: pass --nas <api base> or set LIVE_CHECK_NAS (for example https://<nas host>/bluray/api/)\n${USAGE}`);
+  if (!o.nas.endsWith('/')) o.nas = `${o.nas}/`;
   o.origin = checkOrigin(o.origin);
   const out = resolve(o.out);
   const rel = relative(REPO, out);
