@@ -5,7 +5,7 @@ import { fakeNas } from '../../tests/helpers/fake-nas';
 import { fakeVideoCodecApi } from '../../tests/helpers/fake-video-decoder';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
 import { VirtualClock, storedZip } from '../../tests/helpers/jvm-asm';
-import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
+import { asm, buildMovieObjects, imm, psr, reg } from '../../tests/helpers/hdmv-builders';
 import { buildSyntheticDisc, discEntries, lpcmStream, syntheticClip, type SyntheticDiscSpec } from '../../tests/helpers/synthetic-disc';
 import { createRing, renderQuantum, ringViews } from './audio/ring';
 import { runBdjWorker } from './bdj/bdj-worker';
@@ -511,15 +511,17 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memory: { classBytes: MEMORY_PROFILES.constrained.bdjClassCacheBytes } });
   });
 
-  it('applies the player settings when an HDMV program hands over to a BD-J title, before the worker boots (R9)', async () => {
+  it('applies the player settings at the open of a disc that uses BD-J, so its HDMV First Play reads them (bd_open)', async () => {
     const w = handWorker();
-    const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(1))] }]);
+    // First Play copies the menu language (PSR18) into GPR98, as a mixed disc does to choose its BD-J menu's language
+    const movieObjects = buildMovieObjects([{ cmds: [asm.set('move', reg(98), psr(18)), asm.jumpTitle(imm(1))] }]);
     const files = bdjDisc({ movieObjects, index: { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'bdj', name: '00001' }] } });
     await harness(files, { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
     const boot = w.sent.find((m) => m.type === 'boot')!;
     const regs = new SharedRegisterView(boot.type === 'boot' ? boot.registers : new SharedArrayBuffer(0));
     expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
+    expect(regs.gprRead(98)).toBe(0x667261);
   });
 
   it('falls back with a timeout bdj-failed 20,000 ms after a boot that never completes', async () => {

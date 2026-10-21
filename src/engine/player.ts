@@ -1087,8 +1087,9 @@ export class Player {
   }
 
   /**
-   * The player settings an application sets with bd_set_player_setting_str, written only when a BD-J title is entered
-   * (before its worker boots): HDMV discs keep the registers' defaults (ruling R9).
+   * The player settings an application sets with bd_set_player_setting_str, written when the registers of a disc that
+   * uses BD-J are made, as libbluray has them from bd_open: its HDMV First Play reads them too. Discs without BD-J keep
+   * the registers' defaults (ruling R9, narrowed in 5e).
    */
   private applyBdjSettings(regs: RegisterFile): void {
     if (this.deps.playerSettings) applyPlayerSettings(regs, this.deps.playerSettings);
@@ -1099,6 +1100,7 @@ export class Player {
     const shared = usesBdj && this.bdjSupported ? new SharedArrayBuffer(REGISTER_WORDS * 4) : undefined;
     const regs = new RegisterFile(shared ? { shared } : {});
     this.initRegs(regs, index);
+    if (usesBdj) this.applyBdjSettings(regs);
     regs.onPsrEvent((e) => this.onPsrEvent(e, regs));
     return regs;
   }
@@ -1122,7 +1124,6 @@ export class Player {
       plane: new GraphicsPlaneReader(createGraphicsPlane()),
       disc: this.bdjDisc(),
     };
-    this.applyBdjSettings(early.regs);
     this.earlyBdj = early;
     void (async () => {
       try {
@@ -1191,7 +1192,6 @@ export class Player {
     if (early && this.earlyBdj !== early) early = null; // dropped meanwhile
     this.earlyBdj = null;
     const programRegs = early?.regs ?? (regs?.shared ? regs : this.newProgramRegs(disc.index, disc.usesBdj));
-    if (!early) this.applyBdjSettings(programRegs); // an early worker's registers have them already
     const status = early?.status ?? new StatusBlockWriter(createStatusBlock());
     const plane = early?.plane ?? new GraphicsPlaneReader(createGraphicsPlane());
     // an early worker's boot (sent or still to come) and the session's carry the same disc: only one reaches the worker

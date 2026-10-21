@@ -149,13 +149,15 @@ what would change that decision.
   is unimplemented. We run the same code, so the same holds here. There is no bytecode verifier and there are no
   access checks: no `IllegalAccessError`, no `IncompatibleClassChangeError` for `invokevirtual` on a static method, no
   check that a final method is not overridden.
-- **Player settings come from the browser's locale, under BD-J only (5c, ruling R9).** The engine worker derives
-  `bd_set_player_setting_str`'s audio, PG and menu languages and the country from `navigator.language`
-  (`playerSettingsForLocale`): the language as ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs label streams with),
-  the region in lowercase (`us`); anything it cannot map stays unset. They are written to the program's registers only
-  when a BD-J title is entered, before its worker boots, so HDMV discs keep the registers' defaults (PSR16-19) and
-  their first stream choice is unchanged. libbluray applies them for every disc; an HDMV disc that later enters a
-  BD-J title gets them from then on. There is no settings UI yet.
+- **Player settings come from the browser's locale, on discs that use BD-J (5c ruling R9, narrowed in 5e).** The
+  engine worker derives `bd_set_player_setting_str`'s audio, PG and menu languages and the country from
+  `navigator.language` (`playerSettingsForLocale`): the language as ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs
+  label streams with), the region in lowercase (`us`); anything it cannot map stays unset. They are written to the
+  program's registers when a disc whose index names a BD-J object opens, as libbluray writes them at `bd_open`, so a
+  mixed disc's HDMV First Play and HDMV titles read them too (one disc's First Play copies the menu language into a GPR
+  that its BD-J menu reads to pick its language). Until 5e they were written only on BD-J entry. Discs without BD-J keep
+  the registers' defaults (PSR16-19) and their first stream choice is unchanged; libbluray applies the settings for
+  every disc. There is no settings UI yet.
 - **Open on purpose in 5c.** A new BD-J worker and JVM start for every BD-J entry, where libbluray keeps one JVM
   across HDMV and BD-J handoffs (deviation 5). The HDMV Navigator is dropped, not suspended, while BD-J runs, so
   libbluray's resume of a suspended object across a BD-J title is lost on mixed discs (deviation 6). The mixed
