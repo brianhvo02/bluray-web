@@ -145,6 +145,52 @@ describe('bdj-store routes', () => {
     expect(await read(sora)).toEqual(tar('sora'));
   });
 
+  it('refuses a write naming another person in X-Bdj-Person with 409, writing nothing', async () => {
+    const mika = await tokenFor('Mika');
+    const sora = await tokenFor('Sora');
+    const mikaId = auth.verify(mika)!.personId;
+    const soraId = auth.verify(sora)!.personId;
+    const put = await call('PUT', SCOPE, mika, { 'If-None-Match': '*', 'X-Bdj-Person': soraId }, tar('mika'));
+    expect(put.status).toBe(409);
+    expect(await put.json()).toEqual({ error: 'person-changed' });
+    expect((await call('GET', SCOPE, mika)).headers.get('etag')).toBeNull();
+    const ok = await call('PUT', SCOPE, mika, { 'If-None-Match': '*', 'X-Bdj-Person': mikaId }, tar('mika'));
+    expect(ok.status).toBe(200);
+    const del = await call('DELETE', SCOPE, mika, { 'If-Match': '*', 'X-Bdj-Person': soraId });
+    expect(del.status).toBe(409);
+    expect((await call('GET', SCOPE, mika)).headers.get('etag')).toBe(ok.headers.get('etag'));
+    expect((await call('DELETE', SCOPE, mika, { 'If-Match': '*', 'X-Bdj-Person': mikaId })).status).toBe(204);
+  });
+
+  it('refuses a PUT whose device moves to another person while its body arrives', async () => {
+    const mika = await tokenFor('Mika');
+    const sora = await tokenFor('Sora');
+    const device = auth.verify(mika)!;
+    const mikaId = device.personId;
+    const soraId = auth.verify(sora)!.personId;
+    const answer = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request(`${base}/api/bdj-store/${SCOPE}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${mika}`, 'If-None-Match': '*', 'X-Bdj-Person': mikaId, 'Transfer-Encoding': 'chunked' },
+      });
+      req.on('response', (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => (body += c.toString()));
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      });
+      req.on('error', reject);
+      const body = tar('mika');
+      req.write(body.subarray(0, 512));
+      setTimeout(() => {
+        auth.moveDevice(device.id, soraId);
+        req.end(body.subarray(512));
+      }, 50);
+    });
+    expect(await answer).toEqual({ status: 409, body: '{"error":"person-changed"}' });
+    expect((await call('GET', SCOPE, sora)).headers.get('etag')).toBeNull();
+    expect((await call('GET', SCOPE, mika)).headers.get('etag')).toBeNull();
+  });
+
   /** Sends a PUT of `parts` (then ends it unless `hang`) and answers the response, failing on a reset connection. */
   function put(token: string, parts: Buffer[], opts: { length?: number; hang?: boolean } = {}): Promise<{ status: number; body: string; ms: number }> {
     const started = Date.now();
