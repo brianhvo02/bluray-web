@@ -63,9 +63,11 @@ export class RendezvousClient implements CodeRegistrar {
   }
 
   async registerCode(codeHash: string, routes: { https: string }, expiresAt: number): Promise<void> {
-    let status = await this.postCode(await this.ensureRegistered(), codeHash, routes, expiresAt);
+    // The key's own id first, not a `POST /nas`: the running server has registered the key, and every registration
+    // spends one of the Worker's 5 an hour per address, which the server needs when it reconnects.
+    let status = await this.postCode(await (this.nasId ?? this.localNasId()), codeHash, routes, expiresAt);
     if (status === 401) {
-      // The service may have lost its registry (a new deployment): register the key again, once.
+      // An unknown NAS: never registered, or the service lost its registry (a new deployment). Register, once.
       this.nasId = undefined;
       status = await this.postCode(await this.ensureRegistered(), codeHash, routes, expiresAt);
     }

@@ -56,11 +56,22 @@ describe('RendezvousClient', () => {
   it('registers codes the Worker accepts and finds by the code', async () => {
     const client = new RendezvousClient(BASE.slice(0, -1), keyFile, workerFetch);
     await client.registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 10 * 60_000);
-    expect(requests).toEqual(['POST /nas', 'POST /codes']);
+    // A NAS the service doesn't know yet: the code is refused as from an unknown NAS, the key registered, the code sent again.
+    expect(requests).toEqual(['POST /codes', 'POST /nas', 'POST /codes']);
     const res = await lookup('k7qm-4xp2-r9td');
     expect(res.status).toBe(200);
     const nasId = await client.ensureRegistered();
     expect(await res.json()).toEqual({ nasId, routes: { ...ROUTES, webrtc: { nasId } } });
+  });
+
+  it('mints a code in a later process without registering the NAS again', async () => {
+    // The running server registered the key; the owner-code command is a new process with the same key file. Each
+    // `POST /nas` spends one of the Worker's 5 an hour per address, which the server needs when it reconnects.
+    await new RendezvousClient(BASE, keyFile, workerFetch).ensureRegistered();
+    requests = [];
+    await new RendezvousClient(BASE, keyFile, workerFetch).registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 10 * 60_000);
+    expect(requests).toEqual(['POST /codes']);
+    expect((await lookup('K7QM4XP2R9TD')).status).toBe(200);
   });
 
   it('re-registers the NAS when the service has forgotten it', async () => {
