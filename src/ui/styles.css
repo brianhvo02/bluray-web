@@ -5,9 +5,22 @@
   color: #e8e8ea;
 }
 html, body, #root { height: 100%; margin: 0; }
+/* the hidden attribute (tab panels) beats any class's display */
+[hidden] { display: none !important; }
 
 button { font: inherit; color: inherit; background: #26262c; border: 1px solid #3a3a42; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
+/* :where keeps the hover at the plain button's specificity, so any classed button's own look wins */
+button:where(:hover:not(:disabled)) { background: #303038; border-color: #4a4a55; }
+:root { accent-color: #6ea8ff; }
+input:is([type='text'], [type='search'], :not([type])), select { font: inherit; color: inherit; background: #15151a; border: 1px solid #3a3a42; border-radius: 6px; padding: 6px 10px; min-width: 0; }
+input:disabled, select:disabled { opacity: 0.45; }
+input::placeholder { color: #8a8a96; }
+:is(button, input, select, summary):focus-visible { outline: 2px solid #6ea8ff; outline-offset: 2px; }
+/* headings take focus programmatically when a screen opens; they need no ring */
+:is(h2, h3)[tabindex='-1']:focus { outline: none; }
+a { color: #6ea8ff; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .app { height: 100%; }
 
 .landing { max-width: 720px; margin: 0 auto; padding: 48px 24px; display: flex; flex-direction: column; gap: 20px; }
@@ -16,7 +29,21 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .drop-zone .hint { font-size: 0.9em; opacity: 0.7; }
 .update-prompt { position: fixed; z-index: 60; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; background: rgba(30, 30, 36, 0.96); border: 1px solid #3a3a42; border-radius: 8px; }
 .error-banner { background: #3a1518; border: 1px solid #7a2a30; border-radius: 8px; padding: 12px 16px; }
-.recent ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.landing > * { margin: 0; }
+.landing h2 { font-size: 1.25em; }
+.recent { display: flex; flex-direction: column; gap: 8px; }
+.recent h2 { margin: 0; }
+.recent ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.recent-date { opacity: 0.6; }
+.server-discs ul { flex-direction: column; align-items: flex-start; }
+.server-discs .hint { margin: 4px 0 0; font-size: 0.85em; opacity: 0.7; }
+
+.pair { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: #18181d; border: 1px solid #2a2a30; border-radius: 12px; }
+.pair h2, .pair p { margin: 0; }
+.pair form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.pair label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
+.pair label input { font-size: 1rem; }
+.pair label:first-child input { width: 12em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.05em; }
 .library { display: flex; flex-direction: column; gap: 12px; }
 .library-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; }
@@ -45,6 +72,133 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .buffer-ring circle { fill: none; stroke-width: 3; }
 .buffer-ring-track { stroke: #3a3a42; }
 .buffer-ring-fill { stroke: #6ea8ff; stroke-linecap: round; transition: stroke-dasharray 0.3s; }
+.library h2 { margin: 0; }
+
+/* NAS settings */
+.admin { gap: 16px; }
+.admin > h3 { margin: 0; padding-top: 16px; border-top: 1px solid #2a2a30; }
+.admin-people > .admin-person:first-child { border-top: none; }
+.admin-new-code label { display: inline-flex; align-items: center; gap: 6px; }
+.admin-code { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 16px; background: #18181d; border: 1px solid #2a2a30; border-radius: 10px; }
+.admin-code p { margin: 0; }
+.admin-qr { border-radius: 6px; }
+.admin-titles, .admin-relay { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid #2a2a30; }
+.admin-titles h3, .admin-relay h3, .admin-titles p, .admin-relay p { margin: 0; }
+.admin-switch { display: flex; align-items: center; gap: 8px; }
+.admin-switch input { flex: none; margin: 0; }
+.admin-confirm-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px 16px; background: #18181d; border: 1px solid #3a3a42; border-radius: 8px; }
+.admin-confirm-box p { margin: 0; }
+.admin-own { display: flex; flex-direction: column; gap: 8px; }
+.admin-own h4 { margin: 8px 0 0; }
+.admin-own-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px solid #2a2a30; }
+.admin-own-main { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.admin-own-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-own-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.admin-own-form label { display: flex; align-items: center; gap: 6px; }
+.admin-tmdb { display: flex; align-items: center; gap: 10px; font-size: 0.8em; opacity: 0.7; }
+.admin-tmdb img { flex: none; }
+
+/* NAS title library: shelves, posters, a title, a season */
+.titles { display: flex; flex-direction: column; gap: 16px; }
+.titles h2 { margin: 0; }
+.titles-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.titles-actions { display: flex; gap: 8px; }
+.title-icon-button { flex: none; min-width: 36px; }
+.title-search { box-sizing: border-box; width: 100%; padding: 8px 14px; border-radius: 999px; }
+.title-shelves { display: flex; flex-wrap: wrap; gap: 8px; }
+.title-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; }
+.title-chip.selected { background: #6ea8ff; border-color: #6ea8ff; color: #0b0b0d; }
+.title-chip-count { font-size: 0.8em; opacity: 0.7; font-variant-numeric: tabular-nums; }
+.title-section { margin: 8px 0 0; font-size: 1em; font-weight: 600; opacity: 0.85; }
+.title-muted { opacity: 0.65; font-size: 0.9em; }
+.title-link { align-self: flex-start; background: none; border: none; padding: 4px 0; color: #6ea8ff; }
+.title-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+
+.title-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 20px 16px; }
+.title-card { width: 100%; height: 100%; display: flex; flex-direction: column; gap: 4px; padding: 0; background: none; border: none; border-radius: 8px; text-align: left; }
+.title-card:hover:not(:disabled) { background: none; }
+.title-poster { display: block; width: 100%; aspect-ratio: 2 / 3; margin-bottom: 4px; object-fit: cover; border-radius: 8px; background: #1f1f25; transition: transform 0.15s, box-shadow 0.15s; }
+.title-card:hover .title-poster { transform: translateY(-2px); box-shadow: 0 0 0 2px #6ea8ff; }
+.title-card-name { font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+
+.title-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.title-row, .episode-row { box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 12px; text-align: left; background: #18181d; border-color: #2a2a30; border-radius: 8px; }
+.title-row:hover:not(:disabled), .episode-row:hover:not(:disabled) { background: #202027; border-color: #3a3a42; }
+.title-thumb { flex: none; width: 40px; height: 60px; object-fit: cover; border-radius: 4px; background: #1f1f25; font-size: 0.75em; }
+.title-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.title-row-name { font-weight: 600; overflow-wrap: anywhere; }
+.title-row-name .title-muted { font-weight: 400; }
+.title-chevron { flex: none; font-size: 1.4em; line-height: 1; opacity: 0.5; }
+/* a title or own disc with no art: its initials on a tile */
+.poster-placeholder { display: flex; align-items: center; justify-content: center; font-weight: 700; letter-spacing: 0.05em; color: #8a8a96; background: linear-gradient(135deg, #26262e, #16161b); }
+.title-poster.poster-placeholder, .series-poster.poster-placeholder { font-size: 1.8em; }
+
+.title-back { flex: none; align-self: flex-start; width: 36px; height: 36px; padding: 0; font-size: 1.4em; line-height: 1; border-radius: 999px; }
+.series-banner { position: relative; display: flex; }
+.series-banner-art { display: block; width: 100%; height: clamp(120px, 24vw, 200px); object-fit: cover; border-radius: 12px; background: #1f1f25; }
+.series-banner-art + .title-back { position: absolute; top: 12px; left: 12px; background: rgba(0, 0, 0, 0.55); border-color: rgba(255, 255, 255, 0.2); }
+.series-head { display: flex; align-items: flex-end; gap: 16px; }
+/* the poster overlaps the banner's lower edge when there is one */
+.series-banner:has(.series-banner-art) + .series-head { margin-top: -64px; padding-left: 16px; }
+.series-poster { flex: none; width: 120px; aspect-ratio: 2 / 3; object-fit: cover; border: 3px solid #0b0b0d; border-radius: 10px; background: #1f1f25; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+.series-names { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-bottom: 4px; }
+.series-names h2 { margin-bottom: 4px; overflow-wrap: anywhere; }
+.series-meta { margin-top: 6px; font-size: 0.9em; opacity: 0.85; }
+.extras-row { margin-top: -10px; }
+
+.season-head { display: flex; align-items: center; gap: 12px; }
+.season-head-text { min-width: 0; display: flex; flex-direction: column; }
+.segmented { align-self: flex-start; display: inline-flex; gap: 2px; padding: 3px; background: #18181d; border: 1px solid #2a2a30; border-radius: 8px; }
+.segmented button { padding: 6px 18px; background: none; border: none; border-radius: 6px; }
+.segmented button.selected { background: #34343c; }
+.episode-number { flex: none; width: 2.25em; height: 2.25em; display: flex; align-items: center; justify-content: center; border-radius: 6px; background: #26262c; font-weight: 600; font-variant-numeric: tabular-nums; }
+.disc-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #18181d; border: 1px solid #2a2a30; border-radius: 10px; }
+.disc-card-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.disc-copy { box-sizing: border-box; width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; }
+.disc-copy-drive { font-size: 0.75em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; }
+.disc-copy-folder { overflow-wrap: anywhere; }
+.disc-copy-owned, .owner-refile { display: flex; flex-direction: column; gap: 6px; }
+
+/* Owner screens: Unsorted, Hidden, Music renames, "File differently…" */
+.owner-cards { display: flex; flex-direction: column; gap: 12px; }
+.owner-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; background: #18181d; border: 1px solid #2a2a30; border-radius: 10px; }
+.disc-card .owner-card, .owner-notice .owner-card, .owner-row .owner-card { padding: 12px; background: #121216; }
+.owner-why { margin: 0; font-size: 0.85em; color: #ffcf66; }
+.owner-disc { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.owner-disc-name { font-size: 1.05em; overflow-wrap: anywhere; }
+.owner-subhead { margin: 4px 0 0; font-size: 0.75em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; }
+.owner-options { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.owner-option { box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: 12px; padding: 6px 10px; text-align: left; }
+.owner-option.selected { background: #14182a; border-color: #6ea8ff; }
+.owner-option-poster { flex: none; width: 32px; height: 48px; object-fit: cover; border-radius: 4px; background: #1f1f25; font-size: 0.7em; }
+.owner-search { display: flex; gap: 8px; }
+.owner-search .title-search { flex: 1; width: auto; }
+.owner-numbers { display: flex; flex-wrap: wrap; gap: 12px; }
+.owner-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
+.owner-field input { font-size: 1rem; }
+.owner-numbers .owner-field input, .owner-number input { width: 6em; }
+.owner-number { align-self: flex-start; }
+.owner-primary { align-self: flex-start; font-weight: 600; color: #fff; background: #2d5bd6; border-color: #2d5bd6; }
+.owner-primary:hover:not(:disabled) { background: #3b69e6; border-color: #3b69e6; }
+.owner-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.owner-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding-top: 8px; border-top: 1px solid #2a2a30; }
+.owner-catalogue { margin: 0; }
+.owner-message { margin: 0; font-size: 0.9em; color: #ffcf66; }
+.owner-message[role='alert'] { color: #ff8f8f; }
+.owner-notice { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; background: #14182a; border: 1px solid #2d3f6e; border-radius: 8px; }
+.owner-notice p { margin: 0; }
+.owner-notice:focus { outline: none; }
+.owner-skipped { margin: 0; padding-left: 20px; }
+.owner-form { display: flex; flex-direction: column; gap: 10px; padding: 12px; background: #121216; border: 1px solid #2a2a30; border-radius: 8px; }
+.owner-kinds { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; border: none; }
+.owner-kinds legend { padding: 0; margin-bottom: 6px; font-size: 0.9em; opacity: 0.8; }
+.owner-radio { display: inline-flex; align-items: center; gap: 6px; }
+.owner-row { display: flex; flex-direction: column; gap: 8px; }
+.owner-row-main { display: flex; align-items: center; gap: 8px; }
+.owner-row-main > .title-row { flex: 1; min-width: 0; }
+.owner-row-main > .title-link { flex: none; align-self: center; white-space: nowrap; }
+/* Hidden's rows hold their text directly, not a row button: the row itself is the card */
+.owner-row-main:has(> .title-row-text) { padding: 8px 12px; background: #18181d; border: 1px solid #2a2a30; border-radius: 8px; }
 
 .player { position: relative; height: 100%; background: #000; overflow: hidden; }
 .player.idle { cursor: auto; }
@@ -143,6 +297,15 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .playlist { grid-template-columns: 56px 64px 1fr auto; gap: 8px; }
   .encoding-prompt ul { grid-template-columns: 1fr; }
   .remote-pad { right: max(16px, env(safe-area-inset-right)); bottom: calc(max(12px, env(safe-area-inset-bottom)) + 150px); }
+}
+@media (max-width: 600px) {
+  .landing { padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  .title-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 16px 12px; }
+  .series-poster { width: 96px; }
+  .series-banner:has(.series-banner-art) + .series-head { margin-top: -48px; padding-left: 12px; }
+  .owner-card { padding: 12px; }
+  .owner-row-main { flex-wrap: wrap; }
+  .owner-row-main > .title-row { flex-basis: 100%; }
 }
 @media (pointer: coarse) {
   button, .audio-menu-list button { min-width: 44px; min-height: 44px; }
