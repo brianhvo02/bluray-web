@@ -49,9 +49,18 @@ export function loopGap(gapMs: number, cpuMs: number): string | null {
     : `the event loop was blocked for ${s(gapMs, 0)} s (${s(cpuMs, 1)} s of CPU): synchronous work held it`;
 }
 
-const cpuMsSince = (from: NodeJS.CpuUsage): number => {
-  const u = process.cpuUsage(from);
-  return (u.user + u.system) / 1000;
+/** What the loop-gap check reads at each turn of the replay loop: the time and this process's CPU time, in ms. */
+export interface LoopClock {
+  readonly nowMs: () => number;
+  readonly cpuMs: () => number;
+}
+
+const processLoopClock: LoopClock = {
+  nowMs: () => performance.now(),
+  cpuMs: () => {
+    const u = process.cpuUsage();
+    return (u.user + u.system) / 1000;
+  },
 };
 
 export interface PlayerBdjReplay {
@@ -179,6 +188,8 @@ export async function replayPlayerBdj(
     memoryProfile?: MemoryProfileName;
     /** Called once the run has ended, before the player closes, with the player and the last BD-J worker started. */
     beforeClose?: (player: Player, worker: BdjWorkerHandle | null) => void | Promise<void>;
+    /** The loop-gap check's clock (default: performance.now and process.cpuUsage); tests inject one. */
+    loopClock?: LoopClock;
     /** The disc's saved data (default: a new, empty one, as in a browser that never played it); a test passes one store to several runs as to several viewings. */
     store?: BdjStore;
   },
@@ -344,12 +355,14 @@ export async function replayPlayerBdj(
     stepFrom = { events: 0, flushes: 0, at: t0 };
     await player.handle({ type: 'open', disc: { kind: 'files', entries: await directoryEntries(dir) } });
     let tailFrom: number | null = null;
-    let turn = { at: performance.now(), cpu: process.cpuUsage() };
+    const loopClock = opts.loopClock ?? processLoopClock;
+    let turn = { at: loopClock.nowMs(), cpu: loopClock.cpuMs() };
     for (;;) {
       // before any wait or timeout is judged: after a host sleep they have all expired, and none of them is the cause
-      const gap = loopGap(performance.now() - turn.at, cpuMsSince(turn.cpu));
+      const next = { at: loopClock.nowMs(), cpu: loopClock.cpuMs() };
+      const gap = loopGap(next.at - turn.at, next.cpu - turn.cpu);
       if (gap) throw fail(gap);
-      turn = { at: performance.now(), cpu: process.cpuUsage() };
+      turn = next;
       if (done && stepIdx >= script.length) {
         tailFrom ??= performance.now();
         if (performance.now() - tailFrom >= (opts.tailMs ?? 0)) break;
