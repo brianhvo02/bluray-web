@@ -858,3 +858,48 @@ describe('platform audio suspension', () => {
     expect(c.getSnapshot().notices.map((n) => n.code)).toContain('background-pause');
   });
 });
+
+describe('opening at a place', () => {
+  const start = { playlistId: '00001', timeUs: 5_000_000, hdmv: null, playback: { psr1: 2, psr2: 0, psr3: 1 } } as const;
+
+  it('sends the start point with a local or a NAS open', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const file = new File(['x'], 'index.bdmv');
+    c.open([['Disc/BDMV/index.bdmv', file]], start);
+    expect(worker.posted[0]).toEqual({ type: 'open', disc: { kind: 'files', entries: [['Disc/BDMV/index.bdmv', file]] }, start });
+    const spec = { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/', token: 't1', manifest: { discId: 'd1', name: 'Disc', files: [], inline: {} } } as const;
+    c.openRemote(spec, undefined, undefined, undefined, start);
+    expect(worker.posted.at(-1)).toEqual({ type: 'open', disc: spec, start });
+  });
+
+  it('readPlace resolves with the next placeState', async () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const first = c.readPlace();
+    const second = c.readPlace();
+    expect(worker.posted).toEqual([{ type: 'readPlace' }, { type: 'readPlace' }]);
+    worker.emit({ type: 'placeState', mode: 'hdmv', title: 2, psrs: [1, 2], gprs: { 5: 9 } });
+    await expect(first).resolves.toEqual({ mode: 'hdmv', title: 2, psrs: [1, 2], gprs: { 5: 9 } });
+    await expect(second).resolves.toEqual({ mode: 'hdmv', title: 2, psrs: [1, 2], gprs: { 5: 9 } });
+    const third = c.readPlace();
+    worker.emit({ type: 'placeState', mode: 'none', title: null, psrs: [], gprs: null });
+    await expect(third).resolves.toEqual({ mode: 'none', title: null, psrs: [], gprs: null });
+  });
+
+  it('records startFailed, and forgets it on the next open', () => {
+    expect(INITIAL_SNAPSHOT.startFailed).toBeNull();
+    expect(reduceEvent(INITIAL_SNAPSHOT, { type: 'startFailed', reason: 'past-end' }).startFailed).toBe('past-end');
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([], start);
+    worker.emit({ type: 'startFailed', reason: 'no-playlist' });
+    expect(c.getSnapshot().startFailed).toBe('no-playlist');
+    c.open([]);
+    expect(c.getSnapshot().startFailed).toBeNull();
+    worker.emit({ type: 'startFailed', reason: 'past-end' });
+    const spec = { kind: 'remote', base: 'https://nas.example/bluray/api/discs/d1/', token: 't1', manifest: { discId: 'd1', name: 'Disc', files: [], inline: {} } } as const;
+    c.openRemote(spec);
+    expect(c.getSnapshot().startFailed).toBeNull();
+  });
+});
