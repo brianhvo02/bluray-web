@@ -43,6 +43,12 @@ export interface BdjStore {
    */
   readonly saveDebounceMs?: number;
   /**
+   * How long ScopeSync waits for a scope's load before it keeps the scope in memory only; without it 3 s
+   * (scope-sync.ts LOAD_TIMEOUT_MS), enough for IndexedDB. A remote store sets more (nas-store.ts), in line with the
+   * disc's own reads: the load counts as I/O for the start-up timer, which bounds it (ruling R26).
+   */
+  readonly loadTimeoutMs?: number;
+  /**
    * How the scope quota counts (Vfs QuotaAccounting): `tar` for a store that keeps scopes as ustar archives with a 16 MB
    * limit on their size (the NAS, ruling R24); file lengths (`bytes`) without it.
    */

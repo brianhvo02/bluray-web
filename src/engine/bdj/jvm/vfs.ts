@@ -212,6 +212,8 @@ export class Vfs {
   /** The lengths of the files on the memory mounts. */
   private memUsed = 0;
   private readonly quotas: QuotaRoot[] = [];
+  /** The writable handles open on each memory file (writing): a stored snapshot is not imported over one. */
+  private readonly writers = new WeakMap<MemFile, Set<Handle>>();
 
   constructor(opts: VfsOptions) {
     this.disc = opts.disc;
@@ -509,6 +511,12 @@ export class Vfs {
     }
   }
 
+  /** Whether a memory file at `path` has a writable handle open (a write in progress: ScopeSync imports nothing over it). */
+  writing(path: string): boolean {
+    const node = this.memNode(this.canonicalize(path));
+    return node?.kind === 'file' && (this.writers.get(node)?.size ?? 0) > 0;
+  }
+
   /**
    * The files under the memory directory `dir` (`looseOnly`: only those directly in it), paths relative to it in
    * order, without a copy: a file returned is not written in place again (as peek), so the bytes stay as they are.
@@ -630,6 +638,11 @@ export class Vfs {
       const file = node;
       const h = new Handle(canon, () => file.len, mode !== 'r', mode === 'a', file, null, null);
       if (mode === 'a') h.position = file.len;
+      if (h.writable) {
+        let open = this.writers.get(file);
+        if (!open) this.writers.set(file, (open = new Set()));
+        open.add(h);
+      }
       return h;
     }
     if (mode !== 'r') return null;
@@ -709,6 +722,7 @@ export class Vfs {
   /** A file written through `h` gives back the room its buffer grew by beyond its length. */
   close(h: VfsHandle): void {
     const file = (h as Handle).node;
+    if (file) this.writers.get(file)?.delete(h as Handle);
     if (!file || !h.writable || file.shared) return;
     const slack = file.buf.length - file.len;
     if (slack >= Math.max(SLACK_KEPT, file.len >> 3)) file.buf = file.buf.slice(0, file.len);

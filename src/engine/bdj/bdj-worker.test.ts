@@ -470,7 +470,7 @@ describe('runBdjWorker and the storage scopes', () => {
     vfs.write(h, new Uint8Array([1]), 0, 1);
     port.onmessage!({ data: { type: 'stop' } });
     await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
-    expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone)`, error: true });
+    expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone); tried again later`, error: true });
   }, 90_000);
 
   it("keeps a NAS disc's saved data in the person's NAS store: their other device sees it, another person does not", async () => {

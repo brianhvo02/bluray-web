@@ -6,7 +6,7 @@ import { Vfs } from '../jvm/vfs';
 import { ZipArchive } from '../jvm/zip';
 import { ScopeQuotaError, type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot } from './bdj-store';
 import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore } from './idb-store';
-import { FullRelay, SAVE_DEBOUNCE_MS, ScopeSync } from './scope-sync';
+import { FullRelay, SAVE_DEBOUNCE_MS, SAVE_MAX_WAIT_MS, ScopeSync } from './scope-sync';
 import type { StoreScope } from './scopes';
 
 const rtBdj = ZipArchive.open(readFileSync(fileURLToPath(new URL('../../../bdj-classlib/rt-bdj.jar', import.meta.url))));
@@ -369,6 +369,87 @@ describe('ScopeSync', () => {
     const nas = await setup(new IdbBdjStore('nas:abc', idb));
     expect(read(nas.vfs, '/persistent/7fff0123/4001/count')).toBe('<missing>');
   });
+});
+
+describe('ScopeSync: slow loads, writes under a merge, retries (5e final review)', () => {
+  beforeEach(() => void vi.useFakeTimers());
+  afterEach(() => void vi.useRealTimers());
+
+  it("waits as long as the store says for a load (BdjStore.loadTimeoutMs): a NAS store's, not 3 s", async () => {
+    const store = new MemoryStore();
+    store.put(PERSISTENT.key, [['a', 1000, 'kept']]);
+    const answerAfter = (ms: number): BdjStore => ({
+      loadTimeoutMs: 12_500,
+      load: async (scope) => {
+        await new Promise((r) => setTimeout(r, ms));
+        return store.load(scope);
+      },
+      save: (scope, snapshot, etag) => store.save(scope, snapshot, etag),
+    });
+    const lines: string[] = [];
+    const deps = { setTimer: (ms: number, fn: () => void) => ((id) => () => clearTimeout(id))(setTimeout(fn, ms)), log: (l: string) => void lines.push(l) };
+    const slow = ScopeSync.load([PERSISTENT], { store: answerAfter(10_000), ...deps });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const vfs = new Vfs({ disc: null, jdkLib: rtBdj, nowMs: () => 0 });
+    (await slow).attach(vfs);
+    expect(read(vfs, '/persistent/7fff0123/a')).toBe('kept');
+    expect(lines).toEqual([]);
+    const tooSlow = ScopeSync.load([PERSISTENT], { store: answerAfter(13_000), ...deps });
+    await vi.advanceTimersByTimeAsync(13_000);
+    await tooSlow;
+    expect(lines).toEqual([`BD-J storage: ${PERSISTENT.key} could not be loaded (no answer within 12500 ms); what is written there lasts until BD-J stops`]);
+  });
+
+  it('imports no stored file over one Java is writing (a handle open, or changed since the snapshot): Java\'s stays and is saved (review minor 3)', async () => {
+    const store = new MemoryStore();
+    const { vfs, sync, clock } = await setup(store);
+    clock.t = 5_000_000;
+    write(vfs, '/persistent/7fff0123/open', 'mine');
+    write(vfs, '/persistent/7fff0123/changed', 'mine');
+    const h = vfs.open('/persistent/7fff0123/open', 'a')!;
+    // stored elsewhere meanwhile, newer, with another file; and Java writes `changed` again while the save is out
+    store.put(PERSISTENT.key, [['open', 9_000_000, 'theirs'], ['changed', 9_000_000, 'theirs'], ['other', 9_000_000, 'theirs']]);
+    const save = store.save.bind(store);
+    let once = true;
+    store.save = async (scope, snapshot, etag) => {
+      if (once) {
+        once = false;
+        clock.t = 6_000_000;
+        write(vfs, '/persistent/7fff0123/changed', 'mine again');
+      }
+      return save(scope, snapshot, etag);
+    };
+    await sync.flush();
+    expect(read(vfs, '/persistent/7fff0123/open')).toBe('mine');
+    expect(read(vfs, '/persistent/7fff0123/changed')).toBe('mine again');
+    expect(read(vfs, '/persistent/7fff0123/other')).toBe('theirs');
+    expect(store.text(PERSISTENT.key)).toEqual(['changed=mine', 'open=mine', 'other=theirs']);
+    // the write through the open handle reaches the file Java holds, and the next save takes it
+    const more = enc.encode(' and more');
+    expect(vfs.write(h, more, 0, more.length)).toBe(true);
+    vfs.close(h);
+    expect(vfs.writing('/persistent/7fff0123/open')).toBe(false);
+    await sync.flush();
+    expect(store.text(PERSISTENT.key)).toEqual(['changed=mine again', 'open=mine and more', 'other=theirs']);
+  });
+
+  it('tries a save that gave up after three conflicts again later, without another write (review minor 4)', async () => {
+    const store = new MemoryStore();
+    const { vfs, sync, errors } = await setup(store);
+    write(vfs, '/persistent/7fff0123/a', '1');
+    const save = store.save.bind(store);
+    let conflicts = 3;
+    store.save = async (scope, snapshot, etag) => {
+      if (conflicts-- > 0) store.put(scope, [['b', 10_000 - conflicts * 1000, String(conflicts)]]); // another tab, each time newer
+      return save(scope, snapshot, etag);
+    };
+    await sync.flush();
+    expect(errors).toEqual([`BD-J storage: ${PERSISTENT.key} could not be saved (still stored elsewhere after 3 tries); tried again later`]);
+    expect(store.saves).toEqual([]);
+    await vi.advanceTimersByTimeAsync(SAVE_MAX_WAIT_MS);
+    expect(store.text(PERSISTENT.key)).toEqual(['a=1', 'b=0']);
+  });
+
 });
 
 describe('FullRelay (a 507 heard during the boot)', () => {

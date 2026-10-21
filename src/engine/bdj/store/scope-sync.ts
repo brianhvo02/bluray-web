@@ -13,16 +13,30 @@ import type { Vfs, VfsChange } from '../jvm/vfs';
 import { EMPTY_SNAPSHOT, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles, type BdjStore, type Snapshot, type SnapshotFile } from './bdj-store';
 import type { StoreScope } from './scopes';
 
+/** `merged` with the files at `paths` as `ours` has them (left out where it has none). */
+function keepOurs(merged: Snapshot, ours: Snapshot, paths: ReadonlySet<string>): Snapshot {
+  const mine = new Map(ours.files.map((f) => [f.path, f]));
+  const files: SnapshotFile[] = [];
+  for (const f of merged.files) {
+    if (!paths.has(f.path)) files.push(f);
+    else if (mine.has(f.path)) files.push(mine.get(f.path)!);
+  }
+  return { files };
+}
+
 /** The save follows the last write by this much (the plan's Global Constraints), unless the store says less (BdjStore.saveDebounceMs). */
 export const SAVE_DEBOUNCE_MS = 2000;
 /** A disc that keeps writing more often than the debounce is still saved this often. */
 export const SAVE_MAX_WAIT_MS = 10_000;
-/** A scope whose load has not answered by then stays in memory only for the session (a hung IndexedDB). */
+/**
+ * A scope whose load has not answered by then stays in memory only for the session (a hung IndexedDB), unless the
+ * store says otherwise (BdjStore.loadTimeoutMs).
+ */
 export const LOAD_TIMEOUT_MS = 3000;
 /** A save that keeps meeting newer snapshots gives up after this many tries (until the next write). */
 const SAVE_ATTEMPTS = 3;
 
-export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 'stat'> & Partial<Pick<Vfs, 'setQuotaLimit' | 'quotaUsed'>>;
+export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 'stat'> & Partial<Pick<Vfs, 'setQuotaLimit' | 'quotaUsed' | 'writing'>>;
 
 export interface ScopeSyncDeps {
   readonly store: BdjStore;
@@ -92,7 +106,7 @@ export class ScopeSync {
 
   /** Loads every scope at once; one that fails or times out stays in memory only (logged), the others carry on. */
   static async load(scopes: readonly StoreScope[], deps: ScopeSyncDeps): Promise<ScopeSync> {
-    const timeout = deps.loadTimeoutMs ?? LOAD_TIMEOUT_MS;
+    const timeout = deps.loadTimeoutMs ?? deps.store.loadTimeoutMs ?? LOAD_TIMEOUT_MS;
     const states = await Promise.all(
       scopes.map(async (scope): Promise<ScopeState> => {
         let cancel: () => void = () => undefined;
@@ -242,10 +256,13 @@ export class ScopeSync {
         // (a loose-only scope takes none of the stored subfolder paths: they belong to the disc scopes)
         const remote = state.scope.looseOnly ? { files: result.conflict.files.filter((f) => !f.path.includes('/')) } : result.conflict;
         const { merged, fromRemote } = mergeSnapshots(snapshot, remote);
-        this.vfs.importFiles(state.scope.dir, fromRemote);
+        // a file Java is writing now (a handle open on it, or changed since this snapshot) is newer than the stored one
+        // and is not replaced under it (its data would go to an unlinked file): Java's stays, in the VFS and in the save
+        const busy = new Set(fromRemote.filter((f) => this.busy(state, f.path, snapshot)).map((f) => f.path));
+        this.vfs.importFiles(state.scope.dir, busy.size === 0 ? fromRemote : fromRemote.filter((f) => !busy.has(f.path)));
         state.etag = result.conflict.etag;
         state.stored = remote;
-        snapshot = merged;
+        snapshot = busy.size === 0 ? merged : keepOurs(merged, snapshot, busy);
         if (attempt >= SAVE_ATTEMPTS) throw new Error(`still stored elsewhere after ${attempt} tries`);
       }
     } catch (e) {
@@ -253,10 +270,29 @@ export class ScopeSync {
         this.deps.log(`BD-J storage: ${state.scope.key} was not saved: ${e.message}; the saved copy stays as it was`, true);
         return;
       }
-      // tried again after the next write (or the stop flush)
+      // tried again after the next write, the stop flush, or SAVE_MAX_WAIT_MS from now (review minor 4)
       state.dirty = true;
-      this.deps.log(`BD-J storage: ${state.scope.key} could not be saved (${e instanceof Error ? e.message : String(e)})`, true);
+      this.cancelMaxWait ??= this.deps.setTimer(this.deps.maxWaitMs ?? SAVE_MAX_WAIT_MS, () => {
+        this.cancelMaxWait = null;
+        void this.flush();
+      });
+      this.deps.log(`BD-J storage: ${state.scope.key} could not be saved (${e instanceof Error ? e.message : String(e)}); tried again later`, true);
     }
+  }
+
+  /**
+   * Whether Java is writing the file at `rel` now: a writable handle is open on it, or it changed (or went, or came)
+   * since `snapshot` was taken.
+   */
+  private busy(state: ScopeState, rel: string, snapshot: Snapshot): boolean {
+    const path = `${state.scope.dir}/${rel}`;
+    if (this.vfs!.writing?.(path)) return true;
+    // a file refused for room is saved as stored (snapshot), not as the VFS has it: the stored one may replace it
+    if (state.refused.has(rel)) return false;
+    const now = this.vfs!.stat(path);
+    const then = snapshot.files.find((f) => f.path === rel);
+    if (!then) return now !== null;
+    return now?.kind !== 'file' || now.mtimeMs !== then.mtime || now.size !== then.bytes.length;
   }
 
   /** The scope's files now, a refused file as stored (or left out). */
