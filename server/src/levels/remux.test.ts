@@ -314,7 +314,8 @@ describe('remuxInterval budgets and PSI', () => {
   }
 });
 
-describe('remuxInterval with PCR on the video PID', () => {
+// Re-muxes every interval of the fixture clip: a few seconds locally, over 5 s on CI runners (as the whole-clip tests above).
+describe('remuxInterval with PCR on the video PID', { timeout: 30_000 }, () => {
   // The fixture's ATS counts packets; spread it to a 27 MHz arrival clock over the clip's 10 s, and give the video PID a
   // PCR every 40 ms, as a disc whose PCR rides on its video.
   const m2ts = readFileSync(join(fixture('disc-levels'), 'STREAM/00001.m2ts'));
