@@ -353,6 +353,52 @@ describe('PlaceSaver', () => {
     expect(t.store.queued.size).toBe(0);
   });
 
+  it('sends nothing directly to a pairing made after the disc opened: neither a page-hide flush nor a store-failed save', async () => {
+    const t = setup();
+    await t.play(10_000); // registers read: a page-hide flush won't wait for the engine
+    const before = t.nas.sent.length;
+    t.nas.paired = PAIRING_B;
+    await t.saver.pairingChanged();
+    await t.saver.flushNow({ keepalive: true });
+    expect(t.nas.sent.slice(before)).toEqual([]);
+
+    const failing = memoryStore();
+    const broken: PlaceStore = { ...failing, put: () => Promise.reject(new Error('QuotaExceededError')), queue: () => Promise.reject(new Error('QuotaExceededError')) };
+    const u = setup({ store: broken, log: () => {} });
+    u.nas.paired = PAIRING_B; // paired again without the saver hearing of it
+    await u.play(10_000);
+    expect(u.nas.sent).toEqual([]);
+  });
+
+  it('stops sending through a pairing made while the outbox goes out', async () => {
+    const t = setup();
+    t.nas.answer = new Error("Couldn't reach the NAS.");
+    await t.play(10_000);
+    t.show({ currentPlaylistId: '00002', durationUs: 1440 * S, timeUs: 0 });
+    await t.play(10_000);
+    expect(t.store.queued.size).toBe(2);
+    const before = t.nas.sent.length;
+    t.nas.answer = () => {
+      t.nas.paired = PAIRING_B; // paired again as the first one goes
+      return 'stored';
+    };
+    await t.saver.drainOutbox();
+    expect(t.nas.sent.slice(before).map((x) => x.place.playlistId)).toEqual(['00001']);
+    expect(t.store.queued.size).toBe(0); // the other pairing's place is let go
+  });
+
+  it('waits out a NAS that answers 503, 502, 504 or 429, never dropping the place', async () => {
+    const t = setup();
+    t.nas.answer = new NasHttpError(503, null);
+    await t.play(10_000);
+    for (let i = 0; i < MAX_SEND_ATTEMPTS; i++) await t.saver.drainOutbox();
+    for (const status of [502, 504, 429]) {
+      t.nas.answer = new NasHttpError(status, null);
+      await t.saver.drainOutbox();
+    }
+    expect([...t.store.queued.values()].map((e) => e.attempts)).toEqual([0]);
+  });
+
   it('never reads a file over the limit, keeps one copy of a font, and keeps fonts through a new subtitle pick', async () => {
     const t = setup();
     const huge = new File([], 'huge.ttf');

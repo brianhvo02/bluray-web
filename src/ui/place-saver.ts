@@ -93,8 +93,11 @@ function savesAtOnce(prev: Seen, next: Seen): boolean {
 function failure(err: unknown): 'drop' | 'wait' | 'refused' {
   if (!(err instanceof NasHttpError)) return 'wait';
   if (err.status === 400 || err.status === 413 || (err.status === 404 && err.code === 'bad-key')) return 'drop';
-  return err.status === 404 ? 'wait' : 'refused';
+  // a plain 404, a rate limit, or the NAS restarting behind its proxy: nothing wrong with the place
+  return TRANSIENT.has(err.status) ? 'wait' : 'refused';
 }
+
+const TRANSIENT = new Set([404, 429, 502, 503, 504]);
 
 const isFontName = (name: string): boolean => FONT_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext));
 
@@ -115,6 +118,8 @@ export class PlaceSaver {
   private drainAgain = false;
   /** Byte sizes of the text files added to this disc, by name (the engine's snapshot has none). */
   private sizes: Record<string, number> = {};
+  /** `pairingKey` of the NAS pairing as last read (null: none; undefined: not read yet), for a send that can't wait. */
+  private pairingNow: string | null | undefined = undefined;
   private readonly minUs: number;
 
   constructor(private readonly deps: PlaceSaverDeps) {
@@ -129,6 +134,7 @@ export class PlaceSaver {
     this.end();
     if (!target.remote && target.discKey.startsWith('d.')) return;
     this.target = { ...target, opens: this.deps.discOpens() };
+    void this.currentPairing().catch(() => undefined); // known before a page-hide flush needs it
     void this.drainOutbox();
   }
 
@@ -203,6 +209,20 @@ export class PlaceSaver {
     return this.deps.store.clearOutbox().catch((err: unknown) => this.log('clearing saved places failed', err));
   }
 
+  /** NasClient.onPairingChange: the outbox is emptied, and the pairing read again. */
+  async pairingChanged(): Promise<void> {
+    this.pairingNow = undefined;
+    await Promise.all([this.clearOutbox(), this.currentPairing().catch(() => undefined)]);
+  }
+
+  /** The NAS pairing's key now (null when unpaired), remembered for sends that can't wait. */
+  private async currentPairing(): Promise<string | null> {
+    const nas = this.deps.nas;
+    const pairing = nas ? await nas.pairing() : null;
+    this.pairingNow = pairing ? pairingKey(pairing) : null;
+    return this.pairingNow;
+  }
+
   /**
    * Subtitle files the user added (a pick or a drop, as `loadSubtitleFiles` got them): their sizes go into places, and
    * their bytes are kept on this device for a resume here. A pick with subtitle files replaces the kept subtitle files
@@ -266,8 +286,9 @@ export class PlaceSaver {
       await store.put(place);
       return;
     }
-    // A keepalive request leaves before the page can go; the outbox keeps the place should it not arrive.
-    const sending = keepalive ? this.send(place, true) : null;
+    // A keepalive request leaves before the page can go (checked against the pairing last read, as the page may not
+    // live to read it again); the outbox keeps the place should it not arrive.
+    const sending = keepalive && t.pairing !== null && t.pairing === this.pairingNow ? this.send(place, true) : null;
     try {
       await store.put(place);
     } catch (err) {
@@ -286,7 +307,16 @@ export class PlaceSaver {
     if (sending) {
       void sending.then((done) => (done && queued ? store.sent(placeKey(place), place.updatedAt) : undefined)).catch((err: unknown) => this.log('saving the place failed', err));
     } else if (queued) void this.drainOutbox();
-    else void this.send(place, false); // the device's store failed: straight to the NAS, best effort
+    else if (t.pairing !== null) void this.sendIfPaired(place, t.pairing); // the device's store failed: straight to the NAS, best effort
+  }
+
+  /** A send outside the outbox, only while the pairing is still the one the disc was opened through. */
+  private async sendIfPaired(place: PlaybackPlace, pairing: string): Promise<void> {
+    try {
+      if ((await this.currentPairing()) === pairing) await this.send(place, false);
+    } catch (err) {
+      this.log('sending the place failed', err);
+    }
   }
 
   /** One place to the NAS, outside the outbox; true once it needn't be sent again. */
@@ -306,11 +336,11 @@ export class PlaceSaver {
   private async sendOutbox(): Promise<void> {
     const { store, nas } = this.deps;
     if (!nas) return;
-    const pairing = await nas.pairing();
-    if (!pairing) return;
-    const current = pairingKey(pairing);
     for (const { place, pairing: savedUnder } of await store.outbox()) {
       const key = placeKey(place);
+      // read before every send: the device may pair again while a round goes on
+      const current = await this.currentPairing();
+      if (current === null) return;
       if (savedUnder !== current) {
         await store.sent(key, place.updatedAt);
         continue;

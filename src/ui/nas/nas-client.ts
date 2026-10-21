@@ -666,7 +666,6 @@ export class NasClient {
 
   private reset(pairing: NasPairing | null): void {
     this.generation++;
-    for (const listener of this.pairingListeners) listener();
     this.current = pairing;
     this.cached = null;
     this.pending = null;
@@ -675,6 +674,8 @@ export class NasClient {
     this.links.clear();
     for (const url of this.artUrls.values()) this.objectUrls.revoke(url);
     this.artUrls.clear();
+    // last, so a listener's `pairing()` already gives the new pairing
+    for (const listener of this.pairingListeners) listener();
   }
 
   private get objectUrls(): { create(blob: Blob): string; revoke(url: string): void } {

@@ -158,7 +158,7 @@ export function App(): ReactElement {
     window.addEventListener('pagehide', leaving);
     const offSession = nas.onSession(() => void places.drainOutbox());
     // a new pairing (another NAS or person), a forgotten one, or one the NAS revoked: what waits isn't theirs
-    const offPairing = nas.onPairingChange(() => void places.clearOutbox());
+    const offPairing = nas.onPairingChange(() => void places.pairingChanged());
     return () => {
       document.removeEventListener('visibilitychange', hidden);
       window.removeEventListener('pagehide', leaving);
