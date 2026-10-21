@@ -2,6 +2,7 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
+import { parseDiscKey } from '../../../src/engine/disc/disc-key';
 import type { DiscEntry } from '../../../src/engine/disc/nas-api';
 import { json } from '../http';
 import type { Handler, Response } from '../http';
@@ -11,6 +12,7 @@ import { buildIsoManifest, buildManifest, discUnchanged, largestClip, largestIso
 import { parseRange } from '../ranges';
 
 const PROBE_BYTES = 4_194_304;
+const RESOLVE = /^\/api\/discs\/resolve\/([^/]+)$/;
 const ROUTE = /^\/api\/discs\/([^/]+)\/(manifest|probe|files\/(.+))$/;
 
 const notFound = (): Response => json(404, { error: 'not found' });
@@ -90,7 +92,26 @@ export function discRoutes(library: Library): Handler {
     return file ? serveBytes(req, file.size, (start, end) => isoFileStream(abs, file, start, end)) : notFound();
   };
 
+  /** The listed disc a link key names. Several copies of one fingerprint answer the one with the smallest path (byte order). */
+  const resolve = (key: string): DiscEntry | null => {
+    const parsed = parseDiscKey(key);
+    if (!parsed) return null;
+    if (parsed.kind === 'disc') return library.disc(parsed.discId) ?? null;
+    let best: { discId: string; path: string } | null = null;
+    for (const ev of library.evidence()) {
+      if (ev.fingerprint !== parsed.fingerprint) continue;
+      if (best === null || Buffer.compare(Buffer.from(ev.path), Buffer.from(best.path)) < 0) best = ev;
+    }
+    return best ? (library.disc(best.discId) ?? null) : null;
+  };
+
   return async (req, url) => {
+    const resolved = RESOLVE.exec(url.pathname);
+    if (resolved) {
+      if (req.method !== 'GET') return null;
+      const disc = resolve(decodeURIComponent(resolved[1]!));
+      return disc ? json(200, { disc }) : json(404, { error: 'not-found' });
+    }
     const match = ROUTE.exec(url.pathname);
     if (!match) return null;
     const [, id = '', action = '', encodedPath] = match;

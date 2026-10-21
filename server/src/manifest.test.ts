@@ -123,6 +123,26 @@ describe('disc routes', () => {
 
   const clip = (disc: string): Buffer => readFileSync(join(tmp, 'root', disc, 'BDMV/STREAM/00001.m2ts'));
 
+  it('resolves a disc key to the listed disc, fingerprint first', async () => {
+    const get = (key: string): Promise<Response> => fetch(`${base}/resolve/${key}`);
+    const byId = await get(`d.${ids.menu}`);
+    expect(byId.status).toBe(200);
+    expect(await byId.json()).toEqual({ disc: library.disc(ids.menu!) });
+    // two copies of one synthetic disc: the one with the smaller path
+    const fingerprint = library.evidence().find((e) => e.discId === ids[AWKWARD])!.fingerprint;
+    const copies = library.evidence().filter((e) => e.fingerprint === fingerprint && fingerprint !== null);
+    expect(copies.length).toBeGreaterThan(1);
+    const smallest = [...copies].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)))[0]!;
+    const byFp = await get(`f.${fingerprint}`);
+    expect(byFp.status).toBe(200);
+    expect(await byFp.json()).toEqual({ disc: library.disc(smallest.discId) });
+    for (const key of [`d.${'0'.repeat(16)}`, `f.${'A'.repeat(32)}`, 'nonsense', 'f.abc']) {
+      const res = await get(key);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'not-found' });
+    }
+  });
+
   it('serves the manifest', async () => {
     const res = await fetch(`${base}/${ids.menu}/manifest`);
     expect(res.status).toBe(200);

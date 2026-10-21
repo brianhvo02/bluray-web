@@ -214,6 +214,20 @@ describe('NasClient', () => {
     expect(await nas.artUrl('0123456789abcdef0123456789abcdef', 'large')).toBe(`${BASE}art/0123456789abcdef0123456789abcdef?size=large&t=${encodeURIComponent(token)}`);
   });
 
+  it('resolves a disc key, null when the NAS has none', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const disc = { id: '0123456789abcdef', name: 'Disc', path: 'drv5/Disc', kind: 'folder' };
+    const session = await nas.session();
+    server.nas = async (url) => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      return route === 'discs/resolve/d.0123456789abcdef' ? Response.json({ disc }) : Response.json({ error: 'not-found' }, { status: 404 });
+    };
+    expect(await nas.resolveDisc('d.0123456789abcdef')).toEqual(disc);
+    expect(await nas.resolveDisc('d.fedcba9876543210')).toBeNull();
+  });
+
   it('gives a failed art URL a fresh token, never the one it carried', async () => {
     const server = fakeServer();
     const nas = client(server);
