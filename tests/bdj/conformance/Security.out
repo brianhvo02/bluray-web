@@ -7,4 +7,5 @@ root thread group: denied java.lang.RuntimePermission "modifyThreadGroup" ""; ac
 own thread group: ok main
 create class loader: denied java.lang.RuntimePermission "createClassLoader" ""; access denied ("java.lang.RuntimePermission" "createClassLoader")
 exit: denied java.lang.RuntimePermission "exitVM.0" ""; access denied ("java.lang.RuntimePermission" "exitVM.0")
+thread started by untrusted code reads user.home: ok denied access denied ("java.util.PropertyPermission" "user.home" "read")
 trusted read java.version: set

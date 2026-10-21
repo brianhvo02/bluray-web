@@ -276,6 +276,12 @@ what would change that decision.
   replay loop over 20 s (`LOOP_GAP_MS`) now ends the run at once as void, naming the gap and the CPU used in it; a busy
   gap is reported as a blocked event loop instead. Keep the machine awake (`caffeinate -i`, lid open) for long local
   runs.
+- **A context passed to doPrivileged is always honoured (5e, Ruling R20).** Our `doPrivileged(action, context)` keeps a
+  caller-supplied `AccessControlContext` as the privileged context whoever made it. HotSpot honours one that is not
+  authorized only when the caller's domain implies `SecurityPermission "createAccessControlContext"`; otherwise it
+  replaces it with a single domain that has no code source and no permissions, so every check inside fails. Ours is the
+  more permissive of the two, and only for xlet code that builds its own context and passes it to doPrivileged; no disc
+  in the library check does. The conformance program `Security` avoids the case with a trusted caller.
 - **BD-J worker slow-read log (Task 14b).** The BD-J worker logs a slow disc read only at RemoteSource's waiting threshold (`WAITING_AFTER_MS`, 3 s), with how long it waited; reads from picked files (FileSource) are not timed.
 
 ## Audio

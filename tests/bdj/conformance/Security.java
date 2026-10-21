@@ -107,6 +107,25 @@ public class Security {
                 return null;
             }
         });
+        // a thread started under the untrusted context inherits it: its run(), trusted code alone on its stack, is
+        // still denied what the untrusted domain lacks
+        check("thread started by untrusted code reads user.home", new Check() {
+            public Object run() throws Exception {
+                final String[] seen = new String[1];
+                Thread t = new Thread(new Runnable() {
+                    public void run() {
+                        try {
+                            seen[0] = System.getProperty("user.home") == null ? "null" : "set";
+                        } catch (SecurityException e) {
+                            seen[0] = "denied " + e.getMessage();
+                        }
+                    }
+                });
+                t.start();
+                t.join();
+                return seen[0];
+            }
+        });
         // no untrusted frame on the stack: everything is allowed (the program itself has no restricted context here
         // in bluray-web; under HotSpot its application code source has the default policy, which grants this read)
         System.out.println("trusted read java.version: " + (System.getProperty("java.version") == null ? "null" : "set"));

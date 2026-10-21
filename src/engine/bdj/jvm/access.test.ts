@@ -7,7 +7,9 @@ import type { JObject } from './values';
 import { Vfs } from './vfs';
 import { ZipArchive } from './zip';
 import { assembleClass } from '../../../../tests/helpers/jvm-asm';
-import type { Const } from '../../../../tests/helpers/jvm-asm';
+import type { AsmMethod, Const } from '../../../../tests/helpers/jvm-asm';
+
+type AsmCode = NonNullable<AsmMethod['code']>;
 
 // Ruling R20: AccessController walks the interpreter's frames. A class defined with a protection domain of its own (as
 // libbluray's BDJClassLoader defines an xlet's classes) restricts every check made with it on the stack, unless trusted
@@ -18,7 +20,7 @@ const RT = jar('../../../bdj-classlib/rt-bdj.jar');
 
 const NEW = 0xbb, DUP = 0x59, LDC_W = 0x13, ACONST_NULL = 0x01, ICONST_0 = 0x03, ANEWARRAY = 0xbd, ARRAYLENGTH = 0xbe;
 const ALOAD_0 = 0x2a, ALOAD_1 = 0x2b, ALOAD_2 = 0x2c, ARETURN = 0xb0, RETURN = 0xb1, ATHROW = 0xbf;
-const INVOKESPECIAL = 0xb7, INVOKESTATIC = 0xb8, INVOKEVIRTUAL = 0xb6;
+const INVOKESPECIAL = 0xb7, INVOKESTATIC = 0xb8, INVOKEVIRTUAL = 0xb6, GETSTATIC = 0xb2, PUTSTATIC = 0xb3, POP = 0x57;
 
 const c = (k: Const): { c: Const } => ({ c: k });
 const m = (owner: string, name: string, desc: string): { c: Const } => c(['method', owner, name, desc]);
@@ -82,6 +84,34 @@ const PROBE = assembleClass('AccessProbe', [
   },
 ]);
 
+const ACC_PUBLIC = 0x0001;
+const init = { name: '<init>', desc: '()V', access: ACC_PUBLIC, code: [ALOAD_0, INVOKESPECIAL, m('java/lang/Object', '<init>', '()V'), RETURN] };
+const getProperty = (name: string): AsmCode => [LDC_W, str(name), INVOKESTATIC, m('java/lang/System', 'getProperty', '(Ljava/lang/String;)Ljava/lang/String;')];
+
+/** Trusted (boot) action classes, outside sun.* so that restricted code may use them. */
+const TRUSTED_ACTION = assembleClass('TrustedAction', [init, { name: 'run', desc: '()Ljava/lang/Object;', access: ACC_PUBLIC, code: [...getProperty('user.home'), ARETURN] }], [], 'java/lang/Object', {
+  interfaces: ['java/security/PrivilegedAction'],
+});
+/** An action that itself reads through trusted doPrivileged: the inner doPrivileged is where a walk stops. */
+const TRUSTED_NEST = assembleClass('TrustedNest', [
+  init,
+  { name: 'run', desc: '()Ljava/lang/Object;', access: ACC_PUBLIC, code: [LDC_W, str('user.home'), INVOKESTATIC, m('AccessProbe', 'readPrivileged', '(Ljava/lang/String;)Ljava/lang/Object;'), ARETURN] },
+], [], 'java/lang/Object', { interfaces: ['java/security/PrivilegedAction'] });
+/** A trusted Runnable that reads user.home and records "ok" or "denied" in its static `result`. */
+const READER = assembleClass('Reader', [
+  init,
+  {
+    name: 'run',
+    desc: '()V',
+    access: ACC_PUBLIC,
+    code: [
+      ...getProperty('user.home'), POP, LDC_W, str('ok'), PUTSTATIC, c(['field', 'Reader', 'result', 'Ljava/lang/Object;']), RETURN, // 0
+      POP, LDC_W, str('denied'), PUTSTATIC, c(['field', 'Reader', 'result', 'Ljava/lang/Object;']), RETURN, // 14
+    ],
+    handlers: [[0, 14, 14, 'java/lang/SecurityException']],
+  },
+], [['result', 'Ljava/lang/Object;']], 'java/lang/Object', { interfaces: ['java/lang/Runnable'] });
+
 /** The restricted class (defined with AccessProbe.domain()). */
 const UNTRUSTED = assembleClass('Untrusted', [
   { name: 'direct', desc: '()Ljava/lang/Object;', code: [LDC_W, str('user.home'), INVOKESTATIC, m('java/lang/System', 'getProperty', '(Ljava/lang/String;)Ljava/lang/String;'), ARETURN] },
@@ -95,6 +125,29 @@ const UNTRUSTED = assembleClass('Untrusted', [
       NEW, cls('Untrusted'), DUP, INVOKESPECIAL, m('Untrusted', '<init>', '()V'),
       INVOKESTATIC, m('java/security/AccessController', 'doPrivileged', '(Ljava/security/PrivilegedAction;)Ljava/lang/Object;'),
       ARETURN,
+    ],
+  },
+  {
+    // a trusted action, but called by it: the privileged frame is its own
+    name: 'viaTrustedAction',
+    desc: '()Ljava/lang/Object;',
+    code: [NEW, cls('TrustedAction'), DUP, INVOKESPECIAL, m('TrustedAction', '<init>', '()V'), INVOKESTATIC, m('java/security/AccessController', 'doPrivileged', '(Ljava/security/PrivilegedAction;)Ljava/lang/Object;'), ARETURN],
+  },
+  {
+    // its own doPrivileged around an action that reads through trusted doPrivileged: the inner one is where the walk stops
+    name: 'nested',
+    desc: '()Ljava/lang/Object;',
+    code: [NEW, cls('TrustedNest'), DUP, INVOKESPECIAL, m('TrustedNest', '<init>', '()V'), INVOKESTATIC, m('java/security/AccessController', 'doPrivileged', '(Ljava/security/PrivilegedAction;)Ljava/lang/Object;'), ARETURN],
+  },
+  {
+    // starts a thread running trusted code (Reader), waits for it, and returns what it saw
+    name: 'spawn',
+    desc: '()Ljava/lang/Object;',
+    code: [
+      NEW, cls('java/lang/Thread'), DUP, NEW, cls('Reader'), DUP, INVOKESPECIAL, m('Reader', '<init>', '()V'),
+      INVOKESPECIAL, m('java/lang/Thread', '<init>', '(Ljava/lang/Runnable;)V'), DUP,
+      INVOKEVIRTUAL, m('java/lang/Thread', 'start', '()V'), INVOKEVIRTUAL, m('java/lang/Thread', 'join', '()V'),
+      GETSTATIC, c(['field', 'Reader', 'result', 'Ljava/lang/Object;']), ARETURN,
     ],
   },
   { name: '<init>', desc: '()V', access: 0x0001, code: [ALOAD_0, INVOKESPECIAL, m('java/lang/Object', '<init>', '()V'), RETURN] },
@@ -120,6 +173,9 @@ describe('access control over the interpreter stack (Ruling R20)', () => {
     });
     await jvm.boot();
     jvm.loader.define('AccessProbe', PROBE, null, null);
+    jvm.loader.define('TrustedAction', TRUSTED_ACTION, null, null);
+    jvm.loader.define('TrustedNest', TRUSTED_NEST, null, null);
+    jvm.loader.define('Reader', READER, null, null);
     const loader = (await jvm.callStatic('java/lang/ClassLoader', 'getSystemClassLoader', '()Ljava/lang/ClassLoader;')) as JObject;
     const domain = (await jvm.callStatic('AccessProbe', 'domain', '()Ljava/security/ProtectionDomain;')) as JObject;
     untrusted = (await jvm.callStatic('AccessProbe', 'define', '(Ljava/lang/ClassLoader;[BLjava/security/ProtectionDomain;)Ljava/lang/Class;', [loader, byteArray(jvm, UNTRUSTED), domain])) as JObject;
@@ -140,6 +196,18 @@ describe('access control over the interpreter stack (Ruling R20)', () => {
 
   it("still counts the restricted class when it calls doPrivileged itself: the privileged frame's domain is its own", async () => {
     await expect(call('ownPrivileged')).rejects.toThrow('java.security.AccessControlException: access denied ("java.util.PropertyPermission" "user.home" "read")');
+  });
+
+  it("counts the restricted caller of doPrivileged even when the action class is trusted (outside sun.*)", async () => {
+    await expect(call('viaTrustedAction')).rejects.toThrow('java.security.AccessControlException: access denied ("java.util.PropertyPermission" "user.home" "read")');
+  });
+
+  it("stops at the innermost doPrivileged: trusted code nested inside the restricted class's own doPrivileged reads", async () => {
+    expect(await call('nested')).not.toBeNull();
+  });
+
+  it('a thread the restricted class starts inherits its context: trusted code alone on its stack is denied', async () => {
+    expect(jvm.heap.jsString((await call('spawn')) as JObject)).toBe('denied');
   });
 
   it('leaves code with no restricted frame on the stack unchecked', async () => {

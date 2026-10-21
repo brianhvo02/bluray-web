@@ -239,8 +239,11 @@ function doPrivileged(jvm: Jvm, t: JThread, action: JValue, iface: string, conte
 /**
  * AccessController.getStackAccessControlContext (Ruling R20): the protection domains of the methods on the calling
  * thread's stack, innermost first, up to and including the innermost caller of doPrivileged, whose own domain counts
- * and whose context argument becomes the privileged context. Boot classes (null domain) are fully trusted and add
- * nothing; null when nothing restricts the checks, as the JDK expects of a stack of trusted code.
+ * and whose context argument becomes the privileged context. Boot classes (null domain) add nothing. Null only for a
+ * privileged walk that found no domain and no privileged context (trusted code inside doPrivileged: nothing to check).
+ * Otherwise a context, with a null domain array when no domain was found: an unprivileged stack of trusted code still
+ * has its thread's inherited context, which AccessControlContext.optimize merges in (a thread started by restricted
+ * code stays restricted), as the JDK specifies.
  */
 function stackAccessControlContext(jvm: Jvm, t: JThread): JObject | null {
   const frames = t.frames;
@@ -261,6 +264,8 @@ function stackAccessControlContext(jvm: Jvm, t: JThread): JObject | null {
       }
     }
     const domain = mark ? mark.domain : f.method.cls.protectionDomain;
+    // de-duplicated over the whole stack (HotSpot drops only consecutive repeats): a check against a set of domains is
+    // the same either way, so neither side needs "fixing" to match the other
     if (domain !== null && !domains.includes(domain)) domains.push(domain);
     if (mark) {
       isPrivileged = true;
@@ -268,9 +273,10 @@ function stackAccessControlContext(jvm: Jvm, t: JThread): JObject | null {
       break;
     }
   }
-  if (domains.length === 0 && privilegedContext === null) return null;
+  if (domains.length === 0 && isPrivileged && privilegedContext === null) return null;
   const acc = jvm.heap.newObject(jvm.bootClass('java/security/AccessControlContext'));
-  jvm.setField(acc, 'context', '[Ljava/security/ProtectionDomain;', jvm.newArray(jvm.bootClass('java/security/ProtectionDomain'), domains));
+  const array = domains.length ? jvm.newArray(jvm.bootClass('java/security/ProtectionDomain'), domains) : null;
+  jvm.setField(acc, 'context', '[Ljava/security/ProtectionDomain;', array);
   jvm.setField(acc, 'isPrivileged', 'Z', isPrivileged ? 1 : 0);
   jvm.setField(acc, 'isAuthorized', 'Z', 1);
   jvm.setField(acc, 'privilegedContext', 'Ljava/security/AccessControlContext;', privilegedContext);
