@@ -1,4 +1,4 @@
-import type { PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
+import type { DiscPlaces, PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
 import type { PlaceState } from '../engine/protocol';
 import { isFontName, splitPick } from '../player/drop-files';
 import type { PlayerSnapshot } from '../player/player-controller';
@@ -167,6 +167,11 @@ export class PlaceSaver {
     const launch = this.launch;
     this.launch = null;
     return launch && launch.opens === this.deps.discOpens() ? { settings: launch.settings, byLanguage: launch.byLanguage, discKey: launch.discKey } : null;
+  }
+
+  /** The places this device holds for a local disc (never a NAS disc's: those are the NAS's). */
+  placesOf(discKey: string): Promise<DiscPlaces> {
+    return this.deps.store.get(discKey);
   }
 
   /** The subtitle and font files kept on this device for a disc. */

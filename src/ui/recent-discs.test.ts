@@ -25,6 +25,15 @@ describe('recent discs', () => {
     expect(paths).toEqual(['/Movies/A/BDMV', '/Movies/B/BDMV']);
   });
 
+  it('keeps the disc key, and a reopened disc takes the new one', async () => {
+    const factory = new IDBFactory();
+    await saveRecentDisc(handle('A'), 1, factory, samePath, 'f.0123456789ABCDEF0123456789ABCDEF');
+    await saveRecentDisc(handle('B'), 2, factory, samePath);
+    expect((await listRecentDiscs(factory)).map((d) => [d.name, d.discKey])).toEqual([['B', null], ['A', 'f.0123456789ABCDEF0123456789ABCDEF']]);
+    await saveRecentDisc(handle('A'), 3, factory, samePath, 'f.FEDCBA9876543210FEDCBA9876543210');
+    expect((await listRecentDiscs(factory))[0]!.discKey).toBe('f.FEDCBA9876543210FEDCBA9876543210');
+  });
+
   it('removes a disc by id', async () => {
     const factory = new IDBFactory();
     await saveRecentDisc(handle('A'), 1, factory, samePath);

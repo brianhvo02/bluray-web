@@ -18,7 +18,11 @@ import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
 import { discKeyOf } from '../engine/disc/disc-key';
 import { normalizeDiscPaths } from '../engine/disc/paths';
 import { mainPlaylistId } from './nas/library-model';
-import { LOCAL_DEVICE_NAME, type PlaceSaver } from './place-saver';
+import { LOCAL_DEVICE_NAME, type LaunchSettings, type PlaceSaver } from './place-saver';
+import { ResumePrompt } from './nas/ResumePrompt';
+import { playlistsOf, resumeOffer, startOver, within, type ResumeOffer } from './nas/resume-model';
+import { promptLines } from './place-model';
+import type { StartPoint } from '../engine/protocol';
 import type { DiscEntry } from '../engine/disc/nas-api';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
@@ -26,6 +30,15 @@ const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 
 /** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
 const COPY_NOTICE_DELAY_MS = 1500;
+
+/** A place on this device is read for at most this long before a local disc opens without asking. */
+const LOCAL_PLACES_TIMEOUT_MS = 3000;
+
+/** A local disc waiting for the tap that says where it opens: Resume, or Start from beginning. */
+interface PendingResume {
+  readonly offer: Extract<ResumeOffer, { readonly kind: 'ask' | 'changed' }>;
+  readonly open: (start: StartPoint | undefined, launch: LaunchSettings | undefined) => void;
+}
 
 type PlayRoute = Extract<NasRoute, { kind: 'play' }>;
 
@@ -135,6 +148,9 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
   const [capabilities] = useState(() => checkCapabilities());
   const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
+  /** Recent discs row id to "Resume at m:ss", for those with an unfinished place on this device. */
+  const [recentResume, setRecentResume] = useState<ReadonlyMap<number, string>>(new Map());
+  const [pending, setPending] = useState<PendingResume | null>(null);
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -172,6 +188,20 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
   useEffect(() => {
     listRecentDiscs().then(setRecent, () => setRecent([]));
   }, []);
+
+  useEffect(() => {
+    let live = true;
+    void Promise.all(
+      recent.map(async (disc): Promise<readonly [number, string] | null> => {
+        if (disc.discKey === null || disc.discKey.startsWith('d.')) return null;
+        const offer = resumeOffer(await within(places.placesOf(disc.discKey), LOCAL_PLACES_TIMEOUT_MS, null), null, null);
+        return offer.kind === 'ask' ? ([disc.id, promptLines(offer.place, Date.now()).resumeLabel] as const) : null;
+      }),
+    ).then((rows) => live && setRecentResume(new Map(rows.filter((r): r is readonly [number, string] => r !== null))));
+    return () => {
+      live = false;
+    };
+  }, [recent, places]);
 
   /** undefined while loading; null when this device isn't paired. */
   const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
@@ -275,22 +305,47 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     task.catch((err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
 
-  /** A folder's files open, and its place is saved on this device under its fingerprint. */
-  const openLocal = (entries: ReadonlyArray<readonly [string, File]>): void => {
-    controller.open(entries);
-    let discKey: string;
+  /** `discKeyOf` of a folder's files; null when they aren't a disc, or have no fingerprint (so nothing is remembered). */
+  const localKeyOf = (entries: ReadonlyArray<readonly [string, File]>): string | null => {
     try {
-      discKey = discKeyOf('local', [...normalizeDiscPaths(entries)].map(([path, file]) => ({ path, size: file.size })));
+      const key = discKeyOf('local', [...normalizeDiscPaths(entries)].map(([path, file]) => ({ path, size: file.size })));
+      return key.startsWith('d.') ? null : key;
     } catch {
-      return; // not a disc: the engine says why
+      return null; // not a disc: the engine says why
     }
-    places.begin({ discKey, discId: null, remote: false, chosen: null, mainPlaylistId: null, deviceName: LOCAL_DEVICE_NAME, pairing: null });
   };
 
+  /**
+   * Opens a local disc, after asking when this device holds an unfinished place for it: the prompt comes before the
+   * open, and its buttons (taps) start audio, so Resume and Start from beginning open inside a gesture.
+   */
+  const openAskingFirst = async (
+    discKey: string | null,
+    playlists: ReturnType<typeof playlistsOf> | null,
+    open: PendingResume['open'],
+  ): Promise<void> => {
+    setPending(null);
+    const stored = discKey === null ? null : await within(places.placesOf(discKey), LOCAL_PLACES_TIMEOUT_MS, null);
+    const offer = resumeOffer(stored, null, playlists);
+    if (offer.kind === 'ask' || offer.kind === 'changed') setPending({ offer, open });
+    else open(undefined, undefined);
+  };
+
+  /** A folder's files open, and its place is saved on this device under its fingerprint. */
+  const openLocal = (entries: ReadonlyArray<readonly [string, File]>, discKey: string | null = localKeyOf(entries)): Promise<void> =>
+    openAskingFirst(discKey, null, (start, launch) => {
+      controller.open(entries, start);
+      if (discKey !== null) {
+        places.begin({ discKey, discId: null, remote: false, chosen: start?.playlistId ?? null, mainPlaylistId: null, deviceName: LOCAL_DEVICE_NAME, pairing: null }, launch);
+      }
+    });
+
   const openHandle = async (handle: FileSystemDirectoryHandle): Promise<void> => {
-    openLocal(await collectFromDirectoryHandle(handle));
+    const entries = await collectFromDirectoryHandle(handle);
+    const discKey = localKeyOf(entries);
+    run(openLocal(entries, discKey));
     try {
-      await saveRecentDisc(handle);
+      await saveRecentDisc(handle, Date.now(), undefined, undefined, discKey);
       setRecent(await listRecentDiscs());
     } catch {
       // The recent-discs list is a convenience; failing to update it must not block playback.
@@ -323,7 +378,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     setAwaitingFiles(false);
     setLocalError(null);
     const files = e.target.files;
-    if (files && files.length > 0) openLocal(collectFromFileList(files));
+    if (files && files.length > 0) run(openLocal(collectFromFileList(files)));
     e.target.value = '';
   };
 
@@ -339,7 +394,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
           setLocalError('Drop the disc folder itself (the folder that contains BDMV).');
           return;
         }
-        if (dropped.kind === 'entries') openLocal(dropped.entries);
+        if (dropped.kind === 'entries') await openLocal(dropped.entries);
         else await openHandle(dropped.handle);
       }),
     );
@@ -361,9 +416,29 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
 
   const onServerDisc = (spec: RemoteDiscSpec): void => {
     setLocalError(null);
-    controller.openRemote(spec); // starts audio inside the tap; the server's token lasts the run, so there is no refresh
-    // a disc-server disc's place stays on this device, as a folder's does
-    places.begin({ discKey: discKeyOf('local', spec.manifest.files), discId: null, remote: false, chosen: null, mainPlaylistId: mainPlaylistId(spec.manifest), deviceName: LOCAL_DEVICE_NAME, pairing: null });
+    controller.startAudio(); // inside the tap, before a question about the place may come
+    const discKey = discKeyOf('local', spec.manifest.files);
+    // a disc-server disc's place stays on this device, as a folder's does; the server's token lasts the run, so there is no refresh
+    run(
+      openAskingFirst(discKey.startsWith('d.') ? null : discKey, playlistsOf(spec.manifest), (start, launch) => {
+        controller.openRemote(spec, undefined, undefined, undefined, start);
+        places.begin(
+          { discKey, discId: null, remote: false, chosen: start?.playlistId ?? null, mainPlaylistId: mainPlaylistId(spec.manifest), deviceName: LOCAL_DEVICE_NAME, pairing: null },
+          launch,
+        );
+      }),
+    );
+  };
+
+  /** Resume at the place, or Start from beginning (its playlist from 0); either way with the place's settings. */
+  const answerPending = (resume: boolean): void => {
+    if (!pending) return;
+    const { offer, open } = pending;
+    controller.startAudio(); // inside the tap
+    setPending(null);
+    const launch: LaunchSettings = { settings: offer.place.settings, byLanguage: false };
+    if (resume && offer.kind === 'ask') open(offer.start, launch);
+    else open(startOver(offer.place), launch);
   };
 
   const error = localError ?? snapshot.error?.message ?? null;
@@ -401,6 +476,17 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
         {/* webkitdirectory is rendered, not set in an effect: the input must pick folders from the moment it exists */}
         <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" {...{ webkitdirectory: '' }} onChange={onInput} />
       </div>
+      {pending && (
+        <ResumePrompt
+          place={pending.offer.place}
+          changed={pending.offer.kind === 'changed'}
+          resumeOnly={false}
+          disabled={false}
+          nowMs={Date.now()}
+          onResume={() => answerPending(true)}
+          onStartOver={() => answerPending(false)}
+        />
+      )}
       {serverLink && (
         <section className="recent server-discs" data-testid="server-discs">
           <h2>On the disc server</h2>
@@ -526,6 +612,12 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
               <li key={disc.id}>
                 <button type="button" onClick={() => onRecent(disc)}>
                   {disc.name} <span className="recent-date">· {new Date(disc.openedAt).toLocaleDateString()}</span>
+                  {recentResume.has(disc.id) && (
+                    <span className="recent-resume" data-testid="recent-resume">
+                      {' '}
+                      · {recentResume.get(disc.id)}
+                    </span>
+                  )}
                 </button>
               </li>
             ))}
