@@ -152,4 +152,34 @@ describe('NasHistory', () => {
     const { h } = make('/nas/hidden');
     expect(h.getSnapshot()).toBe('https://player.example/nas/hidden');
   });
+
+  it('drops a write the browser refuses, warns once and does not notify', () => {
+    const win = new FakeWindow('/');
+    const like: HistoryLike = {
+      get location() {
+        return win.location;
+      },
+      history: {
+        state: null,
+        pushState: () => {
+          throw new Error('SecurityError');
+        },
+        replaceState: () => {
+          throw new Error('SecurityError');
+        },
+        back: () => {},
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    const hh = new NasHistory(like);
+    const l = vi.fn();
+    hh.subscribe(l);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(() => hh.replace({ kind: 'library', shelf: null, q: 'a' })).not.toThrow();
+    expect(() => hh.push({ kind: 'library', shelf: null, q: 'b' })).not.toThrow();
+    expect(l).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
 });

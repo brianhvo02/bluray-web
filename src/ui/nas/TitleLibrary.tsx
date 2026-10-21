@@ -178,12 +178,16 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
    * refuses more than about 100 history changes in 30 s, so not every keystroke can be one.
    */
   const [draft, setDraft] = useState(query);
-  useEffect(() => setDraft(query), [query]);
   const searchTimer = useRef<number | null>(null);
   const cancelSearchWrite = (): void => {
     if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
     searchTimer.current = null;
   };
+  // The route changed (Back, Forward or a link): a write still pending was for the entry that is gone.
+  useEffect(() => {
+    cancelSearchWrite();
+    setDraft(query);
+  }, [query, routeKey]);
   useEffect(() => cancelSearchWrite, []);
   /** Puts `q` in the address bar, if the library is still the screen shown. */
   const writeSearch = (q: string, shelf: TitleKind | null): void => {

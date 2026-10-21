@@ -39,14 +39,14 @@ export class NasHistory {
   push(route: NasRoute | null): void {
     const url = pathOf(route);
     if (this.isCurrent(url)) return;
-    this.win.history.pushState({ ...this.stateObject(), nasDepth: this.depth() + 1 }, '', url);
+    if (!this.attempt(() => this.win.history.pushState({ ...this.stateObject(), nasDepth: this.depth() + 1 }, '', url))) return;
     this.changed('push');
   }
 
   replace(route: NasRoute | null): void {
     const url = pathOf(route);
     if (this.isCurrent(url)) return;
-    this.win.history.replaceState({ ...this.stateObject(), nasDepth: this.depth() }, '', url);
+    if (!this.attempt(() => this.win.history.replaceState({ ...this.stateObject(), nasDepth: this.depth() }, '', url))) return;
     this.changed('replace');
   }
 
@@ -73,6 +73,22 @@ export class NasHistory {
   getSnapshot = (): string => this.win.location.href;
 
   private readonly onPop = (): void => this.changed('pop');
+
+  private warned = false;
+
+  /** Safari throws SecurityError past about 100 history changes in 30 s: a refused write is dropped. */
+  private attempt(write: () => void): boolean {
+    try {
+      write();
+      return true;
+    } catch (e) {
+      if (!this.warned) {
+        this.warned = true;
+        console.warn('History write refused', e);
+      }
+      return false;
+    }
+  }
 
   private changed(move: Move): void {
     this.move = move;

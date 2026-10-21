@@ -116,3 +116,25 @@ describe('PlayingRoute', () => {
     expect(h.replaced).toEqual([]);
   });
 });
+
+describe('PlayingRoute write floor', () => {
+  it('a burst of seeks makes at most 3 replaces, the last with the final time', async () => {
+    const { vi } = await import('vitest');
+    vi.useFakeTimers();
+    try {
+      const h = fakeHistory();
+      const route = new PlayingRoute(h, () => Date.now());
+      route.start(KEY);
+      route.update(playing(0));
+      for (let i = 1; i <= 20; i++) {
+        vi.advanceTimersByTime(100);
+        route.update(playing(i * 10e6));
+      }
+      vi.advanceTimersByTime(2000);
+      expect(h.replaced.length).toBeLessThanOrEqual(3);
+      expect(times(h).at(-1)).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

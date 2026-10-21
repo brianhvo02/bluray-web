@@ -4,6 +4,8 @@ import type { NasHistory } from './nas-history';
 const REPLACE_EVERY_MS = 5000;
 /** ...and at once when the time moved this much further than playing on would have taken it (a seek). */
 const JUMP_US = 2_000_000;
+/** A seek-triggered write waits for this floor (Safari refuses about 100 history changes in 30 s); a trailing write lands the final position. */
+const JUMP_FLOOR_MS = 1000;
 
 export interface PlayingState {
   readonly currentPlaylistId: string | null;
@@ -19,6 +21,8 @@ export interface PlayingState {
 export class PlayingRoute {
   private key: string | null = null;
   private lastReplaceMs = -Infinity;
+  private lastWriteMs = -Infinity;
+  private trailing: ReturnType<typeof setTimeout> | null = null;
   private last: { readonly state: PlayingState; readonly atMs: number } | null = null;
 
   constructor(
@@ -34,7 +38,22 @@ export class PlayingRoute {
   start(discKey: string): void {
     this.key = discKey;
     this.lastReplaceMs = -Infinity;
+    this.lastWriteMs = -Infinity;
     this.last = null;
+    this.clearTrailing();
+  }
+
+  private clearTrailing(): void {
+    if (this.trailing !== null) clearTimeout(this.trailing);
+    this.trailing = null;
+  }
+
+  private write(key: string, s: PlayingState, now: number): void {
+    this.clearTrailing();
+    if (this.history.route()?.kind !== 'play' || s.currentPlaylistId === null) return;
+    this.lastReplaceMs = now;
+    this.lastWriteMs = now;
+    this.history.replace({ kind: 'play', discKey: key, playlistId: s.currentPlaylistId, timeS: Math.floor(s.timeUs / 1e6) });
   }
 
   update(s: PlayingState): void {
@@ -54,13 +73,23 @@ export class PlayingRoute {
     const jumped = Math.abs(s.timeUs - expectedUs) > JUMP_US;
     const otherPlaylist = last.state.currentPlaylistId !== s.currentPlaylistId;
     if (now - this.lastReplaceMs < REPLACE_EVERY_MS && !paused && !jumped && !otherPlaylist) return;
-    if (this.history.route()?.kind !== 'play') return;
-    this.lastReplaceMs = now;
-    this.history.replace({ kind: 'play', discKey: key, playlistId: s.currentPlaylistId, timeS: Math.floor(s.timeUs / 1e6) });
+    if (jumped && !paused && !otherPlaylist && now - this.lastWriteMs < JUMP_FLOOR_MS) {
+      // Too soon after the last write: the latest state is written when the floor has passed.
+      if (this.trailing === null) {
+        this.trailing = setTimeout(() => {
+          this.trailing = null;
+          const l = this.last;
+          if (this.key === key && l !== null) this.write(key, l.state, this.nowMs());
+        }, JUMP_FLOOR_MS - (now - this.lastWriteMs));
+      }
+      return;
+    }
+    this.write(key, s, now);
   }
 
   stop(): void {
     this.key = null;
     this.last = null;
+    this.clearTrailing();
   }
 }

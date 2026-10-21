@@ -2327,6 +2327,63 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     expect(lastState(h)).toBe('idle');
   });
 
+  it('a plain remote open superseded by a second open drops the first: only the second disc emits titles', async () => {
+    const { h, log, spec } = await setup({ noOpen: true });
+    log.limit('*', 0); // the first open is stuck in its disc's metadata
+    const first = h.player.handle({ type: 'open', disc: spec });
+    await vi.waitFor(() => expect(log.reads.length).toBeGreaterThan(0));
+    const second = fakeNas(fixtureDiscFiles('disc1'));
+    const secondOpen = h.player.handle({ type: 'open', disc: second.spec });
+    log.gate(false); // the first disc's reads go on, too late
+    await first;
+    await secondOpen;
+    expect(h.events.filter((e) => e.type === 'titles')).toHaveLength(1);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('a close while a local files open still reads drops the disc without titles or an error', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reading = false;
+    /** A blob whose reads wait for the gate. */
+    const slow = (blob: Blob): Blob =>
+      ({
+        size: blob.size,
+        type: blob.type,
+        slice: (a?: number, b?: number) => {
+          const part = blob.slice(a, b);
+          return {
+            size: part.size,
+            arrayBuffer: async () => ((reading = true), await gate, part.arrayBuffer()),
+            stream: () => {
+              reading = true;
+              return new ReadableStream<Uint8Array>({
+                async pull(c) {
+                  await gate;
+                  c.enqueue(new Uint8Array(await part.arrayBuffer()));
+                  c.close();
+                },
+              });
+            },
+          };
+        },
+        arrayBuffer: async () => ((reading = true), await gate, blob.arrayBuffer()),
+        text: async () => ((reading = true), await gate, blob.text()),
+        stream: () => blob.stream(),
+      }) as unknown as Blob;
+    const entries = h.entries.map(([p, b]) => [p, slow(b)] as [string, Blob]);
+    const opening = h.player.handle({ type: 'open', disc: { kind: 'files', entries } });
+    await vi.waitFor(() => expect(reading).toBe(true));
+    const closing = h.player.handle({ type: 'close' });
+    release();
+    await opening;
+    await closing;
+    expect(h.events.some((e) => e.type === 'titles')).toBe(false);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    expect(lastState(h)).toBe('idle');
+  });
+
   it('opened with bufferFirst, a close sent while the open is still queued drops it, and a queued cancel opens it', async () => {
     const dropped = await setup({ noOpen: true });
     const opening = dropped.h.player.handle({ type: 'open', disc: dropped.spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });

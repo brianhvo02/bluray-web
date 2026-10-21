@@ -716,6 +716,13 @@ test('library screens are in the address bar, and Back and Forward move between 
   await page.reload();
   await expect(page.getByTestId('title-search')).toHaveValue('moonlit', { timeout: 15_000 });
   await expect(page.getByTestId('title-row')).toHaveAttribute('data-name', 'Moonlit Harbor');
+
+  // Back within the typing delay: the pending search write must not overwrite the entry Back landed on.
+  await page.getByTestId('title-search').fill('zzz');
+  await page.goBack();
+  await expect.poll(() => pathOf(page)).toBe('/nas');
+  await page.waitForTimeout(1000);
+  expect(pathOf(page)).toBe('/nas');
 });
 
 test('a library path opens straight onto its screen after a reload', async ({ page, browserName }) => {

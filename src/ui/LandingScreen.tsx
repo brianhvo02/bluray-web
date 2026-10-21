@@ -41,6 +41,7 @@ interface PlayLinkProps {
 function PlayLink({ nas, controller, history, playingRoute, route, onLibrary }: PlayLinkProps): ReactElement {
   /** undefined while resolving; null when the NAS has no such disc; a string when the NAS couldn't be asked. */
   const [found, setFound] = useState<DiscEntry | null | string | undefined>(undefined);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
     // The same disc again (the pre-flight swapping a `d.` key for its `f.` key) keeps its pre-flight as it is.
@@ -51,7 +52,7 @@ function PlayLink({ nas, controller, history, playingRoute, route, onLibrary }: 
     return () => {
       live = false;
     };
-  }, [nas, route.discKey]);
+  }, [nas, route.discKey, attempt]);
   const back = useCallback(() => history.back(LIBRARY), [history]);
   if (found === undefined) return <p className="status">Loading…</p>;
   if (found === null) return <NasNotFound paired onPair={onLibrary} />;
@@ -59,6 +60,21 @@ function PlayLink({ nas, controller, history, playingRoute, route, onLibrary }: 
     return (
       <div className="error-banner" role="alert" data-testid="nas-error">
         {found}
+        <p>
+          <button
+            type="button"
+            data-testid="nas-retry"
+            onClick={() => {
+              setFound(undefined);
+              setAttempt((n) => n + 1);
+            }}
+          >
+            Retry
+          </button>{' '}
+          <button type="button" data-testid="nas-back-to-library" onClick={() => history.replace(LIBRARY)}>
+            Back to the library
+          </button>
+        </p>
       </div>
     );
   }
