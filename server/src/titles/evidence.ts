@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { MarkType, parseMpls } from '../../../src/engine/bdmv/mpls-parser';
 import { contentHash } from '../../../src/engine/disc/content-hash';
+import { streamsOf } from '../../../src/engine/disc/disc-key';
 import type { DiscEntry } from '../../../src/engine/disc/nas-api';
 import type { UdfFile } from '../../../src/engine/disc/udf';
 import { readIsoFiles } from '../iso';
@@ -90,10 +91,6 @@ async function evidenceOf<F extends { path: string; size: number }>(
   files: readonly F[],
   read: (files: F[]) => Promise<Map<string, Uint8Array>>,
 ): Promise<DiscEvidence> {
-  const streams = files.flatMap((f) => {
-    const m = STREAM.exec(f.path);
-    return m ? [{ name: m[1]!, size: f.size }] : [];
-  });
   const wanted = files.filter((f) => f.size <= MAX_READ_BYTES && (PLAYLIST.test(f.path) || BDMT.test(f.path)));
   const bytes = await read(wanted);
   const discTitles: { lang: string; name: string }[] = [];
@@ -115,7 +112,7 @@ async function evidenceOf<F extends { path: string; size: number }>(
   playlists.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const segments = entry.path.split('/').slice(1);
   const catalogue = new Set([...segments, ...discTitles.map((t) => t.name)].flatMap(catalogueNumbers));
-  return { discId: entry.id, path: entry.path, fingerprint: contentHash(streams), discTitles, segments, catalogueNumbers: [...catalogue], playlists };
+  return { discId: entry.id, path: entry.path, fingerprint: contentHash(streamsOf(files)), discTitles, segments, catalogueNumbers: [...catalogue], playlists };
 }
 
 /**
