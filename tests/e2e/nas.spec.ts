@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, NAS_SERVER_KEY, OWNER_SERIES, PROJECTS, RENDEZVOUS_URL, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
+import { discKeyOf } from '../../src/engine/disc/disc-key';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
 import { telemetry } from './telemetry';
@@ -10,6 +12,8 @@ import { telemetry } from './telemetry';
 // The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
 // library's top level lists), and the rendezvous Worker that turns a code into the server's address. Its title
 // library matches made-up titles from tests/e2e/fixtures/nas-metadata.json against copies of synthetic discs.
+
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 const sleep = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -323,9 +327,11 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await expect(page.getByTestId('relay-badge')).toContainText('Relayed'); // ?rtcrelayed=1 makes the connection count as relayed
   expect(await channelBytes(page)).toBeGreaterThan(1_000_000); // most of disc1's first 1.3 MB clip, over the channel
 
-  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once. The address bar kept the
-  // folder browser's path, so the load opens it.
+  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once. The address bar kept the play
+  // link, so the load opens the disc's pre-flight (resolved over the channel); its Back returns to the folder browser.
   await page.reload();
+  await expect(page.getByTestId('nas-preflight')).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('nas-preflight').getByRole('button', { name: 'Back' }).click();
   await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 30_000 });
   await playFromNas(page, 'disc-bdj');
   await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 45_000 });
@@ -772,6 +778,120 @@ test('a device unpaired while on a NAS path goes back to the landing page', asyn
   await expect(page.getByTestId('pair-screen')).toBeVisible({ timeout: 15_000 });
   expect(pathOf(page)).toBe('/');
   await expect(page.getByTestId('title-library')).toHaveCount(0);
+});
+
+/** The `f.` link key of disc1 (and its copies), as the app works it out from a manifest (whose paths are upper-case). */
+function disc1Key(): string {
+  const dir = join(REPO_ROOT, 'fixtures/synthetic/disc1/BDMV/STREAM');
+  const files = readdirSync(dir).map((name) => ({ path: `BDMV/STREAM/${name.toUpperCase()}`, size: statSync(join(dir, name)).size }));
+  const key = discKeyOf('0000000000000000', files);
+  expect(key).toMatch(/^f\.[0-9A-F]{32}$/);
+  return key;
+}
+
+/** The name of the disc a key opens (the copy the NAS picks). */
+async function resolvedName(key: string): Promise<string> {
+  const res = await ownerApi(`discs/resolve/${encodeURIComponent(key)}`);
+  expect(res.status).toBe(200);
+  return ((await res.json()) as { disc: { name: string } }).disc.name;
+}
+
+const waitForPlaying = (page: Page): Promise<unknown> =>
+  page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 15_000 });
+
+/** The address bar's play route: its path, playlist and time. */
+const playLinkOf = (page: Page): { path: string; pl: string | null; t: number | null } => {
+  const url = new URL(page.url());
+  const t = url.searchParams.get('t');
+  return { path: url.pathname, pl: url.searchParams.get('pl'), t: t === null ? null : Number(t) };
+};
+
+test('playing a NAS episode keeps a play link in the address bar', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  // The episode is 4 s long (the fixture's), so the time is checked on a pause, which writes it at once.
+  await expect.poll(() => playLinkOf(page).pl).toBe('00001');
+  expect(playLinkOf(page).path).toMatch(/^\/nas\/play\/f\.[0-9A-F]{32}$/);
+  expect(playLinkOf(page).path).toBe(`/nas/play/${disc1Key()}`);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(2_000_000);
+  await page.getByTestId('video-canvas').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(2);
+  expect(playLinkOf(page).pl).toBe('00001');
+});
+
+test('a play link opens the pre-flight, then plays from its time', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  const key = disc1Key();
+  await page.goto(`/nas/play/${key}?pl=00000&t=3&telemetry=1`);
+  await expect(page.getByTestId('nas-preflight').locator('h3')).toHaveText(await resolvedName(key), { timeout: 15_000 });
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(3_000_000);
+
+  // Paused a little later, the address bar has the time; a reload lands on the pre-flight with it, not on playback.
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(4_500_000);
+  await page.getByTestId('video-canvas').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(4);
+  const last = playLinkOf(page);
+  expect(last).toMatchObject({ path: `/nas/play/${key}`, pl: '00000' });
+  await page.reload();
+  await expect(page.getByTestId('nas-preflight')).toBeVisible({ timeout: 15_000 });
+  await expect(playerState(page)).toHaveCount(0);
+  expect(playLinkOf(page)).toEqual(last);
+});
+
+test('Back during NAS playback closes the disc and returns to the season', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  const seasonPath = pathOf(page);
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  await expect(playerState(page)).toHaveCount(0);
+  expect(pathOf(page)).toBe(seasonPath);
+
+  // A link opened cold has no app entry behind it: the player's close lands on the library, still in the app.
+  await page.goto(`/nas/play/${disc1Key()}?pl=00000`);
+  await page.getByTestId('nas-play').click({ timeout: 15_000 });
+  await waitForPlaying(page);
+  await page.getByRole('button', { name: 'Playlists' }).click();
+  await page.getByRole('button', { name: 'Open another disc' }).click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  await expect(playerState(page)).toHaveCount(0);
+  expect(pathOf(page)).toBe('/nas');
+});
+
+test('a play link with a bad time or playlist opens the disc without seeking', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  const key = disc1Key();
+  for (const t of ['-5', '99999']) {
+    await page.goto(`/nas/play/${key}?pl=00000&t=${t}&telemetry=1`);
+    await page.getByTestId('nas-play').click({ timeout: 15_000 });
+    await waitForPlaying(page);
+    await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+    // Playing from the start: well short of any seek once it has played a moment.
+    await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThan(500_000);
+    expect((await telemetry(page))!.clockUs).toBeLessThan(2_500_000);
+  }
+  await page.goto(`/nas/play/${key}?pl=99999`);
+  await page.getByTestId('nas-play').click({ timeout: 15_000 });
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("This episode isn't on this disc; it opened normally.")).toBeVisible();
 });
 
 // The owner screens. Each browser files its own discs (nas-server.ts `ownerDiscs`); the tests that change the catalogue

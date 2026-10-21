@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { discKeyOf } from '../../engine/disc/disc-key';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
 import type { DiscEntry, DiscManifest } from '../../engine/disc/nas-api';
 import type { BufferRequest } from '../../engine/protocol';
@@ -7,7 +8,10 @@ import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, sto
 import { discBadges, discFacts, formatSize, mainPlaylist, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
 import { NasHttpError, type NasClient } from './nas-client';
+import { useNasRoute, type NasHistory } from './nas-history';
+import type { NasRoute } from './nas-route';
 import { playOnceOpen } from './play-once-open';
+import type { PlayingRoute } from './playing-route';
 
 /** The disc to open: a folder listing's row, or a title's disc, whose size is only known from its manifest. */
 export type PreflightDisc = Pick<DiscEntry, 'id' | 'name' | 'kind'> & { readonly sizeBytes: number | null };
@@ -18,10 +22,19 @@ interface PreflightProps {
   readonly disc: PreflightDisc;
   /** An episode's playlist, started once the engine has read the disc (its 'titles' event). */
   readonly playlistId?: string;
+  /** A play link's time in the playlist, sought to once it plays (ignored past its end, or without a playlist). */
+  readonly startTimeS?: number;
+  /** Play goes into the address bar as the disc's play route, which `playingRoute` then keeps current. */
+  readonly history: NasHistory;
+  readonly playingRoute: PlayingRoute;
+  /** Play is about to push the play route: the screen holding this pre-flight keeps it shown on that route. */
+  readonly onLaunch?: () => void;
   /** Whether the disc is UHD, once its manifest has shown it (for the row's badge). */
   readonly onFacts: (discId: string, facts: DiscFacts) => void;
   readonly onCancel: () => void;
 }
+
+const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 
 /** A disc gone (or replaced) since its folder was listed answers 404 disc-changed. */
 const message = (err: unknown): string =>
@@ -38,8 +51,13 @@ const ASK_EVERY_WAIT = new URLSearchParams(globalThis.location?.search ?? '').ge
  * connection is slower than the main title (buffer first), Play buffers ahead first: silently for a short wait, else
  * after asking (Wait, or Play now with pauses); a device that can't hold the wait offers pauses.
  */
-export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel }: PreflightProps): ReactElement {
+export function Preflight({ nas, controller, disc, playlistId, startTimeS, history, playingRoute, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
+  const route = useNasRoute(history);
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
+  /** The disc's link key, from its manifest: `f.<fingerprint>`, else `d.<disc id>`. */
+  const discKey = useMemo(() => (manifest ? discKeyOf(disc.id, manifest.files) : null), [manifest, disc.id]);
+  /** Whether the address bar is this disc's play route (a link, or Play pressed here). */
+  const onPlayRoute = route?.kind === 'play' && (route.discKey === discKey || route.discKey === `d.${disc.id}`);
   const [facts, setFacts] = useState<DiscFacts | null>(null);
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
   const [mbps, setMbps] = useState<number | null | undefined>(undefined);
@@ -56,9 +74,28 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
   /** Releases the wait for this open's playlists (playOnceOpen); this pre-flight going away ends it too. */
   const releaseWait = useRef<(() => void) | null>(null);
   useEffect(() => () => releaseWait.current?.(), []);
+  /** Bumped when a launch is abandoned, so its pending open (discBase, session) is dropped. */
+  const launch = useRef(0);
   useEffect(() => {
-    if ((opening === 'launched' || opening === 'buffering') && engineFailed) setOpening('idle');
-  }, [opening, engineFailed]);
+    if ((opening === 'launched' || opening === 'buffering') && engineFailed) {
+      setOpening('idle');
+      playingRoute.stop();
+    }
+  }, [opening, engineFailed, playingRoute]);
+  // A link with the disc id's key gets the fingerprint's once the manifest shows it: the link a copy or a move keeps.
+  useEffect(() => {
+    if (route?.kind === 'play' && discKey !== null && route.discKey === `d.${disc.id}` && route.discKey !== discKey) history.replace({ ...route, discKey });
+  }, [route, discKey, disc.id, history]);
+  // Back (or Forward) off the play route while the disc opens: it is closed, and this pre-flight with it.
+  const leftRoute = opening !== 'idle' && !onPlayRoute;
+  useEffect(() => {
+    if (!leftRoute) return;
+    launch.current++;
+    playingRoute.stop();
+    controller.closeDisc();
+    setOpening('idle');
+    onCancel();
+  }, [leftRoute, playingRoute, controller, onCancel]);
 
   useEffect(() => {
     let live = true;
@@ -123,23 +160,33 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
 
   /** `hold`: the disc opens once the cache holds the target (Wait); otherwise at once, its fill going on behind it. */
   const play = (bufferFirst?: BufferRequest, hold = true): void => {
-    if (!manifest) return;
+    if (!manifest || discKey === null) return;
     controller.startAudio(); // inside the click gesture
     setOpening('starting');
     setError(null);
+    // The play route: pushed from a title or folder, so Back returns there; a link is already on it.
+    playingRoute.start(discKey);
+    if (!onPlayRoute) {
+      onLaunch?.();
+      history.push({ kind: 'play', discKey, playlistId: playlistId ?? null, timeS: null });
+    }
+    const id = ++launch.current;
     Promise.all([nas.discBase(disc.id), nas.session()]).then(
       ([base, session]) => {
+        if (id !== launch.current) return;
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
         const { spec, release } = nasDiscSpec(base, token, manifest, nas.discFetch);
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst);
         if (bufferFirst && !hold) controller.cancelBuffer(); // play now: the queued open doesn't wait for its fill
         releaseWait.current?.();
-        releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId);
+        releaseWait.current = playlistId === undefined ? null : playOnceOpen(controller, playlistId, startTimeS === undefined ? undefined : startTimeS * 1e6);
         if (bufferFirst) watchBufferFailure(controller); // for as long as this disc is open, past this screen
         setOpening(bufferFirst && hold ? 'buffering' : 'launched');
       },
     ).catch((err: unknown) => {
+      if (id !== launch.current) return;
+      playingRoute.stop();
       setOpening('idle');
       setError(message(err));
     });
@@ -158,9 +205,13 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
     else play();
   };
   const stopWaiting = (): void => {
+    launch.current++;
+    playingRoute.stop();
     controller.closeDisc(); // the engine drops the disc unopened
     setOpening('idle');
   };
+  /** Back: off the play route through the history (to the screen Play came from, else the library), else closed here. */
+  const cancel = (): void => (onPlayRoute ? history.back(LIBRARY) : onCancel());
   const buffer = snapshot.buffer;
   const percent = buffer && buffer.targetBytes > 0 ? Math.min(100, Math.floor((buffer.bytes / buffer.targetBytes) * 100)) : 0;
 
@@ -244,7 +295,7 @@ export function Preflight({ nas, controller, disc, playlistId, onFacts, onCancel
                 Lower quality (coming later)
               </button>
             )}
-            <button type="button" onClick={onCancel}>
+            <button type="button" onClick={cancel}>
               Back
             </button>
           </div>

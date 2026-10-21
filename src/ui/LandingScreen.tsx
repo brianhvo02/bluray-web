@@ -7,11 +7,14 @@ import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import { useNasRoute, type NasHistory } from './nas/nas-history';
 import type { NasRoute } from './nas/nas-route';
+import type { PlayingRoute } from './nas/playing-route';
+import { Preflight } from './nas/Preflight';
 import type { NasPairing } from './nas/nas-store';
 import { pairedAs } from './nas/people-model';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
+import type { DiscEntry } from '../engine/disc/nas-api';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
 
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
@@ -19,17 +22,88 @@ const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 /** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
 const COPY_NOTICE_DELAY_MS = 1500;
 
+type PlayRoute = Extract<NasRoute, { kind: 'play' }>;
+
+interface PlayLinkProps {
+  readonly nas: NasClient;
+  readonly controller: PlayerController;
+  readonly history: NasHistory;
+  readonly playingRoute: PlayingRoute;
+  readonly route: PlayRoute;
+}
+
+/**
+ * A play link opened here (a link, a reload during playback, Back or Forward onto one): its disc's pre-flight, with
+ * the link's playlist and time. Play needs the tap, which starts audio.
+ */
+function PlayLink({ nas, controller, history, playingRoute, route }: PlayLinkProps): ReactElement {
+  /** undefined while resolving; null when the NAS has no such disc; a string when the NAS couldn't be asked. */
+  const [found, setFound] = useState<DiscEntry | null | string | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    // The same disc again (the pre-flight swapping a `d.` key for its `f.` key) keeps its pre-flight as it is.
+    nas.resolveDisc(route.discKey).then(
+      (disc) => live && setFound((prev) => (typeof prev === 'object' && prev !== null && disc !== null && prev.id === disc.id ? prev : disc)),
+      (err: unknown) => live && setFound(err instanceof Error ? err.message : String(err)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [nas, route.discKey]);
+  const back = useCallback(() => history.back(LIBRARY), [history]);
+  if (found === undefined) return <p className="status">Loading…</p>;
+  if (found === null || typeof found === 'string') {
+    return (
+      <div className="error-banner" role="alert" data-testid="nas-error">
+        {found ?? "This link's disc isn't on the NAS."}
+      </div>
+    );
+  }
+  return (
+    <section className="titles" data-testid="nas-play-link">
+      <Preflight
+        key={found.id}
+        nas={nas}
+        controller={controller}
+        disc={found}
+        playlistId={route.playlistId ?? undefined}
+        startTimeS={route.timeS ?? undefined}
+        history={history}
+        playingRoute={playingRoute}
+        onFacts={() => {}}
+        onCancel={back}
+      />
+    </section>
+  );
+}
+
 interface LandingScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
   readonly nas: NasClient;
   readonly history: NasHistory;
+  /** Kept current by playback once a NAS pre-flight launches a disc. */
+  readonly playingRoute: PlayingRoute;
   /** A code from a `?pair=` link: the pair screen opens with it filled in. */
   readonly pairCode?: string;
+  /** The `?pair=` code was used (or the NAS forgotten): it isn't offered again. */
+  readonly onPairCodeSpent?: () => void;
 }
 
-export function LandingScreen({ controller, snapshot, nas, history, pairCode }: LandingScreenProps): ReactElement {
+export function LandingScreen({ controller, snapshot, nas, history, playingRoute, pairCode, onPairCodeSpent }: LandingScreenProps): ReactElement {
   const route = useNasRoute(history);
+  /**
+   * The screen a pre-flight launched its disc from, while the play route its Play pushed is shown: that screen stays
+   * (with the pre-flight on it). A play route without one (a link, a reload) shows the link's own pre-flight.
+   */
+  const [launchedOn, setLaunchedOn] = useState<NasRoute | null>(null);
+  const onLaunch = useCallback(() => setLaunchedOn(history.route()), [history]);
+  useEffect(() => {
+    if (route?.kind !== 'play') setLaunchedOn(null);
+  }, [route?.kind]);
+  const playLink = route?.kind === 'play' && launchedOn === null ? route : null;
+  /** The NAS screen shown: the route, or on a pushed play route the screen it was pushed from. */
+  const shown = route?.kind === 'play' && launchedOn !== null ? launchedOn : route;
   const [capabilities] = useState(() => checkCapabilities());
   const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
@@ -81,7 +155,7 @@ export function LandingScreen({ controller, snapshot, nas, history, pairCode }: 
    */
   const [access, setAccess] = useState<{ titles: boolean; owner: boolean } | 'checking' | null>(null);
   const browsing = route !== null;
-  const needsAccess = route !== null && route.kind !== 'folders';
+  const needsAccess = shown !== null && shown.kind !== 'folders' && shown.kind !== 'play';
   const pairingKnown = pairing !== undefined && pairing !== null;
   useEffect(() => {
     if (!browsing) setAccess(null);
@@ -126,6 +200,7 @@ export function LandingScreen({ controller, snapshot, nas, history, pairCode }: 
   );
   const forgetNas = (): void => {
     setPairRequested(false);
+    onPairCodeSpent?.();
     history.replace(null);
     nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
@@ -321,6 +396,7 @@ export function LandingScreen({ controller, snapshot, nas, history, pairCode }: 
             initialCode={pairCode}
             onPaired={() => {
               setPairRequested(false);
+              onPairCodeSpent?.();
               setLocalError(null);
               loadPairing();
             }}
@@ -345,13 +421,32 @@ export function LandingScreen({ controller, snapshot, nas, history, pairCode }: 
             </button>
           </p>
         ))}
-      {paired && route !== null && (route.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
+      {paired && playLink !== null && <PlayLink nas={nas} controller={controller} history={history} playingRoute={playingRoute} route={playLink} />}
+      {paired && shown !== null && playLink === null && (shown.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
         // A guest behind the closed gate on any other route: the folders where it browsed last.
-        <LibraryScreen nas={nas} controller={controller} history={history} path={route.kind === 'folders' ? route.path : rememberedFolder()} onClose={closeNas} />
+        <LibraryScreen
+          nas={nas}
+          controller={controller}
+          history={history}
+          playingRoute={playingRoute}
+          onLaunch={onLaunch}
+          path={shown.kind === 'folders' ? shown.path : rememberedFolder()}
+          onClose={closeNas}
+        />
       )}
-      {paired && route !== null && route.kind !== 'folders' && (access === null || access === 'checking') && <p className="status">Loading…</p>}
-      {paired && route !== null && route.kind !== 'folders' && typeof access === 'object' && access?.titles && (
-        <TitleLibrary nas={nas} controller={controller} history={history} owner={access.owner} onOwnerLost={recheckAccess} onGateClosed={gateClosed} onClose={closeNas} />
+      {paired && shown !== null && playLink === null && shown.kind !== 'folders' && (access === null || access === 'checking') && <p className="status">Loading…</p>}
+      {paired && shown !== null && playLink === null && shown.kind !== 'folders' && typeof access === 'object' && access?.titles && (
+        <TitleLibrary
+          nas={nas}
+          controller={controller}
+          history={history}
+          playingRoute={playingRoute}
+          onLaunch={onLaunch}
+          owner={access.owner}
+          onOwnerLost={recheckAccess}
+          onGateClosed={gateClosed}
+          onClose={closeNas}
+        />
       )}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">

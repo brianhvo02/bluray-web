@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { createController } from '../player/create-controller';
 import type { PlayerController } from '../player/player-controller';
 import { PlatformSession } from '../player/platform-session';
@@ -6,6 +6,7 @@ import { LandingScreen } from './LandingScreen';
 import { NasClient } from './nas/nas-client';
 import { getNasHistory, useNasRoute } from './nas/nas-history';
 import { idbNasStore } from './nas/nas-store';
+import { PlayingRoute } from './nas/playing-route';
 import { PlayerScreen } from './PlayerScreen';
 import { idbShaderLibrary } from './shader-library';
 import { ShaderModel } from './shader-model';
@@ -110,10 +111,13 @@ function UpdatePrompt({ worker }: { worker: ServiceWorker }): ReactElement {
 export function App(): ReactElement {
   const [controller] = useState(getController);
   const [nas] = useState(getNasClient);
-  const [pairCode] = useState(takePairCode);
+  // Spent once paired (or the NAS forgotten), so the landing screen shown again after a disc closes doesn't ask again.
+  const [pairCode, setPairCode] = useState(takePairCode);
+  const spendPairCode = useCallback(() => setPairCode(undefined), []);
   const [history] = useState(getNasHistory);
   // Kept subscribed for the app's life, so the history sees every popstate (its direction drives focus).
   useNasRoute(history);
+  const [playingRoute] = useState(() => new PlayingRoute(history, () => performance.now()));
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useEffect(() => {
     const session = new PlatformSession(
@@ -133,9 +137,17 @@ export function App(): ReactElement {
     <div className="app" data-testid="app">
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 ? (
-        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} history={history} pairCode={pairCode} />
+        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} history={history} playingRoute={playingRoute} pairCode={pairCode} onPairCodeSpent={spendPairCode} />
       ) : (
-        <PlayerScreen controller={controller} snapshot={snapshot} shaderModel={shaders} shaderState={shaderState} nas={nas} />
+        <PlayerScreen
+          controller={controller}
+          snapshot={snapshot}
+          shaderModel={shaders}
+          shaderState={shaderState}
+          nas={nas}
+          history={history}
+          playingRoute={playingRoute}
+        />
       )}
     </div>
   );

@@ -4,15 +4,20 @@ import type { PlayerController } from '../../player/player-controller';
 import { breadcrumbs, discBadges, folderMemory, formatSize, sortRows, type DiscFacts, type LibraryRow } from './library-model';
 import { AdminScreen } from './AdminScreen';
 import { NasHttpError, type NasClient } from './nas-client';
-import type { NasHistory } from './nas-history';
+import { useNasRoute, type NasHistory } from './nas-history';
 import type { NasPairing } from './nas-store';
+import type { PlayingRoute } from './playing-route';
 import { Preflight } from './Preflight';
 
 interface LibraryScreenProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
   readonly history: NasHistory;
-  /** The folder shown, from the address bar. */
+  /** Kept current by playback once a pre-flight here launches a disc. */
+  readonly playingRoute: PlayingRoute;
+  /** A pre-flight here is launching its disc: its play route is about to be pushed, with this folder still shown. */
+  readonly onLaunch: () => void;
+  /** The folder shown, from the address bar (on the play route a pre-flight here pushed, the folder it was opened in). */
   readonly path: string;
   readonly onClose: () => void;
 }
@@ -32,7 +37,8 @@ export const rememberedFolder = (): string => folderMemory(storage()).get();
 const uhdDiscs = new Map<string, boolean>();
 
 /** The NAS's folders and discs: breadcrumbs, folders first, then discs with size and badges; a disc opens its pre-flight. */
-export function LibraryScreen({ nas, controller, history, path, onClose }: LibraryScreenProps): ReactElement {
+export function LibraryScreen({ nas, controller, history, playingRoute, onLaunch, path, onClose }: LibraryScreenProps): ReactElement {
+  const onPlayRoute = useNasRoute(history)?.kind === 'play';
   const [memory] = useState(() => folderMemory(storage()));
   const [rows, setRows] = useState<LibraryRow[] | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -81,8 +87,12 @@ export function LibraryScreen({ nas, controller, history, path, onClose }: Libra
     };
   }, [nas, path, memory, reload, history]);
 
-  // The pre-flight belongs to the folder it was opened in: another folder (Back, Forward) closes it.
+  // The pre-flight belongs to the folder it was opened in: another folder (Back, Forward) closes it, and so does leaving
+  // the play route its Play pushed.
   useEffect(() => setSelected(null), [path]);
+  useEffect(() => {
+    if (!onPlayRoute) setSelected(null);
+  }, [onPlayRoute]);
 
   const onFacts = useCallback((discId: string, facts: DiscFacts) => {
     if (uhdDiscs.get(discId) === facts.uhd) return;
@@ -149,7 +159,16 @@ export function LibraryScreen({ nas, controller, history, path, onClose }: Libra
         </div>
       )}
       {selected ? (
-        <Preflight nas={nas} controller={controller} disc={selected} onFacts={onFacts} onCancel={() => setSelected(null)} />
+        <Preflight
+          nas={nas}
+          controller={controller}
+          disc={selected}
+          history={history}
+          playingRoute={playingRoute}
+          onLaunch={onLaunch}
+          onFacts={onFacts}
+          onCancel={() => setSelected(null)}
+        />
       ) : rows === null ? (
         !error && <p className="status">Loading…</p>
       ) : rows.length === 0 ? (

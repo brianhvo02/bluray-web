@@ -9,6 +9,7 @@ import { NasHttpError, type NasClient } from './nas-client';
 import { useNasRoute, type NasHistory } from './nas-history';
 import { nasRoutePath, seasonIdOf, seasonKeyOf, type NasRoute } from './nas-route';
 import { Poster } from './Poster';
+import type { PlayingRoute } from './playing-route';
 import { Preflight, type PreflightDisc } from './Preflight';
 import { SeasonScreen } from './SeasonScreen';
 import { SeriesScreen } from './SeriesScreen';
@@ -21,6 +22,10 @@ interface TitleLibraryProps {
   readonly controller: PlayerController;
   /** The screen shown is the address bar's route; every move goes through it. */
   readonly history: NasHistory;
+  /** Kept current by playback once a pre-flight here launches a disc. */
+  readonly playingRoute: PlayingRoute;
+  /** A pre-flight here is launching its disc: its play route is about to be pushed, with this screen still shown. */
+  readonly onLaunch: () => void;
   /** From `GET me`: owners get the settings and the Unsorted shelf. */
   readonly owner: boolean;
   /** This device is no longer an owner (the NAS refused the settings): the caller asks `me` again. */
@@ -157,10 +162,13 @@ function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
 }
 
 /** The NAS by title (spec §14, mockups 1–3): search, shelves, recently added and A–Z, then a title's seasons and discs. */
-export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onGateClosed, onClose }: TitleLibraryProps): ReactElement {
+export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch, owner, onOwnerLost, onGateClosed, onClose }: TitleLibraryProps): ReactElement {
   const routed = useNasRoute(history);
-  // A play route has no screen of its own yet: the library, with the address bar left as it is.
-  const route: NasRoute = routed === null || routed.kind === 'play' || routed.kind === 'folders' ? LIBRARY : routed;
+  // The play route a pre-flight here pushed keeps the screen it was opened on (and the pre-flight on it).
+  const beforePlay = useRef<NasRoute>(LIBRARY);
+  const onPlayRoute = routed?.kind === 'play';
+  if (routed !== null && !onPlayRoute && routed.kind !== 'folders') beforePlay.current = routed;
+  const route: NasRoute = routed === null || routed.kind === 'folders' ? LIBRARY : onPlayRoute ? beforePlay.current : routed;
   const routeKey = nasRoutePath(route);
   const query = route.kind === 'library' ? route.q : '';
   /**
@@ -307,8 +315,12 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
   }, [routeKey, openId, gone, history]);
   const detail = loaded !== null && loaded.id === openId && openId !== gone ? loaded.detail : null;
 
-  // A pre-flight belongs to the screen it was opened on: any move (Back, Forward) closes it.
+  // A pre-flight belongs to the screen it was opened on: any move (Back, Forward) closes it, and so does leaving the
+  // play route its Play pushed.
   useEffect(() => setSelected(null), [routeKey]);
+  useEffect(() => {
+    if (!onPlayRoute) setSelected(null);
+  }, [onPlayRoute]);
 
   /**
    * Focus follows the screens: a screen opened in the app focuses its heading, and going back focuses the item that
@@ -378,7 +390,17 @@ export function TitleLibrary({ nas, controller, history, owner, onOwnerLost, onG
   if (selected) {
     return (
       <section className="titles" data-testid="title-library">
-        <Preflight nas={nas} controller={controller} disc={selected.disc} playlistId={selected.playlistId} onFacts={() => {}} onCancel={() => setSelected(null)} />
+        <Preflight
+          nas={nas}
+          controller={controller}
+          disc={selected.disc}
+          playlistId={selected.playlistId}
+          history={history}
+          playingRoute={playingRoute}
+          onLaunch={onLaunch}
+          onFacts={() => {}}
+          onCancel={() => setSelected(null)}
+        />
       </section>
     );
   }
