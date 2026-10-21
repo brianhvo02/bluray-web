@@ -13,6 +13,11 @@ export const LOCAL_DEVICE_NAME = 'this device';
 export const SAVE_EVERY_MS = 10_000;
 /** A time that moves this much more (or less) than the clock did between two snapshots was a seek. */
 const SEEK_JUMP_US = 2_000_000;
+/**
+ * A playlist left this close to its end ended there: under a disc program the navigator (or BD-J) moves on before the
+ * player reports `ended`, so the saver sees the playlist change at about its duration less one tick.
+ */
+const ENDED_WITHIN_US = 1_000_000;
 /** What the NAS accepts in a place's text files (server/src/playback-store.ts). */
 const MAX_TEXT_FILES = 64;
 const MAX_TEXT_FILE_NAME = 512;
@@ -116,7 +121,8 @@ const TRANSIENT = new Set([404, 429, 502, 503, 504]);
  * Saves the open disc's place (spec 2026-10-20 §6.2): every 10 s while playing and at once on a pause, seek, track,
  * offset or shader change, or when the playlist changes (the one that stopped, where it stopped). Only a qualifying
  * playlist (qualifies) makes a place, so a menu loop after an episode keeps the episode's. Every save goes to the
- * device first; a NAS disc's goes to the outbox and is sent from there, and stays there while the NAS can't be reached.
+ * device first: a local disc's into its places, a NAS disc's into the outbox only, sent from there and kept there while
+ * the NAS can't be reached.
  */
 export class PlaceSaver {
   private target: Active | null = null;
@@ -169,7 +175,7 @@ export class PlaceSaver {
     return launch && launch.opens === this.deps.discOpens() ? { settings: launch.settings, byLanguage: launch.byLanguage, discKey: launch.discKey } : null;
   }
 
-  /** The places this device holds for a local disc (never a NAS disc's: those are the NAS's). */
+  /** The places this device holds for a local disc (never a NAS disc's: those are the NAS's, and never stored here). */
   placesOf(discKey: string): Promise<DiscPlaces> {
     return this.deps.store.get(discKey);
   }
@@ -301,31 +307,33 @@ export class PlaceSaver {
   private savePlaylistLeft(t: Active, left: Seen): void {
     const c = this.cached;
     if (!c || c.playlistId !== left.snapshot.currentPlaylistId || !this.qualifies(t, left)) return;
-    this.chain = this.chain.then(() => this.write(t, left, c.place, false)).catch((err: unknown) => this.log('saving the place failed', err));
+    const s = left.snapshot;
+    const ended = s.durationUs > 0 && s.timeUs >= s.durationUs - ENDED_WITHIN_US;
+    this.chain = this.chain.then(() => this.write(t, left, c.place, false, ended)).catch((err: unknown) => this.log('saving the place failed', err));
   }
 
-  private async write(t: Active, seen: Seen, registers: PlaceState, keepalive: boolean): Promise<void> {
+  /** `ended`: the playlist was left at its end, so the place is finished whatever isFinished says. */
+  private async write(t: Active, seen: Seen, registers: PlaceState, keepalive: boolean, ended = false): Promise<void> {
     const built = buildPlace({
       discKey: t.discKey, discId: t.discId ?? '', snapshot: seen.snapshot, place: registers,
       shaderSet: seen.shaderSet, deviceName: t.deviceName, nowMs: this.deps.nowMs(), textFileSizes: this.sizes,
     });
     const place: PlaybackPlace = {
       ...built,
+      finished: built.finished || ended,
       settings: { ...built.settings, textFiles: built.settings.textFiles.slice(0, MAX_TEXT_FILES).map((f) => ({ ...f, name: f.name.slice(0, MAX_TEXT_FILE_NAME) })) },
     };
     const { store, nas } = this.deps;
-    if (!t.remote || !nas) {
+    if (!t.remote) {
       await store.put(place);
       return;
     }
+    // A NAS disc's place is the NAS's (its person's): it never goes into this device's places, which a local copy of
+    // the disc (the same `f.` key) would read. The outbox is its device-first write.
+    if (!nas) return;
     // A keepalive request leaves before the page can go (checked against the pairing last read, as the page may not
     // live to read it again); the outbox keeps the place should it not arrive.
     const sending = keepalive && t.pairing !== null && t.pairing === this.pairingNow ? this.send(place, true) : null;
-    try {
-      await store.put(place);
-    } catch (err) {
-      this.log('saving the place on this device failed', err);
-    }
     let queued = false;
     if (t.pairing !== null) {
       try {

@@ -6,7 +6,7 @@ import { idbPlaceStore, MAX_SEND_ATTEMPTS, MAX_TEXT_FILE_BYTES, MAX_TEXT_FILES_B
 const KEY = `f.${'A'.repeat(32)}`;
 const settings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
 const place = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
-  discKey: KEY, discId: '0123456789abcdef', playlistId: '00001', timeUs: 5e6, durationUs: 1440e6, finished: false,
+  discKey: KEY, discId: '', playlistId: '00001', timeUs: 5e6, durationUs: 1440e6, finished: false,
   mode: 'none', title: null, psrs: [0, 1], gprs: null, settings, updatedAt: 1000, deviceName: 'iPad', ...over,
 });
 
@@ -106,5 +106,41 @@ describe('idbPlaceStore', () => {
       req.onerror = () => reject(req.error);
     });
     expect(kept).toEqual({ key: 'volume', value: 0.3 });
+  });
+
+  it("never answers a NAS disc's place, and drops the ones older versions stored on upgrading", async () => {
+    const factory = new IDBFactory();
+    const nasPlace = place({ discId: '0123456789abcdef', playlistId: '00002', updatedAt: 2000 });
+    // a version 5 database, as the branch's first builds wrote it: a NAS place and a local one under one fingerprint
+    await new Promise<void>((resolve, reject) => {
+      const req = factory.open('bluray-web', 5);
+      req.onupgradeneeded = () => {
+        const s = req.result.createObjectStore('places', { keyPath: 'key' });
+        s.put({ key: `${KEY}/00001`, place: place() });
+        s.put({ key: `${KEY}/00002`, place: nasPlace });
+      };
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    const store = idbPlaceStore(factory, IDBKeyRange);
+    expect(Object.keys((await store.get(KEY)).places)).toEqual(['00001']);
+    const left = await new Promise<unknown[]>((resolve, reject) => {
+      const req = factory.open('bluray-web');
+      req.onsuccess = () => {
+        const all = req.result.transaction('places').objectStore('places').getAllKeys();
+        all.onsuccess = () => {
+          req.result.close();
+          resolve(all.result);
+        };
+      };
+      req.onerror = () => reject(req.error);
+    });
+    expect(left).toEqual([`${KEY}/00001`]);
+    // and one put by mistake is never read back
+    await store.put(place({ discId: 'fedcba9876543210', playlistId: '00003' }));
+    expect(Object.keys((await store.get(KEY)).places)).toEqual(['00001']);
   });
 });

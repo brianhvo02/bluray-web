@@ -61,6 +61,12 @@ interface TextFilesRecord {
   readonly files: readonly StoredTextFile[];
 }
 
+/**
+ * A NAS disc's place: only those carry the NAS's disc id (a local folder's and a disc-server disc's have none). They
+ * belong in the outbox, never in `places` (`db.ts` drops the ones version 5 stored).
+ */
+export const isRemote = (place: Pick<PlaybackPlace, 'discId'>): boolean => place.discId !== '';
+
 /** `<discKey>/<playlistId>`: a place's key on this device. */
 export const placeKey = (place: Pick<PlaybackPlace, 'discKey' | 'playlistId'>): string => `${place.discKey}/${place.playlistId}`;
 
@@ -88,6 +94,7 @@ function withQueued(factory: IDBFactory, key: string, updatedAt: number, change:
 export function idbPlaceStore(factory: IDBFactory = indexedDB, keyRange: typeof IDBKeyRange = IDBKeyRange): PlaceStore {
   return {
     async put(place) {
+      if (isRemote(place)) return;
       await putNewer(factory, STORES.places, { key: placeKey(place), place });
     },
     async get(discKey) {
@@ -96,6 +103,7 @@ export function idbPlaceStore(factory: IDBFactory = indexedDB, keyRange: typeof 
       const places: Record<string, PlaybackPlace> = {};
       let newest: PlaybackPlace | null = null;
       for (const { place } of records) {
+        if (isRemote(place)) continue; // a NAS disc's place (stored by older builds) is never this device's
         places[place.playlistId] = place;
         if (!newest || place.updatedAt > newest.updatedAt) newest = place;
       }

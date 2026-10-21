@@ -11,17 +11,21 @@ const S = 1e6;
 const KEY = `f.${'A'.repeat(32)}`;
 
 /** The store in memory, with what was put, in order. */
-function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; queued: Map<string, OutboxEntry>; files: Map<string, StoredTextFile[]> } {
+function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; saves: PlaybackPlace[]; queued: Map<string, OutboxEntry>; files: Map<string, StoredTextFile[]> } {
   const places = new Map<string, PlaybackPlace>();
   const queued = new Map<string, OutboxEntry>();
   const files = new Map<string, StoredTextFile[]>();
+  /** `put` calls (a local disc's places); `saves` adds the outbox's (a NAS disc's), so either kind of disc is seen. */
   const puts: PlaybackPlace[] = [];
+  const saves: PlaybackPlace[] = [];
   return {
     puts,
+    saves,
     queued,
     files,
     async put(p) {
       puts.push(p);
+      saves.push(p);
       places.set(placeKey(p), p);
     },
     async get(discKey): Promise<DiscPlaces> {
@@ -32,6 +36,7 @@ function memoryStore(): PlaceStore & { puts: PlaybackPlace[]; queued: Map<string
       return [...queued.values()];
     },
     async queue(p, pairing) {
+      saves.push(p);
       queued.set(placeKey(p), { place: p, pairing, attempts: 0 });
     },
     async sent(key, updatedAt) {
@@ -160,17 +165,17 @@ describe('PlaceSaver', () => {
   it('saves every 10 s while playing, and not while paused', async () => {
     const t = setup();
     await t.play(9_999);
-    expect(t.store.puts).toHaveLength(0);
+    expect(t.store.saves).toHaveLength(0);
     await t.play(1);
-    expect(t.store.puts.map((p) => p.timeUs)).toEqual([10 * S]);
+    expect(t.store.saves.map((p) => p.timeUs)).toEqual([10 * S]);
     await t.play(10_000);
-    expect(t.store.puts.map((p) => p.timeUs)).toEqual([10 * S, 20 * S]);
+    expect(t.store.saves.map((p) => p.timeUs)).toEqual([10 * S, 20 * S]);
     t.show({ engineState: 'paused' }); // pause saves at once
     await settle();
-    expect(t.store.puts).toHaveLength(3);
+    expect(t.store.saves).toHaveLength(3);
     await t.play(60_000);
-    expect(t.store.puts).toHaveLength(3);
-    const last = t.store.puts[2]!;
+    expect(t.store.saves).toHaveLength(3);
+    const last = t.store.saves[2]!;
     expect(last).toMatchObject({ discKey: KEY, discId: '0123456789abcdef', playlistId: '00001', timeUs: 20 * S, mode: 'hdmv', title: 1, deviceName: 'iPad', gprs: { 7: 42 } });
     expect(t.nas.sent.map((s) => s.place.timeUs)).toEqual([10 * S, 20 * S, 20 * S]);
     expect(t.store.queued.size).toBe(0);
@@ -181,39 +186,39 @@ describe('PlaceSaver', () => {
     await t.play(3_000);
     t.show({ timeUs: 600 * S }); // seek
     await settle();
-    expect(t.store.puts.map((p) => p.timeUs)).toEqual([600 * S]);
+    expect(t.store.saves.map((p) => p.timeUs)).toEqual([600 * S]);
     t.show({ selectedAudio: 2 });
     await settle();
-    expect(t.store.puts).toHaveLength(2);
+    expect(t.store.saves).toHaveLength(2);
     const file: TextFileInfo = { name: 'ep1.ass', format: 'ass', cues: 10, startUs: 0, offsetMs: 0 };
     t.show({ subtitles: { pg: [], text: { files: [file], missingFonts: [], episodeStarts: [] }, selected: 'text', scale: 1 } });
     await settle();
     t.show({ subtitles: { pg: [], text: { files: [{ ...file, offsetMs: 400 }], missingFonts: [], episodeStarts: [] }, selected: 'text', scale: 1 } });
     await settle();
-    expect(t.store.puts).toHaveLength(4);
-    expect(t.store.puts[3]!.settings.textFiles).toEqual([{ name: 'ep1.ass', size: 0, startUs: 0, offsetMs: 400 }]);
+    expect(t.store.saves).toHaveLength(4);
+    expect(t.store.saves[3]!.settings.textFiles).toEqual([{ name: 'ep1.ass', size: 0, startUs: 0, offsetMs: 400 }]);
     t.show({}, 'Anime4K: Mode A (Fast)');
     await settle();
-    expect(t.store.puts.at(-1)!.settings.shaderSet).toBe('Anime4K: Mode A (Fast)');
+    expect(t.store.saves.at(-1)!.settings.shaderSet).toBe('Anime4K: Mode A (Fast)');
     await t.play(1_000); // playing on is no trigger
-    expect(t.store.puts).toHaveLength(5);
+    expect(t.store.saves).toHaveLength(5);
   });
 
   it("keeps an episode's place when a short menu playlist follows it, saving the episode where it stopped", async () => {
     const t = setup({ target: { chosen: null } });
     await t.play(10_000);
-    expect(t.store.puts).toHaveLength(1);
+    expect(t.store.saves).toHaveLength(1);
     await t.play(5_000);
     // the episode stops at 15 s and the disc's 30 s menu loop plays
     t.setRegisters(placeState(9));
     t.show({ currentPlaylistId: '00099', durationUs: 30 * S, timeUs: 0 });
     await settle();
-    expect(t.store.puts.map((p) => [p.playlistId, p.timeUs, p.title])).toEqual([['00001', 10 * S, 1], ['00001', 15 * S, 1]]);
+    expect(t.store.saves.map((p) => [p.playlistId, p.timeUs, p.title])).toEqual([['00001', 10 * S, 1], ['00001', 15 * S, 1]]);
     await t.play(30_000);
     t.show({ engineState: 'paused' });
     await settle();
-    expect(t.store.puts.every((p) => p.playlistId === '00001')).toBe(true);
-    expect(t.store.puts).toHaveLength(2);
+    expect(t.store.saves.every((p) => p.playlistId === '00001')).toBe(true);
+    expect(t.store.saves).toHaveLength(2);
   });
 
   it('marks a place finished when its playlist ends', async () => {
@@ -221,14 +226,50 @@ describe('PlaceSaver', () => {
     await t.play(10_000);
     t.show({ engineState: 'ended', timeUs: 1440 * S });
     await settle();
-    expect(t.store.puts.at(-1)).toMatchObject({ timeUs: 1440 * S, finished: true });
+    expect(t.store.saves.at(-1)).toMatchObject({ timeUs: 1440 * S, finished: true });
+  });
+
+  it('marks a place finished when a disc program moves on within a second of its end', async () => {
+    // a film whose last chapter starts before 90%: isFinished alone never calls it finished
+    const chapters: PlayerSnapshot['chapters'] = [{ index: 0, startUs: 0 }, { index: 1, startUs: 1200 * S }];
+    const t = setup({ target: { chosen: null } });
+    t.show({ chapters });
+    await t.play(10_000); // registers read
+    t.show({ timeUs: 1440 * S - 250_000 }); // played on to the end (a seek as the saver sees it)
+    await settle();
+    // the navigator replaces the session before the player says ended: the next snapshot is the menu
+    t.show({ currentPlaylistId: '00099', durationUs: 30 * S, timeUs: 0 });
+    await settle();
+    expect(t.store.saves.at(-1)).toMatchObject({ playlistId: '00001', timeUs: 1440 * S - 250_000, finished: true });
+
+    const u = setup({ target: { chosen: null } });
+    u.show({ chapters });
+    await u.play(10_000);
+    u.show({ timeUs: 1440 * S - 1_500_000 }); // 1.5 s before the end: left mid-playlist, still unfinished
+    await settle();
+    u.show({ currentPlaylistId: '00099', durationUs: 30 * S, timeUs: 0 });
+    await settle();
+    expect(u.store.saves.at(-1)).toMatchObject({ playlistId: '00001', finished: false });
+  });
+
+  it("never puts a NAS disc's place in the device's places, so a local copy of the disc never sees it", async () => {
+    const t = setup();
+    await t.play(10_000);
+    t.show({ engineState: 'paused' });
+    await settle();
+    await t.saver.flushNow({ keepalive: true });
+    await t.saver.flushNow({ keepalive: false });
+    expect(t.store.puts).toEqual([]);
+    expect(t.nas.sent.length).toBeGreaterThan(0);
+    // the same fingerprint opened from a local folder: nothing on this device
+    expect(await t.saver.placesOf(KEY)).toEqual({ defaults: null, places: {} });
   });
 
   it('keeps a place in the outbox while the NAS is unreachable and sends it later', async () => {
     const t = setup();
     t.nas.answer = new Error("Couldn't reach the NAS.");
     await t.play(10_000);
-    expect(t.store.puts).toHaveLength(1); // on the device all the same
+    expect(t.store.saves).toHaveLength(1); // on the device all the same
     expect([...t.store.queued.values()].map((e) => [e.place.timeUs, e.pairing])).toEqual([[10 * S, KEY_A]]);
     t.nas.answer = 'stored';
     await t.saver.drainOutbox();
@@ -282,7 +323,7 @@ describe('PlaceSaver', () => {
     const t = setup({ remote: false, target: { discKey: 'd.0123456789abcdef' } });
     await t.play(20_000);
     await t.saver.flushNow({ keepalive: false });
-    expect(t.store.puts).toHaveLength(0);
+    expect(t.store.saves).toHaveLength(0);
   });
 
   it("never saves registers read after another disc opened, but keeps a save made just before a close", async () => {
@@ -293,7 +334,7 @@ describe('PlaceSaver', () => {
     t.setOpens(2); // closeDisc
     await settle();
     expect(t.reads).toEqual([1]);
-    expect(t.store.puts.map((p) => p.timeUs)).toEqual([3 * S]);
+    expect(t.store.saves.map((p) => p.timeUs)).toEqual([3 * S]);
 
     const u = setup();
     await u.play(3_000);
@@ -302,7 +343,7 @@ describe('PlaceSaver', () => {
     u.show({ engineState: 'paused' });
     await settle();
     expect(u.reads).toEqual([]);
-    expect(u.store.puts).toHaveLength(0);
+    expect(u.store.saves).toHaveLength(0);
   });
 
   it('sends nothing queued under one pairing to another, and empties the outbox when asked', async () => {
@@ -330,9 +371,9 @@ describe('PlaceSaver', () => {
     await t.play(10_000);
     t.show({ engineState: 'paused' });
     await settle();
-    expect(t.store.puts.map((p) => p.timeUs)).toEqual([10 * S, 10 * S]);
+    expect(t.store.saves.map((p) => p.timeUs)).toEqual([10 * S, 10 * S]);
     await t.saver.flushNow({ keepalive: true });
-    expect(t.store.puts).toHaveLength(3);
+    expect(t.store.saves).toHaveLength(3);
   });
 
   it("still sends the place to the NAS when the device's store fails", async () => {
@@ -342,7 +383,7 @@ describe('PlaceSaver', () => {
     const t = setup({ store: broken, log: (m) => logged.push(m) });
     await t.play(10_000);
     expect(t.nas.sent.map((s) => s.place.timeUs)).toEqual([10 * S]);
-    expect(logged).toContain('saving the place on this device failed');
+    expect(logged).toContain('queueing the place failed');
   });
 
   it('skips a place the NAS keeps refusing, and drops it after the fifth refusal', async () => {

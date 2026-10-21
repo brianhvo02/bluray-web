@@ -1,5 +1,5 @@
 const DB_NAME = 'bluray-web';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 /** v1 keyed discs by folder name, so two discs opened via folders named "BDMV" overwrote each other. */
 const LEGACY_RECENT_STORE = 'recent-discs';
 
@@ -21,7 +21,7 @@ export const STORES = {
 function openDb(factory: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = factory.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
       if (db.objectStoreNames.contains(LEGACY_RECENT_STORE)) db.deleteObjectStore(LEGACY_RECENT_STORE);
       const create = (name: string, options: IDBObjectStoreParameters): void => {
@@ -35,6 +35,18 @@ function openDb(factory: IDBFactory): Promise<IDBDatabase> {
       create(STORES.places, { keyPath: 'key' });
       create(STORES.placeOutbox, { keyPath: 'key' });
       create(STORES.localTextFiles, { keyPath: 'key' });
+      // Version 5 also put NAS discs' places in `places`, where a local copy of the disc (same `f.` key) found another
+      // person's place: drop them (only they carry a NAS disc id; their outbox copies stay).
+      if (event.oldVersion === 5) {
+        const cursor = req.transaction!.objectStore(STORES.places).openCursor();
+        cursor.onsuccess = () => {
+          const c = cursor.result;
+          if (!c) return;
+          const record = c.value as { place?: { discId?: unknown } };
+          if (typeof record.place?.discId === 'string' && record.place.discId !== '') c.delete();
+          c.continue();
+        };
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
