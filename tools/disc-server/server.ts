@@ -376,8 +376,9 @@ function serveApp(req: IncomingMessage, res: ServerResponse, distDir: string | n
   let rel = segments.length === 0 ? 'index.html' : segments.join('/');
   let stat = containedStat(distDir, rel);
   // A deep path such as /nas/title/… is the app's own route, not a file: it loads the shell, as the Vite dev and preview
-  // servers and Cloudflare Pages do. A path with an extension that is not a file is still a 404.
-  if (!stat?.isFile() && extname(rel) === '') {
+  // servers and Cloudflare Pages do. Under /nas any last segment is a route (play links end in `f.<hex>`, which has an
+  // extension-like suffix); elsewhere a path with an extension that is not a file is still a 404.
+  if (!stat?.isFile() && (segments[0] === 'nas' || extname(rel) === '')) {
     rel = 'index.html';
     stat = containedStat(distDir, rel);
   }

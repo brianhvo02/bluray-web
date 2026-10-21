@@ -287,7 +287,18 @@ describe('disc server (the NAS disc API)', () => {
     expect(r.headers['content-type']).toMatch(/^text\/html/);
     expect(r.headers['cross-origin-opener-policy']).toBe('same-origin');
     expect(r.headers['cross-origin-embedder-policy']).toBe('require-corp');
-    expect((await get('/nas/missing.js', auth)).status).toBe(404);
+    expect((await get('/missing.js', auth)).status).toBe(404);
+  });
+
+  it('answers a /nas play link ending in an extension-like hex suffix with the shell, without a token too', async () => {
+    const play = '/nas/play/f.0123456789ABCDEF0123456789ABCDEF';
+    const withToken = await get(play, auth);
+    expect(withToken.status).toBe(200);
+    expect(withToken.body.toString()).toBe('<!doctype html><title>player</title>');
+    // the shell is public, as the player's own page is: the API behind it is what needs the token
+    const noToken = await get('/nas/title/anilist%3A21');
+    expect(noToken.status).toBe(200);
+    expect(noToken.body.toString()).toBe('<!doctype html><title>player</title>');
   });
 
   it('answers a CORS preflight without the token, and only for the API', async () => {
