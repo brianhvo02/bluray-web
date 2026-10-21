@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
+import { AlphabetRail } from './AlphabetRail';
 import { HiddenScreen } from './HiddenScreen';
 import { rememberedFolder } from './LibraryScreen';
 import { MusicScreen } from './MusicScreen';
@@ -13,6 +14,7 @@ import type { PlayingRoute } from './playing-route';
 import { Preflight, type PreflightDisc } from './Preflight';
 import { SeasonScreen } from './SeasonScreen';
 import { SeriesScreen } from './SeriesScreen';
+import { ENGLISH_KEYS, englishKey, firstOfEach, japaneseOrder, KANA_ROWS, kanaRow } from './title-index';
 import type { OwnerFiling } from './FileDifferently';
 import { displayName, emptyLibraryText, recentlyAdded, searchTitles, seasonLabel, secondaryName, shelf } from './title-model';
 import { UnsortedScreen } from './UnsortedScreen';
@@ -122,14 +124,16 @@ interface TitleCardProps {
   readonly nas: NasClient;
   readonly title: TitleSummary;
   readonly onOpen: (id: string) => void;
+  /** The alphabet bar key this title is the first of, in the list's order: where a tap on that key jumps. */
+  readonly jump?: string;
 }
 
-function TitleCard({ nas, title, onOpen }: TitleCardProps): ReactElement {
+function TitleCard({ nas, title, onOpen, jump }: TitleCardProps): ReactElement {
   const name = displayName(title);
   const native = secondaryName(title);
   return (
     <li>
-      <button type="button" className="title-card" data-testid="title-card" data-name={name} data-title-id={title.id} onClick={() => onOpen(title.id)}>
+      <button type="button" className="title-card" data-testid="title-card" data-name={name} data-title-id={title.id} data-jump={jump} onClick={() => onOpen(title.id)}>
         <Poster nas={nas} artId={title.poster} name={name} size="large" className="title-poster" />
         <span className="title-card-name">{name}</span>
         {native && (
@@ -142,12 +146,12 @@ function TitleCard({ nas, title, onOpen }: TitleCardProps): ReactElement {
   );
 }
 
-function TitleRow({ nas, title, onOpen }: TitleCardProps): ReactElement {
+function TitleRow({ nas, title, onOpen, jump }: TitleCardProps): ReactElement {
   const name = displayName(title);
   const native = secondaryName(title);
   return (
     <li>
-      <button type="button" className="title-row" data-testid="title-row" data-name={name} data-title-id={title.id} onClick={() => onOpen(title.id)}>
+      <button type="button" className="title-row" data-testid="title-row" data-name={name} data-title-id={title.id} data-jump={jump} onClick={() => onOpen(title.id)}>
         <Poster nas={nas} artId={title.poster} name={name} size="small" className="title-thumb" />
         <span className="title-row-text">
           <span className="title-row-name">{name}</span>
@@ -215,6 +219,37 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
   const [gone, setGone] = useState<string | null>(null);
   const [selected, setSelected] = useState<{ disc: PreflightDisc; playlistId?: string } | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  /** The indexed list's order: A–Z by the displayed name, or gojūon by reading; the alphabet bar last used sets it. */
+  const [order, setOrder] = useState<'en' | 'ja'>('en');
+  /** The key an alphabet bar picked, jumped to once the list is rendered in that bar's order. */
+  const jumpTo = useRef<string | null>(null);
+  const [jumps, setJumps] = useState(0);
+  const pickKey = (bar: 'en' | 'ja', key: string): void => {
+    jumpTo.current = key;
+    setOrder(bar);
+    setJumps((n) => n + 1);
+  };
+  useLayoutEffect(() => {
+    const key = jumpTo.current;
+    jumpTo.current = null;
+    if (key === null) return;
+    const target = document.querySelector<HTMLElement>(`[data-jump="${CSS.escape(key)}"]`);
+    if (!target) return;
+    // under the sticky header, with a little room
+    const header = document.querySelector<HTMLElement>('.titles-sticky')?.offsetHeight ?? 0;
+    window.scrollTo({ top: target.getBoundingClientRect().top + window.scrollY - header - 8 });
+  }, [jumps]);
+  /** Keeps `--titles-sticky-h` on the library at the sticky header's height, for the alphabet bars under it. */
+  const stickyObserver = useRef<ResizeObserver | null>(null);
+  const stickyHeader = useCallback((el: HTMLDivElement | null) => {
+    stickyObserver.current?.disconnect();
+    stickyObserver.current = null;
+    const section = el?.parentElement;
+    if (!el || !section || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => section.style.setProperty('--titles-sticky-h', `${el.offsetHeight}px`));
+    observer.observe(el);
+    stickyObserver.current = observer;
+  }, []);
 
   // The owner screens are an owner's: anyone else on their paths gets the library.
   useEffect(() => {
@@ -446,125 +481,149 @@ export function TitleLibrary({ nas, controller, history, playingRoute, onLaunch,
   };
   const searching = draft.trim() !== '';
   const results = titles && searching ? searchTitles(titles, draft) : [];
+  /** The list the alphabet bars index: a Series or Movies shelf, or the library's Series A–Z; none under a search or on Music. */
+  const indexBase =
+    titles === null || searching ? null : picked === 'series' || picked === 'movie' ? shelf(titles, picked) : picked === null && counts.series! > 0 ? shelf(titles, 'series') : null;
+  const indexing = indexBase !== null && indexBase.length > 0;
+  const indexed = !indexing ? null : order === 'ja' ? japaneseOrder(indexBase) : indexBase;
+  /** Each title id that is the first of its key in the shown order, with that key. */
+  const jumpOf = new Map<string, string>();
+  if (indexed) for (const [key, id] of firstOfEach(indexed, order === 'ja' ? kanaRow : englishKey)) jumpOf.set(id, key);
+  const orderLabel = order === 'ja' ? '五十音順' : 'A–Z';
 
   return (
     <section className="titles title-library" data-testid="title-library">
-      <header className="titles-head">
-        <h2>Library</h2>
-        <div className="titles-actions">
-          {owner && (
-            <button type="button" className="title-icon-button" data-testid="nas-settings" aria-label="NAS settings" onClick={() => history.push({ kind: 'settings' })}>
-              <span aria-hidden="true">⚙</span>
+      <div className="titles-sticky" ref={stickyHeader} data-testid="titles-sticky">
+        <header className="titles-head">
+          <h2>Library</h2>
+          <div className="titles-actions">
+            {owner && (
+              <button type="button" className="title-icon-button" data-testid="nas-settings" aria-label="NAS settings" onClick={() => history.push({ kind: 'settings' })}>
+                <span aria-hidden="true">⚙</span>
+              </button>
+            )}
+            <button type="button" className="title-icon-button" onClick={onClose}>
+              Close
             </button>
-          )}
-          <button type="button" className="title-icon-button" onClick={onClose}>
-            Close
-          </button>
-        </div>
-      </header>
-      <input
-        type="search"
-        className="title-search"
-        data-testid="title-search"
-        placeholder="Search in English, romaji or Japanese"
-        aria-label="Search titles"
-        value={draft}
-        // The shelf stays picked under a search, as before paths: clearing the search shows it again.
-        onChange={(e) => {
-          const q = e.target.value;
-          setDraft(q);
-          cancelSearchWrite();
-          searchTimer.current = window.setTimeout(() => writeSearch(q, picked), SEARCH_WRITE_DELAY_MS);
-        }}
-        onBlur={() => {
-          if (searchTimer.current !== null) writeSearch(draft, picked);
-        }}
-      />
-      <div className="title-shelves" role="group" aria-label="Shelves">
-        {SHELVES.filter((s) => s.id !== 'unsorted' || owner).map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            className={`title-chip${picked === s.id ? ' selected' : ''}`}
-            aria-pressed={picked === s.id}
-            data-testid="title-shelf"
-            data-shelf={s.id}
-            onClick={() => {
-              const id = s.id;
-              if (id === 'unsorted') history.push({ kind: 'unsorted' });
-              else {
-                cancelSearchWrite();
-                history.push({ kind: 'library', shelf: picked === id ? null : id, q: draft });
-              }
-            }}
-          >
-            {s.label}
-            {counts[s.id] !== null && <span className="title-chip-count">{counts[s.id]}</span>}
-          </button>
-        ))}
+          </div>
+        </header>
+        <input
+          type="search"
+          className="title-search"
+          data-testid="title-search"
+          placeholder="Search in English, romaji or Japanese"
+          aria-label="Search titles"
+          value={draft}
+          // The shelf stays picked under a search, as before paths: clearing the search shows it again.
+          onChange={(e) => {
+            const q = e.target.value;
+            setDraft(q);
+            cancelSearchWrite();
+            searchTimer.current = window.setTimeout(() => writeSearch(q, picked), SEARCH_WRITE_DELAY_MS);
+          }}
+          onBlur={() => {
+            if (searchTimer.current !== null) writeSearch(draft, picked);
+          }}
+        />
+        <div className="title-shelves" role="group" aria-label="Shelves">
+          {SHELVES.filter((s) => s.id !== 'unsorted' || owner).map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={`title-chip${picked === s.id ? ' selected' : ''}`}
+              aria-pressed={picked === s.id}
+              data-testid="title-shelf"
+              data-shelf={s.id}
+              onClick={() => {
+                const id = s.id;
+                if (id === 'unsorted') history.push({ kind: 'unsorted' });
+                else {
+                  cancelSearchWrite();
+                  history.push({ kind: 'library', shelf: picked === id ? null : id, q: draft });
+                }
+              }}
+            >
+              {s.label}
+              {counts[s.id] !== null && <span className="title-chip-count">{counts[s.id]}</span>}
+            </button>
+          ))}
       </div>
-      {error && (
-        <div className="error-banner" role="alert" data-testid="nas-error">
-          {error}
-        </div>
-      )}
-      {titles === null ? (
-        !error && <p className="status">Loading…</p>
-      ) : searching ? (
-        results.length === 0 ? (
-          <p className="status">No titles match “{draft.trim()}”.</p>
-        ) : (
-          <ul className="title-list" data-testid="title-results">
-            {results.map((t) => (
-              <TitleRow key={t.id} nas={nas} title={t} onOpen={openTitle} />
-            ))}
-          </ul>
-        )
-      ) : picked === 'music' ? (
-        <>
-          <h3 className="title-section">Music</h3>
-          <MusicScreen nas={nas} titles={shelf(titles, 'music')} owner={owner} tmdb={tmdb} onOpen={openTitle} loadDetail={loadDetail} onChanged={changed} />
-        </>
-      ) : picked !== null ? (
-        <>
-          <h3 className="title-section">{SHELVES.find((s) => s.id === picked)!.label}</h3>
-          {shelf(titles, picked).length === 0 ? (
-            <p className="status">Nothing here yet.</p>
-          ) : (
-            <ul className="title-grid">
-              {shelf(titles, picked).map((t) => (
-                <TitleCard key={t.id} nas={nas} title={t} onOpen={openTitle} />
-              ))}
-            </ul>
+      </div>
+      <div className={indexing ? 'titles-main indexed' : 'titles-main'}>
+        {indexing && (
+          <AlphabetRail keys={ENGLISH_KEYS} present={new Set(indexed!.map(englishKey))} active={order === 'en'} side="left" label="Jump to a letter" onPick={(k) => pickKey('en', k)} />
+        )}
+        <div className="titles-body">
+          {error && (
+            <div className="error-banner" role="alert" data-testid="nas-error">
+              {error}
+            </div>
           )}
-        </>
-      ) : titles.length === 0 ? (
-        <p className="status" data-testid="library-empty">
-          {emptyLibraryText(owner, progress)}
-        </p>
-      ) : (
-        <>
-          <h3 className="title-section">Recently added</h3>
-          <ul className="title-grid">
-            {recentlyAdded(titles).map((t) => (
-              <TitleCard key={t.id} nas={nas} title={t} onOpen={openTitle} />
-            ))}
-          </ul>
-          {counts.series! > 0 && (
-            <>
-              <h3 className="title-section">Series A–Z</h3>
-              <ul className="title-list">
-                {shelf(titles, 'series').map((t) => (
+          {titles === null ? (
+            !error && <p className="status">Loading…</p>
+          ) : searching ? (
+            results.length === 0 ? (
+              <p className="status">No titles match “{draft.trim()}”.</p>
+            ) : (
+              <ul className="title-list" data-testid="title-results">
+                {results.map((t) => (
                   <TitleRow key={t.id} nas={nas} title={t} onOpen={openTitle} />
                 ))}
               </ul>
+            )
+          ) : picked === 'music' ? (
+            <>
+              <h3 className="title-section">Music</h3>
+              <MusicScreen nas={nas} titles={shelf(titles, 'music')} owner={owner} tmdb={tmdb} onOpen={openTitle} loadDetail={loadDetail} onChanged={changed} />
+            </>
+          ) : picked !== null ? (
+            <>
+              <h3 className="title-section">
+                {SHELVES.find((s) => s.id === picked)!.label}
+                {indexed && ` · ${orderLabel}`}
+              </h3>
+              {indexed === null ? (
+                <p className="status">Nothing here yet.</p>
+              ) : (
+                <ul className="title-grid">
+                  {indexed.map((t) => (
+                    <TitleCard key={t.id} nas={nas} title={t} onOpen={openTitle} jump={jumpOf.get(t.id)} />
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : titles.length === 0 ? (
+            <p className="status" data-testid="library-empty">
+              {emptyLibraryText(owner, progress)}
+            </p>
+          ) : (
+            <>
+              <h3 className="title-section">Recently added</h3>
+              <ul className="title-grid">
+                {recentlyAdded(titles).map((t) => (
+                  <TitleCard key={t.id} nas={nas} title={t} onOpen={openTitle} />
+                ))}
+              </ul>
+              {counts.series! > 0 && (
+                <>
+                  <h3 className="title-section">Series {orderLabel}</h3>
+                  <ul className="title-list">
+                    {(indexed ?? []).map((t) => (
+                      <TitleRow key={t.id} nas={nas} title={t} onOpen={openTitle} jump={jumpOf.get(t.id)} />
+                    ))}
+                  </ul>
+                </>
+              )}
             </>
           )}
-        </>
-      )}
-      <button type="button" className="title-link" data-testid="browse-folders" onClick={() => history.push({ kind: 'folders', path: rememberedFolder() })}>
-        Browse by folder instead
-      </button>
+          <button type="button" className="title-link" data-testid="browse-folders" onClick={() => history.push({ kind: 'folders', path: rememberedFolder() })}>
+            Browse by folder instead
+          </button>
+        </div>
+        {indexing && (
+          <AlphabetRail keys={KANA_ROWS} present={new Set(indexed!.map(kanaRow))} active={order === 'ja'} side="right" label="五十音で移動" lang="ja" onPick={(k) => pickKey('ja', k)} />
+        )}
+      </div>
     </section>
   );
 }
