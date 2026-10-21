@@ -70,8 +70,20 @@ interface QuotaRoot {
   limit: number;
   /** Only the files directly in `dir` count, not those in its subdirectories. */
   readonly looseOnly: boolean;
+  /** What a file of `len` bytes counts toward it (QuotaAccounting). */
+  readonly cost: (len: number) => number;
   used: number;
 }
+
+/**
+ * How a quota counts: `bytes`, the files' lengths; `tar`, the size of the ustar archive the NAS keeps the scope in
+ * (ruling R24): 512 bytes of header per file plus its length rounded up to 512, and 1024 bytes of end blocks.
+ */
+export type QuotaAccounting = 'bytes' | 'tar';
+
+const TAR_BLOCK = 512;
+const tarCost = (len: number): number => TAR_BLOCK + Math.ceil(len / TAR_BLOCK) * TAR_BLOCK;
+const byteCost = (len: number): number => len;
 
 /** A file whose size is known up front and whose bytes are fetched when first read (reads of it return promises). */
 export interface LazyFile {
@@ -370,7 +382,7 @@ export class Vfs {
   private unlink(file: MemFile): void {
     if (file.linked) {
       this.memUsed -= file.len;
-      if (file.quota) file.quota.used -= file.len;
+      if (file.quota) file.quota.used -= file.quota.cost(file.len);
     }
     file.linked = false;
     file.quota = null;
@@ -381,7 +393,7 @@ export class Vfs {
     file.linked = true;
     file.quota = this.quotaFor(canonPath);
     this.memUsed += file.len;
-    if (file.quota) file.quota.used += file.len;
+    if (file.quota) file.quota.used += file.quota.cost(file.len);
   }
 
   /** Sets a memory file's length, counting it toward the limit; false (and nothing changes) when it would go over. */
@@ -389,9 +401,9 @@ export class Vfs {
     if (file.linked) {
       const used = this.memUsed - file.len + len;
       const q = file.quota;
-      if (len > file.len && (used > this.memLimit || (q !== null && q.used - file.len + len > q.limit))) return false;
+      if (len > file.len && (used > this.memLimit || (q !== null && q.used - q.cost(file.len) + q.cost(len) > q.limit))) return false;
       this.memUsed = used;
-      if (q) q.used += len - file.len;
+      if (q) q.used += q.cost(len) - q.cost(file.len);
     }
     file.len = len;
     return true;
@@ -402,17 +414,18 @@ export class Vfs {
    * limit: a write past it fails as on a full disk. Files already there count toward it at once. `looseOnly`: only the
    * files directly in `dir`. A file counts toward one quota at most: the innermost that holds it.
    */
-  setQuota(dir: string, limitBytes: number, looseOnly = false): void {
+  setQuota(dir: string, limitBytes: number, looseOnly = false, accounting: QuotaAccounting = 'bytes'): void {
     const canon = this.canonicalize(dir);
-    const root: QuotaRoot = { dir: canon, limit: limitBytes, looseOnly, used: 0 };
+    const tar = accounting === 'tar';
+    const root: QuotaRoot = { dir: canon, limit: limitBytes, looseOnly, cost: tar ? tarCost : byteCost, used: tar ? 2 * TAR_BLOCK : 0 };
     this.quotas.push(root);
     const node = this.memNode(canon);
     if (!node) return;
     this.visitFiles(node, canon, (file, path) => {
       if (!file.linked || this.quotaFor(path) !== root) return;
-      if (file.quota) file.quota.used -= file.len;
+      if (file.quota) file.quota.used -= file.quota.cost(file.len);
       file.quota = root;
-      root.used += file.len;
+      root.used += root.cost(file.len);
     });
   }
 
@@ -524,7 +537,7 @@ export class Vfs {
       return false;
     }
     const q = file.quota;
-    if (q && q.used - file.len + length > q.limit) {
+    if (q && q.used - q.cost(file.len) + q.cost(length) > q.limit) {
       this.onFull?.(h.path, q.limit, q.dir);
       return false;
     }
@@ -561,9 +574,9 @@ export class Vfs {
       if (file.linked) moves.push([file, this.quotaFor(path)]);
     });
     const added = new Map<QuotaRoot, number>();
-    for (const [file, q] of moves) if (q && q !== file.quota) added.set(q, (added.get(q) ?? 0) + file.len);
+    for (const [file, q] of moves) if (q && q !== file.quota) added.set(q, (added.get(q) ?? 0) + q.cost(file.len));
     for (const [q, n] of added) {
-      const freed = replaced?.linked && replaced.quota === q ? replaced.len : 0;
+      const freed = replaced?.linked && replaced.quota === q ? q.cost(replaced.len) : 0;
       if (q.used - freed + n > q.limit) {
         this.onFull?.(to, q.limit, q.dir);
         return false;
@@ -571,8 +584,8 @@ export class Vfs {
     }
     for (const [file, q] of moves) {
       if (q === file.quota) continue;
-      if (file.quota) file.quota.used -= file.len;
-      if (q) q.used += file.len;
+      if (file.quota) file.quota.used -= file.quota.cost(file.len);
+      if (q) q.used += q.cost(file.len);
       file.quota = q;
     }
     return true;
@@ -591,6 +604,12 @@ export class Vfs {
       if (node?.kind === 'dir') return null;
       if (!node) {
         if (mode === 'r') return null;
+        const q = this.quotaFor(canon);
+        if (q && q.used + q.cost(0) > q.limit) {
+          // its header alone does not fit the quota (tar accounting): as a full disk refuses a new file
+          this.onFull?.(canon, q.limit, q.dir);
+          return null;
+        }
         const now = this.nowMs();
         node = { kind: 'file', buf: new Uint8Array(0), len: 0, mtimeMs: now, shared: false, linked: false, quota: null };
         this.link(node, canon);

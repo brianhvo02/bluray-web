@@ -330,6 +330,28 @@ describe('paths', () => {
 });
 
 describe('storage scopes (setQuota, importFiles, exportFiles, onChange)', () => {
+  it("counts a NAS scope's quota as its ustar archive (ruling R24): 512 per file, its length in 512s, 1024 at the end", () => {
+    const full: string[] = [];
+    const { vfs } = make({ onFull: (path) => full.push(path) });
+    vfs.mkdir('/persistent/7fff0123');
+    vfs.setQuota('/persistent/7fff0123', 4096, false, 'tar');
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(1024); // the end blocks
+    writeFile(vfs, '/persistent/7fff0123/a', 'x'); // 512 + 512
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2048);
+    // a second file of 1536 bytes makes exactly 4096 (accepted, as the NAS takes a body of exactly its limit)
+    const h = vfs.open('/persistent/7fff0123/b', 'w')!;
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2560);
+    expect(vfs.write(h, new Uint8Array(1536), 0, 1536)).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(4096);
+    // one byte more needs another block; a new file needs its header: both refused
+    expect(vfs.write(h, new Uint8Array(1), 0, 1)).toBe(false);
+    expect(vfs.open('/persistent/7fff0123/c', 'w')).toBeNull();
+    expect(full).toEqual(['/persistent/7fff0123/b', '/persistent/7fff0123/c']);
+    // emptying a file gives its blocks back, not its header
+    expect(vfs.truncate(h, 0)).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2560);
+  });
+
   it('a quota limits the files under its directory, beside the memory limit, and onFull names it', () => {
     const full: string[] = [];
     const { vfs } = make({ onFull: (path, limit, dir) => full.push(`${path} ${limit} ${dir}`) });

@@ -319,7 +319,7 @@ describe('runBdjWorker and the storage scopes', () => {
     vfs.write(h, new Uint8Array([1]), 0, 1);
     port.onmessage!({ data: { type: 'stop' } });
     await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
-    expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone)`, error: false });
+    expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone)`, error: true });
   }, 90_000);
 
   it("keeps a NAS disc's saved data in the person's NAS store: their other device sees it, another person does not", async () => {
@@ -373,17 +373,17 @@ describe('runBdjWorker and the storage scopes', () => {
         }
         return null;
       };
-      const aki = await nas.person('Aki');
-      const akisTablet = await nas.device(aki.personId, 'tablet');
-      const ren = await nas.person('Ren');
-      const logs = await view(aki.token, new IDBFactory());
-      expect(count(aki.personId)).toBe('1');
+      const mika = await nas.person('Mika');
+      const mikasTablet = await nas.device(mika.personId, 'tablet');
+      const sora = await nas.person('Sora');
+      const logs = await view(mika.token, new IDBFactory());
+      expect(count(mika.personId)).toBe('1');
       expect(logs).toContainEqual({ type: 'log', line: 'BD-J storage: persistent/7fff0002 is on the NAS (1 files, 1 bytes)', error: false });
-      await view(akisTablet, new IDBFactory()); // the same person's other device starts from 1
-      expect(count(aki.personId)).toBe('2');
-      await view(ren.token, new IDBFactory()); // another person starts from nothing
-      expect(count(ren.personId)).toBe('1');
-      expect(count(aki.personId)).toBe('2');
+      await view(mikasTablet, new IDBFactory()); // the same person's other device starts from 1
+      expect(count(mika.personId)).toBe('2');
+      await view(sora.token, new IDBFactory()); // another person starts from nothing
+      expect(count(sora.personId)).toBe('1');
+      expect(count(mika.personId)).toBe('2');
       // only the scope routes and `me` went to the store; each through the person's own token
       expect(nas.requests.filter((r) => !r.startsWith('GET /api/me') && !r.includes('/api/bdj-store/'))).toEqual([]);
     } finally {

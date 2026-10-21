@@ -27,7 +27,8 @@ export type ScopeVfs = Pick<Vfs, 'importFiles' | 'exportFiles' | 'setQuota' | 's
 export interface ScopeSyncDeps {
   readonly store: BdjStore;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
-  readonly log: (line: string) => void;
+  /** A line for the engine's log; `error` for a failure (data not loaded or not kept). */
+  readonly log: (line: string, error?: boolean) => void;
   /** Whether a scope has changes not yet stored, on each change of it (the engine waits for the stop flush only then). */
   readonly onUnsaved?: (unsaved: boolean) => void;
   readonly quotaBytes?: number;
@@ -84,7 +85,7 @@ export class ScopeSync {
           ]);
           return { scope, memoryOnly: false, etag: loaded.etag, stored: { files: sortFiles([...loaded.files]) }, dirty: false, refused: new Set() };
         } catch (e) {
-          deps.log(`BD-J storage: ${scope.key} could not be loaded (${e instanceof Error ? e.message : String(e)}); what is written there lasts until BD-J stops`);
+          deps.log(`BD-J storage: ${scope.key} could not be loaded (${e instanceof Error ? e.message : String(e)}); what is written there lasts until BD-J stops`, true);
           return { scope, memoryOnly: true, etag: null, stored: EMPTY_SNAPSHOT, dirty: false, refused: new Set() };
         } finally {
           cancel();
@@ -106,7 +107,9 @@ export class ScopeSync {
       // a loose-only scope's snapshot has no subfolders (they belong to the disc scopes)
       if (s.scope.looseOnly) s.stored = { files: s.stored.files.filter((f) => !f.path.includes('/')) };
       vfs.importFiles(s.scope.dir, s.stored.files);
-      vfs.setQuota(s.scope.dir, quota, s.scope.looseOnly === true);
+      // counted as the store counts it: a NAS scope as its ustar archive (ruling R24), so the write that would cross
+      // 16 MB there fails here at once, as an IOException
+      vfs.setQuota(s.scope.dir, quota, s.scope.looseOnly === true, this.deps.store.quotaAccounting ?? 'bytes');
     }
   }
 
@@ -154,7 +157,7 @@ export class ScopeSync {
     if (!state || !vfs?.setQuotaLimit || !vfs.quotaUsed) return;
     const dir = state.scope.dir;
     vfs.setQuotaLimit(dir, full ? vfs.quotaUsed(dir) : (this.deps.quotaBytes ?? SCOPE_QUOTA_BYTES));
-    this.deps.log(full ? `BD-J storage: ${key} is full: writes that need more room fail (No space left on device)` : `BD-J storage: ${key} has room again`);
+    this.deps.log(full ? `BD-J storage: ${key} is full: writes that need more room fail (No space left on device)` : `BD-J storage: ${key} has room again`, full);
   }
 
   /** Saves every dirty scope now (after any save under way); resolves once they are stored or have failed. */
@@ -227,12 +230,12 @@ export class ScopeSync {
       }
     } catch (e) {
       if (e instanceof ScopeQuotaError) {
-        this.deps.log(`BD-J storage: ${state.scope.key} was not saved: ${e.message}; the saved copy stays as it was`);
+        this.deps.log(`BD-J storage: ${state.scope.key} was not saved: ${e.message}; the saved copy stays as it was`, true);
         return;
       }
       // tried again after the next write (or the stop flush)
       state.dirty = true;
-      this.deps.log(`BD-J storage: ${state.scope.key} could not be saved (${e instanceof Error ? e.message : String(e)})`);
+      this.deps.log(`BD-J storage: ${state.scope.key} could not be saved (${e instanceof Error ? e.message : String(e)})`, true);
     }
   }
 

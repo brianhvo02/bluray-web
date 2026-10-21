@@ -11,7 +11,7 @@
  */
 
 import {
-  NasQuotaError, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles,
+  NasQuotaError, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles,
   type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot, type SnapshotFile,
 } from './bdj-store';
 import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore, type ScopeRecord } from './idb-store';
@@ -75,6 +75,7 @@ export interface NasBdjStoreDeps {
  */
 export class NasBdjStore implements BdjStore {
   readonly saveDebounceMs = NAS_PUSH_DEBOUNCE_MS;
+  readonly quotaAccounting = 'tar';
   private token: string;
   private refreshing: Promise<string> | null = null;
 
@@ -109,6 +110,8 @@ export class NasBdjStore implements BdjStore {
 
   async save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult> {
     const body = writeTar(snapshot.files);
+    // the NAS refuses an archive over 16 MB (`>`, so exactly 16 MB is taken): refused here, without the 507's round trip
+    if (body.length > SCOPE_QUOTA_BYTES) throw new NasQuotaError(scope, body.length, 'scope');
     const res = await this.send('PUT', `bdj-store/${scope}`, {
       'Content-Type': 'application/x-tar',
       ...(etag !== null ? { 'If-Match': etag } : { 'If-None-Match': '*' }),
@@ -233,6 +236,12 @@ export interface WriteAheadDeps {
   /** The disc's browser-only records from before (`nas:<discId>`, scopes.ts storeSource), moved to the NAS once. */
   readonly legacy?: IdbBdjStore | null;
   readonly personId: string;
+  /**
+   * Whose device this is now (`GET me`'s personId; null when the server keeps no people), asked before each put and
+   * before a 412 is merged: an owner can move a device to another person while BD-J runs, and the token then reaches
+   * that person's store. Without it the person is the boot's for the whole session.
+   */
+  readonly whoAmI?: () => Promise<string | null>;
   readonly setTimer: SetTimer;
   readonly log: Log;
   /**
@@ -275,6 +284,9 @@ interface WriteAheadScope {
  */
 export class WriteAheadNasStore implements BdjStore {
   readonly saveDebounceMs = IDB_SAVE_DEBOUNCE_MS;
+  readonly quotaAccounting = 'tar';
+  /** The device now belongs to another person: nothing more is put on the NAS this session (its copies stay pending). */
+  private moved = false;
   private readonly scopes = new Map<string, WriteAheadScope>();
   private cancelDebounce: (() => void) | null = null;
   private cancelMaxWait: (() => void) | null = null;
@@ -321,7 +333,22 @@ export class WriteAheadNasStore implements BdjStore {
     state.nasEtag = remote.etag;
     if (pending) {
       // the last session's changes the NAS did not get: merged as on a 412 (newer mtime wins, ties ours) and put now
-      state.local = mergeSnapshots(state.local, remote).merged;
+      const merged = mergeSnapshots(state.local, remote).merged;
+      if (!sameSnapshot(merged, state.local)) {
+        // the write-ahead copy holds the merge before anything marks it as on the NAS
+        const result = await local.save(scope, merged, etag, { pending: true });
+        if ('etag' in result) {
+          etag = result.etag;
+          state.localEtag = etag;
+          state.local = merged;
+        } else {
+          log(`BD-J storage: ${scope}: this browser's copy changed while it loaded; its pending changes are put as they are`, true);
+          etag = result.conflict.etag;
+          // no version to mark: the record holds less than what is put, so it stays pending until ScopeSync saves
+          state.localEtag = null;
+          state.local = mergeSnapshots(result.conflict, remote).merged;
+        }
+      }
       log(`BD-J storage: ${scope} has changes from this browser the NAS does not have yet: merged, and put on the NAS now`);
       this.soon();
       return { files: state.local.files, etag };
@@ -351,6 +378,8 @@ export class WriteAheadNasStore implements BdjStore {
     this.cancelMaxWait = null;
     this.cancelRetry?.();
     this.cancelRetry = null;
+    if (![...this.scopes.values()].some((s) => s.pending)) return;
+    if (!(await this.samePerson())) return;
     await Promise.all(
       [...this.scopes].map(([scope, state]) => {
         state.pushing = state.pushing.then(() => this.push(scope, state));
@@ -362,6 +391,33 @@ export class WriteAheadNasStore implements BdjStore {
   /** Whether a scope's write-ahead copy is still to go to the NAS (tests, diagnostics). */
   pendingScopes(): string[] {
     return [...this.scopes].filter(([, s]) => s.pending).map(([scope]) => scope).sort();
+  }
+
+  /**
+   * Whether the device is still the boot's person's (whoAmI). When it is not, nothing more goes to the NAS: the copies
+   * stay pending in this browser under the person they were written for (logged as an error once). A failed check is a
+   * failed put (tried again later).
+   */
+  private async samePerson(): Promise<boolean> {
+    if (this.moved) return false;
+    if (!this.deps.whoAmI) return true;
+    let now: string | null;
+    try {
+      now = await this.deps.whoAmI();
+    } catch (e) {
+      this.deps.log(`BD-J storage: the NAS did not say whose device this is (${messageOf(e)}); saved data is put on the NAS later`, true);
+      this.retryLater();
+      return false;
+    }
+    if (now === this.deps.personId) return true;
+    if (!this.moved) {
+      this.moved = true;
+      this.deps.log(
+        `BD-J storage: this device now belongs to another person on the NAS; this session's saved data stays in this browser for the person it was written for, and is not put on the NAS`,
+        true,
+      );
+    }
+    return false;
   }
 
   private state(scope: string): WriteAheadScope {
@@ -426,6 +482,7 @@ export class WriteAheadNasStore implements BdjStore {
     try {
       if (state.nasEtag === undefined) {
         const remote = await nas.load(scope);
+        if (!(await this.samePerson())) return;
         state.nasEtag = remote.etag;
         snapshot = mergeSnapshots(snapshot, remote).merged;
       }
@@ -435,13 +492,18 @@ export class WriteAheadNasStore implements BdjStore {
           state.nasEtag = result.etag;
           break;
         }
-        // another device of this person put it meanwhile: merged per file, newer mtime wins (whole seconds), ties ours
+        // another device of this person put it meanwhile, or the device has moved to another person (whose store the
+        // token now reaches): never merged across people
+        if (!(await this.samePerson())) return;
+        // merged per file, newer mtime wins (whole seconds), ties ours
         snapshot = mergeSnapshots(snapshot, result.conflict).merged;
         state.nasEtag = result.conflict.etag;
         if (attempt >= PUSH_ATTEMPTS) throw new Error(`still changed elsewhere after ${attempt} tries`);
       }
     } catch (e) {
       if (e instanceof ScopeQuotaError) {
+        // not retried on a timer: room comes back only when Java frees some (the next save) or elsewhere (the next
+        // flush or boot puts it again)
         log(`BD-J storage: ${scope} was not put on the NAS: ${e.message}; this browser keeps it`, true);
         if (!state.full) {
           state.full = true;
@@ -464,7 +526,7 @@ export class WriteAheadNasStore implements BdjStore {
         const toLocal = mergeSnapshots(state.local, snapshot).merged;
         if (sameSnapshot(toLocal, state.local)) {
           if (await local.mark(scope, state.localEtag, (r) => ({ ...r, pending: false }))) state.pending = false;
-        } else {
+        } else if (await this.samePerson()) {
           // the NAS had files this session has not seen: this browser's copy takes them (ScopeSync's next save meets the
           // new version, merges and gives them to Java)
           const result = await local.save(scope, toLocal, state.localEtag, { pending: false });
@@ -530,6 +592,11 @@ export interface NasDiscStoreDeps {
  */
 export class NasDiscStore implements BdjStore {
   readonly saveDebounceMs = IDB_SAVE_DEBOUNCE_MS;
+  /**
+   * Every disc from a server counts its quota as the NAS does (ruling R24), even on a server that keeps it in this
+   * browser (the same discs move to a NAS later); a picked folder counts file lengths (IdbBdjStore).
+   */
+  readonly quotaAccounting = 'tar';
   private readonly backend: Promise<BdjStore>;
   private readonly budget: Promise<never>;
 
@@ -560,6 +627,7 @@ export class NasDiscStore implements BdjStore {
       local: new IdbBdjStore(personSource(me.personId), idb),
       legacy,
       personId: me.personId,
+      whoAmI: async () => (await nas.me())?.personId ?? null,
       setTimer,
       log,
       budget: this.budget,

@@ -42,6 +42,11 @@ export interface BdjStore {
    * spares a remote store a request per write. A local store sets less (idb-store.ts IDB_SAVE_DEBOUNCE_MS).
    */
   readonly saveDebounceMs?: number;
+  /**
+   * How the scope quota counts (Vfs QuotaAccounting): `tar` for a store that keeps scopes as ustar archives with a 16 MB
+   * limit on their size (the NAS, ruling R24); file lengths (`bytes`) without it.
+   */
+  readonly quotaAccounting?: 'bytes' | 'tar';
   load(scope: string): Promise<LoadedSnapshot>;
   save(scope: string, snapshot: Snapshot, etag: string | null): Promise<SaveResult>;
   /**

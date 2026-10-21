@@ -25,12 +25,16 @@ export interface StoreNas {
   readonly fetch: typeof fetch;
   /** `METHOD /path` of each request `fetch` sent on, in order (no query). */
   readonly requests: string[];
-  /** A new person (not an owner) with one paired device: its token. */
-  person(name: string): Promise<{ readonly personId: string; readonly token: string }>;
+  /** A new person (not an owner) with one paired device: its id and token. */
+  person(name: string): Promise<{ readonly personId: string; readonly deviceId: string; readonly token: string }>;
   /** Another device of `personId`: its token. */
   device(personId: string, name: string): Promise<string>;
+  /** Moves a device to another person, as the owner's People screen does (Auth.moveDevice): its token follows. */
+  move(deviceId: string, personId: string): void;
   /** The next requests to the store or `me` fail so, one fault each. */
   fail(...faults: StoreNasFault[]): void;
+  /** The next PUTs to the store fail so, one fault each (other requests go through). */
+  failPut(...faults: StoreNasFault[]): void;
   /** Requests carrying `token` go out with a token the server does not know (its 401), until it is refreshed. */
   expire(token: string): void;
   /** What the server holds for a person's scope. */
@@ -55,22 +59,26 @@ export async function startStoreNas(opts: { scopeLimit?: number; personLimit?: n
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/`;
   const faults: StoreNasFault[] = [];
+  const putFaults: StoreNasFault[] = [];
   const expired = new Set<string>();
   const requests: string[] = [];
 
-  const pair = async (code: string, name: string): Promise<string> => {
+  const pair = async (code: string, name: string): Promise<{ deviceId: string; token: string }> => {
     const pairKey = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
     const jwk = await crypto.subtle.exportKey('jwk', pairKey.publicKey);
     const device = auth.redeem(code, name, jwk)!;
     const challenge = auth.challenge(device.id)!;
     const signature = Buffer.from(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pairKey.privateKey, new TextEncoder().encode(challenge))).toString('base64url');
-    return auth.startSession(device.id, challenge, signature)!.token;
+    return { deviceId: device.id, token: auth.startSession(device.id, challenge, signature)!.token };
   };
 
   const storeFetch = (async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(String(input));
     requests.push(`${(init.method ?? 'GET').toUpperCase()} ${url.pathname}`);
-    const fault = url.pathname.startsWith('/api/bdj-store/') || url.pathname === '/api/me' ? faults.shift() : undefined;
+    const method = (init.method ?? 'GET').toUpperCase();
+    const fault =
+      (method === 'PUT' && url.pathname.startsWith('/api/bdj-store/') ? putFaults.shift() : undefined) ??
+      (url.pathname.startsWith('/api/bdj-store/') || url.pathname === '/api/me' ? faults.shift() : undefined);
     if (fault === 'unreachable') throw new TypeError('fetch failed');
     if (fault === 'busy') return Response.json({ error: 'busy' }, { status: 503, headers: { 'Retry-After': '1' } });
     const token = url.searchParams.get('t');
@@ -84,12 +92,14 @@ export async function startStoreNas(opts: { scopeLimit?: number; personLimit?: n
     requests,
     async person(name) {
       const { code, person } = auth.createCode({ newPerson: { name, owner: false } });
-      return { personId: person.id, token: await pair(code, `${name}'s phone`) };
+      return { personId: person.id, ...(await pair(code, `${name}'s phone`)) };
     },
     async device(personId, name) {
-      return pair(auth.createCode({ personId }).code, name);
+      return (await pair(auth.createCode({ personId }).code, name)).token;
     },
+    move: (deviceId, personId) => auth.moveDevice(deviceId, personId),
     fail: (...f) => void faults.push(...f),
+    failPut: (...f) => void putFaults.push(...f),
     expire: (token) => void expired.add(token),
     stored: (personId, scope) => bdjStore.get(personId, scope),
     close: async () => {

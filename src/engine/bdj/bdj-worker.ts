@@ -149,6 +149,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   /** Where they are kept, and a NAS disc's store client (it takes the fresh tokens too). */
   let store: BdjStore | null = null;
   let nasStore: NasBdjStore | null = null;
+  /** The NAS's full or not full per scope, heard before `sync` was there (applied once it is). */
+  const fullBeforeSync = new Map<string, boolean>();
   /** Saves what Java changed, then has the store pass on what it holds (a NAS disc's write-ahead copy). */
   const flushStorage = async (): Promise<void> => {
     await sync?.flush();
@@ -313,6 +315,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       if (ended) return;
       scopes?.attach(rt.jvm.opts.vfs!);
       sync = scopes;
+      for (const [scope, full] of fullBeforeSync) scopes?.full(scope, full);
+      fullBeforeSync.clear();
       // the engine hears that this session has scopes: its stop then always waits for the save (`stop`, `stopped`)
       if (scopes) port.postMessage({ type: 'unsaved', unsaved: false });
       await rt.boot();
@@ -342,7 +346,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       },
       // straight to the engine, as ScopeSync's: puts still run after a stop or a failure has ended the session
       log: (line, error) => port.postMessage({ type: 'log', line, error: error ?? false }),
-      onFull: (scope, full) => sync?.full(scope, full),
+      // a 507 of the boot's put can come before the scopes are in the VFS: kept until they are
+      onFull: (scope, full) => (sync ? sync.full(scope, full) : fullBeforeSync.set(scope, full)),
     });
   };
 
@@ -356,11 +361,11 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
           return () => clearTimeout(id);
         },
         // straight to the engine, as the save state: saves still run after a stop or a failure has ended the session
-        log: (line) => port.postMessage({ type: 'log', line, error: false }),
+        log: (line, error) => port.postMessage({ type: 'log', line, error: error ?? false }),
         onUnsaved: (unsaved) => port.postMessage({ type: 'unsaved', unsaved }),
       });
     } catch (e) {
-      post({ type: 'log', line: `BD-J storage: the disc's storage scopes could not be read (${e instanceof Error ? e.message : String(e)}); saved data lasts until BD-J stops`, error: false });
+      post({ type: 'log', line: `BD-J storage: the disc's storage scopes could not be read (${e instanceof Error ? e.message : String(e)}); saved data lasts until BD-J stops`, error: true });
       return null;
     }
   };

@@ -334,8 +334,8 @@ test.describe('saved data per person on the NAS (disc-bdj-store, tests/e2e/nas-s
     test.setTimeout(240_000);
     await libraryReady();
     const run = `${testInfo.project.name} ${Date.now().toString(36)}`;
-    const aki = `Store Aki ${run}`;
-    const ren = `Store Ren ${run}`;
+    const kai = `Store Kai ${run}`;
+    const den = `Store Den ${run}`;
     const contexts: BrowserContext[] = [];
     const context = async (): Promise<BrowserContext> => {
       const c = await browser.newContext();
@@ -343,9 +343,9 @@ test.describe('saved data per person on the NAS (disc-bdj-store, tests/e2e/nas-s
       return c;
     };
     try {
-      // Aki's phone: the first viewing writes 1, and the page goes 0.5 s later, inside the NAS put's 2 s debounce
+      // Kai's phone: the first viewing writes 1, and the page goes 0.5 s later, inside the NAS put's 2 s debounce
       const phone = await context();
-      const first = await device(phone, browserName, aki);
+      const first = await device(phone, browserName, kai);
       await skipWithoutH264(first);
       await openFromNas(first);
       const at = await written(first);
@@ -357,23 +357,23 @@ test.describe('saved data per person on the NAS (disc-bdj-store, tests/e2e/nas-s
       await expect(next.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
       await openFromNas(next);
       await settlesOn(next, OPENED[1]!, 30_000);
-      await nasHas(aki, 2);
-      const source = `nas-person:${personId(aki)}`;
+      await nasHas(kai, 2);
+      const source = `nas-person:${personId(kai)}`;
       await expect.poll(async () => (await storedScope(next, source, `persistent/${ORG}`))?.pending, { timeout: 15_000 }).toBe(false);
 
-      // Aki's tablet, a browser that never opened the disc: it starts from the NAS's 2
-      const tablet = await device(await context(), browserName, aki);
+      // Kai's tablet, a browser that never opened the disc: it starts from the NAS's 2
+      const tablet = await device(await context(), browserName, kai);
       await openFromNas(tablet);
       await settlesOn(tablet, OPENED[2]!, 30_000);
-      await nasHas(aki, 3);
+      await nasHas(kai, 3);
 
-      // Ren's phone starts from nothing, and Aki's count stays
-      const rens = await device(await context(), browserName, ren);
-      await openFromNas(rens);
-      await settlesOn(rens, OPENED[0]!, 30_000);
-      await nasHas(ren, 1);
-      expect(nasCount(aki)).toBe('3');
-      expect(await storedScope(rens, source, `persistent/${ORG}`)).toBeNull();
+      // Den's phone starts from nothing, and Kai's count stays
+      const dens = await device(await context(), browserName, den);
+      await openFromNas(dens);
+      await settlesOn(dens, OPENED[0]!, 30_000);
+      await nasHas(den, 1);
+      expect(nasCount(kai)).toBe('3');
+      expect(await storedScope(dens, source, `persistent/${ORG}`)).toBeNull();
     } finally {
       for (const c of contexts) await c.close();
     }
