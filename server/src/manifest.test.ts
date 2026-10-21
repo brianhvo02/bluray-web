@@ -136,7 +136,7 @@ describe('disc routes', () => {
     const byFp = await get(`f.${fingerprint}`);
     expect(byFp.status).toBe(200);
     expect(await byFp.json()).toEqual({ disc: library.disc(smallest.discId) });
-    for (const key of [`d.${'0'.repeat(16)}`, `f.${'A'.repeat(32)}`, 'nonsense', 'f.abc']) {
+    for (const key of [`d.${'0'.repeat(16)}`, `f.${'A'.repeat(32)}`, 'nonsense', 'f.abc', 'f.%E0']) {
       const res = await get(key);
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: 'not-found' });

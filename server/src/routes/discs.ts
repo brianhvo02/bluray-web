@@ -109,7 +109,13 @@ export function discRoutes(library: Library): Handler {
     const resolved = RESOLVE.exec(url.pathname);
     if (resolved) {
       if (req.method !== 'GET') return null;
-      const disc = resolve(decodeURIComponent(resolved[1]!));
+      let key: string;
+      try {
+        key = decodeURIComponent(resolved[1]!);
+      } catch {
+        return json(404, { error: 'not-found' });
+      }
+      const disc = resolve(key);
       return disc ? json(200, { disc }) : json(404, { error: 'not-found' });
     }
     const match = ROUTE.exec(url.pathname);
