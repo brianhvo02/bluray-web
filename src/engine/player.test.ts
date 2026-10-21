@@ -23,7 +23,7 @@ import { Navigator } from './nav/navigator';
 import { DEFAULT_CHUNK_PACKETS } from './demux/m2ts-reader';
 import { SOURCE_PACKET_SIZE } from './demux/constants';
 import { serveFetch } from './disc/port-fetch';
-import { Player, type PlayerDeps } from './player';
+import { Player, type BdjPlaybackListener, type PlayerDeps } from './player';
 import { NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type ShaderSetData, type Telemetry } from './protocol';
 import { ShaderStage } from './shaders/stage';
 import { UNAVAILABLE, type CompiledSet, type ShaderBackend } from './shaders/webgl-backend';
@@ -1453,6 +1453,58 @@ describe('Player with HDMV navigation', () => {
     } finally {
       reached.mockRestore();
     }
+  });
+
+  const clockOf = (h: Harness): number => (h.player as unknown as { clock: { nowUs(): number } }).clock.nowUs();
+
+  it('reads the new position while a seek waits for the ring to discard, into an item with no audio stream', async () => {
+    const h = await harness(CodingType.LPCM, { secondClipAudioStreams: [] });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    await h.player.handle({ type: 'pause' });
+    const seeking = h.player.handle({ type: 'seek', timeUs: 5_000_000 });
+    await h.play(60, { audio: false }); // the worklet renders nothing: the discard is still pending
+    expect(clockOf(h)).toBe(5_000_000);
+    await h.play(300);
+    await seeking;
+  });
+
+  it('opens a BD-J playlist paused at its start while its audio decoder loads: no mark or position of the old one', async () => {
+    let gate: Promise<void> = Promise.resolve();
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], {
+      audioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4)],
+      createAudioDecoder: (codingType) => fakeAudioFactory(undefined, gate)(codingType),
+    });
+    await untilPlaying(h);
+    await h.play(3300); // past the marks at 1, 2 and 3 s
+    const marks: number[] = [];
+    const positions: Array<[number, number]> = [];
+    const listener: BdjPlaybackListener = {
+      playlistStarted: () => undefined,
+      playItemChanged: () => undefined,
+      marksReached: (m) => marks.push(...m),
+      position: (item, clipTime45) => positions.push([item, clipTime45]),
+      seeked: () => undefined,
+      playlistEnded: () => undefined,
+    };
+    type BdjInternals = { bdjListener: BdjPlaybackListener | null; playPlaylist(id: string, at: object, caller: 'bdj'): Promise<boolean> };
+    const me = h.player as unknown as BdjInternals;
+    me.bdjListener = listener;
+    let open: () => void = () => undefined;
+    gate = new Promise<void>((r) => (open = r));
+    const opening = me.playPlaylist('00000', {}, 'bdj');
+    await h.play(100); // paused (Java's START has not come), the decoder still loading
+    expect(clockOf(h)).toBe(0);
+    expect(marks.filter((m) => m > 0)).toEqual([]); // the marks at 1 s and later are not passed yet
+    const inTime = (me as unknown as { session: { playItems: Array<{ inTime: number }> } }).session.playItems[0]!.inTime;
+    expect(positions.length).toBeGreaterThan(0);
+    for (const [item, clipTime45] of positions) expect([item, clipTime45]).toEqual([0, inTime]);
+    open();
+    await opening;
+    await h.player.handle({ type: 'play' }); // as Java's selectRate(START)
+    await h.play(1500);
+    expect(marks.filter((m) => m > 0)).toEqual([1]); // the mark at 1 s, reported once it is reached
   });
 
   const twoLanguages = [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })];

@@ -2382,6 +2382,7 @@ export class Player {
     const ring = this.ring;
     if (s.audioActive && ring && this.audioWriter) {
       ring.setPlaying(false);
+      this.clock.useWall(t, false); // the target meanwhile, not the ring's old position (as above)
       await ring.requestDiscard();
       if (gen !== this.seekGeneration) return;
       this.clock.useAudio(ring, t);
