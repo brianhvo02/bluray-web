@@ -733,6 +733,28 @@ describe('NasDiscStore (the backend of a disc from a server)', () => {
     expect(logs.filter((l) => l.includes('could not'))).toEqual([]);
   });
 
+  it('bounds the person check after the GET by the same budget: a check that does not answer falls back at 12 s (review minor 10)', async () => {
+    const { personId, token } = await nas.person('Mika');
+    await client(token).save(SCOPE, { files: [file('nas', 1_000, 'on the NAS')] }, null);
+    const idb = new IDBFactory();
+    await new IdbBdjStore(personSource(personId), idb).save(SCOPE, { files: [file('here', 2_000, 'here')] }, null, { pending: false });
+    const timers = new Timers();
+    // the boot's `me` and the GET answer at once; the check after the GET does not
+    const fetchSlow = slowLink(timers, (_method, path, n) => (path.endsWith('/me') && n === 2 ? 60_000 : 0));
+    const logs: string[] = [];
+    const store = discStore(new NasBdjStore(nas.api, { fetch: fetchSlow, token, timeoutMs: 120_000 }), idb, timers, logs);
+    const loading = store.load(SCOPE);
+    await settle();
+    let loaded: { files: readonly SnapshotFile[] } | null = null;
+    void loading.then((l) => (loaded = l));
+    await timers.advance(11_999);
+    expect(loaded).toBeNull();
+    await timers.advance(1);
+    // this browser's copy, never the GET's snapshot (it could be another person's)
+    expect(view(await loading)).toEqual([['here', 2_000, 'here']]);
+    expect(logs.at(-1)).toContain("could not be loaded from the NAS (the NAS did not answer within 12 s); this browser's copy is used");
+  });
+
   it("keeps a session's saves when the NAS missed the budget and this browser had no copy, and the next boot merges them to the NAS", async () => {
     const { personId, token } = await nas.person('Mika');
     const tablet = await nas.device(personId, 'tablet');

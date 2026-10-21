@@ -439,6 +439,57 @@ describe('runBdjWorker and the storage scopes', () => {
     expect(handle.runtime!.jvm.threads.isHalted).toBe(true);
   }, 90_000);
 
+  it('a stop whose save outlasts STOP_SAVE_WAIT_MS loses only the writes since the last save (review minor 10)', async () => {
+    const received: FromBdj[] = [];
+    const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+    // the browser's store: saves 100 ms after a write; from `stall` on, a save hangs (a strict commit that never ends)
+    const saved: number[][] = [];
+    let stall = false;
+    const store: BdjStore = {
+      saveDebounceMs: 100,
+      load: async () => ({ files: [], etag: null }),
+      save: async (_scope, snapshot) => {
+        if (stall) await new Promise<never>(() => undefined);
+        saved.push([...snapshot.files[0]!.bytes]);
+        return { etag: `e${saved.length}` };
+      },
+    };
+    const handle = runBdjWorker(port, { createStore: () => store });
+    const files = fixtureDiscFiles('disc-bdj');
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        disc: { kind: 'files', entries: discEntries(files) },
+        readAheadBytes: 0,
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+      },
+    });
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+    const [persistent] = await discScopes(syntheticSource(files), null);
+    const vfs = handle.runtime!.jvm.opts.vfs!;
+    vfs.mkdir(persistent!.dir);
+    const put = (b: number): void => {
+      const h = vfs.open(`${persistent!.dir}/save`, 'w')!;
+      vfs.write(h, new Uint8Array([b]), 0, 1);
+      vfs.close(h);
+    };
+    put(1);
+    await vi.waitFor(() => expect(saved).toEqual([[1]])); // the debounced save, long before any stop
+    stall = true;
+    put(2);
+    port.onmessage!({ data: { type: 'stop' } });
+    await new Promise((r) => setTimeout(r, 300));
+    // no `stopped` while the save runs: the engine terminates the worker at STOP_SAVE_WAIT_MS (session.test.ts), and
+    // what the store keeps is the save before the stop
+    expect(received.map((m) => m.type)).not.toContain('stopped');
+    expect(saved).toEqual([[1]]);
+    handle.runtime!.jvm.threads.halt();
+  }, 90_000);
+
   it("logs a save that fails at the stop, though the session has ended", async () => {
     const received: FromBdj[] = [];
     const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
