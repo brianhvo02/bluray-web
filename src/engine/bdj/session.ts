@@ -95,6 +95,11 @@ export class BdjSession {
   /** The start-up timeout is running: armed, and neither fired nor cancelled (it sets no tick while hidden). */
   private ticking = false;
   private hidden: boolean;
+  /** The worker waits on its own I/O (its `io` message): that time is not counted either (Task 7g). */
+  private ioPending = false;
+  /** Of the time since the timeout was armed: what it counted, and what it passed over while the worker waited on I/O. */
+  private counted = 0;
+  private ioWaitMs = 0;
   /** The call whose synchronous handling is under way. */
   private callInHand: number | null = null;
   /** Starts (and what follows them) wait for the reply to this call. */
@@ -154,6 +159,8 @@ export class BdjSession {
     if (this.startedAt !== null) return;
     this.startedAt = this.deps.nowMs();
     this.budget = { left: this.timeoutMs, at: this.wallMs(), interval: 0 };
+    this.counted = 0;
+    this.ioWaitMs = 0;
     this.ticking = true;
     this.tick();
   }
@@ -166,24 +173,36 @@ export class BdjSession {
     return this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
   }
 
+  /** The budget is not being spent: the page is hidden (ruling R22), or the worker waits on its own I/O (Task 7g). */
+  private get paused(): boolean {
+    return this.hidden || this.ioPending;
+  }
+
   /**
-   * Counts the time since the budget was last counted (ruling R22): none while hidden, and none across a host sleep,
-   * found as a wall-clock gap of STARTUP_SLEEP_GAP_MS or more beyond the tick's interval, which restarts the budget.
+   * Counts the time since the budget was last counted (ruling R22): none while hidden, none while the worker waits on
+   * its own reads (Task 7g: a slow link is not a hang), and none across a host sleep, found as a wall-clock gap of
+   * STARTUP_SLEEP_GAP_MS or more beyond the tick's interval, which restarts the budget.
    */
   private count(): void {
     const now = this.wallMs();
     const elapsed = Math.max(0, now - this.budget.at); // a wall clock set back counts nothing
     this.budget.at = now;
     if (this.hidden) return;
+    if (this.ioPending) {
+      this.ioWaitMs += elapsed;
+      return;
+    }
     if (elapsed - this.budget.interval >= STARTUP_SLEEP_GAP_MS) {
       this.budget.left = this.timeoutMs;
+      this.counted = 0;
       this.deps.onLog?.(`BD-J start-up timeout restarted: the host did not run for ${Math.round(elapsed / 1000)} s`, false);
     } else {
       this.budget.left -= elapsed;
+      this.counted += elapsed;
     }
   }
 
-  /** Fires the start-up timeout once the budget is spent; otherwise sets the next tick (none while hidden). */
+  /** Fires the start-up timeout once the budget is spent; otherwise sets the next tick (none while paused). */
   private tick(): void {
     this.cancelTimeout = null;
     if (this.budget.left <= 0) {
@@ -191,7 +210,7 @@ export class BdjSession {
       this.timeout(`no playlist was selected and nothing was shown within ${this.timeoutMs / 1000} s`);
       return;
     }
-    if (this.hidden) return; // setHidden(false) sets the next tick
+    if (this.paused) return; // setHidden(false) or the end of the I/O wait sets the next tick
     const ms = Math.min(STARTUP_TICK_MS, this.budget.left);
     this.budget.interval = ms;
     this.cancelTimeout = this.deps.setTimer(ms, () => {
@@ -208,14 +227,24 @@ export class BdjSession {
     if (hidden === this.hidden) return;
     // shown again: a NAS disc's write-ahead copy goes to the NAS now (ruling R17), as the hide's flush may not have got it there
     if (!hidden) this.flush();
+    this.pause(() => (this.hidden = hidden));
+  }
+
+  /** The worker started or stopped waiting on its own I/O (its `io` message, Task 7g). */
+  private setIoPending(pending: boolean): void {
+    if (pending !== this.ioPending) this.pause(() => (this.ioPending = pending));
+  }
+
+  /** Changes what pauses the budget: the time up to now counts as the state it was spent in, then a fresh tick. */
+  private pause(change: () => void): void {
     if (!this.ticking || this.stopped) {
-      this.hidden = hidden;
+      change();
       return;
     }
     this.cancelTimeout?.();
-    this.count(); // the time up to now counts as the state it was spent in
+    this.count();
     this.budget.interval = 0;
-    this.hidden = hidden;
+    change();
     this.tick();
   }
 
@@ -338,6 +367,9 @@ export class BdjSession {
       case 'unsaved':
         this.storage = true;
         break;
+      case 'io':
+        this.setIoPending(m.pending);
+        break;
       case 'stopped':
         break;
     }
@@ -386,10 +418,15 @@ export class BdjSession {
   /** Java showed it runs: the start-up timeout is cancelled, once. */
   private alive(what: string): void {
     if (!this.ticking || this.startedAt === null) return;
+    this.count();
     this.ticking = false;
     this.cancelTimeout?.();
     this.cancelTimeout = null;
-    this.deps.onLog?.(`BD-J ${what} ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot`, false);
+    this.deps.onLog?.(
+      `BD-J ${what} ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot ` +
+        `(${Math.round(this.counted)} ms of the start-up timeout counted; ${Math.round(this.ioWaitMs)} ms waiting on reads)`,
+      false,
+    );
   }
 
   private send(m: ToBdj): void {

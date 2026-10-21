@@ -293,6 +293,17 @@ what would change that decision.
   logs `BD-J start-up timeout restarted`. A hang while visible and awake still falls back at 20 s, after the thread
   dump. *Revisit if* a blocked engine worker (not a sleep) turns out to hold a hung boot past 20 s for long: each
   restart needs a 5 s gap, so only a worker that keeps stalling for 5 s at a time would delay the fallback.
+- **The BD-J start-up timeout does not count time the BD-J worker waits on its own I/O (5e, Task 7g).** A disc opened
+  from the NAS had Java waiting on its JAR and resource reads (shared with the engine's clip read-ahead) for about
+  87% of the counted time, about 10 s on a good link, so a slower link went past 20 s and fell back to the picker
+  with nothing hung. The worker now sends `io` (pending or not) when it starts or stops waiting on a disc read, the
+  storage scopes or FreeType and the fallback font (`IoWatch`, `bdj-worker.ts`). A change is sent at the next event
+  loop turn only if it still holds, so reads answered from memory send nothing. While a read is pending the session
+  counts nothing. The class library was never counted: the timeout is armed once it has arrived. The first
+  playlist's log line gives the time counted and the time spent waiting on reads. A hang with no read pending still
+  falls back at 20 s. Each read is bounded by its own timeout (`REQUEST_TIMEOUT_MS`, 30 s; the asset fetches 20 s),
+  so a stuck read can't hold the fallback off for good. *Revisit if* a disc turns out to poll the network or the
+  disc in a loop as its way of hanging: only the gaps between its reads would count.
 - **A context passed to doPrivileged is always honoured (5e, Ruling R20).** Our `doPrivileged(action, context)` keeps a
   caller-supplied `AccessControlContext` as the privileged context whoever made it. HotSpot honours one that is not
   authorized only when the caller's domain implies `SecurityPermission "createAccessControlContext"`; otherwise it

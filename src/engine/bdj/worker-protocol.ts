@@ -61,6 +61,11 @@ export type FromBdj =
   | { readonly type: 'dumped' }
   /** The storage scopes are loaded (sent once, false) and, after that, whether they have changes not saved yet: a stop then waits for `stopped`. */
   | { readonly type: 'unsaved'; readonly unsaved: boolean }
+  /**
+   * Whether the worker is waiting on its own I/O (a disc read, the storage scopes, FreeType or the fallback font): sent
+   * on each change. The start-up timeout does not count that time (Task 7g): a slow link is not a hang.
+   */
+  | { readonly type: 'io'; readonly pending: boolean }
   /** The answer to `stop`: the worker can be terminated. */
   | { readonly type: 'stopped' };
 

@@ -12,6 +12,7 @@ import { portFetch } from '../disc/port-fetch';
 import { TokenRelay } from '../disc/http-transport';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
+import type { ByteSource } from '../disc/byte-source';
 import { RemoteSource } from '../disc/remote-source';
 import { BdjError } from './errors';
 import type { FreeType } from './fonts/freetype';
@@ -58,6 +59,54 @@ export class StartupWatch {
     if (this.shown || this.dumped) return false;
     this.dumped = true;
     return true;
+  }
+}
+
+/**
+ * Whether the worker is waiting on its own I/O, for the engine's start-up timeout (Task 7g): a disc read over a slow
+ * link, the storage scopes or the fonts. A change is told at the next turn of the event loop and only if it still
+ * holds then, so reads answered from memory (the read-ahead, the inlined files) send nothing.
+ */
+export class IoWatch {
+  private pending = 0;
+  private told = false;
+  private scheduled = false;
+
+  constructor(private readonly tell: (pending: boolean) => void) {}
+
+  /** `p`, counted as pending I/O until it settles. */
+  track<T>(p: Promise<T>): Promise<T> {
+    this.pending++;
+    this.schedule();
+    const done = (): void => {
+      this.pending--;
+      this.schedule();
+    };
+    p.then(done, done);
+    return p;
+  }
+
+  /** `source`, its reads tracked. */
+  source<S extends ByteSource & { paths(): Iterable<string> }>(source: S): ByteSource & { paths(): Iterable<string> } {
+    return {
+      exists: (path) => source.exists(path),
+      size: (path) => source.size(path),
+      list: (dir) => source.list(dir),
+      paths: () => source.paths(),
+      read: (path, offset, length, signal) => this.track(source.read(path, offset, length, signal)),
+    };
+  }
+
+  private schedule(): void {
+    if (this.scheduled) return;
+    this.scheduled = true;
+    setTimeout(() => {
+      this.scheduled = false;
+      const now = this.pending > 0;
+      if (now === this.told) return;
+      this.told = now;
+      this.tell(now);
+    }, 0);
   }
 }
 
@@ -161,6 +210,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     if (!ended) port.postMessage(m);
   };
 
+  /** What the worker waits on (disc reads, the scopes, the fonts), and whether the engine was last told it waits. */
+  const io = new IoWatch((pending) => post({ type: 'io', pending }));
+
   const fail = (e: unknown): void => {
     if (ended) return;
     let code: BdjFailureCode = 'internal';
@@ -248,13 +300,15 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         remote = disc;
         if (latestToken !== null) disc.setToken(latestToken);
       }
+      // everything below reads the disc through this: the time Java waits on it is not the start-up timeout's (Task 7g)
+      const reads = io.source(disc);
       // the disc model loads while the JDK starts up; the host reads it once Libbluray.init asks for disc info
       let model: { readonly disc: DiscModel; readonly clips: ReadonlyMap<string, Clpi> } | null = null;
       const loading = (async () => {
-        const opened = await openDisc(disc);
+        const opened = await openDisc(reads);
         const clipIds = new Set([...opened.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
         // openDisc has already parsed the clips of a disc with movie objects; only the rest are read here
-        const rest = await loadClips(disc, [...clipIds].filter((id) => !opened.clips.has(id) && disc.exists(clipInfoPath(id))));
+        const rest = await loadClips(reads, [...clipIds].filter((id) => !opened.clips.has(id) && disc.exists(clipInfoPath(id))));
         model = { disc: opened, clips: new Map([...opened.clips, ...rest]) };
       })();
       loading.catch(() => undefined); // awaited below; this only keeps a failure while the runtime is set up from going unhandled
@@ -264,10 +318,10 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       };
       // the storage scopes load while the JDK starts up too: Libbluray.init (and so every xlet) waits for them
       store = createStore(m, fetchFn);
-      const storeLoading = store ? loadScopes(store, disc, m.discId) : Promise.resolve(null);
+      const storeLoading = store ? io.track(loadScopes(store, reads, m.discId)) : Promise.resolve(null);
       planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
-        disc,
+        disc: reads,
         discId: m.discId,
         classLibrary: m.classLibrary,
         ...(m.memory ? { memory: m.memory } : {}),
@@ -301,7 +355,12 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         yieldTask: eventLoopTurn(),
         ...(options.extraIntrinsics ? { extraIntrinsics: options.extraIntrinsics } : {}),
         ...(loadFreeType && options.loadDefaultFont
-          ? { fonts: { loadFreeType: () => loadFreeType().then((ft) => (freeType = ft)), loadDefaultFont: options.loadDefaultFont } }
+          ? {
+              fonts: {
+                loadFreeType: () => io.track(loadFreeType().then((ft) => (freeType = ft))),
+                loadDefaultFont: () => io.track(options.loadDefaultFont!()),
+              },
+            }
           : {}),
         log: (line) => {
           if (line === hostLine) hostLine = null;

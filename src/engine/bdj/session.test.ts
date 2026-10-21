@@ -217,6 +217,64 @@ describe('BdjSession rules', () => {
     expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
   });
 
+  it("does not count time Java waits on its own reads: 60 s of slow disc reads, no fallback; a hang with none pending still falls back at 20 s (Task 7g)", () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    h.clock.advance(5_000);
+    // a JAR read over a slow link: pending for 60 s in all, with Java running for 4 s between two of its reads
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(30_000);
+    f.emit({ type: 'io', pending: false });
+    h.clock.advance(4_000);
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(30_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    f.emit({ type: 'io', pending: false });
+    // 9 s were counted: 11 s more without a read pending is the hang
+    h.clock.advance(10_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+  });
+
+  it('a read pending across a hide and a show still pauses the budget once shown (Task 7g, ruling R22)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(2_000);
+    f.emit({ type: 'io', pending: true });
+    h.session.setHidden(true);
+    h.clock.advance(10_000);
+    h.session.setHidden(false);
+    h.clock.advance(40_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    f.emit({ type: 'io', pending: false });
+    h.clock.advance(17_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it('the first playlist is logged with the budget it used (Task 7g)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    h.clock.advance(3_000);
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(5_000);
+    f.emit({ type: 'io', pending: false });
+    h.clock.advance(1_500);
+    f.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    expect(h.logs).toContain('BD-J selected its first playlist 9500 ms after boot (4500 ms of the start-up timeout counted; 5000 ms waiting on reads)');
+  });
+
   it('a session made while the page is hidden waits for it to be shown', () => {
     const f = fakeWorker();
     const h = session(f.worker, undefined, 0n, { hidden: true });
@@ -311,7 +369,8 @@ describe('BdjSession rules', () => {
       else f.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1, height: 1 } });
       h.clock.advance(60_000);
       expect(h.failures).toEqual([]);
-      expect(h.logs).toContain(show === 'menu' ? 'BD-J showed a menu 10000 ms after boot' : 'BD-J showed a background still 10000 ms after boot');
+      const counted = '(10000 ms of the start-up timeout counted; 0 ms waiting on reads)';
+      expect(h.logs).toContain(show === 'menu' ? `BD-J showed a menu 10000 ms after boot ${counted}` : `BD-J showed a background still 10000 ms after boot ${counted}`);
     }
   });
 

@@ -218,6 +218,58 @@ describe('runBdjWorker', () => {
     expect(Math.max(...ranges)).toBeLessThanOrEqual(BDJ_REMOTE_CHUNK_BYTES);
     expect(maxInFlight).toBeLessThanOrEqual(BDJ_REMOTE_IN_FLIGHT);
   }, 90_000);
+
+  it("tells the engine while Java waits on a disc read (io), so a slow NAS is not taken for a hang (Task 7g)", async () => {
+    const nas = fakeNas(fixtureDiscFiles('disc-bdj'));
+    // a slow link for the xlet's JAR: its reads are held until the test lets them go
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    let held = 0;
+    const fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (String(input).includes('/files/BDMV/JAR/')) {
+        held++;
+        await slow;
+      }
+      return nas.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const received: FromBdj[] = [];
+    const port: BdjPort = {
+      onmessage: null,
+      postMessage: (m) => {
+        received.push(m);
+        if (m.type === 'call') setTimeout(() => port.onmessage!({ data: { type: 'reply', id: m.id, value: 0 } }), 0);
+      },
+    };
+    runBdjWorker(port, { fetch });
+    port.onmessage!({
+      data: {
+        type: 'boot',
+        registers: createRegisterBuffer(),
+        status: createStatusBlock(),
+        plane: createGraphicsPlane(),
+        disc: nas.spec,
+        readAheadBytes: 1024 * 1024,
+        discId: null,
+        classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+      },
+    });
+    await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+    const io = (): boolean[] => received.flatMap((m) => (m.type === 'io' ? [m.pending] : []));
+    // whatever the boot read has landed: nothing is pending now
+    expect(io().at(-1) ?? false).toBe(false);
+    port.onmessage!({ data: { type: 'start', title: 0xffff } });
+    await vi.waitFor(() => expect(held).toBeGreaterThan(0), { timeout: 60_000 });
+    await vi.waitFor(() => expect(io().at(-1)).toBe(true), { timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(io().at(-1)).toBe(true); // still waiting, and said once
+    expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(false);
+    release();
+    await vi.waitFor(() => expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(true), { timeout: 60_000 });
+    expect(io().at(-1)).toBe(false);
+    // only changes are sent: never two of the same in a row
+    expect(io().every((p, i, all) => i === 0 || all[i - 1] !== p)).toBe(true);
+    expect(received.some((m) => m.type === 'failed')).toBe(false);
+  }, 90_000);
 });
 
 describe('runBdjWorker and the storage scopes', () => {
