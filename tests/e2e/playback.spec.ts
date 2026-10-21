@@ -158,11 +158,20 @@ test('a local disc remembers its place on this device', async ({ page }) => {
   await page.reload();
   await setFolder(page.getByTestId('folder-input'), DISC);
   await expect(page.getByTestId('resume-prompt')).toContainText('Stopped at 0:0', { timeout: 10_000 });
+  const label = (await page.getByTestId('resume-at').textContent()) ?? '';
+  const seconds = Number(/^Resume at 0:(\d\d)$/.exec(label)?.[1]);
+  expect(Math.abs(seconds - stoppedAt / 1e6)).toBeLessThan(1);
   await expect(page.getByTestId('resume-at')).toBeVisible();
   await expect(page.getByTestId('resume-start-over')).toBeVisible();
   await page.getByTestId('resume-at').click();
   await expect(page.getByTestId('player')).toHaveAttribute('data-playlist', '00000', { timeout: 15_000 });
   await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(3_000_000);
+  // Start from beginning plays the same playlist from 0
+  await page.reload();
+  await setFolder(page.getByTestId('folder-input'), DISC);
+  await page.getByTestId('resume-start-over').click({ timeout: 10_000 });
+  await expect(page.getByTestId('player')).toHaveAttribute('data-playlist', '00000', { timeout: 15_000 });
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? Infinity, { timeout: 5_000 }).toBeLessThan(1_500_000);
 });
 
 test('arrow keys on a focused seek bar seek by 10 s instead of stepping the slider', async ({ page }) => {

@@ -16,12 +16,11 @@ import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer }
 import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
 import { discKeyOf } from '../engine/disc/disc-key';
-import { normalizeDiscPaths } from '../engine/disc/paths';
 import { mainPlaylistId } from './nas/library-model';
 import { LOCAL_DEVICE_NAME, type LaunchSettings, type PlaceSaver } from './place-saver';
 import { ResumePrompt } from './nas/ResumePrompt';
-import { playlistsOf, resumeOffer, startOver, within, type ResumeOffer } from './nas/resume-model';
-import { promptLines } from './place-model';
+import { playlistsOf, startOver } from './nas/resume-model';
+import { askOrOpen, localKeyOf, recentResumeLabel, type AskOffer } from './local-resume';
 import type { StartPoint } from '../engine/protocol';
 import type { DiscEntry } from '../engine/disc/nas-api';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
@@ -31,12 +30,9 @@ const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 /** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
 const COPY_NOTICE_DELAY_MS = 1500;
 
-/** A place on this device is read for at most this long before a local disc opens without asking. */
-const LOCAL_PLACES_TIMEOUT_MS = 3000;
-
 /** A local disc waiting for the tap that says where it opens: Resume, or Start from beginning. */
 interface PendingResume {
-  readonly offer: Extract<ResumeOffer, { readonly kind: 'ask' | 'changed' }>;
+  readonly offer: AskOffer;
   readonly open: (start: StartPoint | undefined, launch: LaunchSettings | undefined) => void;
 }
 
@@ -193,9 +189,8 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     let live = true;
     void Promise.all(
       recent.map(async (disc): Promise<readonly [number, string] | null> => {
-        if (disc.discKey === null || disc.discKey.startsWith('d.')) return null;
-        const offer = resumeOffer(await within(places.placesOf(disc.discKey), LOCAL_PLACES_TIMEOUT_MS, null), null, null);
-        return offer.kind === 'ask' ? ([disc.id, promptLines(offer.place, Date.now()).resumeLabel] as const) : null;
+        const label = await recentResumeLabel(disc.discKey, (k) => places.placesOf(k), Date.now());
+        return label === null ? null : ([disc.id, label] as const);
       }),
     ).then((rows) => live && setRecentResume(new Map(rows.filter((r): r is readonly [number, string] => r !== null))));
     return () => {
@@ -305,30 +300,36 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     task.catch((err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
 
-  /** `discKeyOf` of a folder's files; null when they aren't a disc, or have no fingerprint (so nothing is remembered). */
-  const localKeyOf = (entries: ReadonlyArray<readonly [string, File]>): string | null => {
-    try {
-      const key = discKeyOf('local', [...normalizeDiscPaths(entries)].map(([path, file]) => ({ path, size: file.size })));
-      return key.startsWith('d.') ? null : key;
-    } catch {
-      return null; // not a disc: the engine says why
-    }
-  };
-
   /**
    * Opens a local disc, after asking when this device holds an unfinished place for it: the prompt comes before the
    * open, and its buttons (taps) start audio, so Resume and Start from beginning open inside a gesture.
    */
+  /** Counts the opens asked for: a call that a later one superseded (or any other open) does nothing when its read ends. */
+  const openSeq = useRef(0);
+  // Another open (the engine leaves idle, or the NAS route changes) drops a prompt and any read still waiting.
+  const routeKey = route === null ? '' : nasRoutePath(route);
+  useEffect(() => {
+    if (snapshot.engineState !== 'idle') {
+      openSeq.current++;
+      setPending(null);
+    }
+  }, [snapshot.engineState]);
+  useEffect(() => {
+    openSeq.current++;
+    setPending(null);
+  }, [routeKey]);
   const openAskingFirst = async (
     discKey: string | null,
     playlists: ReturnType<typeof playlistsOf> | null,
     open: PendingResume['open'],
   ): Promise<void> => {
+    const mine = ++openSeq.current;
     setPending(null);
-    const stored = discKey === null ? null : await within(places.placesOf(discKey), LOCAL_PLACES_TIMEOUT_MS, null);
-    const offer = resumeOffer(stored, null, playlists);
-    if (offer.kind === 'ask' || offer.kind === 'changed') setPending({ offer, open });
-    else open(undefined, undefined);
+    await askOrOpen({
+      discKey, playlists, readPlaces: (k) => places.placesOf(k), isCurrent: () => openSeq.current === mine,
+      ask: (offer) => setPending({ offer, open }),
+      open: () => open(undefined, undefined),
+    });
   };
 
   /** A folder's files open, and its place is saved on this device under its fingerprint. */
@@ -387,9 +388,9 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     setDragging(false);
     setLocalError(null);
     controller.startAudio();
-    const pending = discFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
+    const dropPending = discFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
     run(
-      pending.then(async (dropped) => {
+      dropPending.then(async (dropped) => {
         if (!dropped) {
           setLocalError('Drop the disc folder itself (the folder that contains BDMV).');
           return;
@@ -435,6 +436,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     if (!pending) return;
     const { offer, open } = pending;
     controller.startAudio(); // inside the tap
+    openSeq.current++;
     setPending(null);
     const launch: LaunchSettings = { settings: offer.place.settings, byLanguage: false };
     if (resume && offer.kind === 'ask') open(offer.start, launch);
