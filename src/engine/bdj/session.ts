@@ -78,6 +78,13 @@ export const STARTUP_TICK_MS = 1_000;
  */
 export const STARTUP_SLEEP_GAP_MS = 5_000;
 
+/**
+ * Ruling R26: waiting on the worker's own I/O pauses the start-up timeout for at most this long in all per boot. Past
+ * it the time counts as usual, so a disc that hangs reading in a loop (or retrying a read that keeps failing) still
+ * falls back, 20 s of counted time later, with the thread dump. The legitimate waits measured on the NAS were 8–18 s.
+ */
+export const IO_PAUSE_CEILING_MS = 120_000;
+
 /** At the start-up timeout, how long the worker has to log its thread dump before it is stopped. */
 export const DUMP_WAIT_MS = 1_000;
 
@@ -95,8 +102,14 @@ export class BdjSession {
   /** The start-up timeout is running: armed, and neither fired nor cancelled (it sets no tick while hidden). */
   private ticking = false;
   private hidden: boolean;
-  /** The worker waits on its own I/O (its `io` message): that time is not counted either (Task 7g). */
+  /**
+   * The worker waits on its own I/O (its `io` message): that time is not counted either (Task 7g), up to
+   * IO_PAUSE_CEILING_MS in all (R26). A worker that dies without an `onerror` while this is set sends no `io: false`:
+   * such a session falls back only through that ceiling, 20 s of counted time after it.
+   */
   private ioPending = false;
+  /** IO_PAUSE_CEILING_MS has been reached: waiting on I/O counts from now on. */
+  private ioCeilingReached = false;
   /** Of the time since the timeout was armed: what it counted, and what it passed over while the worker waited on I/O. */
   private counted = 0;
   private ioWaitMs = 0;
@@ -161,6 +174,7 @@ export class BdjSession {
     this.budget = { left: this.timeoutMs, at: this.wallMs(), interval: 0 };
     this.counted = 0;
     this.ioWaitMs = 0;
+    this.ioCeilingReached = false;
     this.ticking = true;
     this.tick();
   }
@@ -173,36 +187,41 @@ export class BdjSession {
     return this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
   }
 
-  /** The budget is not being spent: the page is hidden (ruling R22), or the worker waits on its own I/O (Task 7g). */
-  private get paused(): boolean {
-    return this.hidden || this.ioPending;
-  }
-
   /**
    * Counts the time since the budget was last counted (ruling R22): none while hidden, none while the worker waits on
-   * its own reads (Task 7g: a slow link is not a hang), and none across a host sleep, found as a wall-clock gap of
-   * STARTUP_SLEEP_GAP_MS or more beyond the tick's interval, which restarts the budget.
+   * its own reads (Task 7g: a slow link is not a hang) until IO_PAUSE_CEILING_MS of such waiting (R26), and none across
+   * a host sleep, found as a wall-clock gap of STARTUP_SLEEP_GAP_MS or more beyond the tick's interval, which restarts
+   * the budget.
    */
   private count(): void {
     const now = this.wallMs();
     const elapsed = Math.max(0, now - this.budget.at); // a wall clock set back counts nothing
     this.budget.at = now;
     if (this.hidden) return;
-    if (this.ioPending) {
-      this.ioWaitMs += elapsed;
-      return;
-    }
     if (elapsed - this.budget.interval >= STARTUP_SLEEP_GAP_MS) {
       this.budget.left = this.timeoutMs;
       this.counted = 0;
       this.deps.onLog?.(`BD-J start-up timeout restarted: the host did not run for ${Math.round(elapsed / 1000)} s`, false);
-    } else {
-      this.budget.left -= elapsed;
-      this.counted += elapsed;
+      return;
     }
+    let active = elapsed;
+    if (this.ioPending && !this.ioCeilingReached) {
+      const waited = Math.min(elapsed, IO_PAUSE_CEILING_MS - this.ioWaitMs);
+      this.ioWaitMs += waited;
+      active -= waited;
+      if (this.ioWaitMs >= IO_PAUSE_CEILING_MS) {
+        this.ioCeilingReached = true;
+        this.deps.onLog?.(`BD-J start-up timeout: the worker has waited on its reads for ${IO_PAUSE_CEILING_MS / 1000} s in all; waiting counts from now on`, true);
+      }
+    }
+    this.budget.left -= active;
+    this.counted += active;
   }
 
-  /** Fires the start-up timeout once the budget is spent; otherwise sets the next tick (none while paused). */
+  /**
+   * Fires the start-up timeout once the budget is spent; otherwise sets the next tick (none while hidden). Ticks go on
+   * while the worker waits on I/O, so the R26 ceiling is noticed while a read stays pending.
+   */
   private tick(): void {
     this.cancelTimeout = null;
     if (this.budget.left <= 0) {
@@ -210,7 +229,7 @@ export class BdjSession {
       this.timeout(`no playlist was selected and nothing was shown within ${this.timeoutMs / 1000} s`);
       return;
     }
-    if (this.paused) return; // setHidden(false) or the end of the I/O wait sets the next tick
+    if (this.hidden) return; // setHidden(false) sets the next tick
     const ms = Math.min(STARTUP_TICK_MS, this.budget.left);
     this.budget.interval = ms;
     this.cancelTimeout = this.deps.setTimer(ms, () => {

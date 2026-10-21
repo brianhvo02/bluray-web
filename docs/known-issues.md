@@ -301,9 +301,19 @@ what would change that decision.
   loop turn only if it still holds, so reads answered from memory send nothing. While a read is pending the session
   counts nothing. The class library was never counted: the timeout is armed once it has arrived. The first
   playlist's log line gives the time counted and the time spent waiting on reads. A hang with no read pending still
-  falls back at 20 s. Each read is bounded by its own timeout (`REQUEST_TIMEOUT_MS`, 30 s; the asset fetches 20 s),
-  so a stuck read can't hold the fallback off for good. *Revisit if* a disc turns out to poll the network or the
-  disc in a loop as its way of hanging: only the gaps between its reads would count.
+  falls back at 20 s.
+  - **No single timeout bounds a wait.** One HTTP read can take about 70 s or more: 30 s (`REQUEST_TIMEOUT_MS`), then a
+    401 and a token refresh of up to 10 s, then another 30 s, and a 503 can add one more request. Each scope load
+    can take 3 s. The FreeType wait includes compiling it. Java may also retry a read that keeps failing, or read in
+    a loop as its way of hanging.
+  - **The ceiling is the real bound (ruling R26).** Waiting on I/O pauses the timeout for at most 120 s in all per
+    boot (`IO_PAUSE_CEILING_MS`, `session.ts`). Past that it counts as usual and is logged once, so such a disc
+    falls back 20 s of counted time later, with the thread dump. The legitimate waits measured on the NAS were
+    8–18 s.
+  - **After the timeout is disarmed or has fired,** the worker sends no more `io`. A selected playlist, a visible
+    plane or a still disarms it (`StartupWatch`); the thread-dump request marks it as fired.
+  - A worker that dies without an `onerror` while a read is pending falls back only through the ceiling.
+  - *Revisit if* a disc needs more than 2 minutes of reads before it shows anything: it would fall back.
 - **A context passed to doPrivileged is always honoured (5e, Ruling R20).** Our `doPrivileged(action, context)` keeps a
   caller-supplied `AccessControlContext` as the privileged context whoever made it. HotSpot honours one that is not
   authorized only when the caller's domain implies `SecurityPermission "createAccessControlContext"`; otherwise it

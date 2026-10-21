@@ -16,7 +16,7 @@ import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries, syntheticSource } from '../../../tests/helpers/synthetic-disc';
 import type { BdjStore, LoadedSnapshot, SaveResult, Snapshot } from './store/bdj-store';
 import { discScopes } from './store/scopes';
-import { StartupWatch, runBdjWorker, type BdjPort } from './bdj-worker';
+import { IoWatch, StartupWatch, runBdjWorker, type BdjPort } from './bdj-worker';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { createStatusBlock } from './status-block';
@@ -43,6 +43,100 @@ describe('StartupWatch (the start-up deadlock dump)', () => {
       w.plane(false); // a menu taken down later still showed Java runs
       expect(w.deadlock()).toBe(false);
     }
+  });
+});
+
+describe('IoWatch (the worker waiting on its own I/O, Task 7g)', () => {
+  const turn = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
+  const deferred = (): { promise: Promise<number>; resolve: () => void; reject: () => void } => {
+    let resolve!: () => void;
+    let reject!: () => void;
+    const promise = new Promise<number>((res, rej) => {
+      resolve = () => res(1);
+      reject = () => rej(new Error('read failed'));
+    });
+    return { promise, resolve, reject };
+  };
+  const watch = (): { io: IoWatch; told: boolean[] } => {
+    const told: boolean[] = [];
+    return { io: new IoWatch((p) => void told.push(p)), told };
+  };
+
+  it('stays pending while any of two overlapping reads is pending', async () => {
+    const { io, told } = watch();
+    const a = deferred();
+    const b = deferred();
+    void io.track(a.promise);
+    void io.track(b.promise);
+    await turn();
+    expect(told).toEqual([true]);
+    a.resolve();
+    await turn();
+    expect(told).toEqual([true]);
+    b.resolve();
+    await turn();
+    expect(told).toEqual([true, false]);
+  });
+
+  it('a rejected read clears, and the rejection reaches the reader', async () => {
+    const { io, told } = watch();
+    const a = deferred();
+    const read = io.track(a.promise);
+    await turn();
+    a.reject();
+    await expect(read).rejects.toThrow('read failed');
+    await turn();
+    expect(told).toEqual([true, false]);
+  });
+
+  it('reads answered from memory (settled within the turn) send nothing', async () => {
+    const { io, told } = watch();
+    const source = io.source({ exists: () => true, size: () => 4, list: () => [], paths: () => [], read: async () => new Uint8Array(4) });
+    for (let i = 0; i < 10; i++) await source.read('BDMV/JAR/00000.JAR', 0, 4);
+    await turn();
+    expect(told).toEqual([]);
+  });
+
+  it('changes within one turn are told once, as the state at the end of the turn', async () => {
+    const { io, told } = watch();
+    const a = deferred();
+    const b = deferred();
+    void io.track(a.promise);
+    a.resolve();
+    await Promise.resolve();
+    void io.track(b.promise);
+    await turn();
+    expect(told).toEqual([true]);
+    b.resolve();
+    const c = deferred();
+    await Promise.resolve();
+    void io.track(c.promise); // pending again before the turn ends: nothing changed
+    await turn();
+    expect(told).toEqual([true]);
+  });
+
+  it('tells nothing once stopped (the start-up timeout disarmed or fired)', async () => {
+    const { io, told } = watch();
+    const a = deferred();
+    void io.track(a.promise);
+    await turn();
+    io.stop();
+    a.resolve();
+    void io.track(deferred().promise);
+    await turn();
+    expect(told).toEqual([true]);
+  });
+
+  it('StartupWatch stops it when Java first shows it runs, once', () => {
+    let stops = 0;
+    const w = new StartupWatch(() => void stops++);
+    w.call('selectPlaylist', [-1, -1, -1, '-1']);
+    w.plane(false);
+    expect(stops).toBe(0);
+    w.call('selectPlaylist', [5, -1, -1, '-1']);
+    w.plane(true);
+    w.still(new Uint8Array([1]));
+    expect(stops).toBe(1);
   });
 });
 
@@ -265,7 +359,10 @@ describe('runBdjWorker', () => {
     expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(false);
     release();
     await vi.waitFor(() => expect(received.some((m) => m.type === 'call' && m.name === 'selectPlaylist')).toBe(true), { timeout: 60_000 });
-    expect(io().at(-1)).toBe(false);
+    // the selected playlist disarms the session's start-up timeout: no io is sent after it, whatever Java reads next
+    await new Promise((r) => setTimeout(r, 500));
+    const selected = received.findIndex((m) => m.type === 'call' && m.name === 'selectPlaylist');
+    expect(received.slice(selected).some((m) => m.type === 'io')).toBe(false);
     // only changes are sent: never two of the same in a row
     expect(io().every((p, i, all) => i === 0 || all[i - 1] !== p)).toBe(true);
     expect(received.some((m) => m.type === 'failed')).toBe(false);

@@ -41,17 +41,26 @@ export class StartupWatch {
   private shown = false;
   private dumped = false;
 
+  /** `onShown`: called once, when Java first shows it runs (the session's start-up timeout is then disarmed). */
+  constructor(private readonly onShown?: () => void) {}
+
   call(name: BdjCallName, args: readonly BdjWireValue[]): void {
-    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.shown = true;
+    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.show();
   }
 
   /** A background still was shown (null: one was cleared, which shows nothing). */
   still(image: Uint8Array | null): void {
-    if (image) this.shown = true;
+    if (image) this.show();
   }
 
   plane(visible: boolean): void {
-    if (visible) this.shown = true;
+    if (visible) this.show();
+  }
+
+  private show(): void {
+    if (this.shown) return;
+    this.shown = true;
+    this.onShown?.();
   }
 
   /** A deadlock outcome: true for the first one while Java has shown nothing, which the worker dumps. */
@@ -71,8 +80,14 @@ export class IoWatch {
   private pending = 0;
   private told = false;
   private scheduled = false;
+  private stopped = false;
 
   constructor(private readonly tell: (pending: boolean) => void) {}
+
+  /** Nothing more is told: the start-up timeout has been disarmed (Java showed it runs) or has fired. */
+  stop(): void {
+    this.stopped = true;
+  }
 
   /** `p`, counted as pending I/O until it settles. */
   track<T>(p: Promise<T>): Promise<T> {
@@ -102,6 +117,7 @@ export class IoWatch {
     this.scheduled = true;
     setTimeout(() => {
       this.scheduled = false;
+      if (this.stopped) return;
       const now = this.pending > 0;
       if (now === this.told) return;
       this.told = now;
@@ -189,7 +205,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let remote: RemoteSource | null = null;
   let waitingSince = 0;
   /** Whether Java has shown it runs (the deadlock dump is for start-up only). */
-  const startup = new StartupWatch();
+  // once Java shows it runs, the start-up timeout is disarmed and the engine needs no more `io`
+  const startup = new StartupWatch(() => io.stop());
   /** The plane Java draws into, read for its visibility. */
   let planeView: GraphicsPlaneReader | null = null;
 
@@ -492,6 +509,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         else waiting.push(m);
         break;
       case 'dump':
+        io.stop(); // the start-up timeout has fired
         dump(m.reason);
         post({ type: 'dumped' });
         break;

@@ -8,7 +8,7 @@ import type { DiscSpec } from '../disc/disc-spec';
 import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
-import { BdjSession, DUMP_WAIT_MS, STOP_SAVE_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
+import { BdjSession, DUMP_WAIT_MS, IO_PAUSE_CEILING_MS, STOP_SAVE_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
@@ -240,6 +240,67 @@ describe('BdjSession rules', () => {
     expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
     f.emit({ type: 'dumped' });
     expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+  });
+
+  it('a read that never lands pauses the budget for 120 s at most; the fallback follows 20 s of counted time later (R26)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    f.emit({ type: 'io', pending: true }); // and never false
+    h.clock.advance(IO_PAUSE_CEILING_MS - 1);
+    expect(h.logs.some((l) => l.includes('waited on its reads'))).toBe(false);
+    h.clock.advance(1);
+    expect(h.logs.filter((l) => l.includes('waited on its reads'))).toEqual(['BD-J start-up timeout: the worker has waited on its reads for 120 s in all; waiting counts from now on']);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(19_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+    expect(h.logs.filter((l) => l.includes('waited on its reads'))).toHaveLength(1); // logged once
+  });
+
+  it('the 120 s ceiling is the total of all waits in a boot, not of each one (R26)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    for (let i = 0; i < 4; i++) {
+      f.emit({ type: 'io', pending: true });
+      h.clock.advance(30_000);
+      f.emit({ type: 'io', pending: false });
+      h.clock.advance(1_000); // 4 s counted in all
+    }
+    // the ceiling is reached: a fifth wait counts, 16 s of the budget left
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(15_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it('io after the timeout has fired, or after stop(), changes nothing (Task 7g)', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(20_000);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'io', pending: true }); // ignored: only the dump is waited for
+    h.clock.advance(DUMP_WAIT_MS);
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+
+    const g = fakeWorker();
+    const k = session(g.worker);
+    void k.session.boot(DISC, 0, null, CLASSES);
+    await k.session.stop();
+    const sent = g.sent.length;
+    g.emit({ type: 'io', pending: true });
+    g.emit({ type: 'io', pending: false });
+    k.clock.advance(60_000);
+    expect(g.sent.length).toBe(sent);
+    expect(k.failures).toEqual([]);
   });
 
   it('a read pending across a hide and a show still pauses the budget once shown (Task 7g, ruling R22)', () => {
