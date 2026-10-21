@@ -3,6 +3,7 @@
  * §6.4 and §6.6). Pure: the catalogue, the places and the disc lookups come in as arguments. Original code.
  */
 import type { ContinueItem, EpisodeRef, PlaybackPlace, PlaylistProgress, TitleDetail, TitleSummary } from '../../../src/engine/disc/nas-api';
+import { isShortPlace } from '../../../src/engine/disc/place-rules';
 import type { Catalogue } from './catalogue';
 
 export type { ContinueItem, PlaylistProgress };
@@ -74,7 +75,7 @@ function catalogueFields(slot: EpisodeSlot): Pick<ContinueItem, 'titleId' | 'tit
 }
 
 /**
- * The Continue watching row: an unfinished place is a `resume` card; a finished series episode is an `up-next` card
+ * The Continue watching row: an unfinished place (past its first moments, isShortPlace) is a `resume` card; a finished series episode is an `up-next` card
  * for the following episode (on whichever disc), unless the series has a newer place or the next episode has one of
  * its own; movies, music and a series' last episode drop off. Newest first, at most 50. `discKeyOf` names the disc an
  * Up next episode is on (default `d.<id>`).
@@ -82,6 +83,8 @@ function catalogueFields(slot: EpisodeSlot): Pick<ContinueItem, 'titleId' | 'tit
 export function continueWatching(
   places: readonly PlaybackPlace[], catalogue: Catalogue, discsOf: DiscsOf, discKeyOf: (discId: string) => string = (id) => `d.${id}`,
 ): ContinueItem[] {
+  // an unfinished place near its start is none to resume (spec §6.5): it makes no card and holds back no Up next card
+  places = places.filter((p) => p.finished || !isShortPlace(p.timeUs, p.durationUs));
   if (places.length === 0) return [];
   const index = indexEpisodes(catalogue);
   const slots = new Map(places.map((p) => [p, slotOf(p, index, discsOf)] as const));

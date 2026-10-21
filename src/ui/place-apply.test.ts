@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PlaceSettings } from '../engine/disc/nas-api';
 import type { SubtitleChoice, TextFileInfo } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../player/player-controller';
-import { filesToAdd, LaunchSettingsApplier } from './place-apply';
+import { filesToAdd, LaunchSettingsApplier, TEXT_WAIT_MS } from './place-apply';
 import type { LaunchSettings } from './place-saver';
 import type { StoredTextFile } from './place-store';
 
@@ -13,7 +13,8 @@ const base: PlaceSettings = {
 const bytes = (n: number): Uint8Array => new Uint8Array(n);
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = []) {
+function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opts: { loadFails?: boolean } = {}) {
+  let clock = 1000;
   const calls: unknown[][] = [];
   const loaded: string[][] = [];
   let pending = launch;
@@ -24,7 +25,10 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = []) {
     toggleMute: () => void calls.push(['mute']),
     selectAudio: (i: number) => void calls.push(['audio', i]),
     selectSubtitle: (c: SubtitleChoice) => void calls.push(['subtitle', c]),
-    loadSubtitleFiles: async (files: readonly File[]) => void loaded.push(files.map((f) => f.name)),
+    loadSubtitleFiles: async (files: readonly File[]) => {
+      loaded.push(files.map((f) => f.name));
+      if (opts.loadFails) throw new Error('worker gone');
+    },
     setSubtitleStart: (i: number, us: number | null) => void calls.push(['start', i, us]),
     shiftSubtitleFile: (i: number, ms: number) => void calls.push(['shift', i, ms]),
     scaleSubtitles: (d: number) => void calls.push(['scale', d]),
@@ -44,6 +48,8 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = []) {
       shader = name;
       calls.push(['shader', name]);
     },
+    nowMs: () => clock,
+    log: () => {},
   });
   let snap: PlayerSnapshot = {
     ...INITIAL_SNAPSHOT, engineState: 'loading', currentPlaylistId: null,
@@ -64,8 +70,16 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = []) {
     get snap() {
       return snap;
     },
+    advance(ms: number) {
+      clock += ms;
+    },
   };
 }
+
+/** The engine's subtitle state listing `names` as the text set. */
+const listing = (snap: PlayerSnapshot, ...names: string[]): Partial<PlayerSnapshot> => ({
+  subtitles: { ...snap.subtitles!, text: { files: names.map((name) => ({ name, format: 'srt' as const, cues: 1, startUs: 0, offsetMs: 0 })), missingFonts: [], episodeStarts: [] }, selected: 'text' },
+});
 
 describe('LaunchSettingsApplier', () => {
   it('waits for the disc to play, then sets volume, mute and the shader once', () => {
@@ -119,6 +133,45 @@ describe('LaunchSettingsApplier', () => {
     u.show({ engineState: 'playing', currentPlaylistId: '00004' });
     await settle();
     expect(u.loaded).toEqual([]);
+  });
+});
+
+describe('LaunchSettingsApplier giving up on re-added files', () => {
+  const textFiles = [{ name: 'ep1.srt', size: 0, startUs: null, offsetMs: 400 }];
+  const start = async (opts: { loadFails?: boolean } = {}) => {
+    const t = setup({ settings: { ...base, textFiles, textOn: false, psr2: 0x80000001 }, byLanguage: false }, [{ name: 'ep1.srt', bytes: bytes(2) }], opts);
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    return t;
+  };
+  const adjustments = (calls: unknown[][]) => calls.filter((c) => c[0] === 'shift' || c[0] === 'scale' || c[0] === 'subtitle');
+
+  it('forgets them when the load fails, so a file the user adds later is left alone', async () => {
+    const t = await start({ loadFails: true });
+    t.show(listing(t.snap, 'ep1.srt'));
+    expect(adjustments(t.calls)).toEqual([]);
+  });
+
+  it('gives up after TEXT_WAIT_MS', async () => {
+    const t = await start();
+    t.advance(TEXT_WAIT_MS + 1);
+    t.show({ timeUs: 1 });
+    t.show(listing(t.snap, 'ep1.srt'));
+    expect(adjustments(t.calls)).toEqual([]);
+  });
+
+  it('gives up at a list without them (a file that did not parse)', async () => {
+    const t = await start();
+    t.show(listing(t.snap, 'other.srt'));
+    t.show(listing(t.snap, 'ep1.srt'));
+    expect(adjustments(t.calls)).toEqual([]);
+  });
+
+  it('applies them when they are listed in time', async () => {
+    const t = await start();
+    t.advance(TEXT_WAIT_MS - 1);
+    t.show(listing(t.snap, 'ep1.srt'));
+    expect(adjustments(t.calls)).toEqual([['shift', 0, 400], ['subtitle', { kind: 'pg', stream: 1 }]]);
   });
 });
 

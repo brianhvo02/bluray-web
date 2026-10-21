@@ -175,6 +175,8 @@ const placePath = (discKey: string, playlistId?: string): string =>
 const KEEPALIVE_MAX_BYTES = 60_000;
 /** A place's PUT gives up (as the NAS being unreachable) after this long, so a stalled request can't hold the outbox. */
 export const PLACE_TIMEOUT_MS = 15_000;
+/** A pre-flight waits this long for the places before it offers Play without them. */
+export const PLACES_READ_TIMEOUT_MS = 3_000;
 
 const jsonBody = (method: string, body: unknown): RequestInit => ({
   method,
@@ -615,8 +617,8 @@ export class NasClient {
   }
 
   /** This person's places in a disc, or null when there are none. */
-  async playbackPlaces(discKey: string): Promise<DiscPlaces | null> {
-    const res = await this.authed(placePath(discKey));
+  async playbackPlaces(discKey: string, opts: { readonly timeoutMs?: number } = {}): Promise<DiscPlaces | null> {
+    const res = await this.authed(placePath(discKey), {}, false, opts.timeoutMs);
     if (res.status === 404) return null;
     if (!res.ok) throw await httpError(res);
     return (await res.json()) as DiscPlaces;
@@ -641,8 +643,10 @@ export class NasClient {
   }
 
   /** The Continue watching row: unfinished places and Up next cards, newest first. */
-  async continueWatching(): Promise<ContinueItem[]> {
-    return (await this.json('me/playback')) as ContinueItem[];
+  async continueWatching(opts: { readonly timeoutMs?: number } = {}): Promise<ContinueItem[]> {
+    const res = await this.authed('me/playback', {}, false, opts.timeoutMs);
+    if (!res.ok) throw await httpError(res);
+    return (await res.json()) as ContinueItem[];
   }
 
   /** A title's progress by disc id and playlist id; null when the title isn't open to this device (or unknown). */

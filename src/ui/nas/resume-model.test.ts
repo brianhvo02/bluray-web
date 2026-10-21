@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ContinueItem, DiscPlaces, PlaceSettings, PlaybackPlace } from '../../engine/disc/nas-api';
-import { carriedSettings, continueCard, episodeProgress, resumeOffer, startOver, UNTITLED_DISC } from './resume-model';
+import { carriedSettings, continueCard, episodeProgress, resumeOffer, startOver, UNTITLED_DISC, within } from './resume-model';
 
 const settings: PlaceSettings = {
   audioLanguage: 'jpn', pgLanguage: 'eng', textFiles: [], psr1: 2, psr2: 0x80000001, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 0.8, muted: false,
@@ -27,6 +27,23 @@ describe('resumeOffer', () => {
     expect(resumeOffer(disc(place('00001', { finished: true })), '00001', PLAYLISTS)).toEqual({ kind: 'none' });
     expect(resumeOffer(disc(place('00002')), '00001', PLAYLISTS)).toEqual({ kind: 'none' });
     expect(resumeOffer(null, null, PLAYLISTS)).toEqual({ kind: 'none' });
+  });
+
+  it('asks nothing for a place before min(30 s, 5% of the playlist): Play starts it over with its settings', () => {
+    // 24 min playlist: 30 s is the edge
+    expect(resumeOffer(disc(place('00001', { timeUs: 29_999_999 })), '00001', PLAYLISTS)).toEqual({
+      kind: 'short', place: expect.objectContaining({ playlistId: '00001' }), start: { playlistId: '00001', timeUs: 0, hdmv: null, playback: { psr1: 2, psr2: 0x80000001, psr3: 1 } },
+    });
+    expect(resumeOffer(disc(place('00001', { timeUs: 30_000_000 })), '00001', PLAYLISTS)).toMatchObject({ kind: 'ask' });
+    // 4 min playlist (by the disc's own length, not the place's): 5% is 12 s
+    const short = [{ id: '00001', durationUs: 240_000_000 }];
+    expect(resumeOffer(disc(place('00001', { timeUs: 11_999_999 })), '00001', short)).toMatchObject({ kind: 'short' });
+    expect(resumeOffer(disc(place('00001', { timeUs: 12_000_000 })), '00001', short)).toMatchObject({ kind: 'ask' });
+    // gone from the disc: Play opens the disc as it starts
+    expect(resumeOffer(disc(place('00042', { timeUs: 1_000_000 })), '00042', PLAYLISTS)).toMatchObject({ kind: 'short', start: null });
+    // no playlist requested: the disc opens as it starts, its menus and all
+    expect(resumeOffer(disc(place('00001', { timeUs: 1_000_000 })), null, PLAYLISTS)).toEqual({ kind: 'none' });
+    expect(resumeOffer(disc(place('00001'), place('00002', { timeUs: 1_000_000, updatedAt: 2000 })), null, PLAYLISTS)).toMatchObject({ kind: 'ask', place: { playlistId: '00001' } });
   });
 
   it('says the disc changed when the playlist is gone or the time is past its end', () => {
@@ -82,4 +99,24 @@ it('shows episode progress only for an unfinished place', () => {
   expect(episodeProgress(progress, 'd1', '00002')).toBeNull();
   expect(episodeProgress(progress, 'd2', '00001')).toBeNull();
   expect(episodeProgress(null, 'd1', '00001')).toBeNull();
+});
+
+describe('within', () => {
+  it('answers the fallback for a request that hangs past the time, or fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const hanging = within(new Promise<string>(() => {}), 3000, 'none');
+      await vi.advanceTimersByTimeAsync(2999);
+      let settled = false;
+      void hanging.then(() => (settled = true));
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await hanging).toBe('none');
+      expect(await within(Promise.reject(new Error('x')), 3000, 'none')).toBe('none');
+      expect(await within(Promise.resolve('places'), 3000, 'none')).toBe('places');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

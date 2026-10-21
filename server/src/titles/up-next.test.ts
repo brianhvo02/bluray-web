@@ -67,6 +67,13 @@ describe('continueWatching', () => {
     expect(item).toMatchObject({ kind: 'up-next', discId: 'dC', playlistId: '00001', seasonId: 's2', seasonNumber: 2, episode: 1 });
   });
 
+  it('leaves out a place near its start, which then holds back no Up next card', () => {
+    expect(run([place('dA', '00002', { timeUs: 2_999_999 })])).toEqual([]); // under 5% of 60 s
+    expect(run([place('dA', '00002', { timeUs: 3_000_000 })])).toHaveLength(1);
+    const items = run([place('dA', '00001', { finished: true, updatedAt: 2000 }), place('dA', '00002', { timeUs: 1_000_000, updatedAt: 3000 })]);
+    expect(items.map((i) => [i.kind, i.playlistId])).toEqual([['up-next', '00002']]);
+  });
+
   it("carries the finished episode's settings on an Up next card, and none on a resume card", () => {
     const chosen = { ...settings, audioLanguage: 'jpn', shaderSet: 'Mode A', volume: 0.5 };
     const items = run([place('dB', '00001', { finished: true, settings: chosen, updatedAt: 2000 }), place('dZ', '00009')]);

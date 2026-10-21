@@ -779,7 +779,7 @@ describe('NasClient over WebRTC', () => {
     expect(await nas.putPlace(playbackPlace(), { keepalive: true })).toBe('stored');
     expect(inits).toHaveLength(1);
     expect(inits[0]?.keepalive).toBeUndefined();
-    expect((await nas.playbackPlaces(PLACE_KEY))?.places['00001']?.timeUs).toBe(5e6);
+    expect((await nas.playbackPlaces(PLACE_KEY))?.places['00001']?.timeUs).toBe(60e6);
     expect(Object.keys(server.hits)).toEqual([]); // nothing went over HTTPS
   });
   it('pairs over WebRTC when the lookup has no HTTPS route, then reads me and the library on a new connection', async () => {
@@ -999,7 +999,7 @@ describe('NasClient over WebRTC', () => {
 const PLACE_KEY = `f.${'C'.repeat(32)}`;
 const placeSettings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
 const playbackPlace = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
-  discKey: PLACE_KEY, discId: '0123456789abcdef', playlistId: '00001', timeUs: 5e6, durationUs: 1440e6, finished: false,
+  discKey: PLACE_KEY, discId: '0123456789abcdef', playlistId: '00001', timeUs: 60e6, durationUs: 1440e6, finished: false,
   mode: 'none', title: null, psrs: [0, 1], gprs: null, settings: placeSettings, updatedAt: clock - 1000, deviceName: 'iPad', ...over,
 });
 
@@ -1013,7 +1013,7 @@ describe('NasClient places', () => {
     expect(await nas.putPlace(playbackPlace({ playlistId: '00002', updatedAt: clock - 500 }))).toBe('stored');
     expect(await nas.putPlace(playbackPlace({ timeUs: 1e6, updatedAt: clock - 2000 }))).toBe('stale');
     const places = await nas.playbackPlaces(PLACE_KEY);
-    expect(places?.places['00001']?.timeUs).toBe(5e6);
+    expect(places?.places['00001']?.timeUs).toBe(60e6);
     expect(Object.keys(places!.places).sort()).toEqual(['00001', '00002']);
     expect((await nas.continueWatching()).map((c) => [c.kind, c.playlistId])).toEqual([['resume', '00002'], ['resume', '00001']]);
     await nas.deletePlace(PLACE_KEY, '00002');

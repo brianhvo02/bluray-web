@@ -63,14 +63,22 @@ const post = async (path: string, body: unknown): Promise<unknown> => {
   return res.json();
 };
 
-let apiSession: Promise<string> | null = null;
+/**
+ * The owner person the running project's tests pair as: one per browser project, since the projects run at once against
+ * one server and each person's places (and so the resume prompt) are their own.
+ */
+const projectOwner = (): string => `Owner ${test.info().project.name}`;
+
+const apiSessions = new Map<string, Promise<string>>();
 /**
  * A session token of an owner device this test worker pairs for itself (`E2E API`), as the app does: redeem an owner
  * code with a new P-256 key, then sign the NAS's challenge. Kept for the worker's run (sessions last an hour).
  */
 function apiToken(): Promise<string> {
-  apiSession ??= sessionFor(ownerCode());
-  return apiSession;
+  const person = projectOwner();
+  let session = apiSessions.get(person);
+  if (!session) apiSessions.set(person, (session = sessionFor(ownerCode(person))));
+  return session;
 }
 
 /** Pairs a device (`E2E API`) with `code` through the API and returns its session token. */
@@ -122,7 +130,7 @@ async function libraryReady(): Promise<void> {
  * The rendezvous service holds at most 5 live codes per NAS and a run mints about 20 within its 10 minutes, so each
  * code is registered under a new NAS key (the server makes one when its key file is gone).
  */
-function ownerCode(person?: string): string {
+function ownerCode(person: string = projectOwner()): string {
   return mintOwnerCode(() => rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true }), person);
 }
 
@@ -131,15 +139,14 @@ function ownerCode(person?: string): string {
  * (its NAS id, whose signalling socket is open), put back in place of the last code's.
  */
 function serverOwnerCode(): string {
-  return mintOwnerCode(() => copyFileSync(NAS_SERVER_KEY, join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json')));
+  return mintOwnerCode(() => copyFileSync(NAS_SERVER_KEY, join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json')), projectOwner());
 }
 
-/** `person`: the owner person of that name (made when there is none), else the first owner person. */
-function mintOwnerCode(prepareKey: () => void, person?: string): string {
+/** For the owner person `person`, made when there is none. */
+function mintOwnerCode(prepareKey: () => void, person: string): string {
   const out = exclusively(() => {
     prepareKey();
-    const args = person === undefined ? [SERVER, 'owner-code'] : [SERVER, 'owner-code', '--person', person];
-    return execFileSync(process.execPath, args, { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
+    return execFileSync(process.execPath, [SERVER, 'owner-code', '--person', person], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
   });
   expect(out).toContain('Rendezvous: registered');
   return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
@@ -192,7 +199,7 @@ async function pairByLink(page: Page, query = '', code = ownerCode()): Promise<v
 }
 
 /** Pairs, then opens the title library (an owner always has it). */
-/** `code`: pairs as that code's person (by default the first owner person). */
+/** `code`: pairs as that code's person (by default the project's owner person). */
 async function openTitles(page: Page, browserName: string, query = '', code?: string): Promise<void> {
   await libraryReady();
   await allowLocalNetwork(page, browserName);
@@ -220,8 +227,8 @@ async function playFromNas(page: Page, name: string): Promise<void> {
 const playerState = (page: Page) => page.getByTestId('player');
 
 /**
- * Most tests play as the first owner person, and a place they leave unfinished would bring up the resume prompt in
- * place of Play in the next one: each test starts with none.
+ * A project's tests play as its owner person, one after another, and a place one leaves unfinished would bring up the
+ * resume prompt in place of Play in the next: each test starts with none (this project's person's only).
  */
 test.beforeEach(async () => {
   const res = await ownerApi('me/playback');
@@ -883,7 +890,7 @@ test('watching a NAS episode saves its place on the NAS', async ({ page, browser
 });
 
 // Resume (spec 2026-10-20 §6). Places are per person: each browser's project plays as its own owner person, so the
-// other tests' places (every episode launch makes one for the first owner person) never show in these.
+// other tests' places (every episode launch makes one for the project's owner person) never show in these.
 
 const RESUME_COPY = 'This disc has changed since you stopped.';
 const personSessions = new Map<string, Promise<string>>();
@@ -1023,12 +1030,21 @@ test('a finished episode leaves Continue watching', async ({ page, browserName }
 test('a place on a disc that changed offers only Start from beginning', async ({ page, browserName }) => {
   const api = await openTitlesAsResumePerson(page, browserName);
   // a playlist the disc doesn't have (Review Focus 2)
-  await putPlace(api, disc1Key(), '00042', 2_000_000, 600_000_000);
+  await putPlace(api, disc1Key(), '00042', 120_000_000, 600_000_000);
   await page.goto(`/nas/play/${disc1Key()}`);
   await expect(page.getByTestId('resume-prompt')).toContainText(RESUME_COPY, { timeout: 15_000 });
   await expect(page.getByTestId('resume-at')).toHaveCount(0);
   await expect(page.getByTestId('resume-start-over')).toBeVisible();
   expect((await api(`me/playback/${encodeURIComponent(disc1Key())}`, { method: 'DELETE' })).status).toBe(204);
+});
+
+test('a pre-flight whose places request hangs offers Play after a few seconds', async ({ page, browserName }) => {
+  await openTitlesAsResumePerson(page, browserName);
+  // the disc's places never answer (a stalled WebRTC route, say)
+  await page.route(/\/api\/me\/playback\/[^/?]+(\?.*)?$/, () => {});
+  await openEpisode1(page);
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 8_000 });
+  await expect(page.getByTestId('resume-prompt')).toHaveCount(0);
 });
 
 test('an owner and a guest each see only their own Continue watching', async ({ page, browser, browserName }) => {
@@ -1150,8 +1166,8 @@ test("Back while a play link's disc opens closes it, and the screen Back went to
   // The disc's reads are held, so the open is still in flight when Back comes.
   const held: Route[] = [];
   await context.route(/\/api\/discs\/[^/]+\/files\//, (route) => void held.push(route));
-  // the episode's place (saved as Back closed it) is offered: resuming it opens the disc as Play would
-  await page.getByTestId('resume-at').click();
+  // the episode's place (saved as Back closed it) is offered, unless it is too near the start: either opens the disc
+  await page.getByTestId('resume-at').or(page.getByTestId('nas-play')).click();
   await expect(page.getByText('Reading disc…')).toBeVisible();
   await expect.poll(() => held.length).toBeGreaterThan(0);
   await page.goBack();

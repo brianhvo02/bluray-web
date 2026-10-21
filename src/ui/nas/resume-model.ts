@@ -1,4 +1,5 @@
 import type { ContinueItem, DiscManifest, DiscPlaces, PlaceSettings, PlaybackPlace, PlaylistProgress } from '../../engine/disc/nas-api';
+import { isShortPlace } from '../../engine/disc/place-rules';
 import type { StartPoint } from '../../engine/protocol';
 import { resumeStart } from '../place-model';
 import { playlistOf } from './library-model';
@@ -7,6 +8,21 @@ import { playlistOf } from './library-model';
 export const DISC_CHANGED_COPY = 'This disc has changed since you stopped.';
 /** A Continue watching card whose title the NAS doesn't name, and whose disc has no name either. */
 export const UNTITLED_DISC = 'Untitled disc';
+
+/**
+ * `promise`'s value, or `fallback` once it fails or `ms` pass: a pre-flight never waits on a stalled request (a WebRTC
+ * route, a session that doesn't come) for longer than that.
+ */
+export function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    const done = (v: T): void => {
+      clearTimeout(timer);
+      resolve(v);
+    };
+    promise.then(done, () => done(fallback));
+  });
+}
 
 /** The disc's playlists from its manifest (every MPLS file), with the length of each one inlined there. */
 export function playlistsOf(manifest: DiscManifest): { readonly id: string; readonly durationUs?: number }[] {
@@ -23,11 +39,15 @@ export function playlistsOf(manifest: DiscManifest): { readonly id: string; read
 
 /**
  * What a pre-flight offers for the disc's places: the usual Play (`none`: no place, or a finished one), Resume or
- * Start from beginning (`ask`), or only Start from beginning when the place no longer fits the disc (`changed`).
- * With a playlist requested, its own place; else the disc's newest unfinished place.
+ * Start from beginning (`ask`), or only Start from beginning when the place no longer fits the disc (`changed`). A
+ * place near its start (isShortPlace) asks nothing: for a requested playlist (`short`), Play starts it from the
+ * beginning with the place's settings (`start`; null when the disc no longer has the playlist); with none requested it
+ * is passed over. With a playlist requested, its own place; else the disc's newest unfinished place that isn't short
+ * (none: the disc opens as it starts).
  */
 export type ResumeOffer =
   | { readonly kind: 'none' }
+  | { readonly kind: 'short'; readonly place: PlaybackPlace; readonly start: StartPoint | null }
   | { readonly kind: 'ask'; readonly place: PlaybackPlace; readonly start: StartPoint }
   | { readonly kind: 'changed'; readonly place: PlaybackPlace };
 
@@ -37,9 +57,13 @@ export function resumeOffer(
   playlists: readonly { readonly id: string; readonly durationUs?: number }[] | null,
 ): ResumeOffer {
   if (!places) return { kind: 'none' };
-  const all = Object.values(places.places);
-  const place = playlistId !== null ? places.places[playlistId] : all.filter((p) => !p.finished).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const lengthOf = (p: PlaybackPlace): number => playlists?.find((x) => x.id === p.playlistId)?.durationUs ?? p.durationUs;
+  const short = (p: PlaybackPlace): boolean => isShortPlace(p.timeUs, lengthOf(p));
+  const place = playlistId !== null
+    ? places.places[playlistId]
+    : Object.values(places.places).filter((p) => !p.finished && !short(p)).sort((a, b) => b.updatedAt - a.updatedAt)[0];
   if (!place || place.finished) return { kind: 'none' };
+  if (short(place)) return { kind: 'short', place, start: playlists && !playlists.some((x) => x.id === place.playlistId) ? null : startOver(place) };
   const start = resumeStart(place, playlists);
   return 'problem' in start ? { kind: 'changed', place } : { kind: 'ask', place, start };
 }

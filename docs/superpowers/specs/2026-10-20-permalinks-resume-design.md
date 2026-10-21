@@ -113,7 +113,7 @@ Through a new engine command (or an `open` option; builder) that takes the saved
 
 ### 6.5 Finished
 
-A place is finished when the engine reaches the end of the playlist (`ended`), or when playback passes the start of the playlist's last chapter and that chapter starts in the final 10% of the playlist, or passes 95% when there are no chapters (my call: no credits detection exists anywhere; this is the simplest rule that catches end credits on most discs). A finished place stays stored (so its settings are reused next time) but drops off Continue watching and opens from the beginning without a prompt.
+A place is finished when the engine reaches the end of the playlist (`ended`), or when playback passes the start of the playlist's last chapter and that chapter starts in the final 10% of the playlist, or passes 95% when there are no chapters (my call: no credits detection exists anywhere; this is the simplest rule that catches end credits on most discs). A finished place stays stored (so its settings are reused next time) but drops off Continue watching and opens from the beginning without a prompt. A place near its start, before min(30 s, 5% of the playlist), is not offered either (my call: "Resume at 0:04" is no choice): opening its playlist asks nothing and plays it from the beginning with the place's settings (a disc opened without a playlist passes over it and opens as usual), and the NAS leaves it off Continue watching (where it holds back no Up next card).
 
 Places follow the playlist that played. The catalogue's `EpisodeRef` points at each episode's own playlist; a play-all playlist is one place of its own (my call), finished by the same rule.
 

@@ -7,6 +7,8 @@ import type { PlaceSaver } from './place-saver';
 import type { StoredTextFile } from './place-store';
 
 const PG_DISPLAY_FLAG = 0x80000000;
+/** The engine has this long to list the re-added files; past it they are given up (a later pick is the user's own). */
+export const TEXT_WAIT_MS = 10_000;
 
 export interface LaunchSettingsDeps {
   readonly controller: Pick<
@@ -17,6 +19,7 @@ export interface LaunchSettingsDeps {
   /** Chooses a shader set (null: off) the way the Shaders menu does; a set this device doesn't have is left alone. */
   readonly selectShader: (name: string | null) => void;
   readonly log?: (message: string, err: unknown) => void;
+  readonly nowMs?: () => number;
 }
 
 /** The text files being added again, until the engine reports them and their placements and offsets can be set. */
@@ -27,6 +30,8 @@ interface PendingText {
   readonly textOn: boolean;
   readonly psr2: number;
   readonly scale: number;
+  /** When to give up waiting for the engine's list. */
+  readonly untilMs: number;
 }
 
 /** PSR2 as a subtitle choice: its PG stream when the display flag is on and the stream exists, else off. */
@@ -80,8 +85,17 @@ export class LaunchSettingsApplier {
       if (subtitles.length === 0 || controller.discOpens !== opens) return;
       const files = [...subtitles, ...fonts].map((f) => new File([f.bytes as Uint8Array<ArrayBuffer>], f.name));
       const names = new Set(subtitles.map((f) => f.name));
-      this.text = { opens, files: settings.textFiles.filter((f) => names.has(f.name)), placed, textOn: settings.textOn, psr2: settings.psr2, scale: settings.textScale };
-      await controller.loadSubtitleFiles(files);
+      const pending: PendingText = {
+        opens, files: settings.textFiles.filter((f) => names.has(f.name)), placed, textOn: settings.textOn, psr2: settings.psr2, scale: settings.textScale,
+        untilMs: this.now() + TEXT_WAIT_MS,
+      };
+      this.text = pending;
+      try {
+        await controller.loadSubtitleFiles(files);
+      } catch (err) {
+        if (this.text === pending) this.text = null;
+        throw err;
+      }
       // kept again for this disc's later places (their sizes)
       await places.addTextFiles(files);
     } catch (err) {
@@ -89,18 +103,26 @@ export class LaunchSettingsApplier {
     }
   }
 
-  /** Once the engine has the files: their placements (the same playlist's only), offsets and scale, and PG back if text was off. */
+  private now(): number {
+    return (this.deps.nowMs ?? Date.now)();
+  }
+
+  /**
+   * Once the engine has the files: their placements (the same playlist's only), offsets and scale, and PG back if text
+   * was off. Given up on another disc, past TEXT_WAIT_MS, or at a list without them (a file that didn't parse).
+   */
   private finishText(s: PlayerSnapshot): void {
     const t = this.text!;
     const { controller } = this.deps;
-    if (controller.discOpens !== t.opens) {
+    const subs = s.subtitles;
+    const loaded = subs?.text?.files;
+    if (controller.discOpens !== t.opens || this.now() > t.untilMs) {
       this.text = null;
       return;
     }
-    const subs = s.subtitles;
-    const loaded = subs?.text?.files;
-    if (!subs || !loaded || !t.files.every((f) => loaded.some((l) => l.name === f.name))) return;
+    if (!subs || !loaded) return;
     this.text = null;
+    if (!t.files.every((f) => loaded.some((l) => l.name === f.name))) return;
     for (const f of t.files) {
       const i = loaded.findIndex((l) => l.name === f.name);
       const now = loaded[i]!;
