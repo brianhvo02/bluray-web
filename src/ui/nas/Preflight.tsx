@@ -8,11 +8,11 @@ import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, sto
 import { discBadges, discFacts, formatSize, mainPlaylist, mainPlaylistId, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
 import { videoCaps, type VideoCaps } from '../video-caps';
-import { ORIGINAL_ONLY, busyMessage, levelAudio, levelRows, preflightLevelState } from './level-model';
-import { levelSessionOf } from './level-session';
+import { ORIGINAL_ONLY, busyMessage, levelAudio, levelRows, placeAudioHint, preflightLevelState } from './level-model';
+import { launchManifest, levelSessionOf } from './level-session';
 import { NasBusyError, NasHttpError, PLACES_READ_TIMEOUT_MS, type NasClient } from './nas-client';
 import { useNasRoute, type NasHistory } from './nas-history';
-import type { NasRoute } from './nas-route';
+import { nasRoutePath, type NasRoute } from './nas-route';
 import { noticeMissingStart } from './missing-start-notice';
 import type { PlayingRoute } from './playing-route';
 import { LOCAL_DEVICE_NAME, type LaunchSettings, type PlaceSaver } from '../place-saver';
@@ -147,7 +147,8 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   }, [route, discKey, disc.id, history]);
   // Back (or Forward) off the play route while the disc opens: it is closed. The screen holding this pre-flight closes
   // it on leaving the play route (and a link's pre-flight unmounts with it), so nothing navigates again here.
-  const leftRoute = opening !== 'idle' && !onPlayRoute;
+  // A launch from a title or folder is off the play route until its disc opens (the push comes with the open).
+  const leftRoute = (opening === 'buffering' || opening === 'launched') && !onPlayRoute;
   useEffect(() => {
     if (!leftRoute) return;
     abandonRef.current();
@@ -223,13 +224,21 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
     const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
     return { ...playlistFacts(playlist.playItems, sizes), audio: (playlist.playItems[0]?.stn.audio ?? []).map((a) => ({ language: a.lang })) };
   }, [manifest, launchPlaylist]);
-  /** The audio stream a level request asks for: the place's when resuming, else the browser's language. */
-  // A resume place's audio stream, once the places are in; before that, the browser's language picks it.
-  const psr1 = placesReady && offer.kind !== 'none' ? offer.place.settings.psr1 : undefined;
-  const levelAudioNumber = useMemo(() => levelAudio(original?.audio ?? [], { psr1, language: globalThis.navigator?.language ?? 'en' }), [original, psr1]);
+  /** The playlist the levels are asked for: what plays, else the main title. */
+  const plannedPlaylist = launchPlaylist ?? (manifest ? mainPlaylistId(manifest) : null);
+  /**
+   * The audio stream a level request asks for: a place's, once the places are in (its PSR1 on its own playlist, its
+   * language on another), else the browser's language.
+   */
+  const hint = placeAudioHint(placesReady && offer.kind !== 'none' ? offer.place : null, plannedPlaylist);
+  const levelAudioNumber = useMemo(
+    () => levelAudio(original?.audio ?? [], { ...(hint.psr1 !== undefined ? { psr1: hint.psr1 } : {}), ...(hint.audioLanguage ? { audioLanguage: hint.audioLanguage } : {}), language: globalThis.navigator?.language ?? 'en' }),
+    [original, hint.psr1, hint.audioLanguage],
+  );
   const [caps, setCaps] = useState<VideoCaps | undefined>(undefined);
   useEffect(() => {
-    void videoCaps().then(setCaps, () => setCaps({ hevc: false, hevc10: false, hdrDisplay: false, phone: false }));
+    // never rejects: a probe that fails gives no HEVC and "phone" from the memory profile (loadVideoCaps)
+    void videoCaps().then(setCaps);
   }, []);
   /** Bumped after a busy refusal, so the list is asked again. */
   const [levelsNonce, setLevelsNonce] = useState(0);
@@ -254,8 +263,11 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   useEffect(() => {
     if (auto === null && levelState.auto !== null) setAuto(levelState.auto);
   }, [auto, levelState.auto]);
-  /** Play can open: the level is chosen (or the disc has no playlist to ask levels for). */
-  const levelsKnown = auto !== null || (manifest !== null && original === null);
+  /**
+   * Play can open: the level is chosen (or the disc has no playlist to ask levels for), and some level can play (an
+   * MPEG-2 or VC-1 disc whose levels are all busy has none: Original would have no picture).
+   */
+  const levelsKnown = (auto !== null && levelState.playable) || (manifest !== null && original === null);
   const selected: LevelInfo = useMemo(() => {
     const usable = (id: LevelId | null): LevelInfo | undefined => levelList.find((l) => l.level === id && l.available);
     return usable(picked) ?? usable(auto) ?? usable(levelState.auto) ?? levelList.find((l) => l.available) ?? levelList.find((l) => l.level === (levelState.auto ?? 'original')) ?? ORIGINAL_ONLY[0]!;
@@ -313,13 +325,11 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
     controller.startAudio(); // inside the click gesture
     setOpening('starting');
     setError(null);
-    // The play route: pushed from a title or folder, so Back returns there; a link is already on it.
-    playingRoute.start(discKey);
     launched.current = true;
-    if (!onPlayRoute) {
-      onLaunch?.();
-      history.push({ kind: 'play', discKey, playlistId: start?.playlistId ?? null, timeS: null, resume: false });
-    }
+    const pushRoute = !onPlayRoute;
+    const from = history.route();
+    const fromPath = from ? nasRoutePath(from) : null;
+    if (!pushRoute) playingRoute.start(discKey);
     const id = ++launch.current;
     Promise.all([nas.discBase(disc.id), nas.session(), nas.pairing()]).then(
       async ([base, session, pairing]) => {
@@ -330,8 +340,24 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
         levelSession.end();
         const at: LevelAt = { level: selected.level, audio: levelAudioNumber };
         const atLevel = selected.level !== 'original';
-        const opened = atLevel ? await nas.manifest(disc.id, at) : manifest;
-        if (id !== launch.current) return;
+        // a launch superseded while the level's manifest was asked for gives its GPU lease back
+        const opened = await launchManifest(nas, disc.id, at, manifest, () => id === launch.current);
+        if (opened === null || id !== launch.current) return;
+        const here = history.route();
+        if (pushRoute && (here ? nasRoutePath(here) : null) !== fromPath) {
+          // Back (or a link) left the screen Play was pressed on while the level was asked for: the launch is given up
+          if (atLevel) void nas.releaseViewing(disc.id, at);
+          abandonRef.current();
+          setOpening('idle');
+          return;
+        }
+        if (pushRoute) {
+          // The play route, pushed from a title or folder (so Back returns there) once the disc opens: a refusal before
+          // (the NAS busy, a failed request) leaves the address bar where the viewer was. A link is already on it.
+          playingRoute.start(discKey);
+          onLaunch?.();
+          history.push({ kind: 'play', discKey, playlistId: start?.playlistId ?? null, timeS: null, resume: false });
+        }
         const { spec, release } = nasDiscSpec(base, token, opened, nas.discFetch, atLevel ? { at, original: manifest } : undefined);
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst, start);
         levelSession.begin({ discId: disc.id, levels: levelList, at, original: manifest });

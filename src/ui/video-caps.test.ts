@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectVideoCaps, type VideoCapsEnv } from './video-caps';
+import { detectVideoCaps, loadVideoCaps, type VideoCapsEnv } from './video-caps';
 
 function env(over: Partial<VideoCapsEnv> = {}): VideoCapsEnv {
   return {
@@ -54,5 +54,25 @@ describe('detectVideoCaps', () => {
       expect((await detectVideoCaps(env({ screen: { width, height } }))).phone, `${width}x${height}`).toBe(phone);
     }
     expect((await detectVideoCaps(env({ memoryProfile: 'constrained', screen: { width: 2732, height: 2048 } }))).phone).toBe(true);
+  });
+});
+
+describe('loadVideoCaps', () => {
+  const thrower = (): never => {
+    throw new Error('no screen here');
+  };
+  it('detects from the environment', async () => {
+    expect(await loadVideoCaps(() => env({ memoryProfile: 'constrained' }), () => 'desktop')).toMatchObject({ hevc: true, phone: true });
+  });
+  it('when the environment cannot be read, falls back to no HEVC and the memory profile for phone', async () => {
+    expect(await loadVideoCaps(thrower, () => 'constrained')).toEqual({ hevc: false, hevc10: false, hdrDisplay: false, phone: true });
+    expect(await loadVideoCaps(thrower, () => 'desktop')).toEqual({ hevc: false, hevc10: false, hdrDisplay: false, phone: false });
+  });
+  it('when the probe rejects, falls back the same way', async () => {
+    const broken = env({ matchMedia: thrower });
+    expect(await loadVideoCaps(() => broken, () => 'constrained')).toMatchObject({ phone: true, hevc: false });
+  });
+  it('a computer when even the memory profile cannot be told', async () => {
+    expect(await loadVideoCaps(thrower, thrower)).toEqual({ hevc: false, hevc10: false, hdrDisplay: false, phone: false });
   });
 });

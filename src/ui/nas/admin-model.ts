@@ -71,6 +71,15 @@ export function encodingLine(e: EncodingNow): string {
   return `${e.personName} · ${e.deviceName} — ${e.discName}, ${e.label} (${e.gpuPercent}% of the GPU)`;
 }
 
+/**
+ * The status line of "Encoding now" over its rows: loading, a first load that failed (polling goes on), nothing being
+ * re-encoded, or null when there are rows (a later failed refresh keeps the last list).
+ */
+export function encodingStatus(s: { readonly list: readonly EncodingNow[] | null; readonly failed: boolean }): string | null {
+  if (s.list === null) return s.failed ? "Couldn't load what's encoding." : 'Loading…';
+  return s.list.length === 0 ? 'Nothing is being re-encoded.' : null;
+}
+
 export const TMDB_ATTRIBUTION = 'This product uses the TMDB API but is not endorsed or certified by TMDB';
 
 const discs = (n: number): string => `${n} ${n === 1 ? 'disc' : 'discs'}`;

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, encodingLine, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
+import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, encodingLine, encodingStatus, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
 import type { TitleSummary } from '../../engine/disc/nas-api';
 
 const MINUTE = 60_000;
@@ -162,5 +162,17 @@ describe('encodingLine', () => {
     expect(encodingLine({ personName: 'Mika', deviceName: 'Phone', discName: 'Starfall Wanderer Vol 1', level: 'phone-720', label: 'Phone', gpuPercent: 16 })).toBe(
       'Mika · Phone — Starfall Wanderer Vol 1, Phone (16% of the GPU)',
     );
+  });
+});
+
+describe('encodingStatus', () => {
+  it('says loading, a failed first load, nothing, or nothing to say over the rows', () => {
+    expect(encodingStatus({ list: null, failed: false })).toBe('Loading…');
+    expect(encodingStatus({ list: null, failed: true })).toBe("Couldn't load what's encoding.");
+    expect(encodingStatus({ list: [], failed: false })).toBe('Nothing is being re-encoded.');
+    const row = { personName: 'Mika', deviceName: 'Phone', discName: 'Starfall Wanderer Vol 1', level: 'phone-720' as const, label: 'Phone', gpuPercent: 16 };
+    expect(encodingStatus({ list: [row], failed: false })).toBeNull();
+    // a later failed refresh keeps the last list
+    expect(encodingStatus({ list: [row], failed: true })).toBeNull();
   });
 });

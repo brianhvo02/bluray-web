@@ -55,6 +55,11 @@ describe('waitCopy', () => {
     expect(waitCopy(1800)).toBe('About 30 minutes before it can play straight through');
     expect(waitCopy(1801)).toBe('About 31 minutes before it can play straight through');
   });
+  it('says one minute in the singular', () => {
+    expect(waitCopy(1)).toBe('About 1 minute before it can play straight through');
+    expect(waitCopy(60)).toBe('About 1 minute before it can play straight through');
+    expect(waitCopy(61)).toBe('About 2 minutes before it can play straight through');
+  });
 });
 
 describe('storageRoom', () => {

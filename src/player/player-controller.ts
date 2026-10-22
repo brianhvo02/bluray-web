@@ -213,7 +213,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'startFailed':
       return { ...s, startFailed: e.reason };
     case 'levelChanged':
-      return { ...s, levelSwitch: e.ok ? 'idle' : { error: e.message } };
+      // only the switch this disc is waiting on: a late answer for a disc closed since is no answer for the new one
+      return s.levelSwitch !== 'switching' ? s : { ...s, levelSwitch: e.ok ? 'idle' : { error: e.message } };
     case 'placeState':
       return s; // answers readPlace
     case 'shaderStatus':
@@ -464,10 +465,11 @@ export class PlayerController {
   /**
    * Switches the open NAS disc to another version (a quality level, or the original): same disc id, never with a fetch
    * port (over WebRTC the open disc's port goes on serving). levelSwitch is 'switching' until the engine answers.
+   * `audio`: with a switch to the original, the audio stream (original numbering) to keep playing.
    */
-  setLevel(spec: RemoteDiscSpec): void {
+  setLevel(spec: RemoteDiscSpec, audio?: number): void {
     this.update({ ...this.snapshot, levelSwitch: 'switching' });
-    this.post({ type: 'setLevel', disc: spec });
+    this.post({ type: 'setLevel', disc: spec, ...(audio !== undefined ? { audio } : {}) });
   }
 
   /** Fetches the open NAS disc's main playlist from `fromSeconds` on into its read-ahead cache, `targetBytes` of it. */

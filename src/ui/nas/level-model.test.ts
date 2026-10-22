@@ -12,6 +12,8 @@ import {
   levelRateMbps,
   preflightLevelState,
   levelRows,
+  pickAt,
+  placeAudioHint,
 } from './level-model';
 
 const L = (level: LevelId, budgetMbps: number, available = true, reason?: LevelReason): LevelInfo => ({ level, label: level, budgetMbps, available, ...(reason ? { reason } : {}) });
@@ -108,10 +110,10 @@ describe('preflightLevelState', () => {
   it('is not ready until the levels, the probe and the caps are known', () => {
     expect(preflightLevelState({ ...base, levels: undefined }).ready).toBe(false);
     expect(preflightLevelState({ ...base, connectionMbps: undefined }).ready).toBe(false);
-    expect(preflightLevelState({ ...base, caps: undefined })).toEqual({ ready: false, auto: null });
+    expect(preflightLevelState({ ...base, caps: undefined })).toEqual({ ready: false, auto: null, playable: false });
   });
   it('is ready without a measurement, picking the first level', () => {
-    expect(preflightLevelState({ ...base, connectionMbps: null })).toEqual({ ready: true, auto: 'original' });
+    expect(preflightLevelState({ ...base, connectionMbps: null })).toEqual({ ready: true, auto: 'original', playable: true });
   });
   it('is a pure function of its inputs, so the first result can be kept', () => {
     expect(preflightLevelState(base)).toEqual(preflightLevelState({ ...base }));
@@ -121,5 +123,36 @@ describe('preflightLevelState', () => {
     for (const phone of [false, true]) for (const connectionMbps of [1, 50, null]) {
       expect(preflightLevelState({ ...base, levels, connectionMbps, caps: { phone } }).auto).not.toBe('original');
     }
+  });
+  it('is not playable when no level is available (an MPEG-2 disc with its levels busy)', () => {
+    const levels = [{ ...lv('original', 0, false), reason: 'unplayable' as const }, { ...lv('h264-1080', 8, false), reason: 'busy' as const }, { ...lv('phone-720', 3, false), reason: 'busy' as const }];
+    expect(preflightLevelState({ ...base, levels })).toMatchObject({ ready: true, playable: false });
+    expect(preflightLevelState({ ...base, levels: ORIGINAL_ONLY })).toMatchObject({ ready: true, playable: true });
+  });
+});
+
+describe('pickAt', () => {
+  it('from Original, a level asks for the audio stream that plays', () => {
+    expect(pickAt({ level: 'original', audio: 1 }, 'h264-1080', 2)).toEqual({ level: 'h264-1080', audio: 2 });
+    expect(pickAt({ level: 'original', audio: 1 }, 'h264-1080', null)).toEqual({ level: 'h264-1080', audio: 1 });
+  });
+  it('at a level, the level\'s own audio number goes on (the engine numbers the level\'s one track 1)', () => {
+    expect(pickAt({ level: 'h264-1080', audio: 3 }, 'phone-720', 1)).toEqual({ level: 'phone-720', audio: 3 });
+    expect(pickAt({ level: 'h264-1080', audio: 3 }, 'original', 1)).toEqual({ level: 'original', audio: 3 });
+  });
+});
+
+describe('placeAudioHint', () => {
+  const place = { playlistId: '00001', settings: { psr1: 2, audioLanguage: 'eng' } };
+  it("a place's PSR1 counts on its own playlist only; elsewhere its language does", () => {
+    expect(placeAudioHint(place, '00001')).toEqual({ psr1: 2 });
+    expect(placeAudioHint(place, '00002')).toEqual({ audioLanguage: 'eng' });
+    expect(placeAudioHint({ ...place, settings: { psr1: 2, audioLanguage: null } }, '00002')).toEqual({});
+    expect(placeAudioHint(null, '00001')).toEqual({});
+  });
+  it('levelAudio takes the place language before the browser\'s', () => {
+    const audio = [{ language: 'jpn' }, { language: 'eng' }, { language: 'fra' }];
+    expect(levelAudio(audio, { audioLanguage: 'fra', language: 'en-US' })).toBe(3);
+    expect(levelAudio(audio, { audioLanguage: 'deu', language: 'en-US' })).toBe(2);
   });
 });

@@ -102,8 +102,9 @@ export class LevelSession {
     }
     const outcome = await this.runSwitch(manifest, at, original, deps);
     if (this.state !== state) {
-      // The disc closed during the switch: end() released the old lease only.
-      if (outcome === 'idle') this.release(state.discId, at);
+      // The disc closed during the switch (or the player ended the session on the switch's failure): end() released
+      // the old lease only, so the new one goes too, whatever the outcome.
+      this.release(state.discId, at);
       return;
     }
     if (outcome === 'idle') {
@@ -131,7 +132,8 @@ export class LevelSession {
         resolve(s);
       };
       unsubscribe = controller.subscribe(check);
-      controller.setLevel({ kind: 'remote', base: deps.base, token: deps.token, manifest, query: levelQuery(at), original });
+      // to the original, the audio heard at the level goes on (a level's query names its own)
+      controller.setLevel({ kind: 'remote', base: deps.base, token: deps.token, manifest, query: levelQuery(at), original }, at.level === 'original' ? at.audio : undefined);
       check();
     });
   }
@@ -159,6 +161,24 @@ export class LevelSession {
   private notify(): void {
     for (const fn of [...this.listeners]) fn();
   }
+}
+
+/**
+ * A launch's version of the disc: the original's manifest in hand, or the level's (asking for it takes a GPU lease).
+ * A launch superseded meanwhile gives that lease back and gets null.
+ */
+export async function launchManifest(
+  nas: Pick<NasClient, 'manifest' | 'releaseViewing'>,
+  discId: string,
+  at: LevelAt,
+  original: DiscManifest,
+  current: () => boolean,
+): Promise<DiscManifest | null> {
+  if (at.level === 'original') return original;
+  const manifest = await nas.manifest(discId, at);
+  if (current()) return manifest;
+  void nas.releaseViewing(discId, at);
+  return null;
 }
 
 const sessions = new WeakMap<NasClient, LevelSession>();

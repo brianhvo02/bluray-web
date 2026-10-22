@@ -283,7 +283,7 @@ test('buffers first on a slow connection: the pre-flight asks, and Wait fills th
   await page.getByTestId('nas-open').click();
   await page.getByTestId('browse-folders').click();
   await discRow(page, 'disc1').click();
-  await expect(page.getByTestId('nas-buffer-wait')).toHaveText('About 1 minutes before it can play straight through', { timeout: 15_000 });
+  await expect(page.getByTestId('nas-buffer-wait')).toHaveText('About 1 minute before it can play straight through', { timeout: 15_000 });
   await expect(page.getByTestId('nas-play')).toHaveText('Play now with pauses');
   // the level list preselects one level (at about 1 Mbps nothing fits, so the cheapest: disc1's own rate is below the levels' budgets)
   const preselected = page.locator('[data-testid="level-option"]:checked');
@@ -355,6 +355,29 @@ test('plays a disc at a re-encoded level picked in the pre-flight, seeks, and sw
     const afterSwitch = await frames();
     await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSwitch + 10);
   });
+});
+
+test('a busy NAS refusing the level leaves the address bar where Play was pressed', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'one browser is enough for the pre-flight flow');
+  await openLibrary(page, browserName);
+  await discRow(page, 'disc-levels').click();
+  await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
+  await page.locator('[data-testid="level-option"][data-level="h264-1080"]').check();
+  const before = page.url();
+  // the level's manifest answers busy, as the NAS does when its GPU has no room
+  await page.route('**/discs/*/manifest?level=*', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      headers: { 'Access-Control-Allow-Origin': new URL(page.url()).origin },
+      body: JSON.stringify({ error: 'busy', message: 'The NAS is busy. Try again in a few minutes.' }),
+    }),
+  );
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 20_000 });
+  await page.getByTestId('nas-play').click();
+  await expect(page.getByTestId('nas-error')).toHaveText('The NAS is busy. Try again in a few minutes.', { timeout: 15_000 });
+  expect(page.url()).toBe(before);
+  expect(new URL(page.url()).pathname).not.toContain('/play/');
 });
 
 test('an MPEG-2 disc plays with a picture at a re-encoded level', async ({ page, browserName }) => {

@@ -1,4 +1,4 @@
-import type { LevelId, LevelInfo, LevelReason } from '../../engine/disc/nas-api';
+import type { LevelAt, LevelId, LevelInfo, LevelReason, PlaceSettings } from '../../engine/disc/nas-api';
 import { RATE_MARGIN, bufferPlan } from './buffer-model';
 
 export const BUSY_COPY = 'The NAS is busy re-encoding for others. This will play at original quality.';
@@ -82,9 +82,17 @@ const ISO_639_2: Record<string, readonly string[]> = {
   ko: ['kor'],
 };
 
-/** The 1-based audio stream a level request asks for. */
-export function levelAudio(audio: readonly { language: string }[], o: { psr1?: number; language: string }): number {
+/**
+ * The 1-based audio stream a level request asks for: a place's PSR1, then a place's audio language (ISO 639-2, as the
+ * disc names it), then the browser's language, then 1.
+ */
+export function levelAudio(audio: readonly { language: string }[], o: { psr1?: number; audioLanguage?: string; language: string }): number {
   if (o.psr1 !== undefined && Number.isInteger(o.psr1) && o.psr1 >= 1 && o.psr1 <= audio.length) return o.psr1;
+  if (o.audioLanguage) {
+    const wanted = o.audioLanguage.toLowerCase();
+    const i = audio.findIndex((a) => a.language.toLowerCase() === wanted);
+    if (i >= 0) return i + 1;
+  }
   const codes = ISO_639_2[o.language.slice(0, 2).toLowerCase()];
   if (codes) {
     const i = audio.findIndex((a) => codes.includes(a.language.toLowerCase()));
@@ -93,13 +101,34 @@ export function levelAudio(audio: readonly { language: string }[], o: { psr1?: n
   return 1;
 }
 
+/**
+ * What a saved place says about the audio a level request asks for on `playlistId`. Stream numbers belong to a
+ * playlist's STN, so the place's PSR1 counts only on its own playlist; on another, its audio language does.
+ */
+export function placeAudioHint(
+  place: { readonly playlistId: string; readonly settings: Pick<PlaceSettings, 'psr1' | 'audioLanguage'> } | null,
+  playlistId: string | null,
+): { psr1?: number; audioLanguage?: string } {
+  if (!place) return {};
+  if (place.playlistId === playlistId) return { psr1: place.settings.psr1 };
+  return place.settings.audioLanguage ? { audioLanguage: place.settings.audioLanguage } : {};
+}
+
+/**
+ * The version a Quality menu pick asks for. At Original the audio is the stream that plays (Original numbering); at a
+ * level it is the level's own audio number (the engine numbers the level's one track 1, so it can't say).
+ */
+export function pickAt(at: LevelAt, level: LevelId, playingAudio: number | null): LevelAt {
+  return { level, audio: at.level === 'original' ? (playingAudio ?? at.audio) : at.audio };
+}
+
 export function badgeText(l: LevelInfo): string | null {
   return l.level === 'original' ? null : `${l.label} · re-encoded on the NAS`;
 }
 
 /**
  * Whether the pre-flight knows enough to offer Play (the levels answered or failed, the probe settled, the device's
- * caps known) and the level it preselects then. The pre-flight keeps the first non-null `auto` for the disc, so the
+ * caps known), the level it preselects then, and whether any level can play at all. The pre-flight keeps the first non-null `auto` for the disc, so the
  * preselected radio never changes under the viewer.
  */
 export function preflightLevelState(o: {
@@ -108,8 +137,9 @@ export function preflightLevelState(o: {
   connectionMbps: number | null | undefined;
   caps: { phone: boolean } | undefined;
   originalMbps: number;
-}): { ready: boolean; auto: LevelId | null } {
-  if (o.levels === undefined || o.connectionMbps === undefined || o.caps === undefined) return { ready: false, auto: null };
+}): { ready: boolean; auto: LevelId | null; playable: boolean } {
+  if (o.levels === undefined || o.connectionMbps === undefined || o.caps === undefined) return { ready: false, auto: null, playable: false };
   const auto = autoLevel(o.levels, { connectionMbps: o.connectionMbps ?? Infinity, phone: o.caps.phone, originalMbps: o.originalMbps });
-  return { ready: true, auto };
+  // An MPEG-2 or VC-1 disc whose levels are all busy has nothing to play (Original would have no picture).
+  return { ready: true, auto, playable: o.levels.some((l) => l.available) };
 }

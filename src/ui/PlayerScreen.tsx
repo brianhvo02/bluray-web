@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
-import { badgeText } from './nas/level-model';
+import { badgeText, pickAt } from './nas/level-model';
 import { levelSessionOf } from './nas/level-session';
 import type { NasClient } from './nas/nas-client';
 import type { NasHistory } from './nas/nas-history';
@@ -169,7 +169,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   const quality = levelState
     ? {
         state: levelState,
-        onPick: (level: LevelId) => switchTo({ level, audio: levelState.at.audio }),
+        // from Original, the stream that plays goes on at the level (its number is the original's there)
+        onPick: (level: LevelId) => switchTo(pickAt(levelState.at, level, snapshot.selectedAudio)),
         audio:
           atLevel && currentPlaylistId !== null && levelSession
             ? { tracks: levelSession.originalAudio(currentPlaylistId), current: levelState.at.audio, onPick: (n: number) => switchTo({ level: levelState.at.level, audio: n }) }

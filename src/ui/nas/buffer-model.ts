@@ -53,7 +53,8 @@ export function bufferPlan({ durationS, playlistBytes, connectionMbps, quotaByte
 
 /** "About {n} minutes before it can play straight through", the wait rounded up to a whole minute. */
 export function waitCopy(waitS: number): string {
-  return `About ${Math.ceil(waitS / 60)} minutes before it can play straight through`;
+  const minutes = Math.ceil(waitS / 60);
+  return `About ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} before it can play straight through`;
 }
 
 /** What the pre-flight says on a device that can't hold the wait (Review Focus 5). */

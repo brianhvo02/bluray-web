@@ -1,3 +1,4 @@
+import type { MemoryProfileName } from '../engine/memory-profile';
 import { chooseMemoryProfile } from './memory-profile';
 
 export interface VideoCaps {
@@ -38,6 +39,16 @@ export async function detectVideoCaps(env: VideoCapsEnv): Promise<VideoCaps> {
   };
 }
 
+/** The browser's memory profile (the one place it is read for the caps). */
+function browserMemoryProfile(): MemoryProfileName {
+  return chooseMemoryProfile({
+    search: location.search,
+    coarsePointer: matchMedia('(pointer: coarse)').matches,
+    maxTouchPoints: navigator.maxTouchPoints,
+    platform: navigator.platform,
+  });
+}
+
 export function browserVideoCapsEnv(): VideoCapsEnv {
   return {
     isConfigSupported: typeof VideoDecoder !== 'undefined' && typeof VideoDecoder.isConfigSupported === 'function'
@@ -45,19 +56,32 @@ export function browserVideoCapsEnv(): VideoCapsEnv {
       : undefined,
     matchMedia: (q) => window.matchMedia(q),
     screen: { width: window.screen.width, height: window.screen.height },
-    memoryProfile: chooseMemoryProfile({
-      search: location.search,
-      coarsePointer: matchMedia('(pointer: coarse)').matches,
-      maxTouchPoints: navigator.maxTouchPoints,
-      platform: navigator.platform,
-    }),
+    memoryProfile: browserMemoryProfile(),
   };
+}
+
+/**
+ * The caps, never failing: when the environment can't be read or the probe fails, no HEVC or HDR, and "phone" from the
+ * memory profile alone (a computer when even that can't be told).
+ */
+export async function loadVideoCaps(makeEnv: () => VideoCapsEnv, profile: () => MemoryProfileName): Promise<VideoCaps> {
+  try {
+    return await detectVideoCaps(makeEnv());
+  } catch {
+    let phone = false;
+    try {
+      phone = profile() === 'constrained';
+    } catch {
+      // no profile either: a computer, as the desktop profile is the default
+    }
+    return { hevc: false, hevc10: false, hdrDisplay: false, phone };
+  }
 }
 
 let cached: Promise<VideoCaps> | null = null;
 
-/** One probe per page. */
+/** One probe per page; it never rejects. */
 export function videoCaps(): Promise<VideoCaps> {
-  cached ??= detectVideoCaps(browserVideoCapsEnv());
+  cached ??= loadVideoCaps(browserVideoCapsEnv, browserMemoryProfile);
   return cached;
 }

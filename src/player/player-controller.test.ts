@@ -123,6 +123,26 @@ describe('playlist lifecycle', () => {
     expect(c.getSnapshot().levelSwitch).toBe('idle'); // a new disc starts without one
   });
 
+  it('a late levelChanged from the previous disc does not touch the new one', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const spec = { kind: 'remote', base: 'https://nas.example/discs/a/', token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } } as const;
+    c.openRemote(spec);
+    c.setLevel({ ...spec, query: 'level=h264-1080&audio=1', original: spec.manifest });
+    c.openRemote({ ...spec, manifest: { ...spec.manifest, discId: 'b' } });
+    worker.emit({ type: 'levelChanged', ok: false, message: 'It would not open.' });
+    expect(c.getSnapshot().levelSwitch).toBe('idle');
+  });
+
+  it('setLevel carries the audio stream to keep when it is given', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const spec = { kind: 'remote', base: 'https://nas.example/discs/a/', token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } } as const;
+    c.openRemote(spec);
+    c.setLevel(spec, 2);
+    expect(worker.posted.at(-1)).toEqual({ type: 'setLevel', disc: spec, audio: 2 });
+  });
+
   it('opens a NAS disc buffering first, reports the fill and cancels it', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());

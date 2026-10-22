@@ -3,7 +3,7 @@ import { buildMpls } from '../../../tests/helpers/bdmv-builders';
 import type { DiscManifest, LevelAt } from '../../engine/disc/nas-api';
 import type { RemoteDiscSpec } from '../../engine/disc/disc-spec';
 import type { PlayerController } from '../../player/player-controller';
-import { LevelSession } from './level-session';
+import { LevelSession, launchManifest } from './level-session';
 import { NasBusyError } from './nas-client';
 import type { NasClient } from './nas-client';
 
@@ -32,7 +32,7 @@ function setup(opts: { busy?: boolean; failSwitch?: string } = {}) {
   const nas = { manifest, releaseViewing } as unknown as NasClient;
   const listeners = new Set<() => void>();
   let levelSwitch: 'idle' | 'switching' | { error: string } = 'idle';
-  const setLevel = vi.fn((_spec: RemoteDiscSpec) => {
+  const setLevel = vi.fn((_spec: RemoteDiscSpec, _audio?: number) => {
     levelSwitch = 'switching';
     queueMicrotask(() => {
       levelSwitch = opts.failSwitch ? { error: opts.failSwitch } : 'idle';
@@ -49,7 +49,11 @@ function setup(opts: { busy?: boolean; failSwitch?: string } = {}) {
   } as unknown as PlayerController;
   const session = new LevelSession(nas);
   const deps = { controller, base: 'https://nas/', token: 't' };
-  return { session, deps, manifest, releaseViewing, setLevel };
+  /** Hears the controller before the session does (as PlayerScreen's effect, subscribed first). */
+  const listenFirst = (l: () => void): void => {
+    listeners.add(l);
+  };
+  return { session, deps, manifest, releaseViewing, setLevel, listenFirst };
 }
 const begin = (s: LevelSession, at: LevelAt): void => s.begin({ discId: 'd1', levels, at, original });
 
@@ -125,5 +129,47 @@ describe('LevelSession', () => {
     expect(tracks.map((x) => [x.number, x.language])).toEqual([[1, 'jpn'], [2, 'eng']]);
     expect(tracks[0]!.label).toContain('Japanese');
     expect(t.session.originalAudio('99999')).toEqual([]);
+  });
+
+  it('a failed switch that the player ended first still releases the new lease', async () => {
+    const t = setup({ failSwitch: 'It would not open.' });
+    begin(t.session, H264);
+    // PlayerScreen ends the session when the engine reports the failure (the disc closed)
+    t.listenFirst(() => t.session.end());
+    await t.session.switchTo(PHONE, t.deps);
+    expect(t.session.get()).toBeNull();
+    expect(t.releaseViewing.mock.calls).toEqual([['d1', H264], ['d1', PHONE]]);
+  });
+
+  it('a switch to Original carries the audio stream the level played, in Original numbering', async () => {
+    const t = setup();
+    begin(t.session, { level: 'h264-1080', audio: 2 });
+    await t.session.switchTo({ level: 'original', audio: 2 }, t.deps);
+    expect(t.setLevel.mock.calls[0]![1]).toBe(2);
+    await t.session.switchTo({ level: 'phone-720', audio: 2 }, t.deps);
+    expect(t.setLevel.mock.calls[1]![1]).toBeUndefined(); // a level's query names its audio
+  });
+});
+
+describe('launchManifest', () => {
+  const nasWith = () => {
+    const manifest = vi.fn(async (_id: string, at?: LevelAt): Promise<DiscManifest> => ({ discId: 'd1', name: `at ${at?.level}`, files: [], inline: {} }));
+    const releaseViewing = vi.fn(async () => undefined);
+    return { manifest, releaseViewing };
+  };
+  it('Original is the manifest in hand, with no request', async () => {
+    const nas = nasWith();
+    expect(await launchManifest(nas, 'd1', ORIGINAL_AT, original, () => true)).toBe(original);
+    expect(nas.manifest).not.toHaveBeenCalled();
+  });
+  it("a level's manifest, for a launch still current", async () => {
+    const nas = nasWith();
+    expect((await launchManifest(nas, 'd1', H264, original, () => true))?.name).toBe('at h264-1080');
+    expect(nas.releaseViewing).not.toHaveBeenCalled();
+  });
+  it('a launch superseded while the level was asked for gives the lease back', async () => {
+    const nas = nasWith();
+    expect(await launchManifest(nas, 'd1', H264, original, () => false)).toBeNull();
+    expect(nas.releaseViewing.mock.calls).toEqual([['d1', H264]]);
   });
 });
