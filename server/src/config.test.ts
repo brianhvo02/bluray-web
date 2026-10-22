@@ -15,6 +15,7 @@ describe('loadConfig', () => {
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
       trustedProxy: 'caddy',
       tmdbApiKey: null,
+      discogsToken: null,
       titleLibrary: 'owners',
       rtc: { port: 47998 },
       levels: { backend: 'qsv', cacheBytes: 50_000_000_000, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' },
@@ -31,6 +32,7 @@ describe('loadConfig', () => {
       publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
       trustedProxy: 'caddy',
       tmdbApiKey: null,
+      discogsToken: null,
       titleLibrary: 'owners',
       rtc: { port: 47998 },
       levels: { backend: 'qsv', cacheBytes: 50_000_000_000, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' },
@@ -49,6 +51,11 @@ describe('loadConfig', () => {
     expect(loadConfig({ TMDB_API_KEY: 'k123', TITLE_LIBRARY: 'everyone' })).toMatchObject({ tmdbApiKey: 'k123', titleLibrary: 'everyone' });
     expect(loadConfig({ TMDB_API_KEY: '', TITLE_LIBRARY: 'owners' })).toMatchObject({ tmdbApiKey: null, titleLibrary: 'owners' });
     expect(() => loadConfig({ TITLE_LIBRARY: 'all' })).toThrow('TITLE_LIBRARY "all" is not owners or everyone');
+  });
+
+  it('reads DISCOGS_TOKEN, null when empty', () => {
+    expect(loadConfig({ DISCOGS_TOKEN: ' d-tok ' }).discogsToken).toBe('d-tok');
+    expect(loadConfig({ DISCOGS_TOKEN: '' }).discogsToken).toBeNull();
   });
 
   it('reads NIGHTLY_SCAN_AT and SCAN_PAUSE_MS', () => {
