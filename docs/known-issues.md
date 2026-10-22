@@ -536,7 +536,7 @@ Fill in from `probe.html` on each device.
 - **Subtitle store: an episode upload whose season id changed is listed to owners as not attached, though viewers still get it.** An episode attachment names a season id as well as the disc key and playlist it resolved to. If a rescan or an owner's change gives the season a new id, the NAS still marks the upload `attached` (its disc and playlist resolve, so it stays in the player's Subtitles menu for everyone), but it matches no season screen; the owner's title screens (`ownerListing` in `src/ui/nas/subtitle-model.ts`) list it under "Not attached" on each of the title's screens, marked so that Edit attaches it again. It isn't re-attached by guessing, and the episode language tags leave it out.
 - **Quality levels: a disc program's own audio choice at a level is ignored.** When PSR1 names an audio track the level doesn't carry, the level's track keeps playing. Audio changes at a level go through the player's Audio menu, which reopens the level with that audio.
 - **Quality levels: the level Audio menu doesn't honour the disc's `primaryAudioChange` UO mask.** A level audio switch reopens the disc, so it is not a stream change the mask can block.
-- **Quality levels: "phone" in the auto rule is a size, not a device type.** It means the constrained memory profile or a small screen.
+- **Quality levels: "phone" in the auto rule is a size, not a device type.** It means the constrained memory profile or a screen whose shorter side is under 600 CSS px (phones are 320-440; 1280x800 and 1440x900 laptops are not phones).
 - **Quality levels: the levels request waits up to 10 s,** then the pre-flight offers Original only.
 
 ## Resolved (for reference)

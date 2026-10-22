@@ -46,10 +46,13 @@ describe('detectVideoCaps', () => {
     expect((await detectVideoCaps(env())).hdrDisplay).toBe(false);
   });
 
-  it('phone when constrained or when the shorter screen side is 900 or less', async () => {
+  it('phone when constrained or when the shorter screen side is under 600', async () => {
     expect((await detectVideoCaps(env())).phone).toBe(false);
     expect((await detectVideoCaps(env({ screen: { width: 2560, height: 1600 } }))).phone).toBe(false);
     expect((await detectVideoCaps(env({ screen: { width: 390, height: 844 } }))).phone).toBe(true);
+    for (const [width, height, phone] of [[1280, 800, false], [1440, 900, false], [600, 960, false], [599, 900, true]] as const) {
+      expect((await detectVideoCaps(env({ screen: { width, height } }))).phone, `${width}x${height}`).toBe(phone);
+    }
     expect((await detectVideoCaps(env({ memoryProfile: 'constrained', screen: { width: 2732, height: 2048 } }))).phone).toBe(true);
   });
 });

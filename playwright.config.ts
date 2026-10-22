@@ -5,8 +5,7 @@ import { NAS_PORT, RENDEZVOUS_URL } from './tests/e2e/nas-server';
 const PORT = Number(process.env.E2E_PORT ?? 4173);
 
 /**
- * A desktop's screen. Without it Playwright's screen is its 1280x720 viewport, which the player's auto quality rule takes for a
- * phone (the short side is under 900), so every NAS test would open its disc at Phone, re-encoded, and hold a GPU lease.
+ * A desktop's screen: realistic, and not a phone to the player's auto quality rule (short side under 600).
  */
 const DESKTOP_SCREEN = { width: 1920, height: 1080 };
 

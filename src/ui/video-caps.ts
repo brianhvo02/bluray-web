@@ -16,7 +16,8 @@ export interface VideoCapsEnv {
 
 const HEVC_MAIN = 'hvc1.1.6.L120.90';
 const HEVC_MAIN10 = 'hvc1.2.4.L120.90';
-const PHONE_SHORT_SIDE = 900;
+/** Phones are 320-440 CSS px on the shorter side; laptops start well above this. */
+const PHONE_SHORT_SIDE = 600;
 
 async function probe(env: VideoCapsEnv, codec: string): Promise<boolean> {
   if (!env.isConfigSupported) return false;
@@ -33,7 +34,7 @@ export async function detectVideoCaps(env: VideoCapsEnv): Promise<VideoCaps> {
     hevc,
     hevc10,
     hdrDisplay: env.matchMedia('(dynamic-range: high)').matches,
-    phone: env.memoryProfile === 'constrained' || Math.min(env.screen.width, env.screen.height) <= PHONE_SHORT_SIDE,
+    phone: env.memoryProfile === 'constrained' || Math.min(env.screen.width, env.screen.height) < PHONE_SHORT_SIDE,
   };
 }
 
