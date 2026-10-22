@@ -74,12 +74,12 @@ async function tokenFor(name: string, owner: boolean): Promise<string> {
   return auth.startSession(device.id, challenge, signature)!.token;
 }
 
-const call = (method: string, path: string, token: string | null, body?: BodyInit | object): Promise<Response> => {
+const call = (method: string, path: string, token: string | null, body?: string | Uint8Array | object): Promise<Response> => {
   const raw = body instanceof Uint8Array || typeof body === 'string' || body === undefined;
   return fetch(`${base}${path}`, {
     method,
     headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body !== undefined && !raw ? { 'Content-Type': 'application/json' } : {}) },
-    body: body === undefined ? undefined : raw ? (body as BodyInit) : JSON.stringify(body),
+    body: body === undefined ? undefined : raw ? (body as string) : JSON.stringify(body),
   });
 };
 
@@ -157,7 +157,7 @@ describe('subtitle routes', () => {
     const owner = await tokenFor('Hana', true);
     const guest = await tokenFor('Mika', false);
     const s = await createWithFile(owner);
-    const writes: [string, string, BodyInit | object | undefined][] = [
+    const writes: [string, string, string | Uint8Array | object | undefined][] = [
       ['POST', '/api/subtitles', meta()], ['PATCH', `/api/subtitles/${s.id}`, { name: 'x' }], ['DELETE', `/api/subtitles/${s.id}`, undefined],
       ['PUT', `/api/subtitles/${s.id}/file/x.srt`, 'zzz'], ['PUT', `/api/subtitles/${s.id}/fonts/x.ttf`, 'zzz'],
     ];
