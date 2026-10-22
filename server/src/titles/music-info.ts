@@ -17,6 +17,11 @@ export function artistKey(name: string): string {
   return name.normalize('NFKC').toLowerCase().replace(/[・·\s]+/g, ' ').trim();
 }
 
+const isVariousName = (name: string): boolean => {
+  const k = artistKey(name);
+  return k === VARIOUS_ID || k === artistKey(VARIOUS_NAME);
+};
+
 const NON_LATIN = /[^\p{Script=Latin}\p{N}\p{P}\p{S}\s]/u;
 const isLatin = (s: string): boolean => s.length > 0 && !NON_LATIN.test(s);
 
@@ -59,10 +64,10 @@ export function musicInfo(o: {
   let artist: ArtistInfo;
   const owner = o.ownerArtist?.trim();
   if (owner) {
-    artist = artistKey(owner) === VARIOUS_ID ? various() : named(owner);
+    artist = isVariousName(owner) ? various() : named(owner);
   } else if (lookup) {
     const first = lookup.artists[0];
-    if (first?.id === VARIOUS_ARTISTS_MBID || lookup.secondaryTypes.some((t) => t === 'Soundtrack' || t === 'Compilation')) artist = various();
+    if (first?.id === VARIOUS_ARTISTS_MBID || (first && isVariousName(first.name)) || lookup.secondaryTypes.some((t) => t === 'Soundtrack' || t === 'Compilation')) artist = various();
     else if (first) artist = fromMusicArtist(first);
     else artist = parsed.artist ? named(parsed.artist) : fromParent(o.parentFolder);
   } else {
@@ -71,8 +76,9 @@ export function musicInfo(o: {
 
   let kind: MusicKind;
   if (lookup?.live || discNames.some(hasConcertWord) || hasConcertWord(o.releaseFolder)) kind = 'concert';
-  else if (lookup?.primaryType === 'Single' || parsed.single) kind = 'single';
+  else if (lookup?.primaryType === 'Single') kind = 'single';
   else if (lookup?.primaryType === 'Album' || lookup?.primaryType === 'EP') kind = 'album';
+  else if (parsed.single) kind = 'single';
   else kind = 'other';
 
   const wanted = normalizeTitle(title);

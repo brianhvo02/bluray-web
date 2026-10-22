@@ -30,6 +30,10 @@ describe('musicInfo', () => {
     const a = musicInfo({ ...base, lookup: release(), ownerArtist: 'Neon Harbor' }).artist;
     expect(a).toMatchObject({ id: 'name:' + artistKey('Neon Harbor'), name: 'Neon Harbor' });
     expect(musicInfo({ ...base, lookup: release(), ownerArtist: 'various' }).artist.id).toBe('various');
+    expect(musicInfo({ ...base, lookup: release(), ownerArtist: 'Various artists' }).artist.id).toBe('various');
+  });
+  it('a lookup crediting Various from any source is Various artists', () => {
+    expect(musicInfo({ ...base, lookup: release({ source: 'discogs', artists: [artist({ id: '194', name: 'Various' })] }) }).artist.id).toBe('various');
   });
   it('rejectMatch ignores the lookup', () => {
     const m = musicInfo({ ...base, lookup: release({ title: 'Other', live: true }), rejectMatch: true });
@@ -42,6 +46,7 @@ describe('musicInfo', () => {
     expect(k({ releaseFolder: 'Lantern Parade - Summer Tour' })).toBe('concert');
     expect(k({ lookup: release({ primaryType: 'Single' }) })).toBe('single');
     expect(k({ releaseFolder: 'Lantern Parade - Dawn (Single)' })).toBe('single');
+    expect(k({ lookup: release({ primaryType: 'Album' }), releaseFolder: 'Lantern Parade - Dawn (Single)' })).toBe('album');
     expect(k({ lookup: release({ primaryType: 'EP' }) })).toBe('album');
     expect(k({ lookup: release({ primaryType: 'Album' }) })).toBe('album');
     expect(k({ lookup: release({ primaryType: null }) })).toBe('other');
