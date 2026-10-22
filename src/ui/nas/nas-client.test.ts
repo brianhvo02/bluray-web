@@ -287,6 +287,7 @@ describe('NasClient', () => {
     await expect(nas.admin.clearChoice('d/1')).rejects.toMatchObject({ status: 409, code: 'copy-follows-source', detail: { source: 'd0' } });
     await nas.admin.setName('music:ab', 'Spring Live');
     await nas.admin.setName('music:ab', null);
+    await nas.admin.setMusic('music:ab', { artist: 'Aoi Hoshino', rejectMatch: true });
     await nas.admin.createTitle('music', 'Live 2024', null);
     await nas.admin.createTitle('series', 'Ember Tide', 2);
     await nas.admin.updateTitle('own:x', { name: 'Live 2025' });
@@ -303,6 +304,7 @@ describe('NasClient', () => {
       'DELETE admin/discs/d%2F1/choice',
       'PUT admin/names/music%3Aab {"name":"Spring Live"}',
       'PUT admin/names/music%3Aab {"name":null}',
+      'PUT admin/music/music%3Aab {"artist":"Aoi Hoshino","rejectMatch":true}',
       'POST admin/titles {"kind":"music","name":"Live 2024"}',
       'POST admin/titles {"kind":"series","name":"Ember Tide","seasons":2}',
       'PATCH admin/titles/own%3Ax {"name":"Live 2025"}',

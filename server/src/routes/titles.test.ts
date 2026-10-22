@@ -252,6 +252,7 @@ describe('owner title routes', () => {
       ['PUT', `/api/admin/discs/${encodeURIComponent(A.discId)}/choice`, { choice: { kind: 'hidden' } }],
       ['DELETE', `/api/admin/discs/${encodeURIComponent(A.discId)}/choice`],
       ['PUT', `/api/admin/names/${encodeURIComponent(A.discId)}`, { name: 'x' }],
+      ['PUT', '/api/admin/music/music:x', { artist: 'x' }],
       ['POST', '/api/admin/titles', { kind: 'movie', name: 'x' }],
       ['PATCH', '/api/admin/titles/own:x', { name: 'x' }],
       ['DELETE', '/api/admin/titles/own:x'],
@@ -654,5 +655,37 @@ describe('final review', () => {
     clock += 60_000;
     await service.runNow();
     expect(service.catalogue().titles.filter((x) => x.kind === 'music').map((x) => x.names.display)).toEqual(['First Light Live']);
+  });
+
+  it("sets a music release's artist and rejectMatch on every disc, keeping its name", async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FA${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const music = service.catalogue().titles.find((x) => x.kind === 'music')!;
+    const id = encodeURIComponent(music.id);
+    await send('PUT', `/api/admin/names/${id}`, t, { name: 'First Light Live' });
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { artist: 'Aoi Hoshino', rejectMatch: true })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: 'Aoi Hoshino', rejectMatch: true });
+    // writing one field keeps the other; null clears the artist, false clears rejectMatch
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { artist: null })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: null, rejectMatch: true });
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { rejectMatch: false })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: null });
+  });
+
+  it('refuses a bad music correction and an unknown id', async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FB${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
+    for (const body of [{}, { artist: '  ' }, { artist: 'x'.repeat(201) }, { artist: 3 }, { rejectMatch: 'yes' }, { other: 1 }]) {
+      expect((await send('PUT', `/api/admin/music/${id}`, t, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await send('PUT', '/api/admin/music/nope', t, { artist: 'x' })).status).toBe(404);
+    expect((await send('PUT', `/api/admin/music/${encodeURIComponent(A.discId)}`, t, { artist: 'x' })).status).toBe(404);
   });
 });

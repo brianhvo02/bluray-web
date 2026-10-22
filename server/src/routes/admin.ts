@@ -528,6 +528,30 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       rebuildAfter(titles, library);
       return { status: 204 };
     }
+    case 'PUT music/:id': {
+      const body = await readJson(req);
+      if (!isObject(body) || !hasKeys(body, [], ['artist', 'rejectMatch']) || (body.artist === undefined && body.rejectMatch === undefined)) throw new HttpError(400, 'bad music');
+      const artist = body.artist === undefined || body.artist === null ? body.artist : name(body.artist);
+      if (artist === undefined && body.artist !== undefined) throw new HttpError(400, 'bad music');
+      if (body.rejectMatch !== undefined && typeof body.rejectMatch !== 'boolean') throw new HttpError(400, 'bad music');
+      if (!service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own)) return json(404, { error: 'unknown id' });
+      // every disc of the release keeps its own name; only the fields sent change. A copy keeps following its source.
+      const byId = new Map(library.evidence().map((e) => [e.discId, e]));
+      const detail = service.catalogue().detail(id!);
+      const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
+      for (const discId of discIds) {
+        const origin = owner.choiceOrigin(discId);
+        if (origin?.kind === 'copy' && origin.source !== null) continue;
+        const had = owner.snapshot().choices.get(discId);
+        const prev = had?.kind === 'music' ? had : { kind: 'music' as const, name: null };
+        const keptArtist = artist !== undefined ? artist : prev.artist;
+        const reject = body.rejectMatch !== undefined ? body.rejectMatch : prev.rejectMatch;
+        const next: OwnerChoice = { kind: 'music', name: prev.name, ...(keptArtist !== undefined ? { artist: keptArtist } : {}), ...(reject === true ? { rejectMatch: true } : {}) };
+        owner.setChoice(discId, byId.get(discId)?.fingerprint ?? null, next, origin?.kind === 'group' ? 'group' : 'direct');
+      }
+      rebuildAfter(titles, library);
+      return { status: 204 };
+    }
     case 'POST titles': {
       const body = await readJson(req);
       if (!isObject(body) || !hasKeys(body, ['kind', 'name'], ['seasons'])) throw new HttpError(400, 'bad title');

@@ -331,6 +331,10 @@ export class NasClient {
     setName: async (id: string, name: string | null): Promise<void> => {
       await this.ok(`admin/names/${encodeURIComponent(id)}`, jsonBody('PUT', { name }));
     },
+    /** A music release's artist (null clears it) or whether its lookup match is rejected. */
+    setMusic: async (titleId: string, change: { readonly artist?: string | null; readonly rejectMatch?: boolean }): Promise<void> => {
+      await this.ok(`admin/music/${encodeURIComponent(titleId)}`, jsonBody('PUT', change));
+    },
     createTitle: async (kind: TitleKind, name: string, seasons: number | null): Promise<OwnTitle> =>
       (await this.json('admin/titles', jsonBody('POST', kind === 'series' ? { kind, name, seasons } : { kind, name }))) as OwnTitle,
     /** Renames an own title, or changes an own series' number of seasons. */
