@@ -1126,6 +1126,25 @@ class LiveCheck {
     );
   }
 
+  /**
+   * Starts playback with a real touch on `selector` (it starts audio), tried twice, then a DOM click, as for Play: a touch
+   * can miss on the iPhone (the page moving under it). Done once the element is gone.
+   */
+  private async touchStart(page: Page, selector: string, what: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt < 2) await tapInView(page, selector, what);
+      else {
+        this.log(`${what}: two touches missed; clicking it in the DOM (audio may stay muted)`);
+        await clickEl(page, selector, what);
+      }
+      const gone = await page.until<boolean>(`!${visible(selector)}`, what, 4000).catch((err: unknown) => {
+        if (err instanceof PageReloadedError) throw err;
+        return false;
+      });
+      if (gone) return;
+    }
+  }
+
   /** Waits until the player plays at `atLeastUs` or later; returns its playlist and disc key. */
   private async playingFrom(page: Page, atLeastUs: number, during: string): Promise<{ playlist: string; discKey: string; clockUs: number }> {
     const deadline = Date.now() + 60_000;
@@ -1229,19 +1248,7 @@ class LiveCheck {
       const played = await step('play from the NAS folder', page, async () => {
         await this.openNasDisc(page, disc, query);
         await page.until(visible('[data-testid=playlist-00000]'), 'the playlist picker', 30_000);
-        // a real touch (it starts audio), tried twice, then a DOM click, as for Play (touches can miss on the iPhone)
-        for (let attempt = 0; attempt < 3; attempt++) {
-          if (attempt < 2) await tapInView(page, '[data-testid=playlist-00000]', 'playlist 00000');
-          else {
-            this.log('playlist 00000: two touches missed; clicking it in the DOM (audio may stay muted)');
-            await clickEl(page, '[data-testid=playlist-00000]', 'playlist 00000');
-          }
-          const left = await page.until<boolean>(`!document.querySelector('[data-testid=playlist-picker]')`, 'the picker', 4000).catch((err: unknown) => {
-            if (err instanceof PageReloadedError) throw err;
-            return false;
-          });
-          if (left) break;
-        }
+        await this.touchStart(page, '[data-testid=playlist-00000]', 'playlist 00000');
         ({ playlist, discKey } = await this.playingFrom(page, 500_000, 'the first play'));
         return { ok: true, detail: `playlist ${playlist}, disc key ${discKey.slice(0, 2)}…` };
       });
@@ -1278,7 +1285,7 @@ class LiveCheck {
         const text = await page.until<string>(`(() => { const e = document.querySelector('[data-testid=resume-at]'); return e && e.getClientRects().length ? e.textContent : null; })()`, 'the resume prompt', 30_000);
         const asked = await page.probe<boolean>(visible('[data-testid=resume-start-over]'), 'Start from beginning');
         await page.d.screenshot(join(dir, 'resume-prompt.png')).catch(() => undefined);
-        await tapInView(page, '[data-testid=resume-at]', 'Resume');
+        await this.touchStart(page, '[data-testid=resume-at]', 'Resume');
         const at = await this.playingFrom(page, 0, 'the resume');
         const from = at.clockUs >= savedUs - 500_000;
         await this.pauseAt(page, 'the pause after resuming');
@@ -1298,7 +1305,7 @@ class LiveCheck {
         await clickEl(page, card, 'the Continue watching card');
         await page.until(visible('[data-testid=resume-at]'), 'Resume', 30_000);
         const asked = await page.probe<boolean>(visible('[data-testid=resume-start-over]'), 'Start from beginning');
-        await tapInView(page, '[data-testid=resume-at]', 'Resume');
+        await this.touchStart(page, '[data-testid=resume-at]', 'Resume');
         const at = await this.playingFrom(page, 0, 'the resume from Continue watching');
         return { ok: kind === 'resume' && !asked && at.clockUs >= savedUs - 500_000, detail: `card ${kind}; asked: ${asked}; playing from ${at.clockUs} µs (saved ${savedUs} µs)` };
       });
