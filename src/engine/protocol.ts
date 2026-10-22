@@ -9,7 +9,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'no-picture' | 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
+export type NoticeCode = 'no-picture' | 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'bdj-storage' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
 /** RemoteFailure: a NAS disc changed, the NAS cannot be reached, or this device is no longer paired. */
 export type ErrorCode = DiscErrorCode | RemoteFailure | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
@@ -296,3 +296,10 @@ export type EngineEvent =
  * a picture starts; that disc never sends it again.
  */
 export const NO_PICTURE_MESSAGE = "This disc's video can't be played here yet, so it will play without a picture.";
+
+/**
+ * The notice 'bdj-storage' (ruling R32): what a BD-J disc saves won't last. A scope kept in memory only with no copy
+ * anywhere, a write refused for room (16 MB per scope, the NAS's quota, the VFS's memory cap), or a NAS put that failed
+ * for good. Sent at most once per disc open; it stays until dismissed or another disc opens.
+ */
+export const BDJ_STORAGE_MESSAGE = "This disc's saved data can't be kept right now, so progress you make may be lost.";

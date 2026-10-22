@@ -13,6 +13,7 @@ import type { PlayerBdjHost } from './player-host';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
+import type { StorageLoss } from './store/bdj-store';
 import { bootTransfer, type BdjCallName, type BdjFailureCode, type BdjWireValue, type FromBdj, type ToBdj } from './worker-protocol';
 
 export type { BdjFailureCode } from './worker-protocol';
@@ -39,6 +40,11 @@ export interface BdjSessionDeps {
   readonly onLog?: (line: string, error: boolean) => void;
   /** A background still Java asked to show (null: none). */
   readonly onBackground?: (image: Uint8Array | null, rect: ScreenRect) => void;
+  /**
+   * What the disc saves won't last (the worker's `storageLost`, ruling R32): the player shows the `bdj-storage` notice.
+   * Never called once the session has stopped.
+   */
+  readonly onStorageLost?: (reason: StorageLoss) => void;
   /** The worker's NAS reads got a 401: a fresh token is wanted (setToken delivers it). */
   readonly onTokenNeeded?: () => void;
   readonly nowMs: () => number;
@@ -388,6 +394,9 @@ export class BdjSession {
         break;
       case 'io':
         this.setIoPending(m.pending);
+        break;
+      case 'storageLost':
+        this.deps.onStorageLost?.(m.reason);
         break;
       case 'stopped':
         break;

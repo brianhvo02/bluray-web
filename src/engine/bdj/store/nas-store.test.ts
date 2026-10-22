@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { listTar, writeTar as serverWriteTar } from '../../../../server/src/tar';
 import { createDiscHandler, discApiBase, findDiscs } from '../../../../tools/disc-server/server';
 import { startStoreNas, type StoreNas } from '../../../../tests/helpers/store-nas';
-import { NasQuotaError, SCOPE_QUOTA_BYTES, type Snapshot, type SnapshotFile } from './bdj-store';
+import { NasQuotaError, SCOPE_QUOTA_BYTES, type Snapshot, type SnapshotFile, type StorageLoss } from './bdj-store';
 import { IdbBdjStore, recordKey } from './idb-store';
 import { NAS_PUSH_DEBOUNCE_MS, NAS_PUSH_RETRY_MS, PERSON_HEADER, NasBdjStore, NasDiscStore, NasStoreError, UNCONFIRMED_AGE_SOURCE, WriteAheadNasStore, personSource, storeApiBase, unconfirmedSource } from './nas-store';
 import { readTar, tarPathFits, writeTar } from './tar';
@@ -185,6 +185,8 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     readonly local: IdbBdjStore;
     readonly logs: [string, boolean][];
     readonly full: [string, boolean][];
+    /** What onLost heard (the bdj-storage notice, ruling R32). */
+    readonly lost: StorageLoss[];
   }
   let timers: Timers;
   beforeEach(() => {
@@ -195,6 +197,7 @@ describe('WriteAheadNasStore (ruling R17)', () => {
   const session = (personId: string, token: string, idb: IDBFactory, legacy?: IdbBdjStore, fetchHook?: typeof fetch, whoAmI?: () => Promise<string | null>): Device => {
     const logs: [string, boolean][] = [];
     const full: [string, boolean][] = [];
+    const lost: StorageLoss[] = [];
     const local = new IdbBdjStore(personSource(personId), idb);
     const nasClient = new NasBdjStore(nas.api, { fetch: fetchHook ?? nas.fetch, token, sleep: async () => undefined });
     nasClient.setPerson(personId);
@@ -207,8 +210,9 @@ describe('WriteAheadNasStore (ruling R17)', () => {
       setTimer: timers.setTimer,
       log: (line, error) => logs.push([line, error ?? false]),
       onFull: (scope, f) => full.push([scope, f]),
+      onLost: (reason) => lost.push(reason),
     });
-    return { store, local, logs, full };
+    return { store, local, logs, full, lost };
   };
   const onNas = (personId: string, scope = SCOPE): [string, number][] => listTar(nas.stored(personId, scope).body).map((e) => [e.path, e.mtime]);
 
@@ -725,6 +729,69 @@ describe('WriteAheadNasStore (ruling R17)', () => {
     expect(sent).toEqual([mika.personId, null, mika.personId, null]); // each write tries the header first
     expect(onNas(mika.personId)).toEqual([['a', 2]]);
     expect(logs).toEqual([[`BD-J storage: a write with the ${PERSON_HEADER} header did not reach the NAS, and went without it (a server from before its guard)`, true]]);
+  });
+
+  describe("when saves won't last (the bdj-storage notice, ruling R32)", () => {
+    /** The NAS's store PUTs answer `status` (the rest go through). */
+    const putsAnswer = (status: number, body: object = { error: 'refused' }): typeof fetch =>
+      ((input: string | URL | Request, init?: RequestInit) =>
+        (init?.method ?? 'GET').toUpperCase() === 'PUT'
+          ? Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }))
+          : nas.fetch(input, init)) as typeof fetch;
+
+    it('hears of a put the NAS refuses for good (a 4xx that is not a conflict), and keeps the copy', async () => {
+      const { personId, token } = await nas.person('Mika');
+      const d = session(personId, token, new IDBFactory(), undefined, putsAnswer(403));
+      const loaded = await d.store.load(SCOPE);
+      await d.store.save(SCOPE, { files: [file('a', 5_000, '1')] }, loaded.etag);
+      await timers.advance(NAS_PUSH_DEBOUNCE_MS);
+      expect(d.lost).toEqual(['put-failed']);
+      expect((await d.local.loadRecord(SCOPE))?.pending).toBe(true);
+    });
+
+    it('hears of a device no longer paired (a 401 with no fresh token)', async () => {
+      const { personId, token } = await nas.person('Mika');
+      const d = session(personId, token, new IDBFactory(), undefined, putsAnswer(401));
+      const loaded = await d.store.load(SCOPE);
+      await d.store.save(SCOPE, { files: [file('a', 5_000, '1')] }, loaded.etag);
+      await d.store.flush();
+      expect(d.lost).toEqual(['put-failed']);
+    });
+
+    it('hears nothing of a put still being tried again: unreachable, or busy (503) past its retries', async () => {
+      const { personId, token } = await nas.person('Mika');
+      const busy = session(personId, token, new IDBFactory(), undefined, putsAnswer(503, { error: 'busy' }));
+      const loaded = await busy.store.load(SCOPE);
+      await busy.store.save(SCOPE, { files: [file('a', 5_000, '1')] }, loaded.etag);
+      await busy.store.flush();
+      expect(busy.logs.some(([l, e]) => e && l.includes('HTTP 503'))).toBe(true);
+      const down = session(personId, token, new IDBFactory());
+      await down.store.load(SCOPE);
+      await down.store.save(SCOPE, { files: [file('b', 5_000, '1')] }, null);
+      nas.failPut('unreachable', 'unreachable');
+      await down.store.flush();
+      expect(down.logs.some(([l, e]) => e && l.includes('could not be put on the NAS'))).toBe(true);
+      expect([...busy.lost, ...down.lost]).toEqual([]);
+    });
+
+    it('hears nothing of a 412 that merges, or of a missed boot that keeps an unmerged copy (rulings R28, R29)', async () => {
+      const { personId, token } = await nas.person('Mika');
+      const tabletToken = await nas.device(personId, 'tablet');
+      const phone = session(personId, token, new IDBFactory());
+      const tablet = session(personId, tabletToken, new IDBFactory());
+      await phone.store.save(SCOPE, { files: [file('phone', 1_000_000, 'p')] }, (await phone.store.load(SCOPE)).etag);
+      await tablet.store.save(SCOPE, { files: [file('tablet', 1_000_000, 't')] }, (await tablet.store.load(SCOPE)).etag);
+      await phone.store.flush();
+      await tablet.store.flush(); // 412, merged, put
+      expect(onNas(personId)).toEqual([['phone', 1_000], ['tablet', 1_000]]);
+      nas.fail('unreachable', 'unreachable');
+      const missed = session(personId, token, new IDBFactory());
+      expect(await missed.store.load(BUDA)).toEqual({ files: [], etag: null });
+      await missed.store.save(BUDA, { files: [file('resume', 7_000, 'r')] }, null);
+      await missed.store.flush();
+      expect(missed.logs.some(([l]) => l.includes('this browser has no copy'))).toBe(true);
+      expect([...phone.lost, ...tablet.lost, ...missed.lost]).toEqual([]);
+    });
   });
 });
 

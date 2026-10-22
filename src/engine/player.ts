@@ -52,7 +52,7 @@ import { AssRenderer } from './ass/renderer';
 import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import { NO_PICTURE_MESSAGE, type AudioTrack, type BufferRequest, type BdjMemoryTelemetry, type EngineCommand, type EngineEvent, type FileData, type MenuKey, type NoticeCode, type PlaybackState, type ShaderSetData, type SubtitleChoice } from './protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type AudioTrack, type BufferRequest, type BdjMemoryTelemetry, type EngineCommand, type EngineEvent, type FileData, type MenuKey, type NoticeCode, type PlaybackState, type ShaderSetData, type SubtitleChoice } from './protocol';
 import type { FromBdj } from './bdj/worker-protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
@@ -427,6 +427,8 @@ export class Player {
   private pageHidden = false;
   /** The open disc's no-picture notice: not sent yet, shown, or cleared by a playlist with a picture (never sent again). */
   private noPictureNotice: 'unsent' | 'shown' | 'cleared' = 'unsent';
+  /** The open disc's bdj-storage notice has been sent (ruling R32: once per disc open, whatever BD-J sessions it runs). */
+  private bdjStorageNotice = false;
   /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
   private planeSeen: { plane: GraphicsPlaneReader; version: number; hash: string | null } | null = null;
   /** A BD-J First Play's worker, booting while the disc opens, until enterBdj adopts it. */
@@ -822,6 +824,7 @@ export class Player {
     this.bdjLatency = new InputLatency();
     this.bdjTapsIgnored = 0;
     this.noPictureNotice = 'unsent';
+    this.bdjStorageNotice = false;
     this.stopBdj();
     this.dropEarlyBdj();
     this.stopNavigator();
@@ -1236,6 +1239,11 @@ export class Player {
       },
       onTokenNeeded: () => {
         if (live()) this.deps.emit({ type: 'remoteTokenNeeded' });
+      },
+      onStorageLost: () => {
+        if (!live() || this.bdjStorageNotice) return;
+        this.bdjStorageNotice = true;
+        this.notice('bdj-storage', BDJ_STORAGE_MESSAGE);
       },
       nowMs: () => this.deps.nowMs(),
       setTimer: this.deps.setTimer ?? defaultSetTimer,

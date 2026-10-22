@@ -4,7 +4,7 @@ import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Vfs } from '../jvm/vfs';
 import { ZipArchive } from '../jvm/zip';
-import { ScopeQuotaError, type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot } from './bdj-store';
+import { ScopeQuotaError, type BdjStore, type StorageLoss, type LoadedSnapshot, type SaveResult, type Snapshot } from './bdj-store';
 import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore } from './idb-store';
 import { FullRelay, SAVE_DEBOUNCE_MS, SAVE_MAX_WAIT_MS, ScopeSync } from './scope-sync';
 import type { StoreScope } from './scopes';
@@ -61,15 +61,19 @@ interface Setup {
   readonly clock: { t: number };
   /** The lines logged as errors. */
   readonly errors: string[];
+  /** What onLost heard (the viewer's notice, ruling R32). */
+  readonly losses: StorageLoss[];
 }
 
 async function setup(store: BdjStore, opts: { quotaBytes?: number; scopes?: StoreScope[]; memLimitBytes?: number } = {}): Promise<Setup> {
   const lines: string[] = [];
   const errors: string[] = [];
   const unsaved: boolean[] = [];
+  const losses: StorageLoss[] = [];
   const clock = { t: 1_700_000_000_000 };
   const sync = await ScopeSync.load(opts.scopes ?? [PERSISTENT, BUDA], {
     store,
+    onLost: (reason) => void losses.push(reason),
     setTimer: (ms, fn) => {
       const id = setTimeout(fn, ms);
       return () => clearTimeout(id);
@@ -92,7 +96,7 @@ async function setup(store: BdjStore, opts: { quotaBytes?: number; scopes?: Stor
   });
   sync.attach(vfs);
   s = sync;
-  return { vfs, sync, lines, unsaved, clock, errors };
+  return { vfs, sync, lines, unsaved, clock, errors, losses };
 }
 
 function write(vfs: Vfs, path: string, text: string): boolean {
@@ -451,6 +455,69 @@ describe('ScopeSync: slow loads, writes under a merge, retries (5e final review)
     expect(store.text(PERSISTENT.key)).toEqual(['a=1', 'b=0']);
   });
 
+});
+
+describe("ScopeSync: when saves won't last (the bdj-storage notice, ruling R32)", () => {
+  beforeEach(() => void vi.useFakeTimers());
+  afterEach(() => void vi.useRealTimers());
+
+  it('hears of a scope that stays in memory only once, at the load', async () => {
+    const store = new MemoryStore();
+    store.failLoad = BUDA.key;
+    const { vfs, sync, losses } = await setup(store);
+    expect(losses).toEqual(['memory-only']);
+    write(vfs, `${BUDA.dir}/y`, 'new');
+    await sync.flush();
+    expect(losses).toEqual(['memory-only']);
+  });
+
+  it('hears of a write refused for room in a scope (the 16 MB quota, the VFS memory cap), but not of one outside the scopes', async () => {
+    const store = new MemoryStore();
+    const { vfs, sync, losses } = await setup(store, { quotaBytes: 4 });
+    expect(write(vfs, '/persistent/7fff0123/4001/big', '123456')).toBe(false);
+    expect(losses).toEqual(['full']);
+    await sync.flush();
+    const capped = await setup(new MemoryStore(), { memLimitBytes: 4 });
+    expect(write(capped.vfs, '/tmp/big', '123456')).toBe(false);
+    expect(capped.losses).toEqual([]);
+    expect(write(capped.vfs, '/persistent/7fff0123/big', '123456')).toBe(false);
+    expect(capped.losses).toEqual(['full']);
+  });
+
+  it("hears of a save the store refuses for its quota, and of the NAS's 507 (full), never of its room again", async () => {
+    const store = new MemoryStore();
+    store.quota = 5;
+    const { vfs, sync, losses } = await setup(store);
+    write(vfs, '/persistent/7fff0123/a', 'too long');
+    await sync.flush();
+    expect(losses).toEqual(['full']);
+    sync.full(BUDA.key, true);
+    expect(losses).toEqual(['full', 'full']);
+    sync.full(BUDA.key, false);
+    expect(losses).toEqual(['full', 'full']);
+  });
+
+  it("hears of a browser store that refuses a write for room (IndexedDB's QuotaExceededError)", async () => {
+    const store = new MemoryStore();
+    const { vfs, sync, losses } = await setup(store);
+    store.save = () => Promise.reject(Object.assign(new Error('the quota has been exceeded'), { name: 'QuotaExceededError' }));
+    write(vfs, '/persistent/7fff0123/a', '1');
+    await sync.flush();
+    expect(losses).toEqual(['full']);
+  });
+
+  it('hears nothing of loads and saves that work, of a merged conflict, or of a save tried again later', async () => {
+    const store = new MemoryStore();
+    const { vfs, sync, losses } = await setup(store);
+    write(vfs, '/persistent/7fff0123/mine', 'local');
+    store.put(PERSISTENT.key, [['theirs', 5000, 'remote']]);
+    await sync.flush();
+    expect(store.text(PERSISTENT.key)).toEqual(['mine=local', 'theirs=remote']);
+    store.save = () => Promise.reject(new Error('the NAS could not be reached'));
+    write(vfs, '/persistent/7fff0123/mine', 'again');
+    await sync.flush();
+    expect(losses).toEqual([]);
+  });
 });
 
 describe('FullRelay (a 507 heard during the boot)', () => {

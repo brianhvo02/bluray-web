@@ -10,7 +10,7 @@
  */
 
 import type { Vfs, VfsChange } from '../jvm/vfs';
-import { EMPTY_SNAPSHOT, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles, type BdjStore, type Snapshot, type SnapshotFile } from './bdj-store';
+import { EMPTY_SNAPSHOT, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles, type BdjStore, type Snapshot, type SnapshotFile, type StorageLoss } from './bdj-store';
 import type { StoreScope } from './scopes';
 
 /** `merged` with the files at `paths` as `ours` has them (left out where it has none). */
@@ -45,6 +45,11 @@ export interface ScopeSyncDeps {
   readonly log: (line: string, error?: boolean) => void;
   /** Whether a scope has changes not yet stored, on each change of it (the engine waits for the stop flush only then). */
   readonly onUnsaved?: (unsaved: boolean) => void;
+  /**
+   * What is written won't last (ruling R32): a scope that did not load (memory only), a write or save refused for room.
+   * Heard on every occurrence; the BD-J worker tells the engine once.
+   */
+  readonly onLost?: (reason: StorageLoss) => void;
   readonly quotaBytes?: number;
   readonly debounceMs?: number;
   readonly maxWaitMs?: number;
@@ -120,6 +125,7 @@ export class ScopeSync {
           return { scope, memoryOnly: false, etag: loaded.etag, stored: { files: sortFiles([...loaded.files]) }, dirty: false, refused: new Set() };
         } catch (e) {
           deps.log(`BD-J storage: ${scope.key} could not be loaded (${e instanceof Error ? e.message : String(e)}); what is written there lasts until BD-J stops`, true);
+          deps.onLost?.('memory-only');
           return { scope, memoryOnly: true, etag: null, stored: EMPTY_SNAPSHOT, dirty: false, refused: new Set() };
         } finally {
           cancel();
@@ -176,6 +182,7 @@ export class ScopeSync {
   refused(path: string): void {
     const at = this.locate(path);
     if (!at) return;
+    this.deps.onLost?.('full');
     at.state.refused.add(at.rel);
     this.markDirty(at.state);
   }
@@ -187,6 +194,7 @@ export class ScopeSync {
    */
   full(key: string, full: boolean): void {
     const state = this.states.find((s) => s.scope.key === key);
+    if (state && full) this.deps.onLost?.('full');
     const vfs = this.vfs;
     if (!state || !vfs?.setQuotaLimit || !vfs.quotaUsed) return;
     const dir = state.scope.dir;
@@ -268,8 +276,11 @@ export class ScopeSync {
     } catch (e) {
       if (e instanceof ScopeQuotaError) {
         this.deps.log(`BD-J storage: ${state.scope.key} was not saved: ${e.message}; the saved copy stays as it was`, true);
+        this.deps.onLost?.('full');
         return;
       }
+      // the browser's store out of room (IndexedDB's QuotaExceededError): tried again, but the viewer is told
+      if (e instanceof Error && e.name === 'QuotaExceededError') this.deps.onLost?.('full');
       // tried again after the next write, the stop flush, or SAVE_MAX_WAIT_MS from now (review minor 4)
       state.dirty = true;
       this.cancelMaxWait ??= this.deps.setTimer(this.deps.maxWaitMs ?? SAVE_MAX_WAIT_MS, () => {

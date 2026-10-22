@@ -12,7 +12,7 @@
 
 import {
   NasQuotaError, SCOPE_QUOTA_BYTES, ScopeQuotaError, mergeKeepingRemote, mergeSnapshots, sameSnapshot, snapshotBytes, sortFiles,
-  type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot, type SnapshotFile,
+  type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot, type SnapshotFile, type StorageLoss,
 } from './bdj-store';
 import { IDB_SAVE_DEBOUNCE_MS, IdbBdjStore, recordKey, type ScopeRecord } from './idb-store';
 import { readTar, tarPathFits, writeTar } from './tar';
@@ -62,6 +62,17 @@ export class PersonChangedError extends NasStoreError {
     super(409, message);
     this.name = 'PersonChangedError';
   }
+}
+
+/**
+ * Whether a failed put will not go through however often it is tried (the bdj-storage notice, ruling R32): the NAS
+ * answered a 4xx that is not a conflict or a request to wait (a 401 here is a device no longer paired: its fresh token
+ * was refused or never came). An unreachable NAS, a timeout, a 5xx (a 503 past its retries) and a 412 that kept
+ * changing are tried again.
+ */
+export function failedForGood(e: unknown): boolean {
+  if (!(e instanceof NasStoreError) || e instanceof PersonChangedError || e.status === null) return false;
+  return e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 412 && e.status !== 425 && e.status !== 429;
 }
 
 /** The request header naming the person a write is for (the NAS store contract's X-Bdj-Person guard). */
@@ -362,6 +373,8 @@ export interface WriteAheadDeps {
    * libbluray's JVM does when its disk fills.
    */
   readonly onFull?: (scope: string, full: boolean) => void;
+  /** A put the NAS refused for good (failedForGood; ruling R32): it is still tried again, but the viewer is told. */
+  readonly onLost?: (reason: StorageLoss) => void;
   /** Settles (rejects) when the NAS's part of the boot has run out of time: the loads then use this browser's copy. */
   readonly budget?: Promise<never>;
   readonly pushDebounceMs?: number;
@@ -704,6 +717,7 @@ export class WriteAheadNasStore implements BdjStore {
         return;
       }
       log(`BD-J storage: ${scope} could not be put on the NAS (${messageOf(e)}); this browser keeps it and tries again`, true);
+      if (failedForGood(e)) this.deps.onLost?.('put-failed');
       this.retryLater();
       return;
     }
@@ -830,6 +844,8 @@ export interface NasDiscStoreDeps {
   readonly setTimer: SetTimer;
   readonly log: Log;
   readonly onFull?: (scope: string, full: boolean) => void;
+  /** WriteAheadDeps.onLost. */
+  readonly onLost?: (reason: StorageLoss) => void;
   readonly loadBudgetMs?: number;
   /** Epoch ms now (UNCONFIRMED_MAX_AGE_MS); Date.now by default. */
   readonly nowMs?: () => number;
@@ -918,7 +934,7 @@ export class NasDiscStore implements BdjStore {
   }
 
   private async choose(): Promise<BdjStore> {
-    const { nas, idb, discId, setTimer, log, onFull } = this.deps;
+    const { nas, idb, discId, setTimer, log, onFull, onLost } = this.deps;
     const devices = new IdbBdjStore(DEVICE_SOURCE, idb);
     let me: Awaited<ReturnType<NasBdjStore['me']>>;
     try {
@@ -967,6 +983,7 @@ export class NasDiscStore implements BdjStore {
       log,
       budget: this.budget,
       ...(onFull ? { onFull } : {}),
+      ...(onLost ? { onLost } : {}),
     });
   }
 

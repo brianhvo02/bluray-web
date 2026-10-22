@@ -21,7 +21,7 @@ import { GraphicsPlaneReader, GraphicsPlaneWriter } from './graphics-plane';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
-import type { BdjStore } from './store/bdj-store';
+import type { BdjStore, StorageLoss } from './store/bdj-store';
 import { NasBdjStore, NasDiscStore, storeApiBase } from './store/nas-store';
 import { FullRelay, ScopeSync } from './store/scope-sync';
 import { discScopes, storeSource } from './store/scopes';
@@ -217,6 +217,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let nasStore: NasBdjStore | null = null;
   /** The NAS's full or not full per scope, heard before `sync` was there (applied once it is). */
   const fullRelay = new FullRelay();
+  /** The engine has heard that saved data won't last (storageLost, ruling R32): it hears it once. */
+  let storageLostSent = false;
   /** Saves what Java changed, then has the store pass on what it holds (a NAS disc's write-ahead copy). */
   const flushStorage = async (): Promise<void> => {
     await sync?.flush();
@@ -225,6 +227,13 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
+  };
+
+  /** Tells the engine, once and only while the session runs, that what the disc saves won't last (ruling R32). */
+  const storageLost = (reason: StorageLoss): void => {
+    if (storageLostSent || ended) return;
+    storageLostSent = true;
+    post({ type: 'storageLost', reason });
   };
 
   /** What the worker waits on (disc reads, the scopes, the fonts), and whether the engine was last told it waits. */
@@ -335,6 +344,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       };
       // the storage scopes load while the JDK starts up too: Libbluray.init (and so every xlet) waits for them
       store = createStore(m, fetchFn);
+      // a store was wanted and there is none (no IndexedDB): what the disc saves lasts until BD-J stops
+      if (!store && options.createStore) storageLost('memory-only');
       const storeLoading = store ? io.track(loadScopes(store, reads, m.discId)) : Promise.resolve(null);
       planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
@@ -424,6 +435,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       log,
       // a 507 of the boot's put can come before the scopes are in the VFS: kept until they are
       onFull: (scope, full) => fullRelay.full(scope, full),
+      onLost: storageLost,
     });
   };
 
@@ -439,9 +451,11 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         // straight to the engine, as the save state: saves still run after a stop or a failure has ended the session
         log: (line, error) => port.postMessage({ type: 'log', line, error: error ?? false }),
         onUnsaved: (unsaved) => port.postMessage({ type: 'unsaved', unsaved }),
+        onLost: storageLost,
       });
     } catch (e) {
       post({ type: 'log', line: `BD-J storage: the disc's storage scopes could not be read (${e instanceof Error ? e.message : String(e)}); saved data lasts until BD-J stops`, error: true });
+      storageLost('memory-only');
       return null;
     }
   };

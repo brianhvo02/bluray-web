@@ -24,7 +24,7 @@ import { Player } from './player';
 import { MEMORY_PROFILES, type MemoryProfileName } from './memory-profile';
 import type { CompositorLike } from './render/compositor';
 import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
-import { NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type Telemetry } from './protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const CLASSES: ClassLibrarySource = {
@@ -557,6 +557,25 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(w.sent.some((m) => m.type === 'dump')).toBe(false);
     clock.advance(1);
     expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it("shows the bdj-storage notice once per disc open when the worker says saved data won't last (ruling R32)", async () => {
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    expect(notices(h)).not.toContain('bdj-storage');
+    w.emit({ type: 'storageLost', reason: 'memory-only' });
+    w.emit({ type: 'booted', bootMs: 1 });
+    w.emit({ type: 'storageLost', reason: 'full' }); // a worker tells once; the player shows it once all the same
+    const storage = (): EngineEvent[] => h.events.filter((e) => e.type === 'notice' && e.code === 'bdj-storage');
+    expect(storage()).toEqual([{ type: 'notice', code: 'bdj-storage', message: BDJ_STORAGE_MESSAGE }]);
+    expect(BDJ_STORAGE_MESSAGE).toBe("This disc's saved data can't be kept right now, so progress you make may be lost.");
+    // the disc opened again: its own notice
+    const boots = w.sent.filter((m) => m.type === 'boot').length;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(bdjDisc()) } });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'boot').length).toBe(boots + 1));
+    w.emit({ type: 'storageLost', reason: 'put-failed' });
+    expect(storage()).toHaveLength(2);
   });
 
   /** A booted hand-driven title on a virtual timer clock, and its plane's writer. */

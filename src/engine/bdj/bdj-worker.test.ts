@@ -14,7 +14,7 @@ import { IdbBdjStore } from './store/idb-store';
 import { personSource } from './store/nas-store';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { discEntries, syntheticSource } from '../../../tests/helpers/synthetic-disc';
-import type { BdjStore, LoadedSnapshot, SaveResult, Snapshot } from './store/bdj-store';
+import { ScopeQuotaError, type BdjStore, type LoadedSnapshot, type SaveResult, type Snapshot } from './store/bdj-store';
 import { discScopes } from './store/scopes';
 import { IoWatch, StartupWatch, runBdjWorker, type BdjPort } from './bdj-worker';
 import { createGraphicsPlane } from './graphics-plane';
@@ -524,6 +524,96 @@ describe('runBdjWorker and the storage scopes', () => {
     expect(received).toContainEqual({ type: 'log', line: `BD-J storage: ${persistent!.key} could not be saved (the disk is gone); tried again later`, error: true });
   }, 90_000);
 
+  describe("telling the engine once that saved data won't last (the bdj-storage notice, ruling R32)", () => {
+    const boot = (port: BdjPort, files: ReturnType<typeof fixtureDiscFiles>): void =>
+      port.onmessage!({
+        data: {
+          type: 'boot',
+          registers: createRegisterBuffer(),
+          status: createStatusBlock(),
+          plane: createGraphicsPlane(),
+          disc: { kind: 'files', entries: discEntries(files) },
+          readAheadBytes: 0,
+          discId: null,
+          classLibrary: { rt: jar('rt-bdj.jar'), libbluray: jar('libbluray-j2se.jar'), libblurayAwt: jar('libbluray-awt-j2se.jar') },
+        },
+      });
+
+    it('sends storageLost once for scopes that stay in memory only, however many, and once for a browser with no store', async () => {
+      const files = fixtureDiscFiles('disc-bdj');
+      const received: FromBdj[] = [];
+      const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+      const store: BdjStore = {
+        load: async () => {
+          throw new Error('IndexedDB refused');
+        },
+        save: async () => ({ etag: 'e' }),
+      };
+      runBdjWorker(port, { createStore: () => store });
+      boot(port, files);
+      await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      expect(received.filter((m) => m.type === 'storageLost')).toEqual([{ type: 'storageLost', reason: 'memory-only' }]);
+      port.onmessage!({ data: { type: 'stop' } });
+      await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
+
+      // no IndexedDB (the entry's createStore answers null): nothing lasts past the session
+      const none: FromBdj[] = [];
+      const port2: BdjPort = { onmessage: null, postMessage: (m) => void none.push(m) };
+      runBdjWorker(port2, { createStore: () => null });
+      boot(port2, files);
+      await vi.waitFor(() => expect(none.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      expect(none.filter((m) => m.type === 'storageLost')).toEqual([{ type: 'storageLost', reason: 'memory-only' }]);
+      port2.onmessage!({ data: { type: 'stop' } });
+      await vi.waitFor(() => expect(none.at(-1)).toEqual({ type: 'stopped' }));
+    }, 120_000);
+
+    it('sends one for writes refused for room, and none for a loss found only by the stop', async () => {
+      const files = fixtureDiscFiles('disc-bdj');
+      const received: FromBdj[] = [];
+      const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
+      let quota = Infinity;
+      const store: BdjStore = {
+        load: async () => ({ files: [], etag: null }),
+        save: async (scope, snapshot) => {
+          const bytes = snapshot.files.reduce((n, f) => n + f.bytes.length, 0);
+          if (bytes > quota) throw new ScopeQuotaError(scope, bytes, quota);
+          return { etag: 'e' };
+        },
+      };
+      const handle = runBdjWorker(port, { createStore: () => store });
+      boot(port, files);
+      await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      expect(received.filter((m) => m.type === 'storageLost')).toEqual([]);
+      const [persistent] = await discScopes(syntheticSource(files), null);
+      const vfs = handle.runtime!.jvm.opts.vfs!;
+      vfs.mkdir(persistent!.dir);
+      // a write past the scope's 16 MB is refused twice: one message
+      for (const name of ['a', 'b']) {
+        const h = vfs.open(`${persistent!.dir}/${name}`, 'w')!;
+        expect(vfs.write(h, new Uint8Array(17 * 1024 * 1024), 0, 17 * 1024 * 1024)).toBe(false);
+        vfs.close(h);
+      }
+      expect(received.filter((m) => m.type === 'storageLost')).toEqual([{ type: 'storageLost', reason: 'full' }]);
+
+      // another session: the store refuses only the stop's save, after the session has ended
+      const late: FromBdj[] = [];
+      const port2: BdjPort = { onmessage: null, postMessage: (m) => void late.push(m) };
+      const handle2 = runBdjWorker(port2, { createStore: () => store });
+      boot(port2, files);
+      await vi.waitFor(() => expect(late.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      const vfs2 = handle2.runtime!.jvm.opts.vfs!;
+      vfs2.mkdir(persistent!.dir);
+      const h = vfs2.open(`${persistent!.dir}/save`, 'w')!;
+      vfs2.write(h, new Uint8Array([1, 2]), 0, 2);
+      vfs2.close(h);
+      quota = 1;
+      port2.onmessage!({ data: { type: 'stop' } });
+      await vi.waitFor(() => expect(late.at(-1)).toEqual({ type: 'stopped' }));
+      expect(late).toContainEqual(expect.objectContaining({ type: 'log', line: expect.stringContaining('was not saved') }));
+      expect(late.filter((m) => m.type === 'storageLost')).toEqual([]);
+    }, 120_000);
+  });
+
   it("keeps a NAS disc's saved data in the person's NAS store: their other device sees it, another person does not", async () => {
     const nas = await startStoreNas();
     try {
@@ -631,6 +721,8 @@ describe('runBdjWorker and the storage scopes', () => {
       // pins the early case)
       expect(refused).toBeGreaterThanOrEqual(0);
       expect(full).toBeGreaterThan(Math.max(attached, refused));
+      // the viewer's notice (ruling R32): once
+      expect(received.filter((m) => m.type === 'storageLost')).toEqual([{ type: 'storageLost', reason: 'full' }]);
       port.onmessage!({ data: { type: 'stop' } });
       await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }), { timeout: 10_000 });
     } finally {

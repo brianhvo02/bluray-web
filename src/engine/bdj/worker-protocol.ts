@@ -12,6 +12,7 @@ import type { BdjErrorCode } from './errors';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { JvmMemoryStats } from './jvm/jvm';
+import type { StorageLoss } from './store/bdj-store';
 
 /** A call argument or reply value; a Java long crosses as a decimal string. */
 export type BdjWireValue = number | string | boolean | null;
@@ -66,6 +67,11 @@ export type FromBdj =
    * on each change. The start-up timeout does not count that time (Task 7g): a slow link is not a hang.
    */
   | { readonly type: 'io'; readonly pending: boolean }
+  /**
+   * What the disc saves won't last (ruling R32): sent once per session, at the first loss, and never after a stop or a
+   * failure. The engine shows the viewer its `bdj-storage` notice.
+   */
+  | { readonly type: 'storageLost'; readonly reason: StorageLoss }
   /** The answer to `stop`: the worker can be terminated. */
   | { readonly type: 'stopped' };
 

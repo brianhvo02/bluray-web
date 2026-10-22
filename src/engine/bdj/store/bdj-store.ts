@@ -63,6 +63,13 @@ export interface BdjStore {
   flush?(): Promise<void>;
 }
 
+/**
+ * Why a BD-J session's saved data won't last (the viewer's `bdj-storage` notice, ruling R32): a scope kept in memory
+ * only, with no copy anywhere (`memory-only`); a write refused for room, by a scope's 16 MB, the NAS's 507 or the VFS's
+ * memory cap (`full`); or a NAS put that failed for good, not one still being tried again (`put-failed`).
+ */
+export type StorageLoss = 'memory-only' | 'full' | 'put-failed';
+
 /** Agreed with the NAS session: 16 MB per scope (the NAS also has 256 MB per person). */
 export const SCOPE_QUOTA_BYTES = 16 * 1024 * 1024;
 

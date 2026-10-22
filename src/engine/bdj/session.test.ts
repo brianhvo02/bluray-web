@@ -12,6 +12,7 @@ import { BdjSession, DUMP_WAIT_MS, IO_PAUSE_CEILING_MS, STOP_SAVE_WAIT_MS, type 
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
+import type { StorageLoss } from './store/bdj-store';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
@@ -82,7 +83,7 @@ afterEach(() => {
   for (const s of sessions.splice(0)) s.stop();
 });
 
-function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) => GOLDEN_RETURNS[c.name] ?? 0, time45 = 0n, extra: { readonly hidden?: boolean } = {}): Harness {
+function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) => GOLDEN_RETURNS[c.name] ?? 0, time45 = 0n, extra: { readonly hidden?: boolean; readonly onStorageLost?: (reason: StorageLoss) => void } = {}): Harness {
   const calls: Call[] = [];
   const failures: [BdjFailureCode, string][] = [];
   const logs: string[] = [];
@@ -470,6 +471,23 @@ describe('BdjSession rules', () => {
     h.session.setHidden(false);
     h.session.setHidden(false); // no change: nothing more
     expect(f.sent.map((m) => m.type)).toEqual(['boot', 'flush']);
+  });
+
+  it("passes the worker's storageLost on (the bdj-storage notice, ruling R32), and nothing of it once stopped", async () => {
+    const f = fakeWorker();
+    const lost: StorageLoss[] = [];
+    const h = session(f.worker, undefined, 0n, { onStorageLost: (reason) => void lost.push(reason) });
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'unsaved', unsaved: false });
+    f.emit({ type: 'storageLost', reason: 'memory-only' }); // before the boot is through: the scopes load during it
+    f.emit({ type: 'booted', bootMs: 1 });
+    expect(lost).toEqual(['memory-only']);
+    const stopped = h.session.stop();
+    f.emit({ type: 'storageLost', reason: 'full' }); // the stop's save, while the engine waits for it
+    f.emit({ type: 'stopped' });
+    await stopped;
+    f.emit({ type: 'storageLost', reason: 'put-failed' });
+    expect(lost).toEqual(['memory-only']);
   });
 
   it('with unsaved storage changes, a stop lets the worker save them (stop, stopped) before it is terminated', async () => {

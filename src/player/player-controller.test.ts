@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { NO_PICTURE_MESSAGE, type AudioTrack, type EngineEvent, type Telemetry } from '../engine/protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type AudioTrack, type EngineEvent, type Telemetry } from '../engine/protocol';
 import { FETCH_PORT_RELEASE_MS, INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
 
 class FakeWorker implements WorkerLike {
@@ -182,6 +182,41 @@ describe('notices across playlists', () => {
     startPlaylist(worker, c, '00001', []);
     await new Promise((r) => setTimeout(r, 0));
     expect(c.getSnapshot().notices.map((n) => n.code).sort()).toEqual(['audio-output', 'bdj']);
+  });
+});
+
+describe("the bdj-storage notice (saved data that won't last, ruling R32)", () => {
+  const lost: EngineEvent = { type: 'notice', code: 'bdj-storage', message: BDJ_STORAGE_MESSAGE };
+  const codes = (c: PlayerController): string[] => c.getSnapshot().notices.map((n) => n.code);
+
+  it('shows the text once, and keeps it for the disc: past a playlist picked and BD-J stopping', () => {
+    const shown = reduceEvent(reduceEvent(INITIAL_SNAPSHOT, lost), lost);
+    expect(shown.notices).toEqual([{ code: 'bdj-storage', message: "This disc's saved data can't be kept right now, so progress you make may be lost." }]);
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    worker.emit({ type: 'bdjActive', active: true });
+    worker.emit(lost);
+    worker.emit(lost);
+    expect(c.getSnapshot().notices).toEqual([{ code: 'bdj-storage', message: BDJ_STORAGE_MESSAGE }]);
+    c.playPlaylist('00000'); // from the picker: BD-J stops
+    worker.emit({ type: 'bdjActive', active: false });
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual(['bdj-storage']);
+  });
+
+  it('is cleared like the other notices: dismissed, or another disc opened', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    worker.emit(lost);
+    c.dismissNotice('bdj-storage');
+    expect(codes(c)).toEqual([]);
+    worker.emit(lost); // the next disc's own (the engine sends one per disc open)
+    expect(codes(c)).toEqual(['bdj-storage']);
+    c.open([]);
+    expect(codes(c)).toEqual([]);
+    expect(reduceEvent(reduceEvent(INITIAL_SNAPSHOT, lost), { type: 'noticeCleared', code: 'bdj-storage' }).notices).toEqual([]);
   });
 });
 
