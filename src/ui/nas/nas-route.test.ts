@@ -72,7 +72,19 @@ describe('nas route', () => {
   });
 
   it('converts season ids and keys', () => {
-    expect(seasonKeyOf('anilist:21#s2')).toBe('s2');
+    expect(seasonKeyOf('anilist:21', 'anilist:21#s2')).toBe('s2');
     expect(seasonIdOf('anilist:21', 's2')).toBe('anilist:21#s2');
+  });
+
+  it('gives each season of an AniList series its own key', () => {
+    // a series' seasons are its member entries, `<member id>#season`, so the text after '#' is the same for all
+    const ids = ['anilist:21#season', 'anilist:22#season', 'anilist:23#season'];
+    const keys = ids.map((id) => seasonKeyOf('anilist:21', id));
+    expect(new Set(keys).size).toBe(3);
+    for (const [i, id] of ids.entries()) {
+      expect(seasonIdOf('anilist:21', keys[i]!)).toBe(id);
+      const route: NasRoute = { kind: 'season', titleId: 'anilist:21', seasonKey: keys[i]! };
+      expect(parseNasRoute(u(nasRoutePath(route)))).toEqual(route);
+    }
   });
 });
