@@ -1,4 +1,4 @@
-import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, FolderEntry, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
+import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, FolderEntry, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 import { codeHashOf, isNasId, turnProofMessage } from '../../../rendezvous/src/protocol';
@@ -657,6 +657,71 @@ export class NasClient {
     return (await res.json()) as Record<string, Record<string, PlaylistProgress>>;
   }
 
+  /** The subtitles stored for a disc (owners also see those no longer attached). */
+  async subtitlesForDisc(discKey: string, opts: { readonly timeoutMs?: number } = {}): Promise<StoredSubtitle[]> {
+    return this.subtitleList(`subtitles?discKey=${encodeURIComponent(discKey)}`, opts.timeoutMs);
+  }
+
+  /** The subtitles stored for a title's episodes. */
+  async subtitlesForTitle(titleId: string): Promise<StoredSubtitle[]> {
+    return this.subtitleList(`subtitles?titleId=${encodeURIComponent(titleId)}`);
+  }
+
+  private async subtitleList(path: string, timeoutMs?: number): Promise<StoredSubtitle[]> {
+    const res = await this.authed(path, {}, false, timeoutMs);
+    if (!res.ok) throw await httpError(res);
+    return (await res.json()) as StoredSubtitle[];
+  }
+
+  /** A stored subtitle's file, then its fonts, as `File`s named as stored. */
+  async subtitleFiles(s: StoredSubtitle): Promise<File[]> {
+    const id = encodeURIComponent(s.id);
+    const get = async (path: string, name: string): Promise<File> => new File([await (await this.ok(path)).arrayBuffer()], name);
+    return [await get(`subtitles/${id}/file`, s.fileName), ...(await Promise.all(s.fonts.map((f) => get(`subtitles/${id}/fonts/${encodeURIComponent(f.name)}`, f.name))))];
+  }
+
+  /** Owners: registers a subtitle (its file and fonts go up next). */
+  async createSubtitle(body: SubtitleCreate): Promise<StoredSubtitle> {
+    return (await this.json('subtitles', jsonPost(body))) as StoredSubtitle;
+  }
+
+  /** Owners: sends the subtitle file. `onProgress` is told the bytes sent once they have all gone. */
+  async uploadSubtitleFile(id: string, file: File, onProgress?: (sent: number) => void): Promise<StoredSubtitle> {
+    const stored = await this.upload(`subtitles/${encodeURIComponent(id)}/file/${encodeURIComponent(file.name)}`, file);
+    onProgress?.(file.size);
+    return stored;
+  }
+
+  /** Owners: sends one font of a subtitle. */
+  async uploadSubtitleFont(id: string, file: File): Promise<StoredSubtitle> {
+    return this.upload(`subtitles/${encodeURIComponent(id)}/fonts/${encodeURIComponent(file.name)}`, file);
+  }
+
+  /** Owners: changes a subtitle's name, language, default offset or attachment. */
+  async updateSubtitle(id: string, patch: SubtitlePatch): Promise<StoredSubtitle> {
+    return (await this.json(`subtitles/${encodeURIComponent(id)}`, jsonBody('PATCH', patch))) as StoredSubtitle;
+  }
+
+  /** Owners: removes a subtitle with its fonts. */
+  async deleteSubtitle(id: string): Promise<void> {
+    await this.ok(`subtitles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /**
+   * PUTs `file` as the raw body. A refusal aborts the request, so what is left of a large body stops crossing the link
+   * (over WebRTC the upload otherwise runs on to its end; it stops only through its signal).
+   */
+  private async upload(path: string, file: File): Promise<StoredSubtitle> {
+    const controller = new AbortController();
+    const res = await this.authed(path, { method: 'PUT', body: file, signal: controller.signal });
+    if (!res.ok) {
+      const error = await httpError(res);
+      controller.abort();
+      throw error;
+    }
+    return (await res.json()) as StoredSubtitle;
+  }
+
   private async loadPairing(): Promise<NasPairing | null> {
     const generation = this.generation;
     const stored = await this.deps.store.get();
@@ -839,6 +904,9 @@ export class NasClient {
     const link = rtc ? this.links.get(rtc[1]) : undefined;
     if (rtc && !link) throw new NasLostError();
     const controller = new AbortController();
+    const caller = init.signal;
+    if (caller?.aborted) controller.abort();
+    else caller?.addEventListener('abort', () => controller.abort(), { once: true });
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
     try {
       if (link) {

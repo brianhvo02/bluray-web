@@ -134,6 +134,14 @@ export interface PlaylistProgress { readonly timeUs: number; readonly durationUs
 export type SubtitleAttachment =
   | { readonly kind: 'episode'; readonly discKey: string; readonly playlistId: string; readonly titleId: string; readonly seasonId: string; readonly episode: number }
   | { readonly kind: 'chapter'; readonly discKey: string; readonly playlistId: string; readonly chapter: number };
+/** What a subtitle is for when it is registered or moved: an episode of a title's season, or a chapter of a disc's playlist. */
+export type SubtitleFor =
+  | { readonly kind: 'episode'; readonly titleId: string; readonly seasonId: string; readonly episode: number }
+  | { readonly kind: 'chapter'; readonly discId: string; readonly playlistId: string; readonly chapter: number };
+/** The body of `POST /api/subtitles`. */
+export interface SubtitleCreate { readonly name: string; readonly language: string; readonly offsetMs?: number; readonly for: SubtitleFor }
+/** The body of `PATCH /api/subtitles/<id>`: any of these. */
+export type SubtitlePatch = Partial<SubtitleCreate>;
 /** A subtitle file (SRT or ASS) an owner uploaded to the NAS, with its fonts. */
 export interface StoredSubtitle {
   readonly id: string; readonly name: string; readonly language: string; readonly offsetMs: number;
