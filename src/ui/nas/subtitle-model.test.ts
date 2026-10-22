@@ -197,6 +197,24 @@ describe('uploadSubtitle', () => {
     expect(calls).toEqual(['create', 'file s ep.ass', 'font s a.ttf', 'font s b.ttf']);
     expect(progress).toEqual([[10, 60], [30, 60], [60, 60]]);
   });
+  it('passes on the bytes of each file as they go, counted over the whole upload', async () => {
+    const { nas } = writer();
+    const progress: number[] = [];
+    const going: SubtitleWriter = {
+      ...nas,
+      uploadSubtitleFile: async (id, f, onSent) => {
+        onSent?.(4);
+        onSent?.(2); // a retried request counts again from the start: never told as going back
+        return nas.uploadSubtitleFile(id, f);
+      },
+      uploadSubtitleFont: async (id, f, onSent) => {
+        onSent?.(f.size / 2);
+        return nas.uploadSubtitleFont(id, f);
+      },
+    };
+    await uploadSubtitle(going, body, files, (sent) => progress.push(sent));
+    expect(progress).toEqual([4, 10, 20, 30, 45, 60]);
+  });
   it('deletes the upload when its file is refused', async () => {
     const { nas, calls } = writer('file');
     await expect(uploadSubtitle(nas, body, files)).rejects.toMatchObject({ status: 413 });

@@ -174,7 +174,7 @@ export type SubtitleWriter = Pick<NasClient, 'createSubtitle' | 'uploadSubtitleF
 
 /**
  * Registers a subtitle, then sends its file, then each font (one request each). `onProgress` is told the bytes sent of
- * the total. A failure after the subtitle was registered deletes it, so no half upload is left; the failure is thrown.
+ * the total as they go. A failure after the subtitle was registered deletes it, so no half upload is left; the failure is thrown.
  */
 export async function uploadSubtitle(
   nas: SubtitleWriter,
@@ -185,13 +185,19 @@ export async function uploadSubtitle(
   const total = files.subtitle.size + files.fonts.reduce((n, f) => n + f.size, 0);
   const created = await nas.createSubtitle(body);
   try {
-    let stored = await nas.uploadSubtitleFile(created.id, files.subtitle);
-    let sent = files.subtitle.size;
-    onProgress?.(sent, total);
+    let sent = 0;
+    // each file's bytes as they go, never going back (a retried request starts its count again)
+    const tell = (n: number): void => {
+      if (n > sent) onProgress?.((sent = n), total);
+    };
+    let stored = await nas.uploadSubtitleFile(created.id, files.subtitle, tell);
+    let done = files.subtitle.size;
+    tell(done);
     for (const font of files.fonts) {
-      stored = await nas.uploadSubtitleFont(created.id, font);
-      sent += font.size;
-      onProgress?.(sent, total);
+      const before = done;
+      stored = await nas.uploadSubtitleFont(created.id, font, (n) => tell(before + n));
+      done += font.size;
+      tell(done);
     }
     return stored;
   } catch (err) {

@@ -6,6 +6,7 @@ import { NAS_LOST_MESSAGE } from '../../engine/disc/http-transport';
 import { RTC_BASE, RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { DeviceProof, RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
 import { chooseRoute, chooseWebRtc, routeKey } from './route-choice';
+import { countingBody, type SendWithProgress, xhrSend } from './upload-progress';
 import type { Route, RouteDeps } from './route-choice';
 
 export const NAS_MESSAGES = {
@@ -142,6 +143,11 @@ export interface NasClientDeps {
   readonly openRtc?: (opts: RtcOpenOptions) => Promise<RtcLink>;
   /** Object URLs for art fetched over WebRTC; `URL.createObjectURL`/`revokeObjectURL` by default. */
   readonly objectUrls?: { create(blob: Blob): string; revoke(url: string): void };
+  /**
+   * Sends an HTTPS upload that reports its progress; XMLHttpRequest by default. Without it (no XMLHttpRequest) an
+   * upload goes through `fetch` and reports its size once it has gone.
+   */
+  readonly sendWithProgress?: SendWithProgress;
 }
 
 /** `rtc://<nasId>/…`: a URL that goes through the WebRTC connection to that NAS. */
@@ -687,14 +693,12 @@ export class NasClient {
 
   /** Owners: sends the subtitle file. `onProgress` is told the bytes sent once they have all gone. */
   async uploadSubtitleFile(id: string, file: File, onProgress?: (sent: number) => void): Promise<StoredSubtitle> {
-    const stored = await this.upload(`subtitles/${encodeURIComponent(id)}/file/${encodeURIComponent(file.name)}`, file);
-    onProgress?.(file.size);
-    return stored;
+    return this.upload(`subtitles/${encodeURIComponent(id)}/file/${encodeURIComponent(file.name)}`, file, onProgress);
   }
 
-  /** Owners: sends one font of a subtitle. */
-  async uploadSubtitleFont(id: string, file: File): Promise<StoredSubtitle> {
-    return this.upload(`subtitles/${encodeURIComponent(id)}/fonts/${encodeURIComponent(file.name)}`, file);
+  /** Owners: sends one font of a subtitle; `onProgress` as for the file. */
+  async uploadSubtitleFont(id: string, file: File, onProgress?: (sent: number) => void): Promise<StoredSubtitle> {
+    return this.upload(`subtitles/${encodeURIComponent(id)}/fonts/${encodeURIComponent(file.name)}`, file, onProgress);
   }
 
   /** Owners: changes a subtitle's name, language, default offset or attachment. */
@@ -711,9 +715,9 @@ export class NasClient {
    * PUTs `file` as the raw body. A refusal aborts the request, so what is left of a large body stops crossing the link
    * (over WebRTC the upload otherwise runs on to its end; it stops only through its signal).
    */
-  private async upload(path: string, file: File): Promise<StoredSubtitle> {
+  private async upload(path: string, file: File, onProgress?: (sent: number) => void): Promise<StoredSubtitle> {
     const controller = new AbortController();
-    const res = await this.authed(path, { method: 'PUT', body: file, signal: controller.signal });
+    const res = await this.authed(path, { method: 'PUT', body: file, signal: controller.signal }, false, undefined, onProgress);
     if (!res.ok) {
       const error = await httpError(res);
       controller.abort();
@@ -851,7 +855,7 @@ export class NasClient {
    * Over WebRTC the session must have been started on the connection in use: when the connection changes under a
    * request (a drop and a reconnect), it starts again, and a 401 from the new connection isn't counted.
    */
-  private async authed(path: string, init: RequestInit = {}, viaQuery = false, timeoutMs?: number): Promise<Response> {
+  private async authed(path: string, init: RequestInit = {}, viaQuery = false, timeoutMs?: number, onSent?: (bytes: number) => void): Promise<Response> {
     let refused = 0;
     for (let attempt = 0; attempt < AUTHED_TRIES; attempt++) {
       const generation = this.generation;
@@ -869,7 +873,7 @@ export class NasClient {
       const url = viaQuery ? `${base}${path}${path.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}` : `${base}${path}`;
       const headers = new Headers(init.headers);
       if (!viaQuery) headers.set('Authorization', `Bearer ${token}`);
-      const res = await this.request(url, { ...init, headers }, timeoutMs);
+      const res = await this.request(url, { ...init, headers }, timeoutMs, onSent);
       if (res.status !== 401) return res;
       if (this.cached?.token === token) this.cached = null;
       if (this.linkFor(base) !== link || link?.closed) continue; // the connection changed: not a revocation
@@ -897,9 +901,10 @@ export class NasClient {
   /**
    * fetch, with a network failure (or the timeout, when given) reported as the NAS being unreachable. `rtc://` URLs go
    * through their NAS's WebRTC connection, and fail as NasLostError when it has closed. A failed HTTPS request makes
-   * the next one choose its route again.
+   * the next one choose its route again. `onSent` is told the bytes of a Blob body sent so far (at least once, when the
+   * whole body has gone, even where nothing can say more).
    */
-  private async request(url: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
+  private async request(url: string, init: RequestInit, timeoutMs?: number, onSent?: (bytes: number) => void): Promise<Response> {
     const rtc = /^rtc:\/\/([^/]+)\//.exec(url);
     const link = rtc ? this.links.get(rtc[1]) : undefined;
     if (rtc && !link) throw new NasLostError();
@@ -909,11 +914,17 @@ export class NasClient {
     else caller?.addEventListener('abort', () => controller.abort(), { once: true });
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const counted = onSent && init.body instanceof Blob ? { blob: init.body, onSent } : null;
       if (link) {
         const { keepalive: _https, ...rest } = init; // the connection closes with the page: keepalive means nothing there
-        return await link.fetch(url, { ...rest, signal: controller.signal });
+        const body = counted ? { body: countingBody(counted.blob, counted.onSent) } : {};
+        return await link.fetch(url, { ...rest, ...body, signal: controller.signal });
       }
-      return await this.deps.fetch(url, { ...init, signal: controller.signal });
+      const send = this.deps.sendWithProgress ?? (typeof XMLHttpRequest === 'undefined' ? null : xhrSend(XMLHttpRequest));
+      if (counted && send) return await send(url, { ...init, signal: controller.signal }, counted.onSent);
+      const res = await this.deps.fetch(url, { ...init, signal: controller.signal });
+      counted?.onSent(counted.blob.size);
+      return res;
     } catch (err) {
       // stopped by the caller: the NAS may be fine, so the route stays
       if (caller?.aborted) throw err;
