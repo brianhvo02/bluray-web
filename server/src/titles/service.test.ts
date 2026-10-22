@@ -7,7 +7,9 @@ import { ArtCache } from './art';
 import type { DiscEvidence } from './evidence';
 import { OwnerStore } from './owner-store';
 import { MATCH_RULES_VERSION } from './match';
-import { downloadRootNames, fixtureSources, loadDiscDbOrNone, TitleService } from './service';
+import type { FolderCover } from './catalogue';
+import type { MusicRelease, MusicSource } from './music-sources';
+import { downloadRootNames, fixtureSources, loadDiscDbOrNone, releaseFolderOf, TitleService } from './service';
 import { SourceUnavailable } from './sources';
 import type { Entry, EntryNames, MetadataSource } from './sources';
 
@@ -94,8 +96,15 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-function service(opts: { evidence: () => readonly DiscEvidence[]; anilist: MetadataSource; tmdb?: MetadataSource | null; owner?: OwnerStore; downloadRoots?: string[] }): TitleService {
+function service(opts: {
+  evidence: () => readonly DiscEvidence[]; anilist: MetadataSource; tmdb?: MetadataSource | null; owner?: OwnerStore; downloadRoots?: string[];
+  musicbrainz?: MusicSource | null; discogs?: MusicSource | null; folderCover?: (dir: string) => Promise<FolderCover | null>; locateRelease?: (discId: string, group: string) => string | null;
+}): TitleService {
   return new TitleService({
+    musicbrainz: opts.musicbrainz ?? null,
+    discogs: opts.discogs ?? null,
+    folderCover: opts.folderCover ?? (async () => null),
+    locateRelease: opts.locateRelease ?? (() => null),
     library: { evidence: opts.evidence },
     owner: opts.owner ?? new OwnerStore(dir),
     dataDir: dir,
@@ -560,6 +569,7 @@ describe('TitleService', () => {
     const owner = new OwnerStore(dir);
     const s = new TitleService({
       library: { evidence: () => [] }, owner, dataDir: dir, anilist: fake({}), tmdb: null, discdb: { lookup: () => null },
+      musicbrainz: null, discogs: null, folderCover: async () => null, locateRelease: () => null,
       art: new ArtCache(join(dir, 'art'), vi.fn()), titleLibrary: 'everyone', setTimer: () => () => {},
     });
     expect(s.gate()).toBe('everyone');
@@ -703,5 +713,158 @@ describe('fixtureSources', () => {
     expect(await anilist.search('Other')).toEqual([]);
     expect(await tmdb.entry('tmdb-tv:5')).toEqual(tv);
     expect(await anilist.entry('anilist:1')).toBeNull();
+  });
+});
+
+describe('TitleService music lookups', () => {
+  const GROUP = 'Music/[2024.05.01] Lantern Parade - Night Lights [CD]';
+  const cover = (n: string) => ({ small: `https://coverartarchive.org/release/${n}/front-250`, large: `https://coverartarchive.org/release/${n}/front-500` });
+  const release = (more: Partial<MusicRelease> = {}): MusicRelease => ({
+    source: 'musicbrainz', id: 'rel-1', title: 'Night Lights (Tour Edition)', date: '2024-05-01',
+    artists: [{ id: 'mb-lantern', name: 'Lantern Parade', sortName: null, aliases: [] }], primaryType: 'Album', secondaryTypes: [], live: false, cover: cover('rel-1'), ...more,
+  });
+  const musicDisc = (name: string, catalogueNumbers: string[]): DiscEvidence => ({ ...ev(`drv1/${GROUP}/${name}`), catalogueNumbers });
+  const BD = musicDisc('BD', ['ZQCL-2468']);
+
+  /** A music source answering a table, counting calls; `down` makes every call throw. */
+  function musicSource(table: Record<string, MusicRelease | null>): MusicSource & { calls: string[]; down: boolean } {
+    const src = {
+      calls: [] as string[],
+      down: false,
+      async byCatalogue(catno: string): Promise<MusicRelease | null> {
+        src.calls.push(catno);
+        if (src.down) throw new SourceUnavailable('down');
+        return table[catno] ?? null;
+      },
+    };
+    return src;
+  }
+  const musicOf = (s: TitleService) => s.catalogue().titles.find((t) => t.kind === 'music')!;
+
+  it('looks a music disc up once by its catalogue number, keeps it in metadata.json, and serves it after a restart with no network', async () => {
+    const mb = musicSource({ 'ZQCL-2468': release() });
+    const s = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: mb });
+    await s.runNow();
+    expect(mb.calls).toEqual(['ZQCL-2468']);
+    expect(musicOf(s).music).toMatchObject({ title: 'Night Lights (Tour Edition)', matched: true, artist: { id: 'mb-lantern' } });
+    await s.runNow();
+    expect(mb.calls).toEqual(['ZQCL-2468']);
+    expect((JSON.parse(readFileSync(join(dir, 'metadata.json'), 'utf8')) as { music: Record<string, { value: MusicRelease }> }).music['ZQCL-2468']!.value.title).toBe('Night Lights (Tour Edition)');
+    const down = musicSource({});
+    down.down = true;
+    const again = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: down });
+    expect(musicOf(again).music!.title).toBe('Night Lights (Tour Edition)');
+    expect(down.calls).toEqual([]);
+  });
+
+  it('asks Discogs on a MusicBrainz miss, and for the cover alone when MusicBrainz has none', async () => {
+    const mb = musicSource({ 'ZQCL-2468': release({ cover: null }) });
+    const discogs = musicSource({ 'ZQCL-2468': release({ source: 'discogs', id: 'dg-1', title: 'Discogs Title', cover: cover('dg-1') }), 'ZQCL-1357': release({ source: 'discogs', id: 'dg-2', title: 'Only On Discogs' }) });
+    const other = { ...ev('drv1/Music/Neon Harbor - Tide/BD'), catalogueNumbers: ['ZQCL-1357'] };
+    const s = service({ evidence: () => [BD, other], anilist: fake({}), musicbrainz: mb, discogs });
+    await s.runNow();
+    expect(mb.calls.sort()).toEqual(['ZQCL-1357', 'ZQCL-2468']);
+    expect(discogs.calls.sort()).toEqual(['ZQCL-1357', 'ZQCL-2468']);
+    const titles = s.catalogue().titles.filter((t) => t.kind === 'music');
+    const lantern = titles.find((t) => t.music!.title === 'Night Lights (Tour Edition)')!;
+    expect(s.catalogue().art(lantern.poster!)).toEqual(cover('dg-1'));
+    expect(titles.map((t) => t.music!.title).sort()).toEqual(['Night Lights (Tour Edition)', 'Only On Discogs']);
+  });
+
+  it('does not ask Discogs when MusicBrainz has the release with a cover', async () => {
+    const discogs = musicSource({});
+    const s = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: musicSource({ 'ZQCL-2468': release() }), discogs });
+    await s.runNow();
+    expect(discogs.calls).toEqual([]);
+  });
+
+  it('a failed lookup keeps the cached release', async () => {
+    const mb = musicSource({ 'ZQCL-2468': release() });
+    const s = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: mb });
+    await s.runNow();
+    clock += 31 * DAY;
+    mb.down = true;
+    await s.runNow();
+    expect(mb.calls).toEqual(['ZQCL-2468', 'ZQCL-2468']);
+    expect(musicOf(s).music!.title).toBe('Night Lights (Tour Edition)');
+    expect(musicOf(service({ evidence: () => [BD], anilist: fake({}) })).music!.title).toBe('Night Lights (Tour Edition)');
+  });
+
+  it('looks hits up again after 30 days and misses after 7', async () => {
+    const miss = { ...ev('drv1/Music/Neon Harbor - Tide/BD'), catalogueNumbers: ['ZQCL-1357'] };
+    const mb = musicSource({ 'ZQCL-2468': release() });
+    const s = service({ evidence: () => [BD, miss], anilist: fake({}), musicbrainz: mb });
+    await s.runNow();
+    mb.calls.length = 0;
+    clock += 6 * DAY;
+    await s.runNow();
+    expect(mb.calls).toEqual([]);
+    clock += 1 * DAY;
+    await s.runNow();
+    expect(mb.calls).toEqual(['ZQCL-1357']);
+    mb.calls.length = 0;
+    clock += 22 * DAY; // 29 days after the hit
+    await s.runNow();
+    expect(mb.calls).not.toContain('ZQCL-2468');
+    clock += 1 * DAY;
+    await s.runNow();
+    expect(mb.calls).toContain('ZQCL-2468');
+  });
+
+  it('uses the first disc of a release, in path order, whose lookup hit', async () => {
+    const bd1 = musicDisc('BD1', ['ZQCL-1111']);
+    const bd2 = musicDisc('BD2', ['ZQCL-2222']);
+    const bd3 = musicDisc('BD3', ['ZQCL-3333']);
+    const mb = musicSource({ 'ZQCL-2222': release({ title: 'Second' }), 'ZQCL-3333': release({ title: 'Third' }) });
+    const s = service({ evidence: () => [bd3, bd2, bd1], anilist: fake({}), musicbrainz: mb });
+    await s.runNow();
+    expect(mb.calls).toEqual(['ZQCL-1111', 'ZQCL-2222']);
+    expect(musicOf(s).music!.title).toBe('Second');
+  });
+
+  it('skips lookups for a release whose match the owner rejected', async () => {
+    const owner = new OwnerStore(dir);
+    owner.setChoice(BD.discId, null, { kind: 'music', name: null, rejectMatch: true });
+    const mb = musicSource({ 'ZQCL-2468': release() });
+    const s = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: mb, owner });
+    await s.runNow();
+    expect(mb.calls).toEqual([]);
+    expect(musicOf(s).music).toMatchObject({ title: 'Night Lights', rejected: true });
+  });
+
+  it('finds a release\'s folder cover once, and again when its discs change or on retry day', async () => {
+    const asked: string[] = [];
+    const located: [string, string][] = [];
+    let mtimeMs = 1;
+    let discs = [BD];
+    const s = service({
+      evidence: () => discs, anilist: fake({}),
+      locateRelease: (discId, group) => { located.push([discId, group]); return '/mnt/drv1/' + group; },
+      folderCover: async (d) => { asked.push(d); return { path: `${d}/cover.jpg`, size: 10, mtimeMs }; },
+    });
+    await s.runNow();
+    expect(located).toEqual([[BD.discId, GROUP]]);
+    expect(asked).toEqual([`/mnt/drv1/${GROUP}`]);
+    const first = musicOf(s).poster!;
+    expect(s.catalogue().art(first)).toEqual({ file: `/mnt/drv1/${GROUP}/cover.jpg` });
+    await s.runNow();
+    expect(asked).toHaveLength(1);
+    discs = [{ ...BD, playlists: [{ id: '00001', durationS: 60, chapters: 1, clips: ['00001'] }] }];
+    await s.runNow();
+    expect(asked).toHaveLength(2);
+    mtimeMs = 2;
+    clock += 7 * DAY;
+    await s.runNow();
+    expect(asked).toHaveLength(3);
+    expect(musicOf(s).poster).not.toBe(first);
+    expect(musicOf(service({ evidence: () => discs, anilist: fake({}) })).poster).toBe(musicOf(s).poster);
+  });
+});
+
+describe('releaseFolderOf', () => {
+  it('takes the disc\'s folders below the release off its location', () => {
+    expect(releaseFolderOf('/mnt/a/Music/Rel/Disc 1', ['Music', 'Rel', 'Disc 1'], 'Music/Rel')).toBe('/mnt/a/Music/Rel');
+    expect(releaseFolderOf('/mnt/a/Music/Rel.iso', ['Music', 'Rel.iso'], 'Music/Rel.iso')).toBe('/mnt/a/Music/Rel.iso');
+    expect(releaseFolderOf('/mnt/a/Music/Rel/BD', ['Music', 'Rel', 'BD'], 'Music/Other')).toBeNull();
   });
 });

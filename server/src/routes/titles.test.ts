@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import { RelayState } from '../rtc/relay';
 import { Store } from '../store';
 import { ArtCache } from '../titles/art';
 import { artIdOf } from '../titles/catalogue';
+import type { FolderCover } from '../titles/catalogue';
 import type { DiscEvidence } from '../titles/evidence';
 import { OwnerStore } from '../titles/owner-store';
 import { TitleService } from '../titles/service';
@@ -97,18 +98,19 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number; nasId?: string | null } = {}): Promise<void> {
+async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number; nasId?: string | null; more?: DiscEvidence[]; folderCover?: (dir: string) => Promise<FolderCover | null> } = {}): Promise<void> {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
   relay = new RelayState(data, () => clock);
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
-  evidence = [A, ...BOX, COPY];
+  evidence = [A, ...BOX, COPY, ...(opts.more ?? [])];
   vi.spyOn(library, 'evidence').mockImplementation(() => evidence);
   owner = new OwnerStore(data);
   anilist = fakeSource({ 火斬りの剣: [EMBER], 'Ember Blade': [EMBER] });
   artFetch = vi.fn(async () => new Response(Buffer.from('PNGDATA'), { headers: { 'Content-Type': 'image/png' } }));
   service = new TitleService({
-    library, owner, dataDir: data, anilist, tmdb: null, discdb: { lookup: () => null },
+    library, owner, dataDir: data, anilist, tmdb: null, discdb: { lookup: () => null }, musicbrainz: null, discogs: null,
+    folderCover: opts.folderCover ?? (async () => null), locateRelease: (_id, group) => join(tmp, 'mnt', group),
     art: new ArtCache(join(data, 'art'), artFetch as unknown as typeof fetch), titleLibrary: opts.gate ?? 'owners',
     now: () => clock, setTimer: () => () => {},
   });
@@ -194,6 +196,24 @@ describe('title routes', () => {
       expect((await get(path, t)).status, path).toBe(404);
     }
     expect(artFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('serves a music release\'s folder cover from the file the catalogue found', async () => {
+    const group = 'Music/Lantern Parade - Night Lights';
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const dir = join(tmp, 'mnt', group);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'cover.png'), png);
+    await start({ gate: 'everyone', more: [ev(`drv1/${group}/BD`)], folderCover: async (d) => ({ path: join(d, 'cover.png'), size: png.length, mtimeMs: 1 }) });
+    const t = await token(false);
+    const res = await get('/api/titles', t);
+    const music = ((await res.json()) as { titles: TitleSummary[] }).titles.find((x) => x.kind === 'music')!;
+    expect(music.poster).toMatch(/^[0-9a-f]{32}$/);
+    const art = await get(`/api/art/${music.poster}?size=large`, t);
+    expect(art.status).toBe(200);
+    expect(art.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await art.arrayBuffer())).toEqual(png);
+    expect(artFetch).not.toHaveBeenCalled();
   });
 
   it('reports both flags and the person on GET /api/me', async () => {

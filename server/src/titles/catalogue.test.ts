@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { OwnerChoice, OwnTitle } from '../../../src/engine/disc/nas-api';
-import { buildCatalogue } from './catalogue';
-import type { Catalogue } from './catalogue';
+import { artIdOf, buildCatalogue } from './catalogue';
+import type { Catalogue, FolderCover } from './catalogue';
 import type { DiscDbHit } from './discdb';
 import type { DiscEvidence } from './evidence';
 import type { DiscMatch } from './match';
+import type { MusicArtist, MusicRelease } from './music-sources';
 import type { OwnerSnapshot } from './owner-store';
 import type { Entry, EntryNames } from './sources';
 
@@ -56,6 +57,8 @@ function build(input: {
   discdb?: Record<string, DiscDbHit>;
   addedAt?: Record<string, number>;
   downloadRoots?: string[];
+  music?: Record<string, MusicRelease | null>;
+  folderCovers?: Record<string, FolderCover | null>;
 }): Catalogue {
   return buildCatalogue({
     matches: input.matches,
@@ -65,6 +68,8 @@ function build(input: {
     discdb: { lookup: (fp) => input.discdb?.[fp] ?? null },
     addedAt: new Map(Object.entries(input.addedAt ?? {})),
     downloadRoots: new Set(input.downloadRoots ?? []),
+    music: new Map(Object.entries(input.music ?? {})),
+    folderCovers: new Map(Object.entries(input.folderCovers ?? {})),
   });
 }
 
@@ -639,5 +644,89 @@ describe('buildCatalogue', () => {
       const cat = build({ entries: [one], evidence: [disc], matches: [filed(disc.path, 'anilist:77', 1, 1)], discdb: { FP1: hit } });
       expect(cat.detail('anilist:77')!.seasons[0]!.episodes!.map((e) => [e.number, e.name])).toEqual([[1, null], [2, null], [3, null]]);
     });
+  });
+});
+
+describe('buildCatalogue: music releases', () => {
+  const GROUP = 'Music/[2024.05.01] Lantern Parade - Night Lights [CD]';
+  const lantern = (more: Partial<MusicArtist> = {}): MusicArtist => ({ id: 'mb-lantern', name: 'Lantern Parade', sortName: 'Lantern Parade', aliases: [], ...more });
+  const release = (more: Partial<MusicRelease> = {}): MusicRelease => ({
+    source: 'musicbrainz', id: 'rel-1', title: 'Night Lights (Tour Edition)', date: '2024-05-01', artists: [lantern()], primaryType: 'Album',
+    secondaryTypes: ['Live'], live: true, cover: { small: 'https://coverartarchive.org/release/rel-1/front-250', large: 'https://coverartarchive.org/release/rel-1/front-500' }, ...more,
+  });
+  const COVER: FolderCover = { path: '/mnt/music/Lantern/cover.jpg', size: 1234, mtimeMs: 1_700_000_000_000 };
+  const disc = (name: string, catalogueNumbers: string[], group = GROUP): DiscEvidence => ev(`drv1/${group}/${name}`, { catalogueNumbers });
+  const musicMatch = (e: DiscEvidence, group = GROUP): DiscMatch => ({ discId: e.discId, status: 'music', group, name: group.slice(group.lastIndexOf('/') + 1) });
+  const one = (more: { music?: Record<string, MusicRelease | null>; folderCovers?: Record<string, FolderCover | null>; choice?: OwnerChoice } = {}) => {
+    const bd = disc('BD', ['ZQCL-2468']);
+    const cat = build({ evidence: [bd], matches: [musicMatch(bd)], owner: owner(more.choice ? { [bd.discId]: more.choice } : {}), music: more.music, folderCovers: more.folderCovers });
+    return { cat, title: cat.titles[0]! };
+  };
+
+  it('gives a music title its music info from the lookup and the lookup cover as its poster', () => {
+    const { cat, title } = one({ music: { 'ZQCL-2468': release() } });
+    expect(title.music).toEqual({
+      artist: { id: 'mb-lantern', name: 'Lantern Parade', otherName: null }, kind: 'concert', date: '2024-05-01', concertName: null,
+      title: 'Night Lights (Tour Edition)', matched: true, rejected: false,
+    });
+    expect(title.poster).toBe(artIdOf(release().cover!));
+    expect(cat.art(title.poster!)).toEqual(release().cover);
+  });
+
+  it('takes the folder cover first, served by its file, and its art id changes with the file', () => {
+    const { cat, title } = one({ music: { 'ZQCL-2468': release() }, folderCovers: { [GROUP]: COVER } });
+    expect(title.poster).toBe(artIdOf({ small: `file:${COVER.path}#${COVER.size}:${COVER.mtimeMs}`, large: `file:${COVER.path}#${COVER.size}:${COVER.mtimeMs}` }));
+    expect(cat.art(title.poster!)).toEqual({ file: COVER.path });
+    expect(one({ folderCovers: { [GROUP]: { ...COVER, mtimeMs: COVER.mtimeMs + 1 } } }).title.poster).not.toBe(title.poster);
+    expect(one({ folderCovers: { [GROUP]: { ...COVER, size: 99 } } }).title.poster).not.toBe(title.poster);
+  });
+
+  it('has no poster without a folder cover or a lookup cover, and parses the folder without a lookup', () => {
+    const { title } = one({ music: { 'ZQCL-2468': null } });
+    expect(title.poster).toBeNull();
+    expect(title.music).toMatchObject({ artist: { id: 'name:lantern parade', name: 'Lantern Parade', otherName: null }, title: 'Night Lights', date: '2024-05-01', matched: false });
+  });
+
+  it('drops the lookup and its cover when the owner rejected the match', () => {
+    const choice: OwnerChoice = { kind: 'music', name: null, rejectMatch: true };
+    const { cat, title } = one({ music: { 'ZQCL-2468': release() }, choice });
+    expect(title.music).toMatchObject({ title: 'Night Lights', matched: false, rejected: true, artist: { id: 'name:lantern parade' } });
+    expect(title.poster).toBeNull();
+    expect(cat.art(artIdOf(release().cover!))).toBeNull();
+    expect(one({ music: { 'ZQCL-2468': release() }, folderCovers: { [GROUP]: COVER }, choice }).cat.art(one({ folderCovers: { [GROUP]: COVER } }).title.poster!)).toEqual({ file: COVER.path });
+  });
+
+  it('lets the owner\'s artist win over the lookup', () => {
+    const { title } = one({ music: { 'ZQCL-2468': release() }, choice: { kind: 'music', name: null, artist: 'Neon Harbor' } });
+    expect(title.music!.artist).toEqual({ id: 'name:neon harbor', name: 'Neon Harbor', otherName: null });
+    expect(title.music!.matched).toBe(true);
+  });
+
+  it('speaks for a release with the first disc, in path order, whose lookup hit', () => {
+    const bd1 = disc('BD1', ['ZQCL-1111']);
+    const bd2 = disc('BD2', ['ZQCL-2222']);
+    const bd10 = disc('BD10', ['ZQCL-1010']);
+    const music = { 'ZQCL-1111': null, 'ZQCL-2222': release({ title: 'Second' }), 'ZQCL-1010': release({ title: 'Tenth' }) };
+    const cat = build({ evidence: [bd10, bd2, bd1], matches: [bd10, bd2, bd1].map((e) => musicMatch(e)), music });
+    expect(cat.titles[0]!.music!.title).toBe('Second');
+  });
+
+  it('R4: joins a name-only artist to a looked-up artist whose name or alias is the same name', () => {
+    const hoshino = lantern({ id: 'mb-hoshino', name: '星野あおい', sortName: 'Hoshino, Aoi', aliases: [{ name: 'Aoi Hoshino', locale: 'ja-Latn', primary: true }] });
+    const looked = disc('BD', ['ZQCL-3001'], 'Music/星野あおい - Blue Hour');
+    const byAlias = disc('BD', [], 'Music/Aoi Hoshino - Paper Moon');
+    const byName = disc('BD', [], 'Music/星野あおい - Harbor Lights');
+    const other = disc('BD', [], 'Music/Neon Harbor - Tide');
+    const cat = build({
+      evidence: [looked, byAlias, byName, other],
+      matches: [musicMatch(looked, 'Music/星野あおい - Blue Hour'), musicMatch(byAlias, 'Music/Aoi Hoshino - Paper Moon'), musicMatch(byName, 'Music/星野あおい - Harbor Lights'), musicMatch(other, 'Music/Neon Harbor - Tide')],
+      music: { 'ZQCL-3001': release({ title: 'Blue Hour', artists: [hoshino] }) },
+    });
+    const artistOf = (t: string) => cat.titles.find((x) => x.music!.title === t)!.music!.artist;
+    const joined = { id: 'mb-hoshino', name: 'Aoi Hoshino', otherName: '星野あおい' };
+    expect(artistOf('Blue Hour')).toEqual(joined);
+    expect(artistOf('Paper Moon')).toEqual(joined);
+    expect(artistOf('Harbor Lights')).toEqual(joined);
+    expect(artistOf('Tide')).toEqual({ id: 'name:neon harbor', name: 'Neon Harbor', otherName: null });
   });
 });

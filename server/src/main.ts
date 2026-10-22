@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { appHandlers } from './app';
 import { Auth } from './auth';
@@ -22,14 +23,21 @@ import { RtcPeers } from './rtc/peer';
 import { RelayState, turnResponder } from './rtc/relay';
 import { AddressAdvertiser } from './rtc/public-address';
 import { SignallingClient } from './rtc/signalling-client';
+import { listDir } from './manifest';
 import { ISO_TREES } from './routes/discs';
 import { trustedProxy } from './routes/pair';
 import { Store } from './store';
 import { createAniList } from './titles/anilist';
 import { ArtCache } from './titles/art';
+import type { FolderCover } from './titles/catalogue';
+import { createDiscogs } from './titles/discogs';
+import { findFolderCover } from './titles/folder-cover';
+import { createMusicBrainz } from './titles/musicbrainz';
+import { fixtureMusicSource } from './titles/music-sources';
+import type { MusicRelease, MusicSource } from './titles/music-sources';
 import { OwnerStore } from './titles/owner-store';
 import { Pacer } from './titles/pacer';
-import { downloadRootNames, fixtureSources, loadDiscDbOrNone, TitleService } from './titles/service';
+import { downloadRootNames, fixtureSources, loadDiscDbOrNone, releaseFolderOf, TitleService } from './titles/service';
 import type { Entry, MetadataSource } from './titles/sources';
 import { createTmdb } from './titles/tmdb';
 
@@ -47,6 +55,41 @@ function metadataSources(config: Config): { anilist: MetadataSource; tmdb: Metad
     return { anilist, tmdb: null };
   }
   return { anilist, tmdb: createTmdb(fetch, new Pacer(20, 1_000), config.tmdbApiKey) };
+}
+
+/**
+ * MusicBrainz (paced to one request per 1.1 s) and Discogs (only with `DISCOGS_TOKEN`), or the recorded releases of
+ * `MUSIC_FIXTURE` (a JSON object of catalogue number to release) in E2E tests, with no Discogs.
+ */
+function musicSources(config: Config): { musicbrainz: MusicSource; discogs: MusicSource | null } {
+  const fixture = process.env.MUSIC_FIXTURE;
+  if (fixture) return { musicbrainz: fixtureMusicSource(JSON.parse(readFileSync(fixture, 'utf8')) as Record<string, MusicRelease>), discogs: null };
+  const musicbrainz = createMusicBrainz(fetch, new Pacer(1, 1_100));
+  if (config.discogsToken === null) {
+    console.log('Discogs token not set: music lookups use MusicBrainz only');
+    return { musicbrainz, discogs: null };
+  }
+  return { musicbrainz, discogs: createDiscogs(fetch, new Pacer(50, 60_000), config.discogsToken) };
+}
+
+/** The image in a music release folder, with its size and modification time, read from the read-only mount. */
+async function folderCover(dir: string): Promise<FolderCover | null> {
+  const statSize = async (abs: string): Promise<number | null> => {
+    try {
+      const st = await stat(abs);
+      return st.isFile() ? st.size : null;
+    } catch {
+      return null;
+    }
+  };
+  const path = await findFolderCover(dir, listDir, statSize);
+  if (path === null) return null;
+  try {
+    const st = await stat(path);
+    return { path, size: st.size, mtimeMs: st.mtimeMs };
+  } catch {
+    return null;
+  }
 }
 
 /** The rendezvous client when `RENDEZVOUS_URL` is set; its key lives next to the auth data. */
@@ -130,6 +173,13 @@ async function serve(config: Config): Promise<void> {
     owner,
     dataDir: config.dataDir,
     ...metadataSources(config),
+    ...musicSources(config),
+    folderCover,
+    locateRelease: (discId, group) => {
+      const disc = library.disc(discId);
+      const abs = disc ? library.locate(disc) : null;
+      return disc && abs !== null ? releaseFolderOf(abs, disc.path.split('/').slice(1), group) : null;
+    },
     discdb: loadDiscDbOrNone(process.env.DISCDB_INDEX || DEFAULT_DISCDB_INDEX),
     art: new ArtCache(join(config.dataDir, 'art'), fetch),
     downloadRoots: downloadRootNames(config.roots),

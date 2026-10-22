@@ -1,24 +1,26 @@
 /**
  * The title service: matches new and changed discs after every library scan, keeps the last catalogue (and what built
  * it) in `<dataDir>/metadata.json` so a restart serves it with no network access, and refreshes on a schedule: Unsorted
- * is retried weekly, entries older than 30 days are fetched again monthly. Original code.
+ * is retried weekly, entries older than 30 days are fetched again monthly. After matching it looks music releases up by
+ * catalogue number (MusicBrainz, then Discogs) and finds their folder covers, on the same schedule. Original code.
  */
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { TitleSummary } from '../../../src/engine/disc/nas-api';
 import { normalizeTitle } from '../../../src/engine/disc/title-text';
 import { isCode, replaceAtomically } from '../atomic-json';
 import type { LibraryRoot } from '../config';
 import type { Library } from '../library';
 import type { ArtCache } from './art';
-import { artIdOf, buildCatalogue } from './catalogue';
-import type { Catalogue } from './catalogue';
+import { artIdOf, buildCatalogue, byDiscPath, musicGroupOf } from './catalogue';
+import type { Catalogue, FolderCover } from './catalogue';
 import { loadDiscDb } from './discdb';
 import type { DiscDbHit } from './discdb';
 import type { DiscEvidence } from './evidence';
 import { CIRCUIT_BREAKER, groupKey, MATCH_RULES_VERSION, matchDiscs } from './match';
 import type { DiscMatch, MatchResult } from './match';
+import type { MusicRelease, MusicSource } from './music-sources';
 import type { OwnerStore } from './owner-store';
 import { parseName } from './parse-name';
 import { SourceUnavailable, withSharperPoster } from './sources';
@@ -52,6 +54,14 @@ export interface TitleServiceOptions {
   readonly tmdb: MetadataSource | null;
   readonly discdb: { lookup(fp: string): DiscDbHit | null };
   readonly art: ArtCache;
+  /** Music lookups by catalogue number; null for none. */
+  readonly musicbrainz: MusicSource | null;
+  /** Asked when MusicBrainz misses or has no cover (only its cover is used then); null without a token. */
+  readonly discogs: MusicSource | null;
+  /** The image in a release folder (absolute path), with its size and modification time, or null. */
+  readonly folderCover: (releaseDir: string) => Promise<FolderCover | null>;
+  /** A music release folder's absolute path: the disc's location less its folders below the release group. */
+  readonly locateRelease: (discId: string, group: string) => string | null;
   /** Roots in the Downloads group (see `downloadRootNames`). */
   readonly downloadRoots?: ReadonlySet<string>;
   /** `TITLE_LIBRARY`, used while the owner hasn't set the gate. Default 'owners'. */
@@ -89,6 +99,15 @@ interface MetadataFile {
    * Optional, so such a file still loads.
    */
   readonly rulesVersion?: number;
+  /** Music lookups by catalogue number (null: a miss), with when they were made. Optional: older files lack it. */
+  readonly music?: Record<string, Dated<MusicRelease | null>>;
+  /** Each music release group's folder cover, with the key of its discs' evidence it was found for. Optional too. */
+  readonly folderCovers?: Record<string, MusicCoverRecord>;
+}
+
+interface MusicCoverRecord {
+  readonly key: string;
+  readonly cover: FolderCover | null;
 }
 
 const evidenceKey = (e: DiscEvidence): string => createHash('sha256').update(JSON.stringify(e)).digest('hex').slice(0, 32);
@@ -102,6 +121,18 @@ function defaultTimer(fn: () => void, ms: number): () => void {
   const t = setTimeout(fn, ms);
   t.unref();
   return () => clearTimeout(t);
+}
+
+/**
+ * A music release folder's absolute path from its disc's (`discAbs`, the disc folder or ISO file): the disc's folder
+ * names below the release group (`segments` start below the root) are taken off. Null when the group isn't above it.
+ */
+export function releaseFolderOf(discAbs: string, segments: readonly string[], group: string): string | null {
+  const names = group.split('/');
+  if (names.length > segments.length || names.some((n, i) => n !== segments[i])) return null;
+  let dir = discAbs;
+  for (let i = names.length; i < segments.length; i++) dir = dirname(dir);
+  return dir;
 }
 
 /** The names of the roots whose group is "Downloads": their copies are listed after the others. */
@@ -145,6 +176,10 @@ export class TitleService {
   private lastRunAt: number | null = null;
   private lastRetryAt: number | null = null;
   private lastRefreshAt: number | null = null;
+  /** Music lookups by catalogue number. */
+  private music = new Map<string, Dated<MusicRelease | null>>();
+  /** Folder covers by music release group. */
+  private folderCovers = new Map<string, MusicCoverRecord>();
   /** The matching rules the matches were made under (null: unknown, from a file before the field). */
   private rulesVersion: number | null = null;
   private built!: Catalogue;
@@ -264,7 +299,7 @@ export class TitleService {
   private registerArt(poster: { readonly small: string; readonly large: string }): string | null {
     const id = artIdOf(poster);
     const held = this.built.art(id);
-    if (held) return held.small === poster.small && held.large === poster.large ? id : null;
+    if (held) return 'small' in held && held.small === poster.small && held.large === poster.large ? id : null;
     this.lookupArt.delete(id);
     this.lookupArt.set(id, { small: poster.small, large: poster.large });
     while (this.lookupArt.size > MAX_LOOKUP_ART) this.lookupArt.delete(this.lookupArt.keys().next().value!);
@@ -281,6 +316,8 @@ export class TitleService {
       discdb: this.opts.discdb,
       addedAt: this.firstSeen,
       downloadRoots: this.opts.downloadRoots ?? new Set(),
+      music: new Map([...this.music].map(([k, d]) => [k, d.value])),
+      folderCovers: new Map([...this.folderCovers].map(([g, r]) => [g, r.cover])),
     });
   }
 
@@ -360,6 +397,7 @@ export class TitleService {
       console.error(`title matching stopped: AniList or TMDB was unreachable for ${CIRCUIT_BREAKER} folders in a row; the rest are matched on the next run`);
       const reached = result.matches.filter((m) => !(m.status === 'unsorted' && m.reason === 'source-unreachable'));
       await this.checkpoint(reached, result.entries, keys, cache, now);
+      await this.lookUpMusic(evidence, keys, now, retryDue);
       return;
     }
 
@@ -414,6 +452,102 @@ export class TitleService {
     if (this.lastRefreshAt === null || (refreshed && this.due(this.lastRefreshAt, REFRESH_MS))) this.lastRefreshAt = now;
     this.rebuild();
     this.save();
+    await this.lookUpMusic(evidence, keys, now, retryDue);
+  }
+
+  /**
+   * After matching (spec §3, Sources and Covers): finds each music release's folder cover when its discs' evidence
+   * changed or on retry day, then looks its catalogue numbers up, discs in path order, until one hits. A cached hit is
+   * looked up again after 30 days and a miss after 7; a source that is down keeps what was cached, and CIRCUIT_BREAKER
+   * failures in a row end the lookups until the next run. A release whose match the owner rejected isn't looked up.
+   * Progress is published and saved as matching's is, so the catalogue never waits for it.
+   */
+  private async lookUpMusic(evidence: readonly DiscEvidence[], keys: ReadonlyMap<string, { key: string; group: string }>, now: number, retryDue: boolean): Promise<void> {
+    const { choices } = this.opts.owner.snapshot();
+    const releases = new Map<string, DiscEvidence[]>();
+    for (const e of evidence) {
+      const group = musicGroupOf(e, this.matches.get(e.discId), choices.get(e.discId));
+      if (group !== null) releases.set(group, [...(releases.get(group) ?? []), e]);
+    }
+    for (const discs of releases.values()) discs.sort(byDiscPath);
+
+    const covers = new Map<string, MusicCoverRecord>();
+    for (const [group, discs] of releases) {
+      const key = createHash('sha256').update(discs.map((e) => keys.get(e.discId)?.key ?? evidenceKey(e)).join('\n')).digest('hex').slice(0, 32);
+      const before = this.folderCovers.get(group);
+      if (before && before.key === key && !retryDue) {
+        covers.set(group, before);
+        continue;
+      }
+      const dir = this.opts.locateRelease(discs[0]!.discId, group);
+      let cover: FolderCover | null = null;
+      if (dir !== null) {
+        try {
+          cover = await this.opts.folderCover(dir);
+        } catch (err) {
+          console.error('music folder cover lookup failed', err);
+          cover = before?.cover ?? null;
+        }
+      }
+      covers.set(group, { key, cover });
+    }
+    this.folderCovers = covers;
+
+    const referenced = new Set([...releases.values()].flat().flatMap((e) => e.catalogueNumbers));
+    for (const c of this.music.keys()) if (!referenced.has(c)) this.music.delete(c);
+    if (this.opts.musicbrainz || this.opts.discogs) {
+      let failures = 0;
+      let since = 0;
+      let checkpointAt = this.now();
+      const rejected = (e: DiscEvidence): boolean => {
+        const c = choices.get(e.discId);
+        return c?.kind === 'music' && c.rejectMatch === true;
+      };
+      lookups: for (const discs of releases.values()) {
+        if (discs.some(rejected)) continue;
+        for (const e of discs) {
+          for (const c of e.catalogueNumbers) {
+            const cached = this.music.get(c);
+            if (cached && now - cached.at < (cached.value ? REFRESH_MS : RETRY_UNSORTED_MS)) {
+              if (cached.value) continue lookups;
+              continue;
+            }
+            try {
+              const found = await this.musicRelease(c);
+              this.music.set(c, { at: now, value: found });
+              failures = 0;
+              if (found) continue lookups;
+            } catch (err) {
+              if (!(err instanceof SourceUnavailable)) throw err;
+              if (++failures >= CIRCUIT_BREAKER) {
+                console.error(`music lookups stopped: MusicBrainz or Discogs was unreachable for ${CIRCUIT_BREAKER} catalogue numbers in a row`);
+                break lookups;
+              }
+              if (cached?.value) continue lookups;
+            } finally {
+              if (++since >= CHECKPOINT_GROUPS || this.now() - checkpointAt >= CHECKPOINT_MS) {
+                since = 0;
+                checkpointAt = this.now();
+                this.rebuild();
+                this.save();
+              }
+            }
+          }
+        }
+      }
+    }
+    this.rebuild();
+    this.save();
+  }
+
+  /** MusicBrainz's release for a catalogue number, else Discogs'; MusicBrainz's with Discogs' cover when it has none. */
+  private async musicRelease(catalogueNumber: string): Promise<MusicRelease | null> {
+    const { musicbrainz, discogs } = this.opts;
+    const mb = musicbrainz ? await musicbrainz.byCatalogue(catalogueNumber) : null;
+    if (!discogs || mb?.cover) return mb;
+    const dg = await discogs.byCatalogue(catalogueNumber);
+    if (!mb) return dg;
+    return dg?.cover ? { ...mb, cover: dg.cover } : mb;
   }
 
   /**
@@ -627,6 +761,8 @@ export class TitleService {
     this.lastRetryAt = data.lastRetryAt;
     this.lastRefreshAt = data.lastRefreshAt;
     this.rulesVersion = data.rulesVersion ?? null;
+    this.music = new Map(Object.entries(data.music ?? {}));
+    this.folderCovers = new Map(Object.entries(data.folderCovers ?? {}));
     this.savedHash = this.contentHash(this.serialize());
   }
 
@@ -664,6 +800,8 @@ export class TitleService {
       lastRetryAt: this.lastRetryAt,
       lastRefreshAt: this.lastRefreshAt,
       ...(this.rulesVersion !== null ? { rulesVersion: this.rulesVersion } : {}),
+      music: Object.fromEntries(this.music),
+      folderCovers: Object.fromEntries(this.folderCovers),
     };
   }
 }
@@ -682,6 +820,16 @@ const isMatch = (v: unknown): boolean => {
     (v.seasons === undefined || values(v.seasons, (n) => Number.isSafeInteger(n)));
 };
 const values = (v: unknown, each: (x: unknown) => boolean): boolean => isObject(v) && Object.values(v).every(each);
+const isStringOrNull = (v: unknown): boolean => v === null || isString(v);
+const isMusicArtist = (v: unknown): boolean =>
+  isObject(v) && isString(v.id) && isString(v.name) && isStringOrNull(v.sortName) && Array.isArray(v.aliases) &&
+  v.aliases.every((a) => isObject(a) && isString(a.name) && isStringOrNull(a.locale) && typeof a.primary === 'boolean');
+const isMusicRelease = (v: unknown): boolean =>
+  v === null || (isObject(v) && (v.source === 'musicbrainz' || v.source === 'discogs') && isString(v.id) && isString(v.title) && isStringOrNull(v.date) &&
+    Array.isArray(v.artists) && v.artists.every(isMusicArtist) && isStringOrNull(v.primaryType) && Array.isArray(v.secondaryTypes) &&
+    v.secondaryTypes.every(isString) && typeof v.live === 'boolean' && (v.cover === null || (isObject(v.cover) && isString(v.cover.small) && isString(v.cover.large))));
+const isCoverRecord = (v: unknown): boolean =>
+  isObject(v) && isString(v.key) && (v.cover === null || (isObject(v.cover) && isString(v.cover.path) && isTime(v.cover.size) && isTime(v.cover.mtimeMs)));
 
 /** Whether a parsed metadata.json has the shape `MetadataFile` describes, down to its elements. */
 function validMetadata(data: unknown): data is MetadataFile {
@@ -693,5 +841,7 @@ function validMetadata(data: unknown): data is MetadataFile {
     values(data.discs, (d) => isObject(d) && isString(d.key) && isString(d.group)) &&
     values(data.firstSeen, isTime) &&
     [data.lastRunAt, data.lastRetryAt, data.lastRefreshAt].every((t) => t === null || isTime(t)) &&
-    (data.rulesVersion === undefined || Number.isSafeInteger(data.rulesVersion));
+    (data.rulesVersion === undefined || Number.isSafeInteger(data.rulesVersion)) &&
+    (data.music === undefined || values(data.music, (d) => isDated(d, isMusicRelease))) &&
+    (data.folderCovers === undefined || values(data.folderCovers, isCoverRecord));
 }

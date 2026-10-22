@@ -106,7 +106,8 @@ export async function resolveDiscFile(dir: string, path: string): Promise<string
 /** A directory's entries: real directories and files only count (symlinks are neither). */
 export type ListDir = (abs: string) => Promise<readonly { name: string; isDir: boolean; isFile: boolean }[] | null>;
 
-const listDir: ListDir = async (abs) => (await entries(abs)).map((e) => ({ name: e.name, isDir: e.isDirectory(), isFile: e.isFile() }));
+/** Reads a directory's entries from disk. */
+export const listDir: ListDir = async (abs) => (await entries(abs)).map((e) => ({ name: e.name, isDir: e.isDirectory(), isFile: e.isFile() }));
 
 /**
  * Every regular file under the disc folder's BDMV and CERTIFICATE, upper-cased; on a case clash the first name wins.
