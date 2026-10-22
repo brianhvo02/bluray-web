@@ -163,6 +163,32 @@ describe('ArtCache', () => {
       expect(fetch.urls).toEqual(['https://coverartarchive.org/release/abc/front-250', 'https://ia800000.us.archive.org/1/items/x/front-250.jpg']);
     });
 
+    it('follows the real chain: coverartarchive.org, then archive.org itself, then a data node', async () => {
+      const urls: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request) => {
+        const u = String(url);
+        urls.push(u);
+        if (u.startsWith('https://coverartarchive.org/')) return new Response(null, { status: 307, headers: { location: 'https://archive.org/download/mbid-abc/mbid-abc-1_thumb250.jpg' } });
+        if (u.startsWith('https://archive.org/')) return new Response(null, { status: 302, headers: { location: 'https://dn711103.ca.archive.org/0/items/mbid-abc/mbid-abc-1_thumb250.jpg' } });
+        return new Response(new Uint8Array(10).fill(7), { headers: { 'content-type': 'image/jpeg' } });
+      });
+      const got = await new ArtCache(dir, fetch as unknown as typeof globalThis.fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250');
+      expect(got).not.toBeNull();
+      expect(urls).toEqual([
+        'https://coverartarchive.org/release/abc/front-250',
+        'https://archive.org/download/mbid-abc/mbid-abc-1_thumb250.jpg',
+        'https://dn711103.ca.archive.org/0/items/mbid-abc/mbid-abc-1_thumb250.jpg',
+      ]);
+    });
+
+    it('refuses hosts that only look like archive.org', async () => {
+      for (const to of ['https://evilarchive.org/a.jpg', 'https://archive.org.evil.example/a.jpg', 'http://archive.org/a.jpg', 'https://archive.org:8443/a.jpg', 'https://u:p@archive.org/a.jpg']) {
+        const fetch = redirecting(to);
+        expect(await new ArtCache(dir, fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250')).toBeNull();
+        expect(fetch.urls).toEqual(['https://coverartarchive.org/release/abc/front-250']);
+      }
+    });
+
     it('cancels each redirect\'s body before following it', async () => {
       const cancelled: string[] = [];
       const fetch = vi.fn(async (url: string | URL | Request) => {

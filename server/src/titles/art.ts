@@ -20,14 +20,14 @@ const INDEX = 'index.json';
 const STORED_NAME = /^[A-Za-z0-9_-]{1,64}-(?:small|large)$/;
 /** Art comes from these hosts over https, never elsewhere (M4). */
 const ART_HOSTS = new Set(['s4.anilist.co', 'image.tmdb.org', 'coverartarchive.org', 'i.discogs.com']);
-/** Cover Art Archive answers with a redirect to an archive.org host; each hop is checked on its own. */
+/** Cover Art Archive redirects to archive.org, which redirects to one of its data nodes (`dnNNNNNN.ca.archive.org`); each hop is checked on its own. */
 const MAX_REDIRECTS = 5;
 
 /** Whether `url` is an https URL on an allowed art host, with no credentials or port. */
 function allowedArtUrl(url: string): boolean {
   if (!URL.canParse(url)) return false;
   const u = new URL(url);
-  return u.protocol === 'https:' && (ART_HOSTS.has(u.hostname) || u.hostname.endsWith('.archive.org')) && u.port === '' && u.username === '' && u.password === '';
+  return u.protocol === 'https:' && (ART_HOSTS.has(u.hostname) || u.hostname === 'archive.org' || u.hostname.endsWith('.archive.org')) && u.port === '' && u.username === '' && u.password === '';
 }
 
 /** The image type of `b` from its magic bytes, or null. */
