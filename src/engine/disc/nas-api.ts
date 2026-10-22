@@ -129,3 +129,16 @@ export interface ContinueItem {
 }
 
 export interface PlaylistProgress { readonly timeUs: number; readonly durationUs: number; readonly finished: boolean }
+
+/** What a stored subtitle is for: one episode's playlist, or the start of a chapter of a disc's playlist. */
+export type SubtitleAttachment =
+  | { readonly kind: 'episode'; readonly discKey: string; readonly playlistId: string; readonly titleId: string; readonly seasonId: string; readonly episode: number }
+  | { readonly kind: 'chapter'; readonly discKey: string; readonly playlistId: string; readonly chapter: number };
+/** A subtitle file (SRT or ASS) an owner uploaded to the NAS, with its fonts. */
+export interface StoredSubtitle {
+  readonly id: string; readonly name: string; readonly language: string; readonly offsetMs: number;
+  readonly fileName: string; readonly fileSize: number; readonly fonts: readonly { readonly name: string; readonly size: number }[];
+  readonly attachment: SubtitleAttachment; readonly uploaderPersonId: string; readonly uploadedAt: number;
+  /** Set by the route: false when the attachment's disc or playlist no longer resolves (owners only see these). */
+  readonly attached?: boolean;
+}
