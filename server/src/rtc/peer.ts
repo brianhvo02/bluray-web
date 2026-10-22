@@ -301,7 +301,9 @@ export class RtcPeers {
       iceUseIpv4: true,
       iceUseIpv6: false,
       iceUseLinkLocalAddress: false,
-      iceStunGatherTimeout: 2,
+      // the answer's candidates are the advertised addresses (answerWithCandidates), so a server-reflexive candidate is
+      // never used: no answer waits for werift's STUN lookup (it waited the whole lookup, 2 s when the server is silent)
+      iceStunGatherTimeout: 0,
     });
     pc.config.icePortRange = [port, port];
     const peer: Peer = { sid, pc, owner: mux.owner(), timer: undefined, sampler: undefined, served: null, closed: false, relay: new RelayTracker(), deviceId: null, route: 'webrtc' };
