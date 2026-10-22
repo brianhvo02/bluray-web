@@ -1,5 +1,6 @@
 import type { TitleMusic, TitleSummary } from '../../engine/disc/nas-api';
 import { normalizeTitle, titleMatches } from '../../engine/disc/title-text';
+import { japaneseOrder } from './title-index';
 
 /**
  * The Music shelf as artists (spec §3, "artists first"): the shelf's release titles grouped by artist, each artist's
@@ -29,8 +30,8 @@ const artistOf = (t: TitleSummary): TitleMusic['artist'] => t.music?.artist ?? {
 export function releaseName(t: TitleSummary): string {
   const m = t.music;
   if (t.names.display !== null) return t.names.display;
-  if (!m) return t.names.english ?? t.names.romaji ?? t.names.native ?? '';
-  return m.kind === 'concert' && m.concertName ? m.concertName : m.title;
+  if (m?.kind === 'concert' && m.concertName) return m.concertName;
+  return m?.title || (t.names.english ?? t.names.romaji ?? t.names.native ?? '');
 }
 
 /** The year a release card shows, from its date. */
@@ -78,6 +79,18 @@ export function groupArtists(titles: readonly TitleSummary[]): ArtistGroup[] {
       },
     }))
     .sort((a, b) => (a.id === VARIOUS_ID) !== (b.id === VARIOUS_ID) ? (a.id === VARIOUS_ID ? 1 : -1) : collator.compare(a.name, b.name) || collator.compare(a.id, b.id));
+}
+
+/**
+ * The artist tiles' index titles in the shown order, which the alphabet bars index: A–Z as `groupArtists` sorts them,
+ * or 五十音 order, with Various artists last in both (spec §3).
+ */
+export function artistIndex(groups: readonly ArtistGroup[], order: 'en' | 'ja'): TitleSummary[] {
+  const index = groups.map((g) => g.index);
+  if (order === 'en') return index;
+  const ja = japaneseOrder(index);
+  const various = ja.filter((t) => t.id === `artist:${VARIOUS_ID}`);
+  return [...ja.filter((t) => t.id !== `artist:${VARIOUS_ID}`), ...various];
 }
 
 /** An artist's releases in the page's sections, newest first within each: concerts, albums and singles, and the rest. */

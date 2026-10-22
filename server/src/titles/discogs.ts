@@ -48,7 +48,7 @@ export function createDiscogs(fetch: typeof globalThis.fetch, pacer: Pacer, toke
         throw new SourceUnavailable('discogs: network error');
       }
       if (!res.ok) {
-        await res.body?.cancel();
+        await res.body?.cancel().catch(() => {});
         if (res.status === 429) throw new RateLimited(retryAfterMs(res.headers.get('Retry-After')));
         if (res.status === 404) return null;
         throw new SourceUnavailable(`discogs: HTTP ${res.status}`);

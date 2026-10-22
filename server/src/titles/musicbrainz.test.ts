@@ -112,4 +112,8 @@ describe('createMusicBrainz', () => {
     const fetch = (async () => new Response('busy', { status: 503, headers: { 'Retry-After': '0' } })) as typeof globalThis.fetch;
     await expect(createMusicBrainz(fetch, new Pacer(100, 10)).byCatalogue('ZQCL-2468')).rejects.toBeInstanceOf(SourceUnavailable);
   });
+  it('a 404 whose body fails to cancel is still a miss', async () => {
+    const fetch = (async () => new Response(new ReadableStream({ cancel: () => { throw new Error('stream gone'); } }), { status: 404 })) as typeof globalThis.fetch;
+    await expect(createMusicBrainz(fetch, new Pacer(100, 10)).byCatalogue('ZQCL-2468')).resolves.toBeNull();
+  });
 });

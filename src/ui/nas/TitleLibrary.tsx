@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
-import { artistNames, groupArtists, searchArtists, type ArtistGroup } from './artist-model';
+import { artistIndex, artistNames, groupArtists, searchArtists, type ArtistGroup } from './artist-model';
 import type { MusicOwner } from './ArtistPage';
 import { AlphabetRail } from './AlphabetRail';
 import { ContinueRow } from './ContinueRow';
@@ -573,7 +573,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
             ? shelf(titles, 'series')
             : null;
   const indexing = indexBase !== null && indexBase.length > 0;
-  const indexed = !indexing ? null : order === 'ja' ? japaneseOrder(indexBase) : indexBase;
+  const indexed = !indexing ? null : onMusic ? artistIndex(musicGroups, order) : order === 'ja' ? japaneseOrder(indexBase) : indexBase;
   /** Each title id that is the first of its key in the shown order, with that key. */
   const jumpOf = new Map<string, string>();
   if (indexed) for (const [key, id] of firstOfEach(indexed, order === 'ja' ? kanaRow : englishKey)) jumpOf.set(id, key);

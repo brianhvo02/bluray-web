@@ -711,8 +711,8 @@ async function browseByTitle(page: Page, browserName: string): Promise<void> {
   const card = (name: string) => page.locator(`[data-testid="title-card"][data-name="${name}"]`);
   await expect(card('Starfall Wanderer')).toContainText('星降りの旅人');
   await expect(card('Moonlit Harbor')).toBeVisible();
-  // a music release by its found title
-  await expect(card('Night Lights')).toBeVisible();
+  // a music release by its found title (the folder says only "Night Lights")
+  await expect(card('Night Lights Live 2024')).toBeVisible();
 
   // Search by English, romaji and Japanese names; a blank search shows the shelves again.
   const search = page.getByTestId('title-search');
@@ -1675,7 +1675,7 @@ test("the Music shelf shows artists and opens a release's pre-flight", async ({ 
     await expect(page.getByTestId('artist-section')).toHaveCount(1);
     const concerts = page.locator('[data-testid="artist-section"][data-section="concerts"]');
     await expect(concerts.getByRole('heading')).toHaveText('Concerts');
-    const card = concerts.locator('[data-testid="music-release"][data-name="Night Lights"]');
+    const card = concerts.locator('[data-testid="music-release"][data-name="Night Lights Live 2024"]');
     await expect(card).toContainText('2024');
     await expect(card.locator('img')).toBeVisible();
     // one disc: its pre-flight
@@ -1697,7 +1697,7 @@ test('on a phone the Music shelf and an artist page fit the screen', async ({ br
       await expect(artistTile(page, 'Lantern Parade')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await openArtist(page, 'Lantern Parade');
-      await expect(musicRelease(page, 'Night Lights')).toBeVisible();
+      await expect(musicRelease(page, 'Night Lights Live 2024')).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     });
   } finally {
@@ -1712,7 +1712,7 @@ test("an owner sets a release's artist and drops its match from the release's me
       await openTitles(page, browserName);
       await shelfChip(page, 'music').click();
       await openArtist(page, 'Lantern Parade');
-      const card = musicRelease(page, 'Night Lights');
+      const card = musicRelease(page, 'Night Lights Live 2024');
       id = await card.getAttribute('data-title-id');
 
       // Set artist… moves the release to that artist's tile; the page, now empty, goes back to the shelf.
@@ -1731,7 +1731,8 @@ test("an owner sets a release's artist and drops its match from the release's me
       await expect(artistTile(page, 'Lantern Parade')).toBeVisible();
       await expect(artistTile(page, 'Neon Harbor')).toHaveCount(0);
 
-      // Not this release: the folder's name and date, with no kind known, so Other; Use this release again undoes it.
+      // Not this release: the folder's title ("Night Lights", not the lookup's "Night Lights Live 2024") and date, with no kind
+      // known, so Other; Use this release again undoes it.
       await openArtist(page, 'Lantern Parade');
       await card.getByTestId('music-release-menu').click();
       await card.getByTestId('music-reject').click();
@@ -1740,11 +1741,12 @@ test("an owner sets a release's artist and drops its match from the release's me
       await openArtist(page, 'Lantern Parade');
       await expect(other).toBeVisible();
       await expect(other).toContainText('2024');
+      await expect(musicRelease(page, 'Night Lights Live 2024')).toHaveCount(0);
       await other.getByTestId('music-release-menu').click();
       await expect(other.getByTestId('music-reject')).toHaveCount(0);
       await other.getByTestId('music-unreject').click();
       await openArtist(page, 'Lantern Parade');
-      await expect(page.locator('[data-testid="artist-section"][data-section="concerts"] [data-testid="music-release"][data-name="Night Lights"]')).toBeVisible();
+      await expect(page.locator('[data-testid="artist-section"][data-section="concerts"] [data-testid="music-release"][data-name="Night Lights Live 2024"]')).toBeVisible();
     } finally {
       if (id !== null) await ownerApi(`admin/music/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artist: null, rejectMatch: false }) });
     }

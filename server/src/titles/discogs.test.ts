@@ -89,4 +89,8 @@ describe('createDiscogs', () => {
     expect(err).toBeInstanceOf(SourceUnavailable);
     expect(String(err)).not.toContain(TOKEN);
   });
+  it('a 404 whose body fails to cancel is still a miss', async () => {
+    const fetch = (async () => new Response(new ReadableStream({ cancel: () => { throw new Error('stream gone'); } }), { status: 404 })) as typeof globalThis.fetch;
+    await expect(createDiscogs(fetch, new Pacer(100, 10), TOKEN).byCatalogue('ZQCL-2468')).resolves.toBeNull();
+  });
 });

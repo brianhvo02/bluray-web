@@ -58,7 +58,7 @@ export function musicInfo(o: {
 }): TitleMusic {
   const parsed = parseMusicFolder(o.releaseFolder);
   const lookup = o.rejectMatch ? null : o.lookup;
-  const title = lookup?.title ?? parsed.title;
+  const title = releaseTitle(lookup, parsed.title, o.releaseFolder, o.evidence);
   const discNames = o.evidence.flatMap((e) => e.discTitles.map((t) => t.name));
 
   let artist: ArtistInfo;
@@ -85,6 +85,19 @@ export function musicInfo(o: {
   const concertName = discNames.find((n) => n.trim() !== '' && normalizeTitle(n) !== wanted)?.trim() ?? null;
 
   return { artist, kind, date: lookup?.date ?? parsed.date, concertName, title, matched: lookup !== null, rejected: o.rejectMatch };
+}
+
+/**
+ * The lookup's title, else the parsed one; when both are empty (a folder named only by tags, such as `[ZQCL-2468]`),
+ * the release folder's name, and failing that the first disc's folder name.
+ */
+function releaseTitle(lookup: MusicRelease | null, parsed: string, releaseFolder: string, evidence: readonly DiscEvidence[]): string {
+  const disc = evidence[0]?.path?.split('/').pop()?.replace(/\.iso$/i, '') ?? '';
+  for (const t of [lookup?.title, parsed, releaseFolder, disc]) {
+    const s = t?.trim();
+    if (s) return s;
+  }
+  return '';
 }
 
 function fromParent(parent: string | null): ArtistInfo {

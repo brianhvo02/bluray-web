@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MusicKind, TitleMusic, TitleSummary } from '../../engine/disc/nas-api';
-import { artistChoice, artistCount, artistNames, collagePosters, artistSections, groupArtists, releaseName, releaseYear, searchArtists } from './artist-model';
+import { artistChoice, artistCount, artistIndex, artistNames, collagePosters, artistSections, groupArtists, releaseName, releaseYear, searchArtists } from './artist-model';
 import { englishKey, kanaRow } from './title-index';
 import { displayName } from './title-model';
 
@@ -59,6 +59,18 @@ describe('groupArtists', () => {
   });
 });
 
+describe('artistIndex', () => {
+  it('keeps Various artists last in both orders, so its jump key follows the others', () => {
+    const zephyr = release('m:20', { id: 'name:zephyr band', name: 'Zephyr Band', otherName: null }, 'Gale');
+    const groups = groupArtists([...ALL, zephyr]);
+    expect(artistIndex(groups, 'en').map((t) => t.id).at(-1)).toBe('artist:various');
+    const ja = artistIndex(groups, 'ja').map((t) => t.id);
+    expect(ja.at(-1)).toBe('artist:various');
+    expect(ja).toContain('artist:name:zephyr band');
+    expect(ja).toHaveLength(groups.length);
+  });
+});
+
 describe('artistSections', () => {
   it('sorts concerts, albums and singles, and other, newest first and undated last', () => {
     const undated = release('m:6', AOI, 'Paper Moon');
@@ -92,6 +104,10 @@ describe('release labels', () => {
     expect(releaseName(release('a', LANTERN, 'Night Lights', { kind: 'concert', concertName: 'Harbor Hall 2024' }))).toBe('Harbor Hall 2024');
     expect(releaseName(release('b', LANTERN, 'Dawn Chorus', { kind: 'album', concertName: 'Disc Title' }))).toBe('Dawn Chorus');
     expect(releaseName(release('c', LANTERN, 'Night Lights', { kind: 'concert' }))).toBe('Night Lights');
+  });
+  it('an empty release title falls through to the folder name', () => {
+    expect(releaseName({ ...release('a', LANTERN, ''), names: { english: '[ZQCL-2468]', romaji: null, native: null, synonyms: [], display: null } })).toBe('[ZQCL-2468]');
+    expect(releaseName({ ...release('b', LANTERN, ''), names: { english: null, romaji: 'Kagami', native: null, synonyms: [], display: null } })).toBe('Kagami');
   });
   it("an owner's rename wins", () => {
     expect(releaseName(release('a', LANTERN, 'Night Lights', { kind: 'concert', concertName: 'Hall', display: 'Reel Session' }))).toBe('Reel Session');

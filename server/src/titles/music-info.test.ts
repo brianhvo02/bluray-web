@@ -60,6 +60,12 @@ describe('musicInfo', () => {
     expect(artistKey('ＬＡＮＴＥＲＮ　Parade')).toBe(artistKey('lantern parade'));
     expect(artistKey('ミナト・楽団')).toBe(artistKey('ミナト 楽団'));
   });
+  it('a title that parses empty falls back to the release folder, then the disc folder', () => {
+    expect(musicInfo({ ...base, releaseFolder: '[ZQCL-2468]' }).title).toBe('[ZQCL-2468]');
+    expect(musicInfo({ ...base, releaseFolder: '[ZQCL-2468]', lookup: release({ title: '  ' }) }).title).toBe('[ZQCL-2468]');
+    const disc = [{ discTitles: [], path: 'Music/ /Lantern Parade Live Disc' } as unknown as DiscEvidence];
+    expect(musicInfo({ ...base, releaseFolder: ' ', evidence: disc }).title).toBe('Lantern Parade Live Disc');
+  });
   it('no lookup and no artist goes to Various artists', () => {
     const f = 'Paper Lanterns Hall Concert 2018';
     expect(musicInfo({ ...base, releaseFolder: f, parentFolder: 'Music' }).artist.id).toBe('various');

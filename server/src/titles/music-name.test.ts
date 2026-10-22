@@ -18,6 +18,10 @@ describe('parseMusicFolder', () => {
   it('reads dashed dates and keeps other parentheses', () => {
     expect(parseMusicFolder('[2018-03-07] Neon Harbor - Tidelines (Deluxe)')).toEqual({ date: '2018-03-07', artist: 'Neon Harbor', title: 'Tidelines (Deluxe)', single: false });
   });
+  it('drops a trailing .iso from a release named by its ISO file', () => {
+    expect(parseMusicFolder('Lantern Parade - Night Lights [ZQCL-2468].iso')).toEqual({ date: null, artist: 'Lantern Parade', title: 'Night Lights', single: false });
+    expect(parseMusicFolder('Paper Lanterns Hall Concert 2018.ISO')).toMatchObject({ artist: null, title: 'Paper Lanterns Hall Concert 2018' });
+  });
 });
 
 describe('hasConcertWord', () => {

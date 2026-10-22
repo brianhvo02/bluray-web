@@ -3,7 +3,8 @@
  * `[2021.06.02] Artist - Title [CD][FLAC+CUE+LOG+BK+BDMV][CAT-0001]`, and spots concert words. Original code.
  *
  * Bracketed groups are rip and edition tags and are dropped whole. A parenthesised year is a date and `(Single)` marks
- * a single; both leave the title. Other parentheses stay in the title.
+ * a single; both leave the title. Other parentheses stay in the title. A release that is an ISO file named directly
+ * loses its `.iso`.
  */
 
 export interface ParsedMusicName {
@@ -17,6 +18,7 @@ const LEADING_DATE = /^\s*\[(\d{4})(?:[.-](\d{2})(?:[.-](\d{2}))?)?\]/;
 const PAREN_YEAR = /\(\s*(\d{4})\s*\)/;
 const PAREN_SINGLE = /\(\s*single\s*\)/i;
 const SEPARATOR = /\s+[-–—]\s+/;
+const ISO_SUFFIX = /\.iso$/i;
 
 function tidy(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
@@ -24,7 +26,7 @@ function tidy(s: string): string {
 
 /** Splits a music release folder name into date, artist and title. */
 export function parseMusicFolder(name: string): ParsedMusicName {
-  let rest = name;
+  let rest = name.trim().replace(ISO_SUFFIX, '');
   let date: string | null = null;
   const lead = LEADING_DATE.exec(rest);
   if (lead) {

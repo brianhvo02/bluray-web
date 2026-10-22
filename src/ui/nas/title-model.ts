@@ -5,10 +5,15 @@ import { normalizeTitle, titleMatches } from '../../engine/disc/title-text';
 
 const byName = (a: TitleSummary, b: TitleSummary): number => displayName(a).localeCompare(displayName(b), undefined, { numeric: true, sensitivity: 'base' });
 
-/** Every name a title is found by: the display name, English, romaji, native and synonyms. */
+/**
+ * Every name a title is found by: the display name, English, romaji, native and synonyms, and for a music release its
+ * title, concert name and artist names, as the cards show them.
+ */
 function searchNames(t: TitleSummary): string[] {
   const { display, english, romaji, native, synonyms } = t.names;
-  return [display, english, romaji, native, ...synonyms].filter((n): n is string => n !== null && n !== '');
+  const m = t.music;
+  const music = m ? [m.title, m.concertName, m.artist.name, m.artist.otherName] : [];
+  return [display, english, romaji, native, ...synonyms, ...music].filter((n): n is string => n !== null && n !== undefined && n !== '');
 }
 
 /**
@@ -39,7 +44,7 @@ export function recentlyAdded(titles: readonly TitleSummary[], n = 9): TitleSumm
 /** The name a title is shown by: the owner's display name, then a music release's title, then English, romaji, native. */
 export function displayName(t: TitleSummary): string {
   const { display, english, romaji, native } = t.names;
-  return display ?? t.music?.title ?? english ?? romaji ?? native ?? '';
+  return display ?? (t.music?.title || null) ?? english ?? romaji ?? native ?? '';
 }
 
 /** The native name, shown under the displayed one when it differs. */

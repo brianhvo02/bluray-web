@@ -37,7 +37,7 @@ export function createMusicBrainz(fetch: typeof globalThis.fetch, pacer: Pacer):
         throw new SourceUnavailable('musicbrainz: network error');
       }
       if (!res.ok) {
-        await res.body?.cancel();
+        await res.body?.cancel().catch(() => {});
         if (res.status === 429 || res.status === 503) throw new RateLimited(retryAfterMs(res.headers.get('Retry-After')));
         if (res.status === 404) return null;
         throw new SourceUnavailable(`musicbrainz: HTTP ${res.status}`);
