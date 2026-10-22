@@ -22,6 +22,11 @@
  *   3. Library (--library): on Mika's phone, each disc id (default: the 14 unconfirmed ones) is mapped through
  *      $BDJ_LIBRARY_DIR/map.tsv to its NAS library disc, opened from the NAS, and driven with tools/bdj-library/
  *      generic.keys through the on-screen remote, with a screenshot after every step (<out>/<id>/).
+ *   3b. Places (--places): a disc of two 30 s clips is generated (scripts/make-fixture-disc.ts) and placed beside the
+ *      store disc. On Mika's phone it is played from the NAS folder, a stored subtitle (uploaded by Mika's controller on
+ *      its playlist) is picked, and Pause saves the place at the stopped clock; reopening offers Resume at that time with
+ *      the subtitle back, and Continue watching resumes it without asking. The subtitle is deleted at the end; the
+ *      places go with Mika.
  *   4. Clean-up, always (also on Ctrl-C): each browser forgets its test pairing and test saved data before it closes;
  *      then Sora, then Mika is deleted (DELETE admin/people/<id>, which also clears their saved data on the NAS), and the
  *      NAS's people file is read back over ssh to confirm no test person, device or saved data is left.
@@ -34,7 +39,7 @@
 
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes, webcrypto } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -176,6 +181,8 @@ export interface Options {
   placeRoot: string;
   rehearseStore: string | null;
   library: boolean;
+  /** Resume, Continue watching and a stored subtitle on Mika's phone, with a disc of its own (--places). */
+  places: boolean;
   discs: string[];
   libraryDir: string;
   wdPorts: [number, number];
@@ -185,16 +192,17 @@ export interface Options {
 
 const USAGE =
   'usage: live-check.ts --origin <preview origin> --out <dir> --nas <api base> (or $LIVE_CHECK_NAS) [--mika-phone <target>] [--mika-tablet <target>] [--sora-a chrome-profile] [--sora-b chrome] ' +
-  '[--store-disc place|auto|<library path>|none] [--place-root drv8] [--rehearse-store <library path>|<id>] [--library] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
+  '[--store-disc place|auto|<library path>|none] [--place-root drv8] [--rehearse-store <library path>|<id>] [--library] [--places] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
 
 export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Options {
   const o: Options = {
     origin: '', nas: env.LIVE_CHECK_NAS ?? '', out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'drv8', rehearseStore: null,
-    library: false, discs: [], libraryDir: env.BDJ_LIBRARY_DIR ?? join(homedir(), '.cache/bluray-web/bdj-library'), wdPorts: [4211, 4212], headless: false, callTimeoutMs: 120_000,
+    library: false, places: false, discs: [], libraryDir: env.BDJ_LIBRARY_DIR ?? join(homedir(), '.cache/bluray-web/bdj-library'), wdPorts: [4211, 4212], headless: false, callTimeoutMs: 120_000,
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!;
     if (flag === '--library') { o.library = true; continue; }
+    if (flag === '--places') { o.places = true; continue; }
     if (flag === '--headless') { o.headless = true; continue; }
     const v = argv[++i];
     if (v === undefined) throw new Error(`${flag} needs a value\n${USAGE}`);
@@ -457,12 +465,18 @@ interface MetadataStatus {
   lastRunAt: number | null;
 }
 
-/** Pipes a local tar of `fixtures/synthetic/disc-bdj-store` into `script` run over ssh on the NAS host. */
-function sshUntar(script: string): Promise<void> {
+/** A disc folder a run places on the NAS: `<parent>/<name>` on this machine. */
+export interface PlacedDisc {
+  readonly name: string;
+  readonly parent: string;
+}
+
+/** Pipes a local tar of `disc` (its folder, by name) into `script` run over ssh on the NAS host. */
+function sshUntar(disc: PlacedDisc, script: string): Promise<void> {
   const host = process.env.BLURAY_NAS_HOST ?? 'mediaserver';
   return new Promise((res, rej) => {
     // no AppleDouble files or macOS extended attributes: the NAS gets the fixture's files and nothing else
-    const tar = spawn('tar', ['--no-mac-metadata', '--no-xattrs', '-C', join(REPO, 'fixtures/synthetic'), '-cf', '-', STORE_DISC_NAME], { env: { ...process.env, COPYFILE_DISABLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const tar = spawn('tar', ['--no-mac-metadata', '--no-xattrs', '-C', disc.parent, '-cf', '-', disc.name], { env: { ...process.env, COPYFILE_DISABLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
     const ssh = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', host, script], { stdio: ['pipe', 'pipe', 'pipe'] });
     let err = '';
     tar.stderr.on('data', (d: Buffer) => (err += d.toString()));
@@ -478,8 +492,9 @@ function sshUntar(script: string): Promise<void> {
 }
 
 /**
- * disc-bdj-store placed on the NAS for one run, in a folder of its own (`<root>/zz-live-check-<run id>/`), and removed
- * at the end; the library is rescanned both times through the owner route (POST admin/rescan).
+ * The test discs (disc-bdj-store, and the places disc for --places) placed on the NAS for one run, in a folder of its
+ * own (`<root>/zz-live-check-<run id>/`), and removed at the end; the library is rescanned both times through the owner
+ * route (POST admin/rescan).
  */
 class TestDisc {
   readonly runId = randomBytes(4).toString('hex');
@@ -493,17 +508,23 @@ class TestDisc {
   statusBefore: MetadataStatus | null = null;
   readonly report: { placed?: boolean; listedAfterMs?: number; removed?: boolean; gone?: boolean; unlisted?: boolean; countsRestored?: boolean; detail: string[] } = { detail: [] };
 
-  constructor(rootName: string, private readonly log: (m: string) => void) {
+  constructor(rootName: string, private readonly log: (m: string) => void, private readonly discs: readonly PlacedDisc[]) {
     this.roots = parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'));
     const root = this.roots.find((r) => r.name === rootName);
     if (!root) throw new Error(`--place-root ${rootName}: not a library root (${this.roots.map((r) => r.name).join(', ')})`);
     ({ hostDir: this.hostDir, libraryPath: this.libraryPath } = testDiscFolder(root, this.runId));
   }
 
-  private async listed(c: Controller): Promise<boolean> {
-    const parent = parentOf(this.libraryPath);
-    const l = await c.json<LibraryListing>(`library?path=${encodeURIComponent(parent)}`).catch(() => null);
-    return !!l?.discs.some((d) => d.path === this.libraryPath);
+  /** A placed disc's path in the NAS library. */
+  pathOf(name: string): string {
+    return `${parentOf(this.libraryPath)}/${name}`;
+  }
+
+  /** Whether the library lists every placed disc ('all') or any of them ('any'). */
+  private async listed(c: Controller, how: 'all' | 'any'): Promise<boolean> {
+    const l = await c.json<LibraryListing>(`library?path=${encodeURIComponent(parentOf(this.libraryPath))}`).catch(() => null);
+    const has = (d: PlacedDisc): boolean => !!l?.discs.some((x) => x.path === this.pathOf(d.name));
+    return how === 'all' ? this.discs.every(has) : this.discs.some(has);
   }
 
   private async rescan(c: Controller): Promise<number> {
@@ -517,28 +538,35 @@ class TestDisc {
     return c.json<MetadataStatus>('admin/metadata/status');
   }
 
-  /** Copies the disc into a new folder (mkdir fails if it exists), rescans, and waits until the library lists it. */
+  /** Whether this run places the disc named `name`. */
+  places(name: string): boolean {
+    return this.discs.some((d) => d.name === name);
+  }
+
+  /** Copies the discs into a new folder (mkdir fails if it exists), rescans, and waits until the library lists them. */
   async place(c: Controller): Promise<void> {
     if (!ownTestFolder(this.hostDir, this.runId, this.roots)) throw new Error('refusing a test folder path this run did not make');
     this.statusBefore = await this.status(c);
     // mkdir without -p: the folder must be new, so the clean-up only ever removes what this run made
     await sshRead(`mkdir -- '${this.hostDir}'`);
     this.created = true; // from here on the clean-up removes it, even when the copy below fails
-    await sshUntar(`tar -C '${this.hostDir}' -xf -`);
-    const files = Number((await sshRead(`find '${this.hostDir}' -type f | wc -l`)).trim());
-    const listing = await new Promise<string>((res, rej) => execFile('find', [join(REPO, 'fixtures/synthetic', STORE_DISC_NAME), '-type', 'f'], (e, out) => (e ? rej(e) : res(String(out)))));
-    const want = listing.trim().split('\n').length;
-    if (files !== want) throw new Error(`the NAS copy has ${files} files, the fixture ${want}`);
+    for (const disc of this.discs) {
+      await sshUntar(disc, `tar -C '${this.hostDir}' -xf -`);
+      const files = Number((await sshRead(`find '${this.hostDir}/${disc.name}' -type f | wc -l`)).trim());
+      const listing = await new Promise<string>((res, rej) => execFile('find', [join(disc.parent, disc.name), '-type', 'f'], (e, out) => (e ? rej(e) : res(String(out)))));
+      const want = listing.trim().split('\n').length;
+      if (files !== want) throw new Error(`the NAS copy of ${disc.name} has ${files} files, the source ${want}`);
+      this.log(`test disc placed at ${this.pathOf(disc.name)}`);
+    }
     this.report.placed = true;
-    this.log(`test disc placed at ${this.libraryPath}`);
     const at = await this.rescan(c);
     const deadline = at + 20 * 60_000;
-    while (!(await this.listed(c))) {
-      if (Date.now() > deadline) throw new Error('the rescan did not list the test disc in 20 minutes');
+    while (!(await this.listed(c, 'all'))) {
+      if (Date.now() > deadline) throw new Error('the rescan did not list the test discs in 20 minutes');
       await sleep(3000);
     }
     this.report.listedAfterMs = Date.now() - at;
-    this.log(`test disc listed ${Math.round(this.report.listedAfterMs / 1000)} s after the rescan`);
+    this.log(`test discs listed ${Math.round(this.report.listedAfterMs / 1000)} s after the rescan`);
   }
 
   /**
@@ -553,9 +581,10 @@ class TestDisc {
       return;
     }
     const contents = (await sshRead(`find '${d}' -mindepth 1 -maxdepth 1 -printf '%f\\n'`).catch((e: unknown) => `ERROR ${(e as Error).message}`)).trim();
-    // what this run put there: the disc's folder, or nothing yet when the copy failed
-    if (contents !== STORE_DISC_NAME && contents !== '') {
-      this.report.detail.push(`left ${d} in place: it holds "${contents}", not only ${STORE_DISC_NAME}`);
+    // what this run put there: the discs' folders, or fewer when a copy failed
+    const names = this.discs.map((x) => x.name);
+    if (contents !== '' && contents.split('\n').some((n) => !names.includes(n))) {
+      this.report.detail.push(`left ${d} in place: it holds "${contents.replaceAll('\n', ', ')}", not only ${names.join(', ')}`);
       return;
     }
     await sshRead(`rm -r -- '${d}'`);
@@ -571,7 +600,7 @@ class TestDisc {
     }
     const at = await this.rescan(c);
     const deadline = at + 20 * 60_000;
-    while (await this.listed(c)) {
+    while (await this.listed(c, 'any')) {
       if (Date.now() > deadline) {
         this.report.detail.push('the rescan still lists the test disc after 20 minutes');
         return;
@@ -597,6 +626,45 @@ class TestDisc {
   get clean(): boolean {
     return !this.created || (!!this.report.gone && !!this.report.unlisted && this.report.countsRestored !== false);
   }
+}
+
+/** The places check's disc (--places): generated for the run, not a fixture. */
+export const PLACES_DISC_NAME = 'disc-places';
+
+/**
+ * Generates the places disc (playlist 00000 of two 30 s clips, LPCM audio) in a folder of its own under the gitignored
+ * fixtures/local (the fixture writer writes only under fixtures/), its files dated two hours back so the NAS's scan
+ * counts it as settled (SETTLE_MS) at once. Returns it with a remover.
+ */
+export async function makePlacesDisc(): Promise<PlacedDisc & { remove(): void }> {
+  mkdirSync(join(REPO, 'fixtures/local'), { recursive: true });
+  const parent = mkdtempSync(join(REPO, 'fixtures/local/live-check-places-'));
+  const dir = join(parent, PLACES_DISC_NAME);
+  await new Promise<void>((res, rej) =>
+    execFile('npx', ['tsx', join(REPO, 'scripts/make-fixture-disc.ts'), dir, '--seconds-per-clip', '30'], { cwd: REPO, timeout: 300_000 }, (err, _out, stderr) =>
+      err ? rej(new Error(`making the places disc: ${err.message} ${String(stderr).slice(0, 300)}`)) : res(),
+    ),
+  );
+  const past = new Date(Date.now() - 2 * 3_600_000);
+  const date = (path: string): void => {
+    for (const e of readdirSync(path, { withFileTypes: true })) {
+      if (e.isDirectory()) date(join(path, e.name));
+      utimesSync(join(path, e.name), past, past);
+    }
+  };
+  date(dir);
+  utimesSync(dir, past, past);
+  return { name: PLACES_DISC_NAME, parent, remove: () => rmSync(parent, { recursive: true, force: true }) };
+}
+
+/** A subtitle file for the places check: one cue across the whole disc. */
+const PLACES_SRT = '1\n00:00:00,000 --> 00:01:00,000\nPlaces check (test)\n';
+const PLACES_SRT_NAME = 'places-check.srt';
+
+/** m:ss, as the resume prompt shows a place's time. */
+export function clockLabel(timeUs: number): string {
+  const s = Math.floor(timeUs / 1_000_000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -757,6 +825,13 @@ interface LibraryDisc {
   reloaded?: boolean;
 }
 
+interface PlacesStep {
+  step: string;
+  ok: boolean;
+  detail: string;
+  shot?: string;
+}
+
 interface Result {
   startedAt: string;
   finishedAt?: string;
@@ -766,6 +841,7 @@ interface Result {
   pairings: Array<{ role: string; person: string; ok: boolean; error?: string }>;
   store: { ran: boolean; mode: 'check' | 'rehearsal' | null; skipped?: string; disc?: string; steps: StoreStep[]; pass?: boolean };
   library: { ran: boolean; skipped?: string; discs: LibraryDisc[] };
+  places: { ran: boolean; skipped?: string; steps: PlacesStep[]; pass?: boolean };
   testDisc?: { libraryPath: string; clean: boolean; placed?: boolean; listedAfterMs?: number; removed?: boolean; gone?: boolean; unlisted?: boolean; countsRestored?: boolean; detail: string[] };
   environment: Record<string, unknown>;
   errors: string[];
@@ -786,7 +862,7 @@ class LiveCheck {
     this.people = new People(o.nas, (m) => this.log(m));
     this.r = {
       startedAt: new Date().toISOString(), origin: o.origin, devices: {}, people: { created: false, deleted: [] }, pairings: [],
-      store: { ran: false, mode: null, steps: [] }, library: { ran: false, discs: [] }, environment: {}, errors: [],
+      store: { ran: false, mode: null, steps: [] }, library: { ran: false, discs: [] }, places: { ran: false, steps: [] }, environment: {}, errors: [],
     };
     const add = (role: string, target: string | null, person: string): void => {
       if (!target) return;
@@ -863,16 +939,8 @@ class LiveCheck {
   }
 
   /** From the landing screen of a paired page: the NAS's folder browser at the disc's folder, its pre-flight, Play. */
-  private async openNasDisc(page: Page, disc: DiscEntry): Promise<void> {
-    await page.open(`${this.o.origin}/?telemetry=1`);
-    await page.until(visible('[data-testid=nas-paired]'), 'the paired landing', 30_000);
-    await page.d.evaluate(`(localStorage.setItem(${JSON.stringify(FOLDER_KEY)}, ${JSON.stringify(parentOf(disc.path))}), true)`);
-    await clickEl(page, '[data-testid=nas-open]', 'Open from NAS');
-    await page.until(visible('[data-testid=title-library]') + ` || ${visible('[data-testid=nas-library]')}`, 'the NAS library', 30_000);
-    if (!(await page.probe<boolean>(visible('[data-testid=nas-library]'), 'the folder browser'))) await clickEl(page, '[data-testid=browse-folders]', 'Browse folders');
-    const sel = `[data-testid=nas-disc][data-name=${cssString(disc.name)}]`;
-    await page.until(visible(sel), 'the disc in its folder', 30_000);
-    await clickEl(page, sel, 'the disc');
+  private async openNasDisc(page: Page, disc: DiscEntry, query = ''): Promise<void> {
+    await this.openPreflight(page, disc, query);
     await page.until(`(() => { const b = document.querySelector('[data-testid=nas-play]'); return !!b && !b.disabled; })()`, 'the pre-flight', 60_000);
     // Play is a real touch (it starts audio); when a touch misses (seen on the Simulator with the pre-flight's longer
     // "play now with pauses" page), it is tried once more, then clicked in the DOM (the picture still plays; audio may not)
@@ -899,6 +967,19 @@ class LiveCheck {
       if (await page.probe<boolean>(`!!document.querySelector('[data-testid=player]')`, 'the player')) break;
       await sleep(300);
     }
+  }
+
+  /** The landing page (with `query` added), then the NAS's folder browser at the disc's folder, and the disc: its pre-flight. */
+  private async openPreflight(page: Page, disc: DiscEntry, query: string): Promise<void> {
+    await page.open(`${this.o.origin}/?telemetry=1${query}`);
+    await page.until(visible('[data-testid=nas-paired]'), 'the paired landing', 30_000);
+    await page.d.evaluate(`(localStorage.setItem(${JSON.stringify(FOLDER_KEY)}, ${JSON.stringify(parentOf(disc.path))}), true)`);
+    await clickEl(page, '[data-testid=nas-open]', 'Open from NAS');
+    await page.until(visible('[data-testid=title-library]') + ` || ${visible('[data-testid=nas-library]')}`, 'the NAS library', 30_000);
+    if (!(await page.probe<boolean>(visible('[data-testid=nas-library]'), 'the folder browser'))) await clickEl(page, '[data-testid=browse-folders]', 'Browse folders');
+    const sel = `[data-testid=nas-disc][data-name=${cssString(disc.name)}]`;
+    await page.until(visible(sel), 'the disc in its folder', 30_000);
+    await clickEl(page, sel, 'the disc');
   }
 
   private snap(page: Page, during: string): Promise<TelemetrySnap> {
@@ -942,7 +1023,7 @@ class LiveCheck {
       const path = host ? libraryPath(host, parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'))) : null;
       return path ? this.discAt(path) : null;
     }
-    if (spec === 'place') return this.testDisc ? this.discAt(this.testDisc.libraryPath) : null;
+    if (spec === 'place') return this.testDisc?.places(STORE_DISC_NAME) ? this.discAt(this.testDisc.pathOf(STORE_DISC_NAME)) : null;
     if (spec !== 'auto') return this.discAt(spec);
     // auto: disc-bdj-store anywhere in the top three levels of the library
     const queue: Array<{ path: string; depth: number }> = [{ path: '', depth: 0 }];
@@ -1031,6 +1112,195 @@ class LiveCheck {
       }
     }
     this.r.store.pass = this.r.store.steps.length === 4 && this.r.store.steps.every((s) => s.ok);
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // Places
+
+  /** The player's state, playlist, clock (telemetry) and the disc key in the address bar (`/nas/play/<key>`). */
+  private playing(page: Page, during: string): Promise<{ state: string | null; playlist: string | null; clockUs: number | null; discKey: string | null }> {
+    return page.probe(
+      "(() => { const p = document.querySelector('[data-testid=player]'); const m = /^\\/nas\\/play\\/([^/?]+)/.exec(location.pathname);" +
+        " return { state: p?.getAttribute('data-state') ?? null, playlist: p?.getAttribute('data-playlist') ?? null, clockUs: window.__blurayTelemetry?.clockUs ?? null, discKey: m ? decodeURIComponent(m[1]) : null }; })()",
+      during,
+    );
+  }
+
+  /** Waits until the player plays at `atLeastUs` or later; returns its playlist and disc key. */
+  private async playingFrom(page: Page, atLeastUs: number, during: string): Promise<{ playlist: string; discKey: string; clockUs: number }> {
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const p = await this.playing(page, during);
+      if (p.state === 'playing' && p.playlist && p.discKey && (p.clockUs ?? -1) >= atLeastUs) return { playlist: p.playlist, discKey: p.discKey, clockUs: p.clockUs! };
+      if (Date.now() > deadline) throw new Error(`${during}: not playing from ${clockLabel(atLeastUs)} (${JSON.stringify(p)})`);
+      await sleep(250);
+    }
+  }
+
+  /** Pauses with the control bar's button (in the DOM: a tap on the picture only shows the controls); returns the stopped clock. */
+  private async pauseAt(page: Page, during: string): Promise<number> {
+    await clickEl(page, '[data-testid=play-toggle]', `${during}: pause`);
+    await page.until(`document.querySelector('[data-testid=player]')?.getAttribute('data-state') === 'paused'`, `${during}: paused`, 15_000);
+    await sleep(1500); // telemetry while paused reads the stopped clock
+    const p = await this.playing(page, during);
+    if (p.clockUs === null) throw new Error(`${during}: no clock in the telemetry`);
+    return p.clockUs;
+  }
+
+  /** The person's place for `playlist` on `discKey`, once it is at `nearUs` (± 2 s), or the last one read. */
+  private async placeNear(discKey: string, playlist: string, nearUs: number): Promise<{ timeUs: number; finished: boolean; settings: { textFiles: Array<{ name: string; subtitleId?: string }> } } | null> {
+    type Place = { timeUs: number; finished: boolean; settings: { textFiles: Array<{ name: string; subtitleId?: string }> } };
+    const deadline = Date.now() + 20_000;
+    let last: Place | null = null;
+    while (Date.now() < deadline) {
+      const res = await this.people.mika!.fetch(`me/playback/${encodeURIComponent(discKey)}`);
+      if (res.ok) last = ((await res.json()) as { places: Record<string, Place> }).places[playlist] ?? null;
+      else await res.body?.cancel();
+      if (last && Math.abs(last.timeUs - nearUs) < 2_000_000) return last;
+      await sleep(500);
+    }
+    return last;
+  }
+
+  /** Whether the Subtitles menu shows the stored subtitle `id` picked, with its file in the text set; the menu is closed after. */
+  private async storedPicked(page: Page, id: string, during: string): Promise<boolean> {
+    await clickEl(page, '[data-testid=subtitle-menu]', `${during}: the Subtitles menu`);
+    const ok = await page.until<boolean>(
+      `(() => { const f = document.querySelector('[data-testid=subtitle-file-0]'); const r = document.querySelector(${JSON.stringify(`[data-testid=subtitle-stored-${id}]`)});` +
+        ` return !!f && f.textContent.includes(${JSON.stringify(PLACES_SRT_NAME)}) && r?.getAttribute('aria-checked') === 'true'; })()`,
+      `${during}: the stored subtitle in the text set`,
+      20_000,
+    ).catch((err: unknown) => {
+      if (err instanceof PageReloadedError) throw err;
+      return false;
+    });
+    await clickEl(page, '[data-testid=subtitle-menu]', `${during}: closing the Subtitles menu`).catch(() => undefined);
+    return ok;
+  }
+
+  async places(): Promise<void> {
+    const b = this.browser('mika-phone');
+    if (!this.o.places) {
+      this.r.places.skipped = 'not asked for (--places)';
+      return;
+    }
+    if (!b) {
+      this.r.places.skipped = 'no --mika-phone';
+      return;
+    }
+    const disc = this.testDisc?.places(PLACES_DISC_NAME) ? await this.discAt(this.testDisc.pathOf(PLACES_DISC_NAME)) : null;
+    if (!disc) {
+      this.r.places.skipped = `${PLACES_DISC_NAME} is not in the NAS library`;
+      return;
+    }
+    this.r.places.ran = true;
+    const c = this.people.mika!;
+    const dir = join(this.o.out, 'places');
+    const steps = this.r.places.steps;
+    const step = async (name: string, page: Page, run: () => Promise<{ ok: boolean; detail: string }>): Promise<boolean> => {
+      const shot = join(dir, `${String(steps.length + 1).padStart(2, '0')}-${name.replace(/[^A-Za-z0-9]+/g, '-')}.png`);
+      let rec: PlacesStep;
+      try {
+        rec = { step: name, ...(await run()) };
+      } catch (err) {
+        rec = { step: name, ok: false, detail: (err as Error).message };
+      }
+      await page.d.screenshot(shot).then(() => (rec.shot = relative(this.o.out, shot))).catch(() => undefined);
+      steps.push(rec);
+      this.log(`places: ${name}: ${rec.ok ? 'ok' : 'FAIL'}: ${rec.detail}`);
+      return rec.ok;
+    };
+    // ?placemin=1: any playlist makes a place (the disc's is 60 s, under the 300 s a place needs by default)
+    const query = '&placemin=1';
+    let subtitleId: string | null = null;
+    try {
+      await this.pair(b, this.people.mikaId!);
+      const page = b.page!;
+      let discKey = '';
+      let playlist = '';
+      let savedUs = 0;
+
+      const played = await step('play from the NAS folder', page, async () => {
+        await this.openNasDisc(page, disc, query);
+        await page.until(visible('[data-testid=playlist-00000]'), 'the playlist picker', 30_000);
+        await tapInView(page, '[data-testid=playlist-00000]', 'playlist 00000');
+        ({ playlist, discKey } = await this.playingFrom(page, 500_000, 'the first play'));
+        return { ok: true, detail: `playlist ${playlist}, disc key ${discKey.slice(0, 2)}…` };
+      });
+      if (!played || this.aborted) return;
+
+      // the menus are used while paused: the controls (and an open menu) stay up only then on a touch device
+      await step('pick a stored subtitle', page, async () => {
+        await this.pauseAt(page, 'the pause to pick');
+        const made = await c.json<{ id: string }>('subtitles', jsonPost({ name: 'Places check (test)', language: 'en', offsetMs: 0, for: { kind: 'chapter', discId: disc.id, playlistId: playlist, chapter: 0 } }));
+        subtitleId = made.id;
+        const put = await c.fetch(`subtitles/${encodeURIComponent(made.id)}/file/${PLACES_SRT_NAME}`, { method: 'PUT', body: PLACES_SRT });
+        if (!put.ok) throw new HttpError(put.status, await put.text(), 'uploading the subtitle file');
+        await clickEl(page, '[data-testid=subtitle-menu]', 'the Subtitles menu');
+        await clickEl(page, `[data-testid=subtitle-stored-${made.id}]`, 'the stored subtitle'); // a pick closes the menu
+        const ok = await this.storedPicked(page, made.id, 'the pick');
+        await clickEl(page, '[data-testid=play-toggle]', 'play');
+        await this.playingFrom(page, 0, 'playing again');
+        return { ok, detail: 'picked from "From the NAS"' };
+      });
+
+      const paused = await step('pause saves the place at the stopped clock', page, async () => {
+        await this.playingFrom(page, 8_000_000, 'playing past 0:08');
+        const clockUs = await this.pauseAt(page, 'the pause');
+        const place = await this.placeNear(discKey, playlist, clockUs);
+        if (!place) return { ok: false, detail: 'no place on the NAS' };
+        savedUs = place.timeUs;
+        const trail = clockUs - place.timeUs;
+        const subtitle = place.settings.textFiles.some((f) => f.subtitleId === subtitleId);
+        // the engine reports the stopped clock's time at a pause: no 250 ms report interval to trail by
+        return { ok: Math.abs(trail) <= 50_000 && subtitle && !place.finished, detail: `paused at ${clockUs} µs, saved ${place.timeUs} µs (trails by ${Math.round(trail / 1000)} ms); stored subtitle in the place: ${subtitle}` };
+      });
+      if (!paused || this.aborted) return;
+
+      await step('reopening offers Resume, with the subtitle back', page, async () => {
+        await this.openPreflight(page, disc, query);
+        const want = `Resume at ${clockLabel(savedUs)}`;
+        const text = await page.until<string>(`(() => { const e = document.querySelector('[data-testid=resume-at]'); return e && e.getClientRects().length ? e.textContent : null; })()`, 'the resume prompt', 30_000);
+        const asked = await page.probe<boolean>(visible('[data-testid=resume-start-over]'), 'Start from beginning');
+        await page.d.screenshot(join(dir, 'resume-prompt.png')).catch(() => undefined);
+        await tapInView(page, '[data-testid=resume-at]', 'Resume');
+        const at = await this.playingFrom(page, 0, 'the resume');
+        const from = at.clockUs >= savedUs - 500_000;
+        await this.pauseAt(page, 'the pause after resuming');
+        const subtitle = await this.storedPicked(page, subtitleId!, 'the resume');
+        return { ok: text === want && asked && from && subtitle, detail: `prompt "${text}" (want "${want}"), Start from beginning offered: ${asked}; playing from ${at.clockUs} µs; subtitle back: ${subtitle}` };
+      });
+      if (this.aborted) return;
+
+      await step('Continue watching resumes without asking', page, async () => {
+        const place = await this.placeNear(discKey, playlist, savedUs);
+        if (place) savedUs = place.timeUs;
+        await page.open(`${this.o.origin}/nas?telemetry=1${query}`);
+        const card = `[data-testid=continue-card][data-playlist=${cssString(playlist)}]`;
+        await page.until(visible(card), 'the Continue watching card', 30_000);
+        const kind = await page.probe<string | null>(`document.querySelector(${JSON.stringify(card)})?.getAttribute('data-kind') ?? null`, 'the card');
+        await page.d.screenshot(join(dir, 'continue-watching.png')).catch(() => undefined);
+        await clickEl(page, card, 'the Continue watching card');
+        await page.until(visible('[data-testid=resume-at]'), 'Resume', 30_000);
+        const asked = await page.probe<boolean>(visible('[data-testid=resume-start-over]'), 'Start from beginning');
+        await tapInView(page, '[data-testid=resume-at]', 'Resume');
+        const at = await this.playingFrom(page, 0, 'the resume from Continue watching');
+        return { ok: kind === 'resume' && !asked && at.clockUs >= savedUs - 500_000, detail: `card ${kind}; asked: ${asked}; playing from ${at.clockUs} µs (saved ${savedUs} µs)` };
+      });
+    } catch (err) {
+      steps.push({ step: 'run', ok: false, detail: (err as Error).message });
+      this.log(`places: ${(err as Error).message}`);
+    } finally {
+      if (subtitleId !== null) {
+        const id: string = subtitleId;
+        const del = await c.fetch(`subtitles/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch((e: unknown) => e as Error);
+        const gone = !(del instanceof Error) && (del.status === 204 || del.status === 404);
+        if (!gone) this.r.errors.push(`places: deleting the test subtitle ${id}: ${del instanceof Error ? del.message : `HTTP ${del.status}`}`);
+        else this.log('places: test subtitle deleted');
+      }
+      await this.stop(b);
+    }
+    this.r.places.pass = steps.length === 5 && steps.every((x) => x.ok);
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -1206,14 +1476,22 @@ async function main(): Promise<void> {
     });
   }
   let failed = false;
+  let placesDisc: (PlacedDisc & { remove(): void }) | null = null;
   try {
     await check.people.setUp();
     check.r.people.created = true;
-    if (o.storeDisc === 'place' && o.rehearseStore === null) {
-      check.testDisc = new TestDisc(o.placeRoot, (m) => check.log(m));
+    const placed: PlacedDisc[] = [];
+    if (o.storeDisc === 'place' && o.rehearseStore === null) placed.push({ name: STORE_DISC_NAME, parent: join(REPO, 'fixtures/synthetic') });
+    if (o.places) {
+      placesDisc = await makePlacesDisc();
+      placed.push(placesDisc);
+    }
+    if (placed.length > 0) {
+      check.testDisc = new TestDisc(o.placeRoot, (m) => check.log(m), placed);
       await check.testDisc.place(check.people.mika!);
     }
     await check.store();
+    await check.places();
     await check.library();
   } catch (err) {
     failed = true;
@@ -1221,14 +1499,16 @@ async function main(): Promise<void> {
     check.log(`error: ${(err as Error).message}`);
   } finally {
     await cleanUp();
+    placesDisc?.remove();
   }
   const r = check.r;
   console.error(
     `store: ${r.store.ran ? (r.store.mode === 'rehearsal' ? `rehearsed (${r.store.steps.filter((s) => s.ok).length}/${r.store.steps.length} planes read)` : r.store.pass ? 'PASS' : 'FAIL') : `skipped (${r.store.skipped})`}; ` +
+      `places: ${r.places.ran ? (r.places.pass ? 'PASS' : 'FAIL') : `skipped (${r.places.skipped})`}; ` +
       `library: ${r.library.ran ? `${r.library.discs.filter((d) => d.opened).length}/${r.library.discs.length} opened` : `skipped (${r.library.skipped})`}; ` +
       `${r.testDisc ? `test disc: ${r.testDisc.clean ? 'removed' : 'NOT CLEAN'}; ` : ''}people deleted: ${r.people.cleanupConfirmed ? 'confirmed' : 'NOT CONFIRMED'} → ${join(o.out, 'live-check.json')}`,
   );
-  process.exit(failed || !r.people.cleanupConfirmed || (r.testDisc && !r.testDisc.clean) || (r.store.ran && r.store.mode === 'check' && !r.store.pass) ? 1 : 0);
+  process.exit(failed || !r.people.cleanupConfirmed || (r.testDisc && !r.testDisc.clean) || (r.store.ran && r.store.mode === 'check' && !r.store.pass) || (r.places.ran && !r.places.pass) ? 1 : 0);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

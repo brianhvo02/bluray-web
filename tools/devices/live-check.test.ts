@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkOrigin, countOf, libraryPath, ownTestFolder, parseLiveArgs, parseMap, parseOwnerCode, parseRoots, storeHashes, testDiscFolder, UNCONFIRMED } from './live-check';
+import { checkOrigin, clockLabel, countOf, libraryPath, ownTestFolder, parseLiveArgs, parseMap, parseOwnerCode, parseRoots, storeHashes, testDiscFolder, UNCONFIRMED } from './live-check';
 
 const COMPOSE = `
     environment:
@@ -86,5 +86,13 @@ describe('live-check', () => {
     expect(countOf(hashes[1]!, hashes)).toBe(1);
     expect(countOf('nope', hashes)).toBeNull();
     expect(countOf(null, hashes)).toBeNull();
+  });
+});
+
+describe('clockLabel', () => {
+  it('shows a place as the resume prompt does, m:ss rounded down', () => {
+    expect(clockLabel(0)).toBe('0:00');
+    expect(clockLabel(8_999_999)).toBe('0:08');
+    expect(clockLabel(61_000_000)).toBe('1:01');
   });
 });
