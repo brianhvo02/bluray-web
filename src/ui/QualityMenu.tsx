@@ -15,12 +15,33 @@ export function levelItemLabel(l: LevelInfo): string {
   return l.level === 'original' ? l.label : `${l.label} · ${Math.round(levelRateMbps(l, 0))} Mbps`;
 }
 
+export interface LevelMenuItem {
+  readonly level: LevelId;
+  readonly label: string;
+  readonly checked: boolean;
+  readonly disabled: boolean;
+  readonly title: string | undefined;
+}
+
+/** The menu's items, or none when fewer than two levels are available (the menu is then hidden). */
+export function levelMenuItems(state: LevelState): LevelMenuItem[] {
+  if (state.levels.filter((l) => l.available).length < 2) return [];
+  return state.levels.map((l) => ({
+    level: l.level,
+    label: levelItemLabel(l),
+    checked: l.level === state.at.level,
+    disabled: !l.available,
+    title: l.available ? undefined : l.reason ? REASON_COPY[l.reason] : 'not available',
+  }));
+}
+
 export function QualityMenu({ state, onPick, onOpenChange }: QualityMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
-  const shown = state.levels.filter((l) => l.available).length > 1;
+  const items = levelMenuItems(state);
+  const shown = items.length > 0;
 
   const playableItems = (): HTMLButtonElement[] => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
   const close = (refocus: boolean): void => {
@@ -74,21 +95,21 @@ export function QualityMenu({ state, onPick, onOpenChange }: QualityMenuProps): 
       </button>
       {open && (
         <ul ref={listRef} role="menu" className="audio-menu-list" onKeyDown={moveFocus}>
-          {state.levels.map((l) => (
+          {items.map((l) => (
             <li key={l.level} role="none">
               <button
                 type="button"
                 role="menuitemradio"
-                aria-checked={l.level === state.at.level}
-                disabled={!l.available}
-                title={l.available ? undefined : (l.reason ? REASON_COPY[l.reason] : 'not available')}
+                aria-checked={l.checked}
+                disabled={l.disabled}
+                title={l.title}
                 data-level={l.level}
                 onClick={() => {
                   close(true);
-                  if (l.level !== state.at.level) onPick(l.level);
+                  if (!l.checked) onPick(l.level);
                 }}
               >
-                {levelItemLabel(l)}
+                {l.label}
               </button>
             </li>
           ))}

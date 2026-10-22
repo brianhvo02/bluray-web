@@ -154,11 +154,15 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   useEffect(() => {
     if (typeof snapshot.levelSwitch === 'object') levelSession?.end();
   }, [snapshot.levelSwitch, levelSession]);
+  // A failure belongs to the disc it happened on: it goes when the session ends or another disc begins.
+  const levelDiscId = levelState?.discId ?? null;
+  useEffect(() => setSwitchFailure(null), [levelDiscId]);
   const switchTo = (at: { level: LevelId; audio: number }): void => {
     if (!nas || !levelSession || !levelState) return;
     setSwitchFailure(null);
     Promise.all([nas.discBase(levelState.discId), nas.session()])
       .then(([base, session]) => levelSession.switchTo(at, { controller, base, token: session.token }))
+      .then(() => setSwitchFailure(null))
       .catch((err: unknown) => setSwitchFailure(`Couldn't switch quality: ${err instanceof Error ? err.message : String(err)}`));
   };
   const atLevel = levelState !== null && levelState.at.level !== 'original';
