@@ -46,7 +46,8 @@ export interface ScopeSyncDeps {
   /** Whether a scope has changes not yet stored, on each change of it (the engine waits for the stop flush only then). */
   readonly onUnsaved?: (unsaved: boolean) => void;
   /**
-   * What is written won't last (ruling R32): a scope that did not load (memory only), a write or save refused for room.
+   * What is written won't last (ruling R32): a write into a scope that did not load (memory only; at each such write,
+   * never at the load, R32a), a write or save refused for room.
    * Heard on every occurrence; the BD-J worker tells the engine once.
    */
   readonly onLost?: (reason: StorageLoss) => void;
@@ -101,6 +102,8 @@ export class ScopeSync {
   private saving = 0;
   private unsaved = false;
   private outsideLogged = false;
+  /** A write into a scope kept in memory only has been reported (onLost, once). */
+  private memoryLossTold = false;
 
   private constructor(
     private readonly deps: ScopeSyncDeps,
@@ -124,8 +127,8 @@ export class ScopeSync {
           ]);
           return { scope, memoryOnly: false, etag: loaded.etag, stored: { files: sortFiles([...loaded.files]) }, dirty: false, refused: new Set() };
         } catch (e) {
+          // the viewer hears of it only at Java's first write there (ruling R32a): a disc that never writes loses nothing
           deps.log(`BD-J storage: ${scope.key} could not be loaded (${e instanceof Error ? e.message : String(e)}); what is written there lasts until BD-J stops`, true);
-          deps.onLost?.('memory-only');
           return { scope, memoryOnly: true, etag: null, stored: EMPTY_SNAPSHOT, dirty: false, refused: new Set() };
         } finally {
           cancel();
@@ -157,6 +160,14 @@ export class ScopeSync {
   changed(path: string, change: VfsChange, to?: string): void {
     if (!this.vfs) return;
     const from = this.locate(path);
+    if (change !== 'mkdir') {
+      // Java's first write into a scope kept in memory only: what it saves won't last (ruling R32a)
+      const dest = change === 'rename' && to !== undefined ? this.locate(to) : null;
+      if (!this.memoryLossTold && (from?.state.memoryOnly || dest?.state.memoryOnly)) {
+        this.memoryLossTold = true;
+        this.deps.onLost?.('memory-only');
+      }
+    }
     if (from) {
       if (change === 'delete' || (change === 'truncate' && this.vfs.stat(path)?.size === 0)) from.state.refused.delete(from.rel);
       if (change === 'rename' && to !== undefined) {

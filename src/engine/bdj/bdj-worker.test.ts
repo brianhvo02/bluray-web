@@ -539,7 +539,7 @@ describe('runBdjWorker and the storage scopes', () => {
         },
       });
 
-    it('sends storageLost once for scopes that stay in memory only, however many, and once for a browser with no store', async () => {
+    it("sends storageLost once at Java's first write into scopes kept in memory only, never for a disc that does not write (R32a)", async () => {
       const files = fixtureDiscFiles('disc-bdj');
       const received: FromBdj[] = [];
       const port: BdjPort = { onmessage: null, postMessage: (m) => void received.push(m) };
@@ -549,9 +549,20 @@ describe('runBdjWorker and the storage scopes', () => {
         },
         save: async () => ({ etag: 'e' }),
       };
-      runBdjWorker(port, { createStore: () => store });
+      const handle = runBdjWorker(port, { createStore: () => store });
       boot(port, files);
       await vi.waitFor(() => expect(received.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      expect(received.filter((m) => m.type === 'storageLost')).toEqual([]);
+      const scopes = await discScopes(syntheticSource(files), null);
+      const put = (vfs: NonNullable<typeof handle.runtime>['jvm']['opts']['vfs'] & object, path: string): void => {
+        const parts = path.split('/');
+        for (let i = 2; i < parts.length; i++) vfs.mkdir(parts.slice(0, i).join('/'));
+        const h = vfs.open(path, 'w')!;
+        vfs.write(h, new Uint8Array([1]), 0, 1);
+        vfs.close(h);
+      };
+      put(handle.runtime!.jvm.opts.vfs!, `${scopes[0]!.dir}/a`);
+      put(handle.runtime!.jvm.opts.vfs!, `${scopes[1]!.dir}/b`);
       expect(received.filter((m) => m.type === 'storageLost')).toEqual([{ type: 'storageLost', reason: 'memory-only' }]);
       port.onmessage!({ data: { type: 'stop' } });
       await vi.waitFor(() => expect(received.at(-1)).toEqual({ type: 'stopped' }));
@@ -559,9 +570,14 @@ describe('runBdjWorker and the storage scopes', () => {
       // no IndexedDB (the entry's createStore answers null): nothing lasts past the session
       const none: FromBdj[] = [];
       const port2: BdjPort = { onmessage: null, postMessage: (m) => void none.push(m) };
-      runBdjWorker(port2, { createStore: () => null });
+      const handle2 = runBdjWorker(port2, { createStore: () => null });
       boot(port2, files);
       await vi.waitFor(() => expect(none.map((m) => m.type)).toContain('booted'), { timeout: 60_000 });
+      expect(none.filter((m) => m.type === 'storageLost')).toEqual([]);
+      put(handle2.runtime!.jvm.opts.vfs!, '/tmp/scratch'); // not saved data anyway
+      expect(none.filter((m) => m.type === 'storageLost')).toEqual([]);
+      put(handle2.runtime!.jvm.opts.vfs!, `${scopes[0]!.dir}/a`);
+      put(handle2.runtime!.jvm.opts.vfs!, `${scopes[0]!.dir}/b`);
       expect(none.filter((m) => m.type === 'storageLost')).toEqual([{ type: 'storageLost', reason: 'memory-only' }]);
       port2.onmessage!({ data: { type: 'stop' } });
       await vi.waitFor(() => expect(none.at(-1)).toEqual({ type: 'stopped' }));

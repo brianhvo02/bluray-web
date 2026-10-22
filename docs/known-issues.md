@@ -445,14 +445,20 @@ what would change that decision.
     normally lands well within that, so a stop past 3 s usually loses only the NAS put of that last save, which goes
     at the next open (the copy is pending). Only if IndexedDB itself takes longer, as a strict commit on a busy iPhone
     might, are the writes since the last 100 ms save lost.
-  - **What the viewer is told (ruling R32).** The notice "This disc's saved data can't be kept right now, so
-    progress you make may be lost." (`bdj-storage`, once per disc open) shows for a scope kept in memory only with no
-    copy anywhere, a write refused for room (16 MB per scope, the NAS's 507, IndexedDB's quota, the VFS's memory cap)
-    and a NAS put refused for good (a 4xx that is not a conflict or a request to wait; 401 included). Everything else
-    is log-only: a write outside the disc's scopes (it lasts the session, logged once), a missed boot that keeps an
-    unmerged copy (R28), a 412 that merges, a put still being retried (unreachable, timed out, 5xx), and a device moved
-    to another person (its saves stay in this browser). A loss found only by the stop's save (after the session ended)
-    shows nothing; the next open meets it again if it persists.
+  - **What the viewer is told (rulings R32, R32a).** The notice "This disc's saved data can't be kept right now, so
+    progress you make may be lost." (`bdj-storage`, once per disc open) shows at Java's first write (a file created,
+    written or deleted) into a scope kept in memory only with no copy anywhere, never at boot, so a disc that never
+    writes doesn't see it; and for a write refused for room (16 MB per scope, the NAS's 507, IndexedDB's quota, the
+    VFS's memory cap) and a NAS put refused for good (a 4xx that is not a conflict or a request to wait; 401
+    included). A missed boot that keeps an unmerged copy (R28), a 412 that merges, a put still being retried
+    (unreachable, timed out, 5xx) and a device moved to another person (its saves stay in this browser) are log-only,
+    since those saves last. What can still be lost without the notice:
+    - **Writes outside the disc's scopes** (`/persistent/` or `/buda/` paths no BDJO or `id.bdmv` names) last only
+      the session and are logged once as an error.
+    - **A put the NAS refuses for good is retried every 30 s** (`NAS_PUSH_RETRY_MS`) for the rest of the session;
+      the notice shows once, and the write-ahead copy stays pending in this browser.
+    - **A loss found only by the stop's save** (the session has ended, so the worker sends nothing) shows no notice;
+      it is logged, and the next open meets the same condition again if it persists.
   - **A disc without a disc ID** keys its BUDA scope by a fingerprint of its BDMV file list (ruling R15), so a
     re-ripped copy with other files starts with an empty BUDA scope.
 

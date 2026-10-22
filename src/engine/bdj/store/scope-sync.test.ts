@@ -461,13 +461,16 @@ describe("ScopeSync: when saves won't last (the bdj-storage notice, ruling R32)"
   beforeEach(() => void vi.useFakeTimers());
   afterEach(() => void vi.useRealTimers());
 
-  it('hears of a scope that stays in memory only once, at the load', async () => {
+  it("hears of a scope kept in memory only at Java's first write there, never at the load (ruling R32a)", async () => {
     const store = new MemoryStore();
     store.failLoad = BUDA.key;
     const { vfs, sync, losses } = await setup(store);
-    expect(losses).toEqual(['memory-only']);
-    write(vfs, `${BUDA.dir}/y`, 'new');
+    expect(losses).toEqual([]);
+    write(vfs, '/persistent/7fff0123/z', 'kept'); // a scope that loaded
+    vfs.mkdir(`${BUDA.dir}/sub`);
     await sync.flush();
+    expect(losses).toEqual([]);
+    write(vfs, `${BUDA.dir}/y`, 'new');
     expect(losses).toEqual(['memory-only']);
   });
 

@@ -219,6 +219,8 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   const fullRelay = new FullRelay();
   /** The engine has heard that saved data won't last (storageLost, ruling R32): it hears it once. */
   let storageLostSent = false;
+  /** No scope is kept past the session (no store, or the scopes could not be worked out): a write there is lost. */
+  let unkept = false;
   /** Saves what Java changed, then has the store pass on what it holds (a NAS disc's write-ahead copy). */
   const flushStorage = async (): Promise<void> => {
     await sync?.flush();
@@ -344,8 +346,9 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       };
       // the storage scopes load while the JDK starts up too: Libbluray.init (and so every xlet) waits for them
       store = createStore(m, fetchFn);
-      // a store was wanted and there is none (no IndexedDB): what the disc saves lasts until BD-J stops
-      if (!store && options.createStore) storageLost('memory-only');
+      // a store was wanted and there is none (no IndexedDB): what the disc saves lasts until BD-J stops, which the
+      // viewer hears of at Java's first write there (ruling R32a)
+      if (!store && options.createStore) unkept = true;
       const storeLoading = store ? io.track(loadScopes(store, reads, m.discId)) : Promise.resolve(null);
       planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
@@ -394,7 +397,10 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });
         },
-        onVfsChange: (path, change, to) => sync?.changed(path, change, to),
+        onVfsChange: (path, change, to) => {
+          if (sync) sync.changed(path, change, to);
+          else if (unkept && change !== 'mkdir' && [path, to].some((p) => p !== undefined && /^\/(persistent|buda)\//.test(p))) storageLost('memory-only');
+        },
         onVfsFull: (path) => sync?.refused(path),
       });
       // boot() reports a JDK failure itself, with its BdjError code
@@ -455,7 +461,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
       });
     } catch (e) {
       post({ type: 'log', line: `BD-J storage: the disc's storage scopes could not be read (${e instanceof Error ? e.message : String(e)}); saved data lasts until BD-J stops`, error: true });
-      storageLost('memory-only');
+      unkept = true;
       return null;
     }
   };
