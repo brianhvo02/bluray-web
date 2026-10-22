@@ -201,8 +201,10 @@ export type EngineCommand =
    * query. The engine reads it from then on (source, read-ahead cache, disc model) and starts the playing playlist again
    * on it at the current time, paused if it was; the HDMV program and a BD-J title go on untouched (BD-J keeps reading
    * the original). Never with a fetchPort: over WebRTC the open disc's port goes on serving. Answered by levelChanged.
+   * `audio`: the audio stream (the original's numbering) the viewer heard at a level, sent with a switch to the
+   * original: the restart plays it when it is playable there, and a disc program's PSR1 is set to it.
    */
-  | { readonly type: 'setLevel'; readonly disc: RemoteDiscSpec }
+  | { readonly type: 'setLevel'; readonly disc: RemoteDiscSpec; readonly audio?: number }
   /** A fresh session token for the open NAS disc (a scheduled refresh, or the answer to remoteTokenNeeded). Handled at once, not queued. */
   | { readonly type: 'remoteToken'; readonly token: string }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }

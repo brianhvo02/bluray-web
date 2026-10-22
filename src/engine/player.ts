@@ -640,7 +640,7 @@ export class Player {
           await this.selectAudio(cmd.index);
           break;
         case 'setLevel':
-          await this.setLevel(cmd.disc);
+          await this.setLevel(cmd.disc, cmd.audio);
           break;
         case 'selectSubtitle':
           this.selectSubtitle(cmd.choice);
@@ -1144,8 +1144,10 @@ export class Player {
    * version's, the program (navigator or BD-J title) gets the new model with its state untouched, and the playing
    * playlist starts again on it through playPlaylist, at the current time and paused if it was, so its streams, picture,
    * decoder and compositor are chosen anew. A failure once the switch began leaves the disc closed, with its error.
+   * `audio` (a switch to the original): the stream the viewer heard at the level, played when it is playable here, over
+   * the program's PSR1, which is then set to it. The end of a still play item, once reported, is not reported again.
    */
-  private async setLevel(next: RemoteDiscSpec): Promise<void> {
+  private async setLevel(next: RemoteDiscSpec, audio?: number): Promise<void> {
     const open = this.discSpec;
     const refuse = (message: string): void => this.deps.emit({ type: 'levelChanged', ok: false, message });
     if (next.fetchPort) {
@@ -1163,8 +1165,12 @@ export class Player {
           owner: s.owner,
           timeUs: Math.min(Math.max(0, this.clock.nowUs()), Math.max(0, s.timeline.durationUs - 1)),
           autoplay: this.wantPlaying,
-          // with a program its PSR1 decides (playPlaylist); without one, the track that plays, when the version has it
-          audio: this.programRegs ? null : s.audioStream,
+          // the track heard at the level, when given; else with a program its PSR1 decides (playPlaylist), and without one
+          // the track that plays, when the version has it
+          audio: audio ?? (this.programRegs ? null : s.audioStream),
+          // the end of a still item reported stays reported; a BD-J still the switch lets go (teardownSession) is met
+          // again at the same place, with no report to Java
+          endReported: this.bdjStill ? null : this.navEndReported,
         }
       : null;
     const refill = this.fillArgs;
@@ -1208,8 +1214,14 @@ export class Player {
         const mpls = disc.playlists.get(resume.playlistId);
         if (!mpls || mpls.playItems.length === 0) throw new DiscError('missing-file', `Playlist ${resume.playlistId} is not available.`, [playlistPath(resume.playlistId)]);
         const { item, clipTime45 } = new Timeline(mpls.playItems, mpls.marks).locate(resume.timeUs);
-        const started = await this.playPlaylist(resume.playlistId, { item: item.index, clipTime45 }, resume.owner, resume.audio, { autoplay: resume.autoplay });
+        const started = await this.playPlaylist(resume.playlistId, { item: item.index, clipTime45 }, resume.owner, resume.audio, {
+          autoplay: resume.autoplay,
+          endReported: resume.endReported,
+        });
         if (!started) throw new Error(`Playlist ${resume.playlistId} could not be started on this version of the disc.`);
+        // the program keeps the track the viewer heard, as an Audio menu pick would leave it
+        const regs = this.programRegs;
+        if (audio !== undefined && regs && this.session?.playlistId === resume.playlistId && this.session.audioStream === audio) regs.psrWrite(PSR.PRIMARY_AUDIO_ID, audio);
       }
       // failures as a bufferAhead's (the command's catch)
       if (refill && this.remote === source) this.fill(refill.req, refill.follow).catch((err: unknown) => this.fail(err));
@@ -2039,7 +2051,13 @@ export class Player {
    * place's PSR1), over the program's PSR1. `restart`: the playlist that plays starts again on another version of the
    * disc (setLevel): the program is not told of a start, mark tracking goes on, and it plays only when it was playing.
    */
-  private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user', audio: number | null = null, restart: { readonly autoplay: boolean } | null = null): Promise<boolean> {
+  private async playPlaylist(
+    playlistId: string,
+    at: PlayAt = {},
+    caller: PlaylistCaller = 'user',
+    audio: number | null = null,
+    restart: { readonly autoplay: boolean; readonly endReported: number | null } | null = null,
+  ): Promise<boolean> {
     const viaNavigator = caller !== 'user';
     let source = this.source;
     let mpls = this.disc?.playlists.get(playlistId);
@@ -2053,7 +2071,8 @@ export class Player {
     const startUs = this.startTimeUs(timeline, at);
     const chapters = timeline.chapters(mpls.marks);
     const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
-    this.navEndReported = null;
+    // a restart goes on where presentation was: the end of a still item already reported is not reported again
+    this.navEndReported = restart ? restart.endReported : null;
     this.releaseBdjStill();
     const openPkt = this.openTitlePkt(mpls, timeline, at, startUs);
     if (!restart) {
@@ -2553,8 +2572,12 @@ export class Player {
     const s = this.session;
     if (!s) return;
     const gen = ++this.seekGeneration;
-    this.navEndReported = null;
-    this.releaseBdjStill();
+    if (marks !== 'keep' || this.bdjStill) {
+      // a re-read at the current position (an audio or subtitle switch, a level's restart) is no seek: the end of a
+      // still item reported stays reported. A BD-J still is let go (its release needs the playing state) and met again.
+      this.navEndReported = null;
+      this.releaseBdjStill();
+    }
     const t = Math.min(Math.max(0, targetUs), Math.max(0, s.timeline.durationUs - 1));
     if (marks !== 'keep') {
       const mpls = this.disc?.playlists.get(s.playlistId);
