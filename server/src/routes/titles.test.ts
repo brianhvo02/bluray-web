@@ -688,4 +688,30 @@ describe('final review', () => {
     expect((await send('PUT', '/api/admin/music/nope', t, { artist: 'x' })).status).toBe(404);
     expect((await send('PUT', `/api/admin/music/${encodeURIComponent(A.discId)}`, t, { artist: 'x' })).status).toBe(404);
   });
+
+  it('keeps artist and rejectMatch when a release is renamed, and when its name goes back to the folder', async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FC${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
+    await send('PUT', `/api/admin/music/${id}`, t, { artist: 'Aoi Hoshino', rejectMatch: true });
+    await send('PUT', `/api/admin/names/${id}`, t, { name: 'First Light Live' });
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: 'Aoi Hoshino', rejectMatch: true });
+    await send('PUT', `/api/admin/names/${id}`, t, { name: null });
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: null, artist: 'Aoi Hoshino', rejectMatch: true });
+  });
+
+  it('writes no empty music choice for a correction that carries nothing', async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FD${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { rejectMatch: false })).status).toBe(204);
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { artist: null })).status).toBe(204);
+    expect(owner.snapshot().choices.has(discs[0]!.discId)).toBe(false);
+  });
 });

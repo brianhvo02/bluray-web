@@ -484,6 +484,20 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
   return applyToGroup ? json(200, { skipped }) : { status: 204 };
 }
 
+/** The discs of a music release with the origin a new choice on each takes; a copy that follows its source is left out. */
+function musicReleaseDiscs(titles: TitleLibrary, library: Library, id: string): { discId: string; fingerprint: string | null; origin: 'group' | 'direct' }[] {
+  const byId = new Map(library.evidence().map((e) => [e.discId, e]));
+  const detail = titles.service.catalogue().detail(id);
+  const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
+  const out: { discId: string; fingerprint: string | null; origin: 'group' | 'direct' }[] = [];
+  for (const discId of discIds) {
+    const origin = titles.owner.choiceOrigin(discId);
+    if (origin?.kind === 'copy' && origin.source !== null) continue;
+    out.push({ discId, fingerprint: byId.get(discId)?.fingerprint ?? null, origin: origin?.kind === 'group' ? 'group' : 'direct' });
+  }
+  return out;
+}
+
 /** The owner's title routes (spec §9, §11), or null for another route. `id` is decoded. */
 async function titleAdminRoute(route: string, id: string | undefined, req: Parameters<Handler>[0], url: URL, library: Library, titles: TitleLibrary): Promise<Response | null> {
   const { service, owner } = titles;
@@ -514,15 +528,10 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       // a music title's id comes from its folder; the name is also kept in each disc's music choice, which follows the
       // disc when the folder moves (M8). A copy keeps following its source.
       if (music) {
-        const byId = new Map(library.evidence().map((e) => [e.discId, e]));
-        const detail = service.catalogue().detail(id!);
-        const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
-        for (const discId of discIds) {
-          const origin = owner.choiceOrigin(discId);
-          if (origin?.kind === 'copy' && origin.source !== null) continue;
-          const had = owner.snapshot().choices.get(discId);
+        for (const d of musicReleaseDiscs(titles, library, id!)) {
+          const had = owner.snapshot().choices.get(d.discId);
           if (value === null && had?.kind !== 'music') continue;
-          owner.setChoice(discId, byId.get(discId)?.fingerprint ?? null, { kind: 'music', name: value }, origin?.kind === 'group' ? 'group' : 'direct');
+          owner.setChoice(d.discId, d.fingerprint, { ...(had?.kind === 'music' ? had : {}), kind: 'music', name: value }, d.origin);
         }
       }
       rebuildAfter(titles, library);
@@ -535,19 +544,15 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       if (artist === undefined && body.artist !== undefined) throw new HttpError(400, 'bad music');
       if (body.rejectMatch !== undefined && typeof body.rejectMatch !== 'boolean') throw new HttpError(400, 'bad music');
       if (!service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own)) return json(404, { error: 'unknown id' });
-      // every disc of the release keeps its own name; only the fields sent change. A copy keeps following its source.
-      const byId = new Map(library.evidence().map((e) => [e.discId, e]));
-      const detail = service.catalogue().detail(id!);
-      const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
-      for (const discId of discIds) {
-        const origin = owner.choiceOrigin(discId);
-        if (origin?.kind === 'copy' && origin.source !== null) continue;
-        const had = owner.snapshot().choices.get(discId);
-        const prev = had?.kind === 'music' ? had : { kind: 'music' as const, name: null };
-        const keptArtist = artist !== undefined ? artist : prev.artist;
-        const reject = body.rejectMatch !== undefined ? body.rejectMatch : prev.rejectMatch;
-        const next: OwnerChoice = { kind: 'music', name: prev.name, ...(keptArtist !== undefined ? { artist: keptArtist } : {}), ...(reject === true ? { rejectMatch: true } : {}) };
-        owner.setChoice(discId, byId.get(discId)?.fingerprint ?? null, next, origin?.kind === 'group' ? 'group' : 'direct');
+      // every disc of the release keeps its own name; only the fields sent change
+      for (const d of musicReleaseDiscs(titles, library, id!)) {
+        const had = owner.snapshot().choices.get(d.discId);
+        const prev = had?.kind === 'music' ? had : null;
+        const keptArtist = artist !== undefined ? artist : prev?.artist;
+        const reject = body.rejectMatch !== undefined ? body.rejectMatch : prev?.rejectMatch;
+        if (prev === null && (keptArtist === undefined || keptArtist === null) && reject !== true) continue;
+        const next: OwnerChoice = { kind: 'music', name: prev?.name ?? null, ...(keptArtist !== undefined ? { artist: keptArtist } : {}), ...(reject === true ? { rejectMatch: true } : {}) };
+        owner.setChoice(d.discId, d.fingerprint, next, d.origin);
       }
       rebuildAfter(titles, library);
       return { status: 204 };
