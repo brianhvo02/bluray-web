@@ -65,10 +65,9 @@ export function busyMessage(levels: readonly LevelInfo[]): string | null {
   const reencoded = levels.filter((l) => l.level !== 'original');
   const original = levels.find((l) => l.level === 'original');
   const originalPlays = original ? original.available : true;
-  const busy = reencoded.filter((l) => l.reason === 'busy');
-  if (busy.length === 0) return null;
-  if (!originalPlays && original?.reason === 'unplayable' && busy.length === reencoded.length) return BUSY_TRY_LATER_COPY;
-  return originalPlays ? BUSY_COPY : null;
+  if (!reencoded.some((l) => l.reason === 'busy')) return null;
+  if (originalPlays) return BUSY_COPY;
+  return reencoded.some((l) => l.available) ? null : BUSY_TRY_LATER_COPY;
 }
 
 // Disc languages are ISO 639-2; a browser's are ISO 639-1 (private table, the repo has no helper).

@@ -61,6 +61,8 @@ describe('level model', () => {
     expect(BUSY_TRY_LATER_COPY).toBe('The NAS is busy. Try again in a few minutes.');
     expect(busyMessage([L('original', 0), L('h264-1080', 10, false, 'busy')])).toBe(BUSY_COPY);
     expect(busyMessage([L('original', 0, false, 'unplayable'), L('h264-1080', 10, false, 'busy'), L('phone-720', 4, false, 'busy')])).toBe(BUSY_TRY_LATER_COPY);
+    expect(busyMessage([L('original', 0, false, 'unplayable'), L('h264-1080', 10, false, 'busy'), L('hevc-1080', 7, false, 'no-hevc')])).toBe(BUSY_TRY_LATER_COPY);
+    expect(busyMessage([L('original', 0, false, 'no-encoder'), L('h264-1080', 10, false, 'busy'), L('phone-720', 4, false, 'busy')])).toBe(BUSY_TRY_LATER_COPY);
     expect(busyMessage(film)).toBeNull();
     expect(busyMessage(ORIGINAL_ONLY)).toBeNull();
   });
@@ -72,6 +74,15 @@ describe('level model', () => {
     expect(levelAudio(audio, { psr1: 9, language: 'en-US' })).toBe(2);
     expect(levelAudio(audio, { language: 'de' })).toBe(1);
     expect(levelAudio([{ language: 'GER' }, { language: 'eng' }], { language: 'de-DE' })).toBe(1);
+  });
+
+  it('an unavailable row with no reason says not available', () => {
+    const rows = levelRows([{ level: 'hevc-1080', label: 'x', budgetMbps: 7, available: false }], { durationS: 60, originalBytes: 1, connectionMbps: 10, quotaBytes: 1e9 });
+    expect(rows[0]!.note).toBe('not available');
+  });
+  it('autoLevel with nothing available returns original', () => {
+    expect(autoLevel([L('h264-1080', 10, false, 'busy')], { connectionMbps: 50, phone: false, originalMbps: 40 })).toBe('original');
+    expect(autoLevel([L('h264-1080', 10, false, 'busy')], { connectionMbps: 50, phone: true, originalMbps: 40 })).toBe('original');
   });
 
   it('badge names the level, and nothing for Original', () => {
