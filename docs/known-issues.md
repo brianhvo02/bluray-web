@@ -542,6 +542,15 @@ Fill in from `probe.html` on each device.
 - **Quality levels: a level switch during a BD-J time still restarts the still's timer.** The switch restarts the playlist session (`setLevel`), which lets the still go and meets it again, so a play-item time still lasts up to its `stillTime` longer; nothing hangs and Java sees no second report (HDMV programs are told once). Carrying the remaining time across the restart would remove it.
 - **Quality levels: the play route is pushed when the disc opens, not at the click.** At a level the pre-flight first fetches the level's manifest; a busy refusal then leaves the address bar where it was. Original opens push it after the session round trip, just before the open.
 
+- **Music shelf: a folder scan over 5 MB is skipped.** `titles/folder-cover.ts` takes no image over 5 MB and the NAS resizes nothing, so a release whose only scan is larger shows the Cover Art Archive or Discogs image, else the ♪ tile. *Revisit if* many releases fall back to ♪ for this reason.
+- **Music shelf: MusicBrainz knew about two thirds of the library's music by catalogue number** (43 of 67 when designed). The rest are named from their folders (grouped by artist name, kind from the folder hint) and the owner can set an artist by hand. Discogs (with `DISCOGS_TOKEN`) fills some of the gap. *Revisit if* the shelf has many name-only artists the owner has to fix.
+- **Music shelf: a rejected match lasts until the owner undoes it.** "Not this release" stores `rejectMatch` for the disc's group, so a later, better MusicBrainz or Discogs entry is never tried for it, and a rename keeps it. *Revisit if* owners reject matches they would want retried.
+- **Music shelf: a concert's name shows on its artist-page card, the release title elsewhere.** Recently added, search and the title page use the release title (`displayName`); the artist card shows `concertName` for a concert. *Revisit if* the two names confuse.
+- **Music shelf: library-wide search doesn't match a looked-up title.** Search reads the folder-derived names, so a release found by its looked-up title or artist name won't turn up by it. *Revisit if* owners search the shelf by artist.
+- **Music shelf: Various artists is not last in the 五十音 alphabet order.** It sorts by its name like any tile, among the Latin names. *Revisit if* it is hard to find.
+- **Music shelf: Back from a pre-flight opened on an artist page returns to the shelf,** not the artist page. *Revisit if* it annoys on a long grid.
+- **Music shelf: Set artist and Not this release close the artist page.** The release moves to another artist (or Various artists), so the page's own id may no longer exist; the app goes back to the shelf. *Revisit if* owners fix several releases of one artist in a row.
+
 ## Resolved (for reference)
 
 - **Resolved: the quality levels reached the UI (phase 2, 2026-10-22).** The pre-flight picks a level, the player's Quality menu switches it, and the owner's admin screen lists what the GPU is encoding.

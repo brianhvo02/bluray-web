@@ -1,6 +1,6 @@
 # Music shelf by artist: design
 
-Status: design approved in conversation 2026-10-22; not built.
+Status: built on branch feat/music-shelf 2026-10-22 (not yet deployed).
 
 ## 1. Why
 
