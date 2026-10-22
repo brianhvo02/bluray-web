@@ -538,6 +538,8 @@ Fill in from `probe.html` on each device.
 - **Quality levels: the level Audio menu doesn't honour the disc's `primaryAudioChange` UO mask.** A level audio switch reopens the disc, so it is not a stream change the mask can block.
 - **Quality levels: "phone" in the auto rule is a size, not a device type.** It means the constrained memory profile or a screen whose shorter side is under 600 CSS px (phones are 320-440; 1280x800 and 1440x900 laptops are not phones).
 - **Quality levels: the levels request waits up to 10 s,** then the pre-flight offers Original only.
+- **Quality levels: a level switch during a BD-J time still restarts the still's timer.** The switch restarts the playlist session (`setLevel`), which lets the still go and meets it again, so a play-item time still lasts up to its `stillTime` longer; nothing hangs and Java sees no second report (HDMV programs are told once). Carrying the remaining time across the restart would remove it.
+- **Quality levels: the play route is pushed when the disc opens, not at the click.** At a level the pre-flight first fetches the level's manifest; a busy refusal then leaves the address bar where it was. Original opens push it after the session round trip, just before the open.
 
 ## Resolved (for reference)
 
