@@ -25,6 +25,8 @@ export interface RemoteDiscSpec {
   readonly manifest: DiscManifest;
   /** Extra query parameters for every files request (without the '?'): `level=<id>&audio=<n>` for a quality level. */
   readonly query?: string;
+  /** The original version's manifest, for the BD-J worker, when `manifest` is a level's. */
+  readonly original?: DiscManifest;
   /**
    * Where the disc's requests go when they can't be fetched from this worker (the WebRTC route, whose connection lives
    * on the main thread): `portFetch` over it. It must be in the message's transfer list.

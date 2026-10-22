@@ -22,7 +22,7 @@ import { PlaybackStore } from '../../../server/src/playback-store';
 import { Store } from '../../../server/src/store';
 import type { CodeLookup, CodeRoutes, PlaceSettings, PlaybackPlace, StoredSubtitle } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
-import { NAS_MESSAGES, NasClient, NasLostError, PLACE_TIMEOUT_MS, defaultDeviceName, groupCodeInput } from './nas-client';
+import { NAS_MESSAGES, NasBusyError, NasClient, NasLostError, PLACE_TIMEOUT_MS, defaultDeviceName, groupCodeInput } from './nas-client';
 import type { NasClientDeps } from './nas-client';
 import type { NasPairing, NasStore } from './nas-store';
 
@@ -1231,5 +1231,61 @@ describe('NasClient subtitles', () => {
     await expect(nas.uploadSubtitleFile(stored.id, new File(['abc'], 'refused.srt'))).rejects.toMatchObject({ status: 403, code: 'forbidden' });
     expect(calls).toHaveLength(1);
     expect(calls[0].signal?.aborted).toBe(true);
+  });
+});
+
+describe('NasClient quality levels', () => {
+  const BUSY = 'The NAS is busy re-encoding for others. This will play at original quality.';
+  async function paired(answer: (route: string, method: string) => Response): Promise<{ nas: NasClient; routes: { method: string; route: string }[] }> {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await nas.session();
+    const routes: { method: string; route: string }[] = [];
+    server.nas = async (url, init) => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length) + url.search;
+      const method = init?.method ?? 'GET';
+      routes.push({ method, route });
+      return answer(route, method);
+    };
+    return { nas, routes };
+  }
+
+  it('levels asks with the device flags and audio, and answers null on 404', async () => {
+    const levels = [{ level: 'original', label: 'Original', budgetMbps: 30, available: true }];
+    let n = 0;
+    const { nas, routes } = await paired(() => (n++ === 0 ? Response.json({ levels }) : Response.json({ error: 'not-found' }, { status: 404 })));
+    expect(await nas.levels('d1', { hevc: true, hevc10: false, hdr: false, audio: 2 })).toEqual(levels);
+    expect(routes[0].route).toBe('discs/d1/levels?hevc=1&hevc10=0&hdr=0&audio=2');
+    expect(await nas.levels('d1', { hevc: false, hevc10: false, hdr: false, audio: 1 })).toBeNull();
+  });
+
+  it('manifest at a level asks with level and audio, and Original with neither', async () => {
+    const m = { discId: 'd1', name: 'Disc', files: [], inline: {} };
+    const { nas, routes } = await paired(() => Response.json(m));
+    await nas.manifest('d1', { level: 'phone-720', audio: 1 });
+    await nas.manifest('d1');
+    await nas.manifest('d1', { level: 'original', audio: 3 });
+    expect(routes.map((r) => r.route)).toEqual(['discs/d1/manifest?level=phone-720&audio=1', 'discs/d1/manifest', 'discs/d1/manifest']);
+  });
+
+  it('manifest throws NasBusyError with the NAS message on 503 busy', async () => {
+    const { nas } = await paired(() => Response.json({ error: 'busy', message: BUSY }, { status: 503 }));
+    const err = await nas.manifest('d1', { level: 'h264-1080', audio: 1 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NasBusyError);
+    expect(err).toMatchObject({ name: 'NasBusyError', message: BUSY });
+  });
+
+  it('releaseViewing sends DELETE viewing and swallows errors', async () => {
+    let status = 204;
+    const { nas, routes } = await paired(() => new Response(null, { status }));
+    await nas.releaseViewing('d1', { level: 'h264-1080', audio: 3 });
+    status = 500;
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(nas.releaseViewing('d1', { level: 'h264-1080', audio: 3 })).resolves.toBeUndefined();
+    expect(routes).toEqual([
+      { method: 'DELETE', route: 'discs/d1/viewing?level=h264-1080&audio=3' },
+      { method: 'DELETE', route: 'discs/d1/viewing?level=h264-1080&audio=3' },
+    ]);
   });
 });

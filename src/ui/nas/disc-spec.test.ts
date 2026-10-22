@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { portFetch } from '../../engine/disc/port-fetch';
-import { nasDiscSpec } from './disc-spec';
+import { levelQuery, nasDiscSpec } from './disc-spec';
 
 const manifest = { discId: 'd1', name: 'Disc', files: [], inline: {} };
 
@@ -24,5 +24,20 @@ describe('nasDiscSpec', () => {
     expect(new Headers(discFetch.mock.calls[0]![1]!.headers).get('Range')).toBe('bytes=0-3');
     release();
     spec.fetchPort!.close();
+  });
+});
+
+describe('levelQuery', () => {
+  it('a level spec carries the level query and the original manifest; Original carries neither', () => {
+    expect(levelQuery({ level: 'phone-720', audio: 2 })).toBe('level=phone-720&audio=2');
+    expect(levelQuery({ level: 'original', audio: 2 })).toBeUndefined();
+    expect(levelQuery(undefined)).toBeUndefined();
+    const original = { discId: 'd1', name: 'Disc', files: [], inline: {} };
+    const lv = { ...manifest, name: 'Level' };
+    const { spec } = nasDiscSpec('https://nas.example/bluray/api/discs/d1/', 't', lv, vi.fn<typeof fetch>(), { at: { level: 'phone-720', audio: 2 }, original });
+    expect(spec).toMatchObject({ query: 'level=phone-720&audio=2', original });
+    const plain = nasDiscSpec('https://nas.example/bluray/api/discs/d1/', 't', manifest, vi.fn<typeof fetch>(), { at: { level: 'original', audio: 2 }, original });
+    expect(plain.spec).not.toHaveProperty('query');
+    expect(plain.spec).not.toHaveProperty('original');
   });
 });

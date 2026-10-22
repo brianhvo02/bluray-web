@@ -1,11 +1,11 @@
 import type { spawn as nodeSpawn } from 'node:child_process';
-import type { DiscManifest } from '../../../src/engine/disc/nas-api';
+import type { DiscManifest, LevelId, LevelInfo, LevelReason } from '../../../src/engine/disc/nas-api';
 import type { Capacity, EncoderCodec } from './capacity';
 import { ClipRunner, RetryLater, realClock, type Clock } from './clip-run';
 import type { ClipInput, EncoderBackend, ScanInfo } from './encoder';
 import type { LevelDiscSource } from './level-discs';
 import { audioBpsOf, buildVersion, fpsOf, loadDisc, type ClipVersion, type DiscInfo, type EncodedLevel, type Version } from './level-version';
-import { SOURCE_PACKET_BYTES, keptAudioFor, levelDefFor, levelsFor, planClip, type IntervalPlan, type LevelId, type PlanTuning } from './levels';
+import { SOURCE_PACKET_BYTES, keptAudioFor, levelDefFor, levelsFor, planClip, type IntervalPlan, type PlanTuning } from './levels';
 import type { SegmentCache } from './segment-cache';
 
 export { firstAudioBps, folderDiscSource, isoDiscSource, libraryDiscSources, type ClipSource, type LevelDiscSource } from './level-discs';
@@ -22,17 +22,7 @@ export const ENCODER_IDLE_MS = 60_000;
 const DISC_INFOS = 16;
 const VERSIONS = 32;
 
-/** Why a level isn't available: `no-encoder` when the NAS's encoder for its codec failed its self-test (or has none). */
-export type LevelReason = 'unplayable' | 'no-encoder' | 'no-hevc' | 'no-hevc10' | 'no-hdr-display' | 'busy';
-
-export interface LevelInfo {
-  readonly level: LevelId;
-  readonly label: string;
-  /** The rate the level travels at (its byte budget over the main clip's film, padding included), Mbps to 0.1. */
-  readonly budgetMbps: number;
-  readonly available: boolean;
-  readonly reason?: LevelReason;
-}
+export type { LevelInfo, LevelReason };
 
 const LABELS: Readonly<Record<LevelId, string>> = {
   original: 'Original',

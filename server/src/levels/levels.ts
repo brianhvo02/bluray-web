@@ -1,9 +1,9 @@
 import type { Clpi, EpMap } from '../../../src/engine/bdmv/clpi-parser';
 import type { PlayItem } from '../../../src/engine/bdmv/mpls-parser';
+import type { LevelId } from '../../../src/engine/disc/nas-api';
 import { CodingType, isVideoCoding } from '../../../src/engine/bdmv/stream-types';
 
-/** The quality levels a disc can be served at; `original` is the disc's own bytes. */
-export type LevelId = 'original' | 'h264-1080' | 'phone-720' | 'hevc-1080' | 'hevc-1080-hdr' | 'h264-1080-sdr';
+export type { LevelId };
 
 export interface LevelDef {
   readonly id: Exclude<LevelId, 'original'>;

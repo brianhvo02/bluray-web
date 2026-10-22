@@ -160,3 +160,25 @@ export interface StoredSubtitle {
   /** Set by the route: false when the attachment's disc or playlist no longer resolves (owners only see these). */
   readonly attached?: boolean;
 }
+
+/** The quality levels a disc can be served at; `original` is the disc's own bytes. */
+export type LevelId = 'original' | 'h264-1080' | 'phone-720' | 'hevc-1080' | 'hevc-1080-hdr' | 'h264-1080-sdr';
+
+/** Why a level isn't available: `no-encoder` when the NAS's encoder for its codec failed its self-test (or has none). */
+export type LevelReason = 'unplayable' | 'no-encoder' | 'no-hevc' | 'no-hevc10' | 'no-hdr-display' | 'busy';
+
+/** One entry of `GET discs/<id>/levels`. */
+export interface LevelInfo {
+  readonly level: LevelId;
+  readonly label: string;
+  /** The rate the level travels at (its byte budget over the main clip's film, padding included), Mbps to 0.1. */
+  readonly budgetMbps: number;
+  readonly available: boolean;
+  readonly reason?: LevelReason;
+}
+
+/** A version of a disc: a level with the audio stream it keeps (`audio` is 1-based, as PSR1). */
+export interface LevelAt {
+  readonly level: LevelId;
+  readonly audio: number;
+}

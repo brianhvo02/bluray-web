@@ -1,4 +1,4 @@
-import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, FolderEntry, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
+import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, FolderEntry, LevelAt, LevelInfo, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 import { codeHashOf, isNasId, turnProofMessage } from '../../../rendezvous/src/protocol';
@@ -39,6 +39,11 @@ export class NasHttpError extends Error {
   ) {
     super(`The NAS answered ${status}${code ? ` (${code})` : ''}.`);
   }
+}
+
+/** The NAS has no GPU room for a level's viewing; `message` is its own words for the person. */
+export class NasBusyError extends Error {
+  override readonly name = 'NasBusyError';
 }
 
 export interface NasSession {
@@ -608,8 +613,35 @@ export class NasClient {
     return ((await res.json()) as { disc: DiscEntry }).disc;
   }
 
-  async manifest(discId: string): Promise<DiscManifest> {
-    return (await this.json(`${discPath(discId)}manifest`)) as DiscManifest;
+  /** The disc's manifest, at a level when `at` names one besides Original; a busy GPU throws NasBusyError. */
+  async manifest(discId: string, at?: LevelAt): Promise<DiscManifest> {
+    const query = at && at.level !== 'original' ? `?level=${at.level}&audio=${at.audio}` : '';
+    const res = await this.authed(`${discPath(discId)}manifest${query}`);
+    if (res.status === 503) {
+      const body = (await res.clone().json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
+      if (body?.error === 'busy') throw new NasBusyError(typeof body.message === 'string' ? body.message : 'The NAS is busy.');
+    }
+    if (!res.ok) throw await httpError(res);
+    return (await res.json()) as DiscManifest;
+  }
+
+  /** The levels this disc is offered at for this device (`audio` is 1-based); null when the NAS has no encoder or doesn't know. */
+  async levels(discId: string, q: { hevc: boolean; hevc10: boolean; hdr: boolean; audio: number }): Promise<LevelInfo[] | null> {
+    const flag = (b: boolean): string => (b ? '1' : '0');
+    const res = await this.authed(`${discPath(discId)}levels?hevc=${flag(q.hevc)}&hevc10=${flag(q.hevc10)}&hdr=${flag(q.hdr)}&audio=${q.audio}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw await httpError(res);
+    return ((await res.json()) as { levels: LevelInfo[] }).levels;
+  }
+
+  /** Gives the viewing's GPU lease back; the lease also lapses by itself, so a failure is only logged. */
+  async releaseViewing(discId: string, at: LevelAt): Promise<void> {
+    try {
+      const res = await this.authed(`${discPath(discId)}viewing?level=${at.level}&audio=${at.audio}`, { method: 'DELETE' });
+      if (!res.ok) console.warn(`The NAS refused to release the viewing (${res.status}).`);
+    } catch (err) {
+      console.warn('Could not release the viewing.', err);
+    }
   }
 
   /** Throughput of reading the probe (the first 4 MiB of the disc's largest clip), in megabits per second. */
