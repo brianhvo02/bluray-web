@@ -3,7 +3,7 @@ import { LockHeldError } from '../atomic-json';
 import type { Auth } from '../auth';
 import { parseScope, StoreError } from '../bdj-store';
 import type { BdjStore } from '../bdj-store';
-import { HttpError, json } from '../http';
+import { json, readBody } from '../http';
 import type { Handler, Response } from '../http';
 import { requestDevice } from './titles';
 
@@ -13,6 +13,16 @@ const CLOSE = { Connection: 'close' };
 
 const quota = (limit: 'scope' | 'person', headers: Record<string, string> = {}): Response => json(507, { error: 'quota', limit }, headers);
 const precondition = (): Response => json(412, { error: 'precondition-failed' });
+const personChanged = (headers: Record<string, string> = {}): Response => json(409, { error: 'person-changed' }, headers);
+
+/**
+ * `X-Bdj-Person`: the person the client means to write for. Null when absent (no check). A device moved to another
+ * person between the client's `GET me` and its write is refused instead of landing one person's saves in another's.
+ */
+function expectedPerson(req: IncomingMessage): string | null {
+  const raw = req.headers['x-bdj-person'];
+  return typeof raw === 'string' ? raw.trim() : null;
+}
 
 /** `If-Match`: `*`, or one quoted etag (its bare value); null when absent; undefined when malformed. */
 function ifMatch(req: IncomingMessage): string | null | undefined {
@@ -21,61 +31,6 @@ function ifMatch(req: IncomingMessage): string | null | undefined {
   if (raw === '*') return '*';
   const m = /^"([^"]+)"$/.exec(raw);
   return m ? m[1]! : undefined;
-}
-
-/** After refusing a body, how far past the limit it is read and dropped, and for how long, so the client sees the 507. */
-const DRAIN_BYTES = 8 * 1024 * 1024;
-const DRAIN_MS = 2_000;
-
-/**
- * The body, or null once it passes `limit` bytes (declared or streamed). A refused body is never kept: it is read
- * and dropped until it ends, passes the limit by 8 MB or 2 s go by, whichever comes first, because closing the
- * connection on unread bytes would reset it before the client reads the answer. A 400 if the client goes.
- */
-function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let refused = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const done = (): void => {
-      clearTimeout(timer);
-      req.off('data', onData);
-      req.off('end', onEnd);
-      req.off('error', gone);
-      req.off('close', gone);
-    };
-    const refuse = (): void => {
-      refused = true;
-      chunks.length = 0;
-      timer = setTimeout(stopDraining, DRAIN_MS);
-    };
-    const stopDraining = (): void => {
-      done();
-      req.pause();
-      resolve(null);
-    };
-    const onData = (chunk: Buffer): void => {
-      size += chunk.length;
-      if (!refused && size > limit) refuse();
-      if (!refused) chunks.push(chunk);
-      else if (size > limit + DRAIN_BYTES) stopDraining();
-    };
-    const onEnd = (): void => {
-      done();
-      resolve(refused ? null : Buffer.concat(chunks));
-    };
-    // a client gone mid-upload (a page closing) is not a server fault: no answer reaches it, and nothing is logged
-    const gone = (): void => {
-      done();
-      reject(new HttpError(400, 'request ended early'));
-    };
-    req.on('data', onData);
-    req.on('end', onEnd);
-    req.on('error', gone);
-    req.on('close', gone);
-    if (Number(req.headers['content-length'] ?? 0) > limit) refuse();
-  });
 }
 
 /** A StoreError as its answer (spec §5); anything else is rethrown. */
@@ -112,6 +67,8 @@ export function bdjStoreRoutes(auth: Auth, store: BdjStore): Handler {
     const scope = parseScope(path.slice(PREFIX.length));
     if (scope === null) return json(400, { error: 'bad-scope' }, method === 'PUT' ? CLOSE : {});
     const person = device.personId;
+    const expected = method === 'GET' ? null : expectedPerson(req);
+    if (expected !== null && expected !== person) return personChanged(method === 'PUT' ? CLOSE : {});
 
     if (method === 'GET') {
       const { etag, body } = store.get(person, scope);
@@ -148,6 +105,8 @@ export function bdjStoreRoutes(auth: Auth, store: BdjStore): Handler {
     if (match === null && !noneMatch) return json(428, { error: 'precondition-required' }, CLOSE);
     const body = await readBody(req, store.scopeLimit);
     if (body === null) return quota('scope', CLOSE);
+    // the device may have moved while the body arrived: from here to the write nothing yields
+    if (expected !== null && requestDevice(auth, req.headers.authorization, url)?.personId !== expected) return personChanged();
     let cond: { ifMatch?: string; ifNoneMatch?: boolean };
     if (match !== null) {
       const etag = resolve(match);

@@ -14,7 +14,7 @@ const MEDIA_FIELDS = `
   episodes
   duration
   startDate { year month day }
-  coverImage { medium large }
+  coverImage { large extraLarge }
   bannerImage
   relations { edges { relationType node { id format startDate { year month day } } } }
 `;
@@ -44,7 +44,7 @@ interface Media {
   readonly episodes?: number | null;
   readonly duration?: number | null;
   readonly startDate?: FuzzyDate | null;
-  readonly coverImage?: { readonly medium?: string | null; readonly large?: string | null } | null;
+  readonly coverImage?: { readonly large?: string | null; readonly extraLarge?: string | null } | null;
   readonly bannerImage?: string | null;
   readonly relations?: { readonly edges?: readonly { readonly relationType?: string | null; readonly node?: { readonly id: number; readonly format?: string | null; readonly startDate?: FuzzyDate | null } | null }[] | null } | null;
 }
@@ -69,7 +69,7 @@ function toEntry(m: Media): Entry {
     relations: (m.relations?.edges ?? []).flatMap((e) =>
       e.node && e.relationType ? [{ type: e.relationType, id: `anilist:${e.node.id}`, format: e.node.format ?? null, startDate: fuzzyDateInt(e.node.startDate) }] : [],
     ),
-    poster: cover?.medium && cover.large ? { small: cover.medium, large: cover.large } : null,
+    poster: cover?.large && cover.extraLarge ? { small: cover.large, large: cover.extraLarge } : null,
     banner: m.bannerImage ?? null,
   };
 }

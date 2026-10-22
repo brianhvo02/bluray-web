@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
+import type { StoredSubtitle } from '../engine/disc/nas-api';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { SubtitleChoice } from '../engine/protocol';
@@ -12,6 +13,13 @@ const SCALE_STEP = 0.1;
 const MASKED_TOOLTIP = "The disc doesn't allow this here";
 const PICK_ACCEPT = [...SUBTITLE_EXTENSIONS, ...FONT_EXTENSIONS].join(',');
 
+/** The subtitles stored on the NAS for the playing playlist, and the one picked (null: none, or a local pick since). */
+export interface StoredSubtitles {
+  readonly items: readonly StoredSubtitle[];
+  readonly activeId: string | null;
+  onPick(s: StoredSubtitle): void;
+}
+
 interface SubtitleMenuProps {
   readonly subtitles: SubtitlesState | null;
   /** The disc's UO mask: picks it does not allow here are disabled with a tooltip. */
@@ -21,6 +29,8 @@ interface SubtitleMenuProps {
   readonly nowUs: number;
   /** Index of the set's file showing now, or null. */
   readonly showingFile: number | null;
+  /** A NAS disc's stored subtitles ("From the NAS"); null for other discs. */
+  readonly stored?: StoredSubtitles | null;
   onSelect(choice: SubtitleChoice): void;
   onLoadFiles(files: readonly File[]): void;
   onAddFonts(files: readonly File[]): void;
@@ -36,7 +46,7 @@ interface SubtitleMenuProps {
  * Disc PG tracks, the user's subtitle files (each placed at an episode start, with its own timing), size, fonts,
  * Off, and loading files. Keyboard handling as AudioMenu.
  */
-export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, isMasked, onSelect, onLoadFiles, onAddFonts, onShift, onStart, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
+export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored = null, isMasked, onSelect, onLoadFiles, onAddFonts, onShift, onStart, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -220,6 +230,29 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, isMasked
               </button>
             </li>
           )}
+          {stored && stored.items.length > 0 && (
+            <li role="presentation" className="subtitle-group" data-testid="subtitle-stored">
+              From the NAS
+            </li>
+          )}
+          {stored?.items.map((s) => (
+            <li key={s.id} role="none">
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={stored.activeId === s.id}
+                data-testid={`subtitle-stored-${s.id}`}
+                disabled={offMasked}
+                title={offMasked ? MASKED_TOOLTIP : undefined}
+                onClick={() => {
+                  close(true);
+                  stored.onPick(s);
+                }}
+              >
+                {s.name} · {languageName(s.language) || s.language}
+              </button>
+            </li>
+          ))}
           <li role="none">
             <button type="button" role="menuitem" data-testid="subtitle-load" onClick={() => { close(false); fileRef.current?.click(); }}>
               Load subtitle files…

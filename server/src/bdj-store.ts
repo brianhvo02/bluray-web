@@ -12,7 +12,7 @@ export const PERSON_LIMIT_BYTES = 256 * 1024 * 1024;
 
 const SCOPE_RE = /^(?:persistent\/[0-9a-f]{8}|buda\/[0-9a-f]{8}(?:\/[0-9a-f]{32})?)$/;
 const STALE_TEMP_MS = 60 * 60_000;
-const PERSON_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const PERSON_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type StoreErrorCode = 'precondition' | 'quota-scope' | 'quota-person' | 'bad-archive';
 

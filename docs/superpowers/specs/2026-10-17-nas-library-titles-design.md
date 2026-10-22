@@ -67,7 +67,7 @@ Goals:
 
 Non-goals:
 - Renaming or moving files or folders on the drives. The server stays read-only on the library mounts.
-- Watch history, "continue watching", ratings, user lists, AniList account sync.
+- Ratings, user lists, AniList account sync. (Watch history, Continue watching and Up next were a non-goal here and are now in, per `docs/superpowers/specs/2026-10-20-permalinks-resume-design.md`.)
 - DVD ISOs (the player is Blu-ray only, and the scan already skips them).
 - Bulk use of Blu-ray.com. Only a per-disc "look it up" link is in scope.
 - Matching from video content (fingerprinting frames or audio).

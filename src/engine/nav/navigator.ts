@@ -10,6 +10,7 @@
  */
 
 import type { IndexObject } from '../bdmv/index-parser';
+import { BranchSub, InsnGroup, PlayOpt, type MovieObject } from '../bdmv/mobj-parser';
 import type { Mpls, StreamEntry } from '../bdmv/mpls-parser';
 import type { DiscModel } from '../disc/open-disc';
 import { BdVk, GraphicsController, GcStatus, type GcCtrl as GraphicsCtrl } from '../graphics/graphics-controller';
@@ -86,6 +87,7 @@ const HDMV_MENU_CALL_MASK = 1;
 const HDMV_TITLE_SEARCH_MASK = 2;
 const INDEX_ID_NONE = 0xffff;
 const NO_PLAYLIST = 0xffff;
+const PSR_REG_FLAG = 0x80000000;
 
 /** gc_ctrl_e values the navigator sends to the graphics controller. */
 type GcCtrl = 'INIT_MENU' | 'ENABLE_BUTTON' | 'DISABLE_BUTTON' | 'SET_BUTTON_PAGE' | 'POPUP' | 'IG_END' | 'NOP' | 'VK_KEY' | 'MOUSE_MOVE';
@@ -262,6 +264,57 @@ export class Navigator {
     }
     this.runVm();
     return true;
+  }
+
+  /**
+   * Not in libbluray: resume an HDMV title at a saved place. Sets the title up as startTitle() does, but instead of
+   * running its movie object from the start, finds the object's first PLAY_PL, PLAY_PL_PI or PLAY_PL_PM that plays
+   * `playlist` (an immediate operand, or a register that holds it now), leaves the VM as if it had just executed that
+   * command and opens the playlist at `at`; at its end the program continues after that command. A missing playlist
+   * resumes the program at once, as a PLAY_PL of a missing playlist does. Returns false, changing nothing, when the title
+   * is not an HDMV title or its object never plays `playlist`.
+   */
+  resumeTitle(title: number, playlist: number, at: PlayAt): boolean {
+    const { movieObjects } = this.deps.disc;
+    const object = indexObjectOf(this.deps.disc, title);
+    if (!movieObjects || object?.kind !== 'hdmv') return false;
+    const mobj = movieObjects.objects[object.movieObjectId];
+    const pc = mobj ? this.findPlayPl(mobj, playlist) : -1;
+    if (pc < 0) return false;
+
+    this.dropVm();
+    this.titleType = 'hdmv';
+    this.deps.regs.psrWrite(PSR.TITLE_NUMBER, title); // 5.2.3.3, as _play_title
+    this.deps.emit({ type: 'title', title });
+    const vm = this.createVm();
+    vm.resumeInto(object.movieObjectId, pc);
+    this.hdmvSuspended = true;
+    this.updateHdmvUoMask();
+    this.openPlaylist(playlist, at, (ok) => {
+      if (!ok && this.vm) {
+        this.vm.resume();
+        this.hdmvSuspended = !this.vm.running();
+        this.runVm();
+        return;
+      }
+      this.initMenu();
+    });
+    return true;
+  }
+
+  /** The pc of the first PLAY_PL* in `mobj` whose playlist operand is `playlist` now, or -1. */
+  private findPlayPl(mobj: MovieObject, playlist: number): number {
+    const regs = this.deps.regs;
+    return mobj.cmds.findIndex(({ insn, dst }) => {
+      if (insn.grp !== InsnGroup.BRANCH || insn.subGrp !== BranchSub.PLAY) return false;
+      if (insn.branchOpt !== PlayOpt.PLAY_PL && insn.branchOpt !== PlayOpt.PLAY_PL_PI && insn.branchOpt !== PlayOpt.PLAY_PL_PM) return false;
+      if (insn.opCnt < 1) return false;
+      let value: number;
+      if (insn.immOp1) value = dst >>> 0;
+      else if (dst & PSR_REG_FLAG) value = (dst & ~0x8000007f) === 0 ? regs.psrRead(dst & 0x7f) : 0; // _read_reg
+      else value = (dst & ~0xfff) === 0 ? regs.gprRead(dst) : 0;
+      return value === playlist;
+    });
   }
 
   /** bd_menu_call (_try_menu_call) */
@@ -455,6 +508,18 @@ export class Navigator {
   /** _play_hdmv */
   private playHdmv(id: number): boolean {
     this.titleType = 'hdmv';
+    const vm = this.createVm();
+    const ok = vm.selectObject(id) === 0;
+    this.hdmvSuspended = !vm.running();
+    if (!ok) {
+      this.titleType = 'undef';
+      this.fail(`Cannot start movie object ${id}`);
+    }
+    return ok;
+  }
+
+  /** The VM, created on first use (hdmv_vm_init in _play_hdmv). */
+  private createVm(): HdmvVm {
     if (!this.vm) {
       const { index, movieObjects } = this.deps.disc;
       this.vm = new HdmvVm(movieObjects!, this.deps.regs, {
@@ -464,13 +529,7 @@ export class Navigator {
         seed: this.deps.seed,
       });
     }
-    const ok = this.vm.selectObject(id) === 0;
-    this.hdmvSuspended = !this.vm.running();
-    if (!ok) {
-      this.titleType = 'undef';
-      this.fail(`Cannot start movie object ${id}`);
-    }
-    return ok;
+    return this.vm;
   }
 
   private fail(message: string): void {

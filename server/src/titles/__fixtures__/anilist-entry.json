@@ -9,8 +9,8 @@
       "duration": 105,
       "startDate": { "year": 2022, "month": 8, "day": 19 },
       "coverImage": {
-        "medium": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/small/bx990000-MnOpQr.jpg",
-        "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx990000-MnOpQr.jpg"
+        "large": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx990000-MnOpQr.jpg",
+        "extraLarge": "https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx990000-MnOpQr.jpg"
       },
       "bannerImage": null,
       "relations": {

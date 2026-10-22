@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, NAS_SERVER_KEY, OWNER_SERIES, PROJECTS, RENDEZVOUS_URL, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
+import { discKeyOf } from '../../src/engine/disc/disc-key';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
 import { telemetry } from './telemetry';
@@ -10,6 +12,8 @@ import { telemetry } from './telemetry';
 // The NAS is tests/e2e/nas-server.ts: the built server over a copy of fixtures/synthetic (root `syn`, whose discs the
 // library's top level lists), and the rendezvous Worker that turns a code into the server's address. Its title
 // library matches made-up titles from tests/e2e/fixtures/nas-metadata.json against copies of synthetic discs.
+
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 const sleep = (ms: number): void => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
@@ -59,14 +63,28 @@ const post = async (path: string, body: unknown): Promise<unknown> => {
   return res.json();
 };
 
-let apiSession: Promise<string> | null = null;
+/**
+ * The owner person the running project's tests pair as: one per browser project, since the projects run at once against
+ * one server and each person's places (and so the resume prompt) are their own.
+ */
+const projectOwner = (): string => `Owner ${test.info().project.name}`;
+
+const apiSessions = new Map<string, Promise<string>>();
 /**
  * A session token of an owner device this test worker pairs for itself (`E2E API`), as the app does: redeem an owner
  * code with a new P-256 key, then sign the NAS's challenge. Kept for the worker's run (sessions last an hour).
  */
 function apiToken(): Promise<string> {
-  apiSession ??= (async () => {
-    const code = normalizeCode(ownerCode())!;
+  const person = projectOwner();
+  let session = apiSessions.get(person);
+  if (!session) apiSessions.set(person, (session = sessionFor(ownerCode(person))));
+  return session;
+}
+
+/** Pairs a device (`E2E API`) with `code` through the API and returns its session token. */
+function sessionFor(rawCode: string): Promise<string> {
+  return (async () => {
+    const code = normalizeCode(rawCode)!;
     const key = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
     const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', key.publicKey);
     const { deviceId } = (await post('pair/redeem', { code, deviceName: 'E2E API', publicKeyJwk: { kty, crv, x, y } })) as { deviceId: string };
@@ -75,7 +93,6 @@ function apiToken(): Promise<string> {
     const { token } = (await post('session', { deviceId, challenge, signature })) as { token: string };
     return token;
   })();
-  return apiSession;
 }
 
 /** An owner route of the NAS API, as the owner device. */
@@ -113,8 +130,8 @@ async function libraryReady(): Promise<void> {
  * The rendezvous service holds at most 5 live codes per NAS and a run mints about 20 within its 10 minutes, so each
  * code is registered under a new NAS key (the server makes one when its key file is gone).
  */
-function ownerCode(): string {
-  return mintOwnerCode(() => rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true }));
+function ownerCode(person: string = projectOwner()): string {
+  return mintOwnerCode(() => rmSync(join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json'), { force: true }), person);
 }
 
 /**
@@ -122,13 +139,14 @@ function ownerCode(): string {
  * (its NAS id, whose signalling socket is open), put back in place of the last code's.
  */
 function serverOwnerCode(): string {
-  return mintOwnerCode(() => copyFileSync(NAS_SERVER_KEY, join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json')));
+  return mintOwnerCode(() => copyFileSync(NAS_SERVER_KEY, join(NAS_ENV.DATA_DIR!, 'rendezvous-key.json')), projectOwner());
 }
 
-function mintOwnerCode(prepareKey: () => void): string {
+/** For the owner person `person`, made when there is none. */
+function mintOwnerCode(prepareKey: () => void, person: string): string {
   const out = exclusively(() => {
     prepareKey();
-    return execFileSync(process.execPath, [SERVER, 'owner-code'], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
+    return execFileSync(process.execPath, [SERVER, 'owner-code', '--person', person], { env: { ...process.env, ...NAS_ENV }, encoding: 'utf8' });
   });
   expect(out).toContain('Rendezvous: registered');
   return /Owner pairing code: ([0-9A-Z-]+)/.exec(out)![1]!;
@@ -172,19 +190,20 @@ async function allowLocalNetwork(page: Page, browserName: string): Promise<void>
   if (browserName === 'chromium') await page.context().grantPermissions(['local-network-access']);
 }
 
-async function pairByLink(page: Page): Promise<void> {
-  const code = ownerCode();
-  await page.goto(`/?pair=${code}&telemetry=1`);
+/** `query`: more of the app's flags (`&placemin=1`), read as it loads. */
+async function pairByLink(page: Page, query = '', code = ownerCode()): Promise<void> {
+  await page.goto(`/?pair=${code}&telemetry=1${query}`);
   await expect(page.getByTestId('pair-code')).toHaveValue(code);
   await page.getByTestId('pair-button').click();
   await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
 }
 
 /** Pairs, then opens the title library (an owner always has it). */
-async function openTitles(page: Page, browserName: string): Promise<void> {
+/** `code`: pairs as that code's person (by default the project's owner person). */
+async function openTitles(page: Page, browserName: string, query = '', code?: string): Promise<void> {
   await libraryReady();
   await allowLocalNetwork(page, browserName);
-  await pairByLink(page);
+  await pairByLink(page, query, code);
   await page.getByTestId('nas-open').click();
   await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
 }
@@ -206,6 +225,17 @@ async function playFromNas(page: Page, name: string): Promise<void> {
 }
 
 const playerState = (page: Page) => page.getByTestId('player');
+
+/**
+ * A project's tests play as its owner person, one after another, and a place one leaves unfinished would bring up the
+ * resume prompt in place of Play in the next: each test starts with none (this project's person's only).
+ */
+test.beforeEach(async () => {
+  const res = await ownerApi('me/playback');
+  if (!res.ok) return;
+  const keys = new Set(((await res.json()) as { kind: string; discKey: string }[]).filter((i) => i.kind === 'resume').map((i) => i.discKey));
+  for (const key of keys) await ownerApi(`me/playback/${encodeURIComponent(key)}`, { method: 'DELETE' });
+});
 
 test('pairs from a ?pair= link with an owner code', async ({ page, browserName }) => {
   await allowLocalNetwork(page, browserName);
@@ -323,9 +353,12 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   await expect(page.getByTestId('relay-badge')).toContainText('Relayed'); // ?rtcrelayed=1 makes the connection count as relayed
   expect(await channelBytes(page)).toBeGreaterThan(1_000_000); // most of disc1's first 1.3 MB clip, over the channel
 
-  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once.
+  // A new page load: the pairing has no HTTPS base, so it connects over WebRTC at once. The address bar kept the play
+  // link, so the load opens the disc's pre-flight (resolved over the channel); its Back returns to the folder browser.
   await page.reload();
-  await browse();
+  await expect(page.getByTestId('nas-preflight')).toBeVisible({ timeout: 30_000 });
+  await page.getByTestId('nas-preflight').getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 30_000 });
   await playFromNas(page, 'disc-bdj');
   await page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 45_000 });
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
@@ -448,10 +481,17 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
         // A guest: the listing is up, and there is no way into the settings.
         await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
         await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
+        // The guest's folders are in the address bar too: a folder, then the browser's Back, is the top again.
+        expect(new URL(mika.url()).pathname).toBe('/nas/folders');
+        await mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+        await expect(mika.getByTestId('nas-crumbs')).not.toHaveText('NAS');
+        await mika.goBack();
+        await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
+        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
 
         // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
         await setGate('everyone');
-        await mika.reload();
+        await mika.goto('/');
         await mika.getByTestId('nas-open').click();
         await expect(mika.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
         await expect(mika.locator('[data-testid="title-shelf"][data-shelf="series"]')).toBeVisible();
@@ -636,6 +676,42 @@ test("an episode whose playlist isn't on its disc opens the disc normally, with 
   await expect(page.getByTestId('error')).toHaveCount(0);
 });
 
+test('on a phone the header is compact, and the alphabet bars sit clear of the list and answer a tap', async ({ browser, browserName }) => {
+  // a touch phone's layout: coarse pointer, so every button gets its 44 px minimum
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, ...(browserName === 'firefox' ? {} : { isMobile: true }) });
+  try {
+    const page = await phone.newPage();
+    await openTitles(page, browserName);
+    const left = page.getByTestId('alphabet-rail-left');
+    const right = page.getByTestId('alphabet-rail-right');
+    const list = page.locator('.titles-body');
+    await expect(left).toBeVisible();
+    const [l, r, body] = await Promise.all([left.boundingBox(), right.boundingBox(), list.boundingBox()]);
+    // each bar's keys stay inside it, and the bars keep their distance from the list
+    for (const [rail, box] of [[left, l!], [right, r!]] as const) {
+      const key = await rail.locator('[data-rail-key]').first().boundingBox();
+      expect(key!.x).toBeGreaterThanOrEqual(box.x - 0.5);
+      expect(key!.x + key!.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
+    }
+    expect(body!.x - (l!.x + l!.width)).toBeGreaterThanOrEqual(8);
+    expect(r!.x - (body!.x + body!.width)).toBeGreaterThanOrEqual(8);
+    expect(r!.x + r!.width).toBeLessThanOrEqual(390);
+    // the pinned header stays compact: heading, search and one row of shelves that swipes sideways
+    const header = (await page.getByTestId('titles-sticky').boundingBox())!;
+    expect(header.height).toBeLessThanOrEqual(170);
+    const shelves = await page.locator('.title-shelves [data-testid="title-shelf"]').evaluateAll((chips) => new Set(chips.map((c) => Math.round(c.getBoundingClientRect().top))).size);
+    expect(shelves).toBe(1);
+    // Starfall Wanderer reads ほしふり: a tap on は re-sorts by reading, a tap on S back to A–Z
+    const heading = page.locator('.title-section', { hasText: /^Series / });
+    await right.locator('[data-rail-key="は"]').tap();
+    await expect(heading).toHaveText('Series 五十音順');
+    await left.locator('[data-rail-key="S"]').tap();
+    await expect(heading).toHaveText('Series A–Z');
+  } finally {
+    await phone.close();
+  }
+});
+
 test('the title screens move focus to the new heading, and back to the opener', async ({ page, browserName }) => {
   await openTitles(page, browserName);
   const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
@@ -656,6 +732,521 @@ test('the title screens move focus to the new heading, and back to the opener', 
   await expect(season).toBeFocused();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(card).toBeFocused();
+});
+
+/** The page's path and query, without the origin. */
+const pathOf = (page: Page): string => {
+  const url = new URL(page.url());
+  return url.pathname + url.search;
+};
+
+test('library screens are in the address bar, and Back and Forward move between them', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  expect(pathOf(page)).toBe('/nas');
+  const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
+  const titleId = (await card.getAttribute('data-title-id'))!;
+  await card.click();
+  await expect(page.getByTestId('series-name')).toHaveText('Starfall Wanderer');
+  expect(pathOf(page)).toBe(`/nas/title/${encodeURIComponent(titleId)}`);
+  const season = page.locator('[data-testid="season-row"][data-label="Season 1"]');
+  // The season's key in the path is its catalogue id after the '#'.
+  const seasonId = (await season.getAttribute('data-season-id'))!;
+  const seasonPath = `/nas/title/${encodeURIComponent(titleId)}/season/${encodeURIComponent(seasonId.slice(seasonId.indexOf('#') + 1))}`;
+  await season.click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath);
+
+  await page.goBack();
+  await expect(page.getByTestId('series-screen')).toBeVisible();
+  await expect(page.getByTestId('season-screen')).toHaveCount(0);
+  await expect(season).toBeFocused();
+  await page.goForward();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath);
+
+  await page.goBack();
+  await page.goBack();
+  await expect(card).toBeFocused();
+  expect(pathOf(page)).toBe('/nas');
+  await page.locator('[data-testid="title-shelf"][data-shelf="movie"]').click();
+  await expect(page.getByTestId('title-card')).toHaveCount(1);
+  expect(pathOf(page)).toBe('/nas?shelf=movie');
+
+  // A search reaches the address bar once typing pauses, and a reload shows it.
+  await page.getByTestId('title-search').fill('moonlit');
+  await expect.poll(() => pathOf(page)).toBe('/nas?shelf=movie&q=moonlit');
+  await page.reload();
+  await expect(page.getByTestId('title-search')).toHaveValue('moonlit', { timeout: 15_000 });
+  await expect(page.getByTestId('title-row')).toHaveAttribute('data-name', 'Moonlit Harbor');
+
+  // Back within the typing delay: the pending search write must not overwrite the entry Back landed on.
+  await page.getByTestId('title-search').fill('zzz');
+  await page.goBack();
+  await expect.poll(() => pathOf(page)).toBe('/nas');
+  await page.waitForTimeout(1000);
+  expect(pathOf(page)).toBe('/nas');
+});
+
+test('a library path opens straight onto its screen after a reload', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  const seasonPath = pathOf(page);
+  // Notes whether the library's own screen (its search field) ever shows during the reload.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __librarySeen: boolean };
+    w.__librarySeen = false;
+    new MutationObserver(() => {
+      if (document.querySelector('[data-testid="title-search"]')) w.__librarySeen = true;
+    }).observe(document, { childList: true, subtree: true });
+  });
+  await page.reload();
+  await expect(page.getByTestId('season-screen').locator('h2')).toHaveText('Season 1', { timeout: 15_000 });
+  expect(pathOf(page)).toBe(seasonPath);
+  expect(await page.evaluate(() => (window as unknown as { __librarySeen: boolean }).__librarySeen)).toBe(false);
+  // In-app Back from a screen opened by a reload (no app entry behind it) goes to its parent in place.
+  await page.getByRole('button', { name: 'Back to Starfall Wanderer' }).click();
+  await expect(page.getByTestId('series-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath.slice(0, seasonPath.lastIndexOf('/season/')));
+});
+
+test('the folder browser has its folder in the address bar', async ({ page, browserName }) => {
+  await openLibrary(page, browserName);
+  expect(pathOf(page)).toBe('/nas/folders');
+  await page.locator('[data-testid="nas-folder"][data-name="Anime"]').click();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS › syn › Anime');
+  expect(pathOf(page)).toBe('/nas/folders/syn/Anime');
+  await expect(page.locator('[data-testid="nas-folder"][data-name^="Starfall Wanderer"]')).toBeVisible();
+  const folders = await page.getByTestId('nas-folder').allTextContents();
+  await page.reload();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS › syn › Anime', { timeout: 15_000 });
+  await expect(page.getByTestId('nas-folder')).toHaveText(folders);
+  await page.goBack();
+  await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS');
+  expect(pathOf(page)).toBe('/nas/folders');
+});
+
+test('a device unpaired while on a NAS path goes back to the landing page', async ({ page, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  const redeemed = page.waitForResponse((r) => r.url().endsWith('/api/pair/redeem') && r.request().method() === 'POST');
+  await pairByLink(page);
+  const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
+  await page.getByTestId('nas-open').click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  expect(pathOf(page)).toBe('/nas');
+
+  // The library's own requests are answered before the device is revoked, so the click is what finds it revoked.
+  const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
+  await expect(card).toBeVisible();
+  const res = await ownerApi(`admin/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+  expect(res.status).toBe(204);
+  await card.click();
+  await expect(page.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
+  await expect(page.getByTestId('pair-screen')).toBeVisible();
+  expect(pathOf(page)).toBe('/');
+  await page.reload();
+  await expect(page.getByTestId('pair-screen')).toBeVisible({ timeout: 15_000 });
+  expect(pathOf(page)).toBe('/');
+  await expect(page.getByTestId('title-library')).toHaveCount(0);
+});
+
+/** The `f.` link key of disc1 (and its copies), as the app works it out from a manifest (whose paths are upper-case). */
+function disc1Key(): string {
+  return syntheticDiscKey('disc1');
+}
+
+/** The `f.` link key of a synthetic disc, worked out as `disc1Key` is. */
+function syntheticDiscKey(name: string): string {
+  const dir = join(REPO_ROOT, 'fixtures/synthetic', name, 'BDMV/STREAM');
+  const files = readdirSync(dir).map((name) => ({ path: `BDMV/STREAM/${name.toUpperCase()}`, size: statSync(join(dir, name)).size }));
+  const key = discKeyOf('0000000000000000', files);
+  expect(key).toMatch(/^f\.[0-9A-F]{32}$/);
+  return key;
+}
+
+/** The name of the disc a key opens (the copy the NAS picks). */
+async function resolvedName(key: string): Promise<string> {
+  const res = await ownerApi(`discs/resolve/${encodeURIComponent(key)}`);
+  expect(res.status).toBe(200);
+  return ((await res.json()) as { disc: { name: string } }).disc.name;
+}
+
+const waitForPlaying = (page: Page): Promise<unknown> =>
+  page.waitForFunction(() => document.querySelector('[data-testid="player"]')?.getAttribute('data-state') === 'playing', undefined, { polling: 'raf', timeout: 15_000 });
+
+/** The address bar's play route: its path, playlist and time. */
+const playLinkOf = (page: Page): { path: string; pl: string | null; t: number | null } => {
+  const url = new URL(page.url());
+  const t = url.searchParams.get('t');
+  return { path: url.pathname, pl: url.searchParams.get('pl'), t: t === null ? null : Number(t) };
+};
+
+test('playing a NAS episode keeps a play link in the address bar', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  // The episode is 4 s long (the fixture's), so the time is checked on a pause, which writes it at once.
+  await expect.poll(() => playLinkOf(page).pl).toBe('00001');
+  expect(playLinkOf(page).path).toMatch(/^\/nas\/play\/f\.[0-9A-F]{32}$/);
+  expect(playLinkOf(page).path).toBe(`/nas/play/${disc1Key()}`);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(2_000_000);
+  await page.getByTestId('video-canvas').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(2);
+  expect(playLinkOf(page).pl).toBe('00001');
+});
+
+test('watching a NAS episode saves its place on the NAS', async ({ page, browserName }) => {
+  await openTitles(page, browserName, '&placemin=1');
+  await skipWithoutH264(page);
+  const key = disc1Key();
+  await ownerApi(`me/playback/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(2_000_000);
+  await page.getByTestId('video-canvas').click(); // a pause saves at once
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  const place = async (): Promise<{ timeUs: number; deviceName: string; playlistId: string } | null> => {
+    const res = await ownerApi(`me/playback/${encodeURIComponent(key)}`);
+    if (res.status === 404) return null;
+    return ((await res.json()) as { places: Record<string, { timeUs: number; deviceName: string; playlistId: string }> }).places['00001'] ?? null;
+  };
+  await expect.poll(async () => (await place())?.timeUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(2_000_000);
+  expect(await place()).toMatchObject({ playlistId: '00001', deviceName: expect.any(String) });
+  await ownerApi(`me/playback/${encodeURIComponent(key)}`, { method: 'DELETE' });
+});
+
+// Resume (spec 2026-10-20 §6). Places are per person: each browser's project plays as its own owner person, so the
+// other tests' places (every episode launch makes one for the project's owner person) never show in these.
+
+const RESUME_COPY = 'This disc has changed since you stopped.';
+const personSessions = new Map<string, Promise<string>>();
+
+/** A NAS API route as a device of `person` (an owner person, made when there is none). */
+async function personApi(person: string, path: string, init: RequestInit = {}): Promise<Response> {
+  let session = personSessions.get(person);
+  if (!session) personSessions.set(person, (session = sessionFor(ownerCode(person))));
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${await session}`);
+  return fetch(`${NAS_API}${path}`, { ...init, headers });
+}
+
+/** A place as the app saves one: direct playback of `playlistId` at `timeUs`. */
+function placeBody(discKey: string, discId: string, playlistId: string, timeUs: number, durationUs: number, updatedAt = Date.now()): unknown {
+  return {
+    discKey, discId, playlistId, timeUs, durationUs, finished: false, mode: 'none', title: null, psrs: [], gprs: null,
+    settings: { audioLanguage: null, pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false },
+    updatedAt, deviceName: 'Test Tablet',
+  };
+}
+
+/** Stores a place for `person` through the API, as another of its devices would. */
+async function putPlace(api: (path: string, init?: RequestInit) => Promise<Response>, discKey: string, playlistId: string, timeUs: number, durationUs: number): Promise<void> {
+  const resolved = await api(`discs/resolve/${encodeURIComponent(discKey)}`);
+  expect(resolved.status).toBe(200);
+  const { disc } = (await resolved.json()) as { disc: { id: string } };
+  const res = await api(`me/playback/${encodeURIComponent(discKey)}/${playlistId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(placeBody(discKey, disc.id, playlistId, timeUs, durationUs)),
+  });
+  expect(res.status).toBe(204);
+}
+
+const resumePerson = (browserName: string): string => `Resume Viewer ${browserName}`;
+
+/** Pairs as this project's resume person with no places on disc1, and opens the title library. */
+async function openTitlesAsResumePerson(page: Page, browserName: string): Promise<(path: string, init?: RequestInit) => Promise<Response>> {
+  const person = resumePerson(browserName);
+  const api = (path: string, init?: RequestInit): Promise<Response> => personApi(person, path, init);
+  expect((await api(`me/playback/${encodeURIComponent(disc1Key())}`, { method: 'DELETE' })).status).toBe(204);
+  await openTitles(page, browserName, '&placemin=1', ownerCode(person));
+  return api;
+}
+
+async function openEpisode1(page: Page): Promise<void> {
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await expect(page.getByTestId('nas-preflight')).toBeVisible();
+}
+
+const clockUs = async (page: Page): Promise<number> => (await telemetry(page))?.clockUs ?? 0;
+
+/** Whether the person's place for disc1's `playlistId` is finished (null: none). */
+async function finishedOn(api: (path: string, init?: RequestInit) => Promise<Response>, playlistId: string): Promise<boolean | null> {
+  const res = await api(`me/playback/${encodeURIComponent(disc1Key())}`);
+  return res.status === 200 ? ((await res.json()) as { places: Record<string, { finished: boolean }> }).places[playlistId]?.finished ?? null : null;
+}
+
+test('reopening a NAS episode offers to resume it', async ({ page, browserName }) => {
+  const api = await openTitlesAsResumePerson(page, browserName);
+  await skipWithoutH264(page);
+  await openEpisode1(page);
+  await expect(page.getByTestId('resume-prompt')).toHaveCount(0);
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  // past 0:03 by more than the engine's 250 ms between time events, which the saved time can trail by
+  await expect.poll(() => clockUs(page), { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(3_300_000);
+  await page.getByTestId('video-canvas').click(); // a pause saves at once
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  const prompt = page.getByTestId('resume-prompt');
+  await expect(prompt).toContainText('Pick up where you left off?', { timeout: 10_000 });
+  await expect(page.getByTestId('resume-at')).toHaveText('Resume at 0:03');
+  await expect(page.getByTestId('nas-play')).toHaveCount(0);
+  await page.getByTestId('resume-at').click();
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00001', { timeout: 15_000 });
+  await expect.poll(() => clockUs(page), { timeout: 1_000, intervals: [50] }).toBeGreaterThanOrEqual(3_000_000);
+  // The 4 s episode ends a moment after 0:03, which finishes its place: another device stops at 0:03 again.
+  await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 10_000 });
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => finishedOn(api, '00001'), { timeout: 5_000 }).toBe(true);
+  await putPlace(api, disc1Key(), '00001', 3_000_000, 4_000_000);
+
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('resume-start-over').click({ timeout: 10_000 });
+  await waitForPlaying(page);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00001');
+  expect(await clockUs(page)).toBeLessThan(1_000_000);
+});
+
+test('Continue watching shows the episode and resumes it without asking', async ({ page, browserName }) => {
+  const api = await openTitlesAsResumePerson(page, browserName);
+  await skipWithoutH264(page);
+  await putPlace(api, disc1Key(), '00001', 3_000_000, 4_000_000);
+  await page.goto('/nas?telemetry=1&placemin=1');
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  const card = page.locator('[data-testid="continue-card"][data-playlist="00001"]');
+  await expect(card).toHaveCount(1, { timeout: 10_000 });
+  await expect(card).toHaveAttribute('data-kind', 'resume');
+  await expect(card).toContainText('Starfall Wanderer');
+  await expect(card).toContainText('S1 · Episode 1');
+  await card.click();
+  await expect(page.getByTestId('resume-at')).toHaveText('Resume at 0:03', { timeout: 15_000 });
+  // no question: the one way on is Resume (and Back)
+  await expect(page.getByTestId('resume-start-over')).toHaveCount(0);
+  await expect(page.getByTestId('nas-play')).toHaveCount(0);
+  await page.getByTestId('resume-at').click();
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00001', { timeout: 15_000 });
+  await expect.poll(() => clockUs(page), { timeout: 1_000, intervals: [50] }).toBeGreaterThanOrEqual(3_000_000);
+});
+
+test('a finished episode leaves Continue watching', async ({ page, browserName }) => {
+  const api = await openTitlesAsResumePerson(page, browserName);
+  await skipWithoutH264(page);
+  await putPlace(api, disc1Key(), '00001', 1_000_000, 4_000_000);
+  await page.goto('/nas?telemetry=1&placemin=1');
+  await expect(page.locator('[data-testid="continue-card"][data-playlist="00001"]')).toHaveCount(1, { timeout: 15_000 });
+  await openEpisode1(page);
+  await page.getByTestId('resume-start-over').click({ timeout: 10_000 });
+  await waitForPlaying(page);
+  await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 15_000 });
+  await expect.poll(() => finishedOn(api, '00001'), { timeout: 5_000 }).toBe(true);
+  await page.goto('/nas');
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('title-card').first()).toBeVisible();
+  await expect(page.locator('[data-testid="continue-card"][data-playlist="00001"]')).toHaveCount(0);
+  await openEpisode1(page);
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 10_000 });
+  await expect(page.getByTestId('resume-prompt')).toHaveCount(0);
+});
+
+test('a place on a disc that changed offers only Start from beginning', async ({ page, browserName }) => {
+  const api = await openTitlesAsResumePerson(page, browserName);
+  // a playlist the disc doesn't have (Review Focus 2)
+  await putPlace(api, disc1Key(), '00042', 120_000_000, 600_000_000);
+  await page.goto(`/nas/play/${disc1Key()}`);
+  await expect(page.getByTestId('resume-prompt')).toContainText(RESUME_COPY, { timeout: 15_000 });
+  await expect(page.getByTestId('resume-at')).toHaveCount(0);
+  await expect(page.getByTestId('resume-start-over')).toBeVisible();
+  expect((await api(`me/playback/${encodeURIComponent(disc1Key())}`, { method: 'DELETE' })).status).toBe(204);
+});
+
+test('a pre-flight whose places request hangs offers Play after a few seconds', async ({ page, browserName }) => {
+  await openTitlesAsResumePerson(page, browserName);
+  // the disc's places never answer (a stalled WebRTC route, say)
+  await page.route(/\/api\/me\/playback\/[^/?]+(\?.*)?$/, () => {});
+  await openEpisode1(page);
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 8_000 });
+  await expect(page.getByTestId('resume-prompt')).toHaveCount(0);
+});
+
+test('an owner and a guest each see only their own Continue watching', async ({ page, browser, browserName }) => {
+  // Review Focus 5: the owner's place is on episode 1's playlist, the guest's on disc1's other one.
+  const api = await openTitlesAsResumePerson(page, browserName);
+  await putPlace(api, disc1Key(), '00001', 2_000_000, 4_000_000);
+  const minted = await ownerApi('admin/codes', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPerson: { name: `Resume Guest ${browserName}`, owner: false }, invite: true }),
+  });
+  expect(minted.status).toBe(200);
+  const { code, personId } = (await minted.json()) as { code: string; personId: string };
+  const second = await ownerApi('admin/codes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ personId }) });
+  expect(second.status).toBe(200);
+  const guestToken = sessionFor(((await second.json()) as { code: string }).code);
+  const guestApi = async (path: string, init: RequestInit = {}): Promise<Response> => {
+    const headers = new Headers(init.headers);
+    headers.set('Authorization', `Bearer ${await guestToken}`);
+    return fetch(`${NAS_API}${path}`, { ...init, headers });
+  };
+  await putPlace(guestApi, disc1Key(), '00000', 2_000_000, 8_000_000);
+  const guestContext = await browser.newContext();
+  try {
+    const guest = await guestContext.newPage();
+    await allowLocalNetwork(guest, browserName);
+    await guest.goto('/');
+    await guest.getByTestId('pair-code').fill(code);
+    await guest.getByTestId('pair-button').click();
+    await expect(guest.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await exclusivelyAsync('gate', async () => {
+      try {
+        await setGate('everyone');
+        await guest.getByTestId('nas-open').click();
+        await expect(guest.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+        await expect(guest.getByTestId('continue-card')).toHaveCount(1, { timeout: 10_000 });
+        await expect(guest.getByTestId('continue-card')).toHaveAttribute('data-playlist', '00000');
+        await page.reload();
+        await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+        await expect(page.getByTestId('continue-card')).toHaveCount(1, { timeout: 10_000 });
+        await expect(page.getByTestId('continue-card')).toHaveAttribute('data-playlist', '00001');
+      } finally {
+        await setGate('owners');
+      }
+    });
+  } finally {
+    await guestContext.close();
+    await ownerApi(`admin/people/${encodeURIComponent(personId)}`, { method: 'DELETE' });
+  }
+});
+
+test('a play link opens the pre-flight, then plays from its time', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  const key = disc1Key();
+  await page.goto(`/nas/play/${key}?pl=00000&t=5&telemetry=1`);
+  await expect(page.getByTestId('nas-preflight').locator('h3')).toHaveText(await resolvedName(key), { timeout: 15_000 });
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  // 5 s into the 8 s playlist within 2 s of playing: only the link's seek gets there that soon.
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 2_000, intervals: [100] }).toBeGreaterThanOrEqual(5_000_000);
+  // The link's time stays in the address bar while the playlist starts, then the seek writes it.
+  expect(playLinkOf(page).t).toBeGreaterThanOrEqual(5);
+
+  // Paused a little later, the address bar has the time; a reload lands on the pre-flight with it, not on playback.
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThanOrEqual(6_000_000);
+  await page.getByTestId('video-canvas').click();
+  await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+  await expect.poll(() => playLinkOf(page).t ?? -1).toBeGreaterThanOrEqual(6);
+  const last = playLinkOf(page);
+  expect(last).toMatchObject({ path: `/nas/play/${key}`, pl: '00000' });
+  await page.reload();
+  await expect(page.getByTestId('nas-preflight')).toBeVisible({ timeout: 15_000 });
+  await expect(playerState(page)).toHaveCount(0);
+  expect(playLinkOf(page)).toEqual(last);
+});
+
+test('Back during NAS playback closes the disc and returns to the season', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  const seasonPath = pathOf(page);
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  await expect(playerState(page)).toHaveCount(0);
+  expect(pathOf(page)).toBe(seasonPath);
+
+  // A link opened cold has no app entry behind it: the player's close lands on the library, still in the app.
+  await page.goto(`/nas/play/${disc1Key()}?pl=00000`);
+  await page.getByTestId('nas-play').click({ timeout: 15_000 });
+  await waitForPlaying(page);
+  await page.getByRole('button', { name: 'Playlists' }).click();
+  await page.getByRole('button', { name: 'Open another disc' }).click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  await expect(playerState(page)).toHaveCount(0);
+  expect(pathOf(page)).toBe('/nas');
+});
+
+test("Back while a play link's disc opens closes it, and the screen Back went to stays", async ({ page, context, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  const seasonPath = pathOf(page);
+  await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+  await page.getByTestId('nas-play').click();
+  await waitForPlaying(page);
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  // Forward onto the play link: its own pre-flight, in the same page.
+  await page.goForward();
+  await expect(page.getByTestId('nas-play-link')).toBeVisible({ timeout: 15_000 });
+  // The disc's reads are held, so the open is still in flight when Back comes.
+  const held: Route[] = [];
+  await context.route(/\/api\/discs\/[^/]+\/files\//, (route) => void held.push(route));
+  // the episode's place (saved as Back closed it) is offered, unless it is too near the start: either opens the disc
+  await page.getByTestId('resume-at').or(page.getByTestId('nas-play')).click();
+  await expect(page.getByText('Reading disc…')).toBeVisible();
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await page.goBack();
+  await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+  expect(pathOf(page)).toBe(seasonPath);
+  await context.unroute(/\/api\/discs\/[^/]+\/files\//);
+  for (const route of held) await route.continue().catch(() => {});
+  // Nothing comes of the abandoned open, and the address bar stays where Back went.
+  await page.waitForTimeout(3000);
+  await expect(playerState(page)).toHaveCount(0);
+  await expect(page.getByTestId('season-screen')).toBeVisible();
+  expect(pathOf(page)).toBe(seasonPath);
+});
+
+test('a play link starts at its time even when First Play plays something first', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  // disc-menu's First Play runs its top menu (playlist 00001); the link names the feature, 00000.
+  await page.goto(`/nas/play/${syntheticDiscKey('disc-menu')}?pl=00000&t=2&telemetry=1`);
+  await page.getByTestId('nas-play').click({ timeout: 15_000 });
+  await waitForPlaying(page);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 1_000, intervals: [100] }).toBeGreaterThanOrEqual(2_000_000);
+  await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+});
+
+test('a play link with a bad time or playlist opens the disc without seeking', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page);
+  const key = disc1Key();
+  for (const t of ['-5', '99999']) {
+    await page.goto(`/nas/play/${key}?pl=00000&t=${t}&telemetry=1`);
+    await page.getByTestId('nas-play').click({ timeout: 15_000 });
+    await waitForPlaying(page);
+    await expect(playerState(page)).toHaveAttribute('data-playlist', '00000');
+    // Playing from the start: well short of any seek once it has played a moment.
+    await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 5_000 }).toBeGreaterThan(500_000);
+    expect((await telemetry(page))!.clockUs).toBeLessThan(2_500_000);
+  }
+  await page.goto(`/nas/play/${key}?pl=99999`);
+  await page.getByTestId('nas-play').click({ timeout: 15_000 });
+  await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("This episode isn't on this disc; it opened normally.")).toBeVisible();
 });
 
 // The owner screens. Each browser files its own discs (nas-server.ts `ownerDiscs`); the tests that change the catalogue
@@ -764,6 +1355,20 @@ test('an owner files a disc differently from its season, into Music, and out of 
       await expect(row).toHaveCount(0);
       const hidden = (await (await ownerApi('admin/hidden')).json()) as { discs: { discId: string }[] };
       expect(hidden.discs.map((d) => d.discId)).toContain(id);
+
+      // Filed under the series again, in the same visit: the series that went away opens again.
+      await clearChoices([id]);
+      await shelfChip(page, 'unsorted').click();
+      const again = unsortedCard(page, first);
+      await again.locator(`[data-testid="title-option"][data-name="${name}"]`).click();
+      await again.getByTestId('unsorted-disc').fill('1');
+      await again.getByTestId('unsorted-file').click();
+      await expect(page.getByTestId('unsorted-notice')).toContainText(`Filed under ${name}.`);
+      await page.getByRole('button', { name: 'Back to the library' }).click();
+      await shelfChip(page, 'music').click(); // the Music shelf was picked: unpick it, back to the whole library
+      await page.locator(`[data-testid="title-card"][data-name="${name}"]`).click();
+      await expect(page.getByTestId('series-name')).toHaveText(name);
+      await expect(page.getByTestId('season-row')).toHaveCount(1);
     } finally {
       await clearChoices([id]);
     }
@@ -989,5 +1594,281 @@ test('NAS settings list own titles, to rename, change seasons and delete after a
     } finally {
       await ownerApi(`admin/titles/${encodeURIComponent(created.id)}`, { method: 'DELETE' });
     }
+  });
+});
+
+const NOT_FOUND_COPY = "This link is for a NAS this device isn't paired with. Ask its owner to send you an invite.";
+const MISSING_COPY = "Your NAS doesn't have what this link points to. It may have been removed or renamed, or the link may be for a different NAS.";
+const CLOSED_COPY = "The NAS owner hasn't opened the title library to this device, so this link can't open here. You can still browse the NAS by folder.";
+
+test('a NAS link on an unpaired device asks for an invite', async ({ page }) => {
+  await page.goto('/nas/title/anilist%3A1');
+  await expect(page.getByTestId('nas-not-found')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(NOT_FOUND_COPY);
+  await expect(page.getByTestId('pair-screen')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Pair with a NAS' }).click();
+  await expect(page.getByTestId('pair-screen')).toBeVisible();
+  await expect(page.getByTestId('nas-not-found')).toHaveCount(0);
+  expect(pathOf(page)).toBe('/');
+});
+
+test('a link to something the NAS does not have says so, and leads back to the library', async ({ page, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  await page.goto('/nas/play/d.0000000000000000');
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(MISSING_COPY, { timeout: 15_000 });
+  await page.goto('/nas/title/anilist%3A999999999');
+  await expect(page.getByTestId('nas-not-found').locator('p')).toHaveText(MISSING_COPY, { timeout: 15_000 });
+  // Paired, the button leads back to the library instead of the pair screen.
+  await page.getByRole('button', { name: 'Back to the library' }).click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('nas-paired')).toBeVisible();
+  expect(pathOf(page)).toBe('/nas');
+});
+
+test('a guest behind the closed title gate gets not-found for a title link', async ({ page, browser, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  const res = await ownerApi('admin/codes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPerson: { name: 'Noor', owner: false }, invite: true }),
+  });
+  expect(res.status).toBe(200);
+  const { code } = (await res.json()) as { code: string };
+  const guestContext = await browser.newContext();
+  try {
+    const guest = await guestContext.newPage();
+    await allowLocalNetwork(guest, browserName);
+    await guest.goto('/');
+    await guest.getByTestId('pair-code').fill(code);
+    await guest.getByTestId('pair-button').click();
+    await expect(guest.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await exclusivelyAsync('gate', async () => {
+      await setGate('owners');
+      await guest.goto('/nas/title/anilist%3A1');
+      await expect(guest.getByTestId('nas-not-found').locator('p')).toHaveText(CLOSED_COPY, { timeout: 15_000 });
+      await expect(guest.getByTestId('nas-crumbs')).toHaveCount(0);
+      await guest.getByRole('button', { name: 'Browse by folder' }).click();
+      await expect(guest.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 15_000 });
+      expect(new URL(guest.url()).pathname).toBe('/nas/folders');
+      await guest.goto('/nas');
+      await expect(guest.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 15_000 });
+      await expect(guest.getByTestId('nas-not-found')).toHaveCount(0);
+    });
+  } finally {
+    await guestContext.close();
+  }
+});
+
+// The subtitle store (piece 3): owners upload subtitles with their fonts on a season or movie; everyone sees languages.
+
+const STARFALL = 'anilist:900001';
+const subtitleRow = (page: Page, name: string) => page.locator(`[data-testid="subtitle-row"][data-name="${name}"]`);
+const episodeTags = (page: Page, number: number) => page.locator(`[data-testid="episode-row"][data-number="${number}"] [data-testid="episode-subtitle-tag"]`);
+
+/** Starfall Wanderer's Season 1, from the title library. */
+async function openStarfallSeason(page: Page): Promise<void> {
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('episode-row')).toHaveCount(1);
+}
+
+/**
+ * Runs `fn` while no other project's test touches Starfall Wanderer's stored subtitles (the server is shared), with
+ * none stored at its start or end.
+ */
+async function withStarfallSubtitles(fn: () => Promise<void>): Promise<void> {
+  const clear = async (): Promise<void> => {
+    const res = await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`);
+    expect(res.status).toBe(200);
+    for (const s of (await res.json()) as { id: string }[]) await ownerApi(`subtitles/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+  };
+  await exclusivelyAsync('subtitles', async () => {
+    await clear();
+    try {
+      await fn();
+    } finally {
+      await clear();
+    }
+  });
+}
+
+/** Stores ep1.ass for Starfall Wanderer's episode 1 through the owner API, as `name`, in English. */
+async function storeEpisode1Subtitle(name: string, offsetMs = 0): Promise<string> {
+  const detail = (await (await ownerApi(`titles/${encodeURIComponent(STARFALL)}`)).json()) as { seasons: { id: string; number: number | null }[] };
+  const seasonId = detail.seasons.find((s) => s.number === 1)!.id;
+  const created = await ownerApi('subtitles', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, language: 'en', offsetMs, for: { kind: 'episode', titleId: STARFALL, seasonId, episode: 1 } }),
+  });
+  expect(created.status).toBe(201);
+  const { id } = (await created.json()) as { id: string };
+  const file = await ownerApi(`subtitles/${encodeURIComponent(id)}/file/ep1.ass`, { method: 'PUT', body: readFileSync(join(REPO_ROOT, 'tests/e2e/fixtures/ep1.ass')) });
+  expect(file.status).toBe(200);
+  return id;
+}
+
+test('an owner uploads subtitles with a font for an episode, and everyone sees its language', async ({ page, browser, browserName }) => {
+  await openTitles(page, browserName);
+  await withStarfallSubtitles(async () => {
+    await openStarfallSeason(page);
+    await expect(episodeTags(page, 1)).toHaveCount(0);
+    await page.getByTestId('subtitle-add').click();
+    const form = page.getByTestId('subtitle-upload');
+    await expect(form).toBeVisible();
+    await page.getByTestId('subtitle-upload-files').setInputFiles([join(REPO_ROOT, 'tests/e2e/fixtures/ep1.ass'), join(REPO_ROOT, 'fixtures/ass/fonts/DejaVuSans.ttf')]);
+    await page.getByTestId('subtitle-upload-for').selectOption({ label: 'Episode 1' });
+    await page.getByTestId('subtitle-upload-language').fill('en');
+    await page.getByTestId('subtitle-upload-name').fill(`Fansub ${browserName}`);
+    await page.getByTestId('subtitle-upload-offset').fill('0.4');
+    await page.getByTestId('subtitle-upload-submit').click();
+    await expect(form).toHaveCount(0, { timeout: 15_000 });
+    const row = subtitleRow(page, `Fansub ${browserName}`);
+    await expect(row).toBeVisible();
+    await expect(row).toContainText('EN');
+    await expect(row).toContainText('Episode 1');
+    await expect(row).toContainText('ep1.ass');
+    await expect(row).toContainText('DejaVuSans.ttf');
+    await expect(row).toContainText('+0.4 s');
+    await expect(episodeTags(page, 1)).toHaveText(['EN']);
+    const stored = (await (await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`)).json()) as { name: string; offsetMs: number; fonts: { name: string }[] }[];
+    expect(stored).toEqual([expect.objectContaining({ name: `Fansub ${browserName}`, offsetMs: 400, fonts: [expect.objectContaining({ name: 'DejaVuSans.ttf' })] })]);
+
+    // A guest sees the language on the episode, and neither the button nor the list.
+    const minted = await ownerApi('admin/codes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPerson: { name: `Subtitle Guest ${browserName}`, owner: false }, invite: true }),
+    });
+    expect(minted.status).toBe(200);
+    const { code, personId } = (await minted.json()) as { code: string; personId: string };
+    const guestContext = await browser.newContext();
+    try {
+      const guest = await guestContext.newPage();
+      await allowLocalNetwork(guest, browserName);
+      await guest.goto('/');
+      await guest.getByTestId('pair-code').fill(code);
+      await guest.getByTestId('pair-button').click();
+      await expect(guest.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+      await exclusivelyAsync('gate', async () => {
+        try {
+          await setGate('everyone');
+          await guest.getByTestId('nas-open').click();
+          await expect(guest.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+          await openStarfallSeason(guest);
+          await expect(episodeTags(guest, 1)).toHaveText(['EN']);
+          await expect(guest.getByTestId('subtitle-add')).toHaveCount(0);
+          await expect(guest.getByTestId('subtitle-list')).toHaveCount(0);
+        } finally {
+          await setGate('owners');
+        }
+      });
+    } finally {
+      await guestContext.close();
+      await ownerApi(`admin/people/${encodeURIComponent(personId)}`, { method: 'DELETE' });
+    }
+  });
+});
+
+test('an owner deletes an upload', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await withStarfallSubtitles(async () => {
+    await storeEpisode1Subtitle(`Delete me ${browserName}`);
+    await openStarfallSeason(page);
+    const row = subtitleRow(page, `Delete me ${browserName}`);
+    await expect(row).toBeVisible();
+    await expect(episodeTags(page, 1)).toHaveText(['EN']);
+    await row.getByTestId('subtitle-delete').click();
+    await expect(row.getByTestId('subtitle-delete-confirm')).toBeVisible();
+    await row.getByTestId('subtitle-delete-confirm').click();
+    await expect(row).toHaveCount(0);
+    await expect(episodeTags(page, 1)).toHaveCount(0);
+    const left = (await (await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`)).json()) as unknown[];
+    expect(left).toEqual([]);
+  });
+});
+
+test('an upload with two subtitle files is refused before anything is sent', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await openStarfallSeason(page);
+  const writes: string[] = [];
+  page.on('request', (r) => {
+    if (r.url().includes('/api/subtitles') && r.method() !== 'GET') writes.push(`${r.method()} ${r.url()}`);
+  });
+  await page.getByTestId('subtitle-add').click();
+  await page.getByTestId('subtitle-upload-files').setInputFiles([join(REPO_ROOT, 'tests/e2e/fixtures/ep1.ass'), join(REPO_ROOT, 'tests/e2e/fixtures/ep2.ass')]);
+  await page.getByTestId('subtitle-upload-for').selectOption({ label: 'Episode 1' });
+  await page.getByTestId('subtitle-upload-language').fill('en');
+  await page.getByTestId('subtitle-upload-submit').click();
+  await expect(page.getByTestId('subtitle-upload-error')).toHaveText('Pick one subtitle file (SRT or ASS) at a time.');
+  await expect(page.getByTestId('subtitle-upload')).toBeVisible();
+  expect(writes).toEqual([]);
+});
+
+test('everyone picks a stored subtitle in the player, at its default offset', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await withStarfallSubtitles(async () => {
+    const id = await storeEpisode1Subtitle(`Player pick ${browserName}`, 400);
+    await openEpisode1(page);
+    await page.getByTestId('nas-play').click();
+    // the episode is disc1's 4-second playlist: once it ends the controls stay up
+    await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 15_000 });
+    await expect(playerState(page)).toHaveAttribute('data-playlist', '00001');
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-stored')).toHaveText('From the NAS');
+    const row = page.getByTestId(`subtitle-stored-${id}`);
+    await expect(row).toHaveText(`Player pick ${browserName} · English`);
+    await expect(row).toHaveAttribute('aria-checked', 'false');
+    await row.click();
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-file-0')).toContainText('ep1.ass', { timeout: 10_000 });
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.4 s');
+    await expect(page.getByTestId('subtitle-text')).toHaveAttribute('aria-checked', 'true');
+    await expect(row).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('subtitle-file-1')).toHaveCount(0);
+  });
+});
+
+test('a stored subtitle and my offset come back when I resume', async ({ page, browserName }) => {
+  const api = await openTitlesAsResumePerson(page, browserName);
+  await skipWithoutH264(page);
+  await withStarfallSubtitles(async () => {
+    const id = await storeEpisode1Subtitle(`Resume pick ${browserName}`, 400);
+    await openEpisode1(page);
+    await page.getByTestId('nas-play').click();
+    await waitForPlaying(page);
+    await expect.poll(() => clockUs(page), { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(3_300_000);
+    await page.getByTestId('video-canvas').click();
+    await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+    await page.getByTestId('subtitle-menu').click();
+    await page.getByTestId(`subtitle-stored-${id}`).click();
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.4 s', { timeout: 10_000 });
+    for (let i = 0; i < 5; i++) await page.getByTestId('subtitle-offset-plus').click();
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.9 s');
+    // an offset change saves at once
+    const saved = async (): Promise<unknown> => {
+      const res = await api(`me/playback/${encodeURIComponent(disc1Key())}`);
+      return res.status === 200 ? ((await res.json()) as { places: Record<string, { settings: { textFiles: unknown[] } }> }).places['00001']?.settings.textFiles ?? null : null;
+    };
+    await expect.poll(saved, { timeout: 5_000 }).toEqual([expect.objectContaining({ name: 'ep1.ass', offsetMs: 900, subtitleId: id, language: 'en' })]);
+    await page.goBack();
+    await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+
+    await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+    await expect(page.getByTestId('resume-at')).toHaveText('Resume at 0:03', { timeout: 10_000 });
+    await page.getByTestId('resume-at').click();
+    await expect(playerState(page)).toHaveAttribute('data-playlist', '00001', { timeout: 15_000 });
+    // the 4 s episode ends a moment later, and the controls stay up
+    await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 15_000 });
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-file-0')).toContainText('ep1.ass', { timeout: 10_000 });
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.9 s');
+    await expect(page.getByTestId('subtitle-text')).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId(`subtitle-stored-${id}`)).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('subtitle-file-1')).toHaveCount(0);
   });
 });

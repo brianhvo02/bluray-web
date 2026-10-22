@@ -1,9 +1,12 @@
-import type { ReactElement } from 'react';
+import { useId, useMemo, useState, type ReactElement } from 'react';
 import type { TitleDetail } from '../../engine/disc/nas-api';
 import type { NasClient } from './nas-client';
 import { Poster } from './Poster';
 import type { OwnerFiling } from './FileDifferently';
 import { DiscList, type OpenDisc } from './SeasonScreen';
+import { SubtitleList, useDiscKeys, useManifests, useStoredSubtitles } from './SubtitleList';
+import { SubtitleUpload } from './SubtitleUpload';
+import { ownerListing, subtitleTarget } from './subtitle-model';
 import { displayName, seasonCounts, seasonLabel, secondaryName, titleMeta } from './title-model';
 
 interface SeriesScreenProps {
@@ -16,7 +19,7 @@ interface SeriesScreenProps {
   /** A related title: a movie or side story of the series. */
   readonly onTitle: (titleId: string) => void;
   readonly onOpen: OpenDisc;
-  /** For owners: "File differently…" on a movie's or music title's discs (ruling F3). */
+  /** For owners: "File differently…" on a movie's or music title's discs (ruling F3), and a movie's subtitles. */
   readonly owner?: OwnerFiling;
 }
 
@@ -27,6 +30,15 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
   const native = secondaryName(title);
   const romaji = title.names.romaji !== null && title.names.romaji !== name ? title.names.romaji : null;
   const isSeries = title.kind === 'series';
+  // A movie's subtitles, for owners: the upload sheet and the list (attached to a disc and chapter).
+  const movieOwner = title.kind === 'movie' ? owner : undefined;
+  const { subs, error: subsError, reload } = useStoredSubtitles(nas, title.id, movieOwner !== undefined);
+  const target = useMemo(() => subtitleTarget(title.id, detail.seasons, { episodes: false, extras: detail.extras }), [title.id, detail.seasons, detail.extras]);
+  const manifestOf = useManifests(movieOwner?.nas ?? null);
+  const discKeys = useDiscKeys(manifestOf, target, movieOwner !== undefined && (subs ?? []).length > 0);
+  const [adding, setAdding] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const uploadPanel = useId();
 
   return (
     <section className="titles series-screen" data-testid="series-screen" data-title-id={title.id}>
@@ -45,8 +57,28 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
           {romaji && <span className="title-muted">{romaji}</span>}
           {native && native !== romaji && <span className="title-muted" lang="ja">{native}</span>}
           <span className="series-meta">{titleMeta(detail)}</span>
+          {movieOwner && (
+            <button type="button" className="subtitle-add" data-testid="subtitle-add" aria-expanded={adding} aria-controls={uploadPanel} disabled={uploading} onClick={() => setAdding((a) => !a)}>
+              ＋ Subtitles
+            </button>
+          )}
         </div>
       </div>
+      {movieOwner && adding && (
+        <div id={uploadPanel}>
+          <SubtitleUpload
+            nas={movieOwner.nas}
+            target={target}
+            manifestOf={manifestOf}
+            onDone={() => {
+              setAdding(false);
+              reload();
+            }}
+            onCancel={() => setAdding(false)}
+            onBusy={setUploading}
+          />
+        </div>
+      )}
       {isSeries ? (
         <ul className="title-list">
           {detail.seasons.map((s) => {
@@ -68,6 +100,9 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
         </ul>
       ) : (
         detail.seasons.map((s) => <DiscList key={s.id} season={s} discs={s.discs} onOpen={onOpen} owner={owner} />)
+      )}
+      {movieOwner && (subs || subsError) && (
+        <SubtitleList nas={movieOwner.nas} target={target} listing={subs ? ownerListing(subs, null, new Set(detail.seasons.map((s) => s.id))) : null} error={subsError} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />
       )}
       {detail.related.length > 0 && (
         <ul className="title-list">

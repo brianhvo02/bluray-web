@@ -5,7 +5,7 @@ import type { PlayerController, PlayerSnapshot } from '../player/player-controll
 import { AudioMenu } from './AudioMenu';
 import { ShaderMenu } from './ShaderMenu';
 import type { ShaderModel, ShaderModelState } from './shader-model';
-import { SubtitleMenu } from './SubtitleMenu';
+import { SubtitleMenu, type StoredSubtitles } from './SubtitleMenu';
 import { formatTime } from './format';
 
 const MASKED_TOOLTIP = "The disc doesn't allow this here";
@@ -115,9 +115,13 @@ interface ControlBarProps {
   readonly remoteOpen: boolean;
   onToggleRemote(): void;
   onMenuOpenChange(open: boolean): void;
+  /** Subtitle files or fonts the user picked, as they go to the controller (the player keeps them for a resume). */
+  onSubtitleFiles?(files: readonly File[]): void;
+  /** A NAS disc's stored subtitles for the playing playlist, for the Subtitles menu; absent for other discs. */
+  readonly storedSubtitles?: StoredSubtitles | null;
 }
 
-export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange }: ControlBarProps): ReactElement {
+export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange, onSubtitleFiles, storedSubtitles = null }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
   const masked = (op: UoOp): boolean => snapshot.uoMask.includes(op);
@@ -178,9 +182,16 @@ export function ControlBar({ controller, snapshot, shaderModel, shaderState, vis
           chapters={snapshot.chapters}
           nowUs={snapshot.timeUs}
           showingFile={snapshot.telemetry?.textFile ?? null}
+          stored={storedSubtitles}
           onSelect={(choice) => controller.selectSubtitle(choice)}
-          onLoadFiles={(files) => void controller.loadSubtitleFiles(files)}
-          onAddFonts={(files) => void controller.addSubtitleFonts(files)}
+          onLoadFiles={(files) => {
+            void controller.loadSubtitleFiles(files);
+            onSubtitleFiles?.(files);
+          }}
+          onAddFonts={(files) => {
+            void controller.addSubtitleFonts(files);
+            onSubtitleFiles?.(files);
+          }}
           onShift={(file, ms) => controller.shiftSubtitleFile(file, ms)}
           onStart={(file, startUs) => controller.setSubtitleStart(file, startUs)}
           onScale={(d) => controller.scaleSubtitles(d)}

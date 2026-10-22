@@ -1,7 +1,7 @@
 # Milestone 5e: every BD-J disc in the library — design
 
 Date: 2026-10-18
-Status: Implemented on branch `spec/bdj-5e` (approved 2026-10-18); the check on a real iPhone and iPad is pending (§9, R27), and the merge waits for it
+Status: Implemented on branch `spec/bdj-5e` (approved 2026-10-18); the device check passed on a real iPhone on 2026-10-22 (§9, R27, R33, R34)
 Builds on: `2026-10-17-m5d-bdj-menus-design.md` (5d, merged as PR #7), `2026-10-16-m5c-bdj-playback-design.md`, `2026-10-15-m5b-bdj-jvm-core-design.md`. Parent: `2026-10-12-bluray-web-player-design.md`. Depends in part on the NAS session's step 3 (people and a per-person store; `2026-10-17-nas-server-design.md` and its step-3 successor).
 
 ## 1. Intent
@@ -150,5 +150,5 @@ Where the build departs from this spec or from its plan (`docs/superpowers/plans
 21. **The clock holds at the target while audio loads (Task 7d).** A stale clock from the previous playlist fired marks early after a seek or open; it now holds at the seek or open target, which also changes paused seeks on HDMV discs (vm-trace goldens unchanged).
 
 **Finish line (§3, §5, §6).**
-22. **The device check is deferred (R27).** The user could not run the iPhone and iPad when the rest was done, so the check by hand of library discs on the iPhone over the NAS, and the two-person saved-data check on the live NAS, are the last gate before the merge. `tools/devices/live-check.ts` passed the same run on the iOS Simulator and Mac Safari with two made-up test people on two devices each (each person's count kept apart and shared by their own devices), and opened all 14 unconfirmed discs.
+22. **The device check ran late, on one real device (R27, R33, R34).** The user could not run the devices when the rest was done, so the check became the last gate before the merge, and when it ran (2026-10-22) only the iPhone was at hand: `tools/devices/live-check.ts` ran on the iPhone over the live NAS with the iPad Simulator as the person's second device. Two made-up test people, two devices each: each person's count was kept apart and shared by their own devices. All 14 unconfirmed discs opened on the iPhone and 13 reached their menu. The tool's real touches miss on the iPhone's player screen (a probe showed the phone places touches exactly, so it is the tool's timing), so the arrows and Enter of the 14 were checked in desktop Chrome: 13 react (a sub-menu or a playlist; the MPEG-2/VC-1 one with its notice), and one plays a long opening video before any menu, in libbluray too, left for a check by hand.
 23. **The result is not "every disc works".** The latest full check: works 134, unconfirmed 14, libbluray-fails-too 18, missing-class 0, unsupported-video 0, stall 0, diverges 0, error 0, of 166. The libbluray-fails-too discs show no menu in libbluray's harness either (§5's own exception); the unconfirmed ones wait for the check by hand. `docs/known-issues.md` (BD-J) groups them by cause.

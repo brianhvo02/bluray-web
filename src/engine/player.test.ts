@@ -2604,6 +2604,77 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     expect(lastState(h)).toBe('idle');
   });
 
+  it('a close while a plain open still reads the disc drops the disc without opening it', async () => {
+    const { h, log, spec } = await setup({ noOpen: true });
+    log.limit('*', 0); // every read waits: the open is stuck in the disc's metadata
+    const opening = h.player.handle({ type: 'open', disc: spec });
+    await vi.waitFor(() => expect(log.reads.length).toBeGreaterThan(0));
+    const closing = h.player.handle({ type: 'close' });
+    log.gate(false);
+    await opening;
+    await closing;
+    expect(h.events.some((e) => e.type === 'titles')).toBe(false);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    expect(lastState(h)).toBe('idle');
+  });
+
+  it('a plain remote open superseded by a second open drops the first: only the second disc emits titles', async () => {
+    const { h, log, spec } = await setup({ noOpen: true });
+    log.limit('*', 0); // the first open is stuck in its disc's metadata
+    const first = h.player.handle({ type: 'open', disc: spec });
+    await vi.waitFor(() => expect(log.reads.length).toBeGreaterThan(0));
+    const second = fakeNas(fixtureDiscFiles('disc1'));
+    const secondOpen = h.player.handle({ type: 'open', disc: second.spec });
+    log.gate(false); // the first disc's reads go on, too late
+    await first;
+    await secondOpen;
+    expect(h.events.filter((e) => e.type === 'titles')).toHaveLength(1);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('a close while a local files open still reads drops the disc without titles or an error', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let reading = false;
+    /** A blob whose reads wait for the gate. */
+    const slow = (blob: Blob): Blob =>
+      ({
+        size: blob.size,
+        type: blob.type,
+        slice: (a?: number, b?: number) => {
+          const part = blob.slice(a, b);
+          return {
+            size: part.size,
+            arrayBuffer: async () => ((reading = true), await gate, part.arrayBuffer()),
+            stream: () => {
+              reading = true;
+              return new ReadableStream<Uint8Array>({
+                async pull(c) {
+                  await gate;
+                  c.enqueue(new Uint8Array(await part.arrayBuffer()));
+                  c.close();
+                },
+              });
+            },
+          };
+        },
+        arrayBuffer: async () => ((reading = true), await gate, blob.arrayBuffer()),
+        text: async () => ((reading = true), await gate, blob.text()),
+        stream: () => blob.stream(),
+      }) as unknown as Blob;
+    const entries = h.entries.map(([p, b]) => [p, slow(b)] as [string, Blob]);
+    const opening = h.player.handle({ type: 'open', disc: { kind: 'files', entries } });
+    await vi.waitFor(() => expect(reading).toBe(true));
+    const closing = h.player.handle({ type: 'close' });
+    release();
+    await opening;
+    await closing;
+    expect(h.events.some((e) => e.type === 'titles')).toBe(false);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    expect(lastState(h)).toBe('idle');
+  });
+
   it('opened with bufferFirst, a close sent while the open is still queued drops it, and a queued cancel opens it', async () => {
     const dropped = await setup({ noOpen: true });
     const opening = dropped.h.player.handle({ type: 'open', disc: dropped.spec, bufferFirst: { fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER } });
@@ -2754,4 +2825,156 @@ describe("Player without a picture: reading at the clock's pace (R8)", () => {
     expect(furthest(again)).toBeLessThan(rec.size * 0.8);
     expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
   }, 30_000);
+});
+
+describe('Player opening at a place (resume)', () => {
+  const fixture = (name: string): Array<[string, File]> => discEntries(fixtureDiscFiles(name));
+  const chapterIds = (h: Harness): string[] => h.events.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : []));
+  const times = (h: Harness): number[] => h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : []));
+  const startFailures = (h: Harness): string[] => h.events.flatMap((e) => (e.type === 'startFailed' ? [e.reason] : []));
+  async function readPlace(h: Harness): Promise<Extract<EngineEvent, { type: 'placeState' }>> {
+    await h.player.handle({ type: 'readPlace' });
+    const place = h.events.filter((e) => e.type === 'placeState').at(-1);
+    if (place?.type !== 'placeState') throw new Error('no placeState');
+    return place;
+  }
+  const NAV_EVENTS = new Set(['menuActive', 'uoMask', 'indexTitles']);
+
+  it('opens straight into a playlist at a time, without First Play', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') }, start: { playlistId: '00000', timeUs: 5e6, hdmv: null, playback: { psr1: 1, psr2: 0, psr3: 1 } } });
+    await untilPlaying(h);
+    expect(chapterIds(h)[0]).toBe('00000');
+    expect(times(h)[0]).toBeGreaterThanOrEqual(4.9e6);
+    expect(h.events.some((e) => NAV_EVENTS.has(e.type))).toBe(false);
+    expect(startFailures(h)).toEqual([]);
+    const place = await readPlace(h);
+    expect(place).toMatchObject({ mode: 'none', title: null, gprs: null });
+    expect(place.psrs).toHaveLength(128);
+    expect(place.psrs[3]).toBe(1);
+  });
+
+  it('resumes an HDMV title with its registers', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    const psrs = new RegisterFile().snapshot().psrs;
+    psrs[4] = 3;
+    psrs[16] = 0x123; // a player setting: never restored
+    await h.player.handle({
+      type: 'open',
+      disc: { kind: 'files', entries: fixture('disc-vm') },
+      start: { playlistId: '00003', timeUs: 2.5e6, hdmv: { title: 3, psrs, gprs: { 100: 42, 4095: 7 } }, playback: null },
+    });
+    await untilPlaying(h);
+    expect(chapterIds(h)).toEqual(['00003']); // title 3's object plays 00003 first, at the saved time
+    // (a tick while the open waits for the audio ring can report the clock's old 0 first)
+    expect(times(h).at(-1)).toBeGreaterThanOrEqual(2.4e6);
+    const place = await readPlace(h);
+    expect(place.mode).toBe('hdmv');
+    expect(place.title).toBe(3);
+    expect(place.gprs).toEqual({ 100: 42, 4095: 7 }); // First Play (which sets r0 to 7 and more) never ran
+    expect(place.psrs[16]).not.toBe(0x123);
+    expect(startFailures(h)).toEqual([]);
+  });
+
+  it('plays directly when the title never plays that playlist', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    const psrs = new RegisterFile().snapshot().psrs;
+    await h.player.handle({
+      type: 'open',
+      disc: { kind: 'files', entries: fixture('disc-vm') },
+      start: { playlistId: '00001', timeUs: 1e6, hdmv: { title: 3, psrs, gprs: { 100: 42 } }, playback: null },
+    });
+    await h.play(500);
+    await untilPlaying(h);
+    expect(chapterIds(h)).toEqual(['00001']);
+    expect(times(h)[0]).toBeGreaterThanOrEqual(0.9e6);
+    expect(await readPlace(h)).toMatchObject({ mode: 'none', title: null, gprs: null }); // no navigator: the playlist plays on its own
+    expect(startFailures(h)).toEqual([]);
+  });
+
+  it('reports a start playlist the disc lacks, and a time past the end', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') }, start: { playlistId: '00042', timeUs: 0, hdmv: null, playback: null } });
+    expect(startFailures(h)).toEqual(['no-playlist']);
+    expect(chapterIds(h)).toEqual([]);
+    expect(lastState(h)).toBe('idle');
+
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') }, start: { playlistId: '00000', timeUs: 1e12, hdmv: null, playback: null } });
+    expect(startFailures(h)).toEqual(['no-playlist', 'past-end']);
+    await untilPlaying(h);
+    expect(chapterIds(h)).toEqual(['00000']);
+    expect(times(h)[0]).toBeLessThan(1e6); // from the beginning
+  });
+
+  it('reads the place: mode, title, registers', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    expect(await readPlace(h)).toEqual({ type: 'placeState', mode: 'none', title: null, psrs: [], gprs: null }); // no disc
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') } });
+    const none = await readPlace(h);
+    expect(none).toMatchObject({ mode: 'none', title: null, gprs: null });
+    expect(none.psrs).toHaveLength(128);
+    // disc-vm's First Play sets registers, then plays 00000 and jumps to title 1
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc-vm') } });
+    await vi.waitFor(async () => {
+      await h.play(20);
+      expect((await readPlace(h)).title).toBe(1);
+    }, { timeout: 5000 });
+    const hdmv = await readPlace(h);
+    expect(hdmv.mode).toBe('hdmv');
+    expect(hdmv.gprs).toMatchObject({ 0: 7, 1: 2 });
+    expect(hdmv.psrs[4]).toBe(1);
+    // the BD-J case is in player-bdj.test.ts (it needs a BD-J worker)
+  });
+
+  it('plays directly with the saved audio stream (PSR1) and PG stream (PSR2)', async () => {
+    const audioStreams = [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })];
+    const h = await harness(undefined, { audioStreams, pgStreams: [{ pid: 0x1200, lang: 'eng', units: [] }, { pid: 0x1201, lang: 'jpn', units: [] }], noOpen: true });
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries }, start: { playlistId: '00000', timeUs: 1e6, hdmv: null, playback: { psr1: 2, psr2: 0x80000002, psr3: 1 } } });
+    await untilPlaying(h);
+    expect(h.events.flatMap((e) => (e.type === 'tracks' ? [e.selectedAudio] : []))).toEqual([2]);
+    const subtitles = h.events.filter((e) => e.type === 'subtitles').at(-1);
+    expect(subtitles?.type === 'subtitles' && subtitles.selected).toEqual({ pg: 2 });
+    const place = await readPlace(h);
+    expect(place.psrs.slice(1, 4)).toEqual([2, 0x80000002, 1]);
+  });
+
+  it('an HDMV resume whose playlist fails to open, and whose program then ends, leaves the player idle', async () => {
+    const h = await harness(CodingType.LPCM, {
+      playlists: [{ id: '00000', clipIds: ['00001'], chapterEverySeconds: 1 }, { id: '00001', clipIds: ['00002'], chapterEverySeconds: 1 }],
+      movieObjects: buildMovieObjects([{ cmds: [] }, { cmds: [] }, { cmds: [asm.playPl(imm(1))] }]),
+      dropFiles: ['BDMV/STREAM/00002.m2ts'],
+      noOpen: true,
+    });
+    const psrs = new RegisterFile().snapshot().psrs;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries }, start: { playlistId: '00001', timeUs: 0, hdmv: { title: 1, psrs, gprs: {} }, playback: null } });
+    await vi.waitFor(async () => {
+      await h.play(20);
+      expect(h.events.some((e) => e.type === 'error')).toBe(true); // the missing clip
+      expect(lastState(h)).toBe('idle');
+    }, { timeout: 5000 });
+    expect(chapterIds(h)).toEqual([]);
+  });
+
+  it('a later open drops an open at a place: only the second disc emits titles, and nothing plays', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    const first = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') }, start: { playlistId: '00001', timeUs: 1e6, hdmv: null, playback: null } });
+    const second = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc3') } });
+    await first;
+    await second;
+    const titles = h.events.flatMap((e) => (e.type === 'titles' ? [e.playlists.map((p) => p.id)] : []));
+    expect(titles).toEqual([['00000']]);
+    expect(chapterIds(h)).toEqual([]);
+    expect(startFailures(h)).toEqual([]);
+  });
+
+  it('drops a superseded open: only the second disc emits titles', async () => {
+    const h = await harness(undefined, { noOpen: true });
+    const first = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc1') } });
+    const second = h.player.handle({ type: 'open', disc: { kind: 'files', entries: fixture('disc3') } });
+    await first;
+    await second;
+    const titles = h.events.flatMap((e) => (e.type === 'titles' ? [e.playlists.map((p) => p.id)] : []));
+    expect(titles).toEqual([['00000']]); // disc3's only playlist; disc1 has 00000 and 00001
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+  });
 });

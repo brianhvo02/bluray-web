@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { appHandlers } from './app';
 import { Auth } from './auth';
 import { BdjStore } from './bdj-store';
+import { PlaybackStore } from './playback-store';
+import { SubtitleStore } from './subtitle-store';
 import { ownerCode, printNasId } from './cli';
 import { loadConfig } from './config';
 import type { Config } from './config';
@@ -129,7 +131,7 @@ async function serve(config: Config): Promise<void> {
   const nasId = rendezvous ? await rendezvous.localNasId() : null;
   const isoTrees = new IsoTrees(ISO_TREES);
   const levels = await levelService(config, library, isoTrees);
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, isoTrees, ...(levels ? { levels } : {}) });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), playbackStore: new PlaybackStore(config.dataDir), subtitleStore: new SubtitleStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, isoTrees, ...(levels ? { levels } : {}) });
   const server = createServer(handlers);
   const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 

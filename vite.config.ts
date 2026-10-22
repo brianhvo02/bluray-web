@@ -14,12 +14,13 @@ const crossOriginIsolation = {
 };
 
 /**
- * `server.headers` and `preview.headers` reach 200 responses only. A 304 without them made WebKit refuse a revalidated
- * worker script ("Worker load was blocked by Cross-Origin-Embedder-Policy"): the BD-J worker when a page opened a
- * BD-J disc a second time, the engine worker after a reload. This sets them on every response, as public/_headers does.
+ * The isolation headers on every response, 304s too: `server.headers`/`preview.headers` reach only full responses (sirv
+ * leaves them off a 304), and WebKit refuses a worker whose revalidated script answers 304 without COEP, so a second
+ * page load in a tab (a reload, or a link opened after the app) got no engine worker, and a BD-J disc opened a second
+ * time got no BD-J worker.
  */
 const isolateEveryResponse: Plugin = {
-  name: 'cross-origin-isolation-on-every-response',
+  name: 'isolate-every-response',
   configureServer(server) {
     server.middlewares.use((_req, res, next) => {
       for (const [name, value] of Object.entries(crossOriginIsolation)) res.setHeader(name, value);

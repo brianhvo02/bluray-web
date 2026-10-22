@@ -61,7 +61,7 @@ function toEntry(s: Show, kind: 'series' | 'movie'): Entry {
     runtimeMin: runtimeMin || null,
     seasons: (s.seasons ?? []).filter((season) => season.season_number > 0).map((season) => ({ number: season.season_number, episodes: season.episode_count, runtimeMin: runtimeMin || null })),
     relations: [],
-    poster: s.poster_path ? { small: `${IMAGES}/w185${s.poster_path}`, large: `${IMAGES}/w500${s.poster_path}` } : null,
+    poster: s.poster_path ? { small: `${IMAGES}/w342${s.poster_path}`, large: `${IMAGES}/w780${s.poster_path}` } : null,
     banner: s.backdrop_path ? `${IMAGES}/w1280${s.backdrop_path}` : null,
   };
 }

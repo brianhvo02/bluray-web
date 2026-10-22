@@ -59,8 +59,8 @@ describe('createAniList', () => {
         { type: 'ADAPTATION', id: 'anilist:880001', format: 'MANGA', startDate: null },
       ],
       poster: {
-        small: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/small/bx990001-AbCdEf.jpg',
-        large: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx990001-AbCdEf.jpg',
+        small: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/bx990001-AbCdEf.jpg',
+        large: 'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/bx990001-AbCdEf.jpg',
       },
       banner: 'https://s4.anilist.co/file/anilistcdn/media/anime/banner/990001-GhIjKl.jpg',
     });

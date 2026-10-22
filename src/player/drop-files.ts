@@ -7,9 +7,22 @@ export const FONT_EXTENSIONS: readonly string[] = ['.ttf', '.otf', '.ttc', '.wof
 
 const hasExtension = (file: File, list: readonly string[]): boolean => list.some((ext) => file.name.toLowerCase().endsWith(ext));
 
+/** Whether a file name is a font's (by its extension). */
+export const isFontName = (name: string): boolean => FONT_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext));
+
 /** The subtitle files and the fonts of a pick, in pick order; anything else is ignored. */
 export function splitPick(files: readonly File[]): { readonly subtitles: readonly File[]; readonly fonts: readonly File[] } {
   return { subtitles: files.filter((f) => hasExtension(f, SUBTITLE_EXTENSIONS)), fonts: files.filter((f) => hasExtension(f, FONT_EXTENSIONS)) };
+}
+
+/**
+ * The subtitle files of a pick as `loadSubtitleFiles` takes them: those named as subtitles, or every file when nothing
+ * is named as a subtitle or a font (the engine detects SRT or ASS by content). Empty for fonts alone, which don't
+ * replace the text set.
+ */
+export function pickedSubtitles(files: readonly File[]): readonly File[] {
+  const { subtitles, fonts } = splitPick(files);
+  return subtitles.length || fonts.length ? subtitles : files;
 }
 
 /** The files of a drop: plain files, and the files of dropped folders and of their subfolders (one level). */

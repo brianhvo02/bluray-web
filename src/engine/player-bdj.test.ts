@@ -24,7 +24,7 @@ import { Player } from './player';
 import { MEMORY_PROFILES, type MemoryProfileName } from './memory-profile';
 import type { CompositorLike } from './render/compositor';
 import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
-import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type Telemetry } from './protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type StartPoint, type Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const CLASSES: ClassLibrarySource = {
@@ -102,6 +102,8 @@ interface HarnessOptions {
    * fetch port, as on the WebRTC route; neither worker's own fetch may be used.
    */
   readonly remote?: boolean | 'port';
+  /** Open the disc at this place. */
+  readonly start?: StartPoint;
 }
 
 async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: HarnessOptions = {}): Promise<Harness> {
@@ -173,7 +175,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
   if (opts.memoryProfile) await player.handle({ type: 'setMemoryProfile', profile: opts.memoryProfile });
   await player.handle({ type: 'attachAudio', ring });
   await player.handle({ type: 'attachCanvas', canvas: {} as OffscreenCanvas });
-  await player.handle({ type: 'open', disc: spec ?? { kind: 'files', entries: discEntries(files) } });
+  await player.handle({ type: 'open', disc: spec ?? { kind: 'files', entries: discEntries(files) }, ...(opts.start ? { start: opts.start } : {}) });
   const left = new Float32Array(128);
   const right = new Float32Array(128);
   return {
@@ -411,6 +413,25 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     const types = h.events.map((e) => (e.type === 'state' ? `state:${e.state}` : e.type));
     const titles = types.indexOf('titles');
     expect(types.indexOf('bdjActive', titles)).toBeLessThan(types.indexOf('state:idle', titles));
+  });
+
+  it('reads the place of a BD-J title: its registers, with no title and no GPRs', async () => {
+    const h = await harness(bdjDisc(), { worker: handWorker().worker });
+    await h.player.handle({ type: 'readPlace' });
+    const place = h.events.filter((e) => e.type === 'placeState').at(-1);
+    expect(place).toMatchObject({ type: 'placeState', mode: 'bdj', title: null, gprs: null });
+    expect(place?.type === 'placeState' && place.psrs).toHaveLength(128);
+  });
+
+  it('opens a BD-J disc at a place directly, with BD-J off: no worker, the saved audio stream', async () => {
+    const h = await harness(bdjDisc(), { start: { playlistId: '00000', timeUs: 1e6, hdmv: null, playback: { psr1: 2, psr2: 0, psr3: 1 } } });
+    await until(h, () => lastState(h) === 'playing');
+    expect(h.workers()).toBe(0);
+    expect(h.events).not.toContainEqual(expect.objectContaining({ type: 'bdjActive', active: true }));
+    expect(playlistsPlayed(h)).toEqual(['00000']);
+    expect(h.events.flatMap((e) => (e.type === 'tracks' ? [e.selectedAudio] : []))).toEqual([2]);
+    await h.player.handle({ type: 'readPlace' });
+    expect(h.events.filter((e) => e.type === 'placeState').at(-1)).toMatchObject({ mode: 'none', title: null, gprs: null });
   });
 
   it("boots a BD-J First Play's worker while the disc opens (spec §4.7), once, and the title starts once it has booted", async () => {

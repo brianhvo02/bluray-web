@@ -4,12 +4,24 @@ import type { PlayerController } from '../../player/player-controller';
 import { breadcrumbs, discBadges, folderMemory, formatSize, sortRows, type DiscFacts, type LibraryRow } from './library-model';
 import { AdminScreen } from './AdminScreen';
 import { NasHttpError, type NasClient } from './nas-client';
+import { useNasRoute, type NasHistory } from './nas-history';
 import type { NasPairing } from './nas-store';
+import type { PlayingRoute } from './playing-route';
+import type { PlaceSaver } from '../place-saver';
 import { Preflight } from './Preflight';
 
 interface LibraryScreenProps {
   readonly nas: NasClient;
   readonly controller: PlayerController;
+  readonly history: NasHistory;
+  /** Kept current by playback once a pre-flight here launches a disc. */
+  readonly playingRoute: PlayingRoute;
+  /** Saves the place of the disc Play opens. */
+  readonly places: PlaceSaver;
+  /** A pre-flight here is launching its disc: its play route is about to be pushed, with this folder still shown. */
+  readonly onLaunch: () => void;
+  /** The folder shown, from the address bar (on the play route a pre-flight here pushed, the folder it was opened in). */
+  readonly path: string;
   readonly onClose: () => void;
 }
 
@@ -21,13 +33,16 @@ const storage = (): Storage | undefined => {
   }
 };
 
+/** The folder the browser showed last, where "Browse by folder instead" opens it. */
+export const rememberedFolder = (): string => folderMemory(storage()).get();
+
 /** Which discs turned out to be UHD (from their manifests), kept for the session so their rows show it. */
 const uhdDiscs = new Map<string, boolean>();
 
 /** The NAS's folders and discs: breadcrumbs, folders first, then discs with size and badges; a disc opens its pre-flight. */
-export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps): ReactElement {
+export function LibraryScreen({ nas, controller, history, playingRoute, places, onLaunch, path, onClose }: LibraryScreenProps): ReactElement {
+  const onPlayRoute = useNasRoute(history)?.kind === 'play';
   const [memory] = useState(() => folderMemory(storage()));
-  const [path, setPath] = useState(() => memory.get());
   const [rows, setRows] = useState<LibraryRow[] | null>(null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,14 +81,21 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
       (err: unknown) => {
         if (!live) return;
         // A remembered folder that is gone (renamed, or its drive removed): start from the top.
-        if (err instanceof NasHttpError && err.status === 404 && path !== '') setPath('');
+        if (err instanceof NasHttpError && err.status === 404 && path !== '') history.replace({ kind: 'folders', path: '' });
         else setError(err instanceof Error ? err.message : String(err));
       },
     );
     return () => {
       live = false;
     };
-  }, [nas, path, memory, reload]);
+  }, [nas, path, memory, reload, history]);
+
+  // The pre-flight belongs to the folder it was opened in: another folder (Back, Forward) closes it, and so does leaving
+  // the play route its Play pushed.
+  useEffect(() => setSelected(null), [path]);
+  useEffect(() => {
+    if (!onPlayRoute) setSelected(null);
+  }, [onPlayRoute]);
 
   const onFacts = useCallback((discId: string, facts: DiscFacts) => {
     if (uhdDiscs.get(discId) === facts.uhd) return;
@@ -83,7 +105,7 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
 
   const open = (folder: string): void => {
     setSelected(null);
-    setPath(folder);
+    history.push({ kind: 'folders', path: folder });
   };
 
   if (settings) {
@@ -140,7 +162,17 @@ export function LibraryScreen({ nas, controller, onClose }: LibraryScreenProps):
         </div>
       )}
       {selected ? (
-        <Preflight nas={nas} controller={controller} disc={selected} onFacts={onFacts} onCancel={() => setSelected(null)} />
+        <Preflight
+          nas={nas}
+          controller={controller}
+          disc={selected}
+          history={history}
+          playingRoute={playingRoute}
+          places={places}
+          onLaunch={onLaunch}
+          onFacts={onFacts}
+          onCancel={() => setSelected(null)}
+        />
       ) : rows === null ? (
         !error && <p className="status">Loading…</p>
       ) : rows.length === 0 ? (

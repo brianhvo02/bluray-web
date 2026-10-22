@@ -18,10 +18,11 @@ import { RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
 import type { Library } from '../../../server/src/library';
 import { BdjStore } from '../../../server/src/bdj-store';
+import { PlaybackStore } from '../../../server/src/playback-store';
 import { Store } from '../../../server/src/store';
-import type { CodeLookup, CodeRoutes } from '../../engine/disc/nas-api';
+import type { CodeLookup, CodeRoutes, PlaceSettings, PlaybackPlace, StoredSubtitle } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
-import { NAS_MESSAGES, NasClient, NasLostError, defaultDeviceName, groupCodeInput } from './nas-client';
+import { NAS_MESSAGES, NasClient, NasLostError, PLACE_TIMEOUT_MS, defaultDeviceName, groupCodeInput } from './nas-client';
 import type { NasClientDeps } from './nas-client';
 import type { NasPairing, NasStore } from './nas-store';
 
@@ -92,8 +93,9 @@ function fakeServer(): FakeServer {
       listed.push(path);
       return { folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [] };
     },
+    evidence: () => [],
   } as unknown as Library;
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), publicBase: BASE, now });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(tmp), playbackStore: new PlaybackStore(tmp, { now }), publicBase: BASE, now });
   /** `GET /api/me` (the title routes need a title service), behind the token like the rest. */
   const me: Handler = async (_req, url) => {
     if (url.pathname === '/api/me') return json(200, { owner: true, titleLibrary: true, personName: 'Owner' });
@@ -212,6 +214,20 @@ describe('NasClient', () => {
     expect(asked).toEqual(['me Bearer ', 'titles Bearer ', 'titles/anilist%3A1 Bearer ']);
     const { token } = await nas.session();
     expect(await nas.artUrl('0123456789abcdef0123456789abcdef', 'large')).toBe(`${BASE}art/0123456789abcdef0123456789abcdef?size=large&t=${encodeURIComponent(token)}`);
+  });
+
+  it('resolves a disc key, null when the NAS has none', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const disc = { id: '0123456789abcdef', name: 'Disc', path: 'drv5/Disc', kind: 'folder' };
+    await nas.session();
+    server.nas = async (url) => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length);
+      return route === 'discs/resolve/d.0123456789abcdef' ? Response.json({ disc }) : Response.json({ error: 'not-found' }, { status: 404 });
+    };
+    expect(await nas.resolveDisc('d.0123456789abcdef')).toEqual(disc);
+    expect(await nas.resolveDisc('d.fedcba9876543210')).toBeNull();
   });
 
   it('gives a failed art URL a fresh token, never the one it carried', async () => {
@@ -744,6 +760,28 @@ function fakeObjectUrls(): NonNullable<NasClientDeps['objectUrls']> & { live: Se
 }
 
 describe('NasClient over WebRTC', () => {
+
+  it('sends places over the connection, without keepalive', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const inits: (RequestInit | undefined)[] = [];
+    const openRtc = async (o: RtcOpenOptions): Promise<RtcLink> => {
+      const link = await world.openRtc(o);
+      const inner = link.fetch;
+      const watching = (async (input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).includes('/me/playback/')) inits.push(init);
+        return inner(input, init);
+      }) as typeof fetch;
+      return Object.assign(Object.create(link) as RtcLink, { fetch: watching });
+    };
+    const nas = rtcClient(server, { openRtc });
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(await nas.putPlace(playbackPlace(), { keepalive: true })).toBe('stored');
+    expect(inits).toHaveLength(1);
+    expect(inits[0]?.keepalive).toBeUndefined();
+    expect((await nas.playbackPlaces(PLACE_KEY))?.places['00001']?.timeUs).toBe(60e6);
+    expect(Object.keys(server.hits)).toEqual([]); // nothing went over HTTPS
+  });
   it('pairs over WebRTC when the lookup has no HTTPS route, then reads me and the library on a new connection', async () => {
     const server = fakeServer();
     const world = rtcWorld(server);
@@ -958,6 +996,97 @@ describe('NasClient over WebRTC', () => {
   });
 });
 
+const PLACE_KEY = `f.${'C'.repeat(32)}`;
+const placeSettings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
+const playbackPlace = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({
+  discKey: PLACE_KEY, discId: '0123456789abcdef', playlistId: '00001', timeUs: 60e6, durationUs: 1440e6, finished: false,
+  mode: 'none', title: null, psrs: [0, 1], gprs: null, settings: placeSettings, updatedAt: clock - 1000, deviceName: 'iPad', ...over,
+});
+
+describe('NasClient places', () => {
+  it("stores this person's places on the NAS, answers stale for an older one, and reads and deletes them", async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    expect(await nas.playbackPlaces(PLACE_KEY)).toBeNull();
+    expect(await nas.putPlace(playbackPlace())).toBe('stored');
+    expect(await nas.putPlace(playbackPlace({ playlistId: '00002', updatedAt: clock - 500 }))).toBe('stored');
+    expect(await nas.putPlace(playbackPlace({ timeUs: 1e6, updatedAt: clock - 2000 }))).toBe('stale');
+    const places = await nas.playbackPlaces(PLACE_KEY);
+    expect(places?.places['00001']?.timeUs).toBe(60e6);
+    expect(Object.keys(places!.places).sort()).toEqual(['00001', '00002']);
+    expect((await nas.continueWatching()).map((c) => [c.kind, c.playlistId])).toEqual([['resume', '00002'], ['resume', '00001']]);
+    await nas.deletePlace(PLACE_KEY, '00002');
+    expect(Object.keys((await nas.playbackPlaces(PLACE_KEY))!.places)).toEqual(['00001']);
+    await nas.deletePlace(PLACE_KEY);
+    expect(await nas.playbackPlaces(PLACE_KEY)).toBeNull();
+    expect(await nas.titleProgress('anilist:1')).toBeNull(); // no title library on this NAS
+  });
+
+  it('refuses a malformed place with the error the NAS gives', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await expect(nas.putPlace(playbackPlace({ playlistId: 'a/b' }))).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('sends a place with keepalive over HTTPS when asked, never one too large for it', async () => {
+    const server = fakeServer();
+    const sent: (boolean | undefined)[] = [];
+    const watching = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/me/playback/')) sent.push(init?.keepalive);
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    const nas2 = new NasClient({ fetch: watching, subtle: crypto.subtle, store: memoryStore(), now, rendezvousUrl: RENDEZVOUS });
+    await nas2.pair(await server.code(), 'iPad');
+    expect(await nas2.putPlace(playbackPlace(), { keepalive: true })).toBe('stored');
+    expect(await nas2.putPlace(playbackPlace({ updatedAt: clock - 900 }))).toBe('stored');
+    const gprs = Object.fromEntries(Array.from({ length: 4096 }, (_, i) => [i, 0x7fffffff]));
+    expect(await nas2.putPlace(playbackPlace({ updatedAt: clock - 800, mode: 'hdmv', title: 1, gprs }), { keepalive: true })).toBe('stored');
+    expect(sent).toEqual([true, undefined, undefined]);
+  });
+
+  it('gives up on a place whose request stalls, as the NAS being unreachable', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await nas.session();
+    server.nas = async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const put = nas.putPlace(playbackPlace());
+    const outcome = expect(put).rejects.toThrow(NAS_MESSAGES.unreachable);
+    await vi.advanceTimersByTimeAsync(PLACE_TIMEOUT_MS);
+    await outcome;
+  });
+
+  it('tells its listeners when the pairing changes: paired, forgotten', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    const changed = vi.fn();
+    nas.onPairingChange(changed);
+    await nas.pair(await server.code(), 'iPad');
+    expect(changed).toHaveBeenCalledTimes(1);
+    await nas.forget();
+    expect(changed).toHaveBeenCalledTimes(2);
+  });
+
+  it('tells its listeners when a session starts, so places waiting on the device can go', async () => {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    const started = vi.fn();
+    const off = nas.onSession(started);
+    await nas.session();
+    await nas.session(); // reused: no new session
+    expect(started).toHaveBeenCalledTimes(1);
+    off();
+    clock += 56 * MINUTE;
+    await nas.session();
+    expect(started).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('groupCodeInput', () => {
   it('groups as typed and accepts dashes and spaces', () => {
     expect(groupCodeInput('k7q')).toBe('K7Q');
@@ -981,5 +1110,105 @@ describe('defaultDeviceName', () => {
     expect(defaultDeviceName('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36', 5)).toBe(
       'Android',
     );
+  });
+});
+
+describe('NasClient subtitles', () => {
+  const stored: StoredSubtitle = { id: '0123456789abcdef', name: 'Fan', language: 'en', offsetMs: 0, fileName: 'a b.srt', fileSize: 3, fonts: [{ name: 'f#1.ttf', size: 2 }], attachment: { kind: 'chapter', discKey: 'd.1', playlistId: '00001', chapter: 0 }, uploaderPersonId: 'p', uploadedAt: 1 };
+
+  async function paired(): Promise<{ nas: NasClient; server: FakeServer; calls: { method: string; route: string; body: unknown; signal?: AbortSignal | null }[] }> {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await nas.session();
+    const calls: { method: string; route: string; body: unknown; signal?: AbortSignal | null }[] = [];
+    server.nas = async (url, init) => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length) + url.search;
+      calls.push({ method: init?.method ?? 'GET', route, body: init?.body, signal: init?.signal });
+      if (route === 'subtitles/0123456789abcdef/file') return new Response('abc');
+      if (init?.method !== 'PUT' && route.startsWith('subtitles/0123456789abcdef/fonts/')) return new Response(new Uint8Array([1, 2]));
+      if (route.startsWith('subtitles/0123456789abcdef/file/a%20b.srt')) return Response.json(stored);
+      if (route.includes('refused')) return Response.json({ error: 'forbidden' }, { status: 403 });
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      if (route.startsWith('subtitles?')) return Response.json([stored]);
+      return Response.json(stored, { status: init?.method === 'POST' ? 201 : 200 });
+    };
+    return { nas, server, calls };
+  }
+
+  it('lists by disc and by title with the keys encoded', async () => {
+    const { nas, calls } = await paired();
+    expect(await nas.subtitlesForDisc('d.0123')).toEqual([stored]);
+    expect(await nas.subtitlesForTitle('anilist:1')).toEqual([stored]);
+    expect(calls.map((c) => c.route)).toEqual(['subtitles?discKey=d.0123', 'subtitles?titleId=anilist%3A1']);
+  });
+
+  it('downloads the file, then the fonts, as Files named as stored', async () => {
+    const { nas, calls } = await paired();
+    const files = await nas.subtitleFiles(stored);
+    expect(files.map((f) => f.name)).toEqual(['a b.srt', 'f#1.ttf']);
+    expect(await files[0].text()).toBe('abc');
+    expect((await files[1].arrayBuffer()).byteLength).toBe(2);
+    expect(calls.map((c) => c.route)).toEqual(['subtitles/0123456789abcdef/file', 'subtitles/0123456789abcdef/fonts/f%231.ttf']);
+  });
+
+  it("aborts a download's requests through the caller's signal", async () => {
+    const { nas, calls } = await paired();
+    const abort = new AbortController();
+    await nas.subtitleFiles(stored, abort.signal);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.signal?.aborted === false)).toBe(true);
+    abort.abort();
+    expect(calls.every((c) => c.signal?.aborted === true)).toBe(true);
+  });
+
+  it("a download stopped by its caller is no sign of an unreachable NAS", async () => {
+    const { nas, server } = await paired();
+    let reached!: () => void;
+    const fetched = new Promise<void>((r) => (reached = r));
+    server.nas = async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        reached();
+      });
+    const abort = new AbortController();
+    const files = nas.subtitleFiles(stored, abort.signal);
+    await fetched;
+    abort.abort();
+    await expect(files).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('creates, patches and deletes', async () => {
+    const { nas, calls } = await paired();
+    const forEpisode = { kind: 'episode', titleId: 't', seasonId: 's', episode: 2 } as const;
+    expect(await nas.createSubtitle({ name: 'Fan', language: 'en', for: forEpisode })).toEqual(stored);
+    expect(await nas.updateSubtitle(stored.id, { offsetMs: -500 })).toEqual(stored);
+    await nas.deleteSubtitle(stored.id);
+    expect(calls.map((c) => [c.method, c.route, c.body])).toEqual([
+      ['POST', 'subtitles', JSON.stringify({ name: 'Fan', language: 'en', for: forEpisode })],
+      ['PATCH', 'subtitles/0123456789abcdef', JSON.stringify({ offsetMs: -500 })],
+      ['DELETE', 'subtitles/0123456789abcdef', undefined],
+    ]);
+  });
+
+  it('uploads the File as the raw body under its encoded name', async () => {
+    const { nas, calls } = await paired();
+    const file = new File(['abc'], 'a b.srt');
+    const sent: number[] = [];
+    expect(await nas.uploadSubtitleFile(stored.id, file, (n) => sent.push(n))).toEqual(stored);
+    expect(await nas.uploadSubtitleFont(stored.id, new File([new Uint8Array([1])], 'f#1.ttf'))).toEqual(stored);
+    expect(calls.map((c) => [c.method, c.route])).toEqual([
+      ['PUT', 'subtitles/0123456789abcdef/file/a%20b.srt'],
+      ['PUT', 'subtitles/0123456789abcdef/fonts/f%231.ttf'],
+    ]);
+    expect(calls[0].body).toBe(file);
+    expect(sent).toEqual([3]);
+  });
+
+  it('turns a 403 into a NasHttpError and aborts the refused upload', async () => {
+    const { nas, calls } = await paired();
+    await expect(nas.uploadSubtitleFile(stored.id, new File(['abc'], 'refused.srt'))).rejects.toMatchObject({ status: 403, code: 'forbidden' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].signal?.aborted).toBe(true);
   });
 });

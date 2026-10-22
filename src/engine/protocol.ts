@@ -149,6 +149,30 @@ export interface BufferRequest {
   readonly playlistId?: string;
 }
 
+/**
+ * Where a disc opens instead of its First Play (resume where you left off): a playlist and a time in it. A BD-J disc
+ * opens there directly too, with BD-J off (Menu boots it fresh).
+ */
+export interface StartPoint {
+  readonly playlistId: string;
+  readonly timeUs: number;
+  /** Resume an HDMV title with its registers; null plays the playlist directly. */
+  readonly hdmv: { readonly title: number; readonly psrs: readonly number[]; readonly gprs: Readonly<Record<number, number>> } | null;
+  /** PSRs 1–3 (audio, PG, angle) for direct playback; ignored when hdmv is set. */
+  readonly playback: { readonly psr1: number; readonly psr2: number; readonly psr3: number } | null;
+}
+
+/** The registers a saved place needs: the program's (HDMV or BD-J), or the private PG registers with no program. */
+export interface PlaceState {
+  readonly mode: 'hdmv' | 'bdj' | 'none';
+  /** PSR4 under an HDMV title, else null. */
+  readonly title: number | null;
+  /** All 128 PSRs (empty with no disc open). */
+  readonly psrs: number[];
+  /** The non-zero GPRs, only under an HDMV title. */
+  readonly gprs: Record<number, number> | null;
+}
+
 export type EngineCommand =
   /**
    * `bufferFirst` (a NAS disc, buffer first): the disc's playlists are read, then the playlist is fetched into the
@@ -156,8 +180,11 @@ export type EngineCommand =
    * then goes on ahead of the play position to the playlist's end while the disc is open (a seek moves it), freeing
    * what playback has passed. cancelBuffer opens the disc at once (the fill goes on); a close or another open drops it
    * unopened, even while it is still queued. Every other command sent after it waits for it, as the queue does.
+   * `start`: the disc opens at that place instead of running First Play (or BD-J); startFailed says when it can't.
    */
-  | { readonly type: 'open'; readonly disc: DiscSpec; readonly bufferFirst?: BufferRequest }
+  | { readonly type: 'open'; readonly disc: DiscSpec; readonly bufferFirst?: BufferRequest; readonly start?: StartPoint }
+  /** Answered at once (not queued) with placeState. */
+  | { readonly type: 'readPlace' }
   /**
    * Fetch the open NAS disc's playlist (`playlistId`, else its main title) from `fromSeconds` on into its read-ahead
    * cache until it holds `targetBytes` of it, reporting bufferProgress, then stop; it doesn't follow playback (a
@@ -288,7 +315,14 @@ export type EngineEvent =
   /** The current playlist was torn down (a new pick, a failed pick, or close). */
   | { readonly type: 'playlistCleared' }
   /** On every shader set change and compile result; `error` explains 'error' and 'unavailable'. */
-  | { readonly type: 'shaderStatus'; readonly state: ShaderState; readonly set: string | null; readonly error: string | null };
+  | { readonly type: 'shaderStatus'; readonly state: ShaderState; readonly set: string | null; readonly error: string | null }
+  /** The answer to readPlace. */
+  | ({ readonly type: 'placeState' } & PlaceState)
+  /**
+   * An open's start point could not be used: its playlist is not on the disc (nothing plays, the state is idle), or its
+   * time is at or past the playlist's end (it plays from the beginning).
+   */
+  | { readonly type: 'startFailed'; readonly reason: 'no-playlist' | 'past-end' };
 
 /**
  * The notice of a playlist whose video (MPEG-2, VC-1) the browser can't decode: it plays without a picture. Sent once per

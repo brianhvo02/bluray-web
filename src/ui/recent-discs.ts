@@ -10,6 +10,8 @@ export interface RecentDisc {
   readonly name: string;
   readonly handle: FileSystemDirectoryHandle;
   readonly openedAt: number;
+  /** `discKeyOf` of the disc's files when it was last opened, for its place on this device; null when it has no fingerprint (or an older entry). */
+  readonly discKey: string | null;
 }
 
 /** Whether two handles point at the same folder (injectable because test doubles can't carry methods through IndexedDB). */
@@ -19,7 +21,7 @@ const isSameFolder: SameFolder = (a, b) => a.isSameEntry(b);
 
 export async function listRecentDiscs(factory: IDBFactory = indexedDB): Promise<RecentDisc[]> {
   const all = (await withStore<RecentDisc[]>(factory, 'readonly', (store) => store.getAll() as IDBRequest<RecentDisc[]>)) ?? [];
-  return all.sort((a, b) => b.openedAt - a.openedAt);
+  return all.map((d) => ({ ...d, discKey: d.discKey ?? null })).sort((a, b) => b.openedAt - a.openedAt);
 }
 
 export async function saveRecentDisc(
@@ -27,6 +29,7 @@ export async function saveRecentDisc(
   now = Date.now(),
   factory: IDBFactory = indexedDB,
   sameFolder: SameFolder = isSameFolder,
+  discKey: string | null = null,
 ): Promise<void> {
   let match: RecentDisc | undefined;
   for (const disc of await listRecentDiscs(factory)) {
@@ -36,7 +39,7 @@ export async function saveRecentDisc(
     }
   }
   await withStore(factory, 'readwrite', (store) => {
-    store.put(match ? { ...match, name: handle.name, handle, openedAt: now } : { name: handle.name, handle, openedAt: now });
+    store.put(match ? { ...match, name: handle.name, handle, openedAt: now, discKey } : { name: handle.name, handle, openedAt: now, discKey });
   });
   const stale = (await listRecentDiscs(factory)).slice(MAX_RECENT);
   for (const disc of stale) await removeRecentDisc(disc.id, factory);

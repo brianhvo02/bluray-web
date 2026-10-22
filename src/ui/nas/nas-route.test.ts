@@ -1,0 +1,78 @@
+import { describe, expect, it } from 'vitest';
+import { nasRoutePath, parseNasRoute, seasonIdOf, seasonKeyOf, type NasRoute } from './nas-route';
+
+const u = (p: string): URL => new URL(p, 'https://player.example');
+
+const ROUTES: NasRoute[] = [
+  { kind: 'library', shelf: null, q: '' },
+  { kind: 'library', shelf: 'movie', q: '' },
+  { kind: 'library', shelf: null, q: 'star fall & 100%' },
+  { kind: 'library', shelf: 'music', q: '星降り' },
+  { kind: 'title', titleId: 'anilist:21' },
+  { kind: 'title', titleId: 'own:a/b #1' },
+  { kind: 'season', titleId: 'anilist:21', seasonKey: 's2' },
+  { kind: 'season', titleId: 'anilist:21', seasonKey: 'discs' },
+  { kind: 'extras', titleId: 'anilist:21' },
+  { kind: 'folders', path: '' },
+  { kind: 'folders', path: 'syn/Anime/Starfall Wanderer (星降りの旅人)/Vol.1 #2 100%' },
+  { kind: 'unsorted' },
+  { kind: 'hidden' },
+  { kind: 'settings' },
+  { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: null, resume: false },
+  { kind: 'play', discKey: 'd.abc123', playlistId: '00001', timeS: null, resume: false },
+  { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: 90, resume: false },
+  { kind: 'play', discKey: 'f.abc123', playlistId: '00001', timeS: 0, resume: false },
+  { kind: 'play', discKey: 'f.abc123', playlistId: '00001', timeS: 754, resume: true },
+];
+
+describe('nas route', () => {
+  it.each(ROUTES)('round-trips %j', (route) => {
+    expect(parseNasRoute(u(nasRoutePath(route)))).toEqual(route);
+  });
+
+  it('formats the documented paths', () => {
+    expect(nasRoutePath({ kind: 'library', shelf: null, q: '' })).toBe('/nas');
+    expect(nasRoutePath({ kind: 'library', shelf: 'movie', q: '' })).toBe('/nas?shelf=movie');
+    expect(nasRoutePath({ kind: 'library', shelf: null, q: 'a' })).toBe('/nas?q=a');
+    expect(nasRoutePath({ kind: 'library', shelf: 'movie', q: 'a' })).toBe('/nas?shelf=movie&q=a');
+    expect(nasRoutePath({ kind: 'title', titleId: 'anilist:21' })).toBe('/nas/title/anilist%3A21');
+    expect(nasRoutePath({ kind: 'extras', titleId: 'x' })).toBe('/nas/title/x/extras');
+    expect(nasRoutePath({ kind: 'folders', path: 'a/b' })).toBe('/nas/folders/a/b');
+    expect(nasRoutePath({ kind: 'play', discKey: 'f.1', playlistId: '2', timeS: 3.9, resume: false })).toBe(
+      '/nas/play/f.1?pl=2&t=3',
+    );
+    expect(nasRoutePath({ kind: 'play', discKey: 'f.1', playlistId: '2', timeS: 60, resume: true })).toBe('/nas/play/f.1?pl=2&t=60&resume=1');
+  });
+
+  it('treats /nas and /nas/ as the library', () => {
+    expect(parseNasRoute(u('/nas'))).toEqual({ kind: 'library', shelf: null, q: '' });
+    expect(parseNasRoute(u('/nas/'))).toEqual({ kind: 'library', shelf: null, q: '' });
+  });
+
+  it('returns null outside /nas', () => {
+    expect(parseNasRoute(u('/'))).toBeNull();
+    expect(parseNasRoute(u('/nasx'))).toBeNull();
+    expect(parseNasRoute(u('/probe.html'))).toBeNull();
+  });
+
+  it('falls back to the library for unknown input', () => {
+    const lib = { kind: 'library', shelf: null, q: '' };
+    expect(parseNasRoute(u('/nas?shelf=bogus'))).toEqual(lib);
+    expect(parseNasRoute(u('/nas/title/x/season'))).toEqual(lib);
+    expect(parseNasRoute(u('/nas/unknown'))).toEqual(lib);
+    expect(parseNasRoute(u('/nas/title/%E0%A4%A'))).toEqual(lib);
+  });
+
+  it('reads t as whole seconds or null', () => {
+    const t = (v: string): unknown => (parseNasRoute(u(`/nas/play/f.1?t=${v}`)) as { timeS: unknown }).timeS;
+    expect(t('-3')).toBeNull();
+    expect(t('abc')).toBeNull();
+    expect(t('1e99')).toBeNull();
+    expect(t('12.9')).toBe(12);
+  });
+
+  it('converts season ids and keys', () => {
+    expect(seasonKeyOf('anilist:21#s2')).toBe('s2');
+    expect(seasonIdOf('anilist:21', 's2')).toBe('anilist:21#s2');
+  });
+});

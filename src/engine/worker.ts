@@ -85,6 +85,7 @@ const player = new Player({
   // bd_set_player_setting_str as a player application sets it: the browser's language and region
   playerSettings: playerSettingsForLocale(navigator.language),
   bdjLog: (line, error) => (error ? console.warn : console.debug)(`[BD-J] ${line}`),
+  log: (line) => console.info(`[engine] ${line}`),
   // BD-J background stills: the browser sniffs the format (PNG, JPEG, GIF) from the bytes
   decodeImage: (bytes) => createImageBitmap(new Blob([new Uint8Array(bytes)])),
   // ASS: fonts in the worker's FontFaceSet, DejaVu Sans as the default font (libass's fallback in our harness)

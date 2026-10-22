@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PSR, RegisterFile, type PsrEvent, type RegisterWrite } from './registers';
+import { PSR, RegisterFile, SETTING_PSRS, type PsrEvent, type RegisterWrite } from './registers';
 
 describe('RegisterFile', () => {
   it('starts with libbluray initial PSR values and zeroed GPRs', () => {
@@ -91,5 +91,45 @@ describe('RegisterFile', () => {
     // the 3D flag refuses a second switch without force
     expect(s3d.psrInitUhd(false)).toBe(-1);
     expect(s3d.psrInitUhd(true)).toBe(0);
+  });
+
+  it('snapshots and loads every register, skipping the listed PSRs', () => {
+    const a = new RegisterFile();
+    a.psrWrite(PSR.PRIMARY_AUDIO_ID, 2);
+    a.psrWrite(PSR.TITLE_NUMBER, 3);
+    a.psrSettingWrite(PSR.AUDIO_LANG, 0x6a706e);
+    a.gprWrite(0, 5);
+    a.gprWrite(7, 9);
+    a.gprWrite(4095, 0xffffffff);
+    const s = a.snapshot();
+    expect(s.psrs).toHaveLength(128);
+    expect(s.psrs[PSR.TITLE_NUMBER]).toBe(3);
+    expect(s.gprs).toEqual({ 0: 5, 7: 9, 4095: 0xffffffff });
+
+    const shared = new SharedArrayBuffer((128 + 4096) * 4);
+    const b = new RegisterFile({ shared });
+    const initialLang = b.psrRead(PSR.AUDIO_LANG);
+    const events: PsrEvent[] = [];
+    b.onPsrEvent((e) => events.push(e));
+    b.load(s, SETTING_PSRS);
+    for (let i = 0; i < 128; i++) {
+      expect(b.psrRead(i)).toBe(i === PSR.AUDIO_LANG ? initialLang : s.psrs[i]);
+    }
+    expect([b.gprRead(0), b.gprRead(7), b.gprRead(4095), b.gprRead(1)]).toEqual([5, 9, 0xffffffff, 0]);
+    expect(events).toContainEqual({ type: 'change', psr: PSR.TITLE_NUMBER, oldValue: 0xffff, newValue: 3 });
+    expect(events.some((e) => e.psr === PSR.AUDIO_LANG)).toBe(false);
+    const mirror = new Int32Array(shared);
+    expect(mirror[PSR.TITLE_NUMBER]).toBe(3);
+    expect(mirror[128 + 7]).toBe(9);
+
+    b.load({ psrs: s.psrs, gprs: { 0: 5 } }, SETTING_PSRS);
+    expect(b.gprRead(7)).toBe(0);
+    expect(b.gprRead(4095)).toBe(0);
+    expect(mirror[128 + 7]).toBe(0);
+  });
+
+  it('lists the player-setting PSRs that psrWrite refuses', () => {
+    const r = new RegisterFile();
+    for (let i = 0; i < 128; i++) expect(SETTING_PSRS.has(i)).toBe(r.psrWrite(i, r.psrRead(i)) === -2);
   });
 });

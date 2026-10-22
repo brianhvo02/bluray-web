@@ -137,6 +137,17 @@ describe('TitleService', () => {
     expect(anilist.calls).toEqual([]);
   });
 
+  it('asks for posters stored before the sizes went up at the new sizes after a restart, with no source calls', async () => {
+    const cover = 'https://s4.anilist.co/file/anilistcdn/media/anime/cover';
+    const old = { small: `${cover}/small/bx100-Ab.jpg`, large: `${cover}/medium/bx100-Ab.jpg` };
+    await service({ evidence: () => [A], anilist: fake({ 火斬りの剣: [{ ...EMBER, poster: old }] }) }).runNow();
+    const anilist = fake({ 火斬りの剣: [EMBER] });
+    const s = service({ evidence: () => [A], anilist });
+    const poster = s.catalogue().titles[0]!.poster!;
+    expect(s.catalogue().art(poster)).toEqual({ small: `${cover}/medium/bx100-Ab.jpg`, large: `${cover}/large/bx100-Ab.jpg` });
+    expect(anilist.calls).toEqual([]);
+  });
+
   it('makes no source calls when a run finds the evidence unchanged', async () => {
     const anilist = fake({ 火斬りの剣: [EMBER] });
     const s = service({ evidence: () => [A], anilist });

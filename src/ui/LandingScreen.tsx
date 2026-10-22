@@ -1,32 +1,152 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { checkCapabilities, showStorageHint } from './capabilities';
-import { LibraryScreen } from './nas/LibraryScreen';
+import { NasNotFound } from './nas/NasNotFound';
+import { LibraryScreen, rememberedFolder } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
+import { useNasRoute, type NasHistory } from './nas/nas-history';
+import { nasRoutePath, type NasRoute } from './nas/nas-route';
+import type { PlayingRoute } from './nas/playing-route';
+import { Preflight } from './nas/Preflight';
 import type { NasPairing } from './nas/nas-store';
 import { pairedAs } from './nas/people-model';
 import { collectFromDirectoryHandle, collectFromFileList, discFromDataTransfer } from './disc-input';
 import { listServerDiscs, serverDiscSpec, serverLinkFromLocation, type ServerDisc, type ServerLink } from './disc-server';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
+import { discKeyOf } from '../engine/disc/disc-key';
+import { mainPlaylistId } from './nas/library-model';
+import { LOCAL_DEVICE_NAME, type LaunchSettings, type PlaceSaver } from './place-saver';
+import { ResumePrompt } from './nas/ResumePrompt';
+import { playlistsOf, startOver } from './nas/resume-model';
+import { askOrOpen, localKeyOf, recentResumeLabel, type AskOffer } from './local-resume';
+import type { StartPoint } from '../engine/protocol';
+import type { DiscEntry } from '../engine/disc/nas-api';
 import { listRecentDiscs, reopenRecentDisc, saveRecentDisc, type RecentDisc } from './recent-discs';
+
+const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 
 /** A pick that takes longer than this to hand over its files is being copied (iOS copies every picked file first). */
 const COPY_NOTICE_DELAY_MS = 1500;
+
+/** A local disc waiting for the tap that says where it opens: Resume, or Start from beginning. */
+interface PendingResume {
+  readonly offer: AskOffer;
+  readonly open: (start: StartPoint | undefined, launch: LaunchSettings | undefined) => void;
+}
+
+type PlayRoute = Extract<NasRoute, { kind: 'play' }>;
+
+interface PlayLinkProps {
+  readonly nas: NasClient;
+  readonly places: PlaceSaver;
+  readonly controller: PlayerController;
+  readonly history: NasHistory;
+  readonly playingRoute: PlayingRoute;
+  readonly route: PlayRoute;
+  readonly onLibrary: () => void;
+}
+
+/**
+ * A play link opened here (a link, a reload during playback, Back or Forward onto one): its disc's pre-flight, with
+ * the link's playlist and time. Play needs the tap, which starts audio.
+ */
+function PlayLink({ nas, places, controller, history, playingRoute, route, onLibrary }: PlayLinkProps): ReactElement {
+  /** undefined while resolving; null when the NAS has no such disc; a string when the NAS couldn't be asked. */
+  const [found, setFound] = useState<DiscEntry | null | string | undefined>(undefined);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    // The same disc again (the pre-flight swapping a `d.` key for its `f.` key) keeps its pre-flight as it is.
+    nas.resolveDisc(route.discKey).then(
+      (disc) => live && setFound((prev) => (typeof prev === 'object' && prev !== null && disc !== null && prev.id === disc.id ? prev : disc)),
+      (err: unknown) => live && setFound(err instanceof Error ? err.message : String(err)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [nas, route.discKey, attempt]);
+  const back = useCallback(() => history.back(LIBRARY), [history]);
+  if (found === undefined) return <p className="status">Loading…</p>;
+  if (found === null) return <NasNotFound reason="missing" onLeave={onLibrary} />;
+  if (typeof found === 'string') {
+    return (
+      <div className="error-banner" role="alert" data-testid="nas-error">
+        {found}
+        <p>
+          <button
+            type="button"
+            data-testid="nas-retry"
+            onClick={() => {
+              setFound(undefined);
+              setAttempt((n) => n + 1);
+            }}
+          >
+            Retry
+          </button>{' '}
+          <button type="button" data-testid="nas-back-to-library" onClick={() => history.replace(LIBRARY)}>
+            Back to the library
+          </button>
+        </p>
+      </div>
+    );
+  }
+  return (
+    <section className="titles" data-testid="nas-play-link">
+      <Preflight
+        key={found.id}
+        nas={nas}
+        controller={controller}
+        disc={found}
+        playlistId={route.playlistId ?? undefined}
+        startTimeS={route.timeS ?? undefined}
+        resume={route.resume}
+        history={history}
+        playingRoute={playingRoute}
+        places={places}
+        onFacts={() => {}}
+        onCancel={back}
+      />
+    </section>
+  );
+}
 
 interface LandingScreenProps {
   readonly controller: PlayerController;
   readonly snapshot: PlayerSnapshot;
   readonly nas: NasClient;
+  /** Saves the place of the disc opened here (on this device for a folder or disc-server disc). */
+  readonly places: PlaceSaver;
+  readonly history: NasHistory;
+  /** Kept current by playback once a NAS pre-flight launches a disc. */
+  readonly playingRoute: PlayingRoute;
   /** A code from a `?pair=` link: the pair screen opens with it filled in. */
   readonly pairCode?: string;
+  /** The `?pair=` code was used (or the NAS forgotten): it isn't offered again. */
+  readonly onPairCodeSpent?: () => void;
 }
 
-export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingScreenProps): ReactElement {
+export function LandingScreen({ controller, snapshot, nas, places, history, playingRoute, pairCode, onPairCodeSpent }: LandingScreenProps): ReactElement {
+  const route = useNasRoute(history);
+  /**
+   * The screen a pre-flight launched its disc from, while the play route its Play pushed is shown: that screen stays
+   * (with the pre-flight on it). A play route without one (a link, a reload) shows the link's own pre-flight.
+   */
+  const [launchedOn, setLaunchedOn] = useState<NasRoute | null>(null);
+  const onLaunch = useCallback(() => setLaunchedOn(history.route()), [history]);
+  useEffect(() => {
+    if (route?.kind !== 'play') setLaunchedOn(null);
+  }, [route?.kind]);
+  const playLink = route?.kind === 'play' && launchedOn === null ? route : null;
+  /** The NAS screen shown: the route, or on a pushed play route the screen it was pushed from. */
+  const shown = route?.kind === 'play' && launchedOn !== null ? launchedOn : route;
   const [capabilities] = useState(() => checkCapabilities());
   const [storageHint] = useState(() => showStorageHint(capabilities.canRememberDiscs));
   const [recent, setRecent] = useState<RecentDisc[]>([]);
+  /** Recent discs row id to "Resume at m:ss", for those with an unfinished place on this device. */
+  const [recentResume, setRecentResume] = useState<ReadonlyMap<number, string>>(new Map());
+  const [pending, setPending] = useState<PendingResume | null>(null);
   const [dragging, setDragging] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -65,33 +185,58 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     listRecentDiscs().then(setRecent, () => setRecent([]));
   }, []);
 
+  useEffect(() => {
+    let live = true;
+    void Promise.all(
+      recent.map(async (disc): Promise<readonly [number, string] | null> => {
+        const label = await recentResumeLabel(disc.discKey, (k) => places.placesOf(k), Date.now());
+        return label === null ? null : ([disc.id, label] as const);
+      }),
+    ).then((rows) => live && setRecentResume(new Map(rows.filter((r): r is readonly [number, string] => r !== null))));
+    return () => {
+      live = false;
+    };
+  }, [recent, places]);
+
   /** undefined while loading; null when this device isn't paired. */
   const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
   const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
   /**
-   * The NAS view: closed, asking `me` whether the title library is open to this device, the library (with whether this
-   * device is an owner), or the folder browser. A guest while the gate is closed gets the folders, with no notice.
+   * The NAS view follows the address bar: no NAS route is closed, a folder route the folder browser, any other route
+   * asks `me` whether the title library is open to this device (and whether it is an owner) first. A guest while the
+   * gate is closed gets the folders, with no notice. null until `me` is asked for this visit to the NAS.
    */
-  const [nasView, setNasView] = useState<{ kind: 'closed' | 'checking' | 'folders' } | { kind: 'titles'; owner: boolean }>({ kind: 'closed' });
-  const browsing = nasView.kind !== 'closed';
-  const setBrowsing = (open: boolean): void => {
-    if (!open) {
-      setNasView({ kind: 'closed' });
-      return;
-    }
-    setNasView({ kind: 'checking' });
+  const [access, setAccess] = useState<{ titles: boolean; owner: boolean } | 'checking' | null>(null);
+  const browsing = route !== null;
+  const needsAccess = shown !== null && shown.kind !== 'folders' && shown.kind !== 'play';
+  const pairingKnown = pairing !== undefined && pairing !== null;
+  useEffect(() => {
+    if (!browsing) setAccess(null);
+  }, [browsing]);
+  useEffect(() => {
+    if (!needsAccess || access !== null || !pairingKnown) return;
+    setAccess('checking');
     nas.me().then(
       (me) => {
-        setNasView((v) => (v.kind !== 'checking' ? v : me.titleLibrary ? { kind: 'titles', owner: me.owner } : { kind: 'folders' }));
+        setAccess((a) => (a === 'checking' ? { titles: me.titleLibrary, owner: me.owner } : a));
         // `me` may have brought this device's person name up to date.
         loadPairing();
       },
       // an older NAS without `me`, or any failure: the folder browser shows what is wrong, if anything
-      () => setNasView((v) => (v.kind === 'checking' ? { kind: 'folders' } : v)),
+      () => setAccess((a) => (a === 'checking' ? { titles: false, owner: false } : a)),
     );
-  };
-  const showFolders = useCallback(() => setNasView({ kind: 'folders' }), []);
-  const closeNas = useCallback(() => setNasView({ kind: 'closed' }), []);
+  }, [needsAccess, access, pairingKnown, nas]);
+  // A guest behind the closed gate on the library's path: the folder browser's own path, so Back from a folder it
+  // opens has an entry of its own to land on.
+  const guestOnLibrary = route?.kind === 'library' && typeof access === 'object' && access !== null && !access.titles;
+  useEffect(() => {
+    if (guestOnLibrary) history.replace({ kind: 'folders', path: rememberedFolder() });
+  }, [guestOnLibrary, history]);
+  /** The title routes answered 404: the gate closed since `me` answered, so the folder browser, as for any guest. */
+  const gateClosed = useCallback(() => setAccess({ titles: false, owner: false }), []);
+  /** Ask `me` again (this device may no longer be an owner). */
+  const recheckAccess = useCallback(() => setAccess(null), []);
+  const closeNas = useCallback(() => history.push(null), [history]);
   const loadPairing = (): void => {
     nas.pairing().then(setPairing, () => setPairing(null));
   };
@@ -100,15 +245,37 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
   useEffect(
     () =>
       nas.onUnpaired(() => {
-        setBrowsing(false);
+        history.replace(null);
         setLocalError(NAS_MESSAGES.unpaired);
         loadPairing();
       }),
-    [nas],
+    [nas, history],
   );
+  /** A link's not-found screen: leave its path and show the pair screen. */
+  const pairFromNotFound = (): void => {
+    history.replace(null);
+    setPairRequested(true);
+  };
+  /** A paired device's not-found screen: back to the library (a guest behind the closed gate lands on the folders). */
+  const libraryFromNotFound = (): void => history.replace(LIBRARY);
+  /** The path of a title link whose title the NAS doesn't have (a link, not a step within the app). */
+  const [missingTitle, setMissingTitle] = useState<string | null>(null);
+  const routePath = route === null ? null : nasRoutePath(route);
+  const titleMissing = routePath !== null && missingTitle === routePath;
+  // The path the request was made for: an answer for a screen already left is dropped.
+  const onTitleMissing = useCallback(
+    (path: string) => setMissingTitle(history.route() !== null && nasRoutePath(history.route() as NasRoute) === path ? path : null),
+    [history],
+  );
+  useEffect(() => {
+    if (missingTitle !== null && routePath !== missingTitle) setMissingTitle(null);
+  }, [missingTitle, routePath]);
+  const guestOnTitleRoute =
+    shown !== null && (shown.kind === 'title' || shown.kind === 'season' || shown.kind === 'extras') && typeof access === 'object' && access !== null && !access.titles;
   const forgetNas = (): void => {
     setPairRequested(false);
-    setBrowsing(false);
+    onPairCodeSpent?.();
+    history.replace(null);
     nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
 
@@ -133,10 +300,53 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     task.catch((err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
 
+  /**
+   * Opens a local disc, after asking when this device holds an unfinished place for it: the prompt comes before the
+   * open, and its buttons (taps) start audio, so Resume and Start from beginning open inside a gesture.
+   */
+  /** Counts the opens asked for: a call that a later one superseded (or any other open) does nothing when its read ends. */
+  const openSeq = useRef(0);
+  // Another open (the engine leaves idle, or the NAS route changes) drops a prompt and any read still waiting.
+  const routeKey = route === null ? '' : nasRoutePath(route);
+  useEffect(() => {
+    if (snapshot.engineState !== 'idle') {
+      openSeq.current++;
+      setPending(null);
+    }
+  }, [snapshot.engineState]);
+  useEffect(() => {
+    openSeq.current++;
+    setPending(null);
+  }, [routeKey]);
+  const openAskingFirst = async (
+    discKey: string | null,
+    playlists: ReturnType<typeof playlistsOf> | null,
+    open: PendingResume['open'],
+  ): Promise<void> => {
+    const mine = ++openSeq.current;
+    setPending(null);
+    await askOrOpen({
+      discKey, playlists, readPlaces: (k) => places.placesOf(k), isCurrent: () => openSeq.current === mine,
+      ask: (offer) => setPending({ offer, open }),
+      open: () => open(undefined, undefined),
+    });
+  };
+
+  /** A folder's files open, and its place is saved on this device under its fingerprint. */
+  const openLocal = (entries: ReadonlyArray<readonly [string, File]>, discKey: string | null = localKeyOf(entries)): Promise<void> =>
+    openAskingFirst(discKey, null, (start, launch) => {
+      controller.open(entries, start);
+      if (discKey !== null) {
+        places.begin({ discKey, discId: null, remote: false, chosen: start?.playlistId ?? null, mainPlaylistId: null, deviceName: LOCAL_DEVICE_NAME, pairing: null }, launch);
+      }
+    });
+
   const openHandle = async (handle: FileSystemDirectoryHandle): Promise<void> => {
-    controller.open(await collectFromDirectoryHandle(handle));
+    const entries = await collectFromDirectoryHandle(handle);
+    const discKey = localKeyOf(entries);
+    run(openLocal(entries, discKey));
     try {
-      await saveRecentDisc(handle);
+      await saveRecentDisc(handle, Date.now(), undefined, undefined, discKey);
       setRecent(await listRecentDiscs());
     } catch {
       // The recent-discs list is a convenience; failing to update it must not block playback.
@@ -169,7 +379,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     setAwaitingFiles(false);
     setLocalError(null);
     const files = e.target.files;
-    if (files && files.length > 0) controller.open(collectFromFileList(files));
+    if (files && files.length > 0) run(openLocal(collectFromFileList(files)));
     e.target.value = '';
   };
 
@@ -178,14 +388,14 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
     setDragging(false);
     setLocalError(null);
     controller.startAudio();
-    const pending = discFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
+    const dropPending = discFromDataTransfer(e.dataTransfer); // synchronous part must run inside the event
     run(
-      pending.then(async (dropped) => {
+      dropPending.then(async (dropped) => {
         if (!dropped) {
           setLocalError('Drop the disc folder itself (the folder that contains BDMV).');
           return;
         }
-        if (dropped.kind === 'entries') controller.open(dropped.entries);
+        if (dropped.kind === 'entries') await openLocal(dropped.entries);
         else await openHandle(dropped.handle);
       }),
     );
@@ -207,7 +417,30 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
 
   const onServerDisc = (spec: RemoteDiscSpec): void => {
     setLocalError(null);
-    controller.openRemote(spec); // starts audio inside the tap; the server's token lasts the run, so there is no refresh
+    controller.startAudio(); // inside the tap, before a question about the place may come
+    const discKey = discKeyOf('local', spec.manifest.files);
+    // a disc-server disc's place stays on this device, as a folder's does; the server's token lasts the run, so there is no refresh
+    run(
+      openAskingFirst(discKey.startsWith('d.') ? null : discKey, playlistsOf(spec.manifest), (start, launch) => {
+        controller.openRemote(spec, undefined, undefined, undefined, start);
+        places.begin(
+          { discKey, discId: null, remote: false, chosen: start?.playlistId ?? null, mainPlaylistId: mainPlaylistId(spec.manifest), deviceName: LOCAL_DEVICE_NAME, pairing: null },
+          launch,
+        );
+      }),
+    );
+  };
+
+  /** Resume at the place, or Start from beginning (its playlist from 0); either way with the place's settings. */
+  const answerPending = (resume: boolean): void => {
+    if (!pending) return;
+    const { offer, open } = pending;
+    controller.startAudio(); // inside the tap
+    openSeq.current++;
+    setPending(null);
+    const launch: LaunchSettings = { settings: offer.place.settings, byLanguage: false };
+    if (resume && offer.kind === 'ask') open(offer.start, launch);
+    else open(startOver(offer.place), launch);
   };
 
   const error = localError ?? snapshot.error?.message ?? null;
@@ -245,6 +478,17 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
         {/* webkitdirectory is rendered, not set in an effect: the input must pick folders from the moment it exists */}
         <input ref={inputRef} type="file" multiple hidden data-testid="folder-input" {...{ webkitdirectory: '' }} onChange={onInput} />
       </div>
+      {pending && (
+        <ResumePrompt
+          place={pending.offer.place}
+          changed={pending.offer.kind === 'changed'}
+          resumeOnly={false}
+          disabled={false}
+          nowMs={Date.now()}
+          onResume={() => answerPending(true)}
+          onStartOver={() => answerPending(false)}
+        />
+      )}
       {serverLink && (
         <section className="recent server-discs" data-testid="server-discs">
           <h2>On the disc server</h2>
@@ -296,13 +540,16 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
           )}
         </div>
       )}
+      {pairing === null && browsing && !pairRequested && <NasNotFound reason="unpaired" onLeave={pairFromNotFound} />}
       {pairing !== undefined &&
+        !(pairing === null && browsing && !pairRequested) &&
         (pairing === null || pairRequested ? (
           <PairScreen
             client={nas}
             initialCode={pairCode}
             onPaired={() => {
               setPairRequested(false);
+              onPairCodeSpent?.();
               setLocalError(null);
               loadPairing();
             }}
@@ -316,7 +563,7 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
                 data-testid="nas-open"
                 onClick={() => {
                   setLocalError(null);
-                  setBrowsing(true);
+                  history.push(LIBRARY);
                 }}
               >
                 Open from NAS
@@ -327,9 +574,38 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
             </button>
           </p>
         ))}
-      {paired && nasView.kind === 'checking' && <p className="status">Loading…</p>}
-      {paired && nasView.kind === 'titles' && <TitleLibrary nas={nas} controller={controller} owner={nasView.owner} onOwnerLost={() => setBrowsing(true)} onFolders={showFolders} onClose={closeNas} />}
-      {paired && nasView.kind === 'folders' && <LibraryScreen nas={nas} controller={controller} onClose={closeNas} />}
+      {paired && playLink !== null && <PlayLink nas={nas} places={places} controller={controller} history={history} playingRoute={playingRoute} route={playLink} onLibrary={libraryFromNotFound} />}
+      {paired && shown !== null && playLink === null && guestOnTitleRoute && <NasNotFound reason="closed" onLeave={libraryFromNotFound} />}
+      {paired && shown !== null && playLink === null && titleMissing && !guestOnTitleRoute && <NasNotFound reason="missing" onLeave={libraryFromNotFound} />}
+      {paired && shown !== null && playLink === null && !guestOnTitleRoute && !titleMissing && (shown.kind === 'folders' || (typeof access === 'object' && access !== null && !access.titles)) && (
+        // A guest behind the closed gate on any other route: the folders where it browsed last.
+        <LibraryScreen
+          nas={nas}
+          controller={controller}
+          history={history}
+          playingRoute={playingRoute}
+          places={places}
+          onLaunch={onLaunch}
+          path={shown.kind === 'folders' ? shown.path : rememberedFolder()}
+          onClose={closeNas}
+        />
+      )}
+      {paired && shown !== null && playLink === null && !titleMissing && shown.kind !== 'folders' && (access === null || access === 'checking') && <p className="status">Loading…</p>}
+      {paired && shown !== null && playLink === null && !titleMissing && shown.kind !== 'folders' && typeof access === 'object' && access?.titles && (
+        <TitleLibrary
+          nas={nas}
+          controller={controller}
+          history={history}
+          playingRoute={playingRoute}
+          places={places}
+          onLaunch={onLaunch}
+          owner={access.owner}
+          onOwnerLost={recheckAccess}
+          onGateClosed={gateClosed}
+          onTitleMissing={onTitleMissing}
+          onClose={closeNas}
+        />
+      )}
       {capabilities.canRememberDiscs && recent.length > 0 && (
         <section className="recent">
           <h2>Recent discs</h2>
@@ -338,6 +614,12 @@ export function LandingScreen({ controller, snapshot, nas, pairCode }: LandingSc
               <li key={disc.id}>
                 <button type="button" onClick={() => onRecent(disc)}>
                   {disc.name} <span className="recent-date">· {new Date(disc.openedAt).toLocaleDateString()}</span>
+                  {recentResume.has(disc.id) && (
+                    <span className="recent-resume" data-testid="recent-resume">
+                      {' '}
+                      · {recentResume.get(disc.id)}
+                    </span>
+                  )}
                 </button>
               </li>
             ))}

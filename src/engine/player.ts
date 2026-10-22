@@ -34,7 +34,7 @@ import type { DiscManifest } from './disc/nas-api';
 import { ReadAheadCache, SEGMENT_BYTES } from './disc/read-ahead-cache';
 import { RemoteSource } from './disc/remote-source';
 import { BdVk } from './graphics/graphics-controller';
-import { PSR, RegisterFile, type PsrEvent } from './hdmv/registers';
+import { PSR, RegisterFile, SETTING_PSRS, type PsrEvent } from './hdmv/registers';
 import type { UoOp } from './hdmv/uo-mask';
 import { Navigator, type IgUnit, type NavigatorEvent, type PlaybackPort, type PlayAt } from './nav/navigator';
 import { itemPackets, lookupSpn, markTitlePkt, nextPlaymark } from './nav/packets';
@@ -52,7 +52,7 @@ import { AssRenderer } from './ass/renderer';
 import { MEMORY_PROFILES, type MemoryProfile, type MemoryProfileName } from './memory-profile';
 import type { Mat3 } from './ass/transform';
 import type { AssTrack } from './ass/types';
-import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type AudioTrack, type BufferRequest, type BdjMemoryTelemetry, type EngineCommand, type EngineEvent, type FileData, type MenuKey, type NoticeCode, type PlaybackState, type ShaderSetData, type SubtitleChoice } from './protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type AudioTrack, type BufferRequest, type BdjMemoryTelemetry, type EngineCommand, type EngineEvent, type FileData, type MenuKey, type NoticeCode, type PlaceState, type PlaybackState, type ShaderSetData, type StartPoint, type SubtitleChoice } from './protocol';
 import type { FromBdj } from './bdj/worker-protocol';
 import type { CompositorLike, TextRendererLike } from './render/compositor';
 import { ShaderStage } from './shaders/stage';
@@ -107,6 +107,8 @@ export interface PlayerDeps {
   readonly wallMs?: () => number;
   /** The BD-J runtime's log lines (Java's System.out and uncaught exceptions). */
   readonly bdjLog?: (line: string, error: boolean) => void;
+  /** The engine's own log lines (a resume that falls back); dropped by default. */
+  readonly log?: (line: string) => void;
   /** bd_set_player_setting_str's languages and country, written to the program's registers when a BD-J title is entered. */
   readonly playerSettings?: PlayerSettings;
   /**
@@ -516,6 +518,11 @@ export class Player {
       this.bdj?.session.setHidden(cmd.hidden);
       return Promise.resolve();
     }
+    // a place is saved as the page hides: reading the registers can't wait in the queue behind an open
+    if (cmd.type === 'readPlace') {
+      this.deps.emit({ type: 'placeState', ...this.readPlace() });
+      return Promise.resolve();
+    }
     // a bufferFirst open waits for its fill: cancelling can't wait in the queue behind it
     if (cmd.type === 'cancelBuffer') {
       const hold = this.openHold;
@@ -528,14 +535,14 @@ export class Player {
       }
       return Promise.resolve();
     }
-    // a disc buffering before it opens (or queued to) is dropped unopened by what comes after it
+    // a disc opening (buffering first, reading its metadata, or queued to) is dropped unopened by what comes after it
     if ((cmd.type === 'open' || cmd.type === 'close') && this.openHold) {
       this.openHold.abandoned = true;
       this.openHold.release();
       this.openHold = null;
       this.stopFill();
     }
-    if (cmd.type === 'open' && cmd.bufferFirst) {
+    if (cmd.type === 'open') {
       const hold = openHold();
       this.holds.set(cmd, hold);
       this.openHold = hold;
@@ -548,12 +555,13 @@ export class Player {
     try {
       switch (cmd.type) {
         case 'open':
-          await this.open(cmd.disc, cmd.bufferFirst, this.holds.get(cmd) ?? null);
+          await this.open(cmd.disc, cmd.bufferFirst, this.holds.get(cmd) ?? null, cmd.start ?? null);
           break;
         case 'remoteToken':
         case 'cancelBuffer':
         case 'flushSaves':
         case 'visibility':
+        case 'readPlace':
           break; // handled at once
         case 'bufferAhead':
           await this.fill(cmd, false);
@@ -804,7 +812,7 @@ export class Player {
     this.deps.requestFrame(loop);
   }
 
-  private async open(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null): Promise<void> {
+  private async open(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null, start: StartPoint | null): Promise<void> {
     try {
       if (hold?.abandoned) {
         // dropped while queued: the disc that was open stays as it was until the command that dropped it
@@ -812,13 +820,14 @@ export class Player {
         if (spec.kind === 'remote' && spec.fetchPort) this.deps.emit({ type: 'fetchPortClosed' });
         return;
       }
-      await this.openDisc(spec, bufferFirst, hold);
+      await this.openDisc(spec, bufferFirst, hold, start);
     } finally {
       if (this.openHold === hold) this.openHold = null;
     }
   }
 
-  private async openDisc(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null): Promise<void> {
+  /** `start`: the disc opens there, with no First Play and no BD-J (openAt). */
+  private async openDisc(spec: DiscSpec, bufferFirst: BufferRequest | undefined, hold: OpenHold | null, start: StartPoint | null): Promise<void> {
     this.openedAtMs = this.deps.nowMs();
     this.bdjStartup = null;
     this.bdjLatency = new InputLatency();
@@ -833,14 +842,15 @@ export class Player {
     this.setState('loading');
     const source = this.createSource(spec);
     // spec §4.7: the class library loads, and a BD-J First Play's worker boots, while the disc opens
-    // (not while it buffers first: the disc's First Play waits for that)
-    const early = this.bdjSupported && !bufferFirst ? await this.startEarlyBdj(source) : null;
+    // (not while it buffers first: the disc's First Play waits for that; nor when it opens at a place, with BD-J off)
+    const early = this.bdjSupported && !bufferFirst && !start ? await this.startEarlyBdj(source) : null;
     let disc: DiscModel;
     try {
       disc = await openDisc(source);
     } catch (err) {
       this.dropEarlyBdj();
       this.dropRemote(); // its read-ahead would otherwise go on fetching
+      if (hold?.abandoned) return; // closed meanwhile: nobody waits for this open's error
       throw err;
     }
     this.source = source;
@@ -850,16 +860,11 @@ export class Player {
       const fill = await this.fill(bufferFirst, true);
       if (fill && !hold.cancelled) await Promise.race([fill.reached, hold.released]);
     }
-    if (hold?.abandoned) {
-      // a close or another open came while it filled: the disc is dropped without being opened
-      this.dropRemote();
-      this.source = null;
-      this.disc = null;
-      return;
-    }
+    if (hold?.abandoned) return this.dropUnopened();
     this.soundsPlayed = 0;
     if (disc.usesBdj) this.loadClassLibrary();
     this.bdjDiscId = disc.usesBdj ? ((await readBdid(source))?.discId ?? null) : null;
+    if (hold?.abandoned) return this.dropUnopened();
     this.pgRegs = new RegisterFile();
     this.initRegs(this.pgRegs, disc.index);
     this.bindPg(this.pgRegs);
@@ -869,6 +874,10 @@ export class Player {
     if (disc.movieObjects) this.emitIndexTitles(disc);
     if (disc.sounds) this.deps.emit({ type: 'soundEffects', clips: disc.sounds.clips.map((c) => ({ channels: c.channels, samples: c.samples })) });
     if (disc.usesBdj && !this.bdjSupported) this.notice('bdj', this.bdjUnsupported('disc'));
+    if (start) {
+      await this.openAt(disc, start); // no early BD-J worker was started for it
+      return;
+    }
     // bdjActive goes out before 'idle', so the UI never shows the picker in between
     const bdjFirstPlay = disc.index.firstPlay.kind === 'bdj' && this.bdjSupported;
     if (bdjFirstPlay) this.enterBdj(TITLE_FIRST_PLAY, null, early);
@@ -878,6 +887,66 @@ export class Player {
       this.navigator = this.createNavigator(disc);
       this.navigator.start();
     }
+  }
+
+  /**
+   * Opens the disc at a saved place instead of its First Play. With an HDMV title and the disc's movie objects, the
+   * title resumes on its saved registers at the playlist (Navigator.resumeTitle); when the title never plays that
+   * playlist, or without them (BD-J discs too, with BD-J off), the playlist plays directly with PSRs 1–3 on the private
+   * registers. A playlist the disc lacks plays nothing; a time at or past its end plays from the beginning.
+   */
+  private async openAt(disc: DiscModel, start: StartPoint): Promise<void> {
+    const mpls = disc.playlists.get(start.playlistId);
+    if (!mpls || mpls.playItems.length === 0 || !/^\d{5}$/.test(start.playlistId)) {
+      this.deps.emit({ type: 'startFailed', reason: 'no-playlist' });
+      this.setState('idle');
+      return;
+    }
+    const timeline = new Timeline(mpls.playItems, mpls.marks);
+    let timeUs = Math.max(0, start.timeUs);
+    if (!(timeUs < timeline.durationUs)) {
+      this.deps.emit({ type: 'startFailed', reason: 'past-end' });
+      timeUs = 0;
+    }
+    const { item, clipTime45 } = timeline.locate(timeUs);
+    const at: PlayAt = { item: item.index, clipTime45 };
+    const { hdmv } = start;
+    if (hdmv && disc.movieObjects) {
+      // loaded before the navigator and PG subscribe, so no listener sees half-loaded registers
+      // idle first, as before First Play: a program that ends without a playlist leaves the picker, not 'loading'
+      this.setState('idle');
+      const regs = this.newProgramRegs(disc.index, disc.usesBdj);
+      regs.load({ psrs: hdmv.psrs, gprs: hdmv.gprs }, SETTING_PSRS);
+      this.navigator = this.createNavigator(disc, regs);
+      if (this.navigator.resumeTitle(hdmv.title, Number(start.playlistId), at)) return;
+      this.stopNavigator();
+      this.deps.log?.(`Title ${hdmv.title} never plays playlist ${start.playlistId}: playing the playlist directly`);
+    }
+    const playback = start.playback ?? (hdmv ? { psr1: hdmv.psrs[PSR.PRIMARY_AUDIO_ID] ?? 0, psr2: hdmv.psrs[PSR.PG_STREAM] ?? 0, psr3: hdmv.psrs[PSR.ANGLE_NUMBER] ?? 1 } : null);
+    if (playback && this.pgRegs) {
+      this.pgRegs.psrWrite(PSR.PRIMARY_AUDIO_ID, playback.psr1 >>> 0);
+      this.pgRegs.psrWrite(PSR.PG_STREAM, playback.psr2 >>> 0);
+      this.pgRegs.psrWrite(PSR.ANGLE_NUMBER, playback.psr3 >>> 0);
+    }
+    await this.playPlaylist(start.playlistId, at, 'user', playback ? playback.psr1 & 0xfff : null);
+  }
+
+  /** The registers a saved place needs: the program's (navigator first, as programRegs), else the private PG registers. */
+  private readPlace(): PlaceState {
+    if (this.navRegs) {
+      const { psrs, gprs } = this.navRegs.snapshot();
+      return { mode: 'hdmv', title: psrs[PSR.TITLE_NUMBER]!, psrs, gprs };
+    }
+    if (this.bdj) return { mode: 'bdj', title: null, psrs: this.bdj.regs.snapshot().psrs, gprs: null };
+    return { mode: 'none', title: null, psrs: this.pgRegs?.snapshot().psrs ?? [], gprs: null };
+  }
+
+  /** A close or another open came while the disc opened (read its metadata, or filled): it is dropped unopened. */
+  private dropUnopened(): void {
+    this.dropEarlyBdj();
+    this.dropRemote();
+    this.source = null;
+    this.disc = null;
   }
 
   /** The disc's bytes; a NAS disc's waits show a notice, and its 401s ask the controller for a fresh token. */
@@ -1853,9 +1922,10 @@ export class Player {
   /**
    * `caller`: the navigator or a BD-J title asked for it. Then the result says whether the playlist exists, and the
    * program is told of the start (playlistStarted) synchronously, before the first await. A BD-J title's playlist opens
-   * paused until Java starts it (bdj_wait_start).
+   * paused until Java starts it (bdj_wait_start). `audio`: the audio stream to play when it names a playable one (a
+   * place's PSR1), over the program's PSR1.
    */
-  private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user'): Promise<boolean> {
+  private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user', audio: number | null = null): Promise<boolean> {
     const viaNavigator = caller !== 'user';
     const source = this.source;
     const mpls = this.disc?.playlists.get(playlistId);
@@ -1900,12 +1970,14 @@ export class Player {
     // With a disc program (HDMV or BD-J) the audio stream register (PSR1) decides, when it names a playable stream
     let audioIndex = choice.audioIndex;
     let audioEntry = choice.audio;
-    const wanted = (this.programRegs?.psrRead(PSR.PRIMARY_AUDIO_ID) ?? 0) & 0xfff;
+    const wanted = (audio ?? this.programRegs?.psrRead(PSR.PRIMARY_AUDIO_ID) ?? 0) & 0xfff;
     const wantedEntry = wanted > 0 ? audioEntryFor(mpls.playItems[startItem], wanted) : null;
     if (wantedEntry && PLAYABLE_AUDIO.has(wantedEntry.codingType)) {
       audioIndex = wanted;
       audioEntry = wantedEntry;
     }
+    // without a program the private registers keep the stream that plays, which a saved place reads (readPlace)
+    if (!this.programRegs && audioIndex !== null) this.pgRegs?.psrWrite(PSR.PRIMARY_AUDIO_ID, audioIndex);
     const audioActive = audioEntry !== null && this.ring !== null;
     if (audioEntry && !this.ring) this.notice('audio-disabled', 'Audio output is not available, so video will play without sound.');
 
@@ -2316,6 +2388,7 @@ export class Player {
     if (!s || index === s.audioStream || this.state === 'error') return;
     if (!s.tracks.find((t) => t.index === index)?.playable) return;
     s.audioStream = index;
+    if (!this.programRegs) this.pgRegs?.psrWrite(PSR.PRIMARY_AUDIO_ID, index);
     s.audioActive = this.ring !== null;
     s.audioErrorDisabled = false;
     s.audioStalledBeat = null;
