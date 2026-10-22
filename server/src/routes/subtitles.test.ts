@@ -205,7 +205,8 @@ describe('subtitle routes', () => {
     expect([big.status, await big.json()]).toEqual([413, { error: 'too-large' }]);
     expect(((await (await call('GET', `/api/subtitles?discKey=${KEY}`, owner)).json()) as unknown[]).length).toBe(0);
     for (const n of [1, 2]) {
-      const res = await call('PUT', `/api/subtitles/${s.id}/fonts/f${n}.ttf`, owner, new Uint8Array(30 * 1024 * 1024));
+      // The refused body fits in the drain allowance (20 MB left + 8 MB), so the client never writes into a closed socket.
+      const res = await call('PUT', `/api/subtitles/${s.id}/fonts/f${n}.ttf`, owner, new Uint8Array((n === 1 ? 30 : 21) * 1024 * 1024));
       expect(res.status).toBe(n === 1 ? 200 : 413);
     }
     for (const p of ['file/a.exe', 'file/..%2Fa.srt', 'fonts/a.srt']) {
