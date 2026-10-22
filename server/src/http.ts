@@ -49,6 +49,81 @@ export async function readJson(req: IncomingMessage): Promise<unknown> {
   }
 }
 
+/** A request body went past its limit (declared or streamed). */
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super('body too large');
+    this.name = 'BodyTooLargeError';
+  }
+}
+
+/** After refusing a body, how far past the limit it is dropped, and for how long, so the client sees the answer. */
+const DRAIN_BYTES = 8 * 1024 * 1024;
+const DRAIN_MS = 2_000;
+
+/** Reads and drops what is left of the body, until it ends, 8 MB go by or 2 s pass; then stops reading. */
+async function drain(req: IncomingMessage, it: AsyncIterator<Buffer>, read: number, limit: number): Promise<void> {
+  const deadline = new Promise<'timeout'>((resolve) => setTimeout(resolve, DRAIN_MS, 'timeout').unref());
+  let size = read;
+  try {
+    for (;;) {
+      const next = await Promise.race([it.next(), deadline]);
+      if (next === 'timeout' || next.done) break;
+      size += next.value.length;
+      if (size > Math.max(read, limit) + DRAIN_BYTES) break;
+    }
+  } catch {
+    // the client went; nothing is left to drop
+  }
+  req.pause();
+}
+
+/**
+ * The body's chunks, at most `limit` bytes: a {@link BodyTooLargeError} once it passes (declared or streamed), an
+ * HttpError 400 if the client goes mid-body. Stopping early (an error, or the consumer's `break`) reads and drops
+ * the rest of the body (see `drain`), because closing the connection on unread bytes would reset it before the
+ * client reads the answer.
+ */
+export async function* bodyStream(req: IncomingMessage, limit: number): AsyncGenerator<Buffer, void, undefined> {
+  const it = (req as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
+  let size = 0;
+  let ended = false;
+  try {
+    if (Number(req.headers['content-length'] ?? 0) > limit) throw new BodyTooLargeError();
+    for (;;) {
+      let next: IteratorResult<Buffer>;
+      try {
+        next = await it.next();
+      } catch {
+        // a client gone mid-upload (a page closing) is not a server fault: no answer reaches it
+        ended = true;
+        throw new HttpError(400, 'request ended early');
+      }
+      if (next.done) {
+        ended = true;
+        return;
+      }
+      size += next.value.length;
+      if (size > limit) throw new BodyTooLargeError();
+      yield next.value;
+    }
+  } finally {
+    if (!ended) await drain(req, it, size, limit);
+  }
+}
+
+/** The whole body, or null once it passes `limit` bytes (the rest of it dropped); a 400 if the client goes. */
+export async function readBody(req: IncomingMessage, limit: number): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  try {
+    for await (const chunk of bodyStream(req, limit)) chunks.push(chunk);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) return null;
+    throw err;
+  }
+  return Buffer.concat(chunks);
+}
+
 const health: Handler = async (req, url) => {
   if (url.pathname !== '/api/health') return null;
   if (req.method === 'GET') return json(200, { ok: true });

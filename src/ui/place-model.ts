@@ -42,11 +42,16 @@ export function isFinished(s: {
   return last >= s.durationUs * 0.9 && s.timeUs >= last;
 }
 
+/** A subtitle stored on the NAS that is in the text set (StoredSubtitle's id, file size and language). */
+export interface StoredSubtitleNote { readonly id: string; readonly size: number; readonly language: string }
+
 export function buildPlace(input: {
   readonly discKey: string; readonly discId: string; readonly snapshot: PlayerSnapshot; readonly place: PlaceState;
   readonly shaderSet: string | null; readonly deviceName: string; readonly nowMs: number;
   /** Byte sizes of the text subtitle files by name (the snapshot lacks them). */
   readonly textFileSizes?: Readonly<Record<string, number>>;
+  /** The subtitles in the text set that came from the NAS, by file name: their id, size and language. */
+  readonly storedSubtitles?: Readonly<Record<string, StoredSubtitleNote>>;
 }): PlaybackPlace {
   const { snapshot: s, place } = input;
   const audio = s.audioTracks.find((t) => t.index === s.selectedAudio);
@@ -55,7 +60,11 @@ export function buildPlace(input: {
   const psr2Fallback = typeof sel === 'object' ? ((PG_DISPLAY_FLAG | sel.pg) >>> 0) : 0;
   const settings: PlaceSettings = {
     pgLanguage: typeof sel === 'object' ? (s.subtitles?.pg.find((t) => t.index === sel.pg)?.language || null) : null,
-    textFiles: (s.subtitles?.text?.files ?? []).map((f): PlaceTextFile => ({ name: f.name, size: input.textFileSizes?.[f.name] ?? 0, startUs: f.startUs, offsetMs: f.offsetMs })),
+    textFiles: (s.subtitles?.text?.files ?? []).map((f): PlaceTextFile => {
+      const stored = input.storedSubtitles?.[f.name];
+      if (stored) return { name: f.name, size: stored.size, startUs: f.startUs, offsetMs: f.offsetMs, subtitleId: stored.id, language: stored.language };
+      return { name: f.name, size: input.textFileSizes?.[f.name] ?? 0, startUs: f.startUs, offsetMs: f.offsetMs };
+    }),
     audioLanguage: audio && audio.language !== '' ? audio.language : null,
     psr1: psr(1) ?? s.selectedAudio ?? 0,
     psr2: psr(2) ?? psr2Fallback,
@@ -76,7 +85,7 @@ export function buildPlace(input: {
 
 /**
  * The settings an Up next card carries to the next episode: audio and PG by language (numbering differs between
- * discs), the rest as is (text files too: Task 8 decides whether they apply). The first playable audio track with the
+ * discs), the rest as is (text files too: a stored subtitle's language picks the next episode's in place-apply). The first playable audio track with the
  * language, else the first playable one (the disc's default); PG off when the new disc has no stream in the language.
  */
 export function settingsForUpNext(prev: PlaceSettings, tracks: readonly AudioTrack[], pgTracks: readonly PgTrack[]): PlaceSettings {

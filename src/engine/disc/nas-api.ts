@@ -103,7 +103,11 @@ export interface UnsortedItem { readonly discId: string; readonly path: string; 
 
 /** The player settings a place carries, so resuming on another device sounds and looks the same. */
 /** A text subtitle file of a place: identified by name and size (its bytes stay on the device). */
-export interface PlaceTextFile { readonly name: string; readonly size: number; readonly startUs: number | null; readonly offsetMs: number }
+export interface PlaceTextFile {
+  readonly name: string; readonly size: number; readonly startUs: number | null; readonly offsetMs: number;
+  /** A subtitle stored on the NAS (piece 3): its id, fetched again on a resume, and its language, which Up next carries. */
+  readonly subtitleId?: string; readonly language?: string;
+}
 export interface PlaceSettings { readonly audioLanguage: string | null; readonly pgLanguage: string | null; readonly textFiles: readonly PlaceTextFile[]; readonly psr1: number; readonly psr2: number; readonly psr3: number; readonly textOn: boolean; readonly textScale: number; readonly shaderSet: string | null; readonly volume: number; readonly muted: boolean }
 /** Where one person stopped in one playlist of a disc (spec: resume). `finished` places stay for Up next, and go first when the store is full. */
 export interface PlaybackPlace {
@@ -129,3 +133,30 @@ export interface ContinueItem {
 }
 
 export interface PlaylistProgress { readonly timeUs: number; readonly durationUs: number; readonly finished: boolean }
+
+/** What a stored subtitle is for: one episode's playlist, or the start of a chapter of a disc's playlist. */
+export type SubtitleAttachment =
+  | { readonly kind: 'episode'; readonly discKey: string; readonly playlistId: string; readonly titleId: string; readonly seasonId: string; readonly episode: number }
+  /** `titleId`: the title it was uploaded from, so its owners still find it there when the disc is gone (listing only). */
+  | { readonly kind: 'chapter'; readonly discKey: string; readonly playlistId: string; readonly chapter: number; readonly titleId?: string };
+/**
+ * What a subtitle is for when it is registered or moved: an episode of a title's season, or a chapter of a disc's
+ * playlist (with the title it is uploaded from, which the app always sends).
+ */
+export type SubtitleFor =
+  | { readonly kind: 'episode'; readonly titleId: string; readonly seasonId: string; readonly episode: number }
+  | { readonly kind: 'chapter'; readonly discId: string; readonly playlistId: string; readonly chapter: number; readonly titleId?: string };
+/** The body of `POST /api/subtitles`. */
+export interface SubtitleCreate { readonly name: string; readonly language: string; readonly offsetMs?: number; readonly for: SubtitleFor }
+/** The body of `PATCH /api/subtitles/<id>`: any of these. */
+export type SubtitlePatch = Partial<SubtitleCreate>;
+/** A subtitle file (SRT or ASS) an owner uploaded to the NAS, with its fonts. */
+export interface StoredSubtitle {
+  readonly id: string; readonly name: string; readonly language: string; readonly offsetMs: number;
+  readonly fileName: string; readonly fileSize: number; readonly fonts: readonly { readonly name: string; readonly size: number }[];
+  readonly attachment: SubtitleAttachment; readonly uploadedAt: number;
+  /** Who uploaded it; in answers to owners only. */
+  readonly uploaderPersonId?: string;
+  /** Set by the route: false when the attachment's disc or playlist no longer resolves (owners only see these). */
+  readonly attached?: boolean;
+}

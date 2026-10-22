@@ -82,6 +82,14 @@ const SHELVES: readonly { readonly id: Shelf; readonly label: string }[] = [
  * What the library fetched this session (spec §10: the title list once per session), per NAS client, so leaving and
  * coming back, or going back from a title, doesn't fetch again.
  */
+/** A title's seasons' ids, the same array for the same detail (a season screen's memo depends on it). */
+const seasonIdCache = new WeakMap<TitleDetail, readonly string[]>();
+function seasonIdsOf(detail: TitleDetail): readonly string[] {
+  let ids = seasonIdCache.get(detail);
+  if (!ids) seasonIdCache.set(detail, (ids = detail.seasons.map((s) => s.id)));
+  return ids;
+}
+
 const sessionCache = new WeakMap<NasClient, { titles?: Promise<TitleSummary[]>; details: Map<string, Promise<TitleDetail>> }>();
 function cacheOf(nas: NasClient): { titles?: Promise<TitleSummary[]>; details: Map<string, Promise<TitleDetail>> } {
   let cache = sessionCache.get(nas);
@@ -474,7 +482,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
     const season = seasonKey === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => seasonKey !== null && seasonKeyOf(s.id) === seasonKey);
     if (season) {
       return (
-        <SeasonScreen nas={nas} titleId={detail.title.id} seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} onBack={closeSeason} onOpen={openDisc} owner={filing} />
+        <SeasonScreen nas={nas} titleId={detail.title.id} seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} seasonIds={seasonIdsOf(detail)} onBack={closeSeason} onOpen={openDisc} owner={filing} />
       );
     }
     return <SeriesScreen nas={nas} detail={detail} onBack={back} onSeason={openSeason} onExtras={() => openSeason('extras')} onTitle={openTitle} onOpen={openDisc} owner={filing} />;

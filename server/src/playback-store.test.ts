@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PlaybackPlace } from '../../src/engine/disc/nas-api';
-import { PlaybackStore } from './playback-store';
+import { isPlaybackPlace, PlaybackStore } from './playback-store';
 
 // Every name here is made up.
 
@@ -92,5 +92,25 @@ describe('PlaybackStore', () => {
     expect(() => store.put('mika', place({ discKey: 'f.zz' }))).toThrow();
     expect(() => store.get('../mika', KEY)).toThrow();
     expect(() => store.all('a/b')).toThrow();
+  });
+});
+
+describe('isPlaybackPlace', () => {
+  const withFile = (file: Record<string, unknown>): unknown => {
+    const p = place();
+    return { ...p, settings: { ...p.settings, textFiles: [{ name: 'ep1.ass', size: 10, startUs: 0, offsetMs: 900, ...file }] } };
+  };
+  it('takes a text file with or without a stored subtitle id and language', () => {
+    expect(isPlaybackPlace(withFile({}))).toBe(true);
+    expect(isPlaybackPlace(withFile({ subtitleId: 'a'.repeat(64), language: 'en' }))).toBe(true);
+    expect(isPlaybackPlace(withFile({ subtitleId: 's1' }))).toBe(true);
+  });
+  it('refuses a bad stored subtitle id or language', () => {
+    expect(isPlaybackPlace(withFile({ subtitleId: 'a'.repeat(65) }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ subtitleId: '' }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ subtitleId: 7 }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ subtitleId: 's1', language: '' }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ subtitleId: 's1', language: 'x'.repeat(36) }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ subtitleId: 's1', language: null }))).toBe(false);
   });
 });

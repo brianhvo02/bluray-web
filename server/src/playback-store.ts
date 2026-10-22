@@ -19,7 +19,11 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const strOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string';
 
-const isTextFile = (f: unknown): boolean => isObject(f) && typeof f.name === 'string' && f.name.length <= 512 && num(f.size) && (f.startUs === null || num(f.startUs)) && num(f.offsetMs);
+const optionalString = (v: unknown, max: number): boolean => v === undefined || (typeof v === 'string' && v.length >= 1 && v.length <= max);
+
+/** A text file of a place; a stored subtitle's also carries its id (1–64 chars) and language (a BCP 47 tag, 1–35). */
+const isTextFile = (f: unknown): boolean => isObject(f) && typeof f.name === 'string' && f.name.length <= 512 && num(f.size) && (f.startUs === null || num(f.startUs)) && num(f.offsetMs)
+  && optionalString(f.subtitleId, 64) && optionalString(f.language, 35);
 
 function isSettings(v: unknown): v is PlaceSettings {
   return isObject(v) && strOrNull(v.audioLanguage) && strOrNull(v.pgLanguage) && Array.isArray(v.textFiles) && v.textFiles.length <= 64 && v.textFiles.every(isTextFile) && num(v.psr1) && num(v.psr2) && num(v.psr3) && typeof v.textOn === 'boolean'

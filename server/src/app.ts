@@ -2,6 +2,8 @@ import type { Auth } from './auth';
 import type { BdjStore } from './bdj-store';
 import type { PlaybackStore } from './playback-store';
 import { playbackRoutes } from './routes/playback';
+import { subtitleRoutes } from './routes/subtitles';
+import type { SubtitleStore } from './subtitle-store';
 import type { CodeRegistrar } from './codes';
 import { json } from './http';
 import type { Handler } from './http';
@@ -24,6 +26,8 @@ export interface AppOptions {
   bdjStore: BdjStore;
   /** Absent in tests that never touch places. */
   playbackStore?: PlaybackStore;
+  /** Owner-uploaded subtitles; without it, their routes answer 404. */
+  subtitleStore?: SubtitleStore;
   publicBase: string;
   registrar?: CodeRegistrar;
   registrarDeadlineMs?: number;
@@ -60,6 +64,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
     requireToken(auth),
     bdjStoreRoutes(auth, opts.bdjStore),
     ...(opts.playbackStore ? [playbackRoutes(auth, opts.playbackStore, { titles: opts.titles, library: opts.library })] : []),
+    ...(opts.subtitleStore ? [subtitleRoutes(auth, opts.subtitleStore, { titles: opts.titles, library: opts.library })] : []),
     adminRoutes(auth, {
       library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
       titles: opts.titles, relay: opts.relay, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,

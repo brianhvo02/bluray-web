@@ -1,9 +1,9 @@
 import type { DiscPlaces, PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
 import type { PlaceState } from '../engine/protocol';
-import { isFontName, splitPick } from '../player/drop-files';
+import { isFontName, pickedSubtitles, splitPick } from '../player/drop-files';
 import type { PlayerSnapshot } from '../player/player-controller';
 import { NasHttpError, type NasClient } from './nas/nas-client';
-import { buildPlace, PLACE_MIN_DURATION_US, qualifies } from './place-model';
+import { buildPlace, PLACE_MIN_DURATION_US, qualifies, type StoredSubtitleNote } from './place-model';
 import { pairingKey } from './nas/nas-store';
 import { MAX_TEXT_FILE_BYTES, MAX_TEXT_FILES_BYTES, placeKey, type PlaceStore, type StoredTextFile } from './place-store';
 
@@ -86,6 +86,12 @@ interface Cached {
   readonly place: PlaceState;
 }
 
+/** The text files' sizes and the stored subtitle, by file name, as a save started (they are cleared when the disc ends). */
+interface TextNotes {
+  readonly sizes: Readonly<Record<string, number>>;
+  readonly stored: Readonly<Record<string, StoredSubtitleNote>>;
+}
+
 /** What a save carries besides the registers: tracks, subtitles and their offsets, scale, shader. */
 function settingsOf(seen: Seen): string {
   const s = seen.snapshot;
@@ -135,6 +141,8 @@ export class PlaceSaver {
   private drainAgain = false;
   /** Byte sizes of the text files added to this disc, by name (the engine's snapshot has none). */
   private sizes: Record<string, number> = {};
+  /** The NAS subtitle in the text set, by its file name (a stored pick replaces the set, so there is at most one). */
+  private readonly stored = new Map<string, StoredSubtitleNote>();
   /** `pairingKey` of the NAS pairing as last read (null: none; undefined: not read yet), for a send that can't wait. */
   private pairingNow: string | null | undefined = undefined;
   private readonly minUs: number;
@@ -166,6 +174,7 @@ export class PlaceSaver {
     this.seen = null;
     this.cached = null;
     this.sizes = {};
+    this.stored.clear();
   }
 
   /** The launch's settings (once), while the disc they were given with is the one open; null otherwise. */
@@ -178,6 +187,21 @@ export class PlaceSaver {
   /** The places this device holds for a local disc (never a NAS disc's: those are the NAS's, and never stored here). */
   placesOf(discKey: string): Promise<DiscPlaces> {
     return this.deps.store.get(discKey);
+  }
+
+  /**
+   * A subtitle from the NAS became the text set (picked, or added again on a resume): its id, size and language, by the
+   * file's name, so places keep it.
+   */
+  noteStoredSubtitle(fileName: string, id: string, size: number, language: string): void {
+    if (!this.target) return; // no disc is being saved
+    this.stored.clear();
+    this.stored.set(fileName, { id, size, language });
+  }
+
+  /** The stored subtitle noted for the text set, by file name. */
+  storedSubtitleNotes(): ReadonlyMap<string, StoredSubtitleNote> {
+    return this.stored;
   }
 
   /** The subtitle and font files kept on this device for a disc. */
@@ -212,7 +236,7 @@ export class PlaceSaver {
     const seen = this.seen;
     const c = this.cached;
     if (opts.keepalive && t && seen && c && c.opens === t.opens && c.playlistId === seen.snapshot.currentPlaylistId && this.qualifies(t, seen)) {
-      return this.write(t, seen, c.place, true).catch((err: unknown) => this.log('saving the place failed', err));
+      return this.write(t, seen, c.place, this.textNotes(), true).catch((err: unknown) => this.log('saving the place failed', err));
     }
     this.save(opts.keepalive);
     return this.chain;
@@ -271,8 +295,8 @@ export class PlaceSaver {
     const t = this.target;
     if (!t) return;
     const split = splitPick(files);
-    // as the controller does: nothing recognised by name means the files are subtitles
-    const subtitles = split.subtitles.length || split.fonts.length ? split.subtitles : files;
+    const subtitles = pickedSubtitles(files);
+    if (subtitles.length > 0) this.stored.clear(); // the local files replace the set, a stored subtitle's too
     for (const f of subtitles) this.sizes[f.name] = f.size;
     const picked = [...subtitles, ...split.fonts].filter((f) => f.size <= MAX_TEXT_FILE_BYTES);
     const names = new Set(picked.map((f) => f.name));
@@ -294,11 +318,12 @@ export class PlaceSaver {
     const seen = this.seen;
     if (!t || !seen || !this.qualifies(t, seen) || this.deps.discOpens() !== t.opens) return;
     const read = this.deps.readPlace();
+    const notes = this.textNotes();
     this.chain = this.chain
       .then(async () => {
         const place = await read;
         if (this.target === t) this.cached = { opens: t.opens, playlistId: seen.snapshot.currentPlaylistId!, place };
-        await this.write(t, seen, place, keepalive);
+        await this.write(t, seen, place, notes, keepalive);
       })
       .catch((err: unknown) => this.log('saving the place failed', err));
   }
@@ -309,14 +334,20 @@ export class PlaceSaver {
     if (!c || c.playlistId !== left.snapshot.currentPlaylistId || !this.qualifies(t, left)) return;
     const s = left.snapshot;
     const ended = s.durationUs > 0 && s.timeUs >= s.durationUs - ENDED_WITHIN_US;
-    this.chain = this.chain.then(() => this.write(t, left, c.place, false, ended)).catch((err: unknown) => this.log('saving the place failed', err));
+    const notes = this.textNotes();
+    this.chain = this.chain.then(() => this.write(t, left, c.place, notes, false, ended)).catch((err: unknown) => this.log('saving the place failed', err));
+  }
+
+  /** What the saver knows of the text set now, for a write that may land after the disc has ended (a close). */
+  private textNotes(): TextNotes {
+    return { sizes: { ...this.sizes }, stored: Object.fromEntries(this.stored) };
   }
 
   /** `ended`: the playlist was left at its end, so the place is finished whatever isFinished says. */
-  private async write(t: Active, seen: Seen, registers: PlaceState, keepalive: boolean, ended = false): Promise<void> {
+  private async write(t: Active, seen: Seen, registers: PlaceState, notes: TextNotes, keepalive: boolean, ended = false): Promise<void> {
     const built = buildPlace({
       discKey: t.discKey, discId: t.discId ?? '', snapshot: seen.snapshot, place: registers,
-      shaderSet: seen.shaderSet, deviceName: t.deviceName, nowMs: this.deps.nowMs(), textFileSizes: this.sizes,
+      shaderSet: seen.shaderSet, deviceName: t.deviceName, nowMs: this.deps.nowMs(), textFileSizes: notes.sizes, storedSubtitles: notes.stored,
     });
     const place: PlaybackPlace = {
       ...built,

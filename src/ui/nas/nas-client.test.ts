@@ -20,7 +20,7 @@ import type { Library } from '../../../server/src/library';
 import { BdjStore } from '../../../server/src/bdj-store';
 import { PlaybackStore } from '../../../server/src/playback-store';
 import { Store } from '../../../server/src/store';
-import type { CodeLookup, CodeRoutes, PlaceSettings, PlaybackPlace } from '../../engine/disc/nas-api';
+import type { CodeLookup, CodeRoutes, PlaceSettings, PlaybackPlace, StoredSubtitle } from '../../engine/disc/nas-api';
 import { normalizeCode } from '../../engine/disc/pairing-code';
 import { NAS_MESSAGES, NasClient, NasLostError, PLACE_TIMEOUT_MS, defaultDeviceName, groupCodeInput } from './nas-client';
 import type { NasClientDeps } from './nas-client';
@@ -1110,5 +1110,105 @@ describe('defaultDeviceName', () => {
     expect(defaultDeviceName('Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36', 5)).toBe(
       'Android',
     );
+  });
+});
+
+describe('NasClient subtitles', () => {
+  const stored: StoredSubtitle = { id: '0123456789abcdef', name: 'Fan', language: 'en', offsetMs: 0, fileName: 'a b.srt', fileSize: 3, fonts: [{ name: 'f#1.ttf', size: 2 }], attachment: { kind: 'chapter', discKey: 'd.1', playlistId: '00001', chapter: 0 }, uploaderPersonId: 'p', uploadedAt: 1 };
+
+  async function paired(): Promise<{ nas: NasClient; server: FakeServer; calls: { method: string; route: string; body: unknown; signal?: AbortSignal | null }[] }> {
+    const server = fakeServer();
+    const nas = client(server);
+    await nas.pair(await server.code(), 'iPad');
+    await nas.session();
+    const calls: { method: string; route: string; body: unknown; signal?: AbortSignal | null }[] = [];
+    server.nas = async (url, init) => {
+      const route = url.pathname.slice(new URL(BASE).pathname.length) + url.search;
+      calls.push({ method: init?.method ?? 'GET', route, body: init?.body, signal: init?.signal });
+      if (route === 'subtitles/0123456789abcdef/file') return new Response('abc');
+      if (init?.method !== 'PUT' && route.startsWith('subtitles/0123456789abcdef/fonts/')) return new Response(new Uint8Array([1, 2]));
+      if (route.startsWith('subtitles/0123456789abcdef/file/a%20b.srt')) return Response.json(stored);
+      if (route.includes('refused')) return Response.json({ error: 'forbidden' }, { status: 403 });
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      if (route.startsWith('subtitles?')) return Response.json([stored]);
+      return Response.json(stored, { status: init?.method === 'POST' ? 201 : 200 });
+    };
+    return { nas, server, calls };
+  }
+
+  it('lists by disc and by title with the keys encoded', async () => {
+    const { nas, calls } = await paired();
+    expect(await nas.subtitlesForDisc('d.0123')).toEqual([stored]);
+    expect(await nas.subtitlesForTitle('anilist:1')).toEqual([stored]);
+    expect(calls.map((c) => c.route)).toEqual(['subtitles?discKey=d.0123', 'subtitles?titleId=anilist%3A1']);
+  });
+
+  it('downloads the file, then the fonts, as Files named as stored', async () => {
+    const { nas, calls } = await paired();
+    const files = await nas.subtitleFiles(stored);
+    expect(files.map((f) => f.name)).toEqual(['a b.srt', 'f#1.ttf']);
+    expect(await files[0].text()).toBe('abc');
+    expect((await files[1].arrayBuffer()).byteLength).toBe(2);
+    expect(calls.map((c) => c.route)).toEqual(['subtitles/0123456789abcdef/file', 'subtitles/0123456789abcdef/fonts/f%231.ttf']);
+  });
+
+  it("aborts a download's requests through the caller's signal", async () => {
+    const { nas, calls } = await paired();
+    const abort = new AbortController();
+    await nas.subtitleFiles(stored, abort.signal);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.signal?.aborted === false)).toBe(true);
+    abort.abort();
+    expect(calls.every((c) => c.signal?.aborted === true)).toBe(true);
+  });
+
+  it("a download stopped by its caller is no sign of an unreachable NAS", async () => {
+    const { nas, server } = await paired();
+    let reached!: () => void;
+    const fetched = new Promise<void>((r) => (reached = r));
+    server.nas = async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        reached();
+      });
+    const abort = new AbortController();
+    const files = nas.subtitleFiles(stored, abort.signal);
+    await fetched;
+    abort.abort();
+    await expect(files).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('creates, patches and deletes', async () => {
+    const { nas, calls } = await paired();
+    const forEpisode = { kind: 'episode', titleId: 't', seasonId: 's', episode: 2 } as const;
+    expect(await nas.createSubtitle({ name: 'Fan', language: 'en', for: forEpisode })).toEqual(stored);
+    expect(await nas.updateSubtitle(stored.id, { offsetMs: -500 })).toEqual(stored);
+    await nas.deleteSubtitle(stored.id);
+    expect(calls.map((c) => [c.method, c.route, c.body])).toEqual([
+      ['POST', 'subtitles', JSON.stringify({ name: 'Fan', language: 'en', for: forEpisode })],
+      ['PATCH', 'subtitles/0123456789abcdef', JSON.stringify({ offsetMs: -500 })],
+      ['DELETE', 'subtitles/0123456789abcdef', undefined],
+    ]);
+  });
+
+  it('uploads the File as the raw body under its encoded name', async () => {
+    const { nas, calls } = await paired();
+    const file = new File(['abc'], 'a b.srt');
+    const sent: number[] = [];
+    expect(await nas.uploadSubtitleFile(stored.id, file, (n) => sent.push(n))).toEqual(stored);
+    expect(await nas.uploadSubtitleFont(stored.id, new File([new Uint8Array([1])], 'f#1.ttf'))).toEqual(stored);
+    expect(calls.map((c) => [c.method, c.route])).toEqual([
+      ['PUT', 'subtitles/0123456789abcdef/file/a%20b.srt'],
+      ['PUT', 'subtitles/0123456789abcdef/fonts/f%231.ttf'],
+    ]);
+    expect(calls[0].body).toBe(file);
+    expect(sent).toEqual([3]);
+  });
+
+  it('turns a 403 into a NasHttpError and aborts the refused upload', async () => {
+    const { nas, calls } = await paired();
+    await expect(nas.uploadSubtitleFile(stored.id, new File(['abc'], 'refused.srt'))).rejects.toMatchObject({ status: 403, code: 'forbidden' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].signal?.aborted).toBe(true);
   });
 });

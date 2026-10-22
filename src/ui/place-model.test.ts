@@ -80,6 +80,13 @@ describe('buildPlace', () => {
       settings: { audioLanguage: 'jpn', pgLanguage: null, textFiles: [{ name: 'ep03.en.ass', size: 1234, startUs: 0, offsetMs: 400 }], psr1: 2, psr2: 0x80000001, psr3: 1, textOn: true, textScale: 1.5, shaderSet: 'a4k', volume: 0.5, muted: true },
     });
   });
+  it('marks a stored subtitle with its id and language, its size from the NAS', () => {
+    const p = buildPlace({
+      discKey: 'k', discId: 'd', snapshot, place: { mode: 'none', title: null, psrs: [], gprs: null }, shaderSet: null, deviceName: 'x', nowMs: 1,
+      storedSubtitles: { 'ep03.en.ass': { id: 'sub-1', size: 2048, language: 'en' } },
+    });
+    expect(p.settings.textFiles).toEqual([{ name: 'ep03.en.ass', size: 2048, startUs: 0, offsetMs: 400, subtitleId: 'sub-1', language: 'en' }]);
+  });
   it('records the PG language of a selected PG stream', () => {
     const sn = { ...snapshot, subtitles: { pg: [{ index: 3, language: 'eng' }], text: null, selected: { pg: 3 }, scale: 1 } } as unknown as PlayerSnapshot;
     const p = buildPlace({ discKey: 'k', discId: 'd', snapshot: sn, place: { mode: 'none', title: null, psrs: [], gprs: null }, shaderSet: null, deviceName: 'x', nowMs: 1 });
@@ -108,6 +115,10 @@ describe('settingsForUpNext', () => {
   it('maps PG by language and keeps the display flag', () => {
     const next = settingsForUpNext(settings, [track(1, 'jpn')], [{ index: 1, language: 'fra' }, { index: 2, language: 'eng' }]);
     expect(next.psr2).toBe(((0x80000000 | 2) >>> 0));
+  });
+  it("keeps a stored subtitle's id and language for the next episode's pick", () => {
+    const textFiles = [{ name: 'ep1.ass', size: 9, startUs: 0, offsetMs: 900, subtitleId: 'sub-1', language: 'en' }];
+    expect(settingsForUpNext({ ...settings, textFiles, textOn: true }, [], []).textFiles).toEqual(textFiles);
   });
   it('turns PG off when the language is missing on the new disc', () => {
     expect(settingsForUpNext(settings, [], [{ index: 1, language: 'fra' }]).psr2).toBe(0xfff);
