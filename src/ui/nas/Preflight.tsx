@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { discKeyOf } from '../../engine/disc/disc-key';
 import { DISC_CHANGED_MESSAGE } from '../../engine/disc/http-transport';
-import type { ContinueItem, DiscEntry, DiscManifest, DiscPlaces } from '../../engine/disc/nas-api';
+import type { ContinueItem, DiscEntry, DiscManifest, DiscPlaces, LevelAt, LevelId, LevelInfo } from '../../engine/disc/nas-api';
 import type { BufferRequest, StartPoint } from '../../engine/protocol';
 import type { PlayerController } from '../../player/player-controller';
 import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, storageRoom, tooBigCopy, waitCopy, watchBufferFailure, type BufferPlan } from './buffer-model';
 import { discBadges, discFacts, formatSize, mainPlaylist, mainPlaylistId, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
+import { videoCaps } from '../video-caps';
+import { ORIGINAL_ONLY, autoLevel, busyMessage, levelAudio, levelRows } from './level-model';
+import { levelSessionOf } from './level-session';
 import { NasHttpError, PLACES_READ_TIMEOUT_MS, type NasClient } from './nas-client';
 import { useNasRoute, type NasHistory } from './nas-history';
 import type { NasRoute } from './nas-route';
@@ -81,6 +84,10 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   /** undefined while probing; null when there is no measurement (no clip to probe, or it failed). */
   const [mbps, setMbps] = useState<number | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  /** The disc's levels (ORIGINAL_ONLY when the NAS has none); undefined until asked. */
+  const [levels, setLevels] = useState<readonly LevelInfo[] | undefined>(undefined);
+  /** The level the viewer picked; null while the automatic choice stands. */
+  const [picked, setPicked] = useState<LevelId | null>(null);
   /** The storage the read-ahead cache can use, asked for only when the connection is slower than the title. */
   const [quota, setQuota] = useState<number | undefined>(undefined);
   /**
@@ -206,16 +213,48 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   /** What plays: the requested playlist, else the place offered. */
   const launchPlaylist = playlistId ?? (offer.kind === 'none' || (offer.kind === 'short' && offer.start === null) ? undefined : offer.place.playlistId);
 
+  /** The original version's length and bytes of what plays (the episode's playlist, else the main title's). */
+  const original = useMemo(() => {
+    const playlist = manifest && ((launchPlaylist !== undefined ? playlistOf(manifest, launchPlaylist) : null) ?? mainPlaylist(manifest));
+    if (!manifest || !playlist) return null;
+    const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
+    return { ...playlistFacts(playlist.playItems, sizes), audio: (playlist.playItems[0]?.stn.audio ?? []).map((a) => ({ language: a.lang })) };
+  }, [manifest, launchPlaylist]);
+  /** The audio stream a level request asks for: the place's when resuming, else the browser's language. */
+  const psr1 = offer.kind === 'none' ? undefined : offer.place.settings.psr1;
+  const levelAudioNumber = useMemo(() => levelAudio(original?.audio ?? [], { psr1, language: globalThis.navigator?.language ?? 'en' }), [original, psr1]);
+  // The levels are asked once the places are (their audio stream is the place's); Play never waits for them.
+  useEffect(() => {
+    if (!manifest || !placesReady || original === null) return;
+    let live = true;
+    void videoCaps()
+      .then((caps) => nas.levels(disc.id, { hevc: caps.hevc, hevc10: caps.hevc10, hdr: caps.hdrDisplay, audio: levelAudioNumber }))
+      .catch(() => null)
+      .then((list) => live && setLevels(list ?? ORIGINAL_ONLY));
+    return () => {
+      live = false;
+    };
+  }, [nas, disc.id, manifest, placesReady, original, levelAudioNumber]);
+  const levelList = levels ?? ORIGINAL_ONLY;
+  const originalMbps = original && original.durationS > 0 ? (original.playlistBytes * 8) / original.durationS / 1e6 : 0;
+  const [phone, setPhone] = useState(false);
+  useEffect(() => {
+    void videoCaps().then((c) => setPhone(c.phone));
+  }, []);
+  const selected: LevelInfo = useMemo(() => {
+    const auto = autoLevel(levelList, { connectionMbps: typeof mbps === 'number' ? mbps : Infinity, phone, originalMbps });
+    const id = picked !== null && levelList.some((l) => l.level === picked && l.available) ? picked : auto;
+    return levelList.find((l) => l.level === id) ?? ORIGINAL_ONLY[0]!;
+  }, [levelList, mbps, phone, originalMbps, picked]);
   /**
-   * The length and bytes of what plays (the episode's playlist, else the main title's) against this connection; null
-   * until both are known (or with no playlist).
+   * The length and bytes of what plays at the selected level against this connection; null until both are known (or
+   * with no playlist).
    */
   const need = useMemo(() => {
-    const playlist = manifest && ((launchPlaylist !== undefined ? playlistOf(manifest, launchPlaylist) : null) ?? mainPlaylist(manifest));
-    if (!playlist || typeof mbps !== 'number') return null;
-    const sizes = new Map(manifest.files.map((f) => [f.path, f.size]));
-    return { ...playlistFacts(playlist.playItems, sizes), connectionMbps: mbps };
-  }, [manifest, mbps, launchPlaylist]);
+    if (!original || typeof mbps !== 'number') return null;
+    const playlistBytes = selected.level === 'original' ? original.playlistBytes : ((selected.budgetMbps * 1e6) / 8) * original.durationS;
+    return { durationS: original.durationS, playlistBytes, connectionMbps: mbps };
+  }, [original, mbps, selected]);
   /** Whether the connection keeps up, before the storage is asked for (persist() can prompt). */
   const keepsUp = need !== null && bufferPlan({ ...need, quotaBytes: Infinity }).kind === 'play';
   /** The connection is slower, and this device can't keep a read-ahead cache (the engine said at its start). */
@@ -269,12 +308,19 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
     }
     const id = ++launch.current;
     Promise.all([nas.discBase(disc.id), nas.session(), nas.pairing()]).then(
-      ([base, session, pairing]) => {
+      async ([base, session, pairing]) => {
         if (id !== launch.current) return;
         // The engine asks again only after the NAS refused the token it has, so that one is never handed back.
         let token = session.token;
-        const { spec, release } = nasDiscSpec(base, token, manifest, nas.discFetch);
+        const levelSession = levelSessionOf(nas);
+        levelSession.end();
+        const at: LevelAt = { level: selected.level, audio: levelAudioNumber };
+        const atLevel = selected.level !== 'original';
+        const opened = atLevel ? await nas.manifest(disc.id, at) : manifest;
+        if (id !== launch.current) return;
+        const { spec, release } = nasDiscSpec(base, token, opened, nas.discFetch, atLevel ? { at, original: manifest } : undefined);
         controller.openRemote(spec, () => nas.freshSession(token).then((s) => (token = s.token)), release, bufferFirst, start);
+        levelSession.begin({ discId: disc.id, levels: levelList, at, original: manifest });
         places.begin(
           {
             discKey, discId: disc.id, remote: true, chosen: start?.playlistId ?? null, mainPlaylistId: mainPlaylistId(manifest),
@@ -324,6 +370,13 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   const buffer = snapshot.buffer;
   const percent = buffer && buffer.targetBytes > 0 ? Math.min(100, Math.floor((buffer.bytes / buffer.targetBytes) * 100)) : 0;
 
+  const rows = levelRows(levelList, {
+    durationS: original?.durationS ?? 0,
+    originalBytes: original?.playlistBytes ?? 0,
+    connectionMbps: typeof mbps === 'number' ? mbps : Infinity,
+    quotaBytes: quota ?? Infinity,
+  });
+  const busy = busyMessage(levelList);
   const lines = preflightLines(mbps ?? null, facts?.peakMbps ?? null);
   const badges = discBadges(disc, facts?.uhd);
   const size = disc.sizeBytes ?? (manifest ? manifest.files.reduce((sum, f) => sum + f.size, 0) : null);
@@ -381,6 +434,24 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
               onStartOver={() => go(startOverLaunch())}
             />
           )}
+          {levelList.length > 1 && (
+            <>
+              {busy && (
+                <p className="status" data-testid="level-busy">
+                  {busy}
+                </p>
+              )}
+              <fieldset className="level-list" data-testid="level-list" disabled={opening !== 'idle'}>
+                <legend>Quality</legend>
+                {rows.map((r) => (
+                  <label key={r.level} className="level-option">
+                    <input type="radio" name="level" data-testid="level-option" data-level={r.level} value={r.level} checked={selected.level === r.level} disabled={!r.available} onChange={() => setPicked(r.level)} />
+                    <span>{r.label}</span> · <span className="level-note">{r.note}</span>
+                  </label>
+                ))}
+              </fieldset>
+            </>
+          )}
           {plan?.kind === 'ask' && (
             <p className="status" data-testid="nas-buffer-wait">
               {waitCopy(plan.waitS)}
@@ -410,11 +481,6 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
                 onClick={() => go(playLaunch())}
               >
                 {plan?.kind === 'ask' || plan?.kind === 'too-big' || cannotBuffer ? 'Play now with pauses' : 'Play'}
-              </button>
-            )}
-            {plan?.kind === 'ask' && (
-              <button type="button" disabled>
-                Lower quality (coming later)
               </button>
             )}
             <button type="button" onClick={cancel}>

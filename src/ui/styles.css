@@ -402,3 +402,9 @@ a { color: #6ea8ff; }
 .relay-badge { align-self: flex-start; background: rgba(0, 0, 0, 0.6); border-radius: 6px; padding: 2px 8px; font-size: 0.85em; pointer-events: none; }
 .nas-not-found { background: #1b1b20; border: 1px solid #2a2a30; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
 .nas-not-found p { margin: 0; }
+
+.level-list { display: flex; flex-direction: column; gap: 6px; border: 1px solid #3a3a42; border-radius: 6px; padding: 8px 12px; margin: 0; }
+.level-list legend { padding: 0 4px; }
+.level-option { display: flex; align-items: center; gap: 6px; }
+.level-option input:disabled + span { opacity: 0.5; }
+.level-note { color: #9a9aa5; }
