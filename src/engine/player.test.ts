@@ -2497,6 +2497,22 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     expect(progress(h).map((p) => p.bytes)).toEqual([...progress(h).map((p) => p.bytes)].sort((a, b) => a - b));
   });
 
+  it('a fill running when setLevel switches the version starts again on the new one, reporting progress', async () => {
+    const { h, log, spec } = await setup();
+    log.gate(true); // the fill holds at each clip's first chunk
+    await h.player.handle({ type: 'bufferAhead', fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER });
+    await vi.waitFor(() => expect(log.reads.some((r) => r.path.includes('/STREAM/') && r.from >= CHUNK)).toBe(true));
+    await h.player.handle({ type: 'setLevel', disc: { ...spec, query: 'level=h264-1080&audio=1' } });
+    expect(h.events).toContainEqual({ type: 'levelChanged', ok: true });
+    const before = progress(h).length;
+    log.reads.length = 0;
+    log.gate(false);
+    await filled(h);
+    expect(progress(h).length).toBeGreaterThan(before);
+    expect(progress(h).at(-1)!.stopped).toBeUndefined();
+    expect(log.reads.some((r) => r.path.includes('/STREAM/') && r.from === 0)).toBe(true); // from the start, on the new version
+  });
+
   it('then plays from the cache without reading the network', async () => {
     const { h, log } = await setup();
     await h.player.handle({ type: 'bufferAhead', fromSeconds: 0, targetBytes: Number.MAX_SAFE_INTEGER });
@@ -3085,6 +3101,109 @@ describe("Player switching a NAS disc's quality level (setLevel)", () => {
     expect(after.filter((e) => e.type === 'chapters').map((e) => e.type === 'chapters' && e.playlistId)).toEqual(['00000']);
     expect(Math.abs(times(after)[0]! - at)).toBeLessThan(300_000);
     expect(times(after).at(-1)!).toBeGreaterThan(at);
+  }, 30_000);
+
+  for (const order of ['during the switch', 'before the switch, still loading'] as const) {
+    it(`a program's playlist started ${order} plays on the new version, with no error`, async () => {
+      const two = () =>
+        buildSyntheticDisc({
+          clips: [syntheticClip('00001', 6), syntheticClip('00002', 4)],
+          playlists: [
+            { id: '00000', clipIds: ['00001'], chapterEverySeconds: 2 },
+            { id: '00001', clipIds: ['00002'], chapterEverySeconds: 2 },
+          ],
+        });
+      const lv = levelNas(two(), two());
+      const h = await harness(undefined, { remote: () => lv.nas });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      const port = h.player.bdjPort();
+      const before = h.events.length;
+      let started: Promise<boolean>;
+      let switching: Promise<void>;
+      if (order === 'during the switch') {
+        switching = h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+        await Promise.resolve();
+        started = port.playPlaylist('00001', {});
+      } else {
+        started = port.playPlaylist('00001', {});
+        switching = h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+      }
+      await switching;
+      expect(await started).toBe(true);
+      await h.play(300);
+      const after = h.events.slice(before);
+      expect(after.filter((e) => e.type === 'error')).toEqual([]);
+      expect(after).toContainEqual({ type: 'levelChanged', ok: true });
+      expect(after.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : [])).at(-1)).toBe('00001');
+      expect(lastState(h)).toBe('paused'); // a BD-J playlist opens paused until Java starts it
+      expect(lv.urls.some((u) => u.includes('/STREAM/00002.M2TS') && u.includes(LEVEL_QUERY))).toBe(true);
+    }, 30_000);
+  }
+
+  it('setLevel over the WebRTC route keeps reading through the open disc\'s port', async () => {
+    const lv = levelNas(disc(), disc());
+    const { port1, port2 } = new MessageChannel();
+    const stop = serveFetch(port1, lv.nas.fetch);
+    const ownFetch = vi.fn(async () => {
+      throw new TypeError('the engine fetched directly');
+    });
+    try {
+      const h = await harness(undefined, { remote: () => ({ ...lv.nas, spec: { ...lv.nas.spec, fetchPort: port2 }, fetch: ownFetch as unknown as typeof fetch }) });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+      expect(h.events).toContainEqual({ type: 'levelChanged', ok: true });
+      await untilPlaying(h);
+      await h.play(300);
+      expect(lv.urls.at(-1)).toContain(LEVEL_QUERY);
+      expect(ownFetch).not.toHaveBeenCalled();
+      expect(h.events.filter((e) => e.type === 'fetchPortClosed')).toEqual([]);
+    } finally {
+      stop();
+      port1.close();
+    }
+  }, 30_000);
+
+  it('a version that fails to open leaves the disc closed with its error, and answers levelChanged ok: false', async () => {
+    const lv = levelNas(disc(), disc());
+    const h = await harness(undefined, { remote: () => lv.nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const manifest = { ...lv.levelSpec.manifest, inline: {}, files: lv.levelSpec.manifest.files.filter((f) => !f.path.endsWith('INDEX.BDMV')) };
+    const before = h.events.length;
+    await h.player.handle({ type: 'setLevel', disc: { ...lv.levelSpec, manifest } });
+    const after = h.events.slice(before);
+    expect(after.filter((e) => e.type === 'levelChanged')).toEqual([{ type: 'levelChanged', ok: false, message: expect.any(String) }]);
+    expect(after).toContainEqual(expect.objectContaining({ type: 'error' }));
+    expect(lastState(h)).toBe('error');
+  }, 30_000);
+
+  it('clears the old version\'s "Waiting for the NAS drive…" notice', async () => {
+    const lv = levelNas(disc(), disc());
+    let hold = false;
+    const held = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (hold && String(input).includes('/STREAM/') && !String(input).includes('level=')) {
+        return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true }));
+      }
+      return lv.nas.fetch(input, init);
+    }) as typeof fetch;
+    const h = await harness(undefined, { remote: () => ({ ...lv.nas, fetch: held }), remoteLimits: { chunkBytes: 64 * 1024, readAheadBytes: 128 * 1024 } });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    hold = true;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await h.player.handle({ type: 'seek', timeUs: 9_000_000 });
+      await vi.advanceTimersByTimeAsync(3_500);
+      expect(h.events).toContainEqual({ type: 'notice', code: 'nas-waiting', message: 'Waiting for the NAS drive…' });
+      const before = h.events.length;
+      await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+      expect(h.events.slice(before)).toContainEqual({ type: 'noticeCleared', code: 'nas-waiting' });
+      expect(h.events.slice(before)).toContainEqual({ type: 'levelChanged', ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
   }, 30_000);
 
   it('setLevel refuses another disc', async () => {

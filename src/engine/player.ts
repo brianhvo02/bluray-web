@@ -431,6 +431,18 @@ export class Player {
   private noPictureNotice: 'unsent' | 'shown' | 'cleared' = 'unsent';
   /** Audio streams asked for that the playing playlist's STN lacks (a quality level keeps one track), logged once per disc. */
   private missingAudioLogged = new Set<number>();
+  /** A setLevel under way: resolves once the new version is in place (source, cache, disc model), before its restart. */
+  private switching: Promise<void> | null = null;
+  /** Bumped by every setLevel: a playlist open that began on an older version goes on, once the switch is done, on the new one. */
+  private levelVersion = 0;
+  /** A program's playlist open met a setLevel under way: the switch does not restart the playlist it noted. */
+  private levelSuperseded = false;
+  /** Playlist opens loading their clips. */
+  private opening = 0;
+  /** The fill running (or starting), to start again on another version of the disc. */
+  private fillArgs: { readonly req: BufferRequest; readonly follow: boolean } | null = null;
+  /** The open disc's source showed the nas-waiting notice and has not cleared it. */
+  private nasWaiting = false;
   /** The open disc's bdj-storage notice has been sent (ruling R32: once per disc open, whatever BD-J sessions it runs). */
   private bdjStorageNotice = false;
   /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
@@ -970,6 +982,7 @@ export class Player {
       ...(this.deps.remoteLimits?.chunkBytes ? { chunkBytes: this.deps.remoteLimits.chunkBytes } : {}),
       onWaiting: (waiting) => {
         if (this.remote !== source) return; // a disc closed meanwhile
+        this.nasWaiting = waiting;
         if (waiting) this.notice('nas-waiting', NAS_WAITING_MESSAGE);
         else this.deps.emit({ type: 'noticeCleared', code: 'nas-waiting' });
       },
@@ -1022,6 +1035,7 @@ export class Player {
    */
   private async fill(req: BufferRequest, follow: boolean): Promise<CacheFill | null> {
     this.stopFill();
+    this.fillArgs = { req, follow };
     const remote = this.remote;
     const disc = this.disc;
     if (!remote || !disc) return null;
@@ -1078,6 +1092,7 @@ export class Player {
     void fill.run().finally(() => {
       if (this.filling !== fill) return;
       this.filling = null;
+      this.fillArgs = null;
       remote.setWriteThrough(null);
     });
     return fill;
@@ -1087,6 +1102,7 @@ export class Player {
   private stopFill(): void {
     this.filling?.stop();
     this.filling = null;
+    this.fillArgs = null;
     this.remote?.setWriteThrough(null);
   }
 
@@ -1112,6 +1128,7 @@ export class Player {
   /** Forgets the NAS disc: its fetches stop and its read-ahead is freed. */
   private dropRemote(): void {
     this.stopFill();
+    this.nasWaiting = false;
     this.remote?.close();
     this.remote = null;
     void this.cache?.then((cache) => cache?.close());
@@ -1154,16 +1171,33 @@ export class Player {
           audio: this.programRegs ? null : s.audioStream,
         }
       : null;
-    this.teardownSession();
-    this.stopFill();
-    const oldRemote = this.remote;
-    const oldCache = this.cache;
-    this.remote = null;
-    this.cache = null;
-    this.tokens = null;
-    oldRemote.close();
-    (await oldCache)?.close();
+    const refill = this.fillArgs;
+    const generation = this.openGeneration;
+    this.levelVersion++;
+    this.levelSuperseded = false;
+    // A program's playlist open (navigator or BD-J, outside the command queue) that meets the switch waits for it and
+    // then opens on the new version (playPlaylist): it never reads the closed source, and it is what plays afterwards.
+    let switched!: () => void;
+    this.switching = new Promise<void>((resolve) => (switched = resolve));
+    const release = (): void => {
+      this.switching = null;
+      switched();
+    };
     try {
+      this.teardownSession();
+      this.stopFill();
+      const oldRemote = this.remote;
+      const oldCache = this.cache;
+      this.remote = null;
+      this.cache = null;
+      this.tokens = null;
+      if (this.nasWaiting) {
+        // the old source can no longer say its read landed
+        this.nasWaiting = false;
+        this.deps.emit({ type: 'noticeCleared', code: 'nas-waiting' });
+      }
+      oldRemote.close();
+      (await oldCache)?.close();
       const original = next.original ?? open.original;
       const source = this.createSource({ ...next, ...(original ? { original } : {}) });
       const disc = await openDisc(source);
@@ -1171,13 +1205,19 @@ export class Player {
       this.disc = disc;
       this.navigator?.replaceDisc(disc);
       this.bdj?.host.replaceDisc(disc);
-      if (resume) {
+      // the program started (or stopped) a playlist meanwhile, or one of its opens is still loading: that one plays
+      const superseded = this.levelSuperseded || this.opening > 0 || generation !== this.openGeneration;
+      release(); // before the restart, which opens the playlist like any other
+      if (resume && !superseded) {
         const mpls = disc.playlists.get(resume.playlistId);
         if (!mpls || mpls.playItems.length === 0) throw new DiscError('missing-file', `Playlist ${resume.playlistId} is not available.`, [playlistPath(resume.playlistId)]);
         const { item, clipTime45 } = new Timeline(mpls.playItems, mpls.marks).locate(resume.timeUs);
-        await this.playPlaylist(resume.playlistId, { item: item.index, clipTime45 }, resume.owner, resume.audio, { autoplay: resume.autoplay });
+        const started = await this.playPlaylist(resume.playlistId, { item: item.index, clipTime45 }, resume.owner, resume.audio, { autoplay: resume.autoplay });
+        if (!started) throw new Error(`Playlist ${resume.playlistId} could not be started on this version of the disc.`);
       }
+      if (refill && this.remote === source) void this.fill(refill.req, refill.follow);
     } catch (err) {
+      release();
       this.close();
       this.reportError(err);
       this.setState('error');
@@ -1559,6 +1599,7 @@ export class Player {
 
   /** _preload_m2ts for an IG sub-path: the whole clip is demuxed into the PES units of every IG PID (0x1400 to 0x141f), in stream order. */
   private async preloadSubPathIg(clipId: string, signal: AbortSignal): Promise<IgUnit[]> {
+    while (this.switching) await this.switching; // read from the version a setLevel is putting in place
     const source = this.source;
     const path = streamPath(clipId);
     if (!source || !source.exists(path)) throw new DiscError('missing-file', `Missing sub-path clip ${path}`, [path]);
@@ -2003,8 +2044,8 @@ export class Player {
    */
   private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user', audio: number | null = null, restart: { readonly autoplay: boolean } | null = null): Promise<boolean> {
     const viaNavigator = caller !== 'user';
-    const source = this.source;
-    const mpls = this.disc?.playlists.get(playlistId);
+    let source = this.source;
+    let mpls = this.disc?.playlists.get(playlistId);
     if (!source || !mpls || mpls.playItems.length === 0) {
       if (viaNavigator) return false;
       throw new DiscError('missing-file', `Playlist ${playlistId} is not available.`, [playlistPath(playlistId)]);
@@ -2026,8 +2067,38 @@ export class Player {
     }
     this.setState('loading');
     const clipIds = [...new Set(mpls.playItems.map((p) => p.clipId))];
-    const clips = await loadClips(source, clipIds);
-    await checkStreamReadable(source, clipIds[0]);
+    let clips: Awaited<ReturnType<typeof loadClips>>;
+    let version = this.levelVersion;
+    this.opening++;
+    try {
+      for (;;) {
+        let loaded: typeof clips | null = null;
+        let failure: unknown = null;
+        try {
+          loaded = await loadClips(source, clipIds);
+          await checkStreamReadable(source, clipIds[0]);
+        } catch (err) {
+          failure = err;
+        }
+        if (version === this.levelVersion && !this.switching) {
+          if (failure !== null || !loaded) throw failure;
+          clips = loaded;
+          break;
+        }
+        // setLevel replaced the disc's version under this open: it goes on, on the new version, once that is in place
+        this.levelSuperseded = true;
+        while (this.switching) await this.switching;
+        if (generation !== this.openGeneration) return true;
+        const nextSource = this.source;
+        const nextMpls = this.disc?.playlists.get(playlistId);
+        if (!nextSource || !nextMpls) return true; // the switch failed: the disc closed
+        source = nextSource;
+        mpls = nextMpls;
+        version = this.levelVersion;
+      }
+    } finally {
+      this.opening--;
+    }
     if (generation !== this.openGeneration) return true; // superseded while loading
 
     const choice = chooseStreams(mpls.playItems[0].stn);
