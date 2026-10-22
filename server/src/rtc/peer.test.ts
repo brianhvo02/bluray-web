@@ -195,6 +195,26 @@ describe('RtcPeers', () => {
     expect(answer).not.toMatch(/(^|[\s:])100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./m);
   });
 
+  it("answers at once when the NAS's STUN server never replies, and the connection still opens", { timeout: 30_000 }, async () => {
+    // the answer's candidates are the advertised addresses, so no STUN lookup is waited for
+    const silent = createSocket('udp4');
+    await new Promise<void>((resolve) => silent.bind(0, '127.0.0.1', () => resolve()));
+    open.push({ close: () => new Promise<void>((resolve) => silent.close(() => resolve())) });
+    const peers = new RtcPeers({ handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => [{ urls: `stun:127.0.0.1:${silent.address().port}` }], now: Date.now });
+    open.push({ close: () => peers.closeAll() });
+    await peers.listen();
+    const pc = new RTCPeerConnection({ iceServers: STUN(), iceUseIpv6: false });
+    open.push({ close: () => pc.close() });
+    pc.createDataChannel('api');
+    await pc.setLocalDescription(await pc.createOffer());
+    const t0 = performance.now();
+    await peers.answer('sid-sssssssssssssssssss', pc.localDescription!.sdp);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    const { client } = await connect(peers, 'sid-ttttttttttttttttttt');
+    const { token } = await sessionOver(client);
+    expect(await readRange(client, token, 0, 9)).toEqual(INDEX.subarray(0, 10));
+  });
+
   it('serves two devices at once on the one UDP port', { timeout: 30_000 }, async () => {
     const peers = peersOn(0);
     const a = await connect(peers, 'sid-ccccccccccccccccccc');
