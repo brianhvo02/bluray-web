@@ -87,7 +87,10 @@ export type UnsortedReason = 'no-title' | 'several-fit' | 'no-season' | 'episode
 
 export type TitleKind = 'series' | 'movie' | 'music';
 export interface TitleNames { readonly english: string | null; readonly romaji: string | null; readonly native: string | null; readonly synonyms: readonly string[]; readonly display: string | null }
-export interface TitleSummary { readonly id: string; readonly kind: TitleKind; readonly names: TitleNames; readonly poster: string | null; readonly year: number | null; readonly seasons: number; readonly discs: number; readonly addedAt: number; readonly own: boolean }
+export type MusicKind = 'concert' | 'album' | 'single' | 'other';
+/** What the Music shelf knows about a release: its artist (grouping id, headline and native name), kind and names. */
+export interface TitleMusic { readonly artist: { readonly id: string; readonly name: string; readonly otherName: string | null }; readonly kind: MusicKind; readonly date: string | null; readonly concertName: string | null; readonly title: string; readonly matched: boolean; readonly rejected: boolean }
+export interface TitleSummary { readonly id: string; readonly kind: TitleKind; readonly names: TitleNames; readonly poster: string | null; readonly year: number | null; readonly seasons: number; readonly discs: number; readonly addedAt: number; readonly own: boolean; readonly music?: TitleMusic }
 export interface DiscRef { readonly discId: string; readonly root: string; readonly folder: string; readonly displayName: string | null }
 export interface DiscSlot { readonly number: number | null; readonly label: string; readonly copies: readonly DiscRef[] }
 export interface EpisodeRef { readonly number: number; readonly name: string | null; readonly runtimeMin: number | null; readonly discId: string; readonly playlistId: string }
@@ -99,7 +102,7 @@ export interface TitleDetail { readonly title: TitleSummary; readonly banner: st
 /** What the owner decided for one disc (spec §7). */
 export type OwnerChoice =
   | { readonly kind: 'title'; readonly titleId: string; readonly season: number | null; readonly disc: number | null }
-  | { readonly kind: 'music'; readonly name: string | null }
+  | { readonly kind: 'music'; readonly name: string | null; readonly artist?: string | null; readonly rejectMatch?: boolean }
   | { readonly kind: 'extras'; readonly titleId: string; readonly season: number | null }
   | { readonly kind: 'hidden' };
 export interface OwnTitle { readonly id: string; readonly kind: TitleKind; readonly name: string; readonly seasons: number | null }
