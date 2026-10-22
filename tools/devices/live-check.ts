@@ -1259,6 +1259,7 @@ class LiveCheck {
       });
 
       const paused = await step('pause saves the place at the stopped clock', page, async () => {
+        if ((await this.playing(page, 'the player')).state === 'paused') await clickEl(page, '[data-testid=play-toggle]', 'play');
         await this.playingFrom(page, 8_000_000, 'playing past 0:08');
         const clockUs = await this.pauseAt(page, 'the pause');
         const place = await this.placeNear(discKey, playlist, clockUs);
