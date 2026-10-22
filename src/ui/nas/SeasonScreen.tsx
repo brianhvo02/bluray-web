@@ -72,6 +72,8 @@ interface SeasonScreenProps {
   /** 'Season 2', 'Extras', … */
   readonly heading: string;
   readonly season: SeasonDetail;
+  /** The title's seasons' ids: an episode upload naming none of them is listed to owners as not attached. */
+  readonly seasonIds: readonly string[];
   readonly onBack: () => void;
   readonly onOpen: OpenDisc;
   /** For owners: "File differently…" on the discs (ruling F3), and uploading and managing subtitles. */
@@ -82,7 +84,7 @@ type Tab = 'episodes' | 'discs';
 const TABS: readonly Tab[] = ['episodes', 'discs'];
 
 /** A season: Episodes and Discs tabs, or the discs alone when its episodes aren't known. */
-export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack, onOpen, owner }: SeasonScreenProps): ReactElement {
+export function SeasonScreen({ nas, titleId, seriesName, heading, season, seasonIds, onBack, onOpen, owner }: SeasonScreenProps): ReactElement {
   const episodes = season.episodes;
   /** Places by disc id and playlist id; null until known (or when the NAS has none to give). */
   const [progress, setProgress] = useState<Readonly<Record<string, Readonly<Record<string, PlaylistProgress>>>> | null>(null);
@@ -103,7 +105,7 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
   const target = useMemo(() => subtitleTarget(titleId, [season], { episodes: true }), [titleId, season]);
   const manifestOf = useManifests(owner?.nas ?? null);
   const discKeys = useDiscKeys(manifestOf, target, owner !== undefined && (subs ?? []).some((s) => s.attachment.kind === 'chapter'));
-  const listing = useMemo(() => (subs ? ownerListing(subs, { id: season.id, discKeys: new Set(discKeys.keys.keys()) }) : null), [subs, season.id, discKeys]);
+  const listing = useMemo(() => (subs ? ownerListing(subs, { id: season.id, discKeys: new Set(discKeys.keys.keys()) }, new Set(seasonIds)) : null), [subs, season.id, discKeys, seasonIds]);
   const [adding, setAdding] = useState(false);
   const [uploading, setUploading] = useState(false);
   const uploadPanel = useId();

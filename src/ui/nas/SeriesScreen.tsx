@@ -102,7 +102,7 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
         detail.seasons.map((s) => <DiscList key={s.id} season={s} discs={s.discs} onOpen={onOpen} owner={owner} />)
       )}
       {movieOwner && (subs || subsError) && (
-        <SubtitleList nas={movieOwner.nas} target={target} listing={subs ? ownerListing(subs, null) : null} error={subsError} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />
+        <SubtitleList nas={movieOwner.nas} target={target} listing={subs ? ownerListing(subs, null, new Set(detail.seasons.map((s) => s.id))) : null} error={subsError} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />
       )}
       {detail.related.length > 0 && (
         <ul className="title-list">

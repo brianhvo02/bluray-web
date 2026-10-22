@@ -268,12 +268,20 @@ describe('ownerListing', () => {
   const c = sub('c', 'en', ch(0, '00001', 'd.1'));
   const d = off(sub('d', 'en', ch(0, '00001', 'd.gone')));
   const e = sub('e', 'en', ep(2, 's2'));
+  const seasons = new Set(['s1', 's2']);
   it("lists a season's attached uploads, and every upload of the title that isn't attached", () => {
-    expect(ownerListing([a, b, c, d, e], { id: 's1', discKeys: new Set(['d.1']) })).toEqual({ attached: [a, c], notAttached: [b, d] });
-    expect(ownerListing([a, b, c, d, e], { id: 's2', discKeys: new Set() })).toEqual({ attached: [e], notAttached: [b, d] });
+    expect(ownerListing([a, b, c, d, e], { id: 's1', discKeys: new Set(['d.1']) }, seasons)).toEqual({ attached: [a, c], notAttached: [b, d] });
+    expect(ownerListing([a, b, c, d, e], { id: 's2', discKeys: new Set() }, seasons)).toEqual({ attached: [e], notAttached: [b, d] });
   });
   it("lists everything on a movie's screen, the unattached apart", () => {
-    expect(ownerListing([c, d], null)).toEqual({ attached: [c], notAttached: [d] });
+    expect(ownerListing([c, d], null, new Set())).toEqual({ attached: [c], notAttached: [d] });
+  });
+  it("puts an episode upload whose season the title no longer has under Not attached, on each screen, marked so Edit re-attaches it", () => {
+    // its disc and playlist still resolve (attached on the NAS), but a rescan gave the season another id
+    const moved = sub('m', 'en', ep(3, 's-old'));
+    expect(ownerListing([a, moved, e], { id: 's1', discKeys: new Set() }, seasons)).toEqual({ attached: [a], notAttached: [{ ...moved, attached: false }] });
+    expect(ownerListing([a, moved, e], { id: 's2', discKeys: new Set() }, seasons)).toEqual({ attached: [e], notAttached: [{ ...moved, attached: false }] });
+    expect(ownerListing([moved, c], null, seasons)).toEqual({ attached: [c], notAttached: [{ ...moved, attached: false }] });
   });
 });
 

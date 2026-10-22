@@ -132,16 +132,20 @@ export function forSeason(subs: readonly StoredSubtitle[], seasonId: string, dis
 /**
  * The owner's list on a screen of a title, from the title's uploads: the attached ones of this season (`season`; all of
  * them on a movie's screen, `season` null), and every upload of the title that is not attached, on each of its screens,
- * so one whose disc, playlist or season went can always be re-attached or deleted.
+ * so one whose disc, playlist or season went can always be re-attached or deleted. An episode upload whose season is
+ * not one of the title's (`seasonIds`; a rescan gave the season another id) counts as not attached here, though its
+ * disc and playlist still resolve and viewers still get it in the player; it is marked so, so Edit re-attaches it.
  */
 export function ownerListing(
   subs: readonly StoredSubtitle[],
   season: { readonly id: string; readonly discKeys: ReadonlySet<string> } | null,
+  seasonIds: ReadonlySet<string>,
 ): { readonly attached: StoredSubtitle[]; readonly notAttached: StoredSubtitle[] } {
-  const live = subs.filter((s) => s.attached !== false);
+  const lost = (s: StoredSubtitle): boolean => s.attachment.kind === 'episode' && !seasonIds.has(s.attachment.seasonId);
+  const live = subs.filter((s) => s.attached !== false && !lost(s));
   return {
     attached: season ? forSeason(live, season.id, season.discKeys) : live,
-    notAttached: subs.filter((s) => s.attached === false),
+    notAttached: subs.filter((s) => s.attached === false || lost(s)).map((s) => (s.attached === false ? s : { ...s, attached: false })),
   };
 }
 
