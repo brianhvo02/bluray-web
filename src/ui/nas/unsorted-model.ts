@@ -61,6 +61,11 @@ export function titleChoice(title: TitleSummary, season: number | null, disc: nu
   return { kind: 'title', titleId: title.id, season: title.kind === 'series' ? season : null, disc };
 }
 
+/** Filing a bonus disc with `title`'s extras: a series' season's when one is given, else the title's own (spec §9). */
+export function extrasChoice(title: TitleSummary, season: number | null): OwnerChoice {
+  return { kind: 'extras', titleId: title.id, season: title.kind === 'series' ? season : null };
+}
+
 /** Search results from several sources as one list, each title once, in the order found. */
 export function mergeResults(lists: readonly (readonly TitleSummary[])[]): TitleSummary[] {
   const seen = new Set<string>();

@@ -241,6 +241,7 @@ a { color: #6ea8ff; }
 .owner-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
 .owner-field input { font-size: 1rem; }
 .owner-numbers .owner-field input, .owner-number input { width: 6em; }
+.owner-check { display: flex; align-items: center; gap: 6px; font-size: 0.9em; }
 .owner-number { align-self: flex-start; }
 .owner-primary { align-self: flex-start; font-weight: 600; color: #fff; background: #2d5bd6; border-color: #2d5bd6; }
 .owner-primary:hover:not(:disabled) { background: #3b69e6; border-color: #3b69e6; }

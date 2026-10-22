@@ -3,7 +3,7 @@ import type { OwnerChoice, TitleKind, TitleSummary, UnsortedItem, UnsortedReason
 import type { NasClient, SkippedDisc } from './nas-client';
 import { Poster } from './Poster';
 import { displayName } from './title-model';
-import { applyNumber, blurayComSearchUrl, discPlace, lookupFailure, mergeResults, parseNumber, reasonText, seasonOnPick, skippedText, suggestionLine, titleChoice } from './unsorted-model';
+import { applyNumber, blurayComSearchUrl, discPlace, extrasChoice, lookupFailure, mergeResults, parseNumber, reasonText, seasonOnPick, skippedText, suggestionLine, titleChoice } from './unsorted-model';
 
 const PAGE = 50;
 const MAX_NAME = 200;
@@ -148,6 +148,8 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
   /** Whether Season holds a suggestion's hint rather than the owner's typing. */
   const [hinted, setHinted] = useState(false);
   const [discNo, setDiscNo] = useState('');
+  /** Whether the disc goes with the title's or season's extras rather than its discs. */
+  const [asExtras, setAsExtras] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<TitleSummary[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -185,6 +187,17 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
 
   const fileUnder = (title: TitleSummary): void => {
     const s = parseNumber(season);
+    if (asExtras) {
+      // a blank season puts it with the title's own extras
+      if (title.kind === 'series' && s === undefined) {
+        setError('Season is a number from 1 to 1000, or blank for the title\'s extras.');
+        return;
+      }
+      const choice = extrasChoice(title, s ?? null);
+      const where = choice.kind === 'extras' && choice.season !== null ? `season ${choice.season} of ${displayName(title)}` : displayName(title);
+      choose(choice, `Filed with the extras of ${where}.`);
+      return;
+    }
     const d = parseNumber(discNo);
     if (title.kind === 'series' && (s === undefined || s === null)) {
       setError('Season is a number from 1 to 1000.');
@@ -288,9 +301,13 @@ export function DiscCard({ nas, disc, tmdb, onFiled, onCreated, onSkip }: DiscCa
         </label>
         <label className="owner-field">
           <span>Disc / volume</span>
-          <input type="text" inputMode="numeric" data-testid="unsorted-disc" value={discNo} onChange={(e) => setDiscNo(e.target.value)} />
+          <input type="text" inputMode="numeric" data-testid="unsorted-disc" value={discNo} disabled={asExtras} onChange={(e) => setDiscNo(e.target.value)} />
         </label>
       </div>
+      <label className="owner-check">
+        <input type="checkbox" data-testid="unsorted-extras" checked={asExtras} onChange={(e) => setAsExtras(e.target.checked)} /> Extras (a bonus disc)
+      </label>
+      {asExtras && seasonUsed && <p className="status">Season blank: with the title's extras.</p>}
       {error && (
         <p className="owner-message" role="alert" data-testid="unsorted-error">
           {error}
