@@ -96,3 +96,20 @@ export function levelAudio(audio: readonly { language: string }[], o: { psr1?: n
 export function badgeText(l: LevelInfo): string | null {
   return l.level === 'original' ? null : `${l.label} · re-encoded on the NAS`;
 }
+
+/**
+ * Whether the pre-flight knows enough to offer Play (the levels answered or failed, the probe settled, the device's
+ * caps known) and the level it preselects then. The pre-flight keeps the first non-null `auto` for the disc, so the
+ * preselected radio never changes under the viewer.
+ */
+export function preflightLevelState(o: {
+  levels: readonly LevelInfo[] | undefined;
+  /** undefined while probing; null when there is no measurement. */
+  connectionMbps: number | null | undefined;
+  caps: { phone: boolean } | undefined;
+  originalMbps: number;
+}): { ready: boolean; auto: LevelId | null } {
+  if (o.levels === undefined || o.connectionMbps === undefined || o.caps === undefined) return { ready: false, auto: null };
+  const auto = autoLevel(o.levels, { connectionMbps: o.connectionMbps ?? Infinity, phone: o.caps.phone, originalMbps: o.originalMbps });
+  return { ready: true, auto };
+}

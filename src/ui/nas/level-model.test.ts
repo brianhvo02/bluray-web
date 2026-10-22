@@ -10,6 +10,7 @@ import {
   busyMessage,
   levelAudio,
   levelRateMbps,
+  preflightLevelState,
   levelRows,
 } from './level-model';
 
@@ -88,5 +89,27 @@ describe('level model', () => {
   it('badge names the level, and nothing for Original', () => {
     expect(badgeText(L('h264-1080', 10))).toBe('h264-1080 · re-encoded on the NAS');
     expect(badgeText(L('original', 0))).toBeNull();
+  });
+});
+
+describe('preflightLevelState', () => {
+  const lv = (level: LevelId, budgetMbps: number, available = true): LevelInfo => ({ level, label: level, budgetMbps, available });
+  const base = { levels: [lv('original', 0), lv('h264-1080', 8)], connectionMbps: 50, caps: { phone: false }, originalMbps: 30 };
+  it('is not ready until the levels, the probe and the caps are known', () => {
+    expect(preflightLevelState({ ...base, levels: undefined }).ready).toBe(false);
+    expect(preflightLevelState({ ...base, connectionMbps: undefined }).ready).toBe(false);
+    expect(preflightLevelState({ ...base, caps: undefined })).toEqual({ ready: false, auto: null });
+  });
+  it('is ready without a measurement, picking the first level', () => {
+    expect(preflightLevelState({ ...base, connectionMbps: null })).toEqual({ ready: true, auto: 'original' });
+  });
+  it('is a pure function of its inputs, so the first result can be kept', () => {
+    expect(preflightLevelState(base)).toEqual(preflightLevelState({ ...base }));
+  });
+  it('never yields Original when it is unplayable', () => {
+    const levels = [lv('original', 0, false), lv('h264-1080', 8), lv('phone-720', 3)];
+    for (const phone of [false, true]) for (const connectionMbps of [1, 50, null]) {
+      expect(preflightLevelState({ ...base, levels, connectionMbps, caps: { phone } }).auto).not.toBe('original');
+    }
   });
 });

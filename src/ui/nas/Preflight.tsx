@@ -7,10 +7,10 @@ import type { PlayerController } from '../../player/player-controller';
 import { BUFFER_FAILED_COPY, bufferPlan, playlistFacts, readAheadCacheBytes, storageRoom, tooBigCopy, waitCopy, watchBufferFailure, type BufferPlan } from './buffer-model';
 import { discBadges, discFacts, formatSize, mainPlaylist, mainPlaylistId, openFailed, playlistOf, preflightLines, type DiscFacts } from './library-model';
 import { nasDiscSpec } from './disc-spec';
-import { videoCaps } from '../video-caps';
-import { ORIGINAL_ONLY, autoLevel, busyMessage, levelAudio, levelRows } from './level-model';
+import { videoCaps, type VideoCaps } from '../video-caps';
+import { ORIGINAL_ONLY, busyMessage, levelAudio, levelRows, preflightLevelState } from './level-model';
 import { levelSessionOf } from './level-session';
-import { NasHttpError, PLACES_READ_TIMEOUT_MS, type NasClient } from './nas-client';
+import { NasBusyError, NasHttpError, PLACES_READ_TIMEOUT_MS, type NasClient } from './nas-client';
 import { useNasRoute, type NasHistory } from './nas-history';
 import type { NasRoute } from './nas-route';
 import { noticeMissingStart } from './missing-start-notice';
@@ -221,31 +221,42 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
     return { ...playlistFacts(playlist.playItems, sizes), audio: (playlist.playItems[0]?.stn.audio ?? []).map((a) => ({ language: a.lang })) };
   }, [manifest, launchPlaylist]);
   /** The audio stream a level request asks for: the place's when resuming, else the browser's language. */
-  const psr1 = offer.kind === 'none' ? undefined : offer.place.settings.psr1;
+  // A resume place's audio stream, once the places are in; before that, the browser's language picks it.
+  const psr1 = placesReady && offer.kind !== 'none' ? offer.place.settings.psr1 : undefined;
   const levelAudioNumber = useMemo(() => levelAudio(original?.audio ?? [], { psr1, language: globalThis.navigator?.language ?? 'en' }), [original, psr1]);
-  // The levels are asked once the places are (their audio stream is the place's); Play never waits for them.
+  const [caps, setCaps] = useState<VideoCaps | undefined>(undefined);
   useEffect(() => {
-    if (!manifest || !placesReady || original === null) return;
+    void videoCaps().then(setCaps);
+  }, []);
+  /** Bumped after a busy refusal, so the list is asked again. */
+  const [levelsNonce, setLevelsNonce] = useState(0);
+  // Asked alongside the probe (not after the places); asked again when the places change the audio stream. Play waits for it.
+  useEffect(() => {
+    if (!manifest || original === null || !caps) return;
     let live = true;
-    void videoCaps()
-      .then((caps) => nas.levels(disc.id, { hevc: caps.hevc, hevc10: caps.hevc10, hdr: caps.hdrDisplay, audio: levelAudioNumber }))
-      .catch(() => null)
-      .then((list) => live && setLevels(list ?? ORIGINAL_ONLY));
+    void within(
+      nas.levels(disc.id, { hevc: caps.hevc, hevc10: caps.hevc10, hdr: caps.hdrDisplay, audio: levelAudioNumber }).catch(() => null),
+      PLACES_READ_TIMEOUT_MS,
+      null,
+    ).then((list) => live && setLevels(list ?? ORIGINAL_ONLY));
     return () => {
       live = false;
     };
-  }, [nas, disc.id, manifest, placesReady, original, levelAudioNumber]);
+  }, [nas, disc.id, manifest, original, caps, levelAudioNumber, levelsNonce]);
   const levelList = levels ?? ORIGINAL_ONLY;
   const originalMbps = original && original.durationS > 0 ? (original.playlistBytes * 8) / original.durationS / 1e6 : 0;
-  const [phone, setPhone] = useState(false);
+  const levelState = preflightLevelState({ levels, connectionMbps: mbps, caps, originalMbps });
+  /** The automatic level, taken once when the levels, the probe and the caps are all known, then kept. */
+  const [auto, setAuto] = useState<LevelId | null>(null);
   useEffect(() => {
-    void videoCaps().then((c) => setPhone(c.phone));
-  }, []);
+    if (auto === null && levelState.auto !== null) setAuto(levelState.auto);
+  }, [auto, levelState.auto]);
+  /** Play can open: the level is chosen (or the disc has no playlist to ask levels for). */
+  const levelsKnown = auto !== null || (manifest !== null && original === null);
   const selected: LevelInfo = useMemo(() => {
-    const auto = autoLevel(levelList, { connectionMbps: typeof mbps === 'number' ? mbps : Infinity, phone, originalMbps });
-    const id = picked !== null && levelList.some((l) => l.level === picked && l.available) ? picked : auto;
-    return levelList.find((l) => l.level === id) ?? ORIGINAL_ONLY[0]!;
-  }, [levelList, mbps, phone, originalMbps, picked]);
+    const usable = (id: LevelId | null): LevelInfo | undefined => levelList.find((l) => l.level === id && l.available);
+    return usable(picked) ?? usable(auto) ?? levelList.find((l) => l.level === (levelState.auto ?? 'original')) ?? ORIGINAL_ONLY[0]!;
+  }, [levelList, picked, auto, levelState.auto]);
   /**
    * The length and bytes of what plays at the selected level against this connection; null until both are known (or
    * with no playlist).
@@ -340,6 +351,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
       playingRoute.stop();
       setOpening('idle');
       setError(message(err));
+      if (err instanceof NasBusyError) setLevelsNonce((n) => n + 1);
     });
   };
 
@@ -428,7 +440,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
               place={offer.place}
               changed={offer.kind === 'changed'}
               resumeOnly={resume}
-              disabled={!manifest || opening !== 'idle' || estimating}
+              disabled={!manifest || opening !== 'idle' || estimating || !levelsKnown}
               nowMs={Date.now()}
               onResume={() => go(resumeLaunch())}
               onStartOver={() => go(startOverLaunch())}
@@ -469,7 +481,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
           )}
           <div className="preflight-actions">
             {plan?.kind === 'ask' && (
-              <button type="button" data-testid="nas-wait" disabled={!manifest || opening !== 'idle' || !placesReady} onClick={() => waitFor(plan.bytes, offer.kind === 'ask' ? resumeLaunch() : offer.kind === 'changed' ? startOverLaunch() : playLaunch())}>
+              <button type="button" data-testid="nas-wait" disabled={!manifest || opening !== 'idle' || !placesReady || !levelsKnown} onClick={() => waitFor(plan.bytes, offer.kind === 'ask' ? resumeLaunch() : offer.kind === 'changed' ? startOverLaunch() : playLaunch())}>
                 Wait
               </button>
             )}
@@ -477,7 +489,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
               <button
                 type="button"
                 data-testid="nas-play"
-                disabled={!manifest || opening !== 'idle' || estimating || !placesReady}
+                disabled={!manifest || opening !== 'idle' || estimating || !placesReady || !levelsKnown}
                 onClick={() => go(playLaunch())}
               >
                 {plan?.kind === 'ask' || plan?.kind === 'too-big' || cannotBuffer ? 'Play now with pauses' : 'Play'}
