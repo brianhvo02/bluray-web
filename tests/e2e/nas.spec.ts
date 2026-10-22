@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page, type Route } from '@playwright/test';
@@ -1661,4 +1661,148 @@ test('a guest behind the closed title gate gets not-found for a title link', asy
   } finally {
     await guestContext.close();
   }
+});
+
+// The subtitle store (piece 3): owners upload subtitles with their fonts on a season or movie; everyone sees languages.
+
+const STARFALL = 'anilist:900001';
+const subtitleRow = (page: Page, name: string) => page.locator(`[data-testid="subtitle-row"][data-name="${name}"]`);
+const episodeTags = (page: Page, number: number) => page.locator(`[data-testid="episode-row"][data-number="${number}"] [data-testid="episode-subtitle-tag"]`);
+
+/** Starfall Wanderer's Season 1, from the title library. */
+async function openStarfallSeason(page: Page): Promise<void> {
+  await page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]').click();
+  await page.locator('[data-testid="season-row"][data-label="Season 1"]').click();
+  await expect(page.getByTestId('episode-row')).toHaveCount(1);
+}
+
+/**
+ * Runs `fn` while no other project's test touches Starfall Wanderer's stored subtitles (the server is shared), with
+ * none stored at its start or end.
+ */
+async function withStarfallSubtitles(fn: () => Promise<void>): Promise<void> {
+  const clear = async (): Promise<void> => {
+    const res = await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`);
+    expect(res.status).toBe(200);
+    for (const s of (await res.json()) as { id: string }[]) await ownerApi(`subtitles/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+  };
+  await exclusivelyAsync('subtitles', async () => {
+    await clear();
+    try {
+      await fn();
+    } finally {
+      await clear();
+    }
+  });
+}
+
+/** Stores ep1.ass for Starfall Wanderer's episode 1 through the owner API, as `name`. */
+async function storeEpisode1Subtitle(name: string): Promise<string> {
+  const detail = (await (await ownerApi(`titles/${encodeURIComponent(STARFALL)}`)).json()) as { seasons: { id: string; number: number | null }[] };
+  const seasonId = detail.seasons.find((s) => s.number === 1)!.id;
+  const created = await ownerApi('subtitles', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, language: 'en', offsetMs: 0, for: { kind: 'episode', titleId: STARFALL, seasonId, episode: 1 } }),
+  });
+  expect(created.status).toBe(201);
+  const { id } = (await created.json()) as { id: string };
+  const file = await ownerApi(`subtitles/${encodeURIComponent(id)}/file/ep1.ass`, { method: 'PUT', body: readFileSync(join(REPO_ROOT, 'tests/e2e/fixtures/ep1.ass')) });
+  expect(file.status).toBe(200);
+  return id;
+}
+
+test('an owner uploads subtitles with a font for an episode, and everyone sees its language', async ({ page, browser, browserName }) => {
+  await openTitles(page, browserName);
+  await withStarfallSubtitles(async () => {
+    await openStarfallSeason(page);
+    await expect(episodeTags(page, 1)).toHaveCount(0);
+    await page.getByTestId('subtitle-add').click();
+    const form = page.getByTestId('subtitle-upload');
+    await expect(form).toBeVisible();
+    await page.getByTestId('subtitle-upload-files').setInputFiles([join(REPO_ROOT, 'tests/e2e/fixtures/ep1.ass'), join(REPO_ROOT, 'fixtures/ass/fonts/DejaVuSans.ttf')]);
+    await page.getByTestId('subtitle-upload-for').selectOption({ label: 'Episode 1' });
+    await page.getByTestId('subtitle-upload-language').fill('en');
+    await page.getByTestId('subtitle-upload-name').fill(`Fansub ${browserName}`);
+    await page.getByTestId('subtitle-upload-offset').fill('0.4');
+    await page.getByTestId('subtitle-upload-submit').click();
+    await expect(form).toHaveCount(0, { timeout: 15_000 });
+    const row = subtitleRow(page, `Fansub ${browserName}`);
+    await expect(row).toBeVisible();
+    await expect(row).toContainText('EN');
+    await expect(row).toContainText('Episode 1');
+    await expect(row).toContainText('ep1.ass');
+    await expect(row).toContainText('DejaVuSans.ttf');
+    await expect(row).toContainText('+0.4 s');
+    await expect(episodeTags(page, 1)).toHaveText(['EN']);
+    const stored = (await (await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`)).json()) as { name: string; offsetMs: number; fonts: { name: string }[] }[];
+    expect(stored).toEqual([expect.objectContaining({ name: `Fansub ${browserName}`, offsetMs: 400, fonts: [expect.objectContaining({ name: 'DejaVuSans.ttf' })] })]);
+
+    // A guest sees the language on the episode, and neither the button nor the list.
+    const minted = await ownerApi('admin/codes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPerson: { name: `Subtitle Guest ${browserName}`, owner: false }, invite: true }),
+    });
+    expect(minted.status).toBe(200);
+    const { code, personId } = (await minted.json()) as { code: string; personId: string };
+    const guestContext = await browser.newContext();
+    try {
+      const guest = await guestContext.newPage();
+      await allowLocalNetwork(guest, browserName);
+      await guest.goto('/');
+      await guest.getByTestId('pair-code').fill(code);
+      await guest.getByTestId('pair-button').click();
+      await expect(guest.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+      await exclusivelyAsync('gate', async () => {
+        try {
+          await setGate('everyone');
+          await guest.getByTestId('nas-open').click();
+          await expect(guest.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+          await openStarfallSeason(guest);
+          await expect(episodeTags(guest, 1)).toHaveText(['EN']);
+          await expect(guest.getByTestId('subtitle-add')).toHaveCount(0);
+          await expect(guest.getByTestId('subtitle-list')).toHaveCount(0);
+        } finally {
+          await setGate('owners');
+        }
+      });
+    } finally {
+      await guestContext.close();
+      await ownerApi(`admin/people/${encodeURIComponent(personId)}`, { method: 'DELETE' });
+    }
+  });
+});
+
+test('an owner deletes an upload', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await withStarfallSubtitles(async () => {
+    await storeEpisode1Subtitle(`Delete me ${browserName}`);
+    await openStarfallSeason(page);
+    const row = subtitleRow(page, `Delete me ${browserName}`);
+    await expect(row).toBeVisible();
+    await expect(episodeTags(page, 1)).toHaveText(['EN']);
+    await row.getByTestId('subtitle-delete').click();
+    await expect(row.getByTestId('subtitle-delete-confirm')).toBeVisible();
+    await row.getByTestId('subtitle-delete-confirm').click();
+    await expect(row).toHaveCount(0);
+    await expect(episodeTags(page, 1)).toHaveCount(0);
+    const left = (await (await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`)).json()) as unknown[];
+    expect(left).toEqual([]);
+  });
+});
+
+test('an upload with two subtitle files is refused before anything is sent', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await openStarfallSeason(page);
+  const writes: string[] = [];
+  page.on('request', (r) => {
+    if (r.url().includes('/api/subtitles') && r.method() !== 'GET') writes.push(`${r.method()} ${r.url()}`);
+  });
+  await page.getByTestId('subtitle-add').click();
+  await page.getByTestId('subtitle-upload-files').setInputFiles([join(REPO_ROOT, 'tests/e2e/fixtures/ep1.ass'), join(REPO_ROOT, 'tests/e2e/fixtures/ep2.ass')]);
+  await page.getByTestId('subtitle-upload-for').selectOption({ label: 'Episode 1' });
+  await page.getByTestId('subtitle-upload-language').fill('en');
+  await page.getByTestId('subtitle-upload-submit').click();
+  await expect(page.getByTestId('subtitle-upload-error')).toHaveText('Pick one subtitle file (SRT or ASS) at a time.');
+  await expect(page.getByTestId('subtitle-upload')).toBeVisible();
+  expect(writes).toEqual([]);
 });

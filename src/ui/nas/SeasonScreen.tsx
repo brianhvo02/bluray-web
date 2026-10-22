@@ -1,8 +1,11 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
 import type { DiscRef, DiscSlot, EpisodeRef, PlaylistProgress, SeasonDetail } from '../../engine/disc/nas-api';
 import { FileDifferently, type OwnerFiling } from './FileDifferently';
 import type { NasClient } from './nas-client';
 import { episodeProgress } from './resume-model';
+import { SubtitleList, useDiscKeys, useManifests, useStoredSubtitles } from './SubtitleList';
+import { SubtitleUpload } from './SubtitleUpload';
+import { forSeason, languageTag, subtitleTarget, tagsByEpisode } from './subtitle-model';
 import type { PreflightDisc } from './Preflight';
 import { copiesLabel, discHeading, episodeMeta } from './title-model';
 
@@ -62,8 +65,8 @@ export function DiscList({ season, discs, onOpen, owner }: DiscListProps): React
 }
 
 interface SeasonScreenProps {
-  /** For this person's progress through the title's episodes. */
-  readonly nas: Pick<NasClient, 'titleProgress'>;
+  /** For this person's progress through the title's episodes, and the languages stored for them. */
+  readonly nas: Pick<NasClient, 'titleProgress' | 'subtitlesForTitle'>;
   readonly titleId: string;
   readonly seriesName: string;
   /** 'Season 2', 'Extras', … */
@@ -71,7 +74,7 @@ interface SeasonScreenProps {
   readonly season: SeasonDetail;
   readonly onBack: () => void;
   readonly onOpen: OpenDisc;
-  /** For owners: "File differently…" on the discs (ruling F3). */
+  /** For owners: "File differently…" on the discs (ruling F3), and uploading and managing subtitles. */
   readonly owner?: OwnerFiling;
 }
 
@@ -94,6 +97,14 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
       live = false;
     };
   }, [nas, titleId, episodes]);
+  // Stored subtitles: language tags on the episodes for everyone; the upload sheet and the list for owners.
+  const { subs, reload } = useStoredSubtitles(nas, titleId, episodes !== null || owner !== undefined);
+  const tags = useMemo(() => tagsByEpisode((subs ?? []).filter((s) => s.attached !== false), season.id), [subs, season.id]);
+  const target = useMemo(() => subtitleTarget(titleId, [season], { episodes: true }), [titleId, season]);
+  const manifestOf = useManifests(owner?.nas ?? null);
+  const discKeys = useDiscKeys(manifestOf, target, owner !== undefined && (subs ?? []).some((s) => s.attachment.kind === 'chapter'));
+  const [adding, setAdding] = useState(false);
+  const uploadPanel = useId();
   const [tab, setTab] = useState<Tab>(episodes ? 'episodes' : 'discs');
   const ids = useId();
   const tabId = (t: Tab): string => `${ids}-tab-${t}`;
@@ -127,7 +138,26 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
             {heading}
           </h2>
         </div>
+        {owner && (
+          <button type="button" className="subtitle-add" data-testid="subtitle-add" aria-expanded={adding} aria-controls={uploadPanel} onClick={() => setAdding((a) => !a)}>
+            ＋ Subtitles
+          </button>
+        )}
       </header>
+      {owner && adding && (
+        <div id={uploadPanel}>
+          <SubtitleUpload
+            nas={owner.nas}
+            target={target}
+            manifestOf={manifestOf}
+            onDone={() => {
+              setAdding(false);
+              reload();
+            }}
+            onCancel={() => setAdding(false)}
+          />
+        </div>
+      )}
       {episodes && (
         <div className="segmented" role="tablist" aria-label="Season view">
           {TABS.map((t) => (
@@ -157,6 +187,7 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
         <ul className="title-list" role="tabpanel" id={panelId('episodes')} aria-labelledby={tabId('episodes')} hidden={tab !== 'episodes'}>
           {episodes.map((e) => {
             const percent = episodeProgress(progress, e.discId, e.playlistId);
+            const languages = tags.get(e.number) ?? [];
             return (
               <li key={`${e.discId}:${e.playlistId}`}>
                 <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} onClick={() => playEpisode(e)}>
@@ -168,6 +199,15 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
                     </span>
                     <span className="title-muted">{episodeMeta(season, e)}</span>
                   </span>
+                  {languages.length > 0 && (
+                    <span className="episode-tags" aria-label={`Subtitles: ${languages.join(', ')}`}>
+                      {[...new Set(languages.map(languageTag))].map((t) => (
+                        <span key={t} className="tag" data-testid="episode-subtitle-tag">
+                          {t}
+                        </span>
+                      ))}
+                    </span>
+                  )}
                   {percent !== null && (
                     <span className="episode-progress" data-testid="episode-progress" role="img" aria-label={`${percent}% watched`}>
                       <i style={{ width: `${percent}%` }} />
@@ -188,6 +228,7 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
           </>
         )}
       </div>
+      {owner && subs && <SubtitleList nas={owner.nas} target={target} subs={forSeason(subs, season.id, new Set(discKeys.keys()))} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />}
     </section>
   );
 }

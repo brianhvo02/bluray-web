@@ -206,6 +206,23 @@ a { color: #6ea8ff; }
 .episode-row:has(.episode-progress) { padding-bottom: 14px; }
 .episode-progress { position: absolute; left: 12px; right: 12px; bottom: 4px; height: 3px; border-radius: 2px; overflow: hidden; }
 
+/* the subtitle store (spec 2026-10-20 §7.2, mockup 3): "＋ Subtitles", the upload sheet, language tags, the owner's list */
+.subtitle-add { flex: none; align-self: center; white-space: nowrap; }
+.season-head .subtitle-add { margin-left: auto; }
+.series-names .subtitle-add { align-self: flex-start; margin-top: 8px; }
+.tag { flex: none; display: inline-block; padding: 1px 6px; border: 1px solid #3a3a42; border-radius: 4px; background: #26262c; font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em; line-height: 1.4; }
+.episode-tags { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.subtitle-upload input[type='number'] { font: inherit; color: inherit; background: #15151a; border: 1px solid #3a3a42; border-radius: 6px; padding: 6px 10px; width: 6em; }
+.subtitle-upload select { max-width: 100%; }
+.subtitle-chapter { align-items: flex-end; }
+.subtitle-progress { width: 100%; accent-color: #6ea8ff; }
+.subtitle-section { display: flex; flex-direction: column; gap: 8px; }
+.subtitle-empty { margin: 0; }
+.subtitle-row { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; background: #18181d; border: 1px solid #2a2a30; border-radius: 8px; }
+.subtitle-row-main { display: flex; align-items: center; gap: 12px; }
+.subtitle-files { overflow-wrap: anywhere; }
+.subtitle-not-attached { margin-left: 8px; color: #ffcf66; font-weight: 600; }
+
 /* Owner screens: Unsorted, Hidden, Music renames, "File differently…" */
 .owner-cards { display: flex; flex-direction: column; gap: 12px; }
 .owner-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; background: #18181d; border: 1px solid #2a2a30; border-radius: 10px; }
@@ -361,6 +378,8 @@ a { color: #6ea8ff; }
   .owner-card { padding: 12px; }
   .owner-row-main { flex-wrap: wrap; }
   .owner-row-main > .title-row { flex-basis: 100%; }
+  .subtitle-row-main { flex-wrap: wrap; }
+  .subtitle-row-main > .title-row-text { flex-basis: calc(100% - 48px); }
 }
 @media (pointer: coarse) {
   button, .audio-menu-list button { min-width: 44px; min-height: 44px; }
