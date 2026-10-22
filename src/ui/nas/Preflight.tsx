@@ -45,6 +45,9 @@ interface PreflightProps {
   readonly onCancel: () => void;
 }
 
+/** Over WebRTC abroad a 3 s timeout would drop an MPEG-2/VC-1 disc to Original, while a NAS without levels answers 404 at once. */
+const LEVELS_TIMEOUT_MS = 10_000;
+
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
 const NO_OFFER: ResumeOffer = { kind: 'none' };
 
@@ -226,7 +229,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   const levelAudioNumber = useMemo(() => levelAudio(original?.audio ?? [], { psr1, language: globalThis.navigator?.language ?? 'en' }), [original, psr1]);
   const [caps, setCaps] = useState<VideoCaps | undefined>(undefined);
   useEffect(() => {
-    void videoCaps().then(setCaps);
+    void videoCaps().then(setCaps, () => setCaps({ hevc: false, hevc10: false, hdrDisplay: false, phone: false }));
   }, []);
   /** Bumped after a busy refusal, so the list is asked again. */
   const [levelsNonce, setLevelsNonce] = useState(0);
@@ -236,7 +239,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
     let live = true;
     void within(
       nas.levels(disc.id, { hevc: caps.hevc, hevc10: caps.hevc10, hdr: caps.hdrDisplay, audio: levelAudioNumber }).catch(() => null),
-      PLACES_READ_TIMEOUT_MS,
+      LEVELS_TIMEOUT_MS,
       null,
     ).then((list) => live && setLevels(list ?? ORIGINAL_ONLY));
     return () => {
