@@ -693,7 +693,12 @@ async function tapInView(page: Page, selector: string, during: string): Promise<
     30_000,
   );
   await sleep(400); // let a smooth scroll finish before the tap's coordinates are taken
-  await page.tapOn(selector, during);
+  try {
+    await page.tapOn(selector, during);
+  } finally {
+    // undo the room and the scroll: left in place, they push the player off the screen and later touches out of bounds
+    await page.until<boolean>(`(() => { document.body.style.paddingBottom = ''; window.scrollTo(0, 0); return true; })()`, during, 10_000).catch(() => undefined);
+  }
 }
 
 /**
