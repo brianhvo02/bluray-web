@@ -711,7 +711,8 @@ async function browseByTitle(page: Page, browserName: string): Promise<void> {
   const card = (name: string) => page.locator(`[data-testid="title-card"][data-name="${name}"]`);
   await expect(card('Starfall Wanderer')).toContainText('星降りの旅人');
   await expect(card('Moonlit Harbor')).toBeVisible();
-  await expect(card('Lantern Parade Live 2024')).toBeVisible();
+  // a music release by its found title
+  await expect(card('Night Lights')).toBeVisible();
 
   // Search by English, romaji and Japanese names; a blank search shows the shelves again.
   const search = page.getByTestId('title-search');
@@ -1373,6 +1374,13 @@ const projectOf = (name: string): Project => name as Project;
 const lastSegment = (folder: string): string => folder.slice(folder.lastIndexOf('/') + 1);
 const shelfChip = (page: Page, id: string) => page.locator(`[data-testid="title-shelf"][data-shelf="${id}"]`);
 const unsortedCard = (page: Page, folder: string) => page.locator(`[data-testid="unsorted-card"][data-folder="${folder}"]`);
+const artistTile = (page: Page, name: string) => page.locator(`[data-testid="artist-tile"][data-name="${name}"]`);
+const musicRelease = (page: Page, name: string) => page.locator(`[data-testid="music-release"][data-name="${name}"]`);
+/** An owner disc marked as Music is a release whose artist is its parent folder (the project's name for the stray disc). */
+async function openArtist(page: Page, artist: string): Promise<void> {
+  await artistTile(page, artist).click();
+  await expect(page.getByTestId('artist-name')).toHaveText(artist);
+}
 
 /** Opens the title library, then Unsorted. */
 async function openUnsorted(page: Page, browserName: string): Promise<void> {
@@ -1450,8 +1458,11 @@ test('an owner files a disc differently from its season, into Music, and out of 
       await expect(page.getByTestId('unsorted-notice')).toContainText(`Filed under ${name}.`);
       await page.getByRole('button', { name: 'Back to the library' }).click();
 
-      // From the season, "File differently…" moves it to Music; the series, now empty, is gone.
-      await page.locator(`[data-testid="title-card"][data-name="${name}"]`).click();
+      // From the season, "File differently…" moves it to Music; the series, now empty, is gone (the release, found by its
+      // folder's title, has the series' name).
+      const seriesCard = page.locator(`[data-testid="title-card"][data-name="${name}"]`);
+      const seriesId = (await seriesCard.getAttribute('data-title-id'))!;
+      await seriesCard.click();
       await page.getByTestId('season-row').first().click();
       const discsTab = page.locator('[data-testid="season-tab"][data-tab="discs"]');
       if ((await discsTab.count()) > 0) await discsTab.click();
@@ -1460,15 +1471,19 @@ test('an owner files a disc differently from its season, into Music, and out of 
       await discCard.getByTestId('disc-refile').click();
       await discCard.getByTestId('unsorted-card').getByTestId('unsorted-music').click();
       await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
-      await expect(page.locator(`[data-testid="title-card"][data-name="${name}"]`)).toHaveCount(0);
+      await expect(page.locator(`[data-testid="title-card"][data-title-id="${seriesId}"]`)).toHaveCount(0);
 
-      // On the Music shelf, "File differently…" and "Don't list" take it out of the library.
+      // On the Music shelf, "File differently…" and "Don't list" take it out of the library: the release is under its
+      // folder's artist, the series' folder; its only release gone, the artist page goes back to the shelf.
       await shelfChip(page, 'music').click();
-      const row = page.locator(`[data-testid="music-row"][data-name="${first}"]`);
-      await expect(row).toBeVisible();
-      await row.getByTestId('music-refile-open').click();
-      await row.getByTestId('unsorted-card').getByTestId('unsorted-hide').click();
-      await expect(row).toHaveCount(0);
+      await openArtist(page, name);
+      const release = musicRelease(page, name);
+      await expect(release).toBeVisible();
+      await release.getByTestId('music-release-menu').click();
+      await release.getByTestId('music-refile-open').click();
+      await page.getByTestId('music-owner-panel').getByTestId('unsorted-card').getByTestId('unsorted-hide').click();
+      await expect(page.getByTestId('artist-grid')).toBeVisible();
+      await expect(artistTile(page, name)).toHaveCount(0);
       const hidden = (await (await ownerApi('admin/hidden')).json()) as { discs: { discId: string }[] };
       expect(hidden.discs.map((d) => d.discId)).toContain(id);
 
@@ -1564,8 +1579,11 @@ test('"New title…" makes a Music title; "Don\'t list" hides a disc and Unhide 
       await card.getByTestId('new-title-later').click();
 
       await page.getByRole('button', { name: 'Back to the library' }).click();
+      // an own music title has no artist: it is under Various artists
       await shelfChip(page, 'music').click();
-      await expect(page.locator('[data-testid="music-row"][data-name="Live 2024"]')).toContainText('Own title');
+      await openArtist(page, 'Various artists');
+      await expect(musicRelease(page, 'Live 2024')).toBeVisible();
+      await page.getByRole('button', { name: 'Back to Music' }).click();
       await shelfChip(page, 'music').click();
 
       // Don't list, then Hidden and Unhide.
@@ -1605,28 +1623,130 @@ test('renaming a music title shows the new name on the Music shelf and in search
       await page.getByRole('button', { name: 'Back to the library' }).click();
       await shelfChip(page, 'music').click();
 
-      const row = page.locator(`[data-testid="music-row"][data-name="${stray}"]`);
-      await expect(row).toContainText(`syn · Owner/${project}/${stray}`);
-      musicId = await row.locator('button[data-title-id]').getAttribute('data-title-id');
-      await row.getByRole('button', { name: `Rename ${stray}` }).click();
-      await row.getByLabel('Display name').fill('Reel Session');
-      await row.getByTestId('music-save').click();
-      const renamed = page.locator('[data-testid="music-row"][data-name="Reel Session"]');
-      await expect(renamed).toContainText(`Renamed · was ${stray}`);
-      await expect(renamed.getByTestId('music-rename')).toBeFocused();
+      // The stray disc's artist is its parent folder, the project's.
+      await openArtist(page, project);
+      const release = musicRelease(page, stray);
+      musicId = await release.getAttribute('data-title-id');
+      await release.getByRole('button', { name: `Change ${stray}` }).click();
+      await release.getByRole('menuitem', { name: 'Rename…' }).click();
+      const form = page.getByTestId('music-rename-form');
+      await form.getByLabel('Display name').fill('Reel Session');
+      await form.getByTestId('music-save').click();
+      const renamed = musicRelease(page, 'Reel Session');
+      await expect(renamed).toBeVisible();
+      await expect(renamed.getByTestId('music-release-menu')).toBeFocused();
 
+      // The Music shelf's search finds the artist by the new name of its release.
+      await page.getByRole('button', { name: 'Back to Music' }).click();
       await page.getByTestId('title-search').fill('reel session');
-      await expect(page.getByTestId('title-row')).toHaveCount(1);
-      await expect(page.getByTestId('title-row')).toHaveAttribute('data-name', 'Reel Session');
+      await expect(page.getByTestId('artist-tile')).toHaveCount(1);
+      await expect(page.getByTestId('artist-tile')).toHaveAttribute('data-name', project);
       await page.getByTestId('title-search').fill('');
 
-      // "Use folder name" takes the rename back.
-      await renamed.getByRole('button', { name: 'Rename Reel Session' }).click();
-      await renamed.getByTestId('music-folder-name').click();
-      await expect(row).toBeVisible();
+      // "Use found name" takes the rename back.
+      await openArtist(page, project);
+      await renamed.getByTestId('music-release-menu').click();
+      await renamed.getByTestId('music-rename').click();
+      await page.getByTestId('music-rename-form').getByTestId('music-folder-name').click();
+      await expect(musicRelease(page, stray)).toBeVisible();
     } finally {
       if (musicId !== null) await ownerApi(`admin/names/${encodeURIComponent(musicId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: null }) });
       await clearChoices([strayId]);
+    }
+  });
+});
+
+test("the Music shelf shows artists and opens a release's pre-flight", async ({ page, browserName }) => {
+  // Another browser's owner test moves this release for a while: the browsers take turns with it.
+  await exclusivelyAsync('catalogue', async () => {
+    await openTitles(page, browserName);
+    await shelfChip(page, 'music').click();
+    const tile = artistTile(page, 'Lantern Parade');
+    await expect(tile.getByTestId('artist-count')).toHaveText('1 release');
+    // the release folder's cover.png, in the tile's collage and on the card
+    await expect(tile.locator('img')).toHaveCount(1);
+    await expect(tile.locator('img')).toBeVisible();
+    await tile.click();
+    await expect(page.getByTestId('artist-page')).toBeVisible();
+    await expect(page.getByTestId('artist-name')).toHaveText('Lantern Parade');
+    await expect(page.getByTestId('artist-name')).toBeFocused();
+    expect(pathOf(page)).toMatch(/^\/nas\/artist\/[^/]+$/);
+    // the recorded release is a live one: Concerts, and no empty sections
+    await expect(page.getByTestId('artist-section')).toHaveCount(1);
+    const concerts = page.locator('[data-testid="artist-section"][data-section="concerts"]');
+    await expect(concerts.getByRole('heading')).toHaveText('Concerts');
+    const card = concerts.locator('[data-testid="music-release"][data-name="Night Lights"]');
+    await expect(card).toContainText('2024');
+    await expect(card.locator('img')).toBeVisible();
+    // one disc: its pre-flight
+    await card.locator('button.title-card').click();
+    await expect(page.getByTestId('nas-preflight')).toBeVisible();
+    await page.goBack();
+    await expect(page.getByTestId('artist-grid')).toBeVisible();
+    await expect(tile).toBeFocused();
+  });
+});
+
+test('on a phone the Music shelf and an artist page fit the screen', async ({ browser, browserName }) => {
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, ...(browserName === 'firefox' ? {} : { isMobile: true }) });
+  try {
+    const page = await phone.newPage();
+    await exclusivelyAsync('catalogue', async () => {
+      await openTitles(page, browserName);
+      await shelfChip(page, 'music').click();
+      await expect(artistTile(page, 'Lantern Parade')).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await openArtist(page, 'Lantern Parade');
+      await expect(musicRelease(page, 'Night Lights')).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  } finally {
+    await phone.close();
+  }
+});
+
+test("an owner sets a release's artist and drops its match from the release's menu", async ({ page, browserName }) => {
+  await exclusivelyAsync('catalogue', async () => {
+    let id: string | null = null;
+    try {
+      await openTitles(page, browserName);
+      await shelfChip(page, 'music').click();
+      await openArtist(page, 'Lantern Parade');
+      const card = musicRelease(page, 'Night Lights');
+      id = await card.getAttribute('data-title-id');
+
+      // Set artist… moves the release to that artist's tile; the page, now empty, goes back to the shelf.
+      await card.getByTestId('music-release-menu').click();
+      await expect(card.getByTestId('music-unreject')).toHaveCount(0);
+      await card.getByTestId('music-set-artist').click();
+      const artistForm = page.getByTestId('music-artist-form');
+      await artistForm.getByTestId('music-artist').fill('Neon Harbor');
+      await artistForm.getByTestId('music-artist-save').click();
+      await expect(artistTile(page, 'Neon Harbor')).toBeVisible();
+      await expect(artistTile(page, 'Lantern Parade')).toHaveCount(0);
+      await openArtist(page, 'Neon Harbor');
+      await card.getByTestId('music-release-menu').click();
+      await card.getByTestId('music-set-artist').click();
+      await page.getByTestId('music-artist-found').click();
+      await expect(artistTile(page, 'Lantern Parade')).toBeVisible();
+      await expect(artistTile(page, 'Neon Harbor')).toHaveCount(0);
+
+      // Not this release: the folder's name and date, with no kind known, so Other; Use this release again undoes it.
+      await openArtist(page, 'Lantern Parade');
+      await card.getByTestId('music-release-menu').click();
+      await card.getByTestId('music-reject').click();
+      const other = page.locator('[data-testid="artist-section"][data-section="other"] [data-testid="music-release"][data-name="Night Lights"]');
+      // the lookup's artist id is gone with it: the page goes back to the shelf, where the folder's artist has a tile
+      await openArtist(page, 'Lantern Parade');
+      await expect(other).toBeVisible();
+      await expect(other).toContainText('2024');
+      await other.getByTestId('music-release-menu').click();
+      await expect(other.getByTestId('music-reject')).toHaveCount(0);
+      await other.getByTestId('music-unreject').click();
+      await openArtist(page, 'Lantern Parade');
+      await expect(page.locator('[data-testid="artist-section"][data-section="concerts"] [data-testid="music-release"][data-name="Night Lights"]')).toBeVisible();
+    } finally {
+      if (id !== null) await ownerApi(`admin/music/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ artist: null, rejectMatch: false }) });
     }
   });
 });

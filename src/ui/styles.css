@@ -129,7 +129,9 @@ a { color: #6ea8ff; }
 .titles-actions { display: flex; gap: 8px; }
 .title-icon-button { flex: none; min-width: 36px; }
 .title-search { box-sizing: border-box; width: 100%; padding: 8px 14px; border-radius: 999px; }
-.title-shelves { display: flex; flex-wrap: wrap; gap: 8px; }
+.title-shelves { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+.title-shelves::-webkit-scrollbar { display: none; }
+.title-shelves .title-chip { flex: none; }
 .title-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; }
 .title-chip.selected { background: #6ea8ff; border-color: #6ea8ff; color: #0b0b0d; }
 .title-chip-count { font-size: 0.8em; opacity: 0.7; font-variant-numeric: tabular-nums; }
@@ -153,6 +155,36 @@ a { color: #6ea8ff; }
 .title-row-name { font-weight: 600; overflow-wrap: anywhere; }
 .title-row-name .title-muted { font-weight: 400; }
 .title-chevron { flex: none; font-size: 1.4em; line-height: 1; opacity: 0.5; }
+/* the Music shelf: artist tiles with a round collage of up to four covers, and an artist's release cards */
+.artist-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 20px 16px; }
+.artist-tile { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0; background: none; border: none; border-radius: 8px; text-align: center; }
+.artist-tile:hover:not(:disabled) { background: none; }
+.artist-collage { display: grid; overflow: hidden; border-radius: 50%; background: #1f1f25; aspect-ratio: 1; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.artist-collage[data-count='1'] { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.artist-collage[data-count='2'] { grid-template-rows: 1fr; }
+.artist-collage[data-count='3'] > :first-child { grid-row: span 2; }
+.artist-collage-cell { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: cover; }
+.artist-collage-cell.poster-placeholder { font-size: 0.8em; }
+.artist-collage-empty { display: flex; align-items: center; justify-content: center; font-size: 2.6em; color: #8a8a96; background: linear-gradient(135deg, #26262e, #16161b); }
+.artist-tile-art { width: 100%; margin-bottom: 4px; transition: transform 0.15s, box-shadow 0.15s; }
+.artist-tile:hover .artist-tile-art { transform: translateY(-2px); box-shadow: 0 0 0 2px #6ea8ff; }
+.artist-tile-name { font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.artist-head { display: flex; align-items: center; gap: 16px; }
+.artist-head-art { flex: none; width: 120px; }
+.artist-section { display: flex; flex-direction: column; gap: 12px; }
+.music-release { position: relative; min-width: 0; }
+.music-cover { aspect-ratio: 1; }
+.music-release-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.music-release .music-menu { position: absolute; top: 6px; right: 6px; }
+.music-menu-button { min-width: 32px; padding: 2px 8px; background: rgba(11, 11, 13, 0.75); border-radius: 999px; }
+.music-menu-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 6; margin: 0; padding: 4px; list-style: none; background: rgba(30, 30, 36, 0.98); border-radius: 8px; min-width: 200px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+.music-menu-list button { display: block; width: 100%; text-align: left; padding: 6px 10px; white-space: nowrap; background: none; border: none; }
+.music-menu-list button:disabled { opacity: 0.45; cursor: not-allowed; }
+.music-owner-panel { display: flex; flex-direction: column; gap: 8px; }
+.music-owner-heading { margin: 0; font-size: 0.95em; }
+@media (min-width: 1000px) {
+  .title-library .artist-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 24px 20px; }
+}
 /* a title or own disc with no art: its initials on a tile */
 .poster-placeholder { display: flex; align-items: center; justify-content: center; font-weight: 700; letter-spacing: 0.05em; color: #8a8a96; background: linear-gradient(135deg, #26262e, #16161b); }
 .title-poster.poster-placeholder, .series-poster.poster-placeholder { font-size: 1.8em; }
@@ -368,14 +400,15 @@ a { color: #6ea8ff; }
 }
 @media (max-width: 600px) {
   .landing { padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
-  .title-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 16px 12px; }
+  .title-grid, .artist-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 16px 12px; }
+  .artist-head-art { width: 96px; }
+  .music-menu-list { position: fixed; top: auto; left: 0; right: 0; bottom: 0; min-width: 0; max-height: 60vh; overflow: auto; border-radius: 12px 12px 0 0; z-index: 40; padding: 4px max(4px, env(safe-area-inset-right)) max(4px, env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left)); }
+  .music-menu-list button { white-space: normal; }
   /* a compact pinned header: tighter rows, a smaller heading, and the shelves on one row that swipes sideways */
   .titles-sticky { gap: 8px; padding-bottom: 8px; }
   .titles-sticky h2 { font-size: 1.15em; }
   .titles-sticky .title-search { padding-top: 6px; padding-bottom: 6px; }
-  .title-shelves { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; }
-  .title-shelves::-webkit-scrollbar { display: none; }
-  .title-shelves .title-chip { flex: none; }
+  .title-shelves { margin-inline: -16px; padding-inline: 16px; }
   .continue-row { grid-auto-columns: minmax(170px, 72vw); gap: 12px; }
   .series-poster { width: 96px; }
   .series-banner:has(.series-banner-art) + .series-head { margin-top: -48px; padding-left: 12px; }

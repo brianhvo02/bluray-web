@@ -18,6 +18,8 @@ const ROUTES: NasRoute[] = [
   { kind: 'unsorted' },
   { kind: 'hidden' },
   { kind: 'settings' },
+  { kind: 'artist', artistId: 'name:neon harbor' },
+  { kind: 'artist', artistId: 'various' },
   { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: null, resume: false },
   { kind: 'play', discKey: 'd.abc123', playlistId: '00001', timeS: null, resume: false },
   { kind: 'play', discKey: 'f.abc123', playlistId: null, timeS: 90, resume: false },
@@ -38,6 +40,7 @@ describe('nas route', () => {
     expect(nasRoutePath({ kind: 'title', titleId: 'anilist:21' })).toBe('/nas/title/anilist%3A21');
     expect(nasRoutePath({ kind: 'extras', titleId: 'x' })).toBe('/nas/title/x/extras');
     expect(nasRoutePath({ kind: 'folders', path: 'a/b' })).toBe('/nas/folders/a/b');
+    expect(nasRoutePath({ kind: 'artist', artistId: 'name:neon harbor' })).toBe('/nas/artist/name%3Aneon%20harbor');
     expect(nasRoutePath({ kind: 'play', discKey: 'f.1', playlistId: '2', timeS: 3.9, resume: false })).toBe(
       '/nas/play/f.1?pl=2&t=3',
     );

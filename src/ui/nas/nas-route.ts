@@ -9,6 +9,8 @@ export type NasRoute =
   | { kind: 'unsorted' }
   | { kind: 'hidden' }
   | { kind: 'settings' }
+  /** An artist's page on the Music shelf, by the artist's grouping id. */
+  | { kind: 'artist'; artistId: string }
   /** `resume`: from a Continue watching card, which resumes the place without asking (`&resume=1`). */
   | { kind: 'play'; discKey: string; playlistId: string | null; timeS: number | null; resume: boolean };
 
@@ -49,6 +51,8 @@ export function parseNasRoute(url: URL): NasRoute | null {
     return { kind: 'folders', path: seg.slice(1).join('/') };
   } else if (seg.length === 1 && (head === 'unsorted' || head === 'hidden' || head === 'settings')) {
     return { kind: head };
+  } else if (head === 'artist' && a && seg.length === 2) {
+    return { kind: 'artist', artistId: a };
   } else if (head === 'play' && a && seg.length === 2) {
     return { kind: 'play', discKey: a, playlistId: params.get('pl') || null, timeS: timeOf(params.get('t')), resume: params.get('resume') === '1' };
   }
@@ -79,6 +83,8 @@ export function nasRoutePath(route: NasRoute): string {
     case 'hidden':
     case 'settings':
       return `/nas/${route.kind}`;
+    case 'artist':
+      return `/nas/artist/${enc(route.artistId)}`;
     case 'play': {
       const p = new URLSearchParams();
       if (route.playlistId) p.set('pl', route.playlistId);

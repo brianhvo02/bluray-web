@@ -36,10 +36,10 @@ export function recentlyAdded(titles: readonly TitleSummary[], n = 9): TitleSumm
   return [...titles].sort((a, b) => b.addedAt - a.addedAt || byName(a, b)).slice(0, n);
 }
 
-/** The name a title is shown by: the owner's display name, then English, romaji, native. */
+/** The name a title is shown by: the owner's display name, then a music release's title, then English, romaji, native. */
 export function displayName(t: TitleSummary): string {
   const { display, english, romaji, native } = t.names;
-  return display ?? english ?? romaji ?? native ?? '';
+  return display ?? t.music?.title ?? english ?? romaji ?? native ?? '';
 }
 
 /** The native name, shown under the displayed one when it differs. */

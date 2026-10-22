@@ -65,6 +65,9 @@ describe('recentlyAdded', () => {
 describe('names', () => {
   it('displayName prefers display, then English, romaji and native', () => {
     expect(displayName(title('x', 'music', { english: 'Folder', display: 'Shown' }))).toBe('Shown');
+    const music = { ...title('x', 'music', { english: '[2024.05.01] Lantern Parade - Night Lights [CD]' }), music: { artist: { id: 'a', name: 'Lantern Parade', otherName: null }, kind: 'concert' as const, date: null, concertName: null, title: 'Night Lights', matched: true, rejected: false } };
+    expect(displayName(music)).toBe('Night Lights');
+    expect(displayName({ ...music, names: { ...music.names, display: 'Shown' } })).toBe('Shown');
     expect(displayName(STARFALL)).toBe('Starfall Wanderer');
     expect(displayName(title('x', 'series', { romaji: 'Hoshifuri no Tabibito', native: '星降りの旅人' }))).toBe('Hoshifuri no Tabibito');
     expect(displayName(title('x', 'series', { native: '星降りの旅人' }))).toBe('星降りの旅人');
