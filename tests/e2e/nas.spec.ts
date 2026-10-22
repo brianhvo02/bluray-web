@@ -1379,6 +1379,59 @@ test('an owner files a disc differently from its season, into Music, and out of 
   });
 });
 
+test("an owner files a bonus disc with a season's extras, then with the title's extras", async ({ page, browserName }, testInfo) => {
+  const project = projectOf(testInfo.project.name);
+  const name = OWNER_SERIES[project];
+  const [first, second] = ownerDiscs(project).series.map(lastSegment) as [string, string];
+  await exclusivelyAsync('catalogue', async () => {
+    const ids: (string | null)[] = [];
+    try {
+      await openUnsorted(page, browserName);
+      const card = unsortedCard(page, first);
+      ids.push(await card.getAttribute('data-disc-id'), await unsortedCard(page, second).getAttribute('data-disc-id'));
+      await card.locator(`[data-testid="title-option"][data-name="${name}"]`).click();
+      await card.getByTestId('unsorted-disc').fill('1');
+      await card.getByTestId('unsorted-file').click();
+      await expect(page.getByTestId('unsorted-notice')).toContainText(`Filed under ${name}.`);
+
+      // The other disc goes with season 1's extras: Disc / volume doesn't apply to extras.
+      const bonus = unsortedCard(page, second);
+      await bonus.locator(`[data-testid="title-option"][data-name="${name}"]`).click();
+      await bonus.getByTestId('unsorted-extras').check();
+      await expect(bonus.getByTestId('unsorted-disc')).toBeDisabled();
+      await bonus.getByTestId('unsorted-season').fill('1');
+      await bonus.getByTestId('unsorted-file').click();
+      await expect(page.getByTestId('unsorted-notice')).toContainText(`Filed with the extras of season 1 of ${name}.`);
+
+      await page.getByRole('button', { name: 'Back to the library' }).click();
+      await page.locator(`[data-testid="title-card"][data-name="${name}"]`).click();
+      await page.getByTestId('season-row').first().click();
+      const discsTab = page.locator('[data-testid="season-tab"][data-tab="discs"]');
+      if ((await discsTab.count()) > 0) await discsTab.click();
+      await expect(page.getByRole('heading', { name: 'Extras' })).toBeVisible();
+      const discCards = page.getByTestId('disc-card');
+      await expect(discCards).toHaveCount(2);
+
+      // "File differently…" on the extras disc, with Season blank, moves it to the title's own extras.
+      const extrasCard = discCards.nth(1);
+      await extrasCard.getByTestId('disc-refile').click();
+      const refile = extrasCard.getByTestId('unsorted-card');
+      await refile.getByTestId('unsorted-search').fill(name);
+      await refile.getByTestId('unsorted-search-button').click();
+      await refile.locator(`[data-testid="title-option"][data-name="${name}"]`).first().click();
+      await refile.getByTestId('unsorted-extras').check();
+      await refile.getByTestId('unsorted-season').fill('');
+      await refile.getByTestId('unsorted-file').click();
+      await expect(page.getByTestId('disc-card')).toHaveCount(1);
+      await expect(page.getByRole('heading', { name: 'Extras' })).toHaveCount(0);
+      await page.getByRole('button', { name: /^Back/ }).first().click();
+      await expect(page.getByTestId('extras-row')).toContainText('1 disc');
+    } finally {
+      await clearChoices(ids);
+    }
+  });
+});
+
 test('"New title…" makes a Music title; "Don\'t list" hides a disc and Unhide brings it back', async ({ page, browserName }, testInfo) => {
   const project = projectOf(testInfo.project.name);
   const stray = ownerStray(project);

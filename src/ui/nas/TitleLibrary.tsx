@@ -413,7 +413,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
   const back = (): void => history.back(LIBRARY);
   const openSeason = (id: string): void => {
     if (openId === null) return;
-    history.push(id === 'extras' ? { kind: 'extras', titleId: openId } : { kind: 'season', titleId: openId, seasonKey: seasonKeyOf(id) });
+    history.push(id === 'extras' ? { kind: 'extras', titleId: openId } : { kind: 'season', titleId: openId, seasonKey: seasonKeyOf(openId, id) });
   };
   const closeSeason = (): void => {
     if (openId !== null) history.back({ kind: 'title', titleId: openId });
@@ -479,7 +479,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
         </section>
       );
     }
-    const season = seasonKey === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => seasonKey !== null && seasonKeyOf(s.id) === seasonKey);
+    const season = seasonKey === 'extras' ? extrasSeason(detail) : detail.seasons.find((s) => seasonKey !== null && openId !== null && s.id === seasonIdOf(openId, seasonKey));
     if (season) {
       return (
         <SeasonScreen nas={nas} titleId={detail.title.id} seriesName={displayName(detail.title)} heading={seasonLabel(season)} season={season} seasonIds={seasonIdsOf(detail)} onBack={closeSeason} onOpen={openDisc} owner={filing} />

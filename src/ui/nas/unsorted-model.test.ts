@@ -8,6 +8,7 @@ import {
   seasonOnPick,
   blurayComSearchUrl,
   discPlace,
+  extrasChoice,
   lookupFailure,
   mergeResults,
   parseNumber,
@@ -84,6 +85,16 @@ describe('titleChoice', () => {
   it('keeps the season for a series only', () => {
     expect(titleChoice(summary({ id: 'anilist:1' }), 2, 3)).toEqual({ kind: 'title', titleId: 'anilist:1', season: 2, disc: 3 });
     expect(titleChoice(summary({ id: 'tmdb-movie:7', kind: 'movie' }), 2, null)).toEqual({ kind: 'title', titleId: 'tmdb-movie:7', season: null, disc: null });
+  });
+});
+
+describe('extrasChoice', () => {
+  it("files a bonus disc with a series' season, or with the title when no season is given", () => {
+    expect(extrasChoice(summary({ id: 'anilist:1' }), 2)).toEqual({ kind: 'extras', titleId: 'anilist:1', season: 2 });
+    expect(extrasChoice(summary({ id: 'anilist:1' }), null)).toEqual({ kind: 'extras', titleId: 'anilist:1', season: null });
+  });
+  it('keeps no season for a movie', () => {
+    expect(extrasChoice(summary({ id: 'tmdb-movie:7', kind: 'movie' }), 2)).toEqual({ kind: 'extras', titleId: 'tmdb-movie:7', season: null });
   });
 });
 

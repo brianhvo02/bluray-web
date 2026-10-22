@@ -90,11 +90,15 @@ export function nasRoutePath(route: NasRoute): string {
   }
 }
 
-/** The text after the first '#' of a catalogue season id. */
-export function seasonKeyOf(seasonId: string): string {
-  return seasonId.slice(seasonId.indexOf('#') + 1);
+/**
+ * A season's key in the address bar: the text after `<titleId>#` for the title's own seasons (`s2`, `discs`), else the
+ * whole id, because an AniList series' seasons are its member entries (`<member id>#season`) and share that text.
+ */
+export function seasonKeyOf(titleId: string, seasonId: string): string {
+  const own = `${titleId}#`;
+  return seasonId.startsWith(own) ? seasonId.slice(own.length) : seasonId;
 }
 
 export function seasonIdOf(titleId: string, seasonKey: string): string {
-  return `${titleId}#${seasonKey}`;
+  return seasonKey.includes('#') ? seasonKey : `${titleId}#${seasonKey}`;
 }
