@@ -53,6 +53,9 @@ export function tagsByEpisode(subs: readonly StoredSubtitle[], seasonId: string)
   return new Map([...sets].map(([episode, set]) => [episode, [...set].sort()]));
 }
 
+/** How long the player waits for the NAS's list of a disc's stored subtitles. */
+export const STORED_LIST_TIMEOUT_MS = 3000;
+
 /** The subtitles stored for one playlist of a disc. */
 export function forPlaylist(subs: readonly StoredSubtitle[], discKey: string, playlistId: string): StoredSubtitle[] {
   return subs.filter((s) => s.attachment.discKey === discKey && s.attachment.playlistId === playlistId);

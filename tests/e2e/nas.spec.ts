@@ -1831,3 +1831,44 @@ test('everyone picks a stored subtitle in the player, at its default offset', as
     await expect(page.getByTestId('subtitle-file-1')).toHaveCount(0);
   });
 });
+
+test('a stored subtitle and my offset come back when I resume', async ({ page, browserName }) => {
+  const api = await openTitlesAsResumePerson(page, browserName);
+  await skipWithoutH264(page);
+  await withStarfallSubtitles(async () => {
+    const id = await storeEpisode1Subtitle(`Resume pick ${browserName}`, 400);
+    await openEpisode1(page);
+    await page.getByTestId('nas-play').click();
+    await waitForPlaying(page);
+    await expect.poll(() => clockUs(page), { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(3_300_000);
+    await page.getByTestId('video-canvas').click();
+    await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
+    await page.getByTestId('subtitle-menu').click();
+    await page.getByTestId(`subtitle-stored-${id}`).click();
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.4 s', { timeout: 10_000 });
+    for (let i = 0; i < 5; i++) await page.getByTestId('subtitle-offset-plus').click();
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.9 s');
+    // an offset change saves at once
+    const saved = async (): Promise<unknown> => {
+      const res = await api(`me/playback/${encodeURIComponent(disc1Key())}`);
+      return res.status === 200 ? ((await res.json()) as { places: Record<string, { settings: { textFiles: unknown[] } }> }).places['00001']?.settings.textFiles ?? null : null;
+    };
+    await expect.poll(saved, { timeout: 5_000 }).toEqual([expect.objectContaining({ name: 'ep1.ass', offsetMs: 900, subtitleId: id, language: 'en' })]);
+    await page.goBack();
+    await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
+
+    await page.locator('[data-testid="episode-row"][data-number="1"]').click();
+    await expect(page.getByTestId('resume-at')).toHaveText('Resume at 0:03', { timeout: 10_000 });
+    await page.getByTestId('resume-at').click();
+    await expect(playerState(page)).toHaveAttribute('data-playlist', '00001', { timeout: 15_000 });
+    // the 4 s episode ends a moment later, and the controls stay up
+    await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 15_000 });
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-file-0')).toContainText('ep1.ass', { timeout: 10_000 });
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.9 s');
+    await expect(page.getByTestId('subtitle-text')).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId(`subtitle-stored-${id}`)).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('subtitle-file-1')).toHaveCount(0);
+  });
+});

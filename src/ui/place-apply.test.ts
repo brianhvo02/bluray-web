@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { PlaceSettings } from '../engine/disc/nas-api';
+import type { PlaceSettings, StoredSubtitle } from '../engine/disc/nas-api';
 import type { SubtitleChoice, TextFileInfo } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../player/player-controller';
 import { filesToAdd, LaunchSettingsApplier, TEXT_WAIT_MS } from './place-apply';
@@ -13,7 +13,20 @@ const base: PlaceSettings = {
 const bytes = (n: number): Uint8Array => new Uint8Array(n);
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opts: { loadFails?: boolean } = {}) {
+const storedSub = (id: string, language: string, playlistId: string, fileName: string): StoredSubtitle => ({
+  id, name: `Fansub ${id}`, language, offsetMs: 400, fileName, fileSize: 120, fonts: [{ name: 'Made Up Sans.ttf', size: 50 }],
+  attachment: { kind: 'episode', discKey: KEY, playlistId, titleId: 'anilist:1', seasonId: 's1', episode: Number(playlistId) }, uploaderPersonId: 'p1', uploadedAt: 1,
+});
+
+interface SetupOpts {
+  loadFails?: boolean;
+  /** The NAS's subtitles for the disc (an Error: the list fails); no NAS when absent. */
+  nasList?: StoredSubtitle[] | Error;
+  /** Ids whose files fail to download. */
+  fetchFails?: string[];
+}
+
+function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opts: SetupOpts = {}) {
   let clock = 1000;
   const calls: unknown[][] = [];
   const loaded: string[][] = [];
@@ -33,16 +46,34 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
     shiftSubtitleFile: (i: number, ms: number) => void calls.push(['shift', i, ms]),
     scaleSubtitles: (d: number) => void calls.push(['scale', d]),
   };
+  const nas = opts.nasList === undefined ? undefined : {
+    subtitlesForDisc: async (key: string, o: { timeoutMs?: number } = {}) => {
+      calls.push(['list', key, o.timeoutMs]);
+      if (opts.nasList instanceof Error) throw opts.nasList;
+      return opts.nasList!;
+    },
+    subtitleFiles: async (sub: StoredSubtitle) => {
+      if (opts.fetchFails?.includes(sub.id)) throw new Error('offline');
+      return [new File(['[Script Info]'], sub.fileName), ...sub.fonts.map((f) => new File(['font'], f.name))];
+    },
+  };
   const applier = new LaunchSettingsApplier({
     controller,
+    nas,
+    pickStored: async (sub) => {
+      calls.push(['pick', sub.id]);
+      return true;
+    },
+    onStoredSubtitle: (id) => void calls.push(['active', id]),
     places: {
+      noteStoredSubtitle: (name, id, size, language) => void calls.push(['note', name, id, size, language]),
       takeLaunchSettings: () => {
         const l = pending;
         pending = null;
         return l && { ...l, discKey: KEY };
       },
       storedTextFiles: async (key) => (key === KEY ? stored : []),
-      addTextFiles: async () => {},
+      addTextFiles: async (files) => void calls.push(['keep', files.map((f) => f.name)]),
     },
     selectShader: (name) => {
       shader = name;
@@ -181,4 +212,91 @@ it('matches stored files by name and, when known, size; fonts only with a subtit
     subtitles: [stored[0]], fonts: [stored[2]],
   });
   expect(filesToAdd([{ name: 'c.srt', size: 0, startUs: null, offsetMs: 0 }], stored)).toEqual({ subtitles: [], fonts: [] });
+});
+
+describe('LaunchSettingsApplier with subtitles stored on the NAS', () => {
+  const ep1 = storedSub('sub-1', 'en', '00001', 'ep1.ass');
+  const stored1 = { name: 'ep1.ass', size: 120, startUs: 0, offsetMs: 900, subtitleId: 'sub-1', language: 'en' };
+
+  it('fetches a resumed stored subtitle again, restores its placement and my offset, and notes it for later saves', async () => {
+    const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true }, byLanguage: false }, [], { nasList: [ep1] });
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    expect(t.calls).toContainEqual(['list', KEY, 3000]);
+    expect(t.loaded).toEqual([['ep1.ass', 'Made Up Sans.ttf']]);
+    expect(t.calls).toContainEqual(['note', 'ep1.ass', 'sub-1', 120, 'en']);
+    expect(t.calls).toContainEqual(['active', 'sub-1']);
+    // its bytes stay on the NAS: nothing is kept on this device
+    expect(t.calls.filter((c) => c[0] === 'keep')).toEqual([]);
+    t.show({ subtitles: { ...t.snap.subtitles!, text: { files: [{ name: 'ep1.ass', format: 'ass', cues: 3, startUs: null, offsetMs: 0 }], missingFonts: [], episodeStarts: [] }, selected: 'text' } });
+    expect(t.calls.filter((c) => c[0] === 'start' || c[0] === 'shift')).toEqual([['start', 0, 0], ['shift', 0, 900]]);
+  });
+
+  it('loads a stored subtitle and local files together, in the order the place had them', async () => {
+    const local = { name: 'mine.srt', size: 2, startUs: null, offsetMs: -200 };
+    const t = setup({ settings: { ...base, textFiles: [local, stored1], textOn: true }, byLanguage: false }, [{ name: 'mine.srt', bytes: bytes(2) }, { name: 'Font.ttf', bytes: bytes(4) }], { nasList: [ep1] });
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    expect(t.loaded).toEqual([['mine.srt', 'ep1.ass', 'Font.ttf', 'Made Up Sans.ttf']]);
+    expect(t.calls).toContainEqual(['keep', ['mine.srt', 'Font.ttf']]);
+    // noted after the local files are kept (keeping a local pick clears the saver's note)
+    const order = t.calls.filter((c) => c[0] === 'keep' || c[0] === 'note').map((c) => c[0]);
+    expect(order).toEqual(['keep', 'note']);
+    t.show(listing(t.snap, 'mine.srt', 'ep1.ass'));
+    expect(t.calls.filter((c) => c[0] === 'shift')).toEqual([['shift', 0, -200], ['shift', 1, 900]]);
+  });
+
+  it('skips a stored subtitle whose download fails, or that is gone, and applies the rest', async () => {
+    const local = { name: 'mine.srt', size: 2, startUs: null, offsetMs: 300 };
+    for (const opts of [{ nasList: [ep1], fetchFails: ['sub-1'] }, { nasList: [] }, { nasList: new Error('offline') }, {}] as SetupOpts[]) {
+      const t = setup({ settings: { ...base, textFiles: [stored1, local], textOn: true }, byLanguage: false }, [{ name: 'mine.srt', bytes: bytes(2) }], opts);
+      t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+      await settle();
+      expect(t.loaded).toEqual([['mine.srt']]);
+      expect(t.calls.filter((c) => c[0] === 'note')).toEqual([]);
+      t.show(listing(t.snap, 'mine.srt'));
+      expect(t.calls.filter((c) => c[0] === 'shift')).toEqual([['shift', 0, 300]]);
+    }
+  });
+
+  it('finds a stored subtitle renamed on the NAS by its id', async () => {
+    const renamed = { ...ep1, fileName: 'ep1.v2.ass' };
+    const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true }, byLanguage: false }, [], { nasList: [renamed] });
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    expect(t.loaded).toEqual([['ep1.v2.ass', 'Made Up Sans.ttf']]);
+    t.show(listing(t.snap, 'ep1.v2.ass'));
+    expect(t.calls.filter((c) => c[0] === 'shift')).toEqual([['shift', 0, 900]]);
+  });
+
+  it("Up next picks the next episode's stored subtitle in the same language, at its default offset", async () => {
+    const subs = [storedSub('sub-2fr', 'fr', '00002', 'ep2.fr.ass'), storedSub('sub-2en', 'EN', '00002', 'ep2.ass'), storedSub('sub-3en', 'en', '00003', 'ep3.ass')];
+    const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true }, byLanguage: true }, [], { nasList: subs });
+    t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pick')).toEqual([['pick', 'sub-2en']]);
+    // the picker loads, places and offsets it; nothing else is loaded or shifted
+    expect(t.loaded).toEqual([]);
+    expect(t.calls.filter((c) => c[0] === 'subtitle' || c[0] === 'shift')).toEqual([]);
+  });
+
+  it('Up next with no stored subtitle in that language shows PG by language instead', async () => {
+    const subs = [storedSub('sub-2fr', 'fr', '00002', 'ep2.fr.ass')];
+    for (const nasList of [subs, new Error('offline')]) {
+      const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true, pgLanguage: 'jpn', psr2: 0x80000001 }, byLanguage: true }, [], { nasList });
+      t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+      await settle();
+      expect(t.calls.filter((c) => c[0] === 'pick')).toEqual([]);
+      expect(t.calls).toContainEqual(['subtitle', { kind: 'pg', stream: 2 }]);
+      expect(t.loaded).toEqual([]);
+    }
+  });
+
+  it('Up next carries nothing from a stored subtitle that was not shown', async () => {
+    const t = setup({ settings: { ...base, textFiles: [stored1], textOn: false }, byLanguage: true }, [], { nasList: [storedSub('sub-2en', 'en', '00002', 'ep2.ass')] });
+    t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pick' || c[0] === 'list')).toEqual([]);
+    expect(t.loaded).toEqual([]);
+  });
 });

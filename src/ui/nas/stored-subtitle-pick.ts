@@ -87,7 +87,7 @@ export class StoredSubtitlePicker {
     if (start !== null && start !== loaded.startUs) controller.setSubtitleStart(0, start);
     if (s.offsetMs !== loaded.offsetMs) controller.shiftSubtitleFile(0, s.offsetMs - loaded.offsetMs);
     controller.selectSubtitle({ kind: 'text' });
-    places.noteStoredSubtitle(s.fileName, s.id, s.fileSize);
+    places.noteStoredSubtitle(s.fileName, s.id, s.fileSize, s.language);
     return true;
   }
 

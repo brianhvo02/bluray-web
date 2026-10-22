@@ -21,14 +21,12 @@ import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
 import type { StoredSubtitle } from '../engine/disc/nas-api';
 import { replacesTextSet, StoredSubtitlePicker } from './nas/stored-subtitle-pick';
-import { forPlaylist } from './nas/subtitle-model';
+import { forPlaylist, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
 
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
 const TAP_NOTICE_MS = 6000;
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
-/** How long the player waits for the NAS's list of a disc's stored subtitles. */
-const STORED_LIST_TIMEOUT_MS = 3000;
 
 
 /** A touch held on the video over a disc menu: where and when it went down, and whether it moved or showed the controls. */
@@ -126,19 +124,6 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   // A resumed (or carried-over) launch's settings, once the disc plays: volume, shader, tracks and subtitle files.
   const shaderStateRef = useRef(shaderState);
   shaderStateRef.current = shaderState;
-  const [launchSettings] = useState(
-    () =>
-      new LaunchSettingsApplier({
-        controller,
-        places,
-        // a set this device doesn't have stays unchosen, rather than chosen and missing
-        selectShader: (name) => {
-          if (name === null || shaderStateRef.current.sets.some((set) => set.name === name && set.available)) void shaderModel.select(name);
-        },
-        log: (message, err) => console.warn(message, err),
-      }),
-  );
-  useEffect(() => launchSettings.observe(snapshot, shaderSet), [launchSettings, snapshot, shaderSet]);
   /** The place is saved before the disc closes: its registers are read while it is still open. */
   const savePlaceAndEnd = useCallback((): void => {
     void places.flushNow({ keepalive: false });
@@ -198,11 +183,30 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
     };
   }, [nas, nasDiscKey, discOpens]);
   const [storedPicker] = useState(() => (nas ? new StoredSubtitlePicker({ nas, controller, places, snapshot: controller.getSnapshot }) : null));
-  const pickStored = (s: StoredSubtitle): void => {
-    void storedPicker?.pick(s).then((placed) => {
+  /** A stored subtitle picked from the menu (or for Up next): checked once placed. */
+  const pickStoredWith = (picker: StoredSubtitlePicker, s: StoredSubtitle): Promise<boolean> =>
+    picker.pick(s).then((placed) => {
       if (placed) setStoredActive(s.id);
+      return placed;
     });
+  const pickStored = (s: StoredSubtitle): void => {
+    if (storedPicker) void pickStoredWith(storedPicker, s);
   };
+  const [launchSettings] = useState(
+    () =>
+      new LaunchSettingsApplier({
+        controller,
+        places,
+        // a set this device doesn't have stays unchosen, rather than chosen and missing
+        selectShader: (name) => {
+          if (name === null || shaderStateRef.current.sets.some((set) => set.name === name && set.available)) void shaderModel.select(name);
+        },
+        ...(nas && storedPicker ? { nas, pickStored: (s: StoredSubtitle) => pickStoredWith(storedPicker, s) } : {}),
+        onStoredSubtitle: setStoredActive,
+        log: (message, err) => console.warn(message, err),
+      }),
+  );
+  useEffect(() => launchSettings.observe(snapshot, shaderSet), [launchSettings, snapshot, shaderSet]);
   const storedHere = stored && currentPlaylistId !== null ? forPlaylist(stored.items, stored.discKey, currentPlaylistId) : null;
   // checked while its file is still the text set's (Remove takes it away)
   const storedActiveId = storedHere?.find((s) => s.id === storedActive && snapshot.subtitles?.text?.files.some((f) => f.name === s.fileName))?.id ?? null;

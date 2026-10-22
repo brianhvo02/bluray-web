@@ -54,7 +54,7 @@ function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[]; f
       return [new File(['[Script Info]'], s.fileName), ...s.fonts.map((f) => new File(['font'], f.name))];
     },
   };
-  const places = { noteStoredSubtitle: (name: string, id: string, size: number) => void calls.push(['note', name, id, size]) };
+  const places = { noteStoredSubtitle: (name: string, id: string, size: number, language: string) => void calls.push(['note', name, id, size, language]) };
   const picker = new StoredSubtitlePicker({ nas, controller, places, snapshot: () => snap, log: () => {} });
   const pick = (s: StoredSubtitle) => picker.pick(s);
   return { calls, controller, engineLists, pick, picker, show };
@@ -72,7 +72,7 @@ describe('StoredSubtitlePicker', () => {
     expect(t.calls).toEqual([['fetch', 'sub-1'], ['load', ['ep1.ass', 'Made Up Sans.ttf']]]);
     t.engineLists(file('ep1.ass'));
     expect(await done).toBe(true);
-    expect(t.calls.slice(2)).toEqual([['start', 0, 0], ['shift', 0, 400], ['select', { kind: 'text' }], ['note', 'ep1.ass', 'sub-1', 120]]);
+    expect(t.calls.slice(2)).toEqual([['start', 0, 0], ['shift', 0, 400], ['select', { kind: 'text' }], ['note', 'ep1.ass', 'sub-1', 120, 'en']]);
   });
 
   it("places a chapter's subtitle at that chapter's start", async () => {
@@ -123,7 +123,7 @@ describe('StoredSubtitlePicker', () => {
     t.engineLists(file('ep1.ass'));
     expect(await done).toBe(true);
     expect(t.calls).toContainEqual(['shift', 0, 400]);
-    expect(t.calls).toContainEqual(['note', 'ep1.ass', 'sub-1', 120]);
+    expect(t.calls).toContainEqual(['note', 'ep1.ass', 'sub-1', 120, 'en']);
   });
 
   it('gives up when another disc opens while the files are fetched', async () => {
@@ -157,7 +157,7 @@ describe('StoredSubtitlePicker waits', () => {
     t.engineLists(file('ep1.srt'));
     expect(await done).toBe(true);
     expect(t.calls.filter((c) => c[0] === 'notice')).toEqual([]);
-    expect(t.calls).toContainEqual(['note', 'ep1.srt', 'sub-1', 120]);
+    expect(t.calls).toContainEqual(['note', 'ep1.srt', 'sub-1', 120, 'en']);
   });
 
   it('a newer pick of a file with the same name abandons the older one, which applies nothing', async () => {
@@ -171,7 +171,7 @@ describe('StoredSubtitlePicker waits', () => {
     t.engineLists(file('ep1.ass'));
     expect(await first).toBe(false);
     expect(await second).toBe(true);
-    expect(t.calls.filter((c) => c[0] === 'shift' || c[0] === 'note')).toEqual([['shift', 0, -300], ['note', 'ep1.ass', 'sub-fr', 120]]);
+    expect(t.calls.filter((c) => c[0] === 'shift' || c[0] === 'note')).toEqual([['shift', 0, -300], ['note', 'ep1.ass', 'sub-fr', 120, 'fr']]);
   });
 
   it('a newer pick while the older one waits for the engine abandons the older one', async () => {
@@ -184,7 +184,7 @@ describe('StoredSubtitlePicker waits', () => {
     await settle();
     t.engineLists(file('ep1.ass'));
     expect(await second).toBe(true);
-    expect(t.calls.filter((c) => c[0] === 'note')).toEqual([['note', 'ep1.ass', 'sub-fr', 120]]);
+    expect(t.calls.filter((c) => c[0] === 'note')).toEqual([['note', 'ep1.ass', 'sub-fr', 120, 'en']]);
   });
 
   it('a local pick (supersede) abandons a pick in flight', async () => {

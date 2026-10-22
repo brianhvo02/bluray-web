@@ -1,10 +1,12 @@
-import type { PlaceTextFile } from '../engine/disc/nas-api';
+import type { PlaceTextFile, StoredSubtitle } from '../engine/disc/nas-api';
 import type { PgTrack, SubtitleChoice } from '../engine/protocol';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { isFontName } from '../player/drop-files';
 import { settingsForUpNext } from './place-model';
 import type { PlaceSaver } from './place-saver';
 import type { StoredTextFile } from './place-store';
+import type { NasClient } from './nas/nas-client';
+import { forPlaylist, sameLanguage, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
 
 const PG_DISPLAY_FLAG = 0x80000000;
 /** The engine has this long to list the re-added files; past it they are given up (a later pick is the user's own). */
@@ -15,7 +17,13 @@ export interface LaunchSettingsDeps {
     PlayerController,
     'discOpens' | 'setVolume' | 'toggleMute' | 'selectAudio' | 'selectSubtitle' | 'loadSubtitleFiles' | 'setSubtitleStart' | 'shiftSubtitleFile' | 'scaleSubtitles'
   >;
-  readonly places: Pick<PlaceSaver, 'takeLaunchSettings' | 'storedTextFiles' | 'addTextFiles'>;
+  readonly places: Pick<PlaceSaver, 'takeLaunchSettings' | 'storedTextFiles' | 'addTextFiles' | 'noteStoredSubtitle'>;
+  /** Where subtitles stored on the NAS come from; absent with no NAS paired. */
+  readonly nas?: Pick<NasClient, 'subtitlesForDisc' | 'subtitleFiles'>;
+  /** Picks a stored subtitle as the Subtitles menu does (StoredSubtitlePicker.pick), for Up next; true once placed. */
+  readonly pickStored?: (s: StoredSubtitle) => Promise<boolean>;
+  /** A resumed stored subtitle is in the text set again (the menu checks its row). */
+  readonly onStoredSubtitle?: (id: string) => void;
   /** Chooses a shader set (null: off) the way the Shaders menu does; a set this device doesn't have is left alone. */
   readonly selectShader: (name: string | null) => void;
   readonly log?: (message: string, err: unknown) => void;
@@ -40,6 +48,13 @@ function pgChoice(psr2: number, pg: readonly PgTrack[]): SubtitleChoice {
   return (psr2 & PG_DISPLAY_FLAG) !== 0 && pg.some((t) => t.index === stream) ? { kind: 'pg', stream } : { kind: 'off' };
 }
 
+/** A stored subtitle a resumed place names, fetched again: its place entry (under the NAS's file name now) and files. */
+interface Fetched {
+  readonly entry: PlaceTextFile;
+  readonly subtitle: StoredSubtitle;
+  readonly files: readonly File[];
+}
+
 /** The stored files a place's text files name (by name, and by size when the place knows it), with the stored fonts. */
 export function filesToAdd(wanted: readonly PlaceTextFile[], stored: readonly StoredTextFile[]): { readonly subtitles: readonly StoredTextFile[]; readonly fonts: readonly StoredTextFile[] } {
   const subtitles = wanted.flatMap((w) => {
@@ -51,8 +66,10 @@ export function filesToAdd(wanted: readonly PlaceTextFile[], stored: readonly St
 
 /**
  * Applies a launch's settings once its disc plays (spec 2026-10-20 §6.1, §6.3, §6.6): volume and mute, the shader set,
- * audio and PG by language for another playlist's settings, and this device's stored text subtitle files with their
- * placements, offsets and scale. A carried file this device has no bytes for (for this disc) is skipped silently.
+ * audio and PG by language for another playlist's settings, and the text subtitle files (this device's, and on a resume
+ * those stored on the NAS) with their placements, offsets and scale. A carried file this device has no bytes for (for
+ * this disc), or that the NAS no longer has or can't send, is skipped silently. For Up next, a stored subtitle that was
+ * shown picks this playlist's stored subtitle in its language instead, and the episode before's other files are left.
  */
 export class LaunchSettingsApplier {
   private text: PendingText | null = null;
@@ -70,23 +87,70 @@ export class LaunchSettingsApplier {
     controller.setVolume(settings.volume);
     if (settings.muted !== s.muted) controller.toggleMute();
     if (settings.shaderSet !== shaderSet) this.deps.selectShader(settings.shaderSet);
+    const pg = s.subtitles?.pg ?? [];
+    // Up next: a stored subtitle shown on the episode before carries its language to this one's (spec §6.6)
+    const carried = launch.byLanguage && settings.textOn ? settings.textFiles.find((f) => f.subtitleId !== undefined && f.language !== undefined) : undefined;
     if (launch.byLanguage) {
       controller.selectAudio(settings.psr1);
-      if (!settings.textOn) controller.selectSubtitle(pgChoice(settings.psr2, s.subtitles?.pg ?? []));
+      if (!settings.textOn) controller.selectSubtitle(pgChoice(settings.psr2, pg));
     }
-    if (settings.textFiles.length > 0) void this.addText(launch.discKey, settings, !launch.byLanguage);
+    if (carried && s.currentPlaylistId !== null) void this.pickNext(launch.discKey, s.currentPlaylistId, carried.language!, pgChoice(settings.psr2, pg));
+    else if (settings.textFiles.length > 0) void this.addText(launch.discKey, settings, !launch.byLanguage);
   }
 
+  /**
+   * Up next: this playlist's stored subtitle in `language`, picked as the menu picks one (at its default offset); with
+   * none (or no list), PG as the language chose it.
+   */
+  private async pickNext(discKey: string, playlistId: string, language: string, pg: SubtitleChoice): Promise<void> {
+    const { controller, nas, pickStored } = this.deps;
+    const opens = controller.discOpens;
+    let match: StoredSubtitle | null = null;
+    if (nas && pickStored) {
+      try {
+        match = sameLanguage(forPlaylist(await nas.subtitlesForDisc(discKey, { timeoutMs: STORED_LIST_TIMEOUT_MS }), discKey, playlistId), language);
+      } catch (err) {
+        this.deps.log?.('listing the stored subtitles failed', err);
+      }
+    }
+    if (controller.discOpens !== opens) return;
+    if (match) void pickStored!(match);
+    else controller.selectSubtitle(pg);
+  }
+
+  /**
+   * A resume's text files again: local ones from this device's store, stored ones (`subtitleId`, only when `placed`:
+   * the place is this playlist's) from the NAS, all in one load so the set is replaced once. A file that can't be had
+   * is skipped silently.
+   */
   private async addText(discKey: string, settings: { readonly textFiles: readonly PlaceTextFile[]; readonly textOn: boolean; readonly psr2: number; readonly textScale: number }, placed: boolean): Promise<void> {
     const { controller, places } = this.deps;
     const opens = controller.discOpens;
     try {
-      const { subtitles, fonts } = filesToAdd(settings.textFiles, await places.storedTextFiles(discKey));
-      if (subtitles.length === 0 || controller.discOpens !== opens) return;
-      const files = [...subtitles, ...fonts].map((f) => new File([f.bytes as Uint8Array<ArrayBuffer>], f.name));
-      const names = new Set(subtitles.map((f) => f.name));
+      const [{ subtitles, fonts }, fetched] = await Promise.all([
+        places.storedTextFiles(discKey).then((kept) => filesToAdd(settings.textFiles.filter((f) => f.subtitleId === undefined), kept)),
+        placed ? this.fetchStored(discKey, settings.textFiles) : Promise.resolve([]),
+      ]);
+      if ((subtitles.length === 0 && fetched.length === 0) || controller.discOpens !== opens) return;
+      const local = new Map(subtitles.map((f) => [f.name, f]));
+      const toFile = (f: StoredTextFile): File => new File([f.bytes as Uint8Array<ArrayBuffer>], f.name);
+      const localFiles = [...subtitles, ...fonts].map(toFile);
+      // the place's order (the engine lists the set in load order), then the fonts
+      const entries: PlaceTextFile[] = [];
+      const files: File[] = [];
+      for (const f of settings.textFiles) {
+        const got = f.subtitleId !== undefined ? fetched.find((x) => x.subtitle.id === f.subtitleId) : undefined;
+        if (got) {
+          entries.push(got.entry);
+          files.push(got.files[0]!);
+        } else if (f.subtitleId === undefined && local.has(f.name) && !entries.some((e) => e.name === f.name)) {
+          entries.push(f);
+          files.push(toFile(local.get(f.name)!));
+        }
+      }
+      files.push(...fonts.map(toFile), ...fetched.flatMap((x) => x.files.slice(1)));
       const pending: PendingText = {
-        opens, files: settings.textFiles.filter((f) => names.has(f.name)), placed, textOn: settings.textOn, psr2: settings.psr2, scale: settings.textScale,
+        opens, files: entries, placed, textOn: settings.textOn, psr2: settings.psr2, scale: settings.textScale,
         untilMs: this.now() + TEXT_WAIT_MS,
       };
       this.text = pending;
@@ -96,11 +160,42 @@ export class LaunchSettingsApplier {
         if (this.text === pending) this.text = null;
         throw err;
       }
-      // kept again for this disc's later places (their sizes)
-      await places.addTextFiles(files);
+      // the local ones kept again for this disc's later places (their sizes); the NAS keeps the stored ones
+      if (subtitles.length > 0) await places.addTextFiles(localFiles);
+      // noted after the local files are kept, which clears the saver's note
+      if (controller.discOpens !== opens) return;
+      for (const { subtitle } of fetched) {
+        places.noteStoredSubtitle(subtitle.fileName, subtitle.id, subtitle.fileSize, subtitle.language);
+        this.deps.onStoredSubtitle?.(subtitle.id);
+      }
     } catch (err) {
       this.deps.log?.('adding the subtitle files again failed', err);
     }
+  }
+
+  /** The stored subtitles a place names, by id, fetched from the NAS; one gone or failing is left out. */
+  private async fetchStored(discKey: string, wanted: readonly PlaceTextFile[]): Promise<Fetched[]> {
+    const { nas } = this.deps;
+    const ids = wanted.filter((f) => f.subtitleId !== undefined);
+    if (!nas || ids.length === 0) return [];
+    let list: StoredSubtitle[];
+    try {
+      list = await nas.subtitlesForDisc(discKey, { timeoutMs: STORED_LIST_TIMEOUT_MS });
+    } catch (err) {
+      this.deps.log?.('listing the stored subtitles failed', err);
+      return [];
+    }
+    const found = await Promise.all(ids.map(async (entry): Promise<Fetched | null> => {
+      const subtitle = list.find((x) => x.id === entry.subtitleId);
+      if (!subtitle) return null;
+      try {
+        return { entry: { ...entry, name: subtitle.fileName }, subtitle, files: await nas.subtitleFiles(subtitle) };
+      } catch (err) {
+        this.deps.log?.('fetching the stored subtitle failed', err);
+        return null;
+      }
+    }));
+    return found.filter((x): x is Fetched => x !== null);
   }
 
   private now(): number {
