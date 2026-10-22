@@ -62,6 +62,16 @@ export interface CodeRegistration {
   readonly signature: string;
 }
 
+/** One viewing the NAS GPU is encoding, from `GET admin/encoding` (owners only). */
+export interface EncodingNow {
+  readonly personName: string;
+  readonly deviceName: string;
+  readonly discName: string;
+  readonly level: LevelId;
+  readonly label: string;
+  readonly gpuPercent: number;
+}
+
 /** `GET /api/discs/<id>/manifest`: a folder disc's files, with the small ones the engine reads whole inlined. */
 export interface DiscManifest {
   readonly discId: string;

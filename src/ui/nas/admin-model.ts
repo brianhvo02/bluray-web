@@ -1,4 +1,4 @@
-import type { TitleSummary } from '../../engine/disc/nas-api';
+import type { EncodingNow, TitleSummary } from '../../engine/disc/nas-api';
 import { displayName } from './title-model';
 import type { NasClient, NasCode, NasTitleStatus } from './nas-client';
 import { codeTarget, lastSeen } from './people-model';
@@ -66,6 +66,11 @@ export function withGate(status: NasTitleStatus | null, gate: NasTitleStatus['ga
 }
 
 /** TMDB's required notice (global constraints), shown with its logo in NAS settings. */
+/** One line of "Encoding now": who watches what, at which level, and the share of the GPU it takes. */
+export function encodingLine(e: EncodingNow): string {
+  return `${e.personName} · ${e.deviceName} — ${e.discName}, ${e.label} (${e.gpuPercent}% of the GPU)`;
+}
+
 export const TMDB_ATTRIBUTION = 'This product uses the TMDB API but is not endorsed or certified by TMDB';
 
 const discs = (n: number): string => `${n} ${n === 1 ? 'disc' : 'discs'}`;

@@ -1,4 +1,4 @@
-import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, FolderEntry, LevelAt, LevelInfo, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
+import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, EncodingNow, FolderEntry, LevelAt, LevelInfo, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 import { codeHashOf, isNasId, turnProofMessage } from '../../../rendezvous/src/protocol';
@@ -289,6 +289,15 @@ export class NasClient {
     relay: async (): Promise<NasRelaySettings> => (await this.json('admin/relay')) as NasRelaySettings,
     setRelay: async (change: { readonly enabled?: boolean; readonly allowPaid?: boolean }): Promise<NasRelaySettings> =>
       (await this.json('admin/relay', jsonBody('PUT', change))) as NasRelaySettings,
+    /** What the NAS is re-encoding and for whom; null when the NAS has no quality levels (404). */
+    encodingNow: async (): Promise<EncodingNow[] | null> => {
+      try {
+        return ((await this.json('admin/encoding')) as { encoding: EncodingNow[] }).encoding;
+      } catch (err) {
+        if (err instanceof NasHttpError && err.status === 404) return null;
+        throw err;
+      }
+    },
     codes: async (): Promise<NasCode[]> => ((await this.json('admin/codes')) as { codes: NasCode[] }).codes,
     /** A pairing code for a person, or for a new one; an invite lasts 3 days, a plain code 10 minutes. */
     createCode: async (target: NasCodeTarget, invite: boolean): Promise<NasMintedCode> =>

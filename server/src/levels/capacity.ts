@@ -77,6 +77,18 @@ export class Capacity {
     return { h264Fps: sum('h264'), hevcFps: sum('hevc'), viewings };
   }
 
+  /** Every lease with the time since it was last touched, oldest first (the owner's "Encoding now"). */
+  list(): readonly { viewingId: string; codec: EncoderCodec; needFps: number; idleMs: number }[] {
+    this.expire();
+    const now = this.now();
+    return [...this.leases.values()].map(({ viewingId, codec, needFps, touchedAt }) => ({ viewingId, codec, needFps, idleMs: now - touchedAt }));
+  }
+
+  /** The GPU's encoder budget for `codec`, frames per second. */
+  budgetOf(codec: EncoderCodec): number {
+    return this.budgets[codec];
+  }
+
   /** The GPU's share the leases take, leaving out `without`. */
   private share(without: ReadonlySet<string>): number {
     let share = 0;

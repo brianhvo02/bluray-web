@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
+import { TMDB_ATTRIBUTION, codeListed, codePollEnd, countdown, countdownTickMs, deleteTitleQuestion, encodingLine, gateSwitchOn, lastSeen, matchingStatus, newCode, ownTitleKind, ownTitles, withGate, type AdminApi } from './admin-model';
 import type { TitleSummary } from '../../engine/disc/nas-api';
 
 const MINUTE = 60_000;
@@ -154,5 +154,13 @@ describe('own titles in NAS settings', () => {
   });
   it('asks before deleting', () => {
     expect(deleteTitleQuestion('Live 2024')).toBe('Delete Live 2024? Its discs go back to Unsorted.');
+  });
+});
+
+describe('encodingLine', () => {
+  it('names who watches what, at which level, and the GPU share', () => {
+    expect(encodingLine({ personName: 'Mika', deviceName: 'Phone', discName: 'Starfall Wanderer Vol 1', level: 'phone-720', label: 'Phone', gpuPercent: 16 })).toBe(
+      'Mika · Phone — Starfall Wanderer Vol 1, Phone (16% of the GPU)',
+    );
   });
 });

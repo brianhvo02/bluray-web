@@ -89,3 +89,20 @@ describe('Capacity', () => {
     expect(c.lease('v7', 'h264', FILM)).toBe(true);
   });
 });
+
+describe('Capacity.list', () => {
+  it('list shows each lease with its idle time', () => {
+    const t = clock();
+    const c = new Capacity(BUDGETS, t.now);
+    c.lease('v1', 'h264', FILM);
+    c.lease('v2', 'hevc', FILM);
+    t.advance(30_000);
+    c.touch('v2');
+    t.advance(30_000);
+    expect(c.list()).toEqual([
+      { viewingId: 'v1', codec: 'h264', needFps: FILM * NEED_MARGIN, idleMs: 60_000 },
+      { viewingId: 'v2', codec: 'hevc', needFps: FILM * NEED_MARGIN, idleMs: 30_000 },
+    ]);
+    expect(c.budgetOf('hevc')).toBe(100);
+  });
+});

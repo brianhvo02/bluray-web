@@ -1260,6 +1260,15 @@ describe('NasClient quality levels', () => {
     expect(await nas.levels('d1', { hevc: false, hevc10: false, hdr: false, audio: 1 })).toBeNull();
   });
 
+  it('admin.encodingNow reads admin/encoding and answers null on 404', async () => {
+    const encoding = [{ personName: 'Owner', deviceName: 'Mac', discName: 'Starfall Wanderer Vol 1', level: 'h264-1080', label: '1080p', gpuPercent: 16 }];
+    let n = 0;
+    const { nas, routes } = await paired(() => (n++ === 0 ? Response.json({ encoding }) : Response.json({ error: 'not found' }, { status: 404 })));
+    expect(await nas.admin.encodingNow()).toEqual(encoding);
+    expect(routes[0].route).toBe('admin/encoding');
+    expect(await nas.admin.encodingNow()).toBeNull();
+  });
+
   it('manifest at a level asks with level and audio, and Original with neither', async () => {
     const m = { discId: 'd1', name: 'Disc', files: [], inline: {} };
     const { nas, routes } = await paired(() => Response.json(m));

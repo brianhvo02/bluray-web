@@ -31,6 +31,7 @@ import {
   firstAudioBps,
   folderDiscSource,
   isoDiscSource,
+  parseViewingId,
   viewingIdOf,
   type LevelDiscSource,
 } from './level-service';
@@ -960,5 +961,15 @@ describe('LevelService: for the routes', () => {
     const s = makeService({ discs: async (id) => folderDiscSource(join(SYNTHETIC, 'disc-mpeg2'), { id, name: 'Starfall Wanderer' }) });
     expect(await s.originalPlayable('mpeg2')).toBe(false);
     s.close();
+  });
+});
+
+describe('parseViewingId', () => {
+  it('reads a viewing id from the end, whatever the device and disc ids hold', () => {
+    expect(parseViewingId(viewingIdOf('dev1', 'abc', 'phone-720', 2))).toEqual({ deviceId: 'dev1', discId: 'abc', level: 'phone-720', audio: 2 });
+    // ids are hex, so the last three colons split it; a colon in the device id stays in the device part
+    expect(parseViewingId(viewingIdOf('d:e', 'abc', 'h264-1080', 1))).toEqual({ deviceId: 'd:e', discId: 'abc', level: 'h264-1080', audio: 1 });
+    expect(parseViewingId('nonsense')).toBeNull();
+    expect(parseViewingId('d:x:original:1')).toBeNull();
   });
 });

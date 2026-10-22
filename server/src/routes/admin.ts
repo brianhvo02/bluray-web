@@ -7,6 +7,8 @@ import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
 import type { Handler, Response } from '../http';
 import type { Library } from '../library';
+import { LEVEL_LABELS } from '../levels/level-service';
+import type { LevelService } from '../levels/level-service';
 import type { RelayState } from '../rtc/relay';
 import type { DiscEvidence } from '../titles/evidence';
 import { groupKey } from '../titles/match';
@@ -28,6 +30,8 @@ export interface AdminOptions {
   titles?: TitleLibrary;
   /** The Cloudflare relay's settings and usage; `admin/relay` answers 404 without it. */
   relay?: RelayState;
+  /** The quality levels; `admin/encoding` answers 404 without them. */
+  levels?: Pick<LevelService, 'encodingNow'>;
   now?: () => number;
   /** How long an owner's lookup may take before it answers 503. Default 10 s. */
   lookupTimeoutMs?: number;
@@ -110,6 +114,42 @@ async function relayRoute(req: Parameters<Handler>[0], relay: RelayState): Promi
   return json(200, { ...relay.settings(), usage: relay.usage() });
 }
 
+/**
+ * `GET admin/encoding` → `{encoding}`: each viewing the GPU is leased to, with the person, device, disc and level. The
+ * disc is named by the catalogue's display name when it is filed and has one, else the last segment of its folder.
+ */
+function encodingRoute(auth: Auth, levels: Pick<LevelService, 'encodingNow'>, library: Library, titles: TitleLibrary | undefined): Response {
+  const viewings = levels.encodingNow();
+  const devices = new Map(auth.devices().map((d) => [d.id, d]));
+  const people = new Map(auth.people().map((p) => [p.id, p.name]));
+  const filed = new Map<string, string>();
+  if (viewings.length > 0 && titles) {
+    const catalogue = titles.service.catalogue();
+    const slots = (s: { copies: readonly { discId: string; displayName: string | null }[] }): void => {
+      for (const c of s.copies) if (c.displayName) filed.set(c.discId, c.displayName);
+    };
+    for (const t of catalogue.titles) {
+      const detail = catalogue.detail(t.id);
+      if (!detail) continue;
+      detail.extras.forEach(slots);
+      for (const s of detail.seasons) [...s.discs, ...s.extras].forEach(slots);
+    }
+  }
+  const encoding = viewings.map((v) => {
+    const device = devices.get(v.deviceId);
+    const disc = library.disc(v.discId);
+    return {
+      personName: (device && people.get(device.personId)) ?? 'Unknown',
+      deviceName: device?.name ?? 'Unknown device',
+      discName: filed.get(v.discId) ?? (disc ? disc.path.slice(disc.path.lastIndexOf('/') + 1) : 'Unknown disc'),
+      level: v.level,
+      label: LEVEL_LABELS[v.level],
+      gpuPercent: Math.round(v.gpuShare * 100),
+    };
+  });
+  return json(200, { encoding }, { 'Cache-Control': 'no-store' });
+}
+
 /** `/api/admin/*`, for owner devices only; the token must come as `Authorization: Bearer`. */
 export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
   const lookups = new LookupLimiter(opts.now ?? Date.now);
@@ -140,6 +180,7 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
       if (answer) return answer;
     }
     if (opts.relay && (route === 'GET relay' || route === 'PUT relay')) return relayRoute(req, opts.relay);
+    if (opts.levels && route === 'GET encoding') return encodingRoute(auth, opts.levels, opts.library, opts.titles);
     switch (route) {
       case 'GET devices':
         return json(200, {

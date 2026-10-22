@@ -24,7 +24,7 @@ const VERSIONS = 32;
 
 export type { LevelInfo, LevelReason };
 
-const LABELS: Readonly<Record<LevelId, string>> = {
+export const LEVEL_LABELS: Readonly<Record<LevelId, string>> = {
   original: 'Original',
   'h264-1080': '1080p',
   'phone-720': 'Phone',
@@ -38,6 +38,18 @@ const ENCODED_LEVELS = new Set<string>(['h264-1080', 'phone-720', 'hevc-1080', '
 /** The viewing a lease is for (spec §6.4): a device watching a disc at a level and audio stream. */
 export function viewingIdOf(deviceId: string, discId: string, level: EncodedLevel, audio: number): string {
   return `${deviceId}:${discId}:${level}:${audio}`;
+}
+
+/** A viewing id's parts, read from the end (disc ids hold no colon; a device id's would stay in the device part); null when it isn't one `viewingIdOf` built. */
+export function parseViewingId(viewingId: string): { deviceId: string; discId: string; level: EncodedLevel; audio: number } | null {
+  const audioAt = viewingId.lastIndexOf(':');
+  const levelAt = viewingId.lastIndexOf(':', audioAt - 1);
+  const discAt = viewingId.lastIndexOf(':', levelAt - 1);
+  if (audioAt < 0 || levelAt < 0 || discAt < 0) return null;
+  const level = viewingId.slice(levelAt + 1, audioAt);
+  const audio = Number(viewingId.slice(audioAt + 1));
+  if (!ENCODED_LEVELS.has(level) || !Number.isInteger(audio)) return null;
+  return { deviceId: viewingId.slice(0, discAt), discId: viewingId.slice(discAt + 1, levelAt), level: level as EncodedLevel, audio };
 }
 
 /** The device-and-disc part of a viewing id (`<device>:<disc>:`): the viewings one lease moves between. */
@@ -204,14 +216,14 @@ export class LevelService {
     if (!source) return null;
     const disc = await this.discInfo(discId, source);
     const main = disc.main;
-    if (!main) return [{ level: 'original', label: LABELS.original, budgetMbps: 0, available: true }];
+    if (!main) return [{ level: 'original', label: LEVEL_LABELS.original, budgetMbps: 0, available: true }];
     const offered = levelsFor(main.video);
     const durationS = filmSeconds(planClip(main.clpi, levelDefFor('phone-720', main.video), 0).intervals);
     const mbps = (bytes: number): number => Math.round((bytes * 8) / durationS / 100_000) / 10;
     const out: LevelInfo[] = [];
     out.push({
       level: 'original',
-      label: LABELS.original,
+      label: LEVEL_LABELS.original,
       budgetMbps: mbps(disc.sizes.get(main.m2tsPath) ?? 0),
       ...(offered.includes('original') ? { available: true } : { available: false, reason: 'unplayable' as const }),
     });
@@ -234,7 +246,7 @@ export class LevelService {
                 ? 'busy'
                 : undefined;
       const budget = mbps(planClip(main.clpi, def, audioBps, this.options.planTuning).sizeBytes);
-      out.push({ level, label: LABELS[level], budgetMbps: budget, ...(reason ? { available: false, reason } : { available: true }) });
+      out.push({ level, label: LEVEL_LABELS[level], budgetMbps: budget, ...(reason ? { available: false, reason } : { available: true }) });
     }
     return out;
   }
@@ -251,6 +263,17 @@ export class LevelService {
     if (!source) return null;
     const { main } = await this.discInfo(discId, source);
     return !main || levelsFor(main.video).includes('original');
+  }
+
+  /** What is encoding now, one entry per leased viewing, for the owner's admin screen; `gpuShare` is 0 to 1 of its codec's budget. */
+  encodingNow(): readonly { deviceId: string; discId: string; level: EncodedLevel; audio: number; codec: EncoderCodec; gpuShare: number }[] {
+    const { capacity } = this.options;
+    const out = [];
+    for (const l of capacity.list()) {
+      const v = parseViewingId(l.viewingId);
+      if (v) out.push({ ...v, codec: l.codec, gpuShare: l.needFps / capacity.budgetOf(l.codec) });
+    }
+    return out;
   }
 
   /** The viewing ended (the disc closed): its encoders stop and its lease is released. */

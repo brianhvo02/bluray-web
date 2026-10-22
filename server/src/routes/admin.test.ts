@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -349,5 +349,39 @@ describe('admin relay', () => {
     expect((await send('GET', '/api/admin/relay', guest)).status).toBe(403);
     expect((await send('PUT', '/api/admin/relay', guest, { enabled: true })).status).toBe(403);
     expect(relay.settings().enabled).toBe(false);
+  });
+});
+
+describe('admin encoding', () => {
+  it('GET admin/encoding names the person, device, disc and level of each viewing, owners only', async () => {
+    const data = join(tmp, 'data2');
+    const root = join(tmp, 'root');
+    cpSync(join(import.meta.dirname, '../../../fixtures/synthetic/disc-levels'), join(root, 'Starfall Wanderer Vol 1'), { recursive: true });
+    const lib = new Library([{ name: 'drvA', dir: root }], join(data, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
+    await lib.scan();
+    const discId = lib.list('drvA')!.discs[0]!.id;
+    const owner = await ownerToken();
+    const guest = await paired({ newPerson: { name: 'Mika', owner: false } }, 'Phone');
+    const ownerDevice = auth.verify(owner)!;
+    const levels = { encodingNow: () => [{ deviceId: ownerDevice.id, discId, level: 'h264-1080', audio: 1, codec: 'h264', gpuShare: 0.164 }] };
+    const server = createServer(appHandlers({ auth, library: lib, bdjStore: store, relay, now: () => clock, publicBase: 'https://nas.example/bluray/api/', levels: levels as never }));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/admin/encoding`;
+    try {
+      expect((await fetch(url, { headers: { Authorization: `Bearer ${guest}` } })).status).toBe(403);
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${owner}` } });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        encoding: [{ personName: 'Owner', deviceName: 'Mac', discName: 'Starfall Wanderer Vol 1', level: 'h264-1080', label: '1080p', gpuPercent: 16 }],
+      });
+    } finally {
+      server.close();
+      server.closeAllConnections();
+    }
+  });
+
+  it('GET admin/encoding is 404 without a levels backend', async () => {
+    const owner = await ownerToken();
+    expect((await send('GET', '/api/admin/encoding', owner)).status).toBe(404);
   });
 });
