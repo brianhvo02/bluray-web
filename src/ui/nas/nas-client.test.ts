@@ -1152,6 +1152,32 @@ describe('NasClient subtitles', () => {
     expect(calls.map((c) => c.route)).toEqual(['subtitles/0123456789abcdef/file', 'subtitles/0123456789abcdef/fonts/f%231.ttf']);
   });
 
+  it("aborts a download's requests through the caller's signal", async () => {
+    const { nas, calls } = await paired();
+    const abort = new AbortController();
+    await nas.subtitleFiles(stored, abort.signal);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.signal?.aborted === false)).toBe(true);
+    abort.abort();
+    expect(calls.every((c) => c.signal?.aborted === true)).toBe(true);
+  });
+
+  it("a download stopped by its caller is no sign of an unreachable NAS", async () => {
+    const { nas, server } = await paired();
+    let reached!: () => void;
+    const fetched = new Promise<void>((r) => (reached = r));
+    server.nas = async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        reached();
+      });
+    const abort = new AbortController();
+    const files = nas.subtitleFiles(stored, abort.signal);
+    await fetched;
+    abort.abort();
+    await expect(files).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('creates, patches and deletes', async () => {
     const { nas, calls } = await paired();
     const forEpisode = { kind: 'episode', titleId: 't', seasonId: 's', episode: 2 } as const;

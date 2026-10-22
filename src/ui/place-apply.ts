@@ -14,11 +14,14 @@ export const TEXT_WAIT_MS = 10_000;
 /** A resumed stored subtitle's download (file and fonts) is given up after this long (a stalled route). */
 export const STORED_FETCH_TIMEOUT_MS = 15_000;
 
-/** `p`, or a rejection after `ms`. */
-function within<T>(p: Promise<T>, ms: number): Promise<T> {
+/** `p`, or a rejection after `ms` (calling `onLate` then, to stop what `p` waits on). */
+function within<T>(p: Promise<T>, ms: number, onLate?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms);
+    timer = setTimeout(() => {
+      onLate?.();
+      reject(new Error(`no answer in ${ms} ms`));
+    }, ms);
   });
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
@@ -86,6 +89,8 @@ export class LaunchSettingsApplier {
   private text: PendingText | null = null;
   /** Bumped by supersede: a re-add started under an older value loads and notes nothing. */
   private generation = 0;
+  /** The stored subtitles being downloaded for a resume: stopped by supersede (and each by its timeout). */
+  private readonly downloads = new Set<AbortController>();
 
   constructor(private readonly deps: LaunchSettingsDeps) {}
 
@@ -96,6 +101,8 @@ export class LaunchSettingsApplier {
   supersede(): void {
     this.generation++;
     this.text = null;
+    for (const d of this.downloads) d.abort();
+    this.downloads.clear();
   }
 
   /** Each snapshot of the player, with the shader set chosen now. */
@@ -127,6 +134,7 @@ export class LaunchSettingsApplier {
   private async pickNext(discKey: string, playlistId: string, language: string, pg: SubtitleChoice): Promise<void> {
     const { controller, nas, pickStored } = this.deps;
     const opens = controller.discOpens;
+    const gen = this.generation;
     let match: StoredSubtitle | null = null;
     if (nas && pickStored) {
       try {
@@ -135,7 +143,8 @@ export class LaunchSettingsApplier {
         this.deps.log?.('listing the stored subtitles failed', err);
       }
     }
-    if (controller.discOpens !== opens) return;
+    // another disc, or a pick the user made while the list came (supersede): theirs stands
+    if (controller.discOpens !== opens || this.generation !== gen) return;
     if (match) void pickStored!(match);
     else controller.selectSubtitle(pg);
   }
@@ -216,11 +225,16 @@ export class LaunchSettingsApplier {
     const found = await Promise.all(ids.map(async (entry): Promise<Fetched | null> => {
       const subtitle = list.find((x) => x.id === entry.subtitleId);
       if (!subtitle) return null;
+      const download = new AbortController();
+      this.downloads.add(download);
       try {
-        return { entry: { ...entry, name: subtitle.fileName }, subtitle, files: await within(nas.subtitleFiles(subtitle), STORED_FETCH_TIMEOUT_MS) };
+        const files = await within(nas.subtitleFiles(subtitle, download.signal), STORED_FETCH_TIMEOUT_MS, () => download.abort());
+        return { entry: { ...entry, name: subtitle.fileName }, subtitle, files };
       } catch (err) {
         this.deps.log?.('fetching the stored subtitle failed', err);
         return null;
+      } finally {
+        this.downloads.delete(download);
       }
     }));
     return found.filter((x): x is Fetched => x !== null);

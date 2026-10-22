@@ -673,10 +673,10 @@ export class NasClient {
     return (await res.json()) as StoredSubtitle[];
   }
 
-  /** A stored subtitle's file, then its fonts, as `File`s named as stored. */
-  async subtitleFiles(s: StoredSubtitle): Promise<File[]> {
+  /** A stored subtitle's file, then its fonts, as `File`s named as stored; `signal` stops the downloads. */
+  async subtitleFiles(s: StoredSubtitle, signal?: AbortSignal): Promise<File[]> {
     const id = encodeURIComponent(s.id);
-    const get = async (path: string, name: string): Promise<File> => new File([await (await this.ok(path)).arrayBuffer()], name);
+    const get = async (path: string, name: string): Promise<File> => new File([await (await this.ok(path, signal ? { signal } : undefined)).arrayBuffer()], name);
     return [await get(`subtitles/${id}/file`, s.fileName), ...(await Promise.all(s.fonts.map((f) => get(`subtitles/${id}/fonts/${encodeURIComponent(f.name)}`, f.name))))];
   }
 
@@ -915,6 +915,8 @@ export class NasClient {
       }
       return await this.deps.fetch(url, { ...init, signal: controller.signal });
     } catch (err) {
+      // stopped by the caller: the NAS may be fine, so the route stays
+      if (caller?.aborted) throw err;
       if (link) throw link.closed ? new NasLostError() : new Error(RTC_UNREACHABLE);
       if (err instanceof TypeError || controller.signal.aborted) {
         if (this.current) this.routes.delete(routeKey(this.current));

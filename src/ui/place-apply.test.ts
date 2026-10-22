@@ -28,12 +28,15 @@ interface SetupOpts {
   fetchGate?: Promise<void>;
   /** Keeping the local files on the device fails (IndexedDB). */
   keepFails?: boolean;
+  /** The list waits for this. */
+  listGate?: Promise<void>;
 }
 
 function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opts: SetupOpts = {}) {
   let clock = 1000;
   const calls: unknown[][] = [];
   const loaded: string[][] = [];
+  const signals: (AbortSignal | undefined)[] = [];
   let pending = launch;
   let shader: string | null = null;
   const controller = {
@@ -53,10 +56,12 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
   const nas = opts.nasList === undefined ? undefined : {
     subtitlesForDisc: async (key: string, o: { timeoutMs?: number } = {}) => {
       calls.push(['list', key, o.timeoutMs]);
+      if (opts.listGate) await opts.listGate;
       if (opts.nasList instanceof Error) throw opts.nasList;
       return opts.nasList!;
     },
-    subtitleFiles: async (sub: StoredSubtitle) => {
+    subtitleFiles: async (sub: StoredSubtitle, signal?: AbortSignal) => {
+      signals.push(signal);
       if (opts.fetchGate) await opts.fetchGate;
       if (opts.fetchFails?.includes(sub.id)) throw new Error('offline');
       return [new File(['[Script Info]'], sub.fileName), ...sub.fonts.map((f) => new File(['font'], f.name))];
@@ -102,6 +107,7 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
     applier,
     calls,
     loaded,
+    signals,
     controller,
     show(change: Partial<PlayerSnapshot>) {
       snap = { ...snap, ...change };
@@ -274,11 +280,29 @@ describe('LaunchSettingsApplier with subtitles stored on the NAS', () => {
     const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true }, byLanguage: false }, [], { nasList: [ep1], fetchGate });
     t.show({ engineState: 'playing', currentPlaylistId: '00001' });
     await settle();
+    expect(t.signals.map((s) => s?.aborted)).toEqual([false]);
     t.applier.supersede();
+    // the download is stopped, not left running
+    expect(t.signals.map((s) => s?.aborted)).toEqual([true]);
     release();
     await settle();
     expect(t.loaded).toEqual([]);
     expect(t.calls.filter((c) => c[0] === 'note' || c[0] === 'active')).toEqual([]);
+  });
+
+  it('a pick the user makes while Up next lists the next stored subtitles wins: nothing is picked or shown', async () => {
+    const subs = [storedSub('sub-2en', 'en', '00002', 'ep2.ass')];
+    for (const nasList of [subs, []]) {
+      let release!: () => void;
+      const listGate = new Promise<void>((r) => (release = r));
+      const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true, psr2: 0x80000001 }, byLanguage: true }, [], { nasList, listGate });
+      t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+      await settle();
+      t.applier.supersede();
+      release();
+      await settle();
+      expect(t.calls.filter((c) => c[0] === 'pick' || c[0] === 'subtitle')).toEqual([]);
+    }
   });
 
   it('notes the stored subtitle though keeping the local files on the device fails', async () => {
@@ -300,6 +324,8 @@ describe('LaunchSettingsApplier with subtitles stored on the NAS', () => {
       expect(t.loaded).toEqual([]);
       await vi.advanceTimersByTimeAsync(1);
       expect(t.loaded).toEqual([['mine.srt']]);
+      // the stalled download is stopped, not left running
+      expect(t.signals.map((s) => s?.aborted)).toEqual([true]);
     });
   });
 
