@@ -844,7 +844,8 @@ class LiveCheck {
     await page.open(`${this.o.origin}/?pair=${encodeURIComponent(code)}&telemetry=1`);
     await page.until(`(document.querySelector('[data-testid=pair-code]')?.value ?? '') !== ''`, 'the pairing screen', 30_000);
     await page.until(`!document.querySelector('[data-testid=pair-button]')?.disabled`, 'the pair button', 15_000);
-    await tapInView(page, '[data-testid=pair-button]', 'the pair button');
+    // a DOM click: pairing needs no user gesture, and a touch at coordinates missed the button on a real iPhone
+    await clickEl(page, '[data-testid=pair-button]', 'the pair button');
     const text = await page.until<string>(
       `(() => { const e = document.querySelector('[data-testid=pair-error]'); if (e && e.getClientRects().length) return 'ERROR: ' + e.textContent; const p = document.querySelector('[data-testid=nas-paired]'); return p ? p.textContent : null; })()`,
       'the pairing',
