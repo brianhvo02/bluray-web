@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { StoredSubtitle } from '../../src/engine/disc/nas-api';
-import { BadNameError, SubtitleStore, TooLargeError, type SubtitleMeta } from './subtitle-store';
+import { BadNameError, EmptyBodyError, SubtitleStore, TooLargeError, type SubtitleMeta } from './subtitle-store';
 
 const META: SubtitleMeta = {
   name: 'Fan subs', language: 'en', offsetMs: 0, uploaderPersonId: 'p1',
@@ -26,6 +26,46 @@ const make = (maxTotalBytes?: number): SubtitleStore => new SubtitleStore(dir, {
 const leftovers = (id: string): string[] => readdirSync(join(dir, 'subtitles', id), { recursive: true }).map(String).filter((n) => n.includes('.tmp-'));
 
 describe('SubtitleStore', () => {
+  it('holds fonts to 50 MiB even when two upload at once', async () => {
+    const s = make();
+    const { id } = s.create(META);
+    const mib = 1024 * 1024;
+    const r = await Promise.allSettled([s.writeFont(id, 'a.ttf', bytes(30 * mib)), s.writeFont(id, 'b.ttf', bytes(30 * mib))]);
+    expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
+    expect(r.find((x) => x.status === 'rejected')).toMatchObject({ reason: expect.any(TooLargeError) });
+    expect(s.get(id)!.fonts).toHaveLength(1);
+    expect(leftovers(id)).toEqual([]);
+  });
+
+  it('refuses an empty subtitle and keeps the existing file', async () => {
+    const s = make();
+    const { id } = s.create(META);
+    await expect(s.writeFile(id, 'a.srt', body())).rejects.toBeInstanceOf(EmptyBodyError);
+    expect(s.list()).toEqual([]);
+    await s.writeFile(id, 'a.srt', body('keep'));
+    await expect(s.writeFile(id, 'b.srt', body())).rejects.toBeInstanceOf(EmptyBodyError);
+    expect(readFileSync(s.filePath(id)!, 'utf8')).toBe('keep');
+    expect(leftovers(id)).toEqual([]);
+  });
+
+  it('leaves no folder when the upload is deleted during a stream', async () => {
+    const s = make();
+    const { id } = s.create(META);
+    async function* slow(): AsyncGenerator<Buffer> {
+      yield Buffer.from('x');
+      s.delete(id);
+      yield Buffer.from('y');
+    }
+    await expect(s.writeFile(id, 'a.srt', slow())).rejects.toThrow();
+    expect(existsSync(join(dir, 'subtitles', id))).toBe(false);
+  });
+
+  it('measures names in bytes', async () => {
+    const s = make();
+    const { id } = s.create(META);
+    await expect(s.writeFile(id, `${'é'.repeat(126)}.ass`, body('x'))).rejects.toBeInstanceOf(BadNameError);
+  });
+
   it('lists an upload only once it has a file', async () => {
     const s = make();
     const c = s.create(META);

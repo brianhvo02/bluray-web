@@ -21,6 +21,14 @@ export class TooLargeError extends Error {
   }
 }
 
+/** A subtitle file with no bytes. */
+export class EmptyBodyError extends Error {
+  constructor() {
+    super('empty body');
+    this.name = 'EmptyBodyError';
+  }
+}
+
 /** A file name that isn't a plain name with an allowed extension. */
 export class BadNameError extends Error {
   constructor() {
@@ -32,7 +40,7 @@ export class BadNameError extends Error {
 export type SubtitleMeta = Omit<StoredSubtitle, 'id' | 'fileName' | 'fileSize' | 'fonts' | 'uploadedAt' | 'attached'>;
 
 function checkName(name: string, ext: RegExp): void {
-  if (name.length < 1 || name.length > 255 || /[/\\\0]/.test(name) || name === '.' || name === '..' || !ext.test(name)) throw new BadNameError();
+  if (name.length < 1 || Buffer.byteLength(name) > 255 || /[/\\\0]/.test(name) || name === '.' || name === '..' || !ext.test(name)) throw new BadNameError();
 }
 
 const total = (s: StoredSubtitle): number => s.fileSize + s.fonts.reduce((n, f) => n + f.size, 0);
@@ -182,7 +190,7 @@ export class SubtitleStore {
 
   private async put(
     id: string, sub: 'sub' | 'fonts', name: string, body: AsyncIterable<Buffer>, limit: number,
-    others: (s: StoredSubtitle) => number, commit: (cur: StoredSubtitle, size: number) => StoredSubtitle,
+    others: (s: StoredSubtitle) => number, commit: (cur: StoredSubtitle, size: number) => StoredSubtitle, afterCommit?: (before: StoredSubtitle) => void,
   ): Promise<StoredSubtitle> {
     const s = this.get(id);
     if (!s) throw new Error('no such subtitle');
@@ -190,11 +198,12 @@ export class SubtitleStore {
     const { temp, size } = await this.stream(id, body, Math.min(limit, this.maxTotal - used));
     try {
       const dest = join(this.root(), id, sub, name);
-      mkdirSync(join(this.root(), id, sub), { recursive: true });
       const result = this.edit(id, (cur) => {
         const next = commit(cur, size);
         if (this.all().reduce((n, o) => n + (o.id === id ? 0 : total(o)), 0) + total(next) > this.maxTotal) throw new TooLargeError();
+        mkdirSync(join(this.root(), id, sub), { recursive: true });
         renameSync(temp, dest);
+        afterCommit?.(cur);
         return { next, result: next };
       });
       if (!result) throw new Error('no such subtitle');
@@ -209,14 +218,14 @@ export class SubtitleStore {
   /** Stores the subtitle file (at most `limit` bytes), replacing an earlier one. */
   async writeFile(id: string, fileName: string, body: AsyncIterable<Buffer>, limit = SUBTITLE_LIMIT_BYTES): Promise<StoredSubtitle> {
     checkName(fileName, SUBTITLE_EXT);
-    let old = '';
-    const result = await this.put(id, 'sub', fileName, body, limit, (o) => total(o) - o.fileSize,
+    return this.put(id, 'sub', fileName, body, limit, (o) => total(o) - o.fileSize,
       (cur, size) => {
-        old = cur.fileName;
+        if (size === 0) throw new EmptyBodyError();
         return { ...cur, fileName, fileSize: size };
+      },
+      (before) => {
+        if (before.fileName && before.fileName !== fileName) rmSync(join(this.root(), id, 'sub', before.fileName), { force: true });
       });
-    if (old && old !== fileName) rmSync(join(this.root(), id, 'sub', old), { force: true });
-    return result;
   }
 
   /** Stores a font; the upload's fonts together stay under 50 MiB, and the same name replaces. */
@@ -227,6 +236,10 @@ export class SubtitleStore {
     const others = cur.fonts.filter((f) => f.name !== fontName).reduce((n, f) => n + f.size, 0);
     return this.put(id, 'fonts', fontName, body, Math.min(limit, FONTS_LIMIT_BYTES - others),
       (o) => total(o) - o.fonts.filter((f) => f.name === fontName).reduce((n, f) => n + f.size, 0),
-      (c, size) => ({ ...c, fonts: [...c.fonts.filter((f) => f.name !== fontName), { name: fontName, size }] }));
+      (c, size) => {
+        const fonts = [...c.fonts.filter((f) => f.name !== fontName), { name: fontName, size }];
+        if (fonts.reduce((n, f) => n + f.size, 0) > FONTS_LIMIT_BYTES) throw new TooLargeError();
+        return { ...c, fonts };
+      });
   }
 }
