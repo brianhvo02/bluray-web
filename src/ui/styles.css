@@ -107,6 +107,8 @@ a { color: #6ea8ff; }
 @media (min-width: 1000px) {
   .title-library .title-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 24px 20px; }
   .title-library .title-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 8px 12px; }
+  /* a row as tall as its tallest title: every row in it fills the height, not only the long one */
+  .title-library .title-list > li > .title-row { height: 100%; }
 }
 /* the library's heading, search and shelves stay at the top while the titles scroll under them */
 .titles-sticky { position: sticky; top: 0; z-index: 5; display: flex; flex-direction: column; gap: 16px; padding: max(8px, env(safe-area-inset-top)) 0 12px; background: #0b0b0d; }
