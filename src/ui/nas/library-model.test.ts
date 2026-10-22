@@ -116,6 +116,11 @@ describe('preflightLines', () => {
     expect(preflightLines(31.6, null)).toEqual(['This connection: 32 Mbps']);
   });
 
+  it('names the selected level when one is picked', () => {
+    expect(preflightLines(5.2, 13.3, '1080p')).toEqual(['This connection: 5 Mbps', '1080p needs about 13 Mbps; expect pauses.']);
+    expect(preflightLines(31.6, 13.3, '1080p')).toEqual(['This connection: 32 Mbps']);
+  });
+
   it('shows nothing without a measurement', () => {
     expect(preflightLines(null, 48)).toEqual([]);
   });
