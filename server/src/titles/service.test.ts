@@ -778,6 +778,45 @@ describe('TitleService music lookups', () => {
     expect(discogs.calls).toEqual([]);
   });
 
+  it('keeps a coverless MusicBrainz hit when Discogs is down, counts no failure, and asks for the cover again within a week', async () => {
+    const discogs = musicSource({ 'ZQCL-2468': release({ source: 'discogs', id: 'dg-1', cover: cover('dg-1') }) });
+    discogs.down = true;
+    // more catalogue numbers than CIRCUIT_BREAKER, each a coverless MusicBrainz hit: none may stop the lookups
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...ev(`drv1/Music/Neon Harbor - Tide ${i}/BD`), catalogueNumbers: [`ZQCL-${5000 + i}`] }));
+    const table = Object.fromEntries(many.map((e) => [e.catalogueNumbers[0]!, release({ cover: null, title: `Tide ${e.catalogueNumbers[0]}` })]));
+    const mbAll = musicSource({ 'ZQCL-2468': release({ cover: null }), ...table });
+    const s = service({ evidence: () => [BD, ...many], anilist: fake({}), musicbrainz: mbAll, discogs });
+    await s.runNow();
+    expect(mbAll.calls).toHaveLength(13);
+    expect(s.catalogue().titles.filter((t) => t.kind === 'music').every((t) => t.music!.matched)).toBe(true);
+    expect(musicOf(service({ evidence: () => [BD], anilist: fake({}) })).music!.title).toBe('Night Lights (Tour Edition)');
+    discogs.down = false;
+    discogs.calls.length = 0;
+    clock += 6 * DAY;
+    await s.runNow();
+    expect(discogs.calls).toEqual([]);
+    clock += 1 * DAY;
+    await s.runNow();
+    expect(discogs.calls).toContain('ZQCL-2468');
+    const lantern = s.catalogue().titles.find((t) => t.music?.title === 'Night Lights (Tour Edition)')!;
+    expect(s.catalogue().art(lantern.poster!)).toEqual(cover('dg-1'));
+  });
+
+  it('loads a metadata.json from before music lookups and folder covers', async () => {
+    const mb = musicSource({ 'ZQCL-2468': release() });
+    await service({ evidence: () => [BD], anilist: fake({}), musicbrainz: mb }).runNow();
+    const data = JSON.parse(readFileSync(join(dir, 'metadata.json'), 'utf8')) as Record<string, unknown>;
+    delete data.music;
+    delete data.folderCovers;
+    writeFileSync(join(dir, 'metadata.json'), JSON.stringify(data));
+    const s = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: mb });
+    expect(readdirSync(dir).filter((f) => f.includes('corrupt'))).toEqual([]);
+    expect(musicOf(s).music!.matched).toBe(false);
+    await s.runNow();
+    expect(mb.calls).toEqual(['ZQCL-2468', 'ZQCL-2468']);
+    expect(musicOf(s).music!.matched).toBe(true);
+  });
+
   it('a failed lookup keeps the cached release', async () => {
     const mb = musicSource({ 'ZQCL-2468': release() });
     const s = service({ evidence: () => [BD], anilist: fake({}), musicbrainz: mb });

@@ -513,8 +513,9 @@ export class TitleService {
               continue;
             }
             try {
-              const found = await this.musicRelease(c);
-              this.music.set(c, { at: now, value: found });
+              const { found, coverLater } = await this.musicRelease(c);
+              // a hit whose cover Discogs couldn't be asked for is due again in a week, not a month
+              this.music.set(c, { at: coverLater ? now - (REFRESH_MS - RETRY_UNSORTED_MS) : now, value: found });
               failures = 0;
               if (found) continue lookups;
             } catch (err) {
@@ -540,14 +541,24 @@ export class TitleService {
     this.save();
   }
 
-  /** MusicBrainz's release for a catalogue number, else Discogs'; MusicBrainz's with Discogs' cover when it has none. */
-  private async musicRelease(catalogueNumber: string): Promise<MusicRelease | null> {
+  /**
+   * MusicBrainz's release for a catalogue number, else Discogs'; MusicBrainz's with Discogs' cover when it has none.
+   * Throws `SourceUnavailable` only when MusicBrainz is down, or it missed and Discogs is down: a MusicBrainz hit is
+   * kept when Discogs is down, with `coverLater` set so the cover is asked for again sooner.
+   */
+  private async musicRelease(catalogueNumber: string): Promise<{ found: MusicRelease | null; coverLater: boolean }> {
     const { musicbrainz, discogs } = this.opts;
     const mb = musicbrainz ? await musicbrainz.byCatalogue(catalogueNumber) : null;
-    if (!discogs || mb?.cover) return mb;
-    const dg = await discogs.byCatalogue(catalogueNumber);
-    if (!mb) return dg;
-    return dg?.cover ? { ...mb, cover: dg.cover } : mb;
+    if (!discogs || mb?.cover) return { found: mb, coverLater: false };
+    let dg: MusicRelease | null;
+    try {
+      dg = await discogs.byCatalogue(catalogueNumber);
+    } catch (err) {
+      if (mb && err instanceof SourceUnavailable) return { found: mb, coverLater: true };
+      throw err;
+    }
+    if (!mb) return { found: dg, coverLater: false };
+    return { found: dg?.cover ? { ...mb, cover: dg.cover } : mb, coverLater: false };
   }
 
   /**

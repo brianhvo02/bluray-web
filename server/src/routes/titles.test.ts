@@ -303,6 +303,14 @@ describe('owner title routes', () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
+  it('starts a run when the owner files a disc as Music, so its lookups and cover follow', async () => {
+    await start();
+    const t = await token(true);
+    const run = vi.spyOn(service, 'runNow');
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(BOX[1]!.discId)}/choice`, t, { choice: { kind: 'music', name: null } });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   it('answers 409 when clearing a choice a copy follows from its source, and clears a direct one', async () => {
     await start();
     const t = await token(true);

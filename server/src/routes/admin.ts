@@ -399,12 +399,17 @@ const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefi
 
 /**
  * After an owner change: the catalogue is built again at once (ruling T9a); a choice naming an entry that isn't loaded
- * (its disc stays Unsorted as `no-title`) also starts a run in the background to load it.
+ * (its disc stays Unsorted as `no-title`) also starts a run in the background to load it, and so does filing a disc as
+ * Music, so its release is looked up and its folder cover found.
  */
 function rebuildAfter(titles: TitleLibrary, library: Library, discId?: string, choice?: OwnerChoice): void {
   // copies follow at once (ruling T9g)
   titles.owner.reattach(library.evidence().map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
   titles.service.rebuild();
+  if (choice?.kind === 'music') {
+    titles.service.runNow().catch((err: unknown) => console.error('title matching failed', err));
+    return;
+  }
   if (discId === undefined || choice === undefined || (choice.kind !== 'title' && choice.kind !== 'extras') || choice.titleId.startsWith('own:')) return;
   if (titles.service.catalogue().unsorted.some((u) => u.discId === discId && u.reason === 'no-title')) {
     titles.service.runNow().catch((err: unknown) => console.error('title matching failed', err));
