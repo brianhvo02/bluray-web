@@ -1220,6 +1220,12 @@ class LiveCheck {
       let playlist = '';
       let savedUs = 0;
 
+      // the player lists a disc's stored subtitles once per open: the subtitle is on the NAS before the disc opens
+      const made = await c.json<{ id: string }>('subtitles', jsonPost({ name: 'Places check (test)', language: 'en', offsetMs: 0, for: { kind: 'chapter', discId: disc.id, playlistId: '00000', chapter: 0 } }));
+      subtitleId = made.id;
+      const put = await c.fetch(`subtitles/${encodeURIComponent(made.id)}/file/${PLACES_SRT_NAME}`, { method: 'PUT', body: PLACES_SRT });
+      if (!put.ok) throw new HttpError(put.status, await put.text(), 'uploading the subtitle file');
+
       const played = await step('play from the NAS folder', page, async () => {
         await this.openNasDisc(page, disc, query);
         await page.until(visible('[data-testid=playlist-00000]'), 'the playlist picker', 30_000);
@@ -1244,10 +1250,6 @@ class LiveCheck {
       // the menus are used while paused: the controls (and an open menu) stay up only then on a touch device
       await step('pick a stored subtitle', page, async () => {
         await this.pauseAt(page, 'the pause to pick');
-        const made = await c.json<{ id: string }>('subtitles', jsonPost({ name: 'Places check (test)', language: 'en', offsetMs: 0, for: { kind: 'chapter', discId: disc.id, playlistId: playlist, chapter: 0 } }));
-        subtitleId = made.id;
-        const put = await c.fetch(`subtitles/${encodeURIComponent(made.id)}/file/${PLACES_SRT_NAME}`, { method: 'PUT', body: PLACES_SRT });
-        if (!put.ok) throw new HttpError(put.status, await put.text(), 'uploading the subtitle file');
         await clickEl(page, '[data-testid=subtitle-menu]', 'the Subtitles menu');
         await clickEl(page, `[data-testid=subtitle-stored-${made.id}]`, 'the stored subtitle'); // a pick closes the menu
         const ok = await this.storedPicked(page, made.id, 'the pick');
