@@ -9,12 +9,15 @@ const MAX_BYTES = 5 * 1024 * 1024;
 const PRIORITY = ['cover', 'front', 'folder', 'jacket', 'jk'];
 const IMAGE = /^(.*)\.(?:jpe?g|png|webp)$/i;
 
-/** The absolute path of the best image directly in `dir` (not in subfolders), or null. Files over 5 MB are skipped. */
+/**
+ * The absolute path of the best image directly in `dir` (not in subfolders), or null. Files over 5 MB are skipped, and
+ * so are dot files (macOS's `._cover.jpg` resource forks on a share filled from a Mac).
+ */
 export async function findFolderCover(dir: string, listDir: ListDir, statSize: (abs: string) => Promise<number | null>): Promise<string | null> {
   const entries = await listDir(dir);
   if (!entries) return null;
   const images = entries
-    .filter((e) => e.isFile && IMAGE.test(e.name))
+    .filter((e) => e.isFile && !e.name.startsWith('.') && IMAGE.test(e.name))
     .map((e) => ({ name: e.name, rank: PRIORITY.indexOf(IMAGE.exec(e.name)![1]!.toLowerCase()) }))
     .map((e) => ({ ...e, rank: e.rank < 0 ? PRIORITY.length : e.rank }))
     .sort((a, b) => a.rank - b.rank || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

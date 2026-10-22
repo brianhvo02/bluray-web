@@ -163,6 +163,19 @@ describe('ArtCache', () => {
       expect(fetch.urls).toEqual(['https://coverartarchive.org/release/abc/front-250', 'https://ia800000.us.archive.org/1/items/x/front-250.jpg']);
     });
 
+    it('cancels each redirect\'s body before following it', async () => {
+      const cancelled: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request) => {
+        if (String(url).startsWith('https://coverartarchive.org/')) {
+          const body = new ReadableStream({ cancel: () => { cancelled.push(String(url)); } });
+          return new Response(body, { status: 307, headers: { location: 'https://ia800000.us.archive.org/1/items/x/front-250.jpg' } });
+        }
+        return new Response(new Uint8Array(10).fill(7), { headers: { 'content-type': 'image/jpeg' } });
+      });
+      expect(await new ArtCache(dir, fetch as unknown as typeof globalThis.fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250')).not.toBeNull();
+      expect(cancelled).toEqual(['https://coverartarchive.org/release/abc/front-250']);
+    });
+
     it('refuses a redirect to another host', async () => {
       const fetch = redirecting('https://evil.example/a.jpg');
       expect(await new ArtCache(dir, fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250')).toBeNull();

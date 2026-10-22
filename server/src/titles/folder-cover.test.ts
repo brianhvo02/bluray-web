@@ -27,6 +27,11 @@ describe('findFolderCover', () => {
     const f = folder({ 'b.webp': 10, 'a.jpeg': 10, 'notes.txt': 10 });
     expect(await findFolderCover('/m', f.list, f.size)).toBe('/m/a.jpeg');
   });
+  it('skips dot files such as macOS resource forks', async () => {
+    const f = folder({ '._a.jpg': 10, '.hidden.png': 10, 'b.png': 10 });
+    expect(await findFolderCover('/m', f.list, f.size)).toBe('/m/b.png');
+    expect(await findFolderCover('/m', folder({ '._a.jpg': 10 }).list, f.size)).toBeNull();
+  });
   it('ignores subfolders and non-images', async () => {
     const f = folder({ 'notes.txt': 10, 'cover.svg': 10 }, ['cover.jpg']);
     expect(await findFolderCover('/m', f.list, f.size)).toBeNull();

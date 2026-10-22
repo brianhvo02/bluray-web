@@ -147,6 +147,7 @@ export class ArtCache {
           abort.abort();
           return null;
         }
+        await res.body?.cancel().catch(() => {});
         res = await this.fetch(next, { signal, redirect: 'manual' });
       }
       const type = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
