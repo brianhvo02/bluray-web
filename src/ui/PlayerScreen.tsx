@@ -19,11 +19,16 @@ import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTa
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
+import type { StoredSubtitle } from '../engine/disc/nas-api';
+import { pickStoredSubtitle, replacesTextSet } from './nas/stored-subtitle-pick';
+import { forPlaylist } from './nas/subtitle-model';
 
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
 const TAP_NOTICE_MS = 6000;
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
+/** How long the player waits for the NAS's list of a disc's stored subtitles. */
+const STORED_LIST_TIMEOUT_MS = 3000;
 
 
 /** A touch held on the video over a disc menu: where and when it went down, and whether it moved or showed the controls. */
@@ -164,8 +169,40 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
     rememberSubtitleFiles(files);
   };
   const rememberSubtitleFiles = (files: readonly File[]): void => {
+    if (replacesTextSet(files)) setStoredActive(null); // a local pick replaces a stored subtitle
     places.addTextFiles(files).catch((err: unknown) => console.warn('keeping the subtitle files failed', err));
   };
+
+  // A NAS disc's stored subtitles (piece 3), listed once per open; a local or disc-server disc has none.
+  const nasDiscKey = nas ? playingRoute.discKey : null;
+  const discOpens = controller.discOpens;
+  const [stored, setStored] = useState<{ readonly discKey: string; readonly items: readonly StoredSubtitle[] } | null>(null);
+  const [storedActive, setStoredActive] = useState<string | null>(null);
+  useEffect(() => {
+    setStored(null);
+    setStoredActive(null);
+    if (!nas || nasDiscKey === null) return;
+    let live = true;
+    nas.subtitlesForDisc(nasDiscKey, { timeoutMs: STORED_LIST_TIMEOUT_MS }).then(
+      (items) => {
+        if (live) setStored({ discKey: nasDiscKey, items });
+      },
+      (err: unknown) => console.warn('listing the stored subtitles failed', err),
+    );
+    return () => {
+      live = false;
+    };
+  }, [nas, nasDiscKey, discOpens]);
+  const pickStored = (s: StoredSubtitle): void => {
+    if (!nas) return;
+    void pickStoredSubtitle({ nas, controller, places, snapshot: controller.getSnapshot }, s).then((placed) => {
+      if (placed) setStoredActive(s.id);
+    });
+  };
+  const storedHere = stored && currentPlaylistId !== null ? forPlaylist(stored.items, stored.discKey, currentPlaylistId) : null;
+  // checked while its file is still the text set's (Remove takes it away)
+  const storedActiveId = storedHere?.find((s) => s.id === storedActive && snapshot.subtitles?.text?.files.some((f) => f.name === s.fileName))?.id ?? null;
+  const storedSubtitles = storedHere ? { items: storedHere, activeId: storedActiveId, onPick: pickStored } : null;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -626,6 +663,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
         onToggleRemote={() => setRemoteOpen((o) => !o)}
         onMenuOpenChange={setMenuOpen}
         onSubtitleFiles={rememberSubtitleFiles}
+        storedSubtitles={storedSubtitles}
       />
     </div>
   );

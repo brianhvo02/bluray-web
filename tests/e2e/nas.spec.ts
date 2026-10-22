@@ -1696,13 +1696,13 @@ async function withStarfallSubtitles(fn: () => Promise<void>): Promise<void> {
   });
 }
 
-/** Stores ep1.ass for Starfall Wanderer's episode 1 through the owner API, as `name`. */
-async function storeEpisode1Subtitle(name: string): Promise<string> {
+/** Stores ep1.ass for Starfall Wanderer's episode 1 through the owner API, as `name`, in English. */
+async function storeEpisode1Subtitle(name: string, offsetMs = 0): Promise<string> {
   const detail = (await (await ownerApi(`titles/${encodeURIComponent(STARFALL)}`)).json()) as { seasons: { id: string; number: number | null }[] };
   const seasonId = detail.seasons.find((s) => s.number === 1)!.id;
   const created = await ownerApi('subtitles', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, language: 'en', offsetMs: 0, for: { kind: 'episode', titleId: STARFALL, seasonId, episode: 1 } }),
+    body: JSON.stringify({ name, language: 'en', offsetMs, for: { kind: 'episode', titleId: STARFALL, seasonId, episode: 1 } }),
   });
   expect(created.status).toBe(201);
   const { id } = (await created.json()) as { id: string };
@@ -1805,4 +1805,29 @@ test('an upload with two subtitle files is refused before anything is sent', asy
   await expect(page.getByTestId('subtitle-upload-error')).toHaveText('Pick one subtitle file (SRT or ASS) at a time.');
   await expect(page.getByTestId('subtitle-upload')).toBeVisible();
   expect(writes).toEqual([]);
+});
+
+test('everyone picks a stored subtitle in the player, at its default offset', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await withStarfallSubtitles(async () => {
+    const id = await storeEpisode1Subtitle(`Player pick ${browserName}`, 400);
+    await openEpisode1(page);
+    await page.getByTestId('nas-play').click();
+    // the episode is disc1's 4-second playlist: once it ends the controls stay up
+    await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 15_000 });
+    await expect(playerState(page)).toHaveAttribute('data-playlist', '00001');
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-stored')).toHaveText('From the NAS');
+    const row = page.getByTestId(`subtitle-stored-${id}`);
+    await expect(row).toHaveText(`Player pick ${browserName} · English`);
+    await expect(row).toHaveAttribute('aria-checked', 'false');
+    await row.click();
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-file-0')).toContainText('ep1.ass', { timeout: 10_000 });
+    await expect(page.getByTestId('subtitle-offset')).toHaveText('+0.4 s');
+    await expect(page.getByTestId('subtitle-text')).toHaveAttribute('aria-checked', 'true');
+    await expect(row).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('subtitle-file-1')).toHaveCount(0);
+  });
 });

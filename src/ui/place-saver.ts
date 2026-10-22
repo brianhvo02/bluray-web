@@ -135,6 +135,8 @@ export class PlaceSaver {
   private drainAgain = false;
   /** Byte sizes of the text files added to this disc, by name (the engine's snapshot has none). */
   private sizes: Record<string, number> = {};
+  /** The NAS subtitle in the text set, by its file name (a stored pick replaces the set, so there is at most one). */
+  private readonly stored = new Map<string, { readonly id: string; readonly size: number }>();
   /** `pairingKey` of the NAS pairing as last read (null: none; undefined: not read yet), for a send that can't wait. */
   private pairingNow: string | null | undefined = undefined;
   private readonly minUs: number;
@@ -166,6 +168,7 @@ export class PlaceSaver {
     this.seen = null;
     this.cached = null;
     this.sizes = {};
+    this.stored.clear();
   }
 
   /** The launch's settings (once), while the disc they were given with is the one open; null otherwise. */
@@ -178,6 +181,17 @@ export class PlaceSaver {
   /** The places this device holds for a local disc (never a NAS disc's: those are the NAS's, and never stored here). */
   placesOf(discKey: string): Promise<DiscPlaces> {
     return this.deps.store.get(discKey);
+  }
+
+  /** A subtitle picked from the NAS became the text set (pickStoredSubtitle): its id and size, by the file's name. */
+  noteStoredSubtitle(fileName: string, id: string, size: number): void {
+    this.stored.clear();
+    this.stored.set(fileName, { id, size });
+  }
+
+  /** The stored subtitle noted for the text set, by file name. */
+  storedSubtitleNotes(): ReadonlyMap<string, { readonly id: string; readonly size: number }> {
+    return this.stored;
   }
 
   /** The subtitle and font files kept on this device for a disc. */
@@ -273,6 +287,7 @@ export class PlaceSaver {
     const split = splitPick(files);
     // as the controller does: nothing recognised by name means the files are subtitles
     const subtitles = split.subtitles.length || split.fonts.length ? split.subtitles : files;
+    if (subtitles.length > 0) this.stored.clear(); // the local files replace the set, a stored subtitle's too
     for (const f of subtitles) this.sizes[f.name] = f.size;
     const picked = [...subtitles, ...split.fonts].filter((f) => f.size <= MAX_TEXT_FILE_BYTES);
     const names = new Set(picked.map((f) => f.name));

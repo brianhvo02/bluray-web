@@ -486,4 +486,21 @@ describe('PlaceSaver', () => {
     expect(sent).toHaveLength(64);
     expect(sent[0]).toEqual({ name: 'ep1.ass', size: 13, startUs: null, offsetMs: 0 });
   });
+
+  it('notes a stored subtitle by file name until a local subtitle pick replaces the set or the disc closes', async () => {
+    const t = setup();
+    t.saver.noteStoredSubtitle('ep1.ass', 'sub-1', 120);
+    expect([...t.saver.storedSubtitleNotes()]).toEqual([['ep1.ass', { id: 'sub-1', size: 120 }]]);
+    // a stored pick replaces the set, and so the earlier note
+    t.saver.noteStoredSubtitle('ep2.ass', 'sub-2', 80);
+    expect([...t.saver.storedSubtitleNotes()]).toEqual([['ep2.ass', { id: 'sub-2', size: 80 }]]);
+    // fonts alone keep it
+    await t.saver.addTextFiles([new File([new Uint8Array(4)], 'more.otf')]);
+    expect([...t.saver.storedSubtitleNotes().keys()]).toEqual(['ep2.ass']);
+    await t.saver.addTextFiles([new File(['a'], 'mine.srt')]);
+    expect([...t.saver.storedSubtitleNotes()]).toEqual([]);
+    t.saver.noteStoredSubtitle('ep1.ass', 'sub-1', 120);
+    t.saver.end();
+    expect([...t.saver.storedSubtitleNotes()]).toEqual([]);
+  });
 });
