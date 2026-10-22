@@ -1223,7 +1223,19 @@ class LiveCheck {
       const played = await step('play from the NAS folder', page, async () => {
         await this.openNasDisc(page, disc, query);
         await page.until(visible('[data-testid=playlist-00000]'), 'the playlist picker', 30_000);
-        await tapInView(page, '[data-testid=playlist-00000]', 'playlist 00000');
+        // a real touch (it starts audio), tried twice, then a DOM click, as for Play (touches can miss on the iPhone)
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt < 2) await tapInView(page, '[data-testid=playlist-00000]', 'playlist 00000');
+          else {
+            this.log('playlist 00000: two touches missed; clicking it in the DOM (audio may stay muted)');
+            await clickEl(page, '[data-testid=playlist-00000]', 'playlist 00000');
+          }
+          const left = await page.until<boolean>(`!document.querySelector('[data-testid=playlist-picker]')`, 'the picker', 4000).catch((err: unknown) => {
+            if (err instanceof PageReloadedError) throw err;
+            return false;
+          });
+          if (left) break;
+        }
         ({ playlist, discKey } = await this.playingFrom(page, 500_000, 'the first play'));
         return { ok: true, detail: `playlist ${playlist}, disc key ${discKey.slice(0, 2)}…` };
       });
