@@ -5,6 +5,7 @@ import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
 import { simpleMenuSegments } from '../../tests/helpers/ig-builders';
 import { clearSegments, subtitleSegments } from '../../tests/helpers/pg-builders';
 import { fakeNas, type FakeNas } from '../../tests/helpers/fake-nas';
+import type { RemoteDiscSpec } from './disc/disc-spec';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
 import { MemoryDirectory } from '../../tests/helpers/memory-fs';
 import { CACHE_DIR, safeName } from './disc/read-ahead-cache';
@@ -114,7 +115,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory; segmentBytes?: number; mutateFiles?: (files: Map<string, Uint8Array<ArrayBuffer>>) => void; videoCodecApi?: VideoCodecApi } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory; segmentBytes?: number; mutateFiles?: (files: Map<string, Uint8Array<ArrayBuffer>>) => void; videoCodecApi?: VideoCodecApi; log?: PlayerDeps['log'] } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
@@ -147,6 +148,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     createAssDeps: opts.createAssDeps ?? fakeAssDeps(),
     createShaderBackend: opts.createShaderBackend,
     ...(opts.playerSettings ? { playerSettings: opts.playerSettings } : {}),
+    ...(opts.log ? { log: opts.log } : {}),
     ...(remote ? { fetch: remote.fetch } : {}),
     ...(opts.remoteLimits ? { remoteLimits: opts.remoteLimits } : {}),
     ...(opts.cacheRoot ? { readAheadCacheRoot: async () => opts.cacheRoot!.asHandle() } : {}),
@@ -2989,4 +2991,132 @@ describe('Player opening at a place (resume)', () => {
     expect(titles).toEqual([['00000']]); // disc3's only playlist; disc1 has 00000 and 00001
     expect(h.events.some((e) => e.type === 'error')).toBe(false);
   });
+});
+
+describe("Player switching a NAS disc's quality level (setLevel)", () => {
+  const LEVEL_QUERY = 'level=h264-1080&audio=1';
+  /** Two versions of disc d1 behind one NAS: the original, and a level's (files requests carrying `level=`). */
+  function levelNas(original: Map<string, Uint8Array<ArrayBuffer>>, level: Map<string, Uint8Array<ArrayBuffer>>) {
+    const a = fakeNas(original);
+    const b = fakeNas(level);
+    const urls: string[] = [];
+    const routed = (async (input: string | URL | Request, init?: RequestInit) => {
+      urls.push(String(input));
+      return (new URL(String(input)).searchParams.has('level') ? b : a).fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const levelSpec: RemoteDiscSpec = { ...b.spec, query: LEVEL_QUERY, original: a.spec.manifest };
+    return { nas: { ...a, fetch: routed }, urls, levelSpec };
+  }
+  function disc(o: { videoCodingType?: number; audioStreams?: SyntheticAudioStream[]; clipSeconds?: number } = {}) {
+    const clip = (id: string, seconds: number) => ({ ...syntheticClip(id, seconds, { audioStreams: o.audioStreams }), ...(o.videoCodingType ? { videoCodingType: o.videoCodingType } : {}) });
+    return buildSyntheticDisc({
+      clips: [clip('00001', o.clipSeconds ?? 10), clip('00002', 4)],
+      playlists: [{ id: '00000', clipIds: ['00001', '00002'], chapterEverySeconds: 2, videoCodingType: o.videoCodingType }],
+    });
+  }
+  const times = (events: readonly EngineEvent[]) => events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : []));
+
+  it('setLevel reads the new version and restarts the playlist at the current time', async () => {
+    const files = disc();
+    const lv = levelNas(files, disc());
+    const h = await harness(undefined, { remote: () => lv.nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(3000);
+    const at = times(h.events).at(-1)!;
+    expect(at).toBeGreaterThan(2_000_000);
+    const before = h.events.length;
+    await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+    const after = h.events.slice(before);
+    expect(after).toContainEqual({ type: 'levelChanged', ok: true });
+    expect(after).toContainEqual(expect.objectContaining({ type: 'chapters', playlistId: '00000' }));
+    expect(Math.abs(times(after)[0]! - at)).toBeLessThan(300_000);
+    await untilPlaying(h);
+    await h.play(500);
+    expect(lv.urls.at(-1)).toContain(LEVEL_QUERY);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+  }, 30_000);
+
+  it('setLevel keeps a paused disc paused at its time', async () => {
+    const lv = levelNas(disc(), disc());
+    const h = await harness(undefined, { remote: () => lv.nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(2000);
+    await h.player.handle({ type: 'pause' });
+    const at = times(h.events).at(-1)!;
+    await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+    await h.play(300);
+    expect(h.events).toContainEqual({ type: 'levelChanged', ok: true });
+    expect(lastState(h)).toBe('paused');
+    expect(Math.abs(times(h.events).at(-1)! - at)).toBeLessThan(300_000);
+  }, 30_000);
+
+  it('setLevel on a no-picture playlist starts the picture on the new version', async () => {
+    const lv = levelNas(disc({ videoCodingType: CodingType.MPEG2_VIDEO }), disc());
+    const h = await harness(undefined, { remote: () => lv.nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video', noPicture: true }));
+    expect(h.drawn).toEqual([]);
+    await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+    expect(h.events).toContainEqual({ type: 'noticeCleared', code: 'no-picture' });
+    await untilPlaying(h);
+    await h.play(500);
+    expect(decoders.at(-1)?.state).toBe('configured');
+    expect(h.drawn.length).toBeGreaterThan(3);
+  }, 30_000);
+
+  it("setLevel under an HDMV program: the program's playlist goes on at its time, and the program is not restarted", async () => {
+    const program = buildMovieObjects([{ cmds: [asm.playPl(imm(0))] }, { cmds: [] }, { cmds: [] }]);
+    const withProgram = (files: Map<string, Uint8Array<ArrayBuffer>>) => files.set('BDMV/MovieObject.bdmv', program);
+    const lv = levelNas(withProgram(disc()), withProgram(disc()));
+    const h = await harness(undefined, { remote: () => lv.nas });
+    await untilPlaying(h);
+    await h.play(2000);
+    const at = times(h.events).at(-1)!;
+    const before = h.events.length;
+    await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+    await untilPlaying(h);
+    await h.play(300);
+    const after = h.events.slice(before);
+    expect(after).toContainEqual({ type: 'levelChanged', ok: true });
+    expect(after.filter((e) => e.type === 'chapters').map((e) => e.type === 'chapters' && e.playlistId)).toEqual(['00000']);
+    expect(Math.abs(times(after)[0]! - at)).toBeLessThan(300_000);
+    expect(times(after).at(-1)!).toBeGreaterThan(at);
+  }, 30_000);
+
+  it('setLevel refuses another disc', async () => {
+    const lv = levelNas(disc(), disc());
+    const h = await harness(undefined, { remote: () => lv.nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    const other: RemoteDiscSpec = { ...lv.levelSpec, manifest: { ...lv.levelSpec.manifest, discId: 'd2' } };
+    await h.player.handle({ type: 'setLevel', disc: other });
+    expect(h.events).toContainEqual({ type: 'levelChanged', ok: false, message: 'Another disc is open.' });
+    await h.play(300);
+    expect(lastState(h)).toBe('playing');
+    expect(lv.urls.some((u) => u.includes('level='))).toBe(false);
+  }, 30_000);
+
+  it('ignores a PSR1 change to a track the level does not carry', async () => {
+    const three = [lpcmStream(0x1100, 10), lpcmStream(0x1101, 10), lpcmStream(0x1102, 10)];
+    const lv = levelNas(disc({ audioStreams: three }), disc({ audioStreams: [lpcmStream(0x1100, 10)] }));
+    const lines: string[] = [];
+    const h = await harness(undefined, { remote: () => lv.nas, log: (l) => lines.push(l) });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+    await untilPlaying(h);
+    const tracks = h.events.flatMap((e) => (e.type === 'tracks' ? [e] : [])).at(-1)!;
+    expect(tracks.audio.map((t) => t.index)).toEqual([1]);
+    const before = h.events.length;
+    await h.player.handle({ type: 'selectAudio', index: 3 });
+    await h.player.handle({ type: 'selectAudio', index: 3 });
+    await h.play(200);
+    expect(h.events.slice(before).filter((e) => e.type === 'tracks' || e.type === 'error')).toEqual([]);
+    expect(lastState(h)).toBe('playing');
+    expect(lines.filter((l) => l.includes('audio stream 3'))).toHaveLength(1);
+  }, 30_000);
 });

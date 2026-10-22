@@ -75,6 +75,8 @@ export interface PlayerSnapshot {
   readonly readAheadCache: boolean | null;
   /** Why the open's start point could not be used (startFailed); null otherwise, and again on every open. */
   readonly startFailed: 'no-playlist' | 'past-end' | null;
+  /** A quality level switch (setLevel): 'switching' until the engine's levelChanged, then 'idle' or its error. */
+  readonly levelSwitch: 'idle' | 'switching' | { readonly error: string };
 }
 
 export type { PlaceState, StartPoint };
@@ -142,6 +144,7 @@ export const INITIAL_SNAPSHOT: PlayerSnapshot = {
   buffer: null,
   readAheadCache: null,
   startFailed: null,
+  levelSwitch: 'idle',
 };
 
 function withNotice(s: PlayerSnapshot, notice: Notice): PlayerSnapshot {
@@ -209,6 +212,8 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
       return { ...s, readAheadCache: e.available };
     case 'startFailed':
       return { ...s, startFailed: e.reason };
+    case 'levelChanged':
+      return { ...s, levelSwitch: e.ok ? 'idle' : { error: e.message } };
     case 'placeState':
       return s; // answers readPlace
     case 'shaderStatus':
@@ -454,6 +459,15 @@ export class PlayerController {
     this.startAudio();
     this.update({ ...INITIAL_SNAPSHOT, volume: this.snapshot.volume, muted: this.snapshot.muted, readAheadCache: this.snapshot.readAheadCache, engineState: 'loading', remoteDisc: true, rtcDisc: spec.base.startsWith('rtc://') });
     this.post({ type: 'open', disc: spec, ...(bufferFirst ? { bufferFirst } : {}), ...(start ? { start } : {}) }, spec.fetchPort ? [spec.fetchPort] : []);
+  }
+
+  /**
+   * Switches the open NAS disc to another version (a quality level, or the original): same disc id, never with a fetch
+   * port (over WebRTC the open disc's port goes on serving). levelSwitch is 'switching' until the engine answers.
+   */
+  setLevel(spec: RemoteDiscSpec): void {
+    this.update({ ...this.snapshot, levelSwitch: 'switching' });
+    this.post({ type: 'setLevel', disc: spec });
   }
 
   /** Fetches the open NAS disc's main playlist from `fromSeconds` on into its read-ahead cache, `targetBytes` of it. */

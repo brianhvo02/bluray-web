@@ -15,7 +15,7 @@ import { DUMP_WAIT_MS, type WorkerLike } from './bdj/session';
 import type { FromBdj, ToBdj } from './bdj/worker-protocol';
 import type { DecodeImage } from './bdj/background';
 import { SharedRegisterView } from './bdj/shared-registers';
-import type { DiscSpec } from './disc/disc-spec';
+import type { DiscSpec, RemoteDiscSpec } from './disc/disc-spec';
 import type { PlayerSettings } from './disc/player-settings';
 import { serveFetch } from './disc/port-fetch';
 import { CodingType } from './bdmv/stream-types';
@@ -102,6 +102,8 @@ interface HarnessOptions {
    * fetch port, as on the WebRTC route; neither worker's own fetch may be used.
    */
   readonly remote?: boolean | 'port';
+  /** Open the NAS disc with this spec in place of the fake NAS's own (a quality level's, say). */
+  readonly remoteSpec?: (spec: RemoteDiscSpec) => RemoteDiscSpec;
   /** Open the disc at this place. */
   readonly start?: StartPoint;
 }
@@ -120,7 +122,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     throw new TypeError('fetched directly');
   });
   const workerFetch = opts.remote === 'port' ? (ownFetch as unknown as typeof fetch) : nas?.fetch;
-  let spec: DiscSpec | null = nas ? nas.spec : null;
+  let spec: DiscSpec | null = nas ? (opts.remoteSpec?.(nas.spec) ?? nas.spec) : null;
   if (nas && opts.remote === 'port') {
     const { port1, port2 } = new MessageChannel();
     serveFetch(port1, nas.fetch);
@@ -505,6 +507,27 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     first.emit({ type: 'stopped' });
     expect(first.terminated()).toBe(true);
     await vi.waitFor(() => expect(second.sent.some((m) => m.type === 'boot')).toBe(true));
+  });
+
+  it('BD-J boots on the original manifest without the level query, and setLevel leaves its worker alone', async () => {
+    const w = handWorker();
+    let original: RemoteDiscSpec['manifest'] | null = null;
+    const toLevel = (spec: RemoteDiscSpec): RemoteDiscSpec => {
+      original = spec.manifest;
+      return { ...spec, manifest: { ...spec.manifest, name: 'level' }, query: 'level=h264-1080&audio=1', original: spec.manifest };
+    };
+    const h = await harness(bdjDisc(), { worker: w.worker, remote: true, remoteSpec: toLevel });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    const boot = w.sent.find((m) => m.type === 'boot')!;
+    if (boot.type !== 'boot' || boot.disc.kind !== 'remote') throw new Error('no remote boot');
+    expect(boot.disc.manifest).toBe(original);
+    expect(boot.disc.query).toBeUndefined();
+    const level: RemoteDiscSpec = toLevel({ ...boot.disc, manifest: original! });
+    await h.player.handle({ type: 'setLevel', disc: { ...level, query: 'level=phone-720&audio=1' } });
+    expect(h.events).toContainEqual({ type: 'levelChanged', ok: true });
+    expect(h.workers()).toBe(1);
+    expect(w.terminated()).toBe(false);
+    expect(w.sent.filter((m) => m.type === 'boot')).toHaveLength(1);
   });
 
   it("writes the application's player settings to the registers Java reads (bd_set_player_setting_str)", async () => {

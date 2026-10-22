@@ -181,9 +181,24 @@ export class Navigator {
   /** What the playlist being opened was asked to start at, for the seeks that follow its open. */
   private startAt: PlayAt | null = null;
 
-  constructor(private readonly deps: NavigatorDeps) {
+  constructor(private deps: NavigatorDeps) {
     deps.regs.onPsrEvent((e) => this.onPsrEvent(e));
     this.gc = new GraphicsController({ regs: deps.regs, onOverlay: (op) => this.onOverlay(op), nowScr: deps.nowScr });
+  }
+
+  /**
+   * The same disc in another version (a quality level): its STN tables, clip info and stream sizes differ, its play items
+   * and marks don't. Nothing of the program's state changes; the open playlist and its packet geometry are the new
+   * version's from now on.
+   */
+  replaceDisc(disc: DiscModel): void {
+    const open = this.playlist;
+    const id = open ? [...this.deps.disc.playlists].find(([, pl]) => pl === open)?.[0] : undefined;
+    this.deps = { ...this.deps, disc };
+    const pl = id === undefined ? undefined : disc.playlists.get(id);
+    if (!pl) return;
+    this.playlist = pl;
+    this.geometry = itemPackets(pl.playItems, disc.clips);
   }
 
   /** The IG plane to composite over the video, or null before any menu was decoded. */

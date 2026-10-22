@@ -104,6 +104,25 @@ describe('playlist lifecycle', () => {
     expect([c.getSnapshot().remoteDisc, c.getSnapshot().rtcDisc]).toEqual([false, false]);
   });
 
+  it('levelSwitch goes switching, then idle or the error', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    const spec = { kind: 'remote', base: 'https://nas.example/discs/a/', token: 't', manifest: { discId: 'a', name: 'a', files: [], inline: {} } } as const;
+    expect(INITIAL_SNAPSHOT.levelSwitch).toBe('idle');
+    c.openRemote(spec);
+    const level = { ...spec, query: 'level=h264-1080&audio=1', original: spec.manifest };
+    c.setLevel(level);
+    expect(worker.posted.at(-1)).toEqual({ type: 'setLevel', disc: level });
+    expect(c.getSnapshot().levelSwitch).toBe('switching');
+    worker.emit({ type: 'levelChanged', ok: true });
+    expect(c.getSnapshot().levelSwitch).toBe('idle');
+    c.setLevel(level);
+    worker.emit({ type: 'levelChanged', ok: false, message: 'Another disc is open.' });
+    expect(c.getSnapshot().levelSwitch).toEqual({ error: 'Another disc is open.' });
+    c.openRemote(spec);
+    expect(c.getSnapshot().levelSwitch).toBe('idle'); // a new disc starts without one
+  });
+
   it('opens a NAS disc buffering first, reports the fill and cancels it', () => {
     const worker = new FakeWorker();
     const c = new PlayerController(worker, new FakeAudio());

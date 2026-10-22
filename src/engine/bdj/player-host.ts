@@ -86,9 +86,24 @@ export class PlayerBdjHost {
   private sounds: SoundData | null = null;
   private readonly unbindPsrs: (() => void) | null;
 
-  constructor(private readonly deps: PlayerBdjHostDeps) {
+  constructor(private deps: PlayerBdjHostDeps) {
     this.unbindPsrs = deps.psrEvents ? bindBdjPsrEvents(deps.regs, deps.psrEvents) : null;
     deps.port.setListener(this.listener);
+  }
+
+  /**
+   * The same disc in another version (a quality level): its STN tables, clip info and stream sizes differ, its play items
+   * and marks don't. Nothing of the program's state changes; the open playlist and its packet geometry are the new
+   * version's from now on.
+   */
+  replaceDisc(disc: DiscModel): void {
+    const open = this.playlist;
+    const id = open ? [...this.deps.disc.playlists].find(([, pl]) => pl === open)?.[0] : undefined;
+    this.deps = { ...this.deps, disc };
+    const pl = id === undefined ? undefined : disc.playlists.get(id);
+    if (!pl) return;
+    this.playlist = pl;
+    this.geometry = itemPackets(pl.playItems, disc.clips);
   }
 
   dispose(): void {

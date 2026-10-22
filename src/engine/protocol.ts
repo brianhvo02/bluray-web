@@ -2,7 +2,7 @@ import type { MemoryProfileName } from './memory-profile';
 import type { JvmMemoryStats } from './bdj/jvm/jvm';
 import type { ClockMode } from './clock/master-clock';
 import type { DiscErrorCode } from './disc/byte-source';
-import type { DiscSpec } from './disc/disc-spec';
+import type { DiscSpec, RemoteDiscSpec } from './disc/disc-spec';
 import type { RemoteFailure } from './disc/http-transport';
 import type { PlaylistSummary } from './disc/open-disc';
 import type { UoOp } from './hdmv/uo-mask';
@@ -196,6 +196,13 @@ export type EngineCommand =
    * fill stops (what the cache holds stays).
    */
   | { readonly type: 'cancelBuffer' }
+  /**
+   * Another version (a quality level, or the original) of the open NAS disc: same disc id, another manifest and files
+   * query. The engine reads it from then on (source, read-ahead cache, disc model) and starts the playing playlist again
+   * on it at the current time, paused if it was; the HDMV program and a BD-J title go on untouched (BD-J keeps reading
+   * the original). Never with a fetchPort: over WebRTC the open disc's port goes on serving. Answered by levelChanged.
+   */
+  | { readonly type: 'setLevel'; readonly disc: RemoteDiscSpec }
   /** A fresh session token for the open NAS disc (a scheduled refresh, or the answer to remoteTokenNeeded). Handled at once, not queued. */
   | { readonly type: 'remoteToken'; readonly token: string }
   | { readonly type: 'attachCanvas'; readonly canvas: OffscreenCanvas }
@@ -297,6 +304,12 @@ export type EngineEvent =
   | { readonly type: 'bufferProgress'; readonly bytes: number; readonly targetBytes: number; readonly mbps: number; readonly stopped?: 'failed' | 'no-cache' }
   /** Once, at the engine's start: whether this device can keep a read-ahead cache (OPFS with sync access handles). */
   | { readonly type: 'readAheadCache'; readonly available: boolean }
+  /**
+   * The answer to setLevel. A failure after the switch began leaves the disc closed, with the usual error event; one
+   * before it (another disc is open) changes nothing.
+   */
+  | { readonly type: 'levelChanged'; readonly ok: true }
+  | { readonly type: 'levelChanged'; readonly ok: false; readonly message: string }
   /** The NAS answered 401: send remoteToken with a fresh token within 10 s, or the disc fails as unpaired. */
   | { readonly type: 'remoteTokenNeeded' }
   /**

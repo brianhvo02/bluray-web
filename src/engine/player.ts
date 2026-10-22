@@ -24,7 +24,7 @@ import { M2tsReader } from './demux/m2ts-reader';
 import { DiscError } from './disc/byte-source';
 import { applyDiscProfile } from './disc/disc-profile';
 import { applyPlayerSettings, type PlayerSettings } from './disc/player-settings';
-import { createByteSource, type DiscSpec } from './disc/disc-spec';
+import { createByteSource, type DiscSpec, type RemoteDiscSpec } from './disc/disc-spec';
 import { portFetch, serveFetch } from './disc/port-fetch';
 import type { FileSource } from './disc/file-source';
 import { RemoteDiscError, TokenRelay } from './disc/http-transport';
@@ -429,6 +429,8 @@ export class Player {
   private pageHidden = false;
   /** The open disc's no-picture notice: not sent yet, shown, or cleared by a playlist with a picture (never sent again). */
   private noPictureNotice: 'unsent' | 'shown' | 'cleared' = 'unsent';
+  /** Audio streams asked for that the playing playlist's STN lacks (a quality level keeps one track), logged once per disc. */
+  private missingAudioLogged = new Set<number>();
   /** The open disc's bdj-storage notice has been sent (ruling R32: once per disc open, whatever BD-J sessions it runs). */
   private bdjStorageNotice = false;
   /** telemetry bdjPlane.hash: the plane and its version at the last telemetry, and the hash of a settled version. */
@@ -628,6 +630,9 @@ export class Player {
           break;
         case 'selectAudio':
           await this.selectAudio(cmd.index);
+          break;
+        case 'setLevel':
+          await this.setLevel(cmd.disc);
           break;
         case 'selectSubtitle':
           this.selectSubtitle(cmd.choice);
@@ -833,6 +838,7 @@ export class Player {
     this.bdjLatency = new InputLatency();
     this.bdjTapsIgnored = 0;
     this.noPictureNotice = 'unsent';
+    this.missingAudioLogged = new Set();
     this.bdjStorageNotice = false;
     this.stopBdj();
     this.dropEarlyBdj();
@@ -1119,6 +1125,68 @@ export class Player {
     }
   }
 
+  /**
+   * Another version of the open NAS disc (a quality level, or the original): the source, the read-ahead cache (its
+   * segments are named with each file's size, so the versions' bytes never mix) and the disc model are the new
+   * version's, the program (navigator or BD-J title) gets the new model with its state untouched, and the playing
+   * playlist starts again on it through playPlaylist, at the current time and paused if it was, so its streams, picture,
+   * decoder and compositor are chosen anew. A failure once the switch began leaves the disc closed, with its error.
+   */
+  private async setLevel(next: RemoteDiscSpec): Promise<void> {
+    const open = this.discSpec;
+    const refuse = (message: string): void => this.deps.emit({ type: 'levelChanged', ok: false, message });
+    if (next.fetchPort) {
+      // never sent with one: the open disc's port goes on serving
+      next.fetchPort.close();
+      const { fetchPort: _fetchPort, ...rest } = next;
+      next = rest;
+    }
+    if (open.kind !== 'remote' || !this.remote || !this.disc) return refuse('No disc from the NAS is open.');
+    if (next.manifest.discId !== open.manifest.discId) return refuse('Another disc is open.');
+    const s = this.session;
+    const resume = s
+      ? {
+          playlistId: s.playlistId,
+          owner: s.owner,
+          timeUs: Math.min(Math.max(0, this.clock.nowUs()), Math.max(0, s.timeline.durationUs - 1)),
+          autoplay: this.wantPlaying,
+          // with a program its PSR1 decides (playPlaylist); without one, the track that plays, when the version has it
+          audio: this.programRegs ? null : s.audioStream,
+        }
+      : null;
+    this.teardownSession();
+    this.stopFill();
+    const oldRemote = this.remote;
+    const oldCache = this.cache;
+    this.remote = null;
+    this.cache = null;
+    this.tokens = null;
+    oldRemote.close();
+    (await oldCache)?.close();
+    try {
+      const original = next.original ?? open.original;
+      const source = this.createSource({ ...next, ...(original ? { original } : {}) });
+      const disc = await openDisc(source);
+      this.source = source;
+      this.disc = disc;
+      this.navigator?.replaceDisc(disc);
+      this.bdj?.host.replaceDisc(disc);
+      if (resume) {
+        const mpls = disc.playlists.get(resume.playlistId);
+        if (!mpls || mpls.playItems.length === 0) throw new DiscError('missing-file', `Playlist ${resume.playlistId} is not available.`, [playlistPath(resume.playlistId)]);
+        const { item, clipTime45 } = new Timeline(mpls.playItems, mpls.marks).locate(resume.timeUs);
+        await this.playPlaylist(resume.playlistId, { item: item.index, clipTime45 }, resume.owner, resume.audio, { autoplay: resume.autoplay });
+      }
+    } catch (err) {
+      this.close();
+      this.reportError(err);
+      this.setState('error');
+      refuse(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    this.deps.emit({ type: 'levelChanged', ok: true });
+  }
+
   /** How a new BD-J worker reads the disc: on the port route, through a fetch port relayed to the engine's own. */
   private bdjDisc(): BdjDisc {
     const route = this.discPort;
@@ -1134,10 +1202,17 @@ export class Player {
     };
   }
 
-  /** The disc in a BD-J worker's boot message: the open disc with its latest token, and the worker's fetch port. */
+  /**
+   * The disc in a BD-J worker's boot message: the open disc with its latest token, and the worker's fetch port. A NAS
+   * disc at a quality level boots on the original version (its manifest, no level query): Java never reads the streams,
+   * and its playlists and clip info stay the disc's own.
+   */
   private bootDisc(disc: BdjDisc): DiscSpec {
     const spec = this.discSpec;
-    return spec.kind === 'remote' && disc.port ? { ...spec, fetchPort: disc.port } : spec;
+    if (spec.kind !== 'remote') return spec;
+    const { query: _query, original, ...rest } = spec;
+    const boot: RemoteDiscSpec = { ...rest, manifest: original ?? spec.manifest };
+    return disc.port ? { ...boot, fetchPort: disc.port } : boot;
   }
 
   private get bdjSupported(): boolean {
@@ -1923,9 +1998,10 @@ export class Player {
    * `caller`: the navigator or a BD-J title asked for it. Then the result says whether the playlist exists, and the
    * program is told of the start (playlistStarted) synchronously, before the first await. A BD-J title's playlist opens
    * paused until Java starts it (bdj_wait_start). `audio`: the audio stream to play when it names a playable one (a
-   * place's PSR1), over the program's PSR1.
+   * place's PSR1), over the program's PSR1. `restart`: the playlist that plays starts again on another version of the
+   * disc (setLevel): the program is not told of a start, mark tracking goes on, and it plays only when it was playing.
    */
-  private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user', audio: number | null = null): Promise<boolean> {
+  private async playPlaylist(playlistId: string, at: PlayAt = {}, caller: PlaylistCaller = 'user', audio: number | null = null, restart: { readonly autoplay: boolean } | null = null): Promise<boolean> {
     const viaNavigator = caller !== 'user';
     const source = this.source;
     const mpls = this.disc?.playlists.get(playlistId);
@@ -1939,13 +2015,15 @@ export class Player {
     const startUs = this.startTimeUs(timeline, at);
     const chapters = timeline.chapters(mpls.marks);
     const startItem = at.item !== undefined && at.item >= 0 && at.item < timeline.items.length ? at.item : timeline.locate(startUs).item.index;
-    this.navItem = startItem;
     this.navEndReported = null;
     this.releaseBdjStill();
     const openPkt = this.openTitlePkt(mpls, timeline, at, startUs);
-    this.navNextMark = this.nextMarkAt(mpls, openPkt);
-    if (caller === 'navigator' && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
-    if (caller === 'bdj') this.bdjListener?.playlistStarted(playlistId, startItem);
+    if (!restart) {
+      this.navItem = startItem;
+      this.navNextMark = this.nextMarkAt(mpls, openPkt);
+      if (caller === 'navigator' && this.navigator) this.navigator.playlistStarted(playlistId, startItem);
+      if (caller === 'bdj') this.bdjListener?.playlistStarted(playlistId, startItem);
+    }
     this.setState('loading');
     const clipIds = [...new Set(mpls.playItems.map((p) => p.clipId))];
     const clips = await loadClips(source, clipIds);
@@ -2076,7 +2154,8 @@ export class Player {
     }
     this.deps.emit({ type: 'chapters', playlistId, durationUs: timeline.durationUs, chapters: session.chapters });
     this.emitTracks(session);
-    await this.startAt(startUs, caller !== 'bdj', openPkt);
+    if (restart) await this.startAt(startUs, restart.autoplay, 'keep');
+    else await this.startAt(startUs, caller !== 'bdj', openPkt);
     return true;
   }
 
@@ -2386,7 +2465,13 @@ export class Player {
   private async applyAudio(index: number): Promise<void> {
     const s = this.session;
     if (!s || index === s.audioStream || this.state === 'error') return;
-    if (!s.tracks.find((t) => t.index === index)?.playable) return;
+    const track = s.tracks.find((t) => t.index === index);
+    if (!track && !this.missingAudioLogged.has(index)) {
+      // a PSR1 the playlist's STN lacks (a quality level carries one track): ignored
+      this.missingAudioLogged.add(index);
+      this.deps.log?.(`Playlist ${s.playlistId} has no audio stream ${index}: ignored`);
+    }
+    if (!track?.playable) return;
     s.audioStream = index;
     if (!this.programRegs) this.pgRegs?.psrWrite(PSR.PRIMARY_AUDIO_ID, index);
     s.audioActive = this.ring !== null;
