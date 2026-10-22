@@ -285,7 +285,12 @@ test('buffers first on a slow connection: the pre-flight asks, and Wait fills th
   await discRow(page, 'disc1').click();
   await expect(page.getByTestId('nas-buffer-wait')).toHaveText('About 1 minutes before it can play straight through', { timeout: 15_000 });
   await expect(page.getByTestId('nas-play')).toHaveText('Play now with pauses');
-  await expect(page.getByRole('button', { name: 'Lower quality (coming later)' })).toBeDisabled();
+  // the level list preselects a re-encoded level, which plays now
+  const preselected = page.locator('[data-testid="level-option"]:checked');
+  await expect(preselected).toHaveCount(1);
+  expect(await preselected.getAttribute('data-level')).not.toBe('original');
+  // ?bufferask=1 makes every wait an ask, so the notes here are waits, not 'plays now'
+  await expect(page.getByTestId('level-list')).toContainText('about 1 minutes');
   await page.getByTestId('nas-wait').click();
   // disc1 opens to its playlists once the cache holds the wait's bytes
   await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
@@ -300,6 +305,60 @@ test('buffers first on a slow connection: the pre-flight asks, and Wait fills th
   expect(cached.some((name) => name.startsWith('BDMV_2fSTREAM_2f00001_2eM2TS.') && name.endsWith('.bin'))).toBe(true);
   await page.getByTestId('playlist-00000').click();
   await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 15_000 });
+});
+
+/** Plays what a pre-flight opened: a disc that opens to its playlist picker gets its first playlist picked. */
+async function startPlaylistIfPicked(page: Page): Promise<void> {
+  const picked = page.getByTestId('playlist-00000');
+  // a level's first bytes wait for the encoder, so the picker can take a while
+  if (await picked.waitFor({ timeout: 30_000 }).then(() => true, () => false)) await picked.click();
+}
+
+test('plays a disc at a re-encoded level picked in the pre-flight, seeks, and switches to Original', async ({ page, browserName }) => {
+  test.setTimeout(120_000);
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  // disc-levels (10 s, 1080p H.264) in place of disc1 (4 s): long enough to seek in
+  await discRow(page, 'disc-levels').click();
+  await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
+  await page.locator('[data-testid="level-option"][data-level="h264-1080"]').check();
+  await page.getByTestId('nas-play').click();
+  await startPlaylistIfPicked(page);
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 60_000 });
+  const frames = async () => (await telemetry(page))?.framesPresented ?? 0;
+  await expect.poll(frames, { timeout: 60_000 }).toBeGreaterThan(30);
+  await expect(page.getByTestId('level-badge')).toHaveText('1080p · re-encoded on the NAS');
+  // seek: ArrowRight (+10 s) would land at the end of a 10 s disc, so seek back to the start; frames keep advancing past it
+  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 30_000 }).toBeGreaterThan(2_000_000);
+  await page.keyboard.press('ArrowLeft');
+  const afterSeek = await frames();
+  await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSeek + 10);
+  // back to Original through the Quality menu
+  await page.getByTestId('quality-menu').click();
+  await page.locator('[role="menuitemradio"][data-level="original"]').click();
+  await expect(page.getByTestId('level-badge')).toBeHidden({ timeout: 60_000 });
+  await expect(page.getByTestId('level-notice')).toBeHidden({ timeout: 60_000 });
+  const afterSwitch = await frames();
+  await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSwitch + 10);
+});
+
+test('an MPEG-2 disc plays with a picture at a re-encoded level', async ({ page, browserName }) => {
+  test.setTimeout(120_000);
+  await openLibrary(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  // disc-mpeg2 (the same video as disc-mpeg2-menu, with no menu): it opens to its playlist picker
+  await discRow(page, 'disc-mpeg2').click();
+  await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
+  const original = page.locator('[data-testid="level-option"][data-level="original"]');
+  await expect(original).toBeDisabled();
+  await expect(original.locator('xpath=ancestor::label[1]')).toContainText("can't play in this browser");
+  await expect(page.locator('[data-testid="level-option"]:checked')).toHaveCount(1);
+  await expect(page.locator('[data-testid="level-option"]:checked')).not.toHaveAttribute('data-level', 'original');
+  await page.getByTestId('nas-play').click();
+  await startPlaylistIfPicked(page);
+  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 60_000 });
+  await expect.poll(async () => (await telemetry(page))?.framesPresented ?? 0, { timeout: 60_000 }).toBeGreaterThan(30);
+  await expect(page.getByRole('status').filter({ hasText: "This disc's video can't be played here yet" })).toHaveCount(0);
 });
 
 test('opens disc-menu from the NAS into its menu', async ({ page, browserName }) => {

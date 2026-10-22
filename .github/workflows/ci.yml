@@ -48,6 +48,8 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0
       - run: npm ci
+      # The NAS stand-in encodes quality levels with ffmpeg and libx264.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: scripts/ci-audio.sh
       - run: npm run test:e2e -- --project ${{ matrix.project }}

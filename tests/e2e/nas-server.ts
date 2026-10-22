@@ -114,8 +114,8 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   // The WebRTC route on loopback: no STUN discovery, and a UDP port of its own.
   RTC_ADVERTISE: '127.0.0.1',
   RTC_PORT: '47990',
-  // No E2E asks for a quality level yet; the default (qsv) would only fail its self-test here. Use x264 when one does.
-  LEVELS_BACKEND: 'off',
+  // libx264 (needs ffmpeg on PATH): the default (qsv) would only fail its self-test here. H.264 levels encode; HEVC ones answer no-encoder.
+  LEVELS_BACKEND: 'x264',
 };
 
 /**
