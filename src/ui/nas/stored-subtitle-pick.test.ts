@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StoredSubtitle } from '../../engine/disc/nas-api';
 import type { SubtitleChoice, TextFileInfo } from '../../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../../player/player-controller';
-import { pickStoredSubtitle, replacesTextSet, STORED_PICK_FAILED } from './stored-subtitle-pick';
+import { replacesTextSet, STORED_PICK_FAILED, StoredSubtitlePicker } from './stored-subtitle-pick';
 
 const KEY = `f.${'B'.repeat(32)}`;
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
@@ -15,7 +15,7 @@ const chapterSub: StoredSubtitle = { ...episodeSub, id: 'sub-2', offsetMs: 0, at
 
 const file = (name: string, offsetMs = 0, startUs: number | null = null): TextFileInfo => ({ name, format: name.endsWith('.srt') ? 'srt' : 'ass', cues: 3, startUs, offsetMs });
 
-function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[] } = {}) {
+function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[]; fetchGate?: Promise<void> } = {}) {
   const calls: unknown[][] = [];
   const listeners = new Set<() => void>();
   let snap: PlayerSnapshot = {
@@ -49,16 +49,22 @@ function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[] } 
   const nas = {
     subtitleFiles: async (s: StoredSubtitle) => {
       calls.push(['fetch', s.id]);
+      if (opts.fetchGate) await opts.fetchGate;
       if (opts.fetchFails) throw new Error('offline');
       return [new File(['[Script Info]'], s.fileName), ...s.fonts.map((f) => new File(['font'], f.name))];
     },
   };
   const places = { noteStoredSubtitle: (name: string, id: string, size: number) => void calls.push(['note', name, id, size]) };
-  const pick = (s: StoredSubtitle) => pickStoredSubtitle({ nas, controller, places, snapshot: () => snap, log: () => {} }, s);
-  return { calls, controller, engineLists, pick, show };
+  const picker = new StoredSubtitlePicker({ nas, controller, places, snapshot: () => snap, log: () => {} });
+  const pick = (s: StoredSubtitle) => picker.pick(s);
+  return { calls, controller, engineLists, pick, picker, show };
 }
 
-describe('pickStoredSubtitle', () => {
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe('StoredSubtitlePicker', () => {
   it('loads the file with its fonts, then places an episode subtitle at 0 with its default offset, selects text and notes the id', async () => {
     const t = setup();
     const done = t.pick(episodeSub);
@@ -126,6 +132,79 @@ describe('pickStoredSubtitle', () => {
     t.controller.discOpens = 2;
     expect(await done).toBe(false);
     expect(t.calls).toEqual([['fetch', 'sub-1']]);
+  });
+});
+
+describe('StoredSubtitlePicker waits', () => {
+  it("shows the notice when the engine doesn't list the file in time, and places nothing", async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const done = t.pick(episodeSub);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await done).toBe(false);
+    expect(t.calls).toEqual([['fetch', 'sub-1'], ['load', ['ep1.ass', 'Made Up Sans.ttf']], ['notice', 'stored-subtitle', STORED_PICK_FAILED]]);
+  });
+
+  it('never times out while the encoding prompt is open, and places the file once it is answered', async () => {
+    vi.useFakeTimers();
+    const t = setup();
+    const done = t.pick({ ...episodeSub, fileName: 'ep1.srt' });
+    await vi.advanceTimersByTimeAsync(1);
+    t.show({ encodingPrompt: { names: ['ep1.srt'] } });
+    await vi.advanceTimersByTimeAsync(60_000);
+    t.show({ encodingPrompt: null });
+    await vi.advanceTimersByTimeAsync(5_000);
+    t.engineLists(file('ep1.srt'));
+    expect(await done).toBe(true);
+    expect(t.calls.filter((c) => c[0] === 'notice')).toEqual([]);
+    expect(t.calls).toContainEqual(['note', 'ep1.srt', 'sub-1', 120]);
+  });
+
+  it('a newer pick of a file with the same name abandons the older one, which applies nothing', async () => {
+    let release!: () => void;
+    const t = setup({ fetchGate: new Promise<void>((r) => (release = r)) });
+    const fr: StoredSubtitle = { ...episodeSub, id: 'sub-fr', language: 'fr', offsetMs: -300 };
+    const first = t.pick(episodeSub);
+    const second = t.pick(fr);
+    release();
+    await settle();
+    t.engineLists(file('ep1.ass'));
+    expect(await first).toBe(false);
+    expect(await second).toBe(true);
+    expect(t.calls.filter((c) => c[0] === 'shift' || c[0] === 'note')).toEqual([['shift', 0, -300], ['note', 'ep1.ass', 'sub-fr', 120]]);
+  });
+
+  it('a newer pick while the older one waits for the engine abandons the older one', async () => {
+    const t = setup();
+    const fr: StoredSubtitle = { ...episodeSub, id: 'sub-fr', offsetMs: -300 };
+    const first = t.pick(episodeSub);
+    await settle();
+    const second = t.pick(fr);
+    expect(await first).toBe(false);
+    await settle();
+    t.engineLists(file('ep1.ass'));
+    expect(await second).toBe(true);
+    expect(t.calls.filter((c) => c[0] === 'note')).toEqual([['note', 'ep1.ass', 'sub-fr', 120]]);
+  });
+
+  it('a local pick (supersede) abandons a pick in flight', async () => {
+    const t = setup();
+    const done = t.pick(episodeSub);
+    await settle();
+    t.picker.supersede();
+    t.engineLists(file('ep1.ass'));
+    expect(await done).toBe(false);
+    expect(t.calls.filter((c) => c[0] !== 'fetch' && c[0] !== 'load')).toEqual([]);
+  });
+
+  it('places nothing when another playlist plays by the time the file is listed', async () => {
+    const t = setup();
+    const done = t.pick(episodeSub);
+    await settle();
+    t.show({ currentPlaylistId: '00002' });
+    t.engineLists(file('ep1.ass'));
+    expect(await done).toBe(false);
+    expect(t.calls.filter((c) => c[0] !== 'fetch' && c[0] !== 'load')).toEqual([]);
   });
 });
 

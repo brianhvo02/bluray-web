@@ -1,5 +1,5 @@
 import type { StoredSubtitle } from '../../engine/disc/nas-api';
-import { splitPick } from '../../player/drop-files';
+import { pickedSubtitles } from '../../player/drop-files';
 import type { PlayerController, PlayerSnapshot } from '../../player/player-controller';
 import type { PlaceSaver } from '../place-saver';
 import { TEXT_WAIT_MS } from '../place-apply';
@@ -15,73 +15,119 @@ export interface StoredPickDeps {
   readonly places: Pick<PlaceSaver, 'noteStoredSubtitle'>;
   readonly snapshot: () => PlayerSnapshot;
   readonly log?: (message: string, err: unknown) => void;
+  /** TEXT_WAIT_MS by default. */
+  readonly waitMs?: number;
 }
 
 /** Whether files picked or dropped replace the text set (as `loadSubtitleFiles` takes them): fonts alone don't. */
 export function replacesTextSet(files: readonly File[]): boolean {
-  const { subtitles, fonts } = splitPick(files);
-  return subtitles.length > 0 || (fonts.length === 0 && files.length > 0);
+  return pickedSubtitles(files).length > 0;
 }
+
+type WaitResult = 'listed' | 'timeout' | 'abandoned';
 
 /**
- * Picks a subtitle stored on the NAS in the player: its file and fonts become the text set (replacing any, as a local
- * pick does), placed at its episode's or chapter's start with its default offset, shown, and noted for the place.
- * A failed fetch shows a notice and changes nothing. True once placed; false when the fetch failed, another disc
- * opened, or the engine didn't list the file within TEXT_WAIT_MS (it didn't parse, or the encoding prompt is still up).
+ * Picks subtitles stored on the NAS in the player, one at a time: the newest pick (or a local pick, `supersede`)
+ * abandons an older one still fetching or waiting, which then applies nothing.
  */
-export async function pickStoredSubtitle(deps: StoredPickDeps, s: StoredSubtitle): Promise<boolean> {
-  const { nas, controller, places } = deps;
-  const log = deps.log ?? ((message, err) => console.warn(message, err));
-  const opens = controller.discOpens;
-  let files: File[];
-  try {
-    files = await nas.subtitleFiles(s);
-  } catch (err) {
-    log('fetching the stored subtitle failed', err);
-    if (controller.discOpens === opens) controller.showNotice(NOTICE_CODE, STORED_PICK_FAILED);
-    return false;
-  }
-  if (controller.discOpens !== opens) return false;
-  // the set before the load: the engine's answer is a new set holding just this file
-  const before = deps.snapshot().subtitles?.text ?? null;
-  const listed = waitFor(deps, () => {
-    const text = deps.snapshot().subtitles?.text;
-    return text != null && text !== before && text.files.length === 1 && text.files[0]!.name === s.fileName;
-  });
-  try {
-    await controller.loadSubtitleFiles(files);
-  } catch (err) {
-    listed.cancel();
-    log('loading the stored subtitle failed', err);
-    return false;
-  }
-  if (!(await listed.done) || controller.discOpens !== opens) return false;
-  const snap = deps.snapshot();
-  const current = snap.subtitles!.text!.files[0]!;
-  const start = startFor(s, snap.chapters);
-  if (start !== null && start !== current.startUs) controller.setSubtitleStart(0, start);
-  if (s.offsetMs !== current.offsetMs) controller.shiftSubtitleFile(0, s.offsetMs - current.offsetMs);
-  controller.selectSubtitle({ kind: 'text' });
-  places.noteStoredSubtitle(s.fileName, s.id, s.fileSize);
-  return true;
-}
+export class StoredSubtitlePicker {
+  private generation = 0;
+  private abandonWait: (() => void) | null = null;
 
-/** Resolves true when `ready` holds after a snapshot, false past TEXT_WAIT_MS or on cancel. */
-function waitFor(deps: StoredPickDeps, ready: () => boolean): { readonly done: Promise<boolean>; cancel(): void } {
-  let finish: (ok: boolean) => void = () => {};
-  const done = new Promise<boolean>((resolve) => {
-    let settled = false;
-    const stop = deps.controller.subscribe(() => {
-      if (ready()) finish(true);
+  constructor(private readonly deps: StoredPickDeps) {}
+
+  /** A local pick replaced the text set: a stored pick in flight applies nothing. */
+  supersede(): void {
+    this.generation++;
+    this.abandonWait?.();
+    this.abandonWait = null;
+  }
+
+  /**
+   * The subtitle's file and fonts become the text set (replacing any, as a local pick does), placed at its episode's
+   * or chapter's start with its default offset, shown, and noted for the place. A failed fetch, or an engine that
+   * doesn't list the file in time (the encoding prompt aside), shows a notice. True once placed.
+   */
+  async pick(s: StoredSubtitle): Promise<boolean> {
+    this.supersede();
+    const gen = this.generation;
+    const { nas, controller, places } = this.deps;
+    const opens = controller.discOpens;
+    const current = (): boolean => gen === this.generation && controller.discOpens === opens;
+    let files: File[];
+    try {
+      files = await nas.subtitleFiles(s);
+    } catch (err) {
+      this.log('fetching the stored subtitle failed', err);
+      if (current()) controller.showNotice(NOTICE_CODE, STORED_PICK_FAILED);
+      return false;
+    }
+    if (!current()) return false;
+    // the set before the load: the engine's answer is a new set holding just this file
+    const before = this.deps.snapshot().subtitles?.text ?? null;
+    const listed = this.waitFor(current, () => {
+      const text = this.deps.snapshot().subtitles?.text;
+      return text != null && text !== before && text.files.length === 1 && text.files[0]!.name === s.fileName;
     });
-    const timer = setTimeout(() => finish(false), TEXT_WAIT_MS);
-    finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      stop();
-      clearTimeout(timer);
-      resolve(ok);
-    };
-  });
-  return { done, cancel: () => finish(false) };
+    try {
+      await controller.loadSubtitleFiles(files);
+    } catch (err) {
+      if (gen === this.generation) this.supersede();
+      this.log('loading the stored subtitle failed', err);
+      return false;
+    }
+    const result = await listed;
+    if (result === 'timeout' && current()) controller.showNotice(NOTICE_CODE, STORED_PICK_FAILED);
+    if (result !== 'listed' || !current()) return false;
+    const snap = this.deps.snapshot();
+    // the playlist it is for has given way to another (a disc program moved on): nothing to place it on
+    if (snap.currentPlaylistId !== s.attachment.playlistId) return false;
+    const loaded = snap.subtitles!.text!.files[0]!;
+    const start = startFor(s, snap.chapters);
+    if (start !== null && start !== loaded.startUs) controller.setSubtitleStart(0, start);
+    if (s.offsetMs !== loaded.offsetMs) controller.shiftSubtitleFile(0, s.offsetMs - loaded.offsetMs);
+    controller.selectSubtitle({ kind: 'text' });
+    places.noteStoredSubtitle(s.fileName, s.id, s.fileSize);
+    return true;
+  }
+
+  /**
+   * Waits for `ready` after a snapshot. Gives up ('abandoned') once `current` fails or the pick is superseded, and
+   * times out after waitMs without the encoding prompt open: while it is open the clock stops, and starts over once it
+   * is answered.
+   */
+  private waitFor(current: () => boolean, ready: () => boolean): Promise<WaitResult> {
+    const waitMs = this.deps.waitMs ?? TEXT_WAIT_MS;
+    return new Promise<WaitResult>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (result: WaitResult): void => {
+        if (settled) return;
+        settled = true;
+        stop();
+        if (timer !== null) clearTimeout(timer);
+        if (this.abandonWait === abandon) this.abandonWait = null;
+        resolve(result);
+      };
+      const abandon = (): void => finish('abandoned');
+      const clock = (): void => {
+        const prompt = this.deps.snapshot().encodingPrompt !== null;
+        if (prompt && timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        } else if (!prompt && timer === null) timer = setTimeout(() => finish('timeout'), waitMs);
+      };
+      const stop = this.deps.controller.subscribe(() => {
+        if (!current()) finish('abandoned');
+        else if (ready()) finish('listed');
+        else clock();
+      });
+      this.abandonWait = abandon;
+      clock();
+    });
+  }
+
+  private log(message: string, err: unknown): void {
+    (this.deps.log ?? ((m, e) => console.warn(m, e)))(message, err);
+  }
 }

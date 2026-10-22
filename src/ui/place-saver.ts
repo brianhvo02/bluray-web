@@ -1,6 +1,6 @@
 import type { DiscPlaces, PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
 import type { PlaceState } from '../engine/protocol';
-import { isFontName, splitPick } from '../player/drop-files';
+import { isFontName, pickedSubtitles, splitPick } from '../player/drop-files';
 import type { PlayerSnapshot } from '../player/player-controller';
 import { NasHttpError, type NasClient } from './nas/nas-client';
 import { buildPlace, PLACE_MIN_DURATION_US, qualifies } from './place-model';
@@ -185,6 +185,7 @@ export class PlaceSaver {
 
   /** A subtitle picked from the NAS became the text set (pickStoredSubtitle): its id and size, by the file's name. */
   noteStoredSubtitle(fileName: string, id: string, size: number): void {
+    if (!this.target) return; // no disc is being saved
     this.stored.clear();
     this.stored.set(fileName, { id, size });
   }
@@ -285,8 +286,7 @@ export class PlaceSaver {
     const t = this.target;
     if (!t) return;
     const split = splitPick(files);
-    // as the controller does: nothing recognised by name means the files are subtitles
-    const subtitles = split.subtitles.length || split.fonts.length ? split.subtitles : files;
+    const subtitles = pickedSubtitles(files);
     if (subtitles.length > 0) this.stored.clear(); // the local files replace the set, a stored subtitle's too
     for (const f of subtitles) this.sizes[f.name] = f.size;
     const picked = [...subtitles, ...split.fonts].filter((f) => f.size <= MAX_TEXT_FILE_BYTES);

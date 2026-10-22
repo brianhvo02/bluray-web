@@ -20,7 +20,7 @@ import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
 import type { StoredSubtitle } from '../engine/disc/nas-api';
-import { pickStoredSubtitle, replacesTextSet } from './nas/stored-subtitle-pick';
+import { replacesTextSet, StoredSubtitlePicker } from './nas/stored-subtitle-pick';
 import { forPlaylist } from './nas/subtitle-model';
 
 const HIDE_CONTROLS_MS = 3000;
@@ -169,7 +169,11 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
     rememberSubtitleFiles(files);
   };
   const rememberSubtitleFiles = (files: readonly File[]): void => {
-    if (replacesTextSet(files)) setStoredActive(null); // a local pick replaces a stored subtitle
+    if (replacesTextSet(files)) {
+      // a local pick replaces a stored subtitle, and one still loading
+      storedPicker?.supersede();
+      setStoredActive(null);
+    }
     places.addTextFiles(files).catch((err: unknown) => console.warn('keeping the subtitle files failed', err));
   };
 
@@ -193,9 +197,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
       live = false;
     };
   }, [nas, nasDiscKey, discOpens]);
+  const [storedPicker] = useState(() => (nas ? new StoredSubtitlePicker({ nas, controller, places, snapshot: controller.getSnapshot }) : null));
   const pickStored = (s: StoredSubtitle): void => {
-    if (!nas) return;
-    void pickStoredSubtitle({ nas, controller, places, snapshot: controller.getSnapshot }, s).then((placed) => {
+    void storedPicker?.pick(s).then((placed) => {
       if (placed) setStoredActive(s.id);
     });
   };

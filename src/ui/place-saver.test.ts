@@ -502,5 +502,8 @@ describe('PlaceSaver', () => {
     t.saver.noteStoredSubtitle('ep1.ass', 'sub-1', 120);
     t.saver.end();
     expect([...t.saver.storedSubtitleNotes()]).toEqual([]);
+    // with no disc being saved, a note is ignored
+    t.saver.noteStoredSubtitle('ep1.ass', 'sub-1', 120);
+    expect([...t.saver.storedSubtitleNotes()]).toEqual([]);
   });
 });

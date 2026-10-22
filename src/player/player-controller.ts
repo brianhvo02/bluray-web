@@ -1,4 +1,4 @@
-import { splitPick } from './drop-files';
+import { pickedSubtitles, splitPick } from './drop-files';
 import type { RemoteDiscSpec } from '../engine/disc/disc-spec';
 import type { PlaylistSummary } from '../engine/disc/open-disc';
 import type { UoOp } from '../engine/hdmv/uo-mask';
@@ -611,10 +611,8 @@ export class PlayerController {
    * fonts alone adds them to an ASS set. `encoding` answers an encoding prompt.
    */
   async loadSubtitleFiles(files: readonly File[], encoding?: string): Promise<void> {
-    const split = splitPick(files);
-    const fonts = split.fonts;
-    // nothing recognised by name: the files are subtitles (the engine detects SRT or ASS by content)
-    const subtitles = split.subtitles.length || fonts.length ? split.subtitles : files;
+    const fonts = splitPick(files).fonts;
+    const subtitles = pickedSubtitles(files);
     if (!subtitles.length) {
       if (fonts.length && this.snapshot.subtitles?.text?.files.some((f) => f.format === 'ass')) await this.addSubtitleFonts(fonts);
       return;
