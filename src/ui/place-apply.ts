@@ -11,6 +11,17 @@ import { forPlaylist, sameLanguage, STORED_LIST_TIMEOUT_MS } from './nas/subtitl
 const PG_DISPLAY_FLAG = 0x80000000;
 /** The engine has this long to list the re-added files; past it they are given up (a later pick is the user's own). */
 export const TEXT_WAIT_MS = 10_000;
+/** A resumed stored subtitle's download (file and fonts) is given up after this long (a stalled route). */
+export const STORED_FETCH_TIMEOUT_MS = 15_000;
+
+/** `p`, or a rejection after `ms`. */
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
 
 export interface LaunchSettingsDeps {
   readonly controller: Pick<
@@ -73,8 +84,19 @@ export function filesToAdd(wanted: readonly PlaceTextFile[], stored: readonly St
  */
 export class LaunchSettingsApplier {
   private text: PendingText | null = null;
+  /** Bumped by supersede: a re-add started under an older value loads and notes nothing. */
+  private generation = 0;
 
   constructor(private readonly deps: LaunchSettingsDeps) {}
+
+  /**
+   * The user replaced the text set (a local pick, or a stored row in the menu): files still being re-added for the
+   * launch are dropped, so they never replace the user's pick.
+   */
+  supersede(): void {
+    this.generation++;
+    this.text = null;
+  }
 
   /** Each snapshot of the player, with the shader set chosen now. */
   observe(s: PlayerSnapshot, shaderSet: string | null): void {
@@ -126,12 +148,14 @@ export class LaunchSettingsApplier {
   private async addText(discKey: string, settings: { readonly textFiles: readonly PlaceTextFile[]; readonly textOn: boolean; readonly psr2: number; readonly textScale: number }, placed: boolean): Promise<void> {
     const { controller, places } = this.deps;
     const opens = controller.discOpens;
+    const gen = this.generation;
+    const current = (): boolean => controller.discOpens === opens && this.generation === gen;
     try {
       const [{ subtitles, fonts }, fetched] = await Promise.all([
         places.storedTextFiles(discKey).then((kept) => filesToAdd(settings.textFiles.filter((f) => f.subtitleId === undefined), kept)),
         placed ? this.fetchStored(discKey, settings.textFiles) : Promise.resolve([]),
       ]);
-      if ((subtitles.length === 0 && fetched.length === 0) || controller.discOpens !== opens) return;
+      if ((subtitles.length === 0 && fetched.length === 0) || !current()) return;
       const local = new Map(subtitles.map((f) => [f.name, f]));
       const toFile = (f: StoredTextFile): File => new File([f.bytes as Uint8Array<ArrayBuffer>], f.name);
       const localFiles = [...subtitles, ...fonts].map(toFile);
@@ -160,14 +184,18 @@ export class LaunchSettingsApplier {
         if (this.text === pending) this.text = null;
         throw err;
       }
-      // the local ones kept again for this disc's later places (their sizes); the NAS keeps the stored ones
-      if (subtitles.length > 0) await places.addTextFiles(localFiles);
-      // noted after the local files are kept, which clears the saver's note
-      if (controller.discOpens !== opens) return;
-      for (const { subtitle } of fetched) {
-        places.noteStoredSubtitle(subtitle.fileName, subtitle.id, subtitle.fileSize, subtitle.language);
-        this.deps.onStoredSubtitle?.(subtitle.id);
+      if (!current()) return;
+      // The local ones kept again for this disc's later places (their sizes); the NAS keeps the stored ones. Keeping
+      // them clears the saver's note at once (before its first await), so the note follows the start of the keep, and
+      // doesn't wait for (or depend on) the device's write.
+      const keeping = subtitles.length > 0 ? places.addTextFiles(localFiles) : Promise.resolve();
+      // A stored pick replaces the set, so a place names at most one stored subtitle (the saver keeps one note).
+      const stored = fetched[0];
+      if (stored) {
+        places.noteStoredSubtitle(stored.subtitle.fileName, stored.subtitle.id, stored.subtitle.fileSize, stored.subtitle.language);
+        this.deps.onStoredSubtitle?.(stored.subtitle.id);
       }
+      await keeping;
     } catch (err) {
       this.deps.log?.('adding the subtitle files again failed', err);
     }
@@ -189,7 +217,7 @@ export class LaunchSettingsApplier {
       const subtitle = list.find((x) => x.id === entry.subtitleId);
       if (!subtitle) return null;
       try {
-        return { entry: { ...entry, name: subtitle.fileName }, subtitle, files: await nas.subtitleFiles(subtitle) };
+        return { entry: { ...entry, name: subtitle.fileName }, subtitle, files: await within(nas.subtitleFiles(subtitle), STORED_FETCH_TIMEOUT_MS) };
       } catch (err) {
         this.deps.log?.('fetching the stored subtitle failed', err);
         return null;

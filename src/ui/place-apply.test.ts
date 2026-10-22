@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PlaceSettings, StoredSubtitle } from '../engine/disc/nas-api';
 import type { SubtitleChoice, TextFileInfo } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../player/player-controller';
-import { filesToAdd, LaunchSettingsApplier, TEXT_WAIT_MS } from './place-apply';
+import { filesToAdd, LaunchSettingsApplier, STORED_FETCH_TIMEOUT_MS, TEXT_WAIT_MS } from './place-apply';
 import type { LaunchSettings } from './place-saver';
 import type { StoredTextFile } from './place-store';
 
@@ -24,6 +24,10 @@ interface SetupOpts {
   nasList?: StoredSubtitle[] | Error;
   /** Ids whose files fail to download. */
   fetchFails?: string[];
+  /** Downloads wait for this. */
+  fetchGate?: Promise<void>;
+  /** Keeping the local files on the device fails (IndexedDB). */
+  keepFails?: boolean;
 }
 
 function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opts: SetupOpts = {}) {
@@ -53,6 +57,7 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
       return opts.nasList!;
     },
     subtitleFiles: async (sub: StoredSubtitle) => {
+      if (opts.fetchGate) await opts.fetchGate;
       if (opts.fetchFails?.includes(sub.id)) throw new Error('offline');
       return [new File(['[Script Info]'], sub.fileName), ...sub.fonts.map((f) => new File(['font'], f.name))];
     },
@@ -73,7 +78,10 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
         return l && { ...l, discKey: KEY };
       },
       storedTextFiles: async (key) => (key === KEY ? stored : []),
-      addTextFiles: async (files) => void calls.push(['keep', files.map((f) => f.name)]),
+      addTextFiles: async (files) => {
+        calls.push(['keep', files.map((f) => f.name)]);
+        if (opts.keepFails) throw new Error('quota');
+      },
     },
     selectShader: (name) => {
       shader = name;
@@ -91,6 +99,7 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
     subtitles: { pg: [{ index: 1, language: 'eng' }, { index: 2, language: 'jpn' }], text: null, selected: 'off', scale: 1 },
   };
   return {
+    applier,
     calls,
     loaded,
     controller,
@@ -257,6 +266,41 @@ describe('LaunchSettingsApplier with subtitles stored on the NAS', () => {
       t.show(listing(t.snap, 'mine.srt'));
       expect(t.calls.filter((c) => c[0] === 'shift')).toEqual([['shift', 0, 300]]);
     }
+  });
+
+  it('a pick the user makes while a resumed stored subtitle downloads wins: nothing is loaded or noted', async () => {
+    let release!: () => void;
+    const fetchGate = new Promise<void>((r) => (release = r));
+    const t = setup({ settings: { ...base, textFiles: [stored1], textOn: true }, byLanguage: false }, [], { nasList: [ep1], fetchGate });
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    t.applier.supersede();
+    release();
+    await settle();
+    expect(t.loaded).toEqual([]);
+    expect(t.calls.filter((c) => c[0] === 'note' || c[0] === 'active')).toEqual([]);
+  });
+
+  it('notes the stored subtitle though keeping the local files on the device fails', async () => {
+    const local = { name: 'mine.srt', size: 2, startUs: null, offsetMs: 0 };
+    const t = setup({ settings: { ...base, textFiles: [local, stored1], textOn: true }, byLanguage: false }, [{ name: 'mine.srt', bytes: bytes(2) }], { nasList: [ep1], keepFails: true });
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'keep' || c[0] === 'note').map((c) => c[0])).toEqual(['keep', 'note']);
+  });
+
+  describe('with a stalled download', () => {
+    afterEach(() => void vi.useRealTimers());
+    it(`gives it up after ${STORED_FETCH_TIMEOUT_MS / 1000} s and loads the rest`, async () => {
+      vi.useFakeTimers();
+      const local = { name: 'mine.srt', size: 2, startUs: null, offsetMs: 0 };
+      const t = setup({ settings: { ...base, textFiles: [stored1, local], textOn: true }, byLanguage: false }, [{ name: 'mine.srt', bytes: bytes(2) }], { nasList: [ep1], fetchGate: new Promise(() => {}) });
+      t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+      await vi.advanceTimersByTimeAsync(STORED_FETCH_TIMEOUT_MS - 1);
+      expect(t.loaded).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(t.loaded).toEqual([['mine.srt']]);
+    });
   });
 
   it('finds a stored subtitle renamed on the NAS by its id', async () => {

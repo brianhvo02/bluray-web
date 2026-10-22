@@ -155,8 +155,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   };
   const rememberSubtitleFiles = (files: readonly File[]): void => {
     if (replacesTextSet(files)) {
-      // a local pick replaces a stored subtitle, and one still loading
+      // a local pick replaces a stored subtitle, and one still loading (picked, or re-added for a resume)
       storedPicker?.supersede();
+      launchSettings.supersede();
       setStoredActive(null);
     }
     places.addTextFiles(files).catch((err: unknown) => console.warn('keeping the subtitle files failed', err));
@@ -189,7 +190,9 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
       if (placed) setStoredActive(s.id);
       return placed;
     });
+  /** The menu's pick: it replaces any files still being re-added for a resume. */
   const pickStored = (s: StoredSubtitle): void => {
+    launchSettings.supersede();
     if (storedPicker) void pickStoredWith(storedPicker, s);
   };
   const [launchSettings] = useState(
