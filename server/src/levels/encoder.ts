@@ -593,6 +593,22 @@ interface EncodedFrame {
  * (`SourceFrames`: the PTS restored, the DTS moved with it, kept increasing and at most the PTS), then splits them into
  * the run's intervals. A PES waits while its source frame isn't known yet.
  */
+/**
+ * An encoded frame's DTS once its PTS is the source frame's (`pts`): the encoder's own DTS, kept as it is. It already
+ * rises with every frame and is at or before the encoder's PTS, which the restore only ever moves later (to the source
+ * frame at or after it), so it stays at or before the restored PTS. Shifting each DTS by its own frame's restore does
+ * not: the shifts differ by a tick or two with the QSV filters' rounding, and where the encoder packs DTS a tick apart
+ * (around frames a VC-1 decoder dropped) a later frame's DTS would have to pass its PTS. A DTS that doesn't rise past
+ * `lastDts` moves a tick on; one that would then pass `pts` is refused. A PES with no DTS field (`encodedDts` null) decodes
+ * at its PTS, which it can't say otherwise.
+ */
+export function encodedFrameDts(encodedDts: number | null, pts: number, lastDts: number): number {
+  const wanted = encodedDts ?? pts;
+  const dts = wanted <= lastDts ? lastDts + 1 : wanted;
+  if (dts > pts) throw new Error(`levels: an encoded frame's DTS can't stay increasing and at most its PTS ${pts}`);
+  return dts;
+}
+
 class IntervalSplitter {
   private videoPid: number | null = null;
   private chunks: Uint8Array[] = [];
@@ -690,12 +706,11 @@ class IntervalSplitter {
   private place(frame: EncodedFrame, pts: number): { index: number; video: EncodedPes[] } | null {
     const { pes } = frame;
     const shift = pts - frame.pts;
-    let dts90 = frame.dts + shift;
-    if (dts90 <= this.lastDts) dts90 = this.lastDts + 1;
-    if (dts90 > pts) throw new Error(`levels: an encoded frame's DTS can't stay increasing and at most its PTS ${pts}`);
+    const hasDts = pes[7]! >> 6 === 3;
+    const dts90 = encodedFrameDts(hasDts ? frame.dts : null, pts, this.lastDts);
     this.lastDts = dts90;
     if (shift !== 0) writeTimestamp(pes, 9, pts);
-    if (pes[7]! >> 6 === 3) writeTimestamp(pes, 14, dts90);
+    if (hasDts) writeTimestamp(pes, 14, dts90);
     else if (dts90 !== pts) throw new Error(`levels: an encoded frame without a DTS would decode at ${dts90}, before its PTS ${pts}`);
 
     const plan = this.starts.get(Math.floor(pts / EP_PTS_GRAIN));

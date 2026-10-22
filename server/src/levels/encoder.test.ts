@@ -28,8 +28,7 @@ import {
   x264Backend,
   type ClipEncoderOptions,
   type EncoderArgsInput,
-  type EncoderBackend,
-} from './encoder';
+  type EncoderBackend, encodedFrameDts } from './encoder';
 import { levelDefFor, planClip, type IntervalPlan, type LevelDef } from './levels';
 import { IntervalCollector, remuxInterval, type EncodedPes, type IntervalSource } from './remux';
 import { distortingBackend, flooredTo, shiftedBy } from './test-backends';
@@ -668,6 +667,32 @@ describe('encodeIntervalAt: tied to its run', () => {
     controller.abort();
     expect(await settled).toBeInstanceOf(Error);
     expect(signals).toContain('SIGKILL');
+  });
+});
+
+describe('encodedFrameDts', () => {
+  it("keeps the encoder's own DTS, which stays at or before the restored PTS, where per-frame shifts would cross them", () => {
+    // A VC-1 film at 23.976p through jellyfin-ffmpeg's QSV (a real disc's numbers): the decoder dropped two source frames,
+    // the encoder squeezed its DTS to 1-tick steps there, and the frames' PTS restore by 1263, 1263 and 1261 ticks.
+    const frames = [
+      { encPts: 1133633, encDts: 1114864, sourcePts: 1134896 },
+      { encPts: 1118618, encDts: 1114865, sourcePts: 1119881 },
+      { encPts: 1114866, encDts: 1114866, sourcePts: 1116127 },
+      { encPts: 1122371, encDts: 1118617, sourcePts: 1123635 },
+    ];
+    let last = -Infinity;
+    const out = frames.map((f) => (last = encodedFrameDts(f.encDts, f.sourcePts, last)));
+    expect(out).toEqual([1114864, 1114865, 1114866, 1118617]);
+    out.forEach((dts, i) => expect(dts).toBeLessThanOrEqual(frames[i]!.sourcePts));
+  });
+
+  it('decodes a frame whose PES has no DTS at its restored PTS', () => {
+    expect(encodedFrameDts(null, 1059159, 1050000)).toBe(1059159);
+  });
+
+  it('moves a DTS that would repeat the last one a tick on, and refuses one that would pass its PTS', () => {
+    expect(encodedFrameDts(100, 200, 100)).toBe(101);
+    expect(() => encodedFrameDts(100, 100, 100)).toThrow(/at most its PTS/);
   });
 });
 
