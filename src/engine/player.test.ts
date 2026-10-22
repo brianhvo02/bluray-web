@@ -791,6 +791,18 @@ describe('Player', () => {
     expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioCodec: 'Dolby Digital (AC-3)' });
   });
 
+  it('a pause reports the exact time before the paused state', async () => {
+    const h = await harness(CodingType.LPCM);
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1100);
+    await h.player.handle({ type: 'pause' });
+    const pausedAt = h.events.findLastIndex((e) => e.type === 'state' && e.state === 'paused');
+    const time = h.events.slice(0, pausedAt).findLast((e) => e.type === 'time');
+    await h.play(1000); // telemetry while paused reads the stopped clock
+    expect(time?.type === 'time' && time.timeUs).toBe(Math.round(lastTelemetry(h)?.clockUs ?? -1));
+  });
+
   it('switching while paused stays paused at the same time', async () => {
     const h = await harness(undefined, { audioStreams: twoTracks(CodingType.AC3), createAudioDecoder: fakeAudioFactory() });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
