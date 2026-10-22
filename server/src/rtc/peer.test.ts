@@ -1,9 +1,11 @@
+import { createSocket } from 'node:dgram';
+import type { Socket } from 'node:dgram';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RTCPeerConnection } from 'werift';
 import type { RTCDataChannel } from 'werift';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WireClient } from '../../../src/engine/disc/rtc-wire';
 import { appHandlers } from '../app';
 import { Auth } from '../auth';
@@ -14,6 +16,40 @@ import { Store } from '../store';
 import { answerWithCandidates, isMdnsCandidate, relayAddresses, RelayTracker, RtcPeers, RtcRefused, stunOnly, wireChannelOf, withoutMdnsCandidates } from './peer';
 
 // Every name here is made up. Each RtcPeers binds an ephemeral UDP port (0), so no run clashes with another's or the E2E's.
+
+/**
+ * A STUN server on loopback that answers every Binding request with the sender's address. werift falls back to
+ * stun.l.google.com when a peer connection is given no STUN server, and `setLocalDescription` waits for that query
+ * (up to the gather timeout), so without this every offer and answer here waited on a round trip over the internet,
+ * and a slow one outlasted the 300 ms `unopenedMs` of the limits test.
+ */
+function stunServer(): Promise<Socket> {
+  const socket = createSocket('udp4');
+  socket.on('message', (msg, from) => {
+    if (msg.length < 20 || msg.readUInt16BE(0) !== 0x0001 || msg.readUInt32BE(4) !== 0x2112a442) return;
+    const res = Buffer.alloc(32);
+    res.writeUInt16BE(0x0101, 0); // Binding success
+    res.writeUInt16BE(12, 2);
+    msg.copy(res, 4, 4, 20); // magic cookie and transaction id
+    res.writeUInt16BE(0x0020, 20); // XOR-MAPPED-ADDRESS
+    res.writeUInt16BE(8, 22);
+    res.writeUInt16BE(0x0001, 24); // IPv4
+    res.writeUInt16BE(from.port ^ 0x2112, 26);
+    const ip = from.address.split('.').reduce((n, b) => n * 256 + Number(b), 0);
+    res.writeUInt32BE((ip ^ 0x2112a442) >>> 0, 28);
+    socket.send(res, from.port, from.address);
+  });
+  return new Promise((resolve) => socket.bind(0, '127.0.0.1', () => resolve(socket)));
+}
+
+let stun: Socket;
+/** The loopback STUN server, the only ICE server any peer connection here uses. */
+const STUN = (): Array<{ urls: string }> => [{ urls: `stun:127.0.0.1:${stun.address().port}` }];
+
+beforeAll(async () => {
+  stun = await stunServer();
+});
+afterAll(() => new Promise<void>((resolve) => stun.close(() => resolve())));
 
 const INDEX = Buffer.from(Array.from({ length: 300_000 }, (_, i) => (i * 37 + 11) & 0xff));
 
@@ -41,14 +77,14 @@ afterEach(async () => {
 });
 
 function peersOn(port: number, limits?: ConstructorParameters<typeof RtcPeers>[0]['limits']): RtcPeers {
-  const peers = new RtcPeers({ handlers, auth, port, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now, limits });
+  const peers = new RtcPeers({ handlers, auth, port, advertise: () => ['127.0.0.1'], iceServers: async () => STUN(), now: Date.now, limits });
   open.push({ close: () => peers.closeAll() });
   return peers;
 }
 
 /** A device's side: an `api` channel offered to `peers` as `sid`, its candidates trickled. */
 async function connect(peers: RtcPeers, sid: string): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel; answer: string; client: WireClient }> {
-  const pc = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
+  const pc = new RTCPeerConnection({ iceServers: STUN(), iceUseIpv6: false });
   open.push({ close: () => pc.close() });
   const dc = pc.createDataChannel('api');
   pc.onIceCandidate.subscribe((c) => {
@@ -115,7 +151,7 @@ describe('RtcPeers', () => {
   it('classes a session relayed when the relay candidate arrives late, notes the route and counts its earlier bytes', { timeout: 30_000 }, async () => {
     let relayed = 0;
     const peers = new RtcPeers({
-      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now, sampleMs: 50,
+      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => STUN(), now: Date.now, sampleMs: 50,
       onRelayedBytes: (n) => (relayed += n),
     });
     open.push({ close: () => peers.closeAll() });
@@ -136,7 +172,7 @@ describe('RtcPeers', () => {
   });
 
   it('classes a session relayed when the device comes from a TURN server it was handed, relay candidates hidden', { timeout: 30_000 }, async () => {
-    const peers = new RtcPeers({ handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => [], now: Date.now });
+    const peers = new RtcPeers({ handlers, auth, port: 0, advertise: () => ['127.0.0.1'], iceServers: async () => STUN(), now: Date.now });
     open.push({ close: () => peers.closeAll() });
     const sid = 'sid-lllllllllllllllllll';
     const { pc, client } = await connect(peers, sid);
@@ -180,7 +216,7 @@ describe('RtcPeers', () => {
 
   it('refuses a fifth offer from one sid and a peer over the limit, and drops one whose channel never opens', { timeout: 30_000 }, async () => {
     const peers = peersOn(0, { peers: 3, unopenedMs: 300 });
-    const device = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
+    const device = new RTCPeerConnection({ iceServers: STUN(), iceUseIpv6: false });
     open.push({ close: () => device.close() });
     device.createDataChannel('api');
     await device.setLocalDescription(await device.createOffer());
@@ -255,7 +291,7 @@ describe('mDNS candidates', () => {
     const remote: string[] = [];
     const added: string[] = [];
     const peers = new RtcPeers({
-      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], now: Date.now, iceServers: async () => [],
+      handlers, auth, port: 0, advertise: () => ['127.0.0.1'], now: Date.now, iceServers: async () => STUN(),
       createPeerConnection: (config) => {
         const pc = new RTCPeerConnection(config);
         const setRemote = pc.setRemoteDescription.bind(pc);
@@ -272,7 +308,7 @@ describe('mDNS candidates', () => {
       },
     });
     open.push({ close: () => peers.closeAll() });
-    const device = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
+    const device = new RTCPeerConnection({ iceServers: STUN(), iceUseIpv6: false });
     open.push({ close: () => device.close() });
     device.createDataChannel('api');
     await device.setLocalDescription(await device.createOffer());
@@ -296,11 +332,11 @@ describe('the NAS peer', () => {
       iceServers: async () => [{ urls: 'stun:stun.example:3478' }, { urls: ['turn:turn.example:3478', 'stun:stun2.example:3478'], username: 'u', credential: 'c' }],
       createPeerConnection: (config) => {
         configs.push(config.iceServers);
-        return new RTCPeerConnection(config);
+        return new RTCPeerConnection({ ...config, iceServers: STUN() }); // the made-up servers are never asked
       },
     });
     open.push({ close: () => peers.closeAll() });
-    const device = new RTCPeerConnection({ iceServers: [], iceUseIpv6: false });
+    const device = new RTCPeerConnection({ iceServers: STUN(), iceUseIpv6: false });
     open.push({ close: () => device.close() });
     device.createDataChannel('api');
     await device.setLocalDescription(await device.createOffer());

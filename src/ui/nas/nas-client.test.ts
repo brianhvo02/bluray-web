@@ -1205,6 +1205,27 @@ describe('NasClient subtitles', () => {
     expect(sent).toEqual([3]);
   });
 
+  it('sends an HTTPS upload through sendWithProgress and passes its progress on', async () => {
+    const server = fakeServer();
+    const sentBy: string[] = [];
+    const nas = new NasClient({
+      fetch: server.fetch, subtle: crypto.subtle, store: memoryStore(), now, rendezvousUrl: RENDEZVOUS,
+      sendWithProgress: async (url, init, onSent) => {
+        sentBy.push(`${init.method} ${new URL(url).pathname.split('/').at(-1)}`);
+        onSent(1);
+        onSent(3);
+        return server.fetch(url, init);
+      },
+    });
+    await nas.pair(await server.code(), 'iPad');
+    server.nas = async () => Response.json(stored);
+    const sent: number[] = [];
+    expect(await nas.uploadSubtitleFile(stored.id, new File(['abc'], 'a b.srt'), (n) => sent.push(n))).toEqual(stored);
+    expect(sent).toEqual([1, 3]);
+    await nas.createSubtitle({ name: 'Fan', language: 'en', for: { kind: 'episode', titleId: 't', seasonId: 's', episode: 1 } });
+    expect(sentBy).toEqual(['PUT a%20b.srt']); // only uploads that report progress go that way
+  });
+
   it('turns a 403 into a NasHttpError and aborts the refused upload', async () => {
     const { nas, calls } = await paired();
     await expect(nas.uploadSubtitleFile(stored.id, new File(['abc'], 'refused.srt'))).rejects.toMatchObject({ status: 403, code: 'forbidden' });

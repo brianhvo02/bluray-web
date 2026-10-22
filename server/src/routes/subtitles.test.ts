@@ -32,7 +32,9 @@ const detail = {
     episodes: [1, 2].map((n) => ({ number: n, name: null, runtimeMin: 24, discId: 'disc1', playlistId: `0000${n}` })), extras: [],
   }],
 };
-const catalogue = { titles: [summary], detail: (id: string) => (id === 'star' ? detail : null), unsorted: [], hidden: [], art: () => null, provisional: [] } as unknown as Catalogue;
+// the ids the title's discs are filed under: a rematch can give them another
+let liveTitleIds = new Set(['star']);
+const catalogue = { titles: [summary], detail: (id: string) => (liveTitleIds.has(id) ? detail : null), unsorted: [], hidden: [], art: () => null, provisional: [] } as unknown as Catalogue;
 
 let tmp: string;
 let data: string;
@@ -47,6 +49,7 @@ beforeEach(async () => {
   data = join(tmp, 'data');
   auth = new Auth(new Store(data), Date.now);
   gate = 'everyone';
+  liveTitleIds = new Set(['star']);
   discs = [
     { discId: 'disc1', fingerprint: FP, playlists: [playlist('00001'), playlist('00002')] },
     { discId: DISC2, fingerprint: null, playlists: [playlist('00800', 3)] },
@@ -153,6 +156,17 @@ describe('subtitle routes', () => {
     const moved = await call('PATCH', `/api/subtitles/${kept.id}`, owner, { for: { ...chapterFor, titleId: 'star' } });
     expect(await moved.json()).toMatchObject({ attached: true, attachment: { kind: 'chapter', discKey: KEY2, playlistId: '00800', chapter: 1, titleId: 'star' } });
     expect((await call('POST', '/api/subtitles', owner, meta({ for: { ...chapterFor, titleId: '' } }))).status).toBe(400);
+  });
+
+  it('lists an episode upload by its disc once its title id is gone, so the new title\'s owners can re-attach it', async () => {
+    const owner = await tokenFor('Hana', true);
+    const ep = await createWithFile(owner);
+    liveTitleIds = new Set(['star-2']); // a rematch filed the same discs under another id
+    const byTitle = (await (await call('GET', '/api/subtitles?titleId=star-2', owner)).json()) as StoredSubtitle[];
+    expect(byTitle.map((s) => s.id)).toEqual([ep.id]);
+    // while its own title still exists, another title sharing its disc doesn't list it
+    liveTitleIds = new Set(['star', 'star-2']);
+    expect(await (await call('GET', '/api/subtitles?titleId=star-2', owner)).json()).toEqual([]);
   });
 
   it('does not list an upload that has no file yet', async () => {

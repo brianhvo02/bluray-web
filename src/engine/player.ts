@@ -2520,6 +2520,8 @@ export class Player {
     this.wantPlaying = false;
     this.ring?.setPlaying(false);
     this.clock.setRunning(false);
+    // the stopped clock's exact time goes out before the state, so a place saved at the pause doesn't trail it
+    this.emitTime(Math.min(this.clock.nowUs(), this.session.timeline.durationUs), true);
     if (this.state === 'playing' || this.state === 'buffering') this.setState('paused');
   }
 

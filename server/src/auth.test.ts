@@ -585,6 +585,9 @@ describe('HTTP', () => {
     const scan = vi.spyOn(library, 'scan');
     expect((await fetch(`${base}/api/admin/rescan`, { method: 'POST', headers })).status).toBe(202);
     expect(scan).toHaveBeenCalledOnce();
+    // The 202 comes before the scan has written its cache under tmp; let it finish, or afterEach's rmSync can race
+    // the write and fail with ENOTEMPTY.
+    await scan.mock.results[0]!.value;
   }, 20_000); // about a dozen HTTP round trips plus device key generation: more than vitest's 5 s default under load
 
   it("pairs an owner with a code for an owner person, and a guest with a code for a new guest", async () => {

@@ -997,7 +997,7 @@ test('reopening a NAS episode offers to resume it', async ({ page, browserName }
   await expect(page.getByTestId('resume-prompt')).toHaveCount(0);
   await page.getByTestId('nas-play').click();
   await waitForPlaying(page);
-  // past 0:03 by more than the engine's 250 ms between time events, which the saved time can trail by
+  // past 0:03 with room to spare, so the place saved at the pause reads 0:03
   await expect.poll(() => clockUs(page), { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(3_300_000);
   await page.getByTestId('video-canvas').click(); // a pause saves at once
   await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
