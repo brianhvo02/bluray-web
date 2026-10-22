@@ -88,7 +88,7 @@ function fakeNas() {
 
 const placeState = (title = 1): PlaceState => ({ mode: 'hdmv', title, psrs: Array.from({ length: 128 }, (_, i) => (i === 4 ? title : 0)), gprs: { 7: 42 } });
 
-function setup(opts: { remote?: boolean; target?: Partial<PlaceTarget>; minUs?: number; store?: PlaceStore; log?: (message: string) => void } = {}) {
+function setup(opts: { levelAudio?: () => number | null; remote?: boolean; target?: Partial<PlaceTarget>; minUs?: number; store?: PlaceStore; log?: (message: string) => void } = {}) {
   let clock = 1_800_000_000_000;
   let opens = 1;
   const timers = new Map<number, { fn: () => void; at: number }>();
@@ -114,6 +114,7 @@ function setup(opts: { remote?: boolean; target?: Partial<PlaceTarget>; minUs?: 
     },
     clearTimer: (id) => timers.delete(id as number),
     minDurationUs: opts.minUs ?? 300 * S,
+    ...(opts.levelAudio ? { levelAudio: opts.levelAudio } : {}),
     ...(opts.log ? { log: opts.log } : {}),
   });
   saver.begin({ discKey: KEY, discId: '0123456789abcdef', remote: opts.remote ?? true, chosen: '00001', mainPlaylistId: null, deviceName: 'iPad', pairing: KEY_A, ...opts.target });
@@ -162,6 +163,20 @@ function setup(opts: { remote?: boolean; target?: Partial<PlaceTarget>; minUs?: 
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 describe('PlaceSaver', () => {
+  it("at a level, the saved PSR1 is the level's audio number", async () => {
+    const t = setup({ levelAudio: () => 3 });
+    t.show({ timeUs: 600 * S }); // a seek saves at once
+    await settle();
+    expect(t.store.saves.at(-1)!.settings.psr1).toBe(3);
+  });
+
+  it('at the original (no level audio), the saved PSR1 is the engine\'s', async () => {
+    const t = setup({ levelAudio: () => null });
+    t.show({ timeUs: 600 * S });
+    await settle();
+    expect(t.store.saves.at(-1)!.settings.psr1).toBe(0); // the engine's register file here
+  });
+
   it('saves every 10 s while playing, and not while paused', async () => {
     const t = setup();
     await t.play(9_999);

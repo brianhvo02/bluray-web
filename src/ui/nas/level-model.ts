@@ -31,7 +31,7 @@ export interface LevelRow {
   note: string;
 }
 
-const REASON_COPY: Record<LevelReason, string> = {
+export const REASON_COPY: Record<LevelReason, string> = {
   unplayable: "can't play in this browser",
   'no-encoder': 'not on this NAS',
   'no-hevc': "this device can't decode it",

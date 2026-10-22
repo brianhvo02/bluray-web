@@ -2,7 +2,10 @@ import { useEffect, useRef, useState, type ReactElement } from 'react';
 import type { UoOp } from '../engine/hdmv/uo-mask';
 import type { Chapter } from '../engine/nav/timeline';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
-import { AudioMenu } from './AudioMenu';
+import { AudioMenu, type LevelAudio } from './AudioMenu';
+import type { LevelId } from '../engine/disc/nas-api';
+import type { LevelState } from './nas/level-session';
+import { QualityMenu } from './QualityMenu';
 import { ShaderMenu } from './ShaderMenu';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { SubtitleMenu, type StoredSubtitles } from './SubtitleMenu';
@@ -119,9 +122,11 @@ interface ControlBarProps {
   onSubtitleFiles?(files: readonly File[]): void;
   /** A NAS disc's stored subtitles for the playing playlist, for the Subtitles menu; absent for other discs. */
   readonly storedSubtitles?: StoredSubtitles | null;
+  /** A NAS disc's quality level: the Quality menu, and the Audio menu's original tracks at a re-encoded level. */
+  readonly quality?: { readonly state: LevelState; onPick(level: LevelId): void; readonly audio: LevelAudio | null } | null;
 }
 
-export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange, onSubtitleFiles, storedSubtitles = null }: ControlBarProps): ReactElement {
+export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange, onSubtitleFiles, storedSubtitles = null, quality = null }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
   const masked = (op: UoOp): boolean => snapshot.uoMask.includes(op);
@@ -173,9 +178,11 @@ export function ControlBar({ controller, snapshot, shaderModel, shaderState, vis
           tracks={snapshot.audioTracks}
           selected={snapshot.selectedAudio}
           disabledReason={tip('primaryAudioChange')}
+          levelAudio={quality?.audio ?? null}
           onSelect={(i) => controller.selectAudio(i)}
           onOpenChange={onMenuOpenChange}
         />
+        {quality && <QualityMenu state={quality.state} onPick={quality.onPick} onOpenChange={onMenuOpenChange} />}
         <SubtitleMenu
           subtitles={snapshot.currentPlaylistId !== null ? snapshot.subtitles : null}
           isMasked={masked}

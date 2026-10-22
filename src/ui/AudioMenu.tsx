@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactElement } from 'react';
 import type { AudioTrack } from '../engine/protocol';
 import { trackLabel } from '../player/language';
+import type { OriginalAudioTrack } from './nas/level-session';
+
+/** At a re-encoded level the menu lists the original disc's tracks, and a pick switches the level's audio. */
+export interface LevelAudio {
+  readonly tracks: readonly OriginalAudioTrack[];
+  readonly current: number;
+  onPick(n: number): void;
+}
 
 interface AudioMenuProps {
+  readonly levelAudio?: LevelAudio | null;
   readonly tracks: readonly AudioTrack[];
   readonly selected: number | null;
   /** Set when the disc does not allow changing the audio here: the button is disabled with this tooltip. */
@@ -12,12 +21,12 @@ interface AudioMenuProps {
   onOpenChange(open: boolean): void;
 }
 
-export function AudioMenu({ tracks, selected, disabledReason, onSelect, onOpenChange }: AudioMenuProps): ReactElement | null {
+export function AudioMenu({ tracks, selected, disabledReason, levelAudio = null, onSelect, onOpenChange }: AudioMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
-  const shown = tracks.length > 1;
+  const shown = (levelAudio ? levelAudio.tracks.length : tracks.length) > 1;
 
   const playableItems = (): HTMLButtonElement[] => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
   const close = (refocus: boolean): void => {
@@ -26,8 +35,8 @@ export function AudioMenu({ tracks, selected, disabledReason, onSelect, onOpenCh
   };
 
   useEffect(() => {
-    if (!shown || disabledReason) setOpen(false);
-  }, [shown, disabledReason]);
+    if (!shown || (!levelAudio && disabledReason)) setOpen(false);
+  }, [shown, disabledReason, levelAudio]);
 
   useEffect(() => onOpenChange(open), [open, onOpenChange]);
 
@@ -66,12 +75,28 @@ export function AudioMenu({ tracks, selected, disabledReason, onSelect, onOpenCh
   if (!shown) return null;
   return (
     <div className="audio-menu" ref={rootRef}>
-      <button ref={buttonRef} type="button" aria-haspopup="menu" aria-expanded={open} data-testid="audio-menu" disabled={disabledReason !== undefined} title={disabledReason} onClick={() => setOpen((o) => !o)}>
+      <button ref={buttonRef} type="button" aria-haspopup="menu" aria-expanded={open} data-testid="audio-menu" disabled={!levelAudio && disabledReason !== undefined} title={levelAudio ? undefined : disabledReason} onClick={() => setOpen((o) => !o)}>
         Audio
       </button>
       {open && (
         <ul ref={listRef} role="menu" className="audio-menu-list" onKeyDown={moveFocus}>
-          {tracks.map((t) => (
+          {levelAudio?.tracks.map((t) => (
+            <li key={t.number} role="none">
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={t.number === levelAudio.current}
+                data-testid={`audio-track-${t.number}`}
+                onClick={() => {
+                  close(true);
+                  if (t.number !== levelAudio.current) levelAudio.onPick(t.number);
+                }}
+              >
+                {t.label}
+              </button>
+            </li>
+          ))}
+          {!levelAudio && tracks.map((t) => (
             <li key={t.index} role="none">
               <button
                 type="button"

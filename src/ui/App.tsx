@@ -3,6 +3,7 @@ import { createController } from '../player/create-controller';
 import type { PlayerController } from '../player/player-controller';
 import { PlatformSession } from '../player/platform-session';
 import { LandingScreen } from './LandingScreen';
+import { levelSessionOf } from './nas/level-session';
 import { NasClient } from './nas/nas-client';
 import { getNasHistory, useNasRoute } from './nas/nas-history';
 import { idbNasStore } from './nas/nas-store';
@@ -49,6 +50,10 @@ function getPlaceSaver(controller: PlayerController, nas: NasClient): PlaceSaver
     clearTimer: (handle) => window.clearTimeout(handle as number),
     // ?placemin=<seconds> is test-only: shorter playlists make places
     minDurationUs: placeMinDurationUs(window.location.search),
+    levelAudio: () => {
+      const s = levelSessionOf(nas).get();
+      return s && s.at.level !== 'original' ? s.at.audio : null;
+    },
   });
   return sharedPlaces;
 }

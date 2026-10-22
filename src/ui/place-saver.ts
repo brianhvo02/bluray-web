@@ -66,6 +66,8 @@ export interface PlaceSaverDeps {
   /** PLACE_MIN_DURATION_US, or `?placemin=` (placeMinDurationUs). */
   readonly minDurationUs?: number;
   readonly log?: (message: string, err: unknown) => void;
+  /** The open disc's level audio number (PSR1 numbering); null at Original or with no level session. */
+  readonly levelAudio?: () => number | null;
 }
 
 interface Active extends PlaceTarget {
@@ -349,10 +351,11 @@ export class PlaceSaver {
       discKey: t.discKey, discId: t.discId ?? '', snapshot: seen.snapshot, place: registers,
       shaderSet: seen.shaderSet, deviceName: t.deviceName, nowMs: this.deps.nowMs(), textFileSizes: notes.sizes, storedSubtitles: notes.stored,
     });
+    const levelAudio = this.deps.levelAudio?.() ?? null;
     const place: PlaybackPlace = {
       ...built,
       finished: built.finished || ended,
-      settings: { ...built.settings, textFiles: built.settings.textFiles.slice(0, MAX_TEXT_FILES).map((f) => ({ ...f, name: f.name.slice(0, MAX_TEXT_FILE_NAME) })) },
+      settings: { ...built.settings, ...(levelAudio === null ? {} : { psr1: levelAudio }), textFiles: built.settings.textFiles.slice(0, MAX_TEXT_FILES).map((f) => ({ ...f, name: f.name.slice(0, MAX_TEXT_FILE_NAME) })) },
     };
     const { store, nas } = this.deps;
     if (!t.remote) {

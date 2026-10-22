@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type MouseEvent, type PointerEvent, type ReactElement } from 'react';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { ControlBar } from './ControlBar';
+import { badgeText } from './nas/level-model';
+import { levelSessionOf } from './nas/level-session';
 import type { NasClient } from './nas/nas-client';
 import type { NasHistory } from './nas/nas-history';
 import type { NasRoute } from './nas/nas-route';
@@ -19,7 +21,7 @@ import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTa
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
-import type { StoredSubtitle } from '../engine/disc/nas-api';
+import type { LevelId, StoredSubtitle } from '../engine/disc/nas-api';
 import { replacesTextSet, StoredSubtitlePicker } from './nas/stored-subtitle-pick';
 import { forPlaylist, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
 
@@ -135,15 +137,50 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
       history.subscribe(() => {
         if (playingRoute.discKey === null || history.route()?.kind === 'play') return;
         playingRoute.stop();
+        if (nas) levelSessionOf(nas).end();
         savePlaceAndEnd();
         controller.closeDisc();
       }),
-    [history, playingRoute, controller, savePlaceAndEnd],
+    [history, playingRoute, controller, savePlaceAndEnd, nas],
   );
+  // The NAS disc's quality level (the session knows the levels, the version playing and the last switch's notice).
+  const levelSession = nas ? levelSessionOf(nas) : null;
+  const levelState = useSyncExternalStore(
+    useCallback((fn: () => void) => (levelSession ? levelSession.subscribe(fn) : () => undefined), [levelSession]),
+    () => (levelSession ? levelSession.get() : null),
+  );
+  const [switchFailure, setSwitchFailure] = useState<string | null>(null);
+  // The engine closed the disc after a failed switch: the level's lease goes with it.
+  useEffect(() => {
+    if (typeof snapshot.levelSwitch === 'object') levelSession?.end();
+  }, [snapshot.levelSwitch, levelSession]);
+  const switchTo = (at: { level: LevelId; audio: number }): void => {
+    if (!nas || !levelSession || !levelState) return;
+    setSwitchFailure(null);
+    Promise.all([nas.discBase(levelState.discId), nas.session()])
+      .then(([base, session]) => levelSession.switchTo(at, { controller, base, token: session.token }))
+      .catch((err: unknown) => setSwitchFailure(`Couldn't switch quality: ${err instanceof Error ? err.message : String(err)}`));
+  };
+  const atLevel = levelState !== null && levelState.at.level !== 'original';
+  const quality = levelState
+    ? {
+        state: levelState,
+        onPick: (level: LevelId) => switchTo({ level, audio: levelState.at.audio }),
+        audio:
+          atLevel && currentPlaylistId !== null && levelSession
+            ? { tracks: levelSession.originalAudio(currentPlaylistId), current: levelState.at.audio, onPick: (n: number) => switchTo({ level: levelState.at.level, audio: n }) }
+            : null,
+      }
+    : null;
+  const levelInfo = levelState?.levels.find((l) => l.level === levelState.at.level);
+  const badge = levelInfo ? badgeText(levelInfo) : null;
+  const originalUnplayable = levelState?.levels.find((l) => l.level === 'original')?.reason === 'unplayable';
+  const levelNotice = snapshot.levelSwitch === 'switching' ? 'Switching quality…' : typeof snapshot.levelSwitch === 'object' ? snapshot.levelSwitch.error : (switchFailure ?? levelState?.notice ?? null);
   /** The player's own close: a NAS disc's play route goes back to where Play was pressed (else the library). */
   const closeDisc = (): void => {
     const nasPlayback = playingRoute.discKey !== null;
     playingRoute.stop();
+    if (nas) levelSessionOf(nas).end();
     savePlaceAndEnd();
     controller.closeDisc();
     if (nasPlayback) history.back(LIBRARY);
@@ -612,6 +649,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
       />
       <div className="notices">
         {nas && snapshot.rtcDisc && <RelayBadge nas={nas} />}
+        {badge && (
+          <span className="level-badge" data-testid="level-badge">
+            {badge}
+            {originalUnplayable ? " (this disc's video can't play here as it is)" : ''}
+          </span>
+        )}
+        {levelNotice && (
+          <div className="notice" role="status" data-testid="level-notice">
+            {levelNotice}
+          </div>
+        )}
         {snapshot.error && (
           <div className="error-banner" role="alert" data-testid="error">
             {snapshot.error.message}
@@ -675,6 +723,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
         onMenuOpenChange={setMenuOpen}
         onSubtitleFiles={rememberSubtitleFiles}
         storedSubtitles={storedSubtitles}
+        quality={quality}
       />
     </div>
   );
