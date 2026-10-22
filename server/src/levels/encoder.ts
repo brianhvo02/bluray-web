@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { setPriority } from 'node:os';
 import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
 import type { Readable } from 'node:stream';
@@ -47,6 +48,8 @@ export interface EncoderBackend {
   readonly id: string;
   readonly binary: string;
   args(input: EncoderArgsInput): string[];
+  /** How far to lower the encoder process's priority (a nice value; 0 or absent leaves it as it is). */
+  nice?(input: EncoderArgsInput): number;
 }
 
 /** A long GOP: the forced keyframes at EP entries are the ones that matter. */
@@ -100,6 +103,8 @@ function rateArgs(rateBps: number): string[] {
  */
 const OUTPUT = ['-fps_mode', 'passthrough', '-enc_time_base', '1/90000', '-mpegts_copyts', '1', '-f', 'mpegts', 'pipe:1'];
 const HEAD = ['-hide_banner', '-nostats', '-loglevel', 'error'];
+/** The nice value of a VC-1 encode, whose software decode takes about 0.45 of a core per viewing (bursts of 1.35): the NAS's other services come first. */
+const VC1_SOFTWARE_NICE = 10;
 
 const QSV_DECODERS = new Map<number, string>([
   [CodingType.AVC, 'h264_qsv'],
@@ -145,15 +150,22 @@ export const qsvBackend: EncoderBackend = {
       : tonemaps(input)
         ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
         : [];
+    // The QSV VC-1 decoder drops frames (a disc's first I-frame among them, so its first interval never starts):
+    // VC-1 is decoded in software and uploaded to the GPU for the filters and the encoder, at a lower priority (`nice`).
+    const vc1 = input.sourceCoding === CodingType.VC1;
+    const decode = vc1
+      ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw', '-copyts', '-c:v', 'vc1']
+      : ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-copyts', '-c:v', decoder];
     return [
-      ...HEAD, '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-copyts', '-c:v', decoder,
+      ...HEAD, ...decode,
       ...inputArgs(input), ...mapArgs(input),
-      '-vf', qsvFilter(input),
+      '-vf', `${vc1 ? 'format=nv12,hwupload=extra_hw_frames=64,' : ''}${qsvFilter(input)}`,
       ...codec, '-preset', preset, ...rateArgs(input.rateBps), ...colour,
       '-forced_idr', '1', '-force_key_frames', keyframeTimes(input), '-g', String(GOP_FRAMES),
       ...OUTPUT,
     ];
   },
+  nice: (input) => (input.sourceCoding === CodingType.VC1 ? VC1_SOFTWARE_NICE : 0),
 };
 
 /** Software H.264 (libx264), for machines without Quick Sync, such as CI. HDR sources and HEVC levels aren't supported. */
@@ -204,6 +216,8 @@ export interface ClipEncoderOptions {
   readonly maxIntervalsPerRun?: number;
   /** Injectable for tests. */
   readonly spawn?: typeof nodeSpawn;
+  /** Lowers a process's priority (`os.setPriority`); for tests. */
+  readonly setPriority?: (pid: number, nice: number) => void;
 }
 
 export const MAX_INTERVALS_PER_RUN = 300;
@@ -306,7 +320,7 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
     const startByte = first.srcSpnStart * SOURCE_PACKET_BYTES;
     const endByte = endSpn * SOURCE_PACKET_BYTES;
     const ticks = options.frameTicks;
-    const args = this.backend.args({
+    const argsInput: EncoderArgsInput = {
       file: 'pipe:0',
       startByte,
       endByte,
@@ -318,8 +332,17 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
       interlaced: options.interlaced,
       hdr: options.hdr,
       rateBps: options.rateBps ?? options.level.targetBps,
-    });
+    };
+    const args = this.backend.args(argsInput);
     const child = (options.spawn ?? nodeSpawn)(this.backend.binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const nice = this.backend.nice?.(argsInput) ?? 0;
+    if (nice !== 0 && child.pid !== undefined) {
+      try {
+        (options.setPriority ?? setPriority)(child.pid, nice);
+      } catch (err) {
+        console.warn('levels: could not lower the encoder priority', err);
+      }
+    }
     this.process = child;
     const live = (): boolean => run === this.run;
     const fail = (err: Error): void => {

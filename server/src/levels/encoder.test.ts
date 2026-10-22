@@ -19,6 +19,7 @@ import {
   deinterlaces,
   IntervalDoesNotFit,
   encodeIntervalAt,
+  encodedFrameDts,
   epFramePts,
   frameTicks,
   probeScan,
@@ -28,7 +29,8 @@ import {
   x264Backend,
   type ClipEncoderOptions,
   type EncoderArgsInput,
-  type EncoderBackend, encodedFrameDts } from './encoder';
+  type EncoderBackend,
+} from './encoder';
 import { levelDefFor, planClip, type IntervalPlan, type LevelDef } from './levels';
 import { IntervalCollector, remuxInterval, type EncodedPes, type IntervalSource } from './remux';
 import { distortingBackend, flooredTo, shiftedBy } from './test-backends';
@@ -94,6 +96,21 @@ describe('qsvBackend arguments', () => {
     ]);
   });
 
+  it('a VC-1 source is decoded in software and uploaded, since the QSV VC-1 decoder drops frames, at a lower priority', () => {
+    const input = argsInput(levelDefFor('phone-720', { height: 1080 }), { sourceCoding: CodingType.VC1 });
+    expect(qsvBackend.args(input)).toEqual([
+      '-hide_banner', '-nostats', '-loglevel', 'error', '-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw', '-copyts', '-c:v', 'vc1',
+      ...FILE_IN, ...MAP,
+      '-vf', 'format=nv12,hwupload=extra_hw_frames=64,scale_qsv=w=1280:h=720',
+      '-c:v', 'h264_qsv', '-preset', 'medium', '-b:v', '3000000', '-maxrate', '3750000', '-bufsize', '6000000',
+      ...TAIL,
+    ]);
+    expect(qsvBackend.nice?.(input)).toBe(10);
+    expect(qsvBackend.nice?.(argsInput(levelDefFor('phone-720', { height: 1080 })))).toBe(0);
+    // an interlaced VC-1 source is deinterlaced on the GPU after the upload
+    expect(qsvBackend.args({ ...input, interlaced: true })).toContain('format=nv12,hwupload=extra_hw_frames=64,vpp_qsv=deinterlace=2:w=1280:h=720');
+  });
+
   it('phone-720, and the standard-definition size for a 576-line source', () => {
     expect(qsvBackend.args(argsInput(levelDefFor('phone-720', { height: 1080 })))).toEqual([
       ...QSV_HEAD, ...FILE_IN, ...MAP,
@@ -150,7 +167,8 @@ describe('qsvBackend arguments', () => {
     expect(decoderOf(CodingType.AVC)).toBe('h264_qsv');
     expect(decoderOf(CodingType.HEVC)).toBe('hevc_qsv');
     expect(decoderOf(CodingType.MPEG2_VIDEO)).toBe('mpeg2_qsv');
-    expect(decoderOf(CodingType.VC1)).toBe('vc1_qsv');
+    // VC-1 is decoded in software: the QSV VC-1 decoder drops frames
+    expect(decoderOf(CodingType.VC1)).toBe('vc1');
     expect(() => qsvBackend.args(argsInput(level, { sourceCoding: CodingType.MPEG1_VIDEO }))).toThrow(/QSV decoder/);
   });
 
@@ -667,6 +685,41 @@ describe('encodeIntervalAt: tied to its run', () => {
     controller.abort();
     expect(await settled).toBeInstanceOf(Error);
     expect(signals).toContain('SIGKILL');
+  });
+});
+
+describe('ClipEncoder: the encoder process priority', () => {
+  it("lowers its ffmpeg's priority by the backend's nice value, and leaves it alone at 0", async () => {
+    const reniced: Array<[number, number]> = [];
+    let spawned: () => void = () => undefined;
+    const spawn = (() => {
+      setImmediate(() => spawned());
+      const child = Object.assign(new EventEmitter(), {
+        pid: 4242,
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        stdin: new PassThrough().resume(),
+        kill: (): boolean => {
+          setImmediate(() => child.emit('close', null, 'SIGKILL'));
+          return true;
+        },
+      });
+      return child;
+    }) as unknown as typeof nodeSpawn;
+    const intervals = intervalsOf('disc-levels');
+    const level = levelDefFor('h264-1080', { height: 1080 });
+    const base: ClipEncoderOptions = { input: { path: clipPath('disc-levels') }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, frameTicks: 3750, spawn, setPriority: (pid, nice) => reniced.push([pid, nice]) };
+    const niced: EncoderBackend = { ...x264Backend, nice: () => 10 };
+    for (const [backend, expected] of [[niced, [[4242, 10]]], [x264Backend, []]] as const) {
+      reniced.length = 0;
+      const encoder = new ClipEncoder(backend, base);
+      encoder.on('error', () => undefined);
+      const started = new Promise<void>((resolve) => (spawned = resolve));
+      encoder.start(0);
+      await started;
+      expect(reniced).toEqual(expected);
+      encoder.stop();
+    }
   });
 });
 
