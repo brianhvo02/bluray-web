@@ -833,6 +833,9 @@ test('a device unpaired while on a NAS path goes back to the landing page', asyn
   const redeemed = page.waitForResponse((r) => r.url().endsWith('/api/pair/redeem') && r.request().method() === 'POST');
   await pairByLink(page);
   const { deviceId } = (await (await redeemed).json()) as { deviceId: string };
+  // Continue watching asks for its places once the titles are shown; it must be answered before the device is revoked,
+  // or that request, not the click, finds the device gone.
+  const places = page.waitForResponse((r) => new URL(r.url()).pathname.endsWith('/api/me/playback') && r.request().method() === 'GET');
   await page.getByTestId('nas-open').click();
   await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
   expect(pathOf(page)).toBe('/nas');
@@ -840,6 +843,7 @@ test('a device unpaired while on a NAS path goes back to the landing page', asyn
   // The library's own requests are answered before the device is revoked, so the click is what finds it revoked.
   const card = page.locator('[data-testid="title-card"][data-name="Starfall Wanderer"]');
   await expect(card).toBeVisible();
+  expect((await places).status()).toBe(200);
   const res = await ownerApi(`admin/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
   expect(res.status).toBe(204);
   await card.click();
