@@ -154,7 +154,9 @@ export type SubtitlePatch = Partial<SubtitleCreate>;
 export interface StoredSubtitle {
   readonly id: string; readonly name: string; readonly language: string; readonly offsetMs: number;
   readonly fileName: string; readonly fileSize: number; readonly fonts: readonly { readonly name: string; readonly size: number }[];
-  readonly attachment: SubtitleAttachment; readonly uploaderPersonId: string; readonly uploadedAt: number;
+  readonly attachment: SubtitleAttachment; readonly uploadedAt: number;
+  /** Who uploaded it; in answers to owners only. */
+  readonly uploaderPersonId?: string;
   /** Set by the route: false when the attachment's disc or playlist no longer resolves (owners only see these). */
   readonly attached?: boolean;
 }

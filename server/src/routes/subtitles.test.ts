@@ -194,7 +194,11 @@ describe('subtitle routes', () => {
     expect((await call('GET', `/api/subtitles/${s.id}/file`, guest)).status).toBe(404);
     expect((await call('GET', `/api/subtitles?discKey=${KEY}`, owner)).status).toBe(200);
     gate = 'everyone';
-    expect(((await (await call('GET', `/api/subtitles?discKey=${KEY}`, guest)).json()) as StoredSubtitle[]).length).toBe(1);
+    const guestList = (await (await call('GET', `/api/subtitles?discKey=${KEY}`, guest)).json()) as StoredSubtitle[];
+    expect(guestList.length).toBe(1);
+    expect(guestList[0]).not.toHaveProperty('uploaderPersonId');
+    expect(((await (await call('GET', `/api/subtitles?titleId=${guestList[0].attachment.titleId ?? ''}`, guest)).json()) as StoredSubtitle[]).every((x) => !('uploaderPersonId' in x))).toBe(true);
+    expect(((await (await call('GET', `/api/subtitles?discKey=${KEY}`, owner)).json()) as StoredSubtitle[])[0].uploaderPersonId).toEqual(expect.any(String));
     expect((await call('GET', `/api/subtitles/${s.id}/file`, guest)).status).toBe(200);
   });
 

@@ -69,6 +69,8 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
   };
   const isAttached = (a: SubtitleAttachment): boolean => discsOf(a.discKey).some((e) => e.playlists.some((p) => p.id === a.playlistId));
   const withAttached = (s: StoredSubtitle): StoredSubtitle => ({ ...s, attached: isAttached(s.attachment) });
+  // Who uploaded a subtitle is the owners' business; other people get the list without it.
+  const withoutUploader = (s: StoredSubtitle): StoredSubtitle => { const { uploaderPersonId: _uploader, ...rest } = s; return rest; };
 
   /** The attachment a `for` stands for, or null when the episode, disc or playlist doesn't resolve. */
   const resolve = (f: For): SubtitleAttachment | null => {
@@ -109,6 +111,7 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
         || (titleId !== null && (s.attachment.titleId === titleId || (s.attachment.kind === 'chapter' && keys.has(s.attachment.discKey)))))
       .map(withAttached)
       .filter((s) => owner || s.attached !== false)
+      .map((s) => (owner ? s : withoutUploader(s)))
       .sort((a, b) => a.uploadedAt - b.uploadedAt || a.id.localeCompare(b.id));
     return json(200, found, { 'Cache-Control': 'no-store' });
   };
