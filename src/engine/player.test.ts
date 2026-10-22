@@ -3141,6 +3141,47 @@ describe("Player switching a NAS disc's quality level (setLevel)", () => {
     }, 30_000);
   }
 
+  it('a stale program open still loading does not stop the restart of the playlist that took over', async () => {
+    const two = () =>
+      buildSyntheticDisc({
+        clips: [syntheticClip('00001', 6), syntheticClip('00002', 4)],
+        playlists: [
+          { id: '00000', clipIds: ['00001'], chapterEverySeconds: 2 },
+          { id: '00001', clipIds: ['00002'], chapterEverySeconds: 2 },
+        ],
+      });
+    const lv = levelNas(two(), two());
+    // the old version's reads of X's clip stall (a NAS stall) until they are aborted
+    const stalls: string[] = [];
+    const stalled = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/STREAM/00002.M2TS') && !String(input).includes('level=')) {
+        stalls.push(String(input));
+        return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true }));
+      }
+      return lv.nas.fetch(input, init);
+    }) as typeof fetch;
+    const h = await harness(undefined, { remote: () => ({ ...lv.nas, fetch: stalled }) });
+    const port = h.player.bdjPort();
+    const x = port.playPlaylist('00001', {}); // X: stale once Y starts, its read in flight
+    await vi.waitFor(() => expect(stalls.length).toBeGreaterThan(0));
+    expect(await port.playPlaylist('00000', {})).toBe(true); // Y
+    port.setRate(1);
+    await untilPlaying(h);
+    await h.play(500);
+    const before = h.events.length;
+    await h.player.handle({ type: 'setLevel', disc: lv.levelSpec });
+    expect(await x).toBe(true);
+    const after = h.events.slice(before);
+    expect(after).toContainEqual({ type: 'levelChanged', ok: true });
+    expect(after.flatMap((e) => (e.type === 'chapters' ? [e.playlistId] : []))).toEqual(['00000']);
+    await untilPlaying(h);
+    const drawn = h.drawn.length;
+    await h.play(500);
+    expect(h.drawn.length).toBeGreaterThan(drawn + 3);
+    expect(h.events.slice(before).filter((e) => e.type === 'error')).toEqual([]);
+    expect(lv.urls.at(-1)).toContain(LEVEL_QUERY);
+  }, 30_000);
+
   it('setLevel over the WebRTC route keeps reading through the open disc\'s port', async () => {
     const lv = levelNas(disc(), disc());
     const { port1, port2 } = new MessageChannel();

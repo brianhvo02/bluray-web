@@ -435,10 +435,6 @@ export class Player {
   private switching: Promise<void> | null = null;
   /** Bumped by every setLevel: a playlist open that began on an older version goes on, once the switch is done, on the new one. */
   private levelVersion = 0;
-  /** A program's playlist open met a setLevel under way: the switch does not restart the playlist it noted. */
-  private levelSuperseded = false;
-  /** Playlist opens loading their clips. */
-  private opening = 0;
   /** The fill running (or starting), to start again on another version of the disc. */
   private fillArgs: { readonly req: BufferRequest; readonly follow: boolean } | null = null;
   /** The open disc's source showed the nas-waiting notice and has not cleared it. */
@@ -1174,7 +1170,6 @@ export class Player {
     const refill = this.fillArgs;
     const generation = this.openGeneration;
     this.levelVersion++;
-    this.levelSuperseded = false;
     // A program's playlist open (navigator or BD-J, outside the command queue) that meets the switch waits for it and
     // then opens on the new version (playPlaylist): it never reads the closed source, and it is what plays afterwards.
     let switched!: () => void;
@@ -1205,8 +1200,9 @@ export class Player {
       this.disc = disc;
       this.navigator?.replaceDisc(disc);
       this.bdj?.host.replaceDisc(disc);
-      // the program started (or stopped) a playlist meanwhile, or one of its opens is still loading: that one plays
-      const superseded = this.levelSuperseded || this.opening > 0 || generation !== this.openGeneration;
+      // The program started (or stopped) a playlist meanwhile: that one plays. An open already current when the switch
+      // began tore the session down, so there is nothing to resume then; a stale one (superseded before) gives up.
+      const superseded = generation !== this.openGeneration;
       release(); // before the restart, which opens the playlist like any other
       if (resume && !superseded) {
         const mpls = disc.playlists.get(resume.playlistId);
@@ -1215,7 +1211,8 @@ export class Player {
         const started = await this.playPlaylist(resume.playlistId, { item: item.index, clipTime45 }, resume.owner, resume.audio, { autoplay: resume.autoplay });
         if (!started) throw new Error(`Playlist ${resume.playlistId} could not be started on this version of the disc.`);
       }
-      if (refill && this.remote === source) void this.fill(refill.req, refill.follow);
+      // failures as a bufferAhead's (the command's catch)
+      if (refill && this.remote === source) this.fill(refill.req, refill.follow).catch((err: unknown) => this.fail(err));
     } catch (err) {
       release();
       this.close();
@@ -2069,35 +2066,30 @@ export class Player {
     const clipIds = [...new Set(mpls.playItems.map((p) => p.clipId))];
     let clips: Awaited<ReturnType<typeof loadClips>>;
     let version = this.levelVersion;
-    this.opening++;
-    try {
-      for (;;) {
-        let loaded: typeof clips | null = null;
-        let failure: unknown = null;
-        try {
-          loaded = await loadClips(source, clipIds);
-          await checkStreamReadable(source, clipIds[0]);
-        } catch (err) {
-          failure = err;
-        }
-        if (version === this.levelVersion && !this.switching) {
-          if (failure !== null || !loaded) throw failure;
-          clips = loaded;
-          break;
-        }
-        // setLevel replaced the disc's version under this open: it goes on, on the new version, once that is in place
-        this.levelSuperseded = true;
-        while (this.switching) await this.switching;
-        if (generation !== this.openGeneration) return true;
-        const nextSource = this.source;
-        const nextMpls = this.disc?.playlists.get(playlistId);
-        if (!nextSource || !nextMpls) return true; // the switch failed: the disc closed
-        source = nextSource;
-        mpls = nextMpls;
-        version = this.levelVersion;
+    for (;;) {
+      let loaded: typeof clips | null = null;
+      let failure: unknown = null;
+      try {
+        loaded = await loadClips(source, clipIds);
+        await checkStreamReadable(source, clipIds[0]);
+      } catch (err) {
+        failure = err;
       }
-    } finally {
-      this.opening--;
+      if (version === this.levelVersion && !this.switching && source === this.source) {
+        if (failure !== null || !loaded) throw failure;
+        clips = loaded;
+        break;
+      }
+      // setLevel replaced the disc's version under this open: it goes on, on the new version, once that is in place
+      // (a stale open, superseded meanwhile, gives up)
+      while (this.switching) await this.switching;
+      if (generation !== this.openGeneration) return true;
+      const nextSource = this.source;
+      const nextMpls = this.disc?.playlists.get(playlistId);
+      if (!nextSource || !nextMpls) return true; // the switch failed: the disc closed
+      source = nextSource;
+      mpls = nextMpls;
+      version = this.levelVersion;
     }
     if (generation !== this.openGeneration) return true; // superseded while loading
 
