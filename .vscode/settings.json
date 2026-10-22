@@ -1,0 +1,14 @@
+{
+  // Fetched upstream sources (.cache/libbluray, doppio, ...) and git worktrees are
+  // not part of this project; keep the Java language server from analysing them.
+  "java.project.resourceFilters": ["node_modules", "\\.git", "\\.cache", "\\.worktrees", "\\.claude"],
+  "java.import.exclusions": [
+    "**/node_modules/**",
+    "**/.metadata/**",
+    "**/archetype-resources/**",
+    "**/META-INF/maven/**",
+    "**/.cache/**",
+    "**/.worktrees/**",
+    "**/.claude/**"
+  ]
+}
