@@ -1,14 +1,20 @@
 /*
  * Original code for bluray-web: the AWT natives of the BD-J virtual machine that are not libbluray's. They cache JNI
  * field IDs in the JDK, which this VM does not need, so they do nothing; libbluray's BDToolkit does the drawing.
+ * Component.getFontMetrics(Font) is replaced too: the JDK's asks its platform font manager whether to use platform
+ * metrics (on HotSpot under libbluray, the X11 font manager, which does not) and then calls
+ * sun.font.FontDesignMetrics.getMetrics, which libbluray's own FontDesignMetrics routes to BDFontMetrics. The platform
+ * font manager is not in the class library (libbluray's java.awt.Font replaces the JDK's), so the method makes that
+ * last call at once.
  *
  * Copyright (C) 2026 bluray-web contributors
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+import { Invoke } from '../interpreter';
 import type { NativeFn, NativeTable } from './index';
-import { none } from './util';
+import { method, none } from './util';
 
 const INIT_IDS = [
   'java/awt/AWTEvent',
@@ -51,5 +57,11 @@ export function registerAwtNatives(natives: NativeTable): void {
     'java/awt/Cursor.finalizeImpl(J)V': none,
     'sun/awt/SunToolkit.closeSplashScreen()V': none,
     'java/awt/SplashScreen._getInstance()J': () => 0n,
+  });
+  natives.replace({
+    'java/awt/Component.getFontMetrics(Ljava/awt/Font;)Ljava/awt/FontMetrics;': (ctx, _self, font) => {
+      const fdm = ctx.jvm.bootClass('sun/font/FontDesignMetrics');
+      return ctx.jvm.withInit(ctx.thread, fdm, () => new Invoke(method(fdm, 'getMetrics(Ljava/awt/Font;)Lsun/font/FontDesignMetrics;'), [font], (m) => m ?? null));
+    },
   });
 }

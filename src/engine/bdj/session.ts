@@ -13,6 +13,7 @@ import type { PlayerBdjHost } from './player-host';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { StatusBlockWriter } from './status-block';
+import type { StorageLoss } from './store/bdj-store';
 import { bootTransfer, type BdjCallName, type BdjFailureCode, type BdjWireValue, type FromBdj, type ToBdj } from './worker-protocol';
 
 export type { BdjFailureCode } from './worker-protocol';
@@ -39,12 +40,24 @@ export interface BdjSessionDeps {
   readonly onLog?: (line: string, error: boolean) => void;
   /** A background still Java asked to show (null: none). */
   readonly onBackground?: (image: Uint8Array | null, rect: ScreenRect) => void;
+  /**
+   * What the disc saves won't last (the worker's `storageLost`, ruling R32): the player shows the `bdj-storage` notice.
+   * Never called once the session has stopped.
+   */
+  readonly onStorageLost?: (reason: StorageLoss) => void;
   /** The worker's NAS reads got a 401: a fresh token is wanted (setToken delivers it). */
   readonly onTokenNeeded?: () => void;
   readonly nowMs: () => number;
+  /**
+   * The wall clock the start-up timeout is counted on (default Date.now): it goes on while the host sleeps, which is
+   * how a sleep shows (ruling R22).
+   */
+  readonly wallMs?: () => number;
   readonly setTimer: (ms: number, fn: () => void) => () => void;
   /** How long after boot (or the first start) Java has to select a playlist, show a menu or show a background still. */
   readonly selectTimeoutMs?: number;
+  /** The page is hidden as the session starts (setHidden changes it): the start-up timeout waits for it to be shown. */
+  readonly hidden?: boolean;
   /** The memory profile's BD-J budgets, for the boot message. */
   readonly memory?: BdjMemoryBudgets;
   /** Asks the worker for its memory stats every this many ms (telemetry), which arrive here. */
@@ -59,14 +72,53 @@ export interface BdjSessionDeps {
  */
 export const SELECT_PLAYLIST_TIMEOUT_MS = 20_000;
 
+/**
+ * Ruling R22: the start-up timeout counts only time the page is visible and the host awake. It is spent in ticks of at
+ * most this long; a hidden page spends nothing.
+ */
+export const STARTUP_TICK_MS = 1_000;
+
+/**
+ * A tick that comes this much later than it was set for means the host slept (or the engine did not run): the
+ * timeout starts over rather than firing at the wake for time Java never had.
+ */
+export const STARTUP_SLEEP_GAP_MS = 5_000;
+
+/**
+ * Ruling R26: waiting on the worker's own I/O pauses the start-up timeout for at most this long in all per boot. Past
+ * it the time counts as usual, so a disc that hangs reading in a loop (or retrying a read that keeps failing) still
+ * falls back, 20 s of counted time later, with the thread dump. The legitimate waits measured on the NAS were 8–18 s.
+ */
+export const IO_PAUSE_CEILING_MS = 120_000;
+
 /** At the start-up timeout, how long the worker has to log its thread dump before it is stopped. */
 export const DUMP_WAIT_MS = 1_000;
+
+/** At a stop with unsaved storage changes, how long the worker has to save them before it is terminated. */
+export const STOP_SAVE_WAIT_MS = 3_000;
 
 export class BdjSession {
   private stopped = false;
   private bootDone: (() => void) | null = null;
   private startedAt: number | null = null;
+  /** The pending start-up tick (null: the timeout is not running, or it has fired or been cancelled). */
   private cancelTimeout: (() => void) | null = null;
+  /** What is left of the start-up timeout, and when it was last counted. */
+  private budget = { left: 0, at: 0, interval: 0 };
+  /** The start-up timeout is running: armed, and neither fired nor cancelled (it sets no tick while hidden). */
+  private ticking = false;
+  private hidden: boolean;
+  /**
+   * The worker waits on its own I/O (its `io` message): that time is not counted either (Task 7g), up to
+   * IO_PAUSE_CEILING_MS in all (R26). A worker that dies without an `onerror` while this is set sends no `io: false`:
+   * such a session falls back only through that ceiling, 20 s of counted time after it.
+   */
+  private ioPending = false;
+  /** IO_PAUSE_CEILING_MS has been reached: waiting on I/O counts from now on. */
+  private ioCeilingReached = false;
+  /** Of the time since the timeout was armed: what it counted, and what it passed over while the worker waited on I/O. */
+  private counted = 0;
+  private ioWaitMs = 0;
   /** The call whose synchronous handling is under way. */
   private callInHand: number | null = null;
   /** Starts (and what follows them) wait for the reply to this call. */
@@ -77,8 +129,12 @@ export class BdjSession {
   private readonly answering = new Map<number, BdjCallName>();
   /** The start-up timeout has fired: the session fails once the worker's thread dump is in (or DUMP_WAIT_MS on). */
   private timedOut: (() => void) | null = null;
+  /** The worker has storage scopes (it sent `unsaved`): a stop and a flush go to it. */
+  private storage = false;
+  private stopping: Promise<void> | null = null;
 
   constructor(private readonly deps: BdjSessionDeps) {
+    this.hidden = deps.hidden ?? false;
     deps.worker.onmessage = (e) => this.receive(e.data);
     deps.worker.onerror = (e) => this.fail('internal', `the BD-J worker failed: ${e.message}`);
   }
@@ -121,8 +177,100 @@ export class BdjSession {
   private armTimeout(): void {
     if (this.startedAt !== null) return;
     this.startedAt = this.deps.nowMs();
-    const ms = this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
-    this.cancelTimeout = this.deps.setTimer(ms, () => this.timeout(`no playlist was selected and nothing was shown within ${ms / 1000} s`));
+    this.budget = { left: this.timeoutMs, at: this.wallMs(), interval: 0 };
+    this.counted = 0;
+    this.ioWaitMs = 0;
+    this.ioCeilingReached = false;
+    this.ticking = true;
+    this.tick();
+  }
+
+  private wallMs(): number {
+    return (this.deps.wallMs ?? Date.now)();
+  }
+
+  private get timeoutMs(): number {
+    return this.deps.selectTimeoutMs ?? SELECT_PLAYLIST_TIMEOUT_MS;
+  }
+
+  /**
+   * Counts the time since the budget was last counted (ruling R22): none while hidden, none while the worker waits on
+   * its own reads (Task 7g: a slow link is not a hang) until IO_PAUSE_CEILING_MS of such waiting (R26), and none across
+   * a host sleep, found as a wall-clock gap of STARTUP_SLEEP_GAP_MS or more beyond the tick's interval, which restarts
+   * the budget.
+   */
+  private count(): void {
+    const now = this.wallMs();
+    const elapsed = Math.max(0, now - this.budget.at); // a wall clock set back counts nothing
+    this.budget.at = now;
+    if (this.hidden) return;
+    if (elapsed - this.budget.interval >= STARTUP_SLEEP_GAP_MS) {
+      this.budget.left = this.timeoutMs;
+      this.counted = 0;
+      this.deps.onLog?.(`BD-J start-up timeout restarted: the host did not run for ${Math.round(elapsed / 1000)} s`, false);
+      return;
+    }
+    let active = elapsed;
+    if (this.ioPending && !this.ioCeilingReached) {
+      const waited = Math.min(elapsed, IO_PAUSE_CEILING_MS - this.ioWaitMs);
+      this.ioWaitMs += waited;
+      active -= waited;
+      if (this.ioWaitMs >= IO_PAUSE_CEILING_MS) {
+        this.ioCeilingReached = true;
+        this.deps.onLog?.(`BD-J start-up timeout: the worker has waited on its reads for ${IO_PAUSE_CEILING_MS / 1000} s in all; waiting counts from now on`, true);
+      }
+    }
+    this.budget.left -= active;
+    this.counted += active;
+  }
+
+  /**
+   * Fires the start-up timeout once the budget is spent; otherwise sets the next tick (none while hidden). Ticks go on
+   * while the worker waits on I/O, so the R26 ceiling is noticed while a read stays pending.
+   */
+  private tick(): void {
+    this.cancelTimeout = null;
+    if (this.budget.left <= 0) {
+      this.ticking = false;
+      this.timeout(`no playlist was selected and nothing was shown within ${this.timeoutMs / 1000} s`);
+      return;
+    }
+    if (this.hidden) return; // setHidden(false) sets the next tick
+    const ms = Math.min(STARTUP_TICK_MS, this.budget.left);
+    this.budget.interval = ms;
+    this.cancelTimeout = this.deps.setTimer(ms, () => {
+      this.count();
+      this.tick();
+    });
+  }
+
+  /**
+   * The page was hidden or shown (the engine's `visibility` command). Hidden time is not counted, and a shown page
+   * sets a fresh tick at once, since browsers throttle a hidden page's timers.
+   */
+  setHidden(hidden: boolean): void {
+    if (hidden === this.hidden) return;
+    // shown again: a NAS disc's write-ahead copy goes to the NAS now (ruling R17), as the hide's flush may not have got it there
+    if (!hidden) this.flush();
+    this.pause(() => (this.hidden = hidden));
+  }
+
+  /** The worker started or stopped waiting on its own I/O (its `io` message, Task 7g). */
+  private setIoPending(pending: boolean): void {
+    if (pending !== this.ioPending) this.pause(() => (this.ioPending = pending));
+  }
+
+  /** Changes what pauses the budget: the time up to now counts as the state it was spent in, then a fresh tick. */
+  private pause(change: () => void): void {
+    if (!this.ticking || this.stopped) {
+      change();
+      return;
+    }
+    this.cancelTimeout?.();
+    this.count();
+    this.budget.interval = 0;
+    change();
+    this.tick();
   }
 
   /** The start-up timeout: the engine's side and the worker's thread dump go to the log, then the session fails. */
@@ -160,24 +308,57 @@ export class BdjSession {
     return this.activityCount;
   }
 
-  /** Terminates the worker; nothing it sent afterwards is acted on. */
-  stop(): void {
-    if (this.stopped) return;
+  /** The page is going away (pagehide) or is shown again: the worker saves its storage changes now. */
+  flush(): void {
+    if (!this.stopped && this.storage) this.post({ type: 'flush' });
+  }
+
+  /**
+   * Terminates the worker; nothing it sent afterwards is acted on. When it has storage scopes, it first saves them
+   * (stop, then stopped; at most STOP_SAVE_WAIT_MS), even if no unsaved change has been heard of yet (one may be on its
+   * way). Settles once the worker is terminated.
+   */
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.stopped = true;
+    this.ticking = false;
     this.cancelTimeout?.();
     this.cancelTimeout = null;
-    this.deps.worker.onmessage = null;
-    this.deps.worker.onerror = null;
-    this.deps.worker.terminate();
     this.bootDone?.();
     this.bootDone = null;
+    const worker = this.deps.worker;
+    worker.onerror = null;
+    if (!this.storage) {
+      worker.onmessage = null;
+      worker.terminate();
+      return (this.stopping = Promise.resolve());
+    }
+    return (this.stopping = new Promise<void>((resolve) => {
+      const done = (): void => {
+        cancel();
+        worker.onmessage = null;
+        worker.onerror = null;
+        worker.terminate();
+        resolve();
+      };
+      const cancel = this.deps.setTimer(STOP_SAVE_WAIT_MS, () => {
+        this.deps.onLog?.(`BD-J worker did not save its storage within ${STOP_SAVE_WAIT_MS} ms of the stop`, true);
+        done();
+      });
+      worker.onmessage = (e) => {
+        if (e.data.type === 'stopped') done();
+        else if (e.data.type === 'log') this.deps.onLog?.(e.data.line, e.data.error);
+      };
+      worker.onerror = () => done();
+      this.post({ type: 'stop' });
+    }));
   }
 
   private receive(m: FromBdj): void {
     if (this.stopped) return;
     // after the start-up timeout only the dump is waited for: Java is refused as after stop() (nothing it sends is
     // acted on), so a playlist it selects now does not play behind the fallback
-    if (this.timedOut && m.type !== 'log' && m.type !== 'dumped') return;
+    if (this.timedOut && m.type !== 'log' && m.type !== 'dumped' && m.type !== 'unsaved') return;
     switch (m.type) {
       case 'booted':
         this.deps.onLog?.(`BD-J booted in ${Math.round(m.bootMs)} ms`, false);
@@ -207,6 +388,17 @@ export class BdjSession {
         break;
       case 'dumped':
         this.timedOut?.();
+        break;
+      case 'unsaved':
+        this.storage = true;
+        break;
+      case 'io':
+        this.setIoPending(m.pending);
+        break;
+      case 'storageLost':
+        this.deps.onStorageLost?.(m.reason);
+        break;
+      case 'stopped':
         break;
     }
   }
@@ -253,10 +445,16 @@ export class BdjSession {
 
   /** Java showed it runs: the start-up timeout is cancelled, once. */
   private alive(what: string): void {
-    if (this.startedAt === null || this.cancelTimeout === null) return;
-    this.cancelTimeout();
+    if (!this.ticking || this.startedAt === null) return;
+    this.count();
+    this.ticking = false;
+    this.cancelTimeout?.();
     this.cancelTimeout = null;
-    this.deps.onLog?.(`BD-J ${what} ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot`, false);
+    this.deps.onLog?.(
+      `BD-J ${what} ${Math.round(this.deps.nowMs() - this.startedAt)} ms after boot ` +
+        `(${Math.round(this.counted)} ms of the start-up timeout counted; ${Math.round(this.ioWaitMs)} ms waiting on reads)`,
+      false,
+    );
   }
 
   private send(m: ToBdj): void {

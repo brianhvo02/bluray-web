@@ -189,7 +189,7 @@ export function parseGateArgs(argv: readonly string[]): GateOptions {
 // ---------------------------------------------------------------------------------------------------------------------
 // Drivers: one page in one browser or device
 
-interface GateDriver {
+export interface GateDriver {
   readonly touch: boolean;
   /** What drove the browser, for the result. */
   readonly via: string;
@@ -420,12 +420,26 @@ function screenLocked(): Promise<boolean> {
   return new Promise((res) => execFile('ioreg', ['-n', 'Root', '-d1', '-a'], (err, out) => res(!err && /<key>CGSSessionScreenIsLocked<\/key>\s*<true\/>/.test(out))));
 }
 
-async function startDriver(o: GateOptions): Promise<GateDriver> {
-  if (o.target.startsWith('ios:')) return SafariDriver.start(o.port + 1, o.target.slice(4));
-  if (o.target.startsWith('sim:') || /^[0-9A-Fa-f-]{20,}$/.test(o.target)) return AppiumDriver.start(o.target, o.callTimeoutMs);
-  if (['chrome', 'firefox', 'firefox-pw', 'webkit'].includes(o.target)) return PlaywrightDriver.start(o.target, o.headless, o.touch);
-  if (o.target === 'safari') return SafariDriver.start(o.port + 1, null);
-  throw new Error(`unknown target ${o.target}\n${USAGE}`);
+export interface DriverOptions {
+  /** safaridriver's port (ios:<udid> and safari). */
+  readonly driverPort: number;
+  readonly headless: boolean;
+  readonly touch: boolean;
+  /** Appium's per-call timeout. */
+  readonly callTimeoutMs: number;
+}
+
+/** A driver for one target (see the targets above); live-check.ts uses it too. */
+export function startTargetDriver(target: string, o: DriverOptions): Promise<GateDriver> {
+  if (target.startsWith('ios:')) return SafariDriver.start(o.driverPort, target.slice(4));
+  if (target.startsWith('sim:') || /^[0-9A-Fa-f-]{20,}$/.test(target)) return AppiumDriver.start(target, o.callTimeoutMs);
+  if (['chrome', 'firefox', 'firefox-pw', 'webkit'].includes(target)) return PlaywrightDriver.start(target, o.headless, o.touch);
+  if (target === 'safari') return SafariDriver.start(o.driverPort, null);
+  throw new Error(`unknown target ${target}\n${USAGE}`);
+}
+
+function startDriver(o: GateOptions): Promise<GateDriver> {
+  return startTargetDriver(o.target, { driverPort: o.port + 1, headless: o.headless, touch: o.touch, callTimeoutMs: o.callTimeoutMs });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -459,12 +473,12 @@ const visibleExpr = (sel: string): string =>
 const BAR_SHOWN = "(() => { const b = document.querySelector('[data-testid=control-bar]'); return !!b && !b.classList.contains('hidden'); })()";
 
 /** A point in a band of the canvas off the 1920x1080 picture (top letterbox, else left pillarbox), or null. */
-const BAND_POINT =
+export const BAND_POINT =
   "(() => { const r = document.querySelector('[data-testid=video-canvas]').getBoundingClientRect(); const s = Math.min(r.width / 1920, r.height / 1080);" +
   ' const top = (r.height - 1080 * s) / 2; const left = (r.width - 1920 * s) / 2;' +
   ' return top > 12 ? { x: r.x + r.width / 2, y: r.y + top / 2 } : left > 12 ? { x: r.x + left / 2, y: r.y + r.height / 2 } : null; })()';
 
-class Page {
+export class Page {
   private marker = '';
   constructor(readonly d: GateDriver) {}
 
@@ -618,6 +632,58 @@ export async function openRemote(ops: RemoteOps, tries = 3): Promise<FirstTap | 
   return { tapsIgnoredBefore: before, tapsIgnoredAfter: after, ignored, tapTarget, remoteOpened: opened, how };
 }
 
+/**
+ * The page operations openRemote needs, on a gate Page. `tapPoint` is the plane point (1920x1080) the first tap goes to:
+ * a point the disc ignores, so the tap opens the remote (5d spec §4.2).
+ */
+export function remoteOpsFor(page: Page, tapPoint: readonly [number, number]): RemoteOps {
+  const remoteShown = "!!document.querySelector('[data-testid=remote-pad]')";
+  return {
+    remoteOpen: async () => page.probe<boolean>(remoteShown, 'the remote'),
+    tapsIgnored: async () => (await page.snapshot('the remote')).t?.bdjPlane?.tapsIgnored ?? 0,
+    tapMenu: async () => {
+      const [px, py] = tapPoint;
+      const p = await page.planePoint(px, py, 'a tap on the menu');
+      // what the tap will land on: the canvas, or something over it (the buffering spinner took it on the iPhone)
+      const target = await page.probe<string | null>(
+        `(() => { const e = document.elementFromPoint(${p.x}, ${p.y}); return e ? (e.getAttribute('data-testid') ?? (e.className || e.tagName.toLowerCase())) : null; })()`,
+        'a tap on the menu',
+      );
+      await page.d.tap(p.x, p.y);
+      return target;
+    },
+    waitRemote: async (ms) =>
+      page.until<boolean>(remoteShown, 'the remote', ms).catch((err: unknown) => {
+        if (err instanceof PageReloadedError) throw err;
+        return false;
+      }),
+    barShown: async () => page.probe<boolean>(BAR_SHOWN, 'the controls'),
+    showControls: async () => {
+      // a tap off the picture (a letterbox or pillarbox band) shows the controls without reaching the disc (R13, R14);
+      // where the picture fills the canvas, a long press does (R15)
+      const band = await page.probe<{ x: number; y: number } | null>(BAND_POINT, 'the letterbox');
+      let how: string;
+      if (band) {
+        await page.d.tap(band.x, band.y);
+        how = 'a tap off the picture';
+      } else if (page.d.longPress) {
+        const [px, py] = tapPoint;
+        const p = await page.planePoint(px, py, 'a long press on the menu');
+        await page.d.longPress(p.x, p.y, 800);
+        how = 'a long press';
+      } else {
+        return 'nothing (no band and no long press on this driver)';
+      }
+      await page.until<boolean>(BAR_SHOWN, 'the controls', 1500).catch((err: unknown) => {
+        if (err instanceof PageReloadedError) throw err;
+        return false;
+      });
+      return how;
+    },
+    tapRemoteToggle: async () => page.tapOn('[data-testid=remote-toggle]', 'the remote button'),
+  };
+}
+
 export interface GateResult {
   target: string;
   via: string;
@@ -727,52 +793,7 @@ class DiscRun {
 
   /** On a touch target, makes sure the on-screen remote shows: a tap on the menu the disc ignores opens it. */
   private async ensureRemote(): Promise<void> {
-    const page = this.page;
-    const remoteShown = "!!document.querySelector('[data-testid=remote-pad]')";
-    const ops: RemoteOps = {
-      remoteOpen: async () => page.probe<boolean>(remoteShown, 'the remote'),
-      tapsIgnored: async () => (await page.snapshot('the remote')).t?.bdjPlane?.tapsIgnored ?? 0,
-      tapMenu: async () => {
-        const [px, py] = this.cfg.tapPoint;
-        const p = await page.planePoint(px, py, 'a tap on the menu');
-        // what the tap will land on: the canvas, or something over it (the buffering spinner took it on the iPhone)
-        const target = await page.probe<string | null>(
-          `(() => { const e = document.elementFromPoint(${p.x}, ${p.y}); return e ? (e.getAttribute('data-testid') ?? (e.className || e.tagName.toLowerCase())) : null; })()`,
-          'a tap on the menu',
-        );
-        await page.d.tap(p.x, p.y);
-        return target;
-      },
-      waitRemote: async (ms) =>
-        page.until<boolean>(remoteShown, 'the remote', ms).catch((err: unknown) => {
-          if (err instanceof PageReloadedError) throw err;
-          return false;
-        }),
-      barShown: async () => page.probe<boolean>(BAR_SHOWN, 'the controls'),
-      showControls: async () => {
-        // a tap off the picture (a letterbox or pillarbox band) shows the controls without reaching the disc (R13, R14);
-        // where the picture fills the canvas, a long press does (R15)
-        const band = await page.probe<{ x: number; y: number } | null>(BAND_POINT, 'the letterbox');
-        let how: string;
-        if (band) {
-          await page.d.tap(band.x, band.y);
-          how = 'a tap off the picture';
-        } else if (page.d.longPress) {
-          const [px, py] = this.cfg.tapPoint;
-          const p = await page.planePoint(px, py, 'a long press on the menu');
-          await page.d.longPress(p.x, p.y, 800);
-          how = 'a long press';
-        } else {
-          return 'nothing (no band and no long press on this driver)';
-        }
-        await page.until<boolean>(BAR_SHOWN, 'the controls', 1500).catch((err: unknown) => {
-          if (err instanceof PageReloadedError) throw err;
-          return false;
-        });
-        return how;
-      },
-      tapRemoteToggle: async () => page.tapOn('[data-testid=remote-toggle]', 'the remote button'),
-    };
+    const ops = remoteOpsFor(this.page, this.cfg.tapPoint);
     const first = await openRemote(ops);
     if (!first) return;
     this.r.firstTap ??= first;
@@ -843,7 +864,14 @@ class DiscRun {
       const rec: StepRecord = { n: ps.n, step: s.text, ms: 0, ok: true };
       switch (s.kind) {
         case 'waitPlaylist':
-          await this.page.until(`document.querySelector('[data-testid=player]')?.getAttribute('data-playlist') === ${JSON.stringify(pad5(s.playlist))}`, s.text, 180_000);
+          // `wait playlist any`: some playlist is playing (the device page shows only the current one)
+          await this.page.until(
+            s.playlist === null
+              ? `(document.querySelector('[data-testid=player]')?.getAttribute('data-playlist') ?? '') !== ''`
+              : `document.querySelector('[data-testid=player]')?.getAttribute('data-playlist') === ${JSON.stringify(pad5(s.playlist))}`,
+            s.text,
+            180_000,
+          );
           break;
         case 'waitFlush':
           await this.page.until(`(window.__blurayTelemetry?.bdjPlane?.flushes ?? 0) >= ${s.n}`, s.text, 90_000);
@@ -886,7 +914,7 @@ class DiscRun {
   }
 }
 
-async function environment(page: Page): Promise<unknown> {
+export async function environment(page: Page): Promise<unknown> {
   return page.d.evaluateAsync(
     `(async () => { const hevc = async (codec) => { try { return (await VideoDecoder.isConfigSupported({ codec, codedWidth: 1920, codedHeight: 1080 })).supported === true; } catch { return false; } };` +
       ` return { userAgent: navigator.userAgent, crossOriginIsolated, hardwareConcurrency: navigator.hardwareConcurrency, deviceMemory: navigator.deviceMemory ?? null,` +

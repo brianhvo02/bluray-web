@@ -538,7 +538,12 @@ export class Scheduler {
     this.makeRunnable(t);
   }
 
-  /** Frees the monitor and hands it on: a woken waiter takes it with its count, a blocked entrant retries. */
+  /**
+   * Frees a monitor and hands it on: to a waiter woken by notify (it takes the monitor back), or to the first thread
+   * blocked entering. Ruling R19: either way the releasing thread's slice ends here (preempt), so the thread handed the
+   * monitor runs before the releaser goes on, as on HotSpot, where it runs in parallel at once. Without it, a MediaTracker
+   * waiter woken by an image's "complete" only ran after the fetcher had also reported its late error.
+   */
   private release(m: Monitor): void {
     m.owner = null;
     m.count = 0;
@@ -547,12 +552,14 @@ export class Scheduler {
     const re = this.reacquiring.get(next);
     if (!re) {
       this.makeRunnable(next);
+      this.preempt();
       return;
     }
     this.reacquiring.delete(next);
     m.owner = next;
     m.count = re.count;
     this.resume(next, re.result);
+    this.preempt();
   }
 
   private endWait(t: JThread, result: () => NativeResult): void {

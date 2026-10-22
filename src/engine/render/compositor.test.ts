@@ -101,6 +101,22 @@ describe('Compositor.drawPg', () => {
 describe('Compositor.drawText', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('forgets the last frame when a playlist starts, and lays text over the 1920×1080 screen only without a picture', () => {
+    const mainCtx = new Proxy({}, { get: () => () => undefined });
+    const main = { width: 1000, height: 1000, getContext: () => mainCtx } as unknown as OffscreenCanvas;
+    const compositor = new Compositor(main, () => ({}) as OffscreenCanvas);
+    const calls: unknown[][] = [];
+    const renderer = { render: (...args: unknown[]) => { calls.push(args); return 1; }, changed: () => false, visible: () => false };
+    const opts = { offsetUs: 0, scale: 1 };
+    compositor.drawVideo({ displayWidth: 640, displayHeight: 480, codedWidth: 640, codedHeight: 480 } as unknown as VideoFrame);
+    compositor.startPlaylist(false);
+    compositor.drawText(renderer, 5, opts);
+    expect(calls.map((c) => c.slice(2))).toEqual([[{ x: 0, y: 218, width: 1000, height: 563 }, { ...opts, storage: null }]]);
+    compositor.startPlaylist(true); // a playlist with a picture: nothing until its first frame
+    compositor.drawText(renderer, 5, opts);
+    expect(calls).toHaveLength(1);
+  });
+
   it('hands the renderer the main context and the fitted rectangle of the last frame', () => {
     const mainCtx = new Proxy({}, { get: () => () => undefined });
     const main = { width: 1000, height: 1000, getContext: () => mainCtx } as unknown as OffscreenCanvas;

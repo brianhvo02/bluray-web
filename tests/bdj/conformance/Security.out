@@ -1,0 +1,11 @@
+declared members of a foreign class: denied java.lang.RuntimePermission "accessDeclaredMembers" ""; access denied ("java.lang.RuntimePermission" "accessDeclaredMembers")
+public members of a foreign class: ok some
+read user.home: denied java.util.PropertyPermission "user.home" "read"; access denied ("java.util.PropertyPermission" "user.home" "read")
+read java.version: ok set
+write java.version: denied java.util.PropertyPermission "java.version" "write"; access denied ("java.util.PropertyPermission" "java.version" "write")
+root thread group: denied java.lang.RuntimePermission "modifyThreadGroup" ""; access denied ("java.lang.RuntimePermission" "modifyThreadGroup")
+own thread group: ok main
+create class loader: denied java.lang.RuntimePermission "createClassLoader" ""; access denied ("java.lang.RuntimePermission" "createClassLoader")
+exit: denied java.lang.RuntimePermission "exitVM.0" ""; access denied ("java.lang.RuntimePermission" "exitVM.0")
+thread started by untrusted code reads user.home: ok denied access denied ("java.util.PropertyPermission" "user.home" "read")
+trusted read java.version: set

@@ -1,8 +1,8 @@
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import { VitePWA } from 'vite-plugin-pwa';
 import type { Plugin } from 'vite';
+import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -16,7 +16,8 @@ const crossOriginIsolation = {
 /**
  * The isolation headers on every response, 304s too: `server.headers`/`preview.headers` reach only full responses (sirv
  * leaves them off a 304), and WebKit refuses a worker whose revalidated script answers 304 without COEP, so a second
- * page load in a tab (a reload, or a link opened after the app) got no engine worker.
+ * page load in a tab (a reload, or a link opened after the app) got no engine worker, and a BD-J disc opened a second
+ * time got no BD-J worker.
  */
 const isolateEveryResponse: Plugin = {
   name: 'isolate-every-response',

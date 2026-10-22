@@ -218,7 +218,7 @@ describe('after JDK boot', () => {
     return out;
   }
 
-  it.each(['Arith', 'Arrays', 'Exceptions', 'Init', 'Strings', 'Collections', 'Reflect', 'Threads'])(
+  it.each(['Arith', 'Arrays', 'Exceptions', 'Init', 'Strings', 'Collections', 'Reflect', 'Threads', 'Sorted', 'Rmi', 'FieldReflect'])(
     '%s prints what HotSpot prints',
     async (name) => {
       const expected = new TextDecoder().decode(file(`./conformance/${name}.out`));
@@ -305,7 +305,7 @@ describe('I/O and zip on the JDK class path alone', () => {
     await jvm.boot();
   }, 60_000);
 
-  it.each(['Io', 'Zip', 'Threads'])(
+  it.each(['Io', 'Zip', 'Threads', 'Urls', 'Net', 'Dates', 'Awt'])(
     '%s prints what HotSpot prints',
     async (name) => {
       await runCapturing(jvm, io, `conformance/${name}`);
@@ -313,6 +313,26 @@ describe('I/O and zip on the JDK class path alone', () => {
     },
     60_000,
   );
+
+  // HotSpot wrote under java.io.tmpdir; a disc writes under /persistent
+  it('FileWriting prints what HotSpot prints, under /persistent', async () => {
+    const args = jvm.heap.newArray(jvm.loader.arrayOf(jvm.bootClass('java/lang/String')), 1) as JArray;
+    (args.data as JValue[])[0] = jvm.heap.newString('/persistent');
+    await runCapturing(jvm, io, 'conformance/FileWriting', 'main', '([Ljava/lang/String;)V', [args]);
+    expect(io.out).toBe(new TextDecoder().decode(file('./conformance/FileWriting.out')));
+  }, 60_000);
+});
+
+// Ruling R20: AccessController.checkPermission under the JDK's policy file, as libbluray's BDJSecurityManager falls back
+// on it. The program installs a security manager, so it has a JVM of its own.
+describe('access control under a security manager', () => {
+  it('Security prints what HotSpot prints', async () => {
+    const io = { out: '', err: '' };
+    const jvm = bootedJvm((s) => (io.out += s), (s) => (io.err += s), [RT, file('./conformance.jar')]);
+    await jvm.boot();
+    await runCapturing(jvm, io, 'conformance/Security');
+    expect(io.out).toBe(new TextDecoder().decode(file('./conformance/Security.out')));
+  }, 60_000);
 });
 
 // Green threads switch only between bytecodes, but they do switch inside java.util.concurrent's read-then-CAS loops,

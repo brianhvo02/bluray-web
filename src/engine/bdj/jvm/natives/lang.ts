@@ -184,20 +184,103 @@ function defineClass(jvm: Jvm, loader: JObject | null, name: JValue, b: JValue, 
   return retrying(() => jvm.mirror(jvm.loader.define(internal, bytes, loader, pd as JObject | null)));
 }
 
-/** doPrivileged: runs the action; a checked exception becomes PrivilegedActionException, as JVM_DoPrivileged does. */
-function doPrivileged(jvm: Jvm, t: JThread, action: JValue, iface: string): NativeResult {
+/** A frame that called AccessController.doPrivileged, while the action runs: where a stack walk stops (Ruling R20). */
+interface PrivilegedFrame {
+  readonly frame: object;
+  /** The protection domain of the class that called doPrivileged (null: a boot class, fully trusted). */
+  readonly domain: JObject | null;
+  /** The AccessControlContext passed to doPrivileged, or null. */
+  readonly context: JObject | null;
+}
+
+/** Each thread's frames inside doPrivileged, innermost last. */
+const privilegedFrames = new WeakMap<JThread, PrivilegedFrame[]>();
+
+/**
+ * doPrivileged: runs the action with its caller marked privileged until it returns or throws (getStackAccessControlContext
+ * stops there); a checked exception becomes PrivilegedActionException, as the JDK specifies.
+ */
+function doPrivileged(jvm: Jvm, t: JThread, action: JValue, iface: string, context: JValue = null): NativeResult {
   if (action === null) return jvm.throwNew('java/lang/NullPointerException');
   const a = action as JObject;
   const m = selectMethod(a.cls, method(jvm.bootClass(iface), 'run()Ljava/lang/Object;'));
   if (!m) return jvm.throwNew('java/lang/AbstractMethodError', `${externalName(a.cls.name)}.run()`);
-  return new Invoke(m, [a], (r) => r ?? null, (e) => {
-    const exception = jvm.bootClass('java/lang/Exception');
-    const runtime = jvm.bootClass('java/lang/RuntimeException');
-    if (e.cls.isSubclassOf(exception) && !e.cls.isSubclassOf(runtime)) {
-      return throwConstructed(jvm, t, 'java/security/PrivilegedActionException', '(Ljava/lang/Exception;)V', [e]);
+  // the top frame is this native's marker; the one under it called doPrivileged
+  const caller = t.frames[t.frames.length - 2];
+  let stack = privilegedFrames.get(t);
+  if (!stack) privilegedFrames.set(t, (stack = []));
+  const entry: PrivilegedFrame | null = caller ? { frame: caller, domain: caller.method.cls.protectionDomain, context: context as JObject | null } : null;
+  if (entry) stack.push(entry);
+  const marks = stack;
+  const done = (): void => {
+    if (!entry) return;
+    const i = marks.lastIndexOf(entry);
+    if (i >= 0) marks.splice(i, 1);
+  };
+  return new Invoke(
+    m,
+    [a],
+    (r) => {
+      done();
+      return r ?? null;
+    },
+    (e) => {
+      done();
+      const exception = jvm.bootClass('java/lang/Exception');
+      const runtime = jvm.bootClass('java/lang/RuntimeException');
+      if (e.cls.isSubclassOf(exception) && !e.cls.isSubclassOf(runtime)) {
+        return throwConstructed(jvm, t, 'java/security/PrivilegedActionException', '(Ljava/lang/Exception;)V', [e]);
+      }
+      return new ThrowResult(e);
+    },
+  );
+}
+
+/**
+ * AccessController.getStackAccessControlContext (Ruling R20): the protection domains of the methods on the calling
+ * thread's stack, innermost first, up to and including the innermost caller of doPrivileged, whose own domain counts
+ * and whose context argument becomes the privileged context. Boot classes (null domain) add nothing. Null only for a
+ * privileged walk that found no domain and no privileged context (trusted code inside doPrivileged: nothing to check).
+ * Otherwise a context, with a null domain array when no domain was found: an unprivileged stack of trusted code still
+ * has its thread's inherited context, which AccessControlContext.optimize merges in (a thread started by restricted
+ * code stays restricted), as the JDK specifies.
+ */
+function stackAccessControlContext(jvm: Jvm, t: JThread): JObject | null {
+  const frames = t.frames;
+  const privileged = privilegedFrames.get(t);
+  const domains: JObject[] = [];
+  let isPrivileged = false;
+  let privilegedContext: JObject | null = null;
+  // the top frame is this native's marker
+  for (let i = frames.length - 2; i >= 0; i--) {
+    const f = frames[i]!;
+    let mark: PrivilegedFrame | undefined;
+    if (privileged?.length) {
+      for (let k = privileged.length - 1; k >= 0; k--) {
+        if (privileged[k]!.frame === f) {
+          mark = privileged[k];
+          break;
+        }
+      }
     }
-    return new ThrowResult(e);
-  });
+    const domain = mark ? mark.domain : f.method.cls.protectionDomain;
+    // de-duplicated over the whole stack (HotSpot drops only consecutive repeats): a check against a set of domains is
+    // the same either way, so neither side needs "fixing" to match the other
+    if (domain !== null && !domains.includes(domain)) domains.push(domain);
+    if (mark) {
+      isPrivileged = true;
+      privilegedContext = mark.context;
+      break;
+    }
+  }
+  if (domains.length === 0 && isPrivileged && privilegedContext === null) return null;
+  const acc = jvm.heap.newObject(jvm.bootClass('java/security/AccessControlContext'));
+  const array = domains.length ? jvm.newArray(jvm.bootClass('java/security/ProtectionDomain'), domains) : null;
+  jvm.setField(acc, 'context', '[Ljava/security/ProtectionDomain;', array);
+  jvm.setField(acc, 'isPrivileged', 'Z', isPrivileged ? 1 : 0);
+  jvm.setField(acc, 'isAuthorized', 'Z', 1);
+  jvm.setField(acc, 'privilegedContext', 'Ljava/security/AccessControlContext;', privilegedContext);
+  return acc;
 }
 
 function setProperties(jvm: Jvm, props: JObject): NativeResult {
@@ -413,6 +496,9 @@ export function registerLangNatives(table: NativeTable): void {
       return bits.getFloat64(0);
     },
 
+    // System.getenv sees no variables. This deliberately differs from libbluray, where xlets under HotSpot see the real
+    // process environment: a browser has no environment to show them
+    'java/lang/ProcessEnvironment.environ()[[B': (ctx) => ctx.jvm.newArray(ctx.jvm.loader.arrayOf(ctx.jvm.loader.primitive('B')), []),
     'java/lang/Runtime.availableProcessors()I': () => 1,
     'java/lang/Runtime.freeMemory()J': () => MEMORY,
     'java/lang/Runtime.totalMemory()J': () => MEMORY,
@@ -496,13 +582,13 @@ export function registerLangNatives(table: NativeTable): void {
 
     'java/security/AccessController.doPrivileged(Ljava/security/PrivilegedAction;)Ljava/lang/Object;': (ctx, a) =>
       doPrivileged(ctx.jvm, ctx.thread, a, 'java/security/PrivilegedAction'),
-    'java/security/AccessController.doPrivileged(Ljava/security/PrivilegedAction;Ljava/security/AccessControlContext;)Ljava/lang/Object;': (ctx, a) =>
-      doPrivileged(ctx.jvm, ctx.thread, a, 'java/security/PrivilegedAction'),
+    'java/security/AccessController.doPrivileged(Ljava/security/PrivilegedAction;Ljava/security/AccessControlContext;)Ljava/lang/Object;': (ctx, a, c) =>
+      doPrivileged(ctx.jvm, ctx.thread, a, 'java/security/PrivilegedAction', c),
     'java/security/AccessController.doPrivileged(Ljava/security/PrivilegedExceptionAction;)Ljava/lang/Object;': (ctx, a) =>
       doPrivileged(ctx.jvm, ctx.thread, a, 'java/security/PrivilegedExceptionAction'),
-    'java/security/AccessController.doPrivileged(Ljava/security/PrivilegedExceptionAction;Ljava/security/AccessControlContext;)Ljava/lang/Object;': (ctx, a) =>
-      doPrivileged(ctx.jvm, ctx.thread, a, 'java/security/PrivilegedExceptionAction'),
-    'java/security/AccessController.getStackAccessControlContext()Ljava/security/AccessControlContext;': () => null,
+    'java/security/AccessController.doPrivileged(Ljava/security/PrivilegedExceptionAction;Ljava/security/AccessControlContext;)Ljava/lang/Object;': (ctx, a, c) =>
+      doPrivileged(ctx.jvm, ctx.thread, a, 'java/security/PrivilegedExceptionAction', c),
+    'java/security/AccessController.getStackAccessControlContext()Ljava/security/AccessControlContext;': (ctx) => stackAccessControlContext(ctx.jvm, ctx.thread),
     'java/security/AccessController.getInheritedAccessControlContext()Ljava/security/AccessControlContext;': (ctx) => {
       const t = ctx.thread.javaThread;
       return t ? ctx.jvm.getField(t, 'inheritedAccessControlContext', 'Ljava/security/AccessControlContext;') : null;

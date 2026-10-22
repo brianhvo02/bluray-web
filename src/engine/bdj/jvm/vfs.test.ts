@@ -328,3 +328,107 @@ describe('paths', () => {
     expect(vfs.memoryStats().memUsed).toBe(1);
   });
 });
+
+describe('storage scopes (setQuota, importFiles, exportFiles, onChange)', () => {
+  it("counts a NAS scope's quota as its ustar archive (ruling R24): 512 per file, its length in 512s, 1024 at the end", () => {
+    const full: string[] = [];
+    const { vfs } = make({ onFull: (path) => full.push(path) });
+    vfs.mkdir('/persistent/7fff0123');
+    vfs.setQuota('/persistent/7fff0123', 4096, false, 'tar');
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(1024); // the end blocks
+    writeFile(vfs, '/persistent/7fff0123/a', 'x'); // 512 + 512
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2048);
+    // a second file of 1536 bytes makes exactly 4096 (accepted, as the NAS takes a body of exactly its limit)
+    const h = vfs.open('/persistent/7fff0123/b', 'w')!;
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2560);
+    expect(vfs.write(h, new Uint8Array(1536), 0, 1536)).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(4096);
+    // one byte more needs another block; a new file needs its header: both refused
+    expect(vfs.write(h, new Uint8Array(1), 0, 1)).toBe(false);
+    expect(vfs.open('/persistent/7fff0123/c', 'w')).toBeNull();
+    expect(full).toEqual(['/persistent/7fff0123/b', '/persistent/7fff0123/c']);
+    // emptying a file gives its blocks back, not its header
+    expect(vfs.truncate(h, 0)).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2560);
+  });
+
+  it('a quota limits the files under its directory, beside the memory limit, and onFull names it', () => {
+    const full: string[] = [];
+    const { vfs } = make({ onFull: (path, limit, dir) => full.push(`${path} ${limit} ${dir}`) });
+    vfs.mkdir('/persistent/7fff0123');
+    vfs.mkdir('/persistent/7fff0123/1');
+    writeFile(vfs, '/persistent/7fff0123/1/old', '12');
+    vfs.setQuota('/persistent/7fff0123', 6);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2); // counted at once
+    const h = vfs.open('/persistent/7fff0123/1/new', 'w')!;
+    expect(vfs.write(h, enc.encode('1234'), 0, 4)).toBe(true);
+    expect(vfs.fits(h, 1)).toBe(false);
+    expect(vfs.write(h, enc.encode('5'), 0, 1)).toBe(false);
+    expect(vfs.truncate(h, 5)).toBe(false);
+    expect(full).toEqual(Array(3).fill('/persistent/7fff0123/1/new 6 /persistent/7fff0123'));
+    // elsewhere is not limited
+    vfs.mkdir('/persistent/other');
+    writeFile(vfs, '/persistent/other/x', '123456789');
+    writeFile(vfs, '/tmp/x', '123456789');
+    // a delete frees room in the scope; a rename into it counts there and is refused when it does not fit
+    expect(vfs.delete('/persistent/7fff0123/1/old')).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(4);
+    expect(vfs.rename('/tmp/x', '/persistent/7fff0123/x')).toBe(false);
+    expect(vfs.stat('/tmp/x')?.size).toBe(9);
+    writeFile(vfs, '/tmp/y', '12');
+    expect(vfs.rename('/tmp/y', '/persistent/7fff0123/y')).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(6);
+    // a directory renamed out of the scope takes its files' room with it
+    expect(vfs.rename('/persistent/7fff0123/1', '/persistent/moved')).toBe(true);
+    expect(vfs.quotaUsed('/persistent/7fff0123')).toBe(2);
+    expect(vfs.memoryStats().memUsed).toBe(4 + 9 + 9 + 2);
+  });
+
+  it('imports a snapshot with its mtimes (not a change), and exports a scope without a copy that later writes leave alone', () => {
+    const changes: string[] = [];
+    const { vfs } = make({ onChange: (path, change, to) => changes.push(`${change} ${path}${to ? ` ${to}` : ''}`) });
+    const stored = enc.encode('saved');
+    vfs.importFiles('/buda/7fff0123/abc', [{ path: '1/a.dat', mtime: 1_700_000_000_000, bytes: stored }, { path: '../escape', mtime: 0, bytes: stored }]);
+    expect(changes).toEqual([]);
+    expect(readAll(vfs, '/buda/7fff0123/abc/1/a.dat')).toBe('saved');
+    expect(vfs.stat('/buda/7fff0123/abc/1/a.dat')?.mtimeMs).toBe(1_700_000_000_000);
+    expect(vfs.stat('/buda/7fff0123/escape')).toBeNull();
+    expect(vfs.memoryStats().memUsed).toBe(5);
+    // a write goes to a copy: the imported bytes stay as stored
+    const h = vfs.open('/buda/7fff0123/abc/1/a.dat', 'rw')!;
+    expect(vfs.write(h, enc.encode('S'), 0, 1)).toBe(true);
+    expect(dec.decode(stored)).toBe('saved');
+    const out = vfs.exportFiles('/buda/7fff0123/abc');
+    expect(out.map((f) => [f.path, dec.decode(f.bytes), f.mtime])).toEqual([['1/a.dat', 'Saved', 100]]);
+    h.position = 0;
+    expect(vfs.write(h, enc.encode('x'), 0, 1)).toBe(true);
+    expect(dec.decode(out[0]!.bytes)).toBe('Saved');
+    expect(vfs.exportFiles('/buda/missing')).toEqual([]);
+    expect(changes).toEqual(['write /buda/7fff0123/abc/1/a.dat', 'write /buda/7fff0123/abc/1/a.dat']);
+  });
+
+  it('reports each change on a memory mount, canonical, after it is made', () => {
+    const changes: string[] = [];
+    const { vfs } = make({ onChange: (path, change, to) => changes.push(`${change} ${path}${to ? ` ${to}` : ''}`) });
+    vfs.mkdir('/persistent/o');
+    writeFile(vfs, '/persistent/o/./f', 'ab');
+    writeFile(vfs, '/persistent/o/f', 'c');
+    const h = vfs.open('/persistent/o/f', 'rw')!;
+    vfs.truncate(h, 0);
+    vfs.setMtime('/persistent/o/f', 5);
+    vfs.rename('/persistent/o/f', '/persistent/o/g');
+    vfs.delete('/persistent/o/g');
+    expect(vfs.open('/persistent/o/none', 'r')).toBeNull();
+    expect(changes).toEqual([
+      'mkdir /persistent/o',
+      'create /persistent/o/f',
+      'write /persistent/o/f',
+      'truncate /persistent/o/f',
+      'write /persistent/o/f',
+      'truncate /persistent/o/f',
+      'mtime /persistent/o/f',
+      'rename /persistent/o/f /persistent/o/g',
+      'delete /persistent/o/g',
+    ]);
+  });
+});

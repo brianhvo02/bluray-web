@@ -319,6 +319,9 @@ describe('BD-J font and text natives against libbluray', () => {
           expect(await ok('java/awt/BDFontMetrics', 'stringWidth(Ljava/lang/String;)I', [metrics, str(utf16(s.text))])).toBe(s.width);
         }
         expect(await ok('java/awt/BDFontMetrics', 'getAscent()I', [metrics])).toBe(size.metrics.ascent);
+        // a component's metrics are the same BDFontMetrics (libbluray's FontDesignMetrics), with no platform font manager
+        const component = jvm.heap.newObject(jvm.bootClass('java/awt/Container'));
+        expect(await ok('java/awt/Component', 'getFontMetrics(Ljava/awt/Font;)Ljava/awt/FontMetrics;', [component, derived])).toBe(metrics);
       }
     }
     expect(logged.filter((l) => /Can't resolve font/.test(l))).toEqual([]);

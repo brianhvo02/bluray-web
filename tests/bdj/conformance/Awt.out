@@ -1,0 +1,11 @@
+rgb 0 ffff0000 c800ff00 640000ff ff808080
+components 128 255 255 100
+size 5 transparent 0 transparency 3 alpha true bits 8
+opaque 0 ffff0000 transparent 0 transparency 2
+rgbs c800ff00
+data-elements 2
+contains true false true true
+bounds java.awt.Rectangle[x=10,y=10,width=40,height=30]
+added 4 true java.awt.Rectangle[x=10,y=10,width=40,height=30]
+translated true java.awt.Rectangle[x=15,y=5,width=40,height=30]
+rect true true

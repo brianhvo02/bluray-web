@@ -12,6 +12,7 @@ import { portFetch } from '../disc/port-fetch';
 import { TokenRelay } from '../disc/http-transport';
 import { clipInfoPath, loadClips, openDisc } from '../disc/open-disc';
 import type { DiscModel } from '../disc/open-disc';
+import type { ByteSource } from '../disc/byte-source';
 import { RemoteSource } from '../disc/remote-source';
 import { BdjError } from './errors';
 import type { FreeType } from './fonts/freetype';
@@ -20,6 +21,10 @@ import { GraphicsPlaneReader, GraphicsPlaneWriter } from './graphics-plane';
 import { BdjRuntime } from './runtime';
 import { SharedRegisterView } from './shared-registers';
 import { StatusBlockReader } from './status-block';
+import type { BdjStore, StorageLoss } from './store/bdj-store';
+import { NasBdjStore, NasDiscStore, storeApiBase } from './store/nas-store';
+import { FullRelay, ScopeSync } from './store/scope-sync';
+import { discScopes, storeSource } from './store/scopes';
 import { WorkerBdjHost } from './worker-host';
 import type { BdjCallName, BdjFailureCode, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
 
@@ -36,17 +41,26 @@ export class StartupWatch {
   private shown = false;
   private dumped = false;
 
+  /** `onShown`: called once, when Java first shows it runs (the session's start-up timeout is then disarmed). */
+  constructor(private readonly onShown?: () => void) {}
+
   call(name: BdjCallName, args: readonly BdjWireValue[]): void {
-    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.shown = true;
+    if (name === 'selectPlaylist' && Number(args[0]) >= 0) this.show();
   }
 
   /** A background still was shown (null: one was cleared, which shows nothing). */
   still(image: Uint8Array | null): void {
-    if (image) this.shown = true;
+    if (image) this.show();
   }
 
   plane(visible: boolean): void {
-    if (visible) this.shown = true;
+    if (visible) this.show();
+  }
+
+  private show(): void {
+    if (this.shown) return;
+    this.shown = true;
+    this.onShown?.();
   }
 
   /** A deadlock outcome: true for the first one while Java has shown nothing, which the worker dumps. */
@@ -54,6 +68,61 @@ export class StartupWatch {
     if (this.shown || this.dumped) return false;
     this.dumped = true;
     return true;
+  }
+}
+
+/**
+ * Whether the worker is waiting on its own I/O, for the engine's start-up timeout (Task 7g): a disc read over a slow
+ * link, the storage scopes or the fonts. A change is told at the next turn of the event loop and only if it still
+ * holds then, so reads answered from memory (the read-ahead, the inlined files) send nothing.
+ */
+export class IoWatch {
+  private pending = 0;
+  private told = false;
+  private scheduled = false;
+  private stopped = false;
+
+  constructor(private readonly tell: (pending: boolean) => void) {}
+
+  /** Nothing more is told: the start-up timeout has been disarmed (Java showed it runs) or has fired. */
+  stop(): void {
+    this.stopped = true;
+  }
+
+  /** `p`, counted as pending I/O until it settles. */
+  track<T>(p: Promise<T>): Promise<T> {
+    this.pending++;
+    this.schedule();
+    const done = (): void => {
+      this.pending--;
+      this.schedule();
+    };
+    p.then(done, done);
+    return p;
+  }
+
+  /** `source`, its reads tracked. */
+  source<S extends ByteSource & { paths(): Iterable<string> }>(source: S): ByteSource & { paths(): Iterable<string> } {
+    return {
+      exists: (path) => source.exists(path),
+      size: (path) => source.size(path),
+      list: (dir) => source.list(dir),
+      paths: () => source.paths(),
+      read: (path, offset, length, signal) => this.track(source.read(path, offset, length, signal)),
+    };
+  }
+
+  private schedule(): void {
+    if (this.scheduled) return;
+    this.scheduled = true;
+    setTimeout(() => {
+      this.scheduled = false;
+      if (this.stopped) return;
+      const now = this.pending > 0;
+      if (now === this.told) return;
+      this.told = now;
+      this.tell(now);
+    }, 0);
   }
 }
 
@@ -95,6 +164,17 @@ export interface BdjWorkerOptions {
   readonly loadDefaultFont?: () => Promise<Uint8Array>;
   /** Reads a NAS disc's files; the worker's fetch by default. */
   readonly fetch?: typeof fetch;
+  /**
+   * Where the disc's saved data (/persistent/, /buda/) lasts between sessions, for the disc's source (scopes.ts
+   * storeSource); without it (or with null) it lasts until BD-J stops, as before.
+   */
+  readonly createStore?: (source: string) => BdjStore | null;
+  /**
+   * The browser's IndexedDB, for a disc opened from a server (the backend choice): its saved data goes to the person's
+   * NAS store with a write-ahead copy here (nas-store.ts NasDiscStore, ruling R17), or stays here on a server that
+   * keeps no people. Without it such a disc takes `createStore`, as a picked folder does.
+   */
+  readonly indexedDB?: IDBFactory;
 }
 
 /** Serves one BD-J session over `port`: boot, then title starts, events and call replies in arrival order. */
@@ -125,13 +205,41 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   let remote: RemoteSource | null = null;
   let waitingSince = 0;
   /** Whether Java has shown it runs (the deadlock dump is for start-up only). */
-  const startup = new StartupWatch();
+  // once Java shows it runs, the start-up timeout is disarmed and the engine needs no more `io`
+  const startup = new StartupWatch(() => io.stop());
   /** The plane Java draws into, read for its visibility. */
   let planeView: GraphicsPlaneReader | null = null;
+
+  /** The storage scopes once loaded and in the VFS. */
+  let sync: ScopeSync | null = null;
+  /** Where they are kept, and a NAS disc's store client (it takes the fresh tokens too). */
+  let store: BdjStore | null = null;
+  let nasStore: NasBdjStore | null = null;
+  /** The NAS's full or not full per scope, heard before `sync` was there (applied once it is). */
+  const fullRelay = new FullRelay();
+  /** The engine has heard that saved data won't last (storageLost, ruling R32): it hears it once. */
+  let storageLostSent = false;
+  /** No scope is kept past the session (no store, or the scopes could not be worked out): a write there is lost. */
+  let unkept = false;
+  /** Saves what Java changed, then has the store pass on what it holds (a NAS disc's write-ahead copy). */
+  const flushStorage = async (): Promise<void> => {
+    await sync?.flush();
+    await store?.flush?.();
+  };
 
   const post = (m: FromBdj): void => {
     if (!ended) port.postMessage(m);
   };
+
+  /** Tells the engine, once and only while the session runs, that what the disc saves won't last (ruling R32). */
+  const storageLost = (reason: StorageLoss): void => {
+    if (storageLostSent || ended) return;
+    storageLostSent = true;
+    post({ type: 'storageLost', reason });
+  };
+
+  /** What the worker waits on (disc reads, the scopes, the fonts), and whether the engine was last told it waits. */
+  const io = new IoWatch((pending) => post({ type: 'io', pending }));
 
   const fail = (e: unknown): void => {
     if (ended) return;
@@ -220,13 +328,15 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         remote = disc;
         if (latestToken !== null) disc.setToken(latestToken);
       }
+      // everything below reads the disc through this: the time Java waits on it is not the start-up timeout's (Task 7g)
+      const reads = io.source(disc);
       // the disc model loads while the JDK starts up; the host reads it once Libbluray.init asks for disc info
       let model: { readonly disc: DiscModel; readonly clips: ReadonlyMap<string, Clpi> } | null = null;
       const loading = (async () => {
-        const opened = await openDisc(disc);
+        const opened = await openDisc(reads);
         const clipIds = new Set([...opened.playlists.values()].flatMap((p) => p.playItems.map((i) => i.clipId)));
         // openDisc has already parsed the clips of a disc with movie objects; only the rest are read here
-        const rest = await loadClips(disc, [...clipIds].filter((id) => !opened.clips.has(id) && disc.exists(clipInfoPath(id))));
+        const rest = await loadClips(reads, [...clipIds].filter((id) => !opened.clips.has(id) && disc.exists(clipInfoPath(id))));
         model = { disc: opened, clips: new Map([...opened.clips, ...rest]) };
       })();
       loading.catch(() => undefined); // awaited below; this only keeps a failure while the runtime is set up from going unhandled
@@ -234,9 +344,15 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         if (!model) throw new Error('the disc model is not loaded yet');
         return model;
       };
+      // the storage scopes load while the JDK starts up too: Libbluray.init (and so every xlet) waits for them
+      store = createStore(m, fetchFn);
+      // a store was wanted and there is none (no IndexedDB): what the disc saves lasts until BD-J stops, which the
+      // viewer hears of at Java's first write there (ruling R32a)
+      if (!store && options.createStore) unkept = true;
+      const storeLoading = store ? io.track(loadScopes(store, reads, m.discId)) : Promise.resolve(null);
       planeView = new GraphicsPlaneReader(m.plane);
       rt = new BdjRuntime({
-        disc,
+        disc: reads,
         discId: m.discId,
         classLibrary: m.classLibrary,
         ...(m.memory ? { memory: m.memory } : {}),
@@ -270,16 +386,31 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         yieldTask: eventLoopTurn(),
         ...(options.extraIntrinsics ? { extraIntrinsics: options.extraIntrinsics } : {}),
         ...(loadFreeType && options.loadDefaultFont
-          ? { fonts: { loadFreeType: () => loadFreeType().then((ft) => (freeType = ft)), loadDefaultFont: options.loadDefaultFont } }
+          ? {
+              fonts: {
+                loadFreeType: () => io.track(loadFreeType().then((ft) => (freeType = ft))),
+                loadDefaultFont: () => io.track(options.loadDefaultFont!()),
+              },
+            }
           : {}),
         log: (line) => {
           if (line === hostLine) hostLine = null;
           else post({ type: 'log', line, error: false });
         },
+        onVfsChange: (path, change, to) => {
+          if (sync) sync.changed(path, change, to);
+          else if (unkept && change !== 'mkdir' && [path, to].some((p) => p !== undefined && /^\/(persistent|buda)\//.test(p))) storageLost('memory-only');
+        },
+        onVfsFull: (path) => sync?.refused(path),
       });
       // boot() reports a JDK failure itself, with its BdjError code
-      await Promise.all([loading, rt.bootJdk().catch(() => undefined)]);
+      const [, , scopes] = await Promise.all([loading, rt.bootJdk().catch(() => undefined), storeLoading]);
       if (ended) return;
+      scopes?.attach(rt.jvm.opts.vfs!);
+      sync = scopes;
+      if (scopes) fullRelay.attach(scopes);
+      // the engine hears that this session has scopes: its stop then always waits for the save (`stop`, `stopped`)
+      if (scopes) port.postMessage({ type: 'unsaved', unsaved: false });
       await rt.boot();
     } catch (e) {
       fail(e);
@@ -290,6 +421,61 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
     post({ type: 'booted', bootMs: performance.now() - t0 });
     if (m.memoryStatsMs) reportMemory(m.memoryStatsMs);
     for (const w of waiting.splice(0)) deliver(w);
+  };
+
+  /** The disc's store, by where it comes from: a server's (NAS) or a picked folder's (this browser). */
+  const createStore = (m: BootMessage, fetchFn: typeof fetch): BdjStore | null => {
+    const apiBase = m.disc.kind === 'remote' ? storeApiBase(m.disc.base) : null;
+    if (m.disc.kind !== 'remote' || !options.indexedDB || apiBase === null) return options.createStore?.(storeSource(m.disc)) ?? null;
+    const log = (line: string, error?: boolean): void => port.postMessage({ type: 'log', line, error: error ?? false });
+    nasStore = new NasBdjStore(apiBase, { fetch: fetchFn, token: latestToken ?? m.disc.token, refreshToken: () => tokens.request(), log });
+    return new NasDiscStore({
+      nas: nasStore,
+      idb: options.indexedDB,
+      discId: m.disc.manifest.discId,
+      setTimer: (ms, fn) => {
+        const id = setTimeout(fn, ms);
+        return () => clearTimeout(id);
+      },
+      // straight to the engine, as ScopeSync's: puts still run after a stop or a failure has ended the session
+      log,
+      // a 507 of the boot's put can come before the scopes are in the VFS: kept until they are
+      onFull: (scope, full) => fullRelay.full(scope, full),
+      onLost: storageLost,
+    });
+  };
+
+  /** The disc's storage scopes from `store`; null (saved data lasts the session only) when they cannot be worked out. */
+  const loadScopes = async (store: BdjStore, disc: Parameters<typeof discScopes>[0], discId: string | null): Promise<ScopeSync | null> => {
+    try {
+      return await ScopeSync.load(await discScopes(disc, discId), {
+        store,
+        setTimer: (ms, fn) => {
+          const id = setTimeout(fn, ms);
+          return () => clearTimeout(id);
+        },
+        // straight to the engine, as the save state: saves still run after a stop or a failure has ended the session
+        log: (line, error) => port.postMessage({ type: 'log', line, error: error ?? false }),
+        onUnsaved: (unsaved) => port.postMessage({ type: 'unsaved', unsaved }),
+        onLost: storageLost,
+      });
+    } catch (e) {
+      post({ type: 'log', line: `BD-J storage: the disc's storage scopes could not be read (${e instanceof Error ? e.message : String(e)}); saved data lasts until BD-J stops`, error: true });
+      unkept = true;
+      return null;
+    }
+  };
+
+  /** The engine stops BD-J: Java halts where it is, and what it wrote is saved before the worker is terminated. */
+  const stop = async (): Promise<void> => {
+    ended = true;
+    driving?.abort();
+    rt?.jvm.threads.halt();
+    // the snapshot is what Java left when it halted, possibly in the middle of a write (a file half written stays so,
+    // as after a power cut); a NAS disc's write-ahead copy is put on the NAS too, while the engine waits (else at the
+    // next open)
+    await flushStorage();
+    port.postMessage({ type: 'stopped' });
   };
 
   /**
@@ -323,11 +509,15 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
   };
 
   port.onmessage = ({ data: m }) => {
+    // a stop and a flush come after a failure too: what Java wrote before it is still saved
+    if (m.type === 'stop') return void stop();
+    if (m.type === 'flush') return void flushStorage();
     if (ended) return;
     switch (m.type) {
       case 'remoteToken':
         latestToken = m.token;
         remote?.setToken(m.token);
+        nasStore?.setToken(m.token);
         tokens.deliver(m.token);
         break;
       case 'boot':
@@ -339,6 +529,7 @@ export function runBdjWorker(port: BdjPort, options: BdjWorkerOptions = {}): Bdj
         else waiting.push(m);
         break;
       case 'dump':
+        io.stop(); // the start-up timeout has fired
         dump(m.reason);
         post({ type: 'dumped' });
         break;

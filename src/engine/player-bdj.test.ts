@@ -5,7 +5,7 @@ import { fakeNas } from '../../tests/helpers/fake-nas';
 import { fakeVideoCodecApi } from '../../tests/helpers/fake-video-decoder';
 import { fixtureDiscFiles } from '../../tests/helpers/fixture-disc';
 import { VirtualClock, storedZip } from '../../tests/helpers/jvm-asm';
-import { asm, buildMovieObjects, imm } from '../../tests/helpers/hdmv-builders';
+import { asm, buildMovieObjects, imm, psr, reg } from '../../tests/helpers/hdmv-builders';
 import { buildSyntheticDisc, discEntries, lpcmStream, syntheticClip, type SyntheticDiscSpec } from '../../tests/helpers/synthetic-disc';
 import { createRing, renderQuantum, ringViews } from './audio/ring';
 import { runBdjWorker } from './bdj/bdj-worker';
@@ -24,7 +24,7 @@ import { Player } from './player';
 import { MEMORY_PROFILES, type MemoryProfileName } from './memory-profile';
 import type { CompositorLike } from './render/compositor';
 import { GraphicsPlaneReader, GraphicsPlaneWriter, updateGraphic } from './bdj/graphics-plane';
-import type { EngineEvent, PlaybackState, StartPoint, Telemetry } from './protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type StartPoint, type Telemetry } from './protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const CLASSES: ClassLibrarySource = {
@@ -88,6 +88,8 @@ interface HarnessOptions {
   /** A worker the test drives by hand instead of the in-process one. */
   readonly worker?: WorkerLike;
   readonly setTimer?: (ms: number, fn: () => void) => () => void;
+  /** PlayerDeps.wallMs: the BD-J start-up timeout's clock (a VirtualClock's nowMs with its setTimer). */
+  readonly wallMs?: () => number;
   readonly playerSettings?: PlayerSettings;
   readonly compositor?: CompositorLike;
   readonly decodeImage?: DecodeImage;
@@ -133,6 +135,7 @@ async function harness(files: Map<string, Uint8Array<ArrayBuffer>>, opts: Harnes
     createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
     createCompositor: () => opts.compositor ?? { resize: () => undefined, drawVideo: () => undefined },
     setTimer: opts.setTimer ?? (() => () => undefined),
+    ...(opts.wallMs ? { wallMs: opts.wallMs } : {}),
     createBdjWorker: () => {
       workers++;
       if (opts.worker) return opts.worker;
@@ -468,6 +471,42 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'start')).toEqual([{ type: 'start', title: 0xffff }]));
   });
 
+  it("flushes BD-J's saved data on flushSaves (pagehide), and a disc reopened boots only once the stopped worker has saved", async () => {
+    const workers = [handWorker(), handWorker()];
+    let created = 0;
+    const player = new Player({
+      emit: () => undefined,
+      videoCodecApi: fakeVideoCodecApi,
+      nowMs: () => 1000,
+      requestFrame: () => undefined,
+      createAudioDecoder: createAudioDecoderFactory(() => Promise.reject(new Error('no wasm'))),
+      createCompositor: () => ({ resize: () => undefined, drawVideo: () => undefined }),
+      setTimer: () => () => undefined,
+      createBdjWorker: () => workers[created++]!.worker,
+      loadClassLibrary: async () => CLASSES,
+    });
+    players.push(player);
+    const [first, second] = workers as [ReturnType<typeof handWorker>, ReturnType<typeof handWorker>];
+    const disc = { kind: 'files', entries: discEntries(bdjDisc()) } as const;
+    await player.handle({ type: 'open', disc });
+    await vi.waitFor(() => expect(first.sent.some((m) => m.type === 'boot')).toBe(true));
+    first.emit({ type: 'booted', bootMs: 1 });
+    first.emit({ type: 'unsaved', unsaved: true }); // Java wrote under /persistent/
+    void player.handle({ type: 'flushSaves' });
+    expect(first.sent.at(-1)).toEqual({ type: 'flush' });
+
+    await player.handle({ type: 'close' });
+    expect(first.sent.at(-1)).toEqual({ type: 'stop' });
+    expect(first.terminated()).toBe(false);
+    await player.handle({ type: 'open', disc });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(created).toBe(2);
+    expect(second.sent.some((m) => m.type === 'boot')).toBe(false); // it would load the scopes before they are saved
+    first.emit({ type: 'stopped' });
+    expect(first.terminated()).toBe(true);
+    await vi.waitFor(() => expect(second.sent.some((m) => m.type === 'boot')).toBe(true));
+  });
+
   it("writes the application's player settings to the registers Java reads (bd_set_player_setting_str)", async () => {
     const w = handWorker();
     await harness(bdjDisc(), { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });
@@ -493,21 +532,23 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(w.sent.find((m) => m.type === 'boot')).toMatchObject({ memory: { classBytes: MEMORY_PROFILES.constrained.bdjClassCacheBytes } });
   });
 
-  it('applies the player settings when an HDMV program hands over to a BD-J title, before the worker boots (R9)', async () => {
+  it('applies the player settings at the open of a disc that uses BD-J, so its HDMV First Play reads them (bd_open)', async () => {
     const w = handWorker();
-    const movieObjects = buildMovieObjects([{ cmds: [asm.jumpTitle(imm(1))] }]);
+    // First Play copies the menu language (PSR18) into GPR98, as a mixed disc does to choose its BD-J menu's language
+    const movieObjects = buildMovieObjects([{ cmds: [asm.set('move', reg(98), psr(18)), asm.jumpTitle(imm(1))] }]);
     const files = bdjDisc({ movieObjects, index: { firstPlay: { kind: 'hdmv', movieObjectId: 0 }, topMenu: { kind: 'hdmv', movieObjectId: 0 }, titles: [{ kind: 'bdj', name: '00001' }] } });
     await harness(files, { worker: w.worker, playerSettings: { audioLanguage: 'jpn', pgLanguage: 'eng', menuLanguage: 'fra', country: 'jp' } });
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
     const boot = w.sent.find((m) => m.type === 'boot')!;
     const regs = new SharedRegisterView(boot.type === 'boot' ? boot.registers : new SharedArrayBuffer(0));
     expect([16, 17, 18, 19].map((i) => regs.psrRead(i))).toEqual([0x6a706e, 0x656e67, 0x667261, 0x6a70]);
+    expect(regs.gprRead(98)).toBe(0x667261);
   });
 
   it('falls back with a timeout bdj-failed 20,000 ms after a boot that never completes', async () => {
     const clock = new VirtualClock();
     const w = handWorker();
-    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer });
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, wallMs: clock.nowMs });
     await vi.waitFor(() => expect(w.sent.map((m) => m.type)).toEqual(['boot']));
     clock.advance(19_999);
     expect(notices(h)).not.toContain('bdj-failed');
@@ -523,11 +564,46 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     expect(w.terminated()).toBe(true);
   });
 
+  it('a hidden page pauses the start-up timeout (the visibility command, ruling R22), before and after the open', async () => {
+    const clock = new VirtualClock();
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, wallMs: clock.nowMs });
+    await vi.waitFor(() => expect(w.sent.map((m) => m.type)).toEqual(['boot']));
+    clock.advance(10_000);
+    await h.player.handle({ type: 'visibility', hidden: true });
+    clock.advance(120_000);
+    expect(w.sent.some((m) => m.type === 'dump')).toBe(false);
+    await h.player.handle({ type: 'visibility', hidden: false });
+    clock.advance(9_999);
+    expect(w.sent.some((m) => m.type === 'dump')).toBe(false);
+    clock.advance(1);
+    expect(w.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it("shows the bdj-storage notice once per disc open when the worker says saved data won't last (ruling R32)", async () => {
+    const w = handWorker();
+    const h = await harness(bdjDisc(), { worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    expect(notices(h)).not.toContain('bdj-storage');
+    w.emit({ type: 'storageLost', reason: 'memory-only' });
+    w.emit({ type: 'booted', bootMs: 1 });
+    w.emit({ type: 'storageLost', reason: 'full' }); // a worker tells once; the player shows it once all the same
+    const storage = (): EngineEvent[] => h.events.filter((e) => e.type === 'notice' && e.code === 'bdj-storage');
+    expect(storage()).toEqual([{ type: 'notice', code: 'bdj-storage', message: BDJ_STORAGE_MESSAGE }]);
+    expect(BDJ_STORAGE_MESSAGE).toBe("This disc's saved data can't be kept right now, so progress you make may be lost.");
+    // the disc opened again: its own notice
+    const boots = w.sent.filter((m) => m.type === 'boot').length;
+    await h.player.handle({ type: 'open', disc: { kind: 'files', entries: discEntries(bdjDisc()) } });
+    await vi.waitFor(() => expect(w.sent.filter((m) => m.type === 'boot').length).toBe(boots + 1));
+    w.emit({ type: 'storageLost', reason: 'put-failed' });
+    expect(storage()).toHaveLength(2);
+  });
+
   /** A booted hand-driven title on a virtual timer clock, and its plane's writer. */
   async function bootedOnClock(): Promise<{ h: Harness; w: ReturnType<typeof handWorker>; clock: VirtualClock; writer: GraphicsPlaneWriter }> {
     const clock = new VirtualClock();
     const w = handWorker();
-    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap });
+    const h = await harness(bdjDisc(), { worker: w.worker, setTimer: clock.setTimer, wallMs: clock.nowMs, decodeImage: async () => ({ width: 1, height: 1, close: () => undefined }) as unknown as ImageBitmap });
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
     const boot = w.sent.find((m) => m.type === 'boot')!;
     if (boot.type !== 'boot') throw new Error('no boot');
@@ -595,6 +671,44 @@ describe('Player with BD-J titles (in-process BD-J worker)', () => {
     await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
     return { h, w };
   }
+
+  it.each([
+    ['MPEG-2 video', CodingType.MPEG2_VIDEO],
+    ['VC-1', CodingType.VC1],
+  ])("selects a playlist of %s, which plays without a picture: selectPlaylist returns 1 and Java gets the playlist's events", async (codec, videoCodingType) => {
+    const w = handWorker();
+    const files = bdjDisc({
+      playlists: [
+        { id: '00000', clipIds: ['00000'], chapterEverySeconds: 1, uoMask: PLAYBACK_MASKED },
+        { id: '00001', clipIds: ['00001'], chapterEverySeconds: 1, videoCodingType },
+      ],
+    });
+    const h = await harness(files, { worker: w.worker });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'boot')).toBe(true));
+    w.emit({ type: 'booted', bootMs: 1 });
+    await vi.waitFor(() => expect(w.sent.some((m) => m.type === 'start')).toBe(true));
+    const events = (ev: number): number[] => w.sent.flatMap((m) => (m.type === 'event' && m.ev === ev ? [m.param] : []));
+    w.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [1, -1, -1, '-1'] });
+    await until(h, () => w.sent.some((m) => m.type === 'reply' && m.id === 1));
+    expect(w.sent.find((m) => m.type === 'reply' && m.id === 1)).toEqual({ type: 'reply', id: 1, value: 1 });
+    expect(events(BdjEvent.PLAYLIST)).toContain(1);
+    w.emit({ type: 'call', id: 2, name: 'selectRate', args: [1, START] });
+    await until(h, () => lastState(h) === 'playing');
+    expect(h.events.filter((e) => e.type === 'unsupported')).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE, noPicture: true }]);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    // the first frame is the black one with the planes over it, composited once the playlist plays
+    await until(h, () => (lastTelemetry(h)?.bdj?.firstFrameMs ?? null) !== null);
+    const bdj = lastTelemetry(h)!.bdj!;
+    expect(bdj.firstFrameMs).toBeGreaterThanOrEqual(bdj.firstPlaylistMs!);
+    expect(lastTelemetry(h)!.framesPresented).toBe(0);
+    await until(h, () => events(BdjEvent.END_OF_PLAYLIST).length > 0);
+    expect(events(BdjEvent.END_OF_PLAYLIST)).toEqual([1]);
+    // Java selecting it again: no second notice
+    w.emit({ type: 'call', id: 3, name: 'selectPlaylist', args: [1, -1, -1, '-1'] });
+    await until(h, () => w.sent.some((m) => m.type === 'reply' && m.id === 3));
+    expect(w.sent.find((m) => m.type === 'reply' && m.id === 3)).toEqual({ type: 'reply', id: 3, value: 1 });
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
+  }, 30_000);
 
   /** A compositor that records its calls by name; drawBdj also notes the plane's buffer and copies it, as the real one does. */
   function recordingCompositor(): { readonly compositor: CompositorLike; readonly calls: string[]; readonly planes: SharedArrayBuffer[] } {

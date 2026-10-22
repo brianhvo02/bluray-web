@@ -169,7 +169,7 @@ export function reduceEvent(s: PlayerSnapshot, e: EngineEvent): PlayerSnapshot {
     case 'fetchPortClosed':
       return s; // handled by the controller
     case 'unsupported':
-      return withNotice(s, { code: `unsupported-${e.kind}`, message: e.message });
+      return withNotice(s, { code: e.noPicture ? 'no-picture' : `unsupported-${e.kind}`, message: e.message });
     case 'error':
       return { ...s, error: { code: e.code, message: e.message, paths: e.paths } };
     case 'telemetry':
@@ -495,8 +495,9 @@ export class PlayerController {
   playPlaylist(playlistId: string): void {
     this.startAudio();
     // Drop the previous playlist's notices now; the engine handles commands in order, so every notice
-    // it emits for the new playlist arrives after this. Disc-level (bdj) and device-level (audio-output) notices stay;
-    // the picked playlist stops a BD-J title, so its ignored-tap notice goes.
+    // it emits for the new playlist arrives after this. Disc-level (bdj, the no-picture notice the engine sends once per
+    // disc) and device-level (audio-output) notices stay; the picked playlist stops a BD-J title, so its ignored-tap
+    // notice goes. Opening a disc clears them all.
     const playlistScoped = (code: string): boolean =>
       code.startsWith('unsupported-') || code === 'audio-disabled' || code === 'decoder-recovered' || code === 'audio-track' || code === 'bdj-tap-ignored';
     this.update({ ...this.snapshot, notices: this.snapshot.notices.filter((n) => !playlistScoped(n.code)) });
@@ -699,6 +700,16 @@ export class PlayerController {
     const scale = Math.round(Math.max(MIN_SUBTITLE_SCALE, Math.min(MAX_SUBTITLE_SCALE, subs.scale + delta)) * 10) / 10;
     this.post({ type: 'setSubtitleScale', scale });
     this.update({ ...this.snapshot, subtitles: { ...subs, scale } });
+  }
+
+  /** The page is going away: a BD-J disc's saved data is stored now rather than after its debounce. */
+  flushSaves(): void {
+    this.post({ type: 'flushSaves' });
+  }
+
+  /** The page was hidden or shown (document.hidden): a BD-J title's start-up timeout counts only visible time. */
+  setVisibility(hidden: boolean): void {
+    this.post({ type: 'visibility', hidden });
   }
 
   /** Tells the engine which memory limits to use (sent once, before a disc opens). */

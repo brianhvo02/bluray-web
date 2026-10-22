@@ -24,6 +24,11 @@ export interface CompositorLike {
   /** Clears to black, draws the background still (if any), then the frame. */
   drawVideo(frame: VideoFrame | null): void;
   /**
+   * A playlist starts: the last frame's size is forgotten. With `picture` false (video the browser can't decode) text is
+   * laid out over the 1920×1080 screen; otherwise none is drawn until the playlist's first frame.
+   */
+  startPlaylist?(picture: boolean): void;
+  /**
    * The BD-J background still drawn under the video from the next drawVideo on (null: none), placed in its screen
    * rectangle of the 1920×1080 menu rectangle. The caller owns the image and closes it after replacing it here.
    */
@@ -80,6 +85,8 @@ export class Compositor implements CompositorLike {
   private bdj: BdjCanvas | null = null;
   /** Display size of the last frame drawn: text is laid out in its fitted rectangle. */
   private frameSize: { readonly width: number; readonly height: number } | null = null;
+  /** The playlist has no picture (startPlaylist(false)): text goes over the 1920×1080 screen. */
+  private noPicture = false;
   /** Storage (coded, visible) size of the last frame: ASS layout follows it for anamorphic video. */
   private storageSize: { readonly width: number; readonly height: number } | null = null;
   private stage: ShaderStage | null = null;
@@ -171,8 +178,15 @@ export class Compositor implements CompositorLike {
     this.bdj = null;
   }
 
+  startPlaylist(picture: boolean): void {
+    this.frameSize = null;
+    this.storageSize = null;
+    this.noPicture = !picture;
+  }
+
   drawText(renderer: TextRendererLike, timeUs: number, opts: TextRenderOptions): void {
-    const f = this.frameSize;
+    // no frame yet: none drawn, unless the playlist has no picture at all (then the 1920×1080 screen)
+    const f = this.frameSize ?? (this.noPicture ? { width: PLANE_WIDTH, height: PLANE_HEIGHT } : null);
     if (!f) return;
     renderer.render(this.ctx, timeUs, fitRect(f.width, f.height, this.canvas.width, this.canvas.height), { ...opts, storage: opts.storage ?? this.storageSize });
   }

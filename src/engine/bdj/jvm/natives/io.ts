@@ -77,6 +77,8 @@ function openFailure(vfs: Vfs | null, path: string, write: boolean): string {
   const parent = vfs?.stat(path.slice(0, path.lastIndexOf('/')) || '/') ?? null;
   if (parent?.kind !== 'dir') return 'No such file or directory';
   if (write && !vfs!.writable(path)) return 'Read-only file system';
+  // a new file the storage scope's quota has no room for (its tar header, ruling R24), as open(2) on a full disk
+  if (write && st === null && vfs!.quotaRefusesNewFile(path)) return 'No space left on device';
   return 'No such file or directory';
 }
 

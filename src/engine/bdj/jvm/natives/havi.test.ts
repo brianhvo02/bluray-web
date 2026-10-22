@@ -12,6 +12,7 @@ import type { JObject, JValue } from '../values';
 import { Vfs } from '../vfs';
 import { ZipArchive } from '../zip';
 import { DISPLAY_IMAGE, registerHaviNatives } from './havi';
+import { byteArray } from './util';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
 const RT = file('../../../../bdj-classlib/rt-bdj.jar');
@@ -54,6 +55,22 @@ describe('HStillImageBackgroundConfiguration.displayImage (background stills)', 
     const img = make('java/awt/BDImageConsumer', { producer: ['Ljava/awt/image/ImageProducer;', source] });
     return make('org/havi/ui/HBackgroundImage', { img: ['Ljava/awt/Image;', img] });
   }
+
+  /** What BDToolkitBase.createImage(byte[], int, int) and createImage(URL) put behind HBackgroundImage's image. */
+  function producerImage(source: JObject): JObject {
+    const img = make('java/awt/BDImageConsumer', { producer: ['Ljava/awt/image/ImageProducer;', source] });
+    return make('org/havi/ui/HBackgroundImage', { img: ['Ljava/awt/Image;', img] });
+  }
+
+  const byteImage = (bytes: Uint8Array, offset: number, length: number): JObject =>
+    producerImage(make('sun/awt/image/ByteArrayImageSource', { imagedata: ['[B', byteArray(jvm, bytes)], imageoffset: ['I', offset], imagelength: ['I', length] }));
+
+  const urlImage = (protocol: string, host: string, path: string): JObject =>
+    producerImage(
+      make('sun/awt/image/URLImageSource', {
+        url: ['Ljava/net/URL;', make('java/net/URL', { protocol: ['Ljava/lang/String;', jvm.heap.newString(protocol)], host: ['Ljava/lang/String;', jvm.heap.newString(host)], file: ['Ljava/lang/String;', jvm.heap.newString(path)] })],
+      }),
+    );
 
   const rect = (x: number, y: number, w: number, h: number): JObject =>
     make('org/havi/ui/HScreenRectangle', { x: ['F', x], y: ['F', y], width: ['F', w], height: ['F', h] });
@@ -128,6 +145,39 @@ describe('HStillImageBackgroundConfiguration.displayImage (background stills)', 
     await display(make(CONFIG), fileImage('/disc/BDMV'), null);
     expect(shown).toEqual([]);
     expect(logged).toEqual(['displayImage(): /disc/BDMV/JAR/missing.jpg cannot be read', 'displayImage(): /disc/BDMV cannot be read']);
+  });
+
+  it("shows the bytes of HBackgroundImage(byte[]) (a ByteArrayImageSource's imagedata from imageoffset, imagelength long)", async () => {
+    const bytes = new Uint8Array([9, 9, 0x89, 0x50, 0x4e, 0x47, 7]);
+    await display(make(CONFIG), byteImage(bytes, 2, 4), null);
+    expect(shown).toEqual([{ image: new Uint8Array([0x89, 0x50, 0x4e, 0x47]), rect: { x: 0, y: 0, width: 1, height: 1 } }]);
+    await display(make(CONFIG), byteImage(bytes, 5, 4), null); // past the end: the background stays as it is
+    expect(shown).toHaveLength(1);
+    expect(logged).toEqual(['displayImage(): byte[7] at 5, 4 long cannot be read']);
+  });
+
+  it('shows the file of a file: URL (HBackgroundImage(URL)), escapes decoded', async () => {
+    await display(make(CONFIG), urlImage('file', '', `/disc/${DISC_FILE.replace('index', 'ind%65x')}`), null);
+    expect(shown).toEqual([{ image: files.get(DISC_FILE), rect: { x: 0, y: 0, width: 1, height: 1 } }]);
+  });
+
+  it("shows a jar entry of a jar: URL over a file: jar, as an xlet's getResource hands them out", async () => {
+    const jar = 'BDMV/JAR/00000.jar';
+    const entry = 'bdjweb/test/TitleXlet.class';
+    await display(make(CONFIG), urlImage('jar', '', `file:/disc/${jar}!/${entry}`), null);
+    expect(shown.map((s) => s.image)).toEqual([ZipArchive.open(files.get(jar)!).read(entry)]);
+  });
+
+  it('a URL that names no file, or a jar entry that is missing, leaves the background as it is and is logged', async () => {
+    await display(make(CONFIG), urlImage('http', 'bdlive.example.invalid', '/bg.png'), null);
+    await display(make(CONFIG), urlImage('jar', '', 'file:/disc/BDMV/JAR/00000.jar!/none.png'), null);
+    await display(make(CONFIG), urlImage('file', '', '/disc/BDMV/JAR/missing.png'), null);
+    expect(shown).toEqual([]);
+    expect(logged).toEqual([
+      'displayImage(): http://bdlive.example.invalid/bg.png names no file',
+      'displayImage(): /disc/BDMV/JAR/00000.jar!/none.png cannot be read',
+      'displayImage(): /disc/BDMV/JAR/missing.png cannot be read',
+    ]);
   });
 
   it('an image from another kind of source is logged and not shown', async () => {

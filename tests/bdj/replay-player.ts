@@ -6,6 +6,7 @@ import { runBdjWorker, type BdjPort, type BdjWorkerHandle } from '../../src/engi
 import { GraphicsPlaneReader, GraphicsPlaneWriter, planeHash } from '../../src/engine/bdj/graphics-plane';
 import type { TraceEntry } from '../../src/engine/bdj/host';
 import type { ClassLibrarySource } from '../../src/engine/bdj/runtime';
+import { MemoryBdjStore, type BdjStore } from '../../src/engine/bdj/store/bdj-store';
 import type { WorkerLike } from '../../src/engine/bdj/session';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from '../../src/engine/bdj/worker-protocol';
 import { createAudioDecoderFactory } from '../../src/engine/decode/audio-decoder';
@@ -22,8 +23,45 @@ import type { KeyStep, SettledStep } from './key-script';
 
 const jar = (name: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(`../../src/bdj-classlib/${name}`, import.meta.url))));
 
+/** `wait menu`: how long a visible plane may go on flushing before the step holds anyway (bdj_trace.c MENU_ANIMATED_S). */
+const MENU_ANIMATED_MS = 30_000;
+
 /** One virtual-clock step: 5 render quanta of 128 frames at 48 kHz. */
 const STEP_MS = 640 / 48;
+
+/**
+ * A turn of the replay loop takes milliseconds; one this long means the run did not go on as it measures it. Node's
+ * clock on macOS counts the time the host is asleep, so after a sleep every wait and timeout in the run has expired at
+ * once (Task 7e: the ~1,000 s "hangs" were lid-closed sleeps). Under heavy load the longest turn seen was far below this.
+ */
+export const LOOP_GAP_MS = 20_000;
+
+/**
+ * Why a gap of `gapMs` between two turns of the replay loop, in which the process used `cpuMs` of CPU, voids the run;
+ * null for a gap under LOOP_GAP_MS. Little CPU: the process did not run (host sleep, or starved); busy: our own code
+ * held the event loop, which is a bug.
+ */
+export function loopGap(gapMs: number, cpuMs: number): string | null {
+  if (gapMs < LOOP_GAP_MS) return null;
+  const s = (ms: number, digits: number): string => (ms / 1000).toFixed(digits);
+  return cpuMs < gapMs / 2
+    ? `the process did not run for ${s(gapMs, 0)} s (${s(cpuMs, 2)} s of CPU): the host slept or was starved; the run is void`
+    : `the event loop was blocked for ${s(gapMs, 0)} s (${s(cpuMs, 1)} s of CPU): synchronous work held it`;
+}
+
+/** What the loop-gap check reads at each turn of the replay loop: the time and this process's CPU time, in ms. */
+export interface LoopClock {
+  readonly nowMs: () => number;
+  readonly cpuMs: () => number;
+}
+
+const processLoopClock: LoopClock = {
+  nowMs: () => performance.now(),
+  cpuMs: () => {
+    const u = process.cpuUsage();
+    return (u.user + u.system) / 1000;
+  },
+};
 
 export interface PlayerBdjReplay {
   /** Java's calls that the engine answered, in reply order, in trace.patch's format. */
@@ -42,6 +80,8 @@ export interface PlayerBdjReplay {
   readonly flushes: readonly string[];
   /** With a script: each step as it ran, a `wait still` step with the hash of the plane it settled on. */
   readonly steps: readonly SettledStep[];
+  /** With a script: how many calls had been traced when each step ran (steps[i] ran after trace[0..stepCalls[i]]). */
+  readonly stepCalls: readonly number[];
 }
 
 /** Records the plane's hash at every flush of every GraphicsPlaneWriter (the BD-J worker runs in process) until undone. */
@@ -82,7 +122,7 @@ export function traceEntryOf(name: BdjCallName, args: readonly BdjWireValue[], v
  * Two ends of an in-process channel between the engine and runBdjWorker: messages are delivered by reference (the
  * disc's Blob stand-ins for clips over 4 GiB cannot be cloned) on a later macrotask, in order, as a MessagePort does.
  */
-function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void, onHandle: (h: BdjWorkerHandle) => void): WorkerLike {
+function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) => void, onHandle: (h: BdjWorkerHandle) => void, store: BdjStore): WorkerLike {
   let closed = false;
   let handle: BdjWorkerHandle | null = null;
   const port: BdjPort = {
@@ -107,7 +147,7 @@ function inProcessWorker(onToBdj: (m: ToBdj) => void, onFromBdj: (m: FromBdj) =>
       handle?.runtime?.jvm.threads.halt();
     },
   };
-  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts });
+  handle = runBdjWorker(port, { extraIntrinsics: registerClassLibraryIntrinsics, ...testBdjFonts, createStore: () => store });
   onHandle(handle);
   return worker;
 }
@@ -148,6 +188,10 @@ export async function replayPlayerBdj(
     memoryProfile?: MemoryProfileName;
     /** Called once the run has ended, before the player closes, with the player and the last BD-J worker started. */
     beforeClose?: (player: Player, worker: BdjWorkerHandle | null) => void | Promise<void>;
+    /** The loop-gap check's clock (default: performance.now and process.cpuUsage); tests inject one. */
+    loopClock?: LoopClock;
+    /** The disc's saved data (default: a new, empty one, as in a browser that never played it); a test passes one store to several runs as to several viewings. */
+    store?: BdjStore;
   },
 ): Promise<PlayerBdjReplay> {
   const dir = typeof discDir === 'string' ? discDir : fileURLToPath(discDir);
@@ -173,7 +217,10 @@ export async function replayPlayerBdj(
   const stepTimeoutMs = opts.stepTimeoutMs ?? 60_000;
   const flushes: string[] = [];
   const steps: SettledStep[] = [];
+  const stepCalls: number[] = [];
   let lastFlushAt = 0;
+  /** Since when the flushed plane has been visible (null: it is not), for `wait menu`. */
+  let visibleSince: number | null = null;
   let stepIdx = 0;
   let stepFrom = { events: 0, flushes: 0, at: 0 };
   let lastWorker: BdjWorkerHandle | null = null;
@@ -197,6 +244,8 @@ export async function replayPlayerBdj(
     }
   };
 
+  // the disc's saved data, empty at first as in a browser that never played it, and kept across its BD-J workers
+  const store = opts.store ?? new MemoryBdjStore();
   const player = new Player({
     emit: (e) => events.push(e),
     videoCodecApi: fakeVideoCodecApi,
@@ -208,9 +257,14 @@ export async function replayPlayerBdj(
     // the replay has its own timeout; the first-playlist timer would measure the virtual clock's real-time steps
     setTimer: () => () => undefined,
     createBdjWorker: () =>
-      inProcessWorker(onToBdj, onFromBdj, (h) => {
-        lastWorker = h;
-      }),
+      inProcessWorker(
+        onToBdj,
+        onFromBdj,
+        (h) => {
+          lastWorker = h;
+        },
+        store,
+      ),
     loadClassLibrary: async () => classes,
     bdjLog: opts.log ? (line) => opts.log!(line) : undefined,
     playerSettings: HARNESS_SETTINGS,
@@ -219,6 +273,7 @@ export async function replayPlayerBdj(
     Object.assign(new Error(`replayPlayerBdj: ${why} before ${opts.until}#${occurrence} (${trace.length} calls traced)`), {
       trace: [...trace],
       steps: [...steps],
+      stepCalls: [...stepCalls],
       flushes: [...flushes],
       events: [...events],
       threadDump: (lastWorker as BdjWorkerHandle | null)?.runtime?.threadDump() ?? [],
@@ -231,6 +286,7 @@ export async function replayPlayerBdj(
       // being handed over, belongs to the next step (bdj_trace.c takes step_flushes before running a step's input)
       const mark = { events: events.length, flushes: flushes.length, at: performance.now() };
       let held = true;
+      let animated = false;
       switch (s.kind) {
         case 'waitFlush':
           held = flushes.length >= s.n;
@@ -238,8 +294,21 @@ export async function replayPlayerBdj(
         case 'waitStill':
           held = flushes.length > stepFrom.flushes && performance.now() - lastFlushAt >= s.ms;
           break;
+        case 'waitQuiet':
+          // bdj_trace.c's plane_quiet: no flush for ms since the later of the last flush and the step's start
+          held = performance.now() - Math.max(lastFlushAt, stepFrom.at) >= s.ms;
+          break;
+        case 'waitMenu': {
+          // bdj_trace.c's plane_menu: visible and still for ms, or visible for 30 s while flushing on (animated)
+          if (!plane?.visible()) visibleSince = null; // an init or close clears the plane without a flush
+          const visible = visibleSince !== null;
+          const still = visible && performance.now() - lastFlushAt >= s.ms;
+          animated = !still && visible && performance.now() - visibleSince! >= MENU_ANIMATED_MS;
+          held = still || animated;
+          break;
+        }
         case 'waitPlaylist':
-          held = events.slice(stepFrom.events).some((e) => e.type === 'chapters' && Number(e.playlistId) === s.playlist);
+          held = events.slice(stepFrom.events).some((e) => e.type === 'chapters' && (s.playlist === null || Number(e.playlistId) === s.playlist));
           break;
         case 'key':
           await player.handle({ type: 'menuKey', key: s.key });
@@ -252,7 +321,14 @@ export async function replayPlayerBdj(
         if (performance.now() - stepFrom.at > stepTimeoutMs) throw fail(`script step ${stepIdx} "${s.text}" did not hold within ${stepTimeoutMs} ms`);
         return;
       }
-      steps.push({ script: 'step', n: stepIdx, step: s.text, ...(s.kind === 'waitStill' ? { hash: flushes.at(-1) ?? null } : {}) });
+      stepCalls.push(trace.length);
+      steps.push({
+        script: 'step',
+        n: stepIdx,
+        step: s.text,
+        // an animated menu has no settled plane: only that it was visible counts (tools/bdj-library/README.md)
+        ...(animated ? { animated: true as const } : s.kind === 'waitStill' || s.kind === 'waitMenu' || s.kind === 'waitQuiet' ? { hash: flushes.at(-1) ?? null } : {}),
+      });
       stepIdx++;
       stepFrom = s.kind === 'key' || s.kind === 'pointer' ? mark : { events: events.length, flushes: flushes.length, at: performance.now() };
     }
@@ -261,6 +337,9 @@ export async function replayPlayerBdj(
     ? hookFlushes((hash) => {
         flushes.push(hash);
         lastFlushAt = performance.now();
+        // the hook runs after the writer published the flush, so the reader's flag is this flush's
+        if (!plane?.visible()) visibleSince = null;
+        else visibleSince ??= lastFlushAt;
       })
     : () => undefined;
   try {
@@ -276,7 +355,14 @@ export async function replayPlayerBdj(
     stepFrom = { events: 0, flushes: 0, at: t0 };
     await player.handle({ type: 'open', disc: { kind: 'files', entries: await directoryEntries(dir) } });
     let tailFrom: number | null = null;
+    const loopClock = opts.loopClock ?? processLoopClock;
+    let turn = { at: loopClock.nowMs(), cpu: loopClock.cpuMs() };
     for (;;) {
+      // before any wait or timeout is judged: after a host sleep they have all expired, and none of them is the cause
+      const next = { at: loopClock.nowMs(), cpu: loopClock.cpuMs() };
+      const gap = loopGap(next.at - turn.at, next.cpu - turn.cpu);
+      if (gap) throw fail(gap);
+      turn = next;
       if (done && stepIdx >= script.length) {
         tailFrom ??= performance.now();
         if (performance.now() - tailFrom >= (opts.tailMs ?? 0)) break;
@@ -307,6 +393,7 @@ export async function replayPlayerBdj(
       plane,
       flushes: [...flushes],
       steps: [...steps],
+      stepCalls: [...stepCalls],
     };
   } finally {
     await player.handle({ type: 'close' });

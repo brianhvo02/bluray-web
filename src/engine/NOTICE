@@ -81,6 +81,10 @@ libbluray (https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-late
                           (displayImage's fields; the still itself is shown where libbluray leaves it unimplemented),
                           HBackgroundImage.java and java/awt/BDToolkitBase.java (createImage(String): where the
                           still's file is named)
+    bdj/store/scopes.ts   from src/libbluray/bdj/java/org/videolan/BDJAppProxy.java (createStorage: the
+                          /persistent/<org>/<app> and /buda/<org>/<disc> directories), BDJXletContext.java
+                          (getXletProperty: dvb.org.id, dvb.app.id), bdj/bdj.c (_bdj_init's disc ID) and
+                          bluray.c (bdj_disc_id from bdid_get); bdjo_get's backup BDJO
   util/byte-reader.ts is an original implementation modelled on libbluray's
   bitstream reader; it contains no libbluray code.
   subs/srt.ts and subs/text-renderer.ts (SubRip subtitles) are original

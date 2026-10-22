@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AudioTrack, EngineEvent, Telemetry } from '../engine/protocol';
+import { BDJ_STORAGE_MESSAGE, NO_PICTURE_MESSAGE, type AudioTrack, type EngineEvent, type Telemetry } from '../engine/protocol';
 import { FETCH_PORT_RELEASE_MS, INITIAL_SNAPSHOT, PlayerController, reduceEvent, type AudioOutputLike, type WorkerLike } from './player-controller';
 
 class FakeWorker implements WorkerLike {
@@ -182,6 +182,105 @@ describe('notices across playlists', () => {
     startPlaylist(worker, c, '00001', []);
     await new Promise((r) => setTimeout(r, 0));
     expect(c.getSnapshot().notices.map((n) => n.code).sort()).toEqual(['audio-output', 'bdj']);
+  });
+});
+
+describe("the bdj-storage notice (saved data that won't last, ruling R32)", () => {
+  const lost: EngineEvent = { type: 'notice', code: 'bdj-storage', message: BDJ_STORAGE_MESSAGE };
+  const codes = (c: PlayerController): string[] => c.getSnapshot().notices.map((n) => n.code);
+
+  it('shows the text once, and keeps it for the disc: past a playlist picked and BD-J stopping', () => {
+    const shown = reduceEvent(reduceEvent(INITIAL_SNAPSHOT, lost), lost);
+    expect(shown.notices).toEqual([{ code: 'bdj-storage', message: "This disc's saved data can't be kept right now, so progress you make may be lost." }]);
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    worker.emit({ type: 'bdjActive', active: true });
+    worker.emit(lost);
+    worker.emit(lost);
+    expect(c.getSnapshot().notices).toEqual([{ code: 'bdj-storage', message: BDJ_STORAGE_MESSAGE }]);
+    c.playPlaylist('00000'); // from the picker: BD-J stops
+    worker.emit({ type: 'bdjActive', active: false });
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual(['bdj-storage']);
+  });
+
+  it('is cleared like the other notices: dismissed, or another disc opened', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    worker.emit(lost);
+    c.dismissNotice('bdj-storage');
+    expect(codes(c)).toEqual([]);
+    worker.emit(lost); // the next disc's own (the engine sends one per disc open)
+    expect(codes(c)).toEqual(['bdj-storage']);
+    c.open([]);
+    expect(codes(c)).toEqual([]);
+    expect(reduceEvent(reduceEvent(INITIAL_SNAPSHOT, lost), { type: 'noticeCleared', code: 'bdj-storage' }).notices).toEqual([]);
+  });
+});
+
+describe('the no-picture notice', () => {
+  const noPicture: EngineEvent = { type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE, noPicture: true };
+  const codes = (c: PlayerController): string[] => c.getSnapshot().notices.map((n) => n.code);
+
+  it('stays for the disc when another playlist is picked, and goes when another disc opens (Review Focus 4)', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    c.playPlaylist('00000');
+    worker.emit(noPicture);
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    c.playPlaylist('00001'); // the engine sends it once per disc: nothing comes for this one
+    worker.emit({ type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
+    expect(c.getSnapshot().notices).toEqual([{ code: 'no-picture', message: NO_PICTURE_MESSAGE }]);
+    c.open([]);
+    expect(codes(c)).toEqual([]);
+    c.playPlaylist('00000');
+    worker.emit(noPicture); // the next disc's own notice
+    expect(codes(c)).toEqual(['no-picture']);
+  });
+
+  it('goes when a playlist with a picture starts, and is not shown again for the disc (R9)', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.open([]);
+    c.playPlaylist('00000');
+    worker.emit(noPicture);
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual(['no-picture']);
+    c.playPlaylist('00001'); // H.264: the engine clears the notice before the playlist's chapters
+    worker.emit({ type: 'noticeCleared', code: 'no-picture' });
+    worker.emit({ type: 'chapters', playlistId: '00001', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual([]);
+    c.playPlaylist('00000'); // MPEG-2 again: the engine sends nothing more for this disc
+    worker.emit({ type: 'chapters', playlistId: '00000', durationUs: 1, chapters: [] });
+    expect(codes(c)).toEqual([]);
+  });
+
+  it('reduces noticeCleared for the no-picture notice', () => {
+    const shown = reduceEvent(INITIAL_SNAPSHOT, noPicture);
+    expect(shown.notices).toEqual([{ code: 'no-picture', message: NO_PICTURE_MESSAGE }]);
+    expect(reduceEvent(shown, { type: 'noticeCleared', code: 'no-picture' }).notices).toEqual([]);
+  });
+
+  it('is dismissed like any notice and does not come back for the next playlist', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.playPlaylist('00000');
+    worker.emit(noPicture);
+    c.dismissNotice('no-picture');
+    c.playPlaylist('00001');
+    expect(codes(c)).toEqual([]);
+  });
+
+  it('drops a playlist-specific unsupported-video error notice when another playlist is picked', () => {
+    const worker = new FakeWorker();
+    const c = new PlayerController(worker, new FakeAudio());
+    c.playPlaylist('00000');
+    worker.emit({ type: 'unsupported', kind: 'video', codec: 'HEVC', message: 'HEVC video is not supported by this browser.' });
+    c.playPlaylist('00001');
+    expect(codes(c)).toEqual([]);
   });
 });
 

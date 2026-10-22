@@ -43,6 +43,11 @@ export class M2tsReader {
     this.cursor = Math.floor(opts.startSpn / PACKETS_PER_ALIGNED_UNIT) * PACKETS_PER_ALIGNED_UNIT;
   }
 
+  /** Source packet where the chunks handed out by next() end (the prefetch is not counted): what was delivered. */
+  get deliveredSpn(): number {
+    return this.cursor;
+  }
+
   get stats(): DemuxStats {
     return { corruptPackets: this.corruptPackets, continuityErrors: this.assembler.continuityErrors };
   }

@@ -43,6 +43,22 @@ describe('MasterClock', () => {
     expect(clock.nowUs()).toBe(2_080_000);
   });
 
+  it('audio mode holds while no frames play, however the output latency moves (paused: Chrome varies it)', () => {
+    const audio = new FakeAudio();
+    const clock = new MasterClock(() => 0);
+    clock.useAudio(audio, 0);
+    audio.latency = 40_000;
+    audio.frames = 48_000;
+    expect(clock.nowUs()).toBe(960_000);
+    for (const latency of [32_000, 48_000, 40_000, 24_000]) {
+      audio.latency = latency;
+      expect(clock.nowUs()).toBe(960_000);
+    }
+    // once frames play again, the latency it reads then applies
+    audio.frames += 4800;
+    expect(clock.nowUs()).toBe(1_076_000);
+  });
+
   it('switches from audio to wall without a jump', () => {
     let now = 0;
     const audio = new FakeAudio();

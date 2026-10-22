@@ -15,7 +15,7 @@ OUT="$ROOT/tests/bdj/fonts/text-golden.json"
 OBJ=/src/libbluray/build/src/libbluray.so.4.0.0.p
 
 mkdir -p "$(dirname "$OUT")"
-docker run --rm --platform "$PLATFORM" \
+docker run --rm --network none --platform "$PLATFORM" \
   -v "$HERE/text_golden.c:/golden/text_golden.c:ro" \
   -v "$ROOT/fixtures/ass/fonts/DejaVuSerif.ttf:/fonts/DejaVuSerif.ttf:ro" \
   "$IMAGE" sh -c "gcc -O1 -Wall -Wextra -Werror -I/src/libbluray/jni -I/src/libbluray/jni/linux -o /tmp/text_golden \

@@ -8,10 +8,11 @@ import type { DiscSpec } from '../disc/disc-spec';
 import { runBdjWorker, type BdjWorkerHandle } from './bdj-worker';
 import { ZipArchive } from './jvm/zip';
 import { BdjEvent, type ClassLibrarySource } from './runtime';
-import { BdjSession, DUMP_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
+import { BdjSession, DUMP_WAIT_MS, IO_PAUSE_CEILING_MS, STOP_SAVE_WAIT_MS, type BdjFailureCode, type WorkerLike } from './session';
 import { createGraphicsPlane } from './graphics-plane';
 import { createRegisterBuffer } from './shared-registers';
 import { StatusBlockReader, StatusBlockWriter, createStatusBlock } from './status-block';
+import type { StorageLoss } from './store/bdj-store';
 import type { BdjCallName, BdjWireValue, FromBdj, ToBdj } from './worker-protocol';
 
 const file = (rel: string): Uint8Array => new Uint8Array(readFileSync(fileURLToPath(new URL(rel, import.meta.url))));
@@ -82,7 +83,7 @@ afterEach(() => {
   for (const s of sessions.splice(0)) s.stop();
 });
 
-function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) => GOLDEN_RETURNS[c.name] ?? 0, time45 = 0n): Harness {
+function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) => GOLDEN_RETURNS[c.name] ?? 0, time45 = 0n, extra: { readonly hidden?: boolean; readonly onStorageLost?: (reason: StorageLoss) => void } = {}): Harness {
   const calls: Call[] = [];
   const failures: [BdjFailureCode, string][] = [];
   const logs: string[] = [];
@@ -103,7 +104,9 @@ function session(worker: WorkerLike, answer: (c: Call) => number | string = (c) 
     onFailed: (code, message) => void failures.push([code, message]),
     onLog: (line) => void logs.push(line),
     nowMs: clock.nowMs,
+    wallMs: clock.nowMs,
     setTimer: clock.setTimer,
+    ...extra,
   });
   sessions.push(s);
   return { session: s, calls, failures, logs, clock, status: new StatusBlockReader(statusBuf) };
@@ -198,6 +201,178 @@ describe('BdjSession rules', () => {
     expect(f.terminated()).toBe(true);
   });
 
+  it('counts only visible time: hidden for 60 s mid-boot, no fallback; then 20 s of visible time in all (ruling R22)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(5_000);
+    h.session.setHidden(true);
+    h.clock.advance(60_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.session.setHidden(false);
+    h.clock.advance(14_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+  });
+
+  it("does not count time Java waits on its own reads: 60 s of slow disc reads, no fallback; a hang with none pending still falls back at 20 s (Task 7g)", () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    h.clock.advance(5_000);
+    // a JAR read over a slow link: pending for 60 s in all, with Java running for 4 s between two of its reads
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(30_000);
+    f.emit({ type: 'io', pending: false });
+    h.clock.advance(4_000);
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(30_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    f.emit({ type: 'io', pending: false });
+    // 9 s were counted: 11 s more without a read pending is the hang
+    h.clock.advance(10_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+  });
+
+  it('a read that never lands pauses the budget for 120 s at most; the fallback follows 20 s of counted time later (R26)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    f.emit({ type: 'io', pending: true }); // and never false
+    h.clock.advance(IO_PAUSE_CEILING_MS - 1);
+    expect(h.logs.some((l) => l.includes('waited on its reads'))).toBe(false);
+    h.clock.advance(1);
+    expect(h.logs.filter((l) => l.includes('waited on its reads'))).toEqual(['BD-J start-up timeout: the worker has waited on its reads for 120 s in all; waiting counts from now on']);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(19_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'dumped' });
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+    expect(h.logs.filter((l) => l.includes('waited on its reads'))).toHaveLength(1); // logged once
+  });
+
+  it('the 120 s ceiling is the total of all waits in a boot, not of each one (R26)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    for (let i = 0; i < 4; i++) {
+      f.emit({ type: 'io', pending: true });
+      h.clock.advance(30_000);
+      f.emit({ type: 'io', pending: false });
+      h.clock.advance(1_000); // 4 s counted in all
+    }
+    // the ceiling is reached: a fifth wait counts, 16 s of the budget left
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(15_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it('io after the timeout has fired, or after stop(), changes nothing (Task 7g)', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(20_000);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    f.emit({ type: 'io', pending: true }); // ignored: only the dump is waited for
+    h.clock.advance(DUMP_WAIT_MS);
+    expect(h.failures).toEqual([['timeout', 'no playlist was selected and nothing was shown within 20 s']]);
+
+    const g = fakeWorker();
+    const k = session(g.worker);
+    void k.session.boot(DISC, 0, null, CLASSES);
+    await k.session.stop();
+    const sent = g.sent.length;
+    g.emit({ type: 'io', pending: true });
+    g.emit({ type: 'io', pending: false });
+    k.clock.advance(60_000);
+    expect(g.sent.length).toBe(sent);
+    expect(k.failures).toEqual([]);
+  });
+
+  it('a read pending across a hide and a show still pauses the budget once shown (Task 7g, ruling R22)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(2_000);
+    f.emit({ type: 'io', pending: true });
+    h.session.setHidden(true);
+    h.clock.advance(10_000);
+    h.session.setHidden(false);
+    h.clock.advance(40_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    f.emit({ type: 'io', pending: false });
+    h.clock.advance(17_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it('the first playlist is logged with the budget it used (Task 7g)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 10 });
+    h.session.start(FIRST_PLAY);
+    h.clock.advance(3_000);
+    f.emit({ type: 'io', pending: true });
+    h.clock.advance(5_000);
+    f.emit({ type: 'io', pending: false });
+    h.clock.advance(1_500);
+    f.emit({ type: 'call', id: 1, name: 'selectPlaylist', args: [0, -1, -1, '-1'] });
+    expect(h.logs).toContain('BD-J selected its first playlist 9500 ms after boot (4500 ms of the start-up timeout counted; 5000 ms waiting on reads)');
+  });
+
+  it('a session made while the page is hidden waits for it to be shown', () => {
+    const f = fakeWorker();
+    const h = session(f.worker, undefined, 0n, { hidden: true });
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(120_000);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.session.setHidden(false);
+    h.clock.advance(20_000);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
+  it('a host sleep (a wall-clock gap of 5 s beyond a tick) restarts the budget instead of firing (ruling R22)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    h.clock.advance(15_000);
+    h.clock.sleep(1_000_000); // the clock moves on, no timer fires until the host wakes
+    h.clock.advance(0);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    expect(h.logs).toContain('BD-J start-up timeout restarted: the host did not run for 1000 s');
+    h.clock.advance(19_999);
+    expect(f.sent.some((m) => m.type === 'dump')).toBe(false);
+    h.clock.advance(1);
+    expect(f.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+    // a gap under 5 s beyond the tick is ordinary lateness and counts
+    const g = fakeWorker();
+    const k = session(g.worker);
+    void k.session.boot(DISC, 0, null, CLASSES);
+    k.clock.advance(15_000);
+    k.clock.sleep(4_000); // 3 s late beyond its 1 s tick
+    k.clock.advance(0);
+    expect(g.sent.some((m) => m.type === 'dump')).toBe(false);
+    k.clock.advance(1_000);
+    expect(g.sent.at(-1)).toEqual({ type: 'dump', reason: 'start-up timeout' });
+  });
+
   it('fails with timeout 20,000 ms after a boot that never completes', async () => {
     const f = fakeWorker();
     const h = session(f.worker);
@@ -256,7 +431,8 @@ describe('BdjSession rules', () => {
       else f.emit({ type: 'background', image: new Uint8Array([1]), rect: { x: 0, y: 0, width: 1, height: 1 } });
       h.clock.advance(60_000);
       expect(h.failures).toEqual([]);
-      expect(h.logs).toContain(show === 'menu' ? 'BD-J showed a menu 10000 ms after boot' : 'BD-J showed a background still 10000 ms after boot');
+      const counted = '(10000 ms of the start-up timeout counted; 0 ms waiting on reads)';
+      expect(h.logs).toContain(show === 'menu' ? `BD-J showed a menu 10000 ms after boot ${counted}` : `BD-J showed a background still 10000 ms after boot ${counted}`);
     }
   });
 
@@ -280,6 +456,101 @@ describe('BdjSession rules', () => {
     expect(h.failures).toEqual([]);
     expect(h.logs).not.toContain('late');
     expect(f.sent.length).toBe(sent);
+  });
+
+  it('asks a worker with storage scopes to flush when the page is shown again (a NAS disc\'s write-ahead copy, ruling R17)', () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 1 });
+    h.session.setHidden(true);
+    h.session.setHidden(false);
+    expect(f.sent.map((m) => m.type)).toEqual(['boot']); // no scopes: nothing to flush
+    f.emit({ type: 'unsaved', unsaved: false });
+    h.session.setHidden(true);
+    h.session.setHidden(false);
+    h.session.setHidden(false); // no change: nothing more
+    expect(f.sent.map((m) => m.type)).toEqual(['boot', 'flush']);
+  });
+
+  it("passes the worker's storageLost on (the bdj-storage notice, ruling R32), and nothing of it once stopped", async () => {
+    const f = fakeWorker();
+    const lost: StorageLoss[] = [];
+    const h = session(f.worker, undefined, 0n, { onStorageLost: (reason) => void lost.push(reason) });
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'unsaved', unsaved: false });
+    f.emit({ type: 'storageLost', reason: 'memory-only' }); // before the boot is through: the scopes load during it
+    f.emit({ type: 'booted', bootMs: 1 });
+    expect(lost).toEqual(['memory-only']);
+    const stopped = h.session.stop();
+    f.emit({ type: 'storageLost', reason: 'full' }); // the stop's save, while the engine waits for it
+    f.emit({ type: 'stopped' });
+    await stopped;
+    f.emit({ type: 'storageLost', reason: 'put-failed' });
+    expect(lost).toEqual(['memory-only']);
+  });
+
+  it('with unsaved storage changes, a stop lets the worker save them (stop, stopped) before it is terminated', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'booted', bootMs: 1 });
+    h.session.flush();
+    expect(f.sent.map((m) => m.type)).toEqual(['boot']); // nothing to save yet
+    f.emit({ type: 'unsaved', unsaved: true });
+    h.session.flush(); // pagehide
+    expect(f.sent.map((m) => m.type)).toEqual(['boot', 'flush']);
+    let done = false;
+    const stopped = h.session.stop().then(() => void (done = true));
+    expect(f.sent.at(-1)).toEqual({ type: 'stop' });
+    expect(f.terminated()).toBe(false);
+    f.emit({ type: 'call', id: 1, name: 'writeReg', args: [1, 4, 1, -1] }); // Java is not answered after the stop
+    f.emit({ type: 'log', line: 'BD-J storage: saved', error: false });
+    expect(h.calls).toEqual([]);
+    expect(h.logs).toContain('BD-J storage: saved');
+    await Promise.resolve();
+    expect(done).toBe(false);
+    f.emit({ type: 'stopped' });
+    await stopped;
+    expect(f.terminated()).toBe(true);
+    expect(h.session.stop()).toBe(h.session.stop()); // once
+  });
+
+  it('terminates a worker that does not answer the stop within STOP_SAVE_WAIT_MS; one without scopes stops at once', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'unsaved', unsaved: true });
+    const stopped = h.session.stop();
+    h.clock.advance(STOP_SAVE_WAIT_MS - 1);
+    expect(f.terminated()).toBe(false);
+    h.clock.advance(1);
+    await stopped;
+    expect(f.terminated()).toBe(true);
+    expect(h.logs).toContain(`BD-J worker did not save its storage within ${STOP_SAVE_WAIT_MS} ms of the stop`);
+
+    const g = fakeWorker();
+    const k = session(g.worker);
+    void k.session.boot(DISC, 0, null, CLASSES);
+    g.emit({ type: 'booted', bootMs: 1 }); // no `unsaved`: the worker has no scopes
+    k.session.flush();
+    void k.session.stop();
+    expect(g.terminated()).toBe(true);
+    expect(g.sent.map((m) => m.type)).toEqual(['boot']);
+  });
+
+  it('with scopes, a stop always waits for the save, even before an unsaved change is heard of (one may be on its way)', async () => {
+    const f = fakeWorker();
+    const h = session(f.worker);
+    void h.session.boot(DISC, 0, null, CLASSES);
+    f.emit({ type: 'unsaved', unsaved: false }); // the scopes are loaded
+    f.emit({ type: 'booted', bootMs: 1 });
+    const stopped = h.session.stop();
+    expect(f.sent.at(-1)).toEqual({ type: 'stop' });
+    expect(f.terminated()).toBe(false);
+    f.emit({ type: 'stopped' });
+    await stopped;
+    expect(f.terminated()).toBe(true);
   });
 
   it('sends a title start the host asks for during selectTitle only after that call is answered', async () => {

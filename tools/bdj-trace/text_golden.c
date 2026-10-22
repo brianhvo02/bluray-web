@@ -260,7 +260,7 @@ static const draw_t DRAWS[] = {
     { 5, 290, 70, 0x00ffffffu, 0 },  /* alpha 0, clipped at the right and bottom */
 };
 
-static const int SIZES[] = { 16, 24, 36 };
+static const int SIZES[] = { 16, 24, 36, 40, 48, 72 };
 static const unsigned EXTRA_CHARS[] = { 0x3042, 0x20ac, 0xd83d, 0xffff };
 typedef struct { jint offset, length; } span_t;
 static const span_t CHAR_SPANS[] = { { 2, 4 }, { 0, 0 }, { 0, 8 }, { 6, 4 }, { -1, 2 }, { 0, -1 } };

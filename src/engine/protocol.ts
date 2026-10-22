@@ -9,7 +9,7 @@ import type { UoOp } from './hdmv/uo-mask';
 import type { Chapter } from './nav/timeline';
 
 export type PlaybackState = 'idle' | 'loading' | 'paused' | 'buffering' | 'playing' | 'ended' | 'error';
-export type NoticeCode = 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
+export type NoticeCode = 'no-picture' | 'bdj' | 'bdj-tap-ignored' | 'bdj-failed' | 'bdj-storage' | 'audio-disabled' | 'decoder-recovered' | 'uo-masked' | 'subtitle-file' | 'subtitle-fonts' | 'menu-memory' | 'nas-waiting';
 /** RemoteFailure: a NAS disc changed, the NAS cannot be reached, or this device is no longer paired. */
 export type ErrorCode = DiscErrorCode | RemoteFailure | 'corrupt-disc' | 'decoder-failed' | 'no-video' | 'internal';
 
@@ -20,6 +20,7 @@ export interface Telemetry {
   readonly avOffsetMeanUs: number | null;
   readonly avOffsetMaxAbsUs: number | null;
   readonly framesInWindow: number;
+  /** Decoded frames presented; stays 0 for a playlist without a picture (whose bdj.firstFrameMs is its first black frame). */
   readonly framesPresented: number;
   readonly framesDropped: number;
   readonly audioBufferedMs: number;
@@ -84,6 +85,7 @@ export interface BdjMemoryTelemetry {
 export interface BdjStartup {
   readonly bootMs: number | null;
   readonly firstPlaylistMs: number | null;
+  /** For a playlist without a picture: its first black frame with the planes (framesPresented stays 0). */
   readonly firstFrameMs: number | null;
 }
 
@@ -230,7 +232,17 @@ export type EngineCommand =
   | { readonly type: 'close' }
   /** Shade the video with this set (compiled in the background), or draw it unshaded (null). Kept across discs. */
   | { readonly type: 'setVideoShaders'; readonly set: ShaderSetData | null }
-  | { readonly type: 'setMemoryProfile'; readonly profile: MemoryProfileName };
+  | { readonly type: 'setMemoryProfile'; readonly profile: MemoryProfileName }
+  /**
+   * The page is going away (pagehide, or hidden): a BD-J title saves what its disc wrote under /persistent/ and /buda/
+   * now rather than at the end of its 2 s debounce. Handled at once, not queued.
+   */
+  | { readonly type: 'flushSaves' }
+  /**
+   * The page was hidden or shown again (document.hidden; sent at start and on every visibilitychange). A BD-J title's
+   * start-up timeout counts only visible time (ruling R22). Handled at once, not queued.
+   */
+  | { readonly type: 'visibility'; readonly hidden: boolean };
 
 export type EngineEvent =
   /** `bdjSupported`: this engine runs BD-J titles. */
@@ -271,7 +283,10 @@ export type EngineEvent =
   | { readonly type: 'state'; readonly state: PlaybackState }
   | { readonly type: 'time'; readonly timeUs: number }
   | { readonly type: 'notice'; readonly code: NoticeCode; readonly message: string }
-  /** The condition behind a notice is over (nas-waiting: the read landed). */
+  /**
+   * The condition behind a notice of that code is over: 'nas-waiting' once the read landed, 'no-picture' once a
+   * playlist with a picture starts.
+   */
   | { readonly type: 'noticeCleared'; readonly code: NoticeCode }
   /**
    * The read-ahead cache's fill: bytes held from the start position on, out of `targetBytes` (the request's, or all
@@ -289,7 +304,12 @@ export type EngineEvent =
    * the order the discs were opened: what serves that port on the main thread can stop now without failing its reads.
    */
   | { readonly type: 'fetchPortClosed' }
-  | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string }
+  /**
+   * A stream the browser can't decode. With `noPicture` (kind 'video', NO_PICTURE_MESSAGE): the playlist plays without a
+   * picture; sent once per disc, it is the disc-level notice 'no-picture'. Otherwise it is the playlist's notice
+   * 'unsupported-<kind>'.
+   */
+  | { readonly type: 'unsupported'; readonly kind: 'video' | 'audio'; readonly codec: string; readonly message: string; readonly noPicture?: true }
   | { readonly type: 'error'; readonly code: ErrorCode; readonly message: string; readonly paths: readonly string[] }
   | { readonly type: 'telemetry'; readonly telemetry: Telemetry }
   /** The current playlist was torn down (a new pick, a failed pick, or close). */
@@ -303,3 +323,17 @@ export type EngineEvent =
    * time is at or past the playlist's end (it plays from the beginning).
    */
   | { readonly type: 'startFailed'; readonly reason: 'no-playlist' | 'past-end' };
+
+/**
+ * The notice of a playlist whose video (MPEG-2, VC-1) the browser can't decode: it plays without a picture. Sent once per
+ * disc (unsupported with noPicture, the notice 'no-picture'), and cleared (noticeCleared 'no-picture') when a playlist with
+ * a picture starts; that disc never sends it again.
+ */
+export const NO_PICTURE_MESSAGE = "This disc's video can't be played here yet, so it will play without a picture.";
+
+/**
+ * The notice 'bdj-storage' (ruling R32): what a BD-J disc saves won't last. A scope kept in memory only with no copy
+ * anywhere, a write refused for room (16 MB per scope, the NAS's quota, the VFS's memory cap), or a NAS put that failed
+ * for good. Sent at most once per disc open; it stays until dismissed or another disc opens.
+ */
+export const BDJ_STORAGE_MESSAGE = "This disc's saved data can't be kept right now, so progress you make may be lost.";

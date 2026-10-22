@@ -1,0 +1,11 @@
+protocol jar file-ends true
+connection true
+entry res/hello.txt jar-file-ends true
+jar-entry res/hello.txt 11
+content-length 11
+read hello, jar|
+open-stream play|chapters|setup|
+relative hello, jar|
+missing java.io.FileNotFoundException
+http http bdlive.example.invalid 8080 /path/check.xml disc=1
+http-external http://bdlive.example.invalid:8080/path/check.xml&disc=1

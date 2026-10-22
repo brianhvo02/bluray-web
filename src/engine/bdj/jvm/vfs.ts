@@ -40,9 +40,50 @@ export interface VfsOptions {
    * full disk (the memory profile's bdjVfsCacheBytes). Default: none.
    */
   readonly memLimitBytes?: number;
-  /** A write or truncate of `path` was refused for the limit. */
-  readonly onFull?: (path: string, limitBytes: number) => void;
+  /**
+   * A write, truncate or rename to `path` was refused for the limit: the memory mounts' (`quotaDir` null) or the quota
+   * of the directory `quotaDir` (setQuota).
+   */
+  readonly onFull?: (path: string, limitBytes: number, quotaDir: string | null) => void;
+  /**
+   * Something on /tmp/, /persistent/ or /buda/ changed (after the change): `path` canonical; for a rename, `to` is the new
+   * path. Snapshots imported with importFiles do not count.
+   */
+  readonly onChange?: (path: string, change: VfsChange, to?: string) => void;
 }
+
+/** What changed on a memory mount (onChange): 'truncate' is a cut or extension, also open('w') on an existing file. */
+export type VfsChange = 'create' | 'write' | 'truncate' | 'delete' | 'mkdir' | 'rename' | 'mtime';
+
+/** One file of a memory subtree (importFiles, exportFiles): its path relative to the subtree, mtime in ms and bytes. */
+export interface VfsTreeFile {
+  readonly path: string;
+  readonly mtime: number;
+  readonly bytes: Uint8Array;
+}
+
+/** A directory whose files' lengths together may not pass `limit` (setQuota): a BD-J storage scope. */
+interface QuotaRoot {
+  /** Canonical, without a trailing slash. */
+  readonly dir: string;
+  /** setQuotaLimit changes it (the NAS out of room). */
+  limit: number;
+  /** Only the files directly in `dir` count, not those in its subdirectories. */
+  readonly looseOnly: boolean;
+  /** What a file of `len` bytes counts toward it (QuotaAccounting). */
+  readonly cost: (len: number) => number;
+  used: number;
+}
+
+/**
+ * How a quota counts: `bytes`, the files' lengths; `tar`, the size of the ustar archive the NAS keeps the scope in
+ * (ruling R24): 512 bytes of header per file plus its length rounded up to 512, and 1024 bytes of end blocks.
+ */
+export type QuotaAccounting = 'bytes' | 'tar';
+
+const TAR_BLOCK = 512;
+const tarCost = (len: number): number => TAR_BLOCK + Math.ceil(len / TAR_BLOCK) * TAR_BLOCK;
+const byteCost = (len: number): number => len;
 
 /** A file whose size is known up front and whose bytes are fetched when first read (reads of it return promises). */
 export interface LazyFile {
@@ -67,6 +108,8 @@ interface MemFile {
   shared: boolean;
   /** In a directory (not deleted while open): its length counts toward the memory mounts' limit. */
   linked: boolean;
+  /** The quota its length counts toward while linked (setQuota), by its path. */
+  quota: QuotaRoot | null;
 }
 type MemNode = MemDir | MemFile;
 
@@ -164,15 +207,20 @@ export class Vfs {
   private readonly spelling = new Map<string, string>();
   private readonly jdkCache = new Map<string, Uint8Array>();
   private readonly memLimit: number;
-  private readonly onFull: ((path: string, limitBytes: number) => void) | undefined;
+  private readonly onFull: ((path: string, limitBytes: number, quotaDir: string | null) => void) | undefined;
+  private readonly onChange: ((path: string, change: VfsChange, to?: string) => void) | undefined;
   /** The lengths of the files on the memory mounts. */
   private memUsed = 0;
+  private readonly quotas: QuotaRoot[] = [];
+  /** The writable handles open on each memory file (writing): a stored snapshot is not imported over one. */
+  private readonly writers = new WeakMap<MemFile, Set<Handle>>();
 
   constructor(opts: VfsOptions) {
     this.disc = opts.disc;
     this.nowMs = opts.nowMs;
     this.memLimit = opts.memLimitBytes ?? Infinity;
     this.onFull = opts.onFull;
+    this.onChange = opts.onChange;
     if (opts.disc) {
       if (!opts.discPaths) throw new Error('Vfs: discPaths is required when a disc is given');
       for (const path of opts.discPaths) {
@@ -313,7 +361,12 @@ export class Vfs {
     const now = this.nowMs();
     t.parent.children.set(t.name, newDir(now));
     t.parent.mtimeMs = now;
+    this.changed(path, 'mkdir');
     return true;
+  }
+
+  private changed(path: string, change: VfsChange, to?: string): void {
+    if (this.onChange) this.onChange(this.canonicalize(path), change, to === undefined ? undefined : this.canonicalize(to));
   }
 
   delete(path: string): boolean {
@@ -324,23 +377,174 @@ export class Vfs {
     t.parent.children.delete(t.name);
     if (node.kind === 'file') this.unlink(node);
     t.parent.mtimeMs = this.nowMs();
+    this.changed(path, 'delete');
     return true;
   }
 
   private unlink(file: MemFile): void {
-    if (file.linked) this.memUsed -= file.len;
+    if (file.linked) {
+      this.memUsed -= file.len;
+      if (file.quota) file.quota.used -= file.quota.cost(file.len);
+    }
     file.linked = false;
+    file.quota = null;
+  }
+
+  /** Counts a file put in a directory toward the limit and the quota of its canonical path. */
+  private link(file: MemFile, canonPath: string): void {
+    file.linked = true;
+    file.quota = this.quotaFor(canonPath);
+    this.memUsed += file.len;
+    if (file.quota) file.quota.used += file.quota.cost(file.len);
   }
 
   /** Sets a memory file's length, counting it toward the limit; false (and nothing changes) when it would go over. */
   private resize(file: MemFile, len: number): boolean {
     if (file.linked) {
       const used = this.memUsed - file.len + len;
-      if (len > file.len && used > this.memLimit) return false;
+      const q = file.quota;
+      if (len > file.len && (used > this.memLimit || (q !== null && q.used - q.cost(file.len) + q.cost(len) > q.limit))) return false;
       this.memUsed = used;
+      if (q) q.used += q.cost(len) - q.cost(file.len);
     }
     file.len = len;
     return true;
+  }
+
+  /**
+   * Limits the files under `dir` (on a memory mount) to `limitBytes` of lengths together, beyond the memory mounts'
+   * limit: a write past it fails as on a full disk. Files already there count toward it at once. `looseOnly`: only the
+   * files directly in `dir`. A file counts toward one quota at most: the innermost that holds it.
+   */
+  setQuota(dir: string, limitBytes: number, looseOnly = false, accounting: QuotaAccounting = 'bytes'): void {
+    const canon = this.canonicalize(dir);
+    const tar = accounting === 'tar';
+    const root: QuotaRoot = { dir: canon, limit: limitBytes, looseOnly, cost: tar ? tarCost : byteCost, used: tar ? 2 * TAR_BLOCK : 0 };
+    this.quotas.push(root);
+    const node = this.memNode(canon);
+    if (!node) return;
+    this.visitFiles(node, canon, (file, path) => {
+      if (!file.linked || this.quotaFor(path) !== root) return;
+      if (file.quota) file.quota.used -= file.quota.cost(file.len);
+      file.quota = root;
+      root.used += root.cost(file.len);
+    });
+  }
+
+  /**
+   * Changes the limit of the quota of `dir` (setQuota): false without one. A limit at or below what its files hold now
+   * refuses every write that needs more room, as a full disk does; the files already there stay.
+   */
+  setQuotaLimit(dir: string, limitBytes: number): boolean {
+    const canon = this.canonicalize(dir);
+    const root = this.quotas.find((q) => q.dir === canon);
+    if (!root) return false;
+    root.limit = limitBytes;
+    return true;
+  }
+
+  /** Whether a quota (setQuota) has no room for a new, empty file at `path` (its tar header): a full disk's ENOSPC. */
+  quotaRefusesNewFile(path: string): boolean {
+    const q = this.quotaFor(this.canonicalize(path));
+    return q !== null && q.used + q.cost(0) > q.limit;
+  }
+
+  /** What the files that count toward the quota of `dir` (setQuota) add up to, as it counts them; 0 without one. */
+  quotaUsed(dir: string): number {
+    const canon = this.canonicalize(dir);
+    return this.quotas.find((q) => q.dir === canon)?.used ?? 0;
+  }
+
+  /** The innermost quota whose directory holds the canonical path. */
+  private quotaFor(canonPath: string): QuotaRoot | null {
+    let best: QuotaRoot | null = null;
+    for (const q of this.quotas) {
+      if (!canonPath.startsWith(`${q.dir}/`) || (q.looseOnly && canonPath.indexOf('/', q.dir.length + 1) >= 0)) continue;
+      if (!best || q.dir.length > best.dir.length) best = q;
+    }
+    return best;
+  }
+
+  /** The memory node at a canonical path; null elsewhere or when it is missing. */
+  private memNode(canon: string): MemNode | null {
+    const r = this.resolve(canon);
+    if (!r || r.mount === null) return null;
+    const b = this.backings.get(r.mount)!;
+    return b.type === 'mem' ? this.walk(b.root, r.rest) : null;
+  }
+
+  private visitFiles(node: MemNode, path: string, fn: (file: MemFile, path: string) => void): void {
+    if (node.kind === 'file') return fn(node, path);
+    for (const [name, child] of node.children) this.visitFiles(child, `${path}/${name}`, fn);
+  }
+
+  /**
+   * Puts `files` under the memory directory `dir` (created as needed), replacing files of the same path (in place when
+   * a writable handle is open on one): a stored snapshot. They count toward the limit and the quotas (even beyond them) but are no change for onChange. The bytes
+   * are kept without a copy and never written in place: a write goes to a copy.
+   */
+  importFiles(dir: string, files: Iterable<VfsTreeFile>): void {
+    const base = this.canonicalize(dir);
+    for (const f of files) {
+      const path = this.canonicalize(`${base}/${f.path}`);
+      if (!path.startsWith(`${base}/`)) continue;
+      const parts = path.split('/').filter(Boolean);
+      const b = this.backings.get(parts[0]!);
+      if (b?.type !== 'mem' || parts.length < 2) continue;
+      let parent: MemDir | null = b.root;
+      for (const seg of parts.slice(1, -1)) {
+        let next: MemNode | undefined = parent.children.get(seg);
+        if (!next) parent.children.set(seg, (next = newDir(f.mtime)));
+        if (next.kind !== 'dir') {
+          parent = null;
+          break;
+        }
+        parent = next;
+      }
+      const name = parts[parts.length - 1]!;
+      const old = parent?.children.get(name);
+      if (!parent || old?.kind === 'dir') continue;
+      if (old && (this.writers.get(old)?.size ?? 0) > 0) {
+        // a file with a writable handle open is replaced in place, so that handle writes to the file as it is now
+        // rather than to an unlinked one
+        this.unlink(old);
+        old.buf = f.bytes;
+        old.len = f.bytes.length;
+        old.mtimeMs = f.mtime;
+        old.shared = true;
+        this.link(old, path);
+        continue;
+      }
+      if (old) this.unlink(old);
+      const file: MemFile = { kind: 'file', buf: f.bytes, len: f.bytes.length, mtimeMs: f.mtime, shared: true, linked: false, quota: null };
+      this.link(file, path);
+      parent.children.set(name, file);
+    }
+  }
+
+  /** Whether a memory file at `path` has a writable handle open (a write in progress: ScopeSync imports nothing over it). */
+  writing(path: string): boolean {
+    const node = this.memNode(this.canonicalize(path));
+    return node?.kind === 'file' && (this.writers.get(node)?.size ?? 0) > 0;
+  }
+
+  /**
+   * The files under the memory directory `dir` (`looseOnly`: only those directly in it), paths relative to it in
+   * order, without a copy: a file returned is not written in place again (as peek), so the bytes stay as they are.
+   * Empty when `dir` is missing.
+   */
+  exportFiles(dir: string, looseOnly = false): VfsTreeFile[] {
+    const node = this.memNode(this.canonicalize(dir));
+    if (node?.kind !== 'dir') return [];
+    const out: VfsTreeFile[] = [];
+    const take = (file: MemFile, path: string): void => {
+      file.shared = true;
+      out.push({ path, mtime: file.mtimeMs, bytes: file.buf.subarray(0, file.len) });
+    };
+    if (looseOnly) {
+      for (const [name, child] of node.children) if (child.kind === 'file') take(child, name);
+    } else this.visitFiles(node, '', (file, path) => take(file, path.slice(1)));
+    return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   }
 
   /** Whether writing `length` bytes through `h` at its position fits in the memory mounts' limit. */
@@ -352,10 +556,17 @@ export class Vfs {
   /** Whether `h`'s file can grow to `length` bytes within the memory mounts' limit; onFull hears of a refusal. */
   fitsLength(h: VfsHandle, length: number): boolean {
     const file = (h as Handle).node;
-    if (!file?.linked) return true;
-    const fits = length <= file.len || this.memUsed - file.len + length <= this.memLimit;
-    if (!fits) this.onFull?.(h.path, this.memLimit);
-    return fits;
+    if (!file?.linked || length <= file.len) return true;
+    if (this.memUsed - file.len + length > this.memLimit) {
+      this.onFull?.(h.path, this.memLimit, null);
+      return false;
+    }
+    const q = file.quota;
+    if (q && q.used - q.cost(file.len) + q.cost(length) > q.limit) {
+      this.onFull?.(h.path, q.limit, q.dir);
+      return false;
+    }
+    return true;
   }
 
   rename(from: string, to: string): boolean {
@@ -368,11 +579,40 @@ export class Vfs {
     if (existing === node) return true;
     if (existing && (existing.kind === 'dir' || node.kind === 'dir')) return false;
     if (node.kind === 'dir' && this.isWithin(node, dst.parent)) return false;
+    if (!this.requota(node, this.canonicalize(to), existing?.kind === 'file' ? existing : null)) return false;
     src.parent.children.delete(src.name);
     if (existing?.kind === 'file') this.unlink(existing);
     dst.parent.children.set(dst.name, node);
     const now = this.nowMs();
     src.parent.mtimeMs = dst.parent.mtimeMs = now;
+    this.changed(from, 'rename', to);
+    return true;
+  }
+
+  /**
+   * A rename moves the files of `node` to `to`: each counts toward its new path's quota from now on. False (nothing
+   * changes, onFull hears of it) when a quota would go over; `replaced`, the file the rename replaces, is freed first.
+   */
+  private requota(node: MemNode, to: string, replaced: MemFile | null): boolean {
+    const moves: [MemFile, QuotaRoot | null][] = [];
+    this.visitFiles(node, to, (file, path) => {
+      if (file.linked) moves.push([file, this.quotaFor(path)]);
+    });
+    const added = new Map<QuotaRoot, number>();
+    for (const [file, q] of moves) if (q && q !== file.quota) added.set(q, (added.get(q) ?? 0) + q.cost(file.len));
+    for (const [q, n] of added) {
+      const freed = replaced?.linked && replaced.quota === q ? q.cost(replaced.len) : 0;
+      if (q.used - freed + n > q.limit) {
+        this.onFull?.(to, q.limit, q.dir);
+        return false;
+      }
+    }
+    for (const [file, q] of moves) {
+      if (q === file.quota) continue;
+      if (file.quota) file.quota.used -= file.quota.cost(file.len);
+      if (q) q.used += q.cost(file.len);
+      file.quota = q;
+    }
     return true;
   }
 
@@ -389,17 +629,31 @@ export class Vfs {
       if (node?.kind === 'dir') return null;
       if (!node) {
         if (mode === 'r') return null;
+        const q = this.quotaFor(canon);
+        if (q && q.used + q.cost(0) > q.limit) {
+          // its header alone does not fit the quota (tar accounting): as a full disk refuses a new file
+          this.onFull?.(canon, q.limit, q.dir);
+          return null;
+        }
         const now = this.nowMs();
-        node = { kind: 'file', buf: new Uint8Array(0), len: 0, mtimeMs: now, shared: false, linked: true };
+        node = { kind: 'file', buf: new Uint8Array(0), len: 0, mtimeMs: now, shared: false, linked: false, quota: null };
+        this.link(node, canon);
         t.parent.children.set(t.name, node);
         t.parent.mtimeMs = now;
+        this.changed(canon, 'create');
       } else if (mode === 'w') {
         this.resize(node, 0);
         node.mtimeMs = this.nowMs();
+        this.changed(canon, 'truncate');
       }
       const file = node;
       const h = new Handle(canon, () => file.len, mode !== 'r', mode === 'a', file, null, null);
       if (mode === 'a') h.position = file.len;
+      if (h.writable) {
+        let open = this.writers.get(file);
+        if (!open) this.writers.set(file, (open = new Set()));
+        open.add(h);
+      }
       return h;
     }
     if (mode !== 'r') return null;
@@ -472,12 +726,14 @@ export class Vfs {
     handle.position = end;
     if (end > file.len) this.resize(file, end);
     file.mtimeMs = this.nowMs();
+    if (file.linked) this.changed(handle.path, 'write');
     return true;
   }
 
   /** A file written through `h` gives back the room its buffer grew by beyond its length. */
   close(h: VfsHandle): void {
     const file = (h as Handle).node;
+    if (file) this.writers.get(file)?.delete(h as Handle);
     if (!file || !h.writable || file.shared) return;
     const slack = file.buf.length - file.len;
     if (slack >= Math.max(SLACK_KEPT, file.len >> 3)) file.buf = file.buf.slice(0, file.len);
@@ -522,6 +778,7 @@ export class Vfs {
     const node = this.walk(b.root, r.rest);
     if (!node) return false;
     node.mtimeMs = ms;
+    this.changed(path, 'mtime');
     return true;
   }
 
@@ -543,6 +800,7 @@ export class Vfs {
     this.resize(file, length);
     if (handle.position > length) handle.position = length;
     file.mtimeMs = this.nowMs();
+    if (file.linked) this.changed(handle.path, 'truncate');
     return true;
   }
 

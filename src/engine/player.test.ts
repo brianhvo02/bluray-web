@@ -23,8 +23,8 @@ import { Navigator } from './nav/navigator';
 import { DEFAULT_CHUNK_PACKETS } from './demux/m2ts-reader';
 import { SOURCE_PACKET_SIZE } from './demux/constants';
 import { serveFetch } from './disc/port-fetch';
-import { Player, type PlayerDeps } from './player';
-import type { EngineEvent, PlaybackState, ShaderSetData, Telemetry } from './protocol';
+import { Player, type BdjPlaybackListener, type PlayerDeps } from './player';
+import { NO_PICTURE_MESSAGE, type EngineEvent, type PlaybackState, type ShaderSetData, type Telemetry } from './protocol';
 import { ShaderStage } from './shaders/stage';
 import { UNAVAILABLE, type CompiledSet, type ShaderBackend } from './shaders/webgl-backend';
 
@@ -114,7 +114,7 @@ function fakeAudioFactory(log: FakeAudioLog = { decoded: [], resets: 0, failNext
   };
 }
 
-async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory; segmentBytes?: number } = {},
+async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?: number; videoCodingType?: number; throwOnDraw?: boolean; audioMuxLag90k?: number; frameBytes?: number; playlists?: SyntheticPlaylistSpec[]; audioStreams?: SyntheticAudioStream[]; secondClipAudioStreams?: SyntheticAudioStream[]; createAudioDecoder?: AudioDecoderFactory; movieObjects?: Uint8Array<ArrayBuffer>; dropFiles?: string[]; extraFiles?: Record<string, Uint8Array<ArrayBuffer>>; igUnits?: Array<{ pts: number; payload: Uint8Array }>; subPathIg?: SyntheticSubPathIg; pgStreams?: SyntheticPgStream[]; createAssDeps?: NonNullable<PlayerDeps['createAssDeps']>; createShaderBackend?: PlayerDeps['createShaderBackend']; index?: SyntheticDiscSpec['index']; playerSettings?: PlayerDeps['playerSettings']; remote?: FakeNas | ((files: Map<string, Uint8Array<ArrayBuffer>>) => FakeNas); remoteLimits?: PlayerDeps['remoteLimits']; clipSeconds?: number; noOpen?: boolean; cacheRoot?: MemoryDirectory; segmentBytes?: number; mutateFiles?: (files: Map<string, Uint8Array<ArrayBuffer>>) => void; videoCodecApi?: VideoCodecApi } = {},
   memory?: 'constrained',
 ): Promise<Harness> {
   decoders.length = 0;
@@ -126,6 +126,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
     subPathIg: opts.subPathIg,
   });
   for (const f of opts.dropFiles ?? []) files.delete(f);
+  opts.mutateFiles?.(files);
   for (const [path, bytes] of Object.entries(opts.extraFiles ?? {})) files.set(path, bytes);
   const remote = typeof opts.remote === 'function' ? opts.remote(files) : opts.remote;
   const events: EngineEvent[] = [];
@@ -139,7 +140,7 @@ async function harness(audio: number | undefined, opts: { corruptAudioPesIndex?:
   const clock = { ms: 1000 };
   const player = new Player({
     emit: (e) => events.push(e),
-    videoCodecApi: fakeApi,
+    videoCodecApi: opts.videoCodecApi ?? fakeApi,
     nowMs: () => clock.ms,
     requestFrame: (cb) => frames.push(cb),
     createAudioDecoder: opts.createAudioDecoder ?? noWasmFactory,
@@ -335,8 +336,9 @@ describe('Player', () => {
     const h = await harness(CodingType.LPCM, {
       playlists: [
         { id: '00000', clipIds: ['00001'] },
-        { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
+        { id: '00001', clipIds: ['00002'] },
       ],
+      dropFiles: ['BDMV/STREAM/00002.m2ts'],
     });
     await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
     await untilPlaying(h);
@@ -344,8 +346,8 @@ describe('Player', () => {
     await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
     const after = h.events.slice(n);
     expect(after).toContainEqual({ type: 'playlistCleared' });
-    expect(after).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
-    expect(after.findIndex((e) => e.type === 'playlistCleared')).toBeLessThan(after.findIndex((e) => e.type === 'unsupported'));
+    expect(after).toContainEqual(expect.objectContaining({ type: 'error', code: 'missing-file' }));
+    expect(after.findIndex((e) => e.type === 'playlistCleared')).toBeLessThan(after.findIndex((e) => e.type === 'error'));
     expect(lastState(h)).toBe('error');
   });
 
@@ -536,11 +538,200 @@ describe('Player', () => {
     expect(lastTelemetry(h)?.audioUnderruns).toBe(0);
   });
 
-  it('reports unsupported video instead of hanging in buffering', async () => {
-    const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.VC1 });
-    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
-    expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video', codec: 'VC-1' }));
-    expect(lastState(h)).toBe('error');
+  describe('video the browser cannot decode', () => {
+    const noPicture = (h: Harness) => h.events.filter((e) => e.type === 'unsupported' && e.kind === 'video');
+    const times = (h: Harness) => h.events.flatMap((e) => (e.type === 'time' ? [e.timeUs] : []));
+
+    it.each([
+      ['MPEG-2 video', CodingType.MPEG2_VIDEO],
+      ['VC-1', CodingType.VC1],
+    ])('plays %s without a picture, on the audio clock, with one notice', async (codec, videoCodingType) => {
+      const h = await harness(CodingType.LPCM, { videoCodingType });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      const at = times(h).at(-1)!;
+      await h.play(1000);
+      expect(times(h).at(-1)! - at).toBeGreaterThan(500_000);
+      expect(decoders).toHaveLength(0); // no VideoDecoder for that stream
+      expect(h.drawn).toEqual([]);
+      expect(noPicture(h)).toEqual([{ type: 'unsupported', kind: 'video', codec, message: NO_PICTURE_MESSAGE, noPicture: true }]);
+      expect(lastTelemetry(h)?.clockMode).toBe('audio');
+      expect(h.events.some((e) => e.type === 'error')).toBe(false);
+    });
+
+    it('runs on the wall clock when there is no audio either, and ends at its duration, its video read to the end (R11)', async () => {
+      // ~1.2 MB a second of video nobody decodes and nothing else: reading is paced on the clock, and the video read to
+      // its OUT time counts as delivered, so the playlist plays its 8 s (an IG-only menu loop does not end early)
+      const h = await harness(undefined, { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 50_000 });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.play(1000);
+      expect(lastTelemetry(h)?.clockMode).toBe('wall');
+      expect(times(h).at(-1)).toBeGreaterThan(500_000);
+      expect(lastState(h)).toBe('playing');
+      await vi.waitFor(async () => {
+        await h.play(500);
+        expect(lastState(h)).toBe('ended');
+      }, { timeout: 10_000 });
+      // the clock stops on the tick that ends the playlist (time events come only every 250 ms)
+      const endedAt = (h.player as unknown as { clock: { nowUs(): number } }).clock.nowUs();
+      expect(Math.abs(endedAt - 8_000_000)).toBeLessThanOrEqual(100_000);
+    });
+
+    it('ends a truncated clip at its end of data plus the play-out of what was delivered, not at its duration (R11)', async () => {
+      // 00000 is 00001 (4 s) then 00002 (4 s), cut to its first half: the audio delivered ends near 6 s
+      const h = await harness(CodingType.LPCM, {
+        videoCodingType: CodingType.MPEG2_VIDEO,
+        mutateFiles: (files) => {
+          const clip = files.get('BDMV/STREAM/00002.m2ts')!;
+          files.set('BDMV/STREAM/00002.m2ts', clip.slice(0, Math.floor(clip.length / 2 / 6144) * 6144));
+        },
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await vi.waitFor(async () => {
+        await h.play(500);
+        expect(lastState(h)).toBe('ended');
+      }, { timeout: 15_000 });
+      expect(times(h).at(-1)).toBeGreaterThan(5_000_000);
+      expect(times(h).at(-1)).toBeLessThan(7_000_000);
+      expect(lastTelemetry(h)?.audioUnderruns ?? 0).toBe(0);
+    });
+
+    it('keeps the audio fed without a picture at low bitrates, on the audio clock (R10)', async () => {
+      // LPCM and ~0.5 MB/s in all, the video dropped: reading paced on what was delivered never lets the audio run dry
+      const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 12_800, clipSeconds: 16 });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      const from = h.events.length;
+      await h.play(12_000);
+      expect(lastTelemetry(h)).toMatchObject({ clockMode: 'audio', audioUnderruns: 0 });
+      expect(h.events.slice(from).filter((e) => e.type === 'state' && e.state === 'buffering')).toEqual([]);
+    }, 30_000);
+
+    it('clears a picked playlist whose decoder cannot be configured, so the picker shows why (UnsupportedCodecError stays)', async () => {
+      const h = await harness(CodingType.LPCM, { videoCodecApi: { ...fakeApi, isConfigSupported: async (config) => ({ supported: false, config }) } });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await vi.waitFor(async () => {
+        await h.play(50);
+        expect(lastState(h)).toBe('error');
+      }, { timeout: 5000 });
+      const cleared = h.events.findIndex((e) => e.type === 'playlistCleared');
+      const unsupported = h.events.findIndex((e) => e.type === 'unsupported' && e.kind === 'video');
+      expect(cleared).toBeGreaterThanOrEqual(0);
+      expect(cleared).toBeLessThan(unsupported);
+      expect(h.events[unsupported]).toMatchObject({ codec: 'H.264/AVC' });
+      expect(h.events[unsupported]).not.toHaveProperty('noPicture');
+    });
+
+    it('does not use up the disc\'s notice on a playlist that fails to open', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.MPEG2_VIDEO },
+        ],
+        dropFiles: ['BDMV/STREAM/00001.m2ts'],
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      expect(lastState(h)).toBe('error');
+      expect(noPicture(h)).toEqual([]);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(1);
+    });
+
+    it('seeks and skips chapters from the clip info', async () => {
+      const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.VC1 });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'seek', timeUs: 5_000_000 });
+      await untilPlaying(h);
+      await h.play(300);
+      expect(times(h).at(-1)).toBeGreaterThanOrEqual(5_000_000);
+      await h.player.handle({ type: 'prevChapter' });
+      await untilPlaying(h);
+      expect(times(h).at(-1)).toBeLessThan(5_000_000);
+      expect(lastTelemetry(h)?.clockMode).toBe('audio');
+    });
+
+    it('notifies once per disc: not again for its next playlist, again for another disc (Review Focus 4)', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
+        ],
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(1);
+      await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(2);
+      expect(noPicture(h)[1]).toMatchObject({ codec: 'VC-1', message: NO_PICTURE_MESSAGE, noPicture: true });
+    });
+
+    it('decodes the picture again for a playlist the browser can decode', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'] },
+        ],
+      });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      await h.play(500);
+      expect(decoders).toHaveLength(1);
+      expect(h.drawn.length).toBeGreaterThan(0);
+    });
+
+    it('clears the notice when a playlist with a picture starts, and does not show it again for that disc (R9)', async () => {
+      const h = await harness(CodingType.LPCM, {
+        playlists: [
+          { id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO },
+          { id: '00001', clipIds: ['00002'] },
+        ],
+      });
+      const cleared = () => h.events.filter((e) => e.type === 'noticeCleared' && e.code === 'no-picture');
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      expect(cleared()).toHaveLength(0);
+      const n = h.events.length;
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      expect(cleared()).toHaveLength(1);
+      // sent with the playlist's own notices, before its chapters
+      expect(h.events.slice(n).findIndex((e) => e.type === 'noticeCleared')).toBeLessThan(h.events.slice(n).findIndex((e) => e.type === 'chapters'));
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00001' });
+      await untilPlaying(h);
+      expect(noPicture(h)).toHaveLength(1);
+      expect(cleared()).toHaveLength(1);
+      // another disc starts afresh
+      await h.player.handle({ type: 'open', disc: { kind: 'files', entries: h.entries } });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      expect(noPicture(h)).toHaveLength(2);
+    });
+
+    it('draws PG subtitles over black', async () => {
+      const subs = subtitleSegments({ x: 10 }).map((payload) => ({ pts: CLIP_START_PTS + 0.5 * 90_000, payload }));
+      const h = await harness(CodingType.LPCM, { videoCodingType: CodingType.MPEG2_VIDEO, pgStreams: [{ pid: 0x1200, lang: 'eng', units: subs }] });
+      await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+      await untilPlaying(h);
+      await h.player.handle({ type: 'selectSubtitle', choice: { kind: 'pg', stream: 1 } });
+      await vi.waitFor(async () => {
+        await h.play(100);
+        expect(h.pgDraws.some((p) => p.hash() !== EMPTY)).toBe(true);
+      }, { timeout: 5000 });
+      expect(h.order.every((o) => !o.startsWith('video:') || o === 'video:null')).toBe(true);
+    });
   });
 
   it('serializes commands so a double playPlaylist leaves one live session', async () => {
@@ -1057,6 +1248,28 @@ describe('Player with HDMV navigation', () => {
       expect(h.igDraws).toEqual([]);
     });
 
+    it('shows the IG menu over no picture when the menu playlist is MPEG-2 video, and its buttons work', async () => {
+      const segments = simpleMenuSegments({ cmds: [asm.jumpTitle(imm(1))] }).map((payload) => ({ pts: CLIP_START_PTS + 0.2 * 90_000, payload }));
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, { cmds: [asm.playPl(imm(1))] }], {
+        igUnits: segments,
+        playlists: [{ ...shortPlaylists[0]!, videoCodingType: CodingType.MPEG2_VIDEO }, shortPlaylists[1]!],
+      });
+      await untilPlaying(h);
+      await vi.waitFor(async () => {
+        await h.play(100);
+        expect(lastTelemetry(h)?.menu).not.toBeNull();
+      }, { timeout: 5000 });
+      expect(decoders).toHaveLength(0);
+      const plane = h.igDraws.at(-1)!;
+      expect(plane.hash()).not.toBe(new OverlayPlane(plane.width, plane.height).hash());
+      expect(h.order.every((o) => !o.startsWith('video:') || o === 'video:null')).toBe(true);
+      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'MPEG-2 video', message: NO_PICTURE_MESSAGE, noPicture: true });
+      await h.player.handle({ type: 'menuKey', key: 'ok' });
+      await untilPlaylist(h, '00001');
+      await untilPlaying(h);
+      expect(decoders).toHaveLength(1); // 00001 is H.264
+    });
+
     it('reports no menu for a disc without IG', async () => {
       const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle]);
       await untilPlaying(h);
@@ -1217,6 +1430,83 @@ describe('Player with HDMV navigation', () => {
     }
   });
 
+  it('reads the new position while a seek waits for its audio decoder: no mark of the old position (_seek_internal)', async () => {
+    let gate: Promise<void> = Promise.resolve();
+    const reached = vi.spyOn(Navigator.prototype, 'markReached');
+    try {
+      const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], {
+        audioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4)],
+        createAudioDecoder: (codingType) => fakeAudioFactory(undefined, gate)(codingType),
+      });
+      await untilPlaying(h);
+      await h.play(3300);
+      await h.player.handle({ type: 'pause' });
+      let open: () => void = () => undefined;
+      gate = new Promise<void>((r) => (open = r));
+      reached.mockClear();
+      const seeking = h.player.handle({ type: 'seek', timeUs: 500_000 });
+      await h.play(100); // paused, its decoder still loading: the navigator is told about the new position only
+      expect(reached).not.toHaveBeenCalled();
+      expect((h.player as unknown as { clock: { nowUs(): number } }).clock.nowUs()).toBe(500_000);
+      open();
+      await seeking;
+    } finally {
+      reached.mockRestore();
+    }
+  });
+
+  const clockOf = (h: Harness): number => (h.player as unknown as { clock: { nowUs(): number } }).clock.nowUs();
+
+  it('reads the new position while a seek waits for the ring to discard, into an item with no audio stream', async () => {
+    const h = await harness(CodingType.LPCM, { secondClipAudioStreams: [] });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    await h.player.handle({ type: 'pause' });
+    const seeking = h.player.handle({ type: 'seek', timeUs: 5_000_000 });
+    await h.play(60, { audio: false }); // the worklet renders nothing: the discard is still pending
+    expect(clockOf(h)).toBe(5_000_000);
+    await h.play(300);
+    await seeking;
+  });
+
+  it('opens a BD-J playlist paused at its start while its audio decoder loads: no mark or position of the old one', async () => {
+    let gate: Promise<void> = Promise.resolve();
+    const h = await nav([{ cmds: [asm.playPl(imm(0))] }, idle, idle], {
+      audioStreams: [dummyAudioStream(0x1100, CodingType.AC3, 4)],
+      createAudioDecoder: (codingType) => fakeAudioFactory(undefined, gate)(codingType),
+    });
+    await untilPlaying(h);
+    await h.play(3300); // past the marks at 1, 2 and 3 s
+    const marks: number[] = [];
+    const positions: Array<[number, number]> = [];
+    const listener: BdjPlaybackListener = {
+      playlistStarted: () => undefined,
+      playItemChanged: () => undefined,
+      marksReached: (m) => marks.push(...m),
+      position: (item, clipTime45) => positions.push([item, clipTime45]),
+      seeked: () => undefined,
+      playlistEnded: () => undefined,
+    };
+    type BdjInternals = { bdjListener: BdjPlaybackListener | null; playPlaylist(id: string, at: object, caller: 'bdj'): Promise<boolean> };
+    const me = h.player as unknown as BdjInternals;
+    me.bdjListener = listener;
+    let open: () => void = () => undefined;
+    gate = new Promise<void>((r) => (open = r));
+    const opening = me.playPlaylist('00000', {}, 'bdj');
+    await h.play(100); // paused (Java's START has not come), the decoder still loading
+    expect(clockOf(h)).toBe(0);
+    expect(marks.filter((m) => m > 0)).toEqual([]); // the marks at 1 s and later are not passed yet
+    const inTime = (me as unknown as { session: { playItems: Array<{ inTime: number }> } }).session.playItems[0]!.inTime;
+    expect(positions.length).toBeGreaterThan(0);
+    for (const [item, clipTime45] of positions) expect([item, clipTime45]).toEqual([0, inTime]);
+    open();
+    await opening;
+    await h.player.handle({ type: 'play' }); // as Java's selectRate(START)
+    await h.play(1500);
+    expect(marks.filter((m) => m > 0)).toEqual([1]); // the mark at 1 s, reported once it is reached
+  });
+
   const twoLanguages = [lpcmStream(0x1100, 4, { lang: 'jpn' }), lpcmStream(0x1101, 4, { lang: 'eng' })];
 
   it('routes a user audio change through PSR1', async () => {
@@ -1341,16 +1631,17 @@ describe('Player with HDMV navigation', () => {
       expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
     });
 
-    it('reports an unsupported codec of a program-started playlist as for a picked one', async () => {
+    it('plays a program-started playlist of undecodable video without a picture, as a picked one', async () => {
       const h = await nav([{ cmds: [asm.playPl(imm(1))] }, idle, idle], {
         playlists: [
           { id: '00000', clipIds: ['00001'] },
           { id: '00001', clipIds: ['00002'], videoCodingType: CodingType.VC1 },
         ],
       });
-      await h.play(300);
-      expect(h.events).toContainEqual(expect.objectContaining({ type: 'unsupported', kind: 'video' }));
-      expect(h.events.some((e) => e.type === 'error' && e.code === 'internal')).toBe(false);
+      await untilPlaying(h);
+      expect(chapterIds(h)).toEqual(['00001']);
+      expect(h.events).toContainEqual({ type: 'unsupported', kind: 'video', codec: 'VC-1', message: NO_PICTURE_MESSAGE, noPicture: true });
+      expect(h.events.some((e) => e.type === 'error')).toBe(false);
     });
   });
 });
@@ -2479,6 +2770,60 @@ describe('Player buffering a NAS disc ahead (buffer first)', () => {
     await vi.waitFor(() => expect(log.reads.some((r) => r.path === P2 && r.from >= start + 8 * CHUNK)).toBe(true), { timeout: 10_000 });
     expect(log.reads.filter((r) => r.path === P2).every((r) => r.from >= start)).toBe(true);
     expect(log.reads.some((r) => r.path === P2 && r.from + CHUNK >= streamSize('00002'))).toBe(true);
+  }, 30_000);
+});
+
+describe("Player without a picture: reading at the clock's pace (R8)", () => {
+  /** A NAS that records the byte ranges asked of the feature clip (00001), with that clip's size. */
+  function rangeNas(files: Map<string, Uint8Array<ArrayBuffer>>) {
+    const nas = fakeNas(files);
+    const ranges: Array<{ start: number; end: number }> = [];
+    const size = files.get('BDMV/STREAM/00001.m2ts')!.length;
+    const recording: typeof globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const range = /^bytes=(\d+)-(\d+)$/.exec(new Headers(init?.headers).get('Range') ?? '');
+      if (range && decodeURIComponent(String(input)).toUpperCase().includes('/FILES/BDMV/STREAM/00001.M2TS')) ranges.push({ start: Number(range[1]), end: Number(range[2]) + 1 });
+      return nas.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    return { nas: { ...nas, fetch: recording }, ranges, size };
+  }
+  const furthest = (ranges: ReadonlyArray<{ end: number }>) => Math.max(0, ...ranges.map((r) => r.end));
+  const opts = { videoCodingType: CodingType.MPEG2_VIDEO, frameBytes: 50_000, clipSeconds: 20, remoteLimits: { chunkBytes: 64 * 1024, readAheadBytes: 256 * 1024 } };
+
+  it('reads a playlist with no audio and no graphics only the read-ahead window ahead of the clock, through the NAS read-ahead too', async () => {
+    let rec!: ReturnType<typeof rangeNas>;
+    const h = await harness(undefined, { ...opts, remote: (files) => (rec = rangeNas(files)).nas });
+    await h.player.handle({ type: 'playPlaylist', playlistId: '00000' });
+    await untilPlaying(h);
+    await h.play(1000);
+    // about 1.2 MB a second: the clock at ~1 s, 2 s of read-ahead, one reader chunk (~2 MB) and the NAS budget, of 20 s
+    expect(furthest(rec.ranges)).toBeLessThan(rec.size * 0.4);
+    await h.play(6000);
+    expect(furthest(rec.ranges)).toBeGreaterThan(rec.size * 0.3); // it goes on, at the clock's pace
+    expect(furthest(rec.ranges)).toBeLessThan(rec.size * 0.65);
+  }, 30_000);
+
+  it('paces the re-read of a menu loop the same way', async () => {
+    let rec!: ReturnType<typeof rangeNas>;
+    const h = await harness(undefined, {
+      ...opts,
+      clipSeconds: 6,
+      frameBytes: 150_000, // about 3.6 MB a second
+      playlists: [{ id: '00000', clipIds: ['00001'], videoCodingType: CodingType.MPEG2_VIDEO }],
+      movieObjects: buildMovieObjects([{ cmds: [asm.playPl(imm(0)), asm.goto(0)] }, { cmds: [] }, { cmds: [] }]),
+      remote: (files) => (rec = rangeNas(files)).nas,
+    });
+    const starts = () => h.events.filter((e) => e.type === 'chapters').length;
+    await vi.waitFor(async () => {
+      await h.play(200);
+      expect(starts()).toBe(2); // the program played the loop again
+    }, { timeout: 20_000 });
+    await h.play(500);
+    // the loop's second read, from the clip's start
+    const again = rec.ranges.slice(rec.ranges.map((r) => r.start).lastIndexOf(0));
+    expect(again.length).toBeLessThan(rec.ranges.length);
+    // under a second in: 2 s of read-ahead, a reader chunk and the NAS budget, of 6 s; unpaced it would be the whole clip
+    expect(furthest(again)).toBeLessThan(rec.size * 0.8);
+    expect(h.events.filter((e) => e.type === 'unsupported')).toHaveLength(1);
   }, 30_000);
 });
 

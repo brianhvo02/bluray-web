@@ -20,6 +20,14 @@ what would change that decision.
   it cleanly. The first PPS only shows up after `configure()`, so the decoder reopens with `prefer-software` when it
   sees the redefinition and resumes at the next key unit. That costs about a second of frames at the start of each
   playlist. *Revisit if* that gap shows (holding the first GOP until the PPS pattern is known would remove it).
+- **MPEG-2 and VC-1 video plays without a picture (5e).** The player decodes only H.264 and HEVC. A playlist with
+  MPEG-2 or VC-1 video, HDMV or BD-J, plays as libbluray plays it, with audio, subtitles and IG or BD-J menus over
+  black, its reads paced by the clock, and a notice once per disc ("This disc's video can't be played here yet, so it
+  will play without a picture"), cleared when a playlist with a picture starts and not shown again for that disc (R9).
+  A playlist with such video and nothing else playable still runs, silent and black on the wall clock, to its end
+  (ruling R12): libbluray does the same, and some HDMV programs rely on it; a user who picks such a playlist sees the
+  notice, not an error. `UnsupportedCodecError` is left for a decoder that fails to configure. *Revisit when* the NAS
+  quality levels reach playback (cross-browser step 4, phase 2): they re-encode those discs' video on the NAS.
 
 ## Menus (HDMV)
 
@@ -109,7 +117,7 @@ what would change that decision.
 - **Note (behaviour, not an issue): `MAIN` is the visible size,** for example 1440x1080 for an anamorphic frame
   (coded 1440x1088, display 1920x1080), as `texImage2D` of a `VideoFrame` gives; confirmed by the Task 1 spike.
 
-## BD-J (milestones 5b-5d)
+## BD-J (milestones 5b-5e)
 
 - **5c timings (Chrome, production build, this machine).** Time from opening the disc to the first frame of the
   title's playlist, as `bdj.firstFrameMs`:
@@ -120,9 +128,9 @@ what would change that decision.
   | RENTAL_FAMILY | 843-884 ms | 875-916 ms |
 
   The margin to the 5 s target on A_NEW_ERA is 12-66 ms. About 4.0 s of its time is the disc's own animation and a
-  `Thread.sleep(3000)`; about 0.7 s is interpretation. On a slower machine the local 5 s check may fail. *Revisit in*
-  5e: the JIT (spec 5c section 4.7, stage 2) is the lever if the margin is needed; stage 1 (intrinsics) replaced the
-  5b figure of about 26 s in Node.
+  `Thread.sleep(3000)`; about 0.7 s is interpretation. On a slower machine the local 5 s check may fail. 5e left
+  the JIT (spec 5c section 4.7, stage 2) out, by the user's choice (start-up behaves fine); it stays the lever if the
+  margin is needed. Stage 1 (intrinsics) replaced the 5b figure of about 26 s in Node.
 - **5d responsiveness and start-up (Task 11; Chrome, production build, this machine).** Menu responsiveness is
   telemetry `bdj.inputLatencyMs` (last, max, count): from a key press or click reaching the engine worker to the next
   presented frame whose BD-J plane holds a publication made after it. The first publication presented after an input
@@ -144,24 +152,28 @@ what would change that decision.
   `JarFile`. About 4.0 s of the 4.8 s is the disc's own animation and `Thread.sleep(3000)`.
 - **Open on purpose in the JVM core.** Weak and soft references hold strongly, reference queues stay empty and
   finalizers never run. `long` is a `bigint`. A failed `invokedynamic` call site re-links on each execution (JDK 8
-  behaviour, not JVMS §5.4.3). Deep method-handle nesting (about 60k) can overflow the JS stack. `rt-bdj.jar` has no
-  socket implementation, so sockets fail with `NoClassDefFoundError` (5e decides network). `SecureRandom` has no
-  entropy source (no `/dev/urandom`), so its first use fails. Signed disc JARs are checked as on HotSpot: the JDK's
-  `JarVerifier` and `SignatureFileVerifier` check the signature block and the entry digests, and libbluray's
-  `VFSCache.isJarVerifiable` strips the signature of a JAR that fails, which then runs unsigned. libbluray itself
-  enforces no BD-J authentication: the signer is never checked against the disc's root certificate
+  behaviour, not JVMS §5.4.3). Deep method-handle nesting (about 60k) can overflow the JS stack. There is no network
+  (5e): the URL handlers and socket classes are in `rt-bdj.jar`, and every connection fails as it does in HotSpot with
+  no network (`natives/net.ts`: an unknown host, then "Network is unreachable"; `localhost` resolves and refuses), so
+  a disc's BD-Live check fails cleanly and the disc carries on. The libbluray harness runs offline too (5e ruling R7).
+  `SecureRandom` has no entropy source (no `/dev/urandom`), so its first use fails. Signed disc JARs are checked as on
+  HotSpot: the JDK's `JarVerifier` and `SignatureFileVerifier` check the signature block and the entry digests, and
+  libbluray's `VFSCache.isJarVerifiable` strips the signature of a JAR that fails, which then runs unsigned. libbluray
+  itself enforces no BD-J authentication: the signer is never checked against the disc's root certificate
   (`BDMV/CERTIFICATE/app.discroot.crt` is not read), the permission request files (`bluray.*.perm`) are mounted but
-  not used to grant anything (`BDJSecurityManager` applies one fixed sandbox to every xlet), and `DSMCCObject.getSigners`
-  is unimplemented. We run the same code, so the same holds here. There is no bytecode verifier and there are no
-  access checks: no `IllegalAccessError`, no `IncompatibleClassChangeError` for `invokevirtual` on a static method, no
-  check that a final method is not overridden.
-- **Player settings come from the browser's locale, under BD-J only (5c, ruling R9).** The engine worker derives
-  `bd_set_player_setting_str`'s audio, PG and menu languages and the country from `navigator.language`
-  (`playerSettingsForLocale`): the language as ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs label streams with),
-  the region in lowercase (`us`); anything it cannot map stays unset. They are written to the program's registers only
-  when a BD-J title is entered, before its worker boots, so HDMV discs keep the registers' defaults (PSR16-19) and
-  their first stream choice is unchanged. libbluray applies them for every disc; an HDMV disc that later enters a
-  BD-J title gets them from then on. There is no settings UI yet.
+  not used to grant anything (`BDJSecurityManager` applies one fixed sandbox to every xlet), and
+  `DSMCCObject.getSigners` is unimplemented. We run the same code, so the same holds here. There is no bytecode
+  verifier and there are no access checks: no `IllegalAccessError`, no `IncompatibleClassChangeError` for
+  `invokevirtual` on a static method, no check that a final method is not overridden.
+- **Player settings come from the browser's locale, on discs that use BD-J (5c ruling R9, narrowed in 5e).** The
+  engine worker derives `bd_set_player_setting_str`'s audio, PG and menu languages and the country from
+  `navigator.language` (`playerSettingsForLocale`): the language as ISO 639-2/B (`fre`, `ger`, `chi`, the codes discs
+  label streams with), the region in lowercase (`us`); anything it cannot map stays unset. They are written to the
+  program's registers when a disc whose index names a BD-J object opens, as libbluray writes them at `bd_open`, so a
+  mixed disc's HDMV First Play and HDMV titles read them too (one disc's First Play copies the menu language into a GPR
+  that its BD-J menu reads to pick its language). Until 5e they were written only on BD-J entry. Discs without BD-J keep
+  the registers' defaults (PSR16-19) and their first stream choice is unchanged; libbluray applies the settings for
+  every disc. There is no settings UI yet.
 - **Open on purpose in 5c.** A new BD-J worker and JVM start for every BD-J entry, where libbluray keeps one JVM
   across HDMV and BD-J handoffs (deviation 5). The HDMV Navigator is dropped, not suspended, while BD-J runs, so
   libbluray's resume of a suspended object across a BD-J title is lost on mixed discs (deviation 6). The mixed
@@ -224,8 +236,8 @@ what would change that decision.
   10 s target warm and misses it cold by 0.8 s, well under the blocker; the iPad misses it by up to 1.6 s cold. Most
   of A_NEW_ERA's time is its own animation and `Thread.sleep(3000)`; about a third of the interpreted part is the JDK
   re-verifying the signed `00000.jar`, as HotSpot does (R10). With the iPhone and iPad gate run concurrently on one
-  disc server the iPhone took 12.7-20.3 s; that was the shared connection, not the player. *Revisit in* 5e: a JIT
-  (5c spec section 4.7, stage 2) is the lever, and whether to build it is the user's decision. Menu responsiveness: at
+  disc server the iPhone took 12.7-20.3 s; that was the shared connection, not the player. A JIT (5c spec
+  section 4.7, stage 2) is the lever; 5e left it out by the user's choice. Menu responsiveness: at
   most 68 ms on every device (bars 0.2 s computer, 0.5 s iPhone). Ten minutes in the menus (200 inputs) brought no
   reload on the iPhone, the iPad, the iPad Simulator or Mac Safari; desktop Chrome and Firefox stayed 120 s.
   Measured device memory stayed well under the constrained budgets (class bytes 1.33 of 4 MB, VFS 4.6 of 64 MB,
@@ -247,9 +259,9 @@ what would change that decision.
   the still under the video, decoded by the browser. Gaps, as in libbluray: no `HPermissionDeniedException`,
   `HConfigurationException` or `IOException` is raised, the background colour is not drawn, and the scaling flag is
   ignored. A failed decode clears the still, but a missing file keeps the previous one, and a still survives a title
-  change inside one BD-J entry. `HBackgroundImage(byte[])` and `HBackgroundImage(URL)` throw `NoClassDefFoundError`
-  because `sun.awt.image.ByteArrayImageSource` and `URLImageSource` are not in the class library (ruling R4): neither
-  local disc uses them. *Revisit if* a disc does: add the two classes and a branch in `natives/havi.ts`.
+  change inside one BD-J entry. `HBackgroundImage(byte[])` and `HBackgroundImage(URL)` work since 5e (Task 2):
+  `sun.awt.image.ByteArrayImageSource` and `URLImageSource` are in the class library, and `natives/havi.ts` reads the
+  bytes or a `file:`/`jar:file:` URL inside the BD-J file system (library discs use both).
 - **JPEG decoded in Java is unsupported (5d).** The class library has no `JPEGImageDecoder` and there is no libjpeg
   in WASM, so a JPEG image Java loads (an AWT image, or a JPEG `HBackgroundImage` on `load()`) fails to load where
   HotSpot decodes it, even though `displayImage` itself would let the browser decode the same bytes. Neither local disc
@@ -265,6 +277,11 @@ what would change that decision.
   lost, stalled about one boot in 60 until it was added, and Xerces error and validation paths may still miss
   classes. The scan follows constant-pool references only, not reflection. A missing class fails loudly
   (`NoClassDefFoundError` in the log), and a boot that stalls on one dumps every Java thread at the 20 s timeout.
+  5e collected again over the start-up files of every BD-J disc in the NAS library (offline, ruling R7), with a
+  keep-list of classes added by hand: `rt-bdj.jar` went from 4,619,640 to 4,919,980 bytes (+6.5%; `classes.txt` from
+  1,870 to 2,085 entries), precached by the service worker for every visitor. The license check found one third-party
+  family the notice did not name: `sun/text/normalizer/**`, behind `java.text.Normalizer`, derives from ICU4J;
+  `pack.sh` now writes the JDK's ICU notice as `THIRD_PARTY_ICU`, and `NOTICE` lists it.
 - **Ignored taps on the iPhone gate (Task 14c, 2026-10-18).** On the iPhone, A_NEW_ERA's tap on the menu centre was
   never counted as ignored. The cause was not the reaction window: idling in A_NEW_ERA's main menu for about 45 s through the
   real Player (local replay, playlist 00149 behind it) brings no control call, no register write and no plane change
@@ -274,7 +291,177 @@ what would change that decision.
   through (`pointer-events: none`). The gate's fallback (tap Remote when the first tap opens nothing) tapped an
   idled-out control bar, so the tap fell through to the picture; it now shows the controls first and records what lay
   under the first tap (`firstTap.tapTarget`).
+- **Replays across a host sleep (5e, Task 7e).** Node's clock on macOS counts the time the machine sleeps. A replay
+  (`replayPlayerBdj`, the local menu tests, the library check's runs) that the host slept through found every wait
+  and timeout expired when it woke, and failed as a step or run timeout after about 1,000 s. That caused the ~1,100 s
+  A_NEW_ERA runs and the four local tests that failed at ~1,000 s during 5e Tasks 7b and 7c: each run's wall time
+  matches a lid-closed sleep in `pmset -g log`, and 120 loaded runs (76 of them jittered) never stalled. A turn of the
+  replay loop over 20 s (`LOOP_GAP_MS`) now ends the run at once as void, naming the gap and the CPU used in it; a busy
+  gap is reported as a blocked event loop instead. Keep the machine awake (`caffeinate -i`, lid open) for long local
+  runs.
+- **The BD-J start-up timeout counts only visible, awake time (5e, Task 7f, ruling R22).** The 20 s timeout (ruling
+  R7: no playlist selected, no visible plane and no background still since the boot) is spent in ticks of at most 1 s
+  (`STARTUP_TICK_MS`, `session.ts`) on the wall clock (`PlayerDeps.wallMs`, `Date.now`). While the page is hidden
+  (the `visibility` command, sent at start and on every `visibilitychange`) no time is counted and no tick runs; a page
+  shown again sets a fresh tick, since browsers throttle a hidden page's timers. A tick that comes 5 s or more later
+  than it was set for (`STARTUP_SLEEP_GAP_MS`: the host slept, or the engine worker did not run) restarts the 20 s and
+  logs `BD-J start-up timeout restarted`. A hang while visible and awake still falls back at 20 s, after the thread
+  dump. *Revisit if* a blocked engine worker (not a sleep) turns out to hold a hung boot past 20 s for long: each
+  restart needs a 5 s gap, so only a worker that keeps stalling for 5 s at a time would delay the fallback.
+- **The BD-J start-up timeout does not count time the BD-J worker waits on its own I/O (5e, Task 7g).** A disc opened
+  from the NAS had Java waiting on its JAR and resource reads (shared with the engine's clip read-ahead) for about
+  87% of the counted time, about 10 s on a good link, so a slower link went past 20 s and fell back to the picker
+  with nothing hung. The worker now sends `io` (pending or not) when it starts or stops waiting on a disc read, the
+  storage scopes or FreeType and the fallback font (`IoWatch`, `bdj-worker.ts`). A change is sent at the next event
+  loop turn only if it still holds, so reads answered from memory send nothing. While a read is pending the session
+  counts nothing. The class library was never counted: the timeout is armed once it has arrived. The first
+  playlist's log line gives the time counted and the time spent waiting on reads. A hang with no read pending still
+  falls back at 20 s. The first `selectPlaylist` of a warm open over the NAS came about 11 s after Play; *revisit if*
+  that matters: Java's disc reads could go ahead of the engine's clip read-ahead on NAS sources.
+  - **No single timeout bounds a wait.** One HTTP read can take about 70 s or more: 30 s (`REQUEST_TIMEOUT_MS`), then a
+    401 and a token refresh of up to 10 s, then another 30 s, and a 503 can add one more request. Each scope load
+    can take 3 s (12.5 s on a NAS disc, ruling R28). The FreeType wait includes compiling it. Java may also retry a
+    read that keeps failing, or read in a loop as its way of hanging.
+  - **The ceiling is the real bound (ruling R26).** Waiting on I/O pauses the timeout for at most 120 s in all per
+    boot (`IO_PAUSE_CEILING_MS`, `session.ts`). Past that it counts as usual and is logged once, so such a disc
+    falls back 20 s of counted time later, with the thread dump. The legitimate waits measured on the NAS were
+    8–18 s.
+  - **After the timeout is disarmed or has fired,** the worker sends no more `io`. A selected playlist, a visible
+    plane or a still disarms it (`StartupWatch`); the thread-dump request marks it as fired.
+  - A worker that dies without an `onerror` while a read is pending falls back only through the ceiling.
+  - *Revisit if* a disc needs more than 2 minutes of reads before it shows anything: it would fall back.
+- **A context passed to doPrivileged is always honoured (5e, Ruling R20).** Our `doPrivileged(action, context)` keeps a
+  caller-supplied `AccessControlContext` as the privileged context whoever made it. HotSpot honours one that is not
+  authorized only when the caller's domain implies `SecurityPermission "createAccessControlContext"`; otherwise it
+  replaces it with a single domain that has no code source and no permissions, so every check inside fails. Ours is the
+  more permissive of the two, and only for xlet code that builds its own context and passes it to doPrivileged; no disc
+  in the library check does. The conformance program `Security` avoids the case with a trusted caller.
 - **BD-J worker slow-read log (Task 14b).** The BD-J worker logs a slow disc read only at RemoteSource's waiting threshold (`WAITING_AFTER_MS`, 3 s), with how long it waited; reads from picked files (FileSource) are not timed.
+- **The BD-J library check (5e, `tools/bdj-library`).** Every BD-J disc in the developer's NAS library (166 of 2,340
+  discs) runs one generic key script (`wait menu`, right, down, ok, `wait playlist any`) in our player and in
+  libbluray's harness, from copied start-up files, with the real clips of the menu playlists where stub streams could
+  not decide (about 43 GB read once, gently; four discs whose menu playlist is the feature stay on stubs). The latest
+  full check (2026-10-21, no verdict changed from the check before): works 134, unconfirmed 14, libbluray-fails-too
+  18, missing-class 0, unsupported-video 0, stall 0, diverges 0, error 0, of 166. The discs are named only by hashed
+  ids, and the results stay outside the repo. What the verdicts can't say:
+  - **libbluray fails too (18 discs).** libbluray in the harness (HotSpot under amd64 emulation, offline, with these
+    keys) shows no menu, and neither do we. By cause: on 14 both players flush their plane but nothing on it is
+    visible within 60 s (one of them on stub video, its menu playlist being the feature); on 2 neither draws at all;
+    on 1 libbluray flushes an invisible plane while ours draws nothing (after the disc's failed BD-Live request its
+    own UI code throws in ours); on 1 HotSpot crashes in libzip under emulation on every run, while ours flushes
+    nothing visible. Some may be harness artefacts (emulation, no network, stub video on the capped disc) or need
+    input the generic script doesn't give; only a native amd64 libbluray run or a check by hand on the device can
+    tell.
+  - **Unconfirmed (14 discs).** The menu shows and ours agrees with libbluray wherever both ran, but a key step
+    was never compared: on 13 of them libbluray stops at its first step drawing nothing (with real video
+    on most), and ours shows the menu but no reaction to a key libbluray never got to; on one, both menus keep
+    repainting, so no key was tried (ruling R6). They are the list for the check by hand. On the real iPhone all 14 opened
+    and 13 reached their menu; in Chrome 13 react to the arrows and Enter, and one plays a long opening video before any
+    menu (in libbluray too), left for a check by hand (rulings R27, R34).
+  - The check compares settled planes and the calls that start something (5d R3), so a difference in animation
+    frames, timing or register writes in between is not caught. A key that changes nothing in both players counts as
+    agreement (R5).
+- **The device check of 5e ran on one real device (rulings R27, R33, R34).** It ran on 2026-10-22 on the user's
+  iPhone over the live NAS, with the iPad Simulator as the second device (no iPad at hand): the two-person saved-data
+  check passed, and the 14 unconfirmed discs opened. `tools/devices/live-check.ts`'s real touches miss on the
+  iPhone's player screen (a probe showed the phone places touches exactly, so it is the tool's timing, likely a touch
+  sent while Safari still scrolls), so arrows and Enter were checked in desktop Chrome. *Revisit* the tool's touch
+  timing before the next device gate.
+- **No HTTPS for BD-J (5e, ruling R13).** The class library has no JSSE (about 267 classes and 1.2 MB, a quarter
+  more jar) for the one library disc that asks for an `https:` URL: Java finds no handler, the disc's BD-Live client
+  catches the `MalformedURLException` and carries on, where HotSpot offline would fail later with another exception.
+  The library check doesn't count that lookup as a missing class (`caughtGaps`). *Revisit if* a disc needs https to
+  reach its menu.
+- **Disc file names in the BD-J file system use a conventional spelling (5e, Task 7d).** `Vfs.discList` returns
+  each disc file's name as an upper-case base name with a lower-case extension (`FileSource` upper-cases paths, and
+  `Vfs`'s `originalNames` option is never passed), where libbluray lists the disc's own spelling
+  (`MenuComposite1.png`, not `MENUCOMPOSITE1.png`). On the library disc where this showed, VFSCache then cached the
+  file under the listed name, the disc's own `new File(dir, "...")` missed the cache and read from the disc
+  instead, with no visible difference (patched to the real spelling, it behaved the same). *Revisit if* a disc
+  compares listed names with its own constants: the original names would have to travel from the folder pick, the
+  NAS and the WebRTC sources into the BD-J worker.
+- **Playlist marks reach Java at presentation time (5e, Task 7d).** Ours reports a mark when playback presents it;
+  libbluray's harness reports it at the read position, a few seconds earlier with stub or fast reads. A menu that
+  waits for a mark appears a few seconds later in ours than in the harness. Not new in 5e. On one library disc
+  libbluray also draws a First Play composite at about 0.9 s, before its BD-J title, that ours skips (`sync()
+  ignored (overlay not open)`); the check doesn't compare that pre-menu plane, and it was not looked into.
+- **Saved data (5e, `bdj/store/`): what can still be lost or late.**
+  - **Browser store (ruling R16).** IndexedDB saves 100 ms after the last write (the plan said 2 s), the only way
+    to keep a save made just before the page closes in Chrome and Safari, which drop the worker's pagehide flush and
+    IndexedDB work started in pagehide. A write in the last 100-200 ms before closing can still be lost there.
+    Firefox keeps the pagehide flush.
+  - **NAS store (ruling R17).** A NAS disc's write goes to IndexedDB first (100 ms) and to the NAS 2 s later. There
+    is no `keepalive` put on pagehide, so another device can miss the last seconds of a session until this device
+    opens the disc again; this device loses nothing.
+  - **The stop snapshot is what Java left.** On a stop (title change, close) the scope is saved as Java's files
+    stand when it halted, possibly in the middle of a write.
+  - **Merges keep the newer file, never a deletion.** A 412, or a pending copy pushed at the next boot, merges per
+    file by mtime, so a file one side deleted comes back if the other still has it (inherent to the NAS contract).
+    A boot that falls back to this browser's copy (NAS slow or unreachable) can show Java older data, and its later
+    writes then win.
+  - **A device moved to another person.** Saves made for person A that are still pending stay in that browser under
+    A (`nas-person:<A>`) and are pushed only if the device is A's again: not lost, not pushed, never put into B's
+    store. Every put checks `GET me` first and carries `X-Bdj-Person`, so a move mid-session is caught (409
+    `person-changed`).
+  - **The person header falls back once per session (ruling R25).** Servers from before the guard refuse
+    `X-Bdj-Person` at the CORS preflight, so a write that fails that way is retried once without it, after a person
+    check, and logged. Once a write with the header has succeeded, that BD-J session never falls back; the flag is
+    kept per session, not persisted (that would need an IndexedDB version bump), so a new session's first write on a
+    network failure can still fall back once after a person check.
+  - **Quotas.** 16 MB per scope is counted as the NAS counts it, the ustar archive with headers and padding (ruling
+    R24), so the write that crosses it fails in Java at once. The NAS's 256 MB per person is only seen as a 507 after
+    the put, so Java gets the IOException on its next write; the write-ahead copy is kept.
+  - **A slow or silent NAS at boot (ruling R28).** A NAS disc's boot gives the NAS 12 s for `GET me`, each scope's
+    GET and the person check after it (three requests one after another, so about 4 s each); the wait counts as I/O
+    for the start-up timer, whose 120 s ceiling bounds it. A slow link is not a dead one: each of the disc's own
+    reads may wait 30 s or more (above), so a boot can go on while the store misses its budget. A scope the NAS
+    doesn't answer in time loads this browser's copy. With none, the disc starts with no saved data, and what it saves
+    is kept here as a pending copy marked `unmerged` (logged as an error at the miss). That copy is not put on the NAS
+    in the same session; the next boot merges it with the NAS's files winning at every path both have (ruling R29),
+    so only the files the NAS lacks are added, and logs how many of this browser's files it dropped. Java wrote it
+    without seeing the saved data, so a fresh progress or settings file never replaces real saved progress; what
+    Java changed in such a file that session is lost. An ordinary pending copy still merges newest-wins. A flush
+    asks the NAS nothing for such a copy (no `GET me`), so a dead link logs only the miss.
+  - **`GET me` not answering at boot (rulings R28, R30).** The disc starts with no saved data, never with what earlier
+    such sessions kept, and the session only adds to a copy kept apart (`nas-unconfirmed:<API base>#<person>`) under
+    the person the NAS last named for this device in this browser (`nas-device`, by API base). That copy goes into
+    the person's own (onto an empty base when theirs is already on the NAS, so files deleted elsewhere don't come back)
+    only at a boot where the NAS names the same person again, and then merges with the NAS's files winning (R29). A
+    boot that names another person removes this NAS's copies kept for anyone else, and any other such copy last saved
+    more than 30 days ago is removed at boot (the confirmed person's own is attached however old): those saves are
+    lost, never given to someone else. The cleanup runs in the background and reads only keys and the age notes
+    (`nas-unconfirmed-age`), never the files. If the device moves and its new person's first boot also misses `GET
+    me`, their saves are added to the copy kept for the previous person, and go to that person only if the NAS names
+    them again before it names anyone else. A device never confirmed in this browser (or on that route: HTTPS and
+    WebRTC have their own API bases) keeps that session's saved data in memory only. After an attach onto an empty
+    base, the person's copy in this browser holds only the attached files, so if that same boot's GET then misses,
+    Java sees only those, not the older picture of the NAS (round 2, M2; the NAS loses nothing, and the next boot's
+    merge restores what Java sees).
+  - **A conflict's merge keeps Java's file only where Java changed it (review N7).** When a save meets a newer stored
+    version, the stored file replaces Java's unless Java changed that file since the snapshot being saved (or Java's
+    is newer). Under an open writable handle it is replaced in place, so the handle writes on into the live file; a
+    write past the replaced length extends it, and one inside it overwrites part of the stored file.
+  - **The stop waits 3 s for the save (`STOP_SAVE_WAIT_MS`).** On a stop (a title change, the disc closed) the engine
+    waits at most 3 s for the BD-J worker's `stopped`, then terminates it (logged). The write-ahead copy in IndexedDB
+    normally lands well within that, so a stop past 3 s usually loses only the NAS put of that last save, which goes
+    at the next open (the copy is pending). Only if IndexedDB itself takes longer, as a strict commit on a busy iPhone
+    might, are the writes since the last 100 ms save lost.
+  - **What the viewer is told (rulings R32, R32a).** The notice "This disc's saved data can't be kept right now, so
+    progress you make may be lost." (`bdj-storage`, once per disc open) shows at Java's first write (a file created,
+    written or deleted) into a scope kept in memory only with no copy anywhere, never at boot, so a disc that never
+    writes doesn't see it; and for a write refused for room (16 MB per scope, the NAS's 507, IndexedDB's quota, the
+    VFS's memory cap) and a NAS put refused for good (a 4xx that is not a conflict or a request to wait; 401
+    included). A missed boot that keeps an unmerged copy (R28), a 412 that merges, a put still being retried
+    (unreachable, timed out, 5xx) and a device moved to another person (its saves stay in this browser) are log-only,
+    since those saves last. What can still be lost without the notice:
+    - **Writes outside the disc's scopes** (`/persistent/` or `/buda/` paths no BDJO or `id.bdmv` names) last only
+      the session and are logged once as an error.
+    - **A put the NAS refuses for good is retried every 30 s** (`NAS_PUSH_RETRY_MS`) for the rest of the session;
+      the notice shows once, and the write-ahead copy stays pending in this browser.
+    - **A loss found only by the stop's save** (the session has ended, so the worker sends nothing) shows no notice;
+      it is logged, and the next open meets the same condition again if it persists.
+  - **A disc without a disc ID** keys its BUDA scope by a fingerprint of its BDMV file list (ruling R15), so a
+    re-ripped copy with other files starts with an empty BUDA scope.
 
 ## Audio
 

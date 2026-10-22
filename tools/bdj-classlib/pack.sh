@@ -38,6 +38,12 @@ javac -nowarn -source 1.3 -target 1.3 \
   -d "$T/xlets-menu" tests/bdj/xlets/src/bdjweb/menu/*.java
 cp tests/bdj/xlets/src/bdjweb/menu/logo.png tests/bdj/xlets/src/bdjweb/menu/bg.png "$T/xlets-menu/"
 $MK tests/bdj/xlets/menu.jar "$T/xlets-menu" -
+# the saved-data disc's xlet (disc-bdj-store), which counts its own openings under /persistent and /buda
+mkdir "$T/xlets-store"
+javac -nowarn -source 1.3 -target 1.3 \
+  -bootclasspath "$LB/libbluray-j2se-1.5.1.jar:$LB/libbluray-awt-j2se-1.5.1.jar:$JRE/lib/rt.jar" \
+  -d "$T/xlets-store" tests/bdj/xlets/src/bdjweb/store/*.java
+$MK tests/bdj/xlets/store.jar "$T/xlets-store" -
 
 # the JVM conformance programs (package conformance) and HotSpot's stdout for each class with a main; every program runs
 # twice and the outputs must match
@@ -114,6 +120,12 @@ awk '/^%% This notice is provided with respect to the following which may be/ { 
      on && /^--- end of LICENSE ---$/ { exit }' "$JAVA_HOME/THIRD_PARTY_README" > $OUT/THIRD_PARTY_APACHE
 grep -q '^  Apache Xerces Java ' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache Xerces section" >&2; exit 1; }
 grep -q 'Apache License' $OUT/THIRD_PARTY_APACHE || { echo "THIRD_PARTY_README: no Apache License text" >&2; exit 1; }
+# the JDK's notice for ICU4J, which sun/text/normalizer (behind java.text.Normalizer) derives from: its section of
+# THIRD_PARTY_README, from its "%%" line to the end of its license text
+awk '/^%% This notice is provided with respect to ICU4C / { on = 1 }
+     on { print }
+     on && /^--- end of LICENSE ---$/ { exit }' "$JAVA_HOME/THIRD_PARTY_README" > $OUT/THIRD_PARTY_ICU
+grep -q 'International Business Machines Corporation' $OUT/THIRD_PARTY_ICU || { echo "THIRD_PARTY_README: no ICU section" >&2; exit 1; }
 cat > $OUT/SAX_NOTICE <<'EOF'
 The org/xml/sax classes in rt-bdj.jar are OpenJDK's copies of SAX (http://www.saxproject.org), which carry Oracle's
 GPLv2 with the Classpath Exception header and, below it, the SAX project's own notice, for example in
@@ -142,6 +154,22 @@ SNAPSHOT=20261015T000000Z
   echo "  GPLv2 with the Classpath Exception."
   echo "- org/xml/sax/**: SAX, GPLv2 with the Classpath Exception in OpenJDK plus the SAX project's public-domain"
   echo "  notice (SAX_NOTICE)."
+  echo "- sun/text/normalizer/** (behind java/text/Normalizer): derived from ICU4J, (C) Copyright IBM Corp. and others,"
+  echo "  GPLv2 with the Classpath Exception in OpenJDK; the JDK's notice for ICU, with its permission notice, is"
+  echo "  THIRD_PARTY_ICU (from the JDK's THIRD_PARTY_README)."
+  echo
+  echo "How classes.txt is collected: from HotSpot's -verbose:class in the libbluray harness (tools/bdj-classlib/collect.sh),"
+  echo "run with no network, over the synthetic and local BD-J discs, the JVM conformance programs and, with the library"
+  echo "check's generic key script, the start-up files of every BD-J disc of the developer's library, plus a keep-list of"
+  echo "classes added by hand (in collect.sh). HotSpot's own platform font stack (sun/font, the X11 and fontconfig"
+  echo "font managers), which its java.awt.Font loads, is left out: libbluray's java/awt/Font takes its place here. A few"
+  echo "class families are listed whole, because a disc's use of them is open-ended:"
+  echo "- sun/reflect/Unsafe*FieldAccessorImpl: reflection on a field picks one by the field's type and modifiers."
+  echo "- sun/reflect/generics/**: the parser and model of generic signatures, behind java.lang.reflect's generic types."
+  echo "- sun/util/locale/provider/{DateFormat,DateFormatSymbols,DecimalFormatSymbols,NumberFormat}ProviderImpl: the"
+  echo "  JRE providers behind java.text's date and number formats."
+  echo "- java/rmi/registry/Registry with java/rmi/Remote and the exceptions its methods declare (AccessException,"
+  echo "  AlreadyBoundException, NotBoundException, RemoteException): discs name the interface; no RMI runs."
   echo
   echo "OpenJDK binary package: $(dpkg-query -W openjdk-8-jre-headless)"
   echo "Corresponding source:   Ubuntu source package $SRC_PKG $SRC_VER,"

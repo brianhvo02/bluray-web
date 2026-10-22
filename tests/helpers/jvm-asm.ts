@@ -172,6 +172,15 @@ export class VirtualClock {
     this.now = end;
   }
 
+  /**
+   * The host sleeps for `ms`: the clock moves on and no timer fires; those that fell due fire at the wake, when
+   * advance next runs (as Node's and browsers' timers do across a macOS sleep).
+   */
+  sleep(ms: number): void {
+    this.now += ms;
+    for (const e of this.timers) e.at = Math.max(e.at, this.now);
+  }
+
   /** Moves time to the earliest pending timer and fires it. */
   advanceToNext(): void {
     const at = Math.min(...this.timers.map((e) => e.at));

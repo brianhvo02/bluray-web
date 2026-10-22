@@ -28,7 +28,7 @@ import type { StackTrace } from './jvm/jvm';
 import type { JThread } from './jvm/threads';
 import { JavaThrowable } from './jvm/values';
 import type { JObject, JValue } from './jvm/values';
-import { Vfs } from './jvm/vfs';
+import { Vfs, type VfsChange } from './jvm/vfs';
 import { ZipArchive } from './jvm/zip';
 
 export interface ClassLibrarySource {
@@ -59,6 +59,10 @@ export interface BdjRuntimeDeps {
   readonly fonts?: BdjFontSources;
   /** The memory profile's BD-J budgets; none by default. */
   readonly memory?: BdjMemoryBudgets;
+  /** A change on /tmp/, /persistent/ or /buda/ (VfsOptions.onChange): the storage scopes' saves (store/scope-sync.ts). */
+  readonly onVfsChange?: (path: string, change: VfsChange, to?: string) => void;
+  /** A write refused for room, by the memory budget or a scope's quota (VfsOptions.onFull). */
+  readonly onVfsFull?: (path: string) => void;
 }
 
 /** The memory profile's budgets the BD-J worker applies (memory-profile.ts, bdjClassCacheBytes and bdjVfsCacheBytes). */
@@ -141,6 +145,7 @@ export class BdjRuntime {
   /** The drive in progress checks whether it is done. */
   private settle: (() => void) | null = null;
   private vfsFullLogged = false;
+  private readonly quotaFullLogged = new Set<string>();
 
   constructor(private readonly deps: BdjRuntimeDeps) {
     const inner = deps.host(
@@ -165,7 +170,9 @@ export class BdjRuntime {
         discPaths: deps.disc.paths(),
         jdkLib: ZipArchive.open(lib.rt),
         nowMs: deps.nowMs,
-        ...(deps.memory ? { memLimitBytes: deps.memory.vfsBytes, onFull: (path, limit) => this.vfsFull(path, limit) } : {}),
+        ...(deps.memory ? { memLimitBytes: deps.memory.vfsBytes } : {}),
+        onFull: (path, limit, quotaDir) => this.vfsFull(path, limit, quotaDir),
+        ...(deps.onVfsChange ? { onChange: deps.onVfsChange } : {}),
         ...(fonts ? { jdkLazy: systemFontFiles(fonts.loadDefaultFont) } : {}),
       }),
       systemProperties: JVM_PROPERTIES,
@@ -179,11 +186,22 @@ export class BdjRuntime {
     registerHaviNatives(this.jvm.natives, host);
   }
 
-  /** The memory mounts' limit refused a write (ENOSPC for Java): logged the first time only. */
-  private vfsFull(path: string, limit: number): void {
+  /**
+   * The memory mounts' limit or a storage scope's quota refused a write (ENOSPC for Java): logged the first time only
+   * for each.
+   */
+  private vfsFull(path: string, limit: number, quotaDir: string | null): void {
+    this.deps.onVfsFull?.(path);
+    const mb = (limit / (1024 * 1024)).toFixed(1);
+    if (quotaDir !== null) {
+      if (this.quotaFullLogged.has(quotaDir)) return;
+      this.quotaFullLogged.add(quotaDir);
+      this.deps.log(`BD-J: no room to write ${path}: the saved data under ${quotaDir} is at its quota of ${mb} MB (No space left on device)`);
+      return;
+    }
     if (this.vfsFullLogged) return;
     this.vfsFullLogged = true;
-    this.deps.log(`BD-J: no room to write ${path}: the BD-J files in memory are at the budget of ${(limit / (1024 * 1024)).toFixed(1)} MB (No space left on device)`);
+    this.deps.log(`BD-J: no room to write ${path}: the BD-J files in memory are at the budget of ${mb} MB (No space left on device)`);
   }
 
   /** Runtime.halt's status, once Java has halted the JVM; nothing runs after that. */

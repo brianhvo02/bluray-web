@@ -12,6 +12,7 @@ import type { BdjErrorCode } from './errors';
 import type { Coalesce } from './input';
 import type { BdjMemoryBudgets, ClassLibrarySource } from './runtime';
 import type { JvmMemoryStats } from './jvm/jvm';
+import type { StorageLoss } from './store/bdj-store';
 
 /** A call argument or reply value; a Java long crosses as a decimal string. */
 export type BdjWireValue = number | string | boolean | null;
@@ -41,7 +42,11 @@ export type ToBdj =
   | { readonly type: 'event'; readonly ev: number; readonly param: number; readonly coalesce?: Coalesce }
   | { readonly type: 'reply'; readonly id: number; readonly value: number | string }
   /** Log a thread dump (diagnostics), then answer `dumped`. */
-  | { readonly type: 'dump'; readonly reason: string };
+  | { readonly type: 'dump'; readonly reason: string }
+  /** Save the storage scopes' changes now (the page is going away: pagehide). */
+  | { readonly type: 'flush' }
+  /** BD-J stops: Java is halted, the storage scopes' changes are saved, then the worker answers `stopped`. */
+  | { readonly type: 'stop' };
 
 export type FromBdj =
   | { readonly type: 'booted'; readonly bootMs: number }
@@ -54,7 +59,21 @@ export type FromBdj =
   /** The NAS answered 401: the engine asks the controller for a fresh token and sends it as remoteToken. */
   | { readonly type: 'remoteTokenNeeded' }
   /** The thread dump asked for has been logged. */
-  | { readonly type: 'dumped' };
+  | { readonly type: 'dumped' }
+  /** The storage scopes are loaded (sent once, false) and, after that, whether they have changes not saved yet: a stop then waits for `stopped`. */
+  | { readonly type: 'unsaved'; readonly unsaved: boolean }
+  /**
+   * Whether the worker is waiting on its own I/O (a disc read, the storage scopes, FreeType or the fallback font): sent
+   * on each change. The start-up timeout does not count that time (Task 7g): a slow link is not a hang.
+   */
+  | { readonly type: 'io'; readonly pending: boolean }
+  /**
+   * What the disc saves won't last (ruling R32): sent once per session, at the first loss, and never after a stop or a
+   * failure. The engine shows the viewer its `bdj-storage` notice.
+   */
+  | { readonly type: 'storageLost'; readonly reason: StorageLoss }
+  /** The answer to `stop`: the worker can be terminated. */
+  | { readonly type: 'stopped' };
 
 export type BdjFailureCode = BdjErrorCode | 'halted' | 'timeout';
 

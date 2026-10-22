@@ -1,0 +1,14 @@
+static-float 1.5 1.5
+static-long 1234567890123 as-float 1.23456795E12
+static-double 2.25
+static-int 7 as-long 7
+static-short -3 byte 9
+static-char q bool true
+static-object obj
+static-final 0.125 true
+static-set 9.5 77
+static-set-boxed 78
+float 3.75 long -42 double 6.5
+set -1.25 5 true
+narrow java.lang.IllegalArgumentException
+final-set java.lang.IllegalAccessException
