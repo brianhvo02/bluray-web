@@ -352,6 +352,11 @@ test('plays a disc at a re-encoded level picked in the pre-flight, seeks, and sw
     await page.locator('[role="menuitemradio"][data-level="original"]').click();
     await expect(page.getByTestId('level-badge')).toBeHidden({ timeout: 60_000 });
     await expect(page.getByTestId('level-notice')).toBeHidden({ timeout: 60_000 });
+    // a slow runner can reach the end of the 10 s disc by now (it then rests paused on the last frame): start over
+    await page.getByTestId('quality-menu').blur();
+    await page.keyboard.press('ArrowLeft');
+    if ((await playerState(page).getAttribute('data-state')) !== 'playing') await page.getByRole('button', { name: 'Play', exact: true }).click();
+    await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 30_000 });
     const afterSwitch = await frames();
     await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSwitch + 10);
   });
