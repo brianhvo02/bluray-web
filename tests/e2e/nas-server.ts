@@ -116,6 +116,8 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   RTC_PORT: '47990',
   // libx264 (needs ffmpeg on PATH): the default (qsv) would only fail its self-test here. H.264 levels encode; HEVC ones answer no-encoder.
   LEVELS_BACKEND: 'x264',
+  // Viewings outlast their tests by 2 minutes (a lease lapses then), and the real budgets (about six 1080p viewings) ran out between tests.
+  LEVELS_GPU_SCALE: '8',
 };
 
 /**

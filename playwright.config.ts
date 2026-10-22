@@ -4,6 +4,12 @@ import { NAS_PORT, RENDEZVOUS_URL } from './tests/e2e/nas-server';
 /** The preview server's port: E2E_PORT moves it off 4173 when another checkout's preview is using that. */
 const PORT = Number(process.env.E2E_PORT ?? 4173);
 
+/**
+ * A desktop's screen. Without it Playwright's screen is its 1280x720 viewport, which the player's auto quality rule takes for a
+ * phone (the short side is under 900), so every NAS test would open its disc at Phone, re-encoded, and hold a GPU lease.
+ */
+const DESKTOP_SCREEN = { width: 1920, height: 1080 };
+
 export default defineConfig({
   testDir: 'tests/e2e',
   timeout: 60_000,
@@ -14,13 +20,14 @@ export default defineConfig({
     {
       name: 'chromium',
       testIgnore: /mobile-.*\.spec\.ts/,
-      use: { channel: 'chrome', launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] } },
+      use: { channel: 'chrome', screen: DESKTOP_SCREEN, launchOptions: { args: ['--autoplay-policy=no-user-gesture-required'] } },
     },
     {
       name: 'firefox',
       testIgnore: /mobile-.*\.spec\.ts/,
       use: {
         ...devices['Desktop Firefox'],
+        screen: DESKTOP_SCREEN,
         launchOptions: {
           firefoxUserPrefs: {
             'media.autoplay.default': 0,
@@ -34,7 +41,7 @@ export default defineConfig({
     {
       name: 'webkit',
       testIgnore: /mobile-.*\.spec\.ts/,
-      use: { ...devices['Desktop Safari'] },
+      use: { ...devices['Desktop Safari'], screen: DESKTOP_SCREEN },
     },
     {
       name: 'mobile-chromium',

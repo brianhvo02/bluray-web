@@ -94,6 +94,17 @@ function startRtc(config: Config, rendezvousUrl: string, rendezvous: RendezvousC
  * The quality levels (spec §5–§6): after the encoder's self-test at start, or none (Original only) when
  * `LEVELS_BACKEND=off`, there is no GPU for `qsv`, or the self-test fails. Segments are cached under `/data/transcode`.
  */
+/**
+ * The GPU budgets, times `LEVELS_GPU_SCALE` when it is a positive number. Only the E2E stand-in sets it: its browsers open
+ * discs side by side (phone-sized screens lease a re-encoded level), a lease lapses 2 minutes after its last read, and the
+ * real budgets (about six 1080p viewings) ran out between tests.
+ */
+function gpuBudgets(): { h264: number; hevc: number } {
+  const scale = Number(process.env.LEVELS_GPU_SCALE ?? 1);
+  const k = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  return { h264: GPU_BUDGETS.h264 * k, hevc: GPU_BUDGETS.hevc * k };
+}
+
 async function levelService(config: Config, library: Library, isoTrees: IsoTrees): Promise<LevelService | undefined> {
   const encoder = await levelsBackend(config.levels);
   if (!encoder) return undefined;
@@ -101,7 +112,7 @@ async function levelService(config: Config, library: Library, isoTrees: IsoTrees
   return new LevelService({
     discs: libraryDiscSources(library, isoTrees),
     cache: new SegmentCache(join(config.dataDir, 'transcode'), config.levels.cacheBytes),
-    capacity: new Capacity(GPU_BUDGETS),
+    capacity: new Capacity(gpuBudgets()),
     backend: encoder.backend,
     codecs: encoder.codecs,
     probe: (input, options) => probeScan(input, { ...options, binary: ffprobePath }),

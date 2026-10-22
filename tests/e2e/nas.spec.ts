@@ -285,10 +285,9 @@ test('buffers first on a slow connection: the pre-flight asks, and Wait fills th
   await discRow(page, 'disc1').click();
   await expect(page.getByTestId('nas-buffer-wait')).toHaveText('About 1 minutes before it can play straight through', { timeout: 15_000 });
   await expect(page.getByTestId('nas-play')).toHaveText('Play now with pauses');
-  // the level list preselects a re-encoded level, which plays now
+  // the level list preselects one level (at about 1 Mbps nothing fits, so the cheapest: disc1's own rate is below the levels' budgets)
   const preselected = page.locator('[data-testid="level-option"]:checked');
   await expect(preselected).toHaveCount(1);
-  expect(await preselected.getAttribute('data-level')).not.toBe('original');
   // ?bufferask=1 makes every wait an ask, so the notes here are waits, not 'plays now'
   await expect(page.getByTestId('level-list')).toContainText('about 1 minute');
   await page.getByTestId('nas-wait').click();
@@ -314,52 +313,70 @@ async function startPlaylistIfPicked(page: Page): Promise<void> {
   if (await picked.waitFor({ timeout: 30_000 }).then(() => true, () => false)) await picked.click();
 }
 
+/**
+ * The quality-level tests take turns across the browsers: the NAS's encoder capacity is shared (six 1080p viewings fit,
+ * and a lease lapses only 2 minutes after the last read), so three browsers' level viewings at once, with those of the
+ * slow-connection test, left the next pre-flight with "The NAS is busy". The viewing is released at the end too.
+ */
+async function levelViewing(page: Page, body: () => Promise<void>): Promise<void> {
+  await exclusivelyAsync('levels', async () => {
+    await body();
+    const released = page.waitForResponse((r) => r.request().method() === 'DELETE' && r.url().includes('/viewing?'), { timeout: 5_000 }).catch(() => null);
+    await page.goBack();
+    await released;
+  });
+}
+
 test('plays a disc at a re-encoded level picked in the pre-flight, seeks, and switches to Original', async ({ page, browserName }) => {
   test.setTimeout(120_000);
-  await openLibrary(page, browserName);
-  await skipWithoutH264(page, { realtime: false });
-  // disc-levels (10 s, 1080p H.264) in place of disc1 (4 s): long enough to seek in
-  await discRow(page, 'disc-levels').click();
-  await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
-  await page.locator('[data-testid="level-option"][data-level="h264-1080"]').check();
-  await page.getByTestId('nas-play').click();
-  await startPlaylistIfPicked(page);
-  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 60_000 });
-  const frames = async () => (await telemetry(page))?.framesPresented ?? 0;
-  await expect.poll(frames, { timeout: 60_000 }).toBeGreaterThan(30);
-  await expect(page.getByTestId('level-badge')).toHaveText('1080p · re-encoded on the NAS');
-  // seek: ArrowRight (+10 s) would land at the end of a 10 s disc, so seek back to the start; frames keep advancing past it
-  await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 30_000 }).toBeGreaterThan(2_000_000);
-  await page.keyboard.press('ArrowLeft');
-  const afterSeek = await frames();
-  await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSeek + 10);
-  // back to Original through the Quality menu
-  await page.getByTestId('quality-menu').click();
-  await page.locator('[role="menuitemradio"][data-level="original"]').click();
-  await expect(page.getByTestId('level-badge')).toBeHidden({ timeout: 60_000 });
-  await expect(page.getByTestId('level-notice')).toBeHidden({ timeout: 60_000 });
-  const afterSwitch = await frames();
-  await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSwitch + 10);
+  await levelViewing(page, async () => {
+    await openLibrary(page, browserName);
+    await skipWithoutH264(page, { realtime: false });
+    // disc-levels (10 s, 1080p H.264) in place of disc1 (4 s): long enough to seek in
+    await discRow(page, 'disc-levels').click();
+    await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
+    await page.locator('[data-testid="level-option"][data-level="h264-1080"]').check();
+    await page.getByTestId('nas-play').click();
+    await startPlaylistIfPicked(page);
+    await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 60_000 });
+    const frames = async () => (await telemetry(page))?.framesPresented ?? 0;
+    await expect.poll(frames, { timeout: 60_000 }).toBeGreaterThan(30);
+    await expect(page.getByTestId('level-badge')).toHaveText('1080p · re-encoded on the NAS');
+    // seek: ArrowRight (+10 s) would land at the end of a 10 s disc, so seek back to the start; frames keep advancing past it
+    await expect.poll(async () => (await telemetry(page))?.clockUs ?? 0, { timeout: 30_000 }).toBeGreaterThan(2_000_000);
+    await page.keyboard.press('ArrowLeft');
+    const afterSeek = await frames();
+    await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSeek + 10);
+    // back to Original through the Quality menu
+    await page.getByTestId('quality-menu').click();
+    await page.locator('[role="menuitemradio"][data-level="original"]').click();
+    await expect(page.getByTestId('level-badge')).toBeHidden({ timeout: 60_000 });
+    await expect(page.getByTestId('level-notice')).toBeHidden({ timeout: 60_000 });
+    const afterSwitch = await frames();
+    await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(afterSwitch + 10);
+  });
 });
 
 test('an MPEG-2 disc plays with a picture at a re-encoded level', async ({ page, browserName }) => {
   test.setTimeout(120_000);
-  await openLibrary(page, browserName);
-  await skipWithoutH264(page, { realtime: false });
-  // disc-mpeg2 (the same video as disc-mpeg2-menu, with no menu): it opens to its playlist picker
-  await discRow(page, 'disc-mpeg2').click();
-  await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
-  const original = page.locator('[data-testid="level-option"][data-level="original"]');
-  await expect(original).toBeDisabled();
-  await expect(original.locator('xpath=ancestor::label[1]')).toContainText("can't play in this browser");
-  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 20_000 });
-  await expect(page.locator('[data-testid="level-option"]:checked')).toHaveCount(1);
-  await expect(page.locator('[data-testid="level-option"]:checked')).not.toHaveAttribute('data-level', 'original');
-  await page.getByTestId('nas-play').click();
-  await startPlaylistIfPicked(page);
-  await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 60_000 });
-  await expect.poll(async () => (await telemetry(page))?.framesPresented ?? 0, { timeout: 60_000 }).toBeGreaterThan(30);
-  await expect(page.getByRole('status').filter({ hasText: "This disc's video can't be played here yet" })).toHaveCount(0);
+  await levelViewing(page, async () => {
+    await openLibrary(page, browserName);
+    await skipWithoutH264(page, { realtime: false });
+    // disc-mpeg2 (the same video as disc-mpeg2-menu, with no menu): it opens to its playlist picker
+    await discRow(page, 'disc-mpeg2').click();
+    await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 20_000 });
+    const original = page.locator('[data-testid="level-option"][data-level="original"]');
+    await expect(original).toBeDisabled();
+    await expect(original.locator('xpath=ancestor::label[1]')).toContainText("can't play in this browser");
+    await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 20_000 });
+    await expect(page.locator('[data-testid="level-option"]:checked')).toHaveCount(1);
+    await expect(page.locator('[data-testid="level-option"]:checked')).not.toHaveAttribute('data-level', 'original');
+    await page.getByTestId('nas-play').click();
+    await startPlaylistIfPicked(page);
+    await expect(playerState(page)).toHaveAttribute('data-state', 'playing', { timeout: 60_000 });
+    await expect.poll(async () => (await telemetry(page))?.framesPresented ?? 0, { timeout: 60_000 }).toBeGreaterThan(30);
+    await expect(page.getByRole('status').filter({ hasText: "This disc's video can't be played here yet" })).toHaveCount(0);
+  });
 });
 
 test('opens disc-menu from the NAS into its menu', async ({ page, browserName }) => {
@@ -417,6 +434,8 @@ test('pairs, browses and plays over WebRTC when HTTPS to the NAS is unreachable:
   // link, so the load opens the disc's pre-flight (resolved over the channel); its Back returns to the folder browser.
   await page.reload();
   await expect(page.getByTestId('nas-preflight')).toBeVisible({ timeout: 30_000 });
+  // the pre-flight settles (the levels, the places) before it is clicked: it re-renders as each answer arrives over the channel
+  await expect(page.getByTestId('level-list')).toBeVisible({ timeout: 30_000 });
   await page.getByTestId('nas-preflight').getByRole('button', { name: 'Back' }).click();
   await expect(page.getByTestId('nas-crumbs')).toHaveText('NAS', { timeout: 30_000 });
   await playFromNas(page, 'disc-bdj');
@@ -488,11 +507,16 @@ test('a disc deleted after its pre-flight fails to open, and Play works again', 
   await page.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
   await discRow(page, project).click();
   await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 15_000 });
+  // Original, whatever the auto rule picked (a small screen takes Phone, whose open fails in the pre-flight itself, with its own error)
+  await page.locator('[data-testid="level-option"][data-level="original"]').check();
   rmSync(dir, { recursive: true, force: true });
   await page.getByTestId('nas-play').click();
   await expect(page.getByTestId('error')).toContainText('This disc changed on the NAS. Open its folder again.', { timeout: 15_000 });
   await expect(page.getByTestId('nas-play')).toBeEnabled();
 });
+
+/** A folder every test leaves alone: the guest's check must not depend on `changed`, which the tests above empty and any rescan then drops. */
+const GUEST_FOLDER = 'Anime';
 
 test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans', async ({ page, browser, browserName }) => {
   await openLibrary(page, browserName);
@@ -539,15 +563,15 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
         await expect(mika.getByTestId('nas-error')).toHaveCount(0);
         await expect(mika.getByTestId('error')).toHaveCount(0);
         // A guest: the listing is up, and there is no way into the settings.
-        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
+        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${GUEST_FOLDER}"]`)).toBeVisible();
         await expect(mika.getByTestId('nas-settings')).toHaveCount(0);
         // The guest's folders are in the address bar too: a folder, then the browser's Back, is the top again.
         expect(new URL(mika.url()).pathname).toBe('/nas/folders');
-        await mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+        await mika.locator(`[data-testid="nas-folder"][data-name="${GUEST_FOLDER}"]`).click();
         await expect(mika.getByTestId('nas-crumbs')).not.toHaveText('NAS');
         await mika.goBack();
         await expect(mika.getByTestId('nas-crumbs')).toHaveText('NAS');
-        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`)).toBeVisible();
+        await expect(mika.locator(`[data-testid="nas-folder"][data-name="${GUEST_FOLDER}"]`)).toBeVisible();
 
         // Once the owner opens the gate, the guest's next app load shows the library, without the owner's parts.
         await setGate('everyone');
@@ -588,7 +612,7 @@ test('the owner invites Mika, who pairs as Mika, then removes Mika, and rescans'
     await expect(mikaRow).toHaveCount(0);
 
     // Mika's next library request finds the device gone with its person: back to pairing.
-    await mika.locator(`[data-testid="nas-folder"][data-name="${CHANGED_FOLDER}"]`).click();
+    await mika.locator(`[data-testid="nas-folder"][data-name="${GUEST_FOLDER}"]`).click();
     await expect(mika.getByTestId('error')).toHaveText('This device is no longer paired with the NAS.');
     await expect(mika.getByTestId('pair-screen')).toBeVisible();
     await expect(mika.getByTestId('nas-library')).toHaveCount(0);
