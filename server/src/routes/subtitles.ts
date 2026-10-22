@@ -8,7 +8,7 @@ import { BodyTooLargeError, bodyStream, json, readJson } from '../http';
 import type { Handler, Response } from '../http';
 import type { Library } from '../library';
 import type { DiscEvidence } from '../titles/evidence';
-import { BadNameError, EmptyBodyError, FONTS_LIMIT_BYTES, SUBTITLE_LIMIT_BYTES, SubtitleStore, TooLargeError } from '../subtitle-store';
+import { BadNameError, EmptyBodyError, NotFoundError, FONTS_LIMIT_BYTES, SUBTITLE_LIMIT_BYTES, SubtitleStore, TooLargeError } from '../subtitle-store';
 import type { SubtitleMeta } from '../subtitle-store';
 import { decodeSegment, requestDevice } from './titles';
 import type { TitleLibrary } from './titles';
@@ -159,10 +159,13 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
   };
 
   const upload = async (req: Parameters<Handler>[0], id: string, kind: 'file' | 'fonts', name: string): Promise<Response> => {
-    if (!store.get(id)) return notFound();
+    const cur = store.get(id);
+    if (!cur) return notFound();
+    // what the store allows this one: its fonts together stay under the limit, the same name replacing
+    const fontRoom = FONTS_LIMIT_BYTES - cur.fonts.filter((f) => f.name !== name).reduce((n, f) => n + f.size, 0);
     const stored = kind === 'file'
       ? await store.writeFile(id, name, bodyStream(req, SUBTITLE_LIMIT_BYTES))
-      : await store.writeFont(id, name, bodyStream(req, FONTS_LIMIT_BYTES));
+      : await store.writeFont(id, name, bodyStream(req, Math.max(0, fontRoom)));
     return json(200, withAttached(stored));
   };
 
@@ -183,21 +186,27 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
     if (write && !device.owner) return json(403, { error: 'forbidden' }, { Connection: 'close' });
     const open = device.owner || (titles !== undefined && titles.service.gate() === 'everyone');
     if (!write && !open) return notFound();
+    // a refused PUT leaves its body unread, so the connection can't carry another request
+    const refuse = (r: Response): Response => (method === 'PUT' ? { ...r, headers: { ...r.headers, Connection: 'close' } } : r);
     try {
       if (shape === 'list') return method === 'GET' ? list(url.searchParams, device.owner) : await create(req, device.personId);
       if (shape === 'one') {
         if (method === 'DELETE') return store.delete(id!) ? { status: 204 } : notFound();
         return await patch(req, id!);
       }
-      if (method === 'PUT') return await upload(req, id!, part as 'file' | 'fonts', name!);
+      if (method === 'PUT') {
+        const res = await upload(req, id!, part as 'file' | 'fonts', name!);
+        return res.status === 200 ? res : refuse(res);
+      }
       const s = store.get(id!);
       if (!s || (!device.owner && !isAttached(s.attachment))) return notFound();
       return await download(part === 'file' && shape === 'file' ? store.filePath(id!) : store.fontPath(id!, name!));
     } catch (err) {
-      if (err instanceof EmptyBodyError) return bad('empty');
-      if (err instanceof BadNameError) return bad('bad-name');
-      if (err instanceof TooLargeError || err instanceof BodyTooLargeError) return json(413, { error: 'too-large' });
-      if (err instanceof LockHeldError) return json(503, { error: 'busy' }, { 'Retry-After': '1' });
+      if (err instanceof EmptyBodyError) return refuse(bad('empty'));
+      if (err instanceof BadNameError) return refuse(bad('bad-name'));
+      if (err instanceof NotFoundError) return refuse(notFound());
+      if (err instanceof TooLargeError || err instanceof BodyTooLargeError) return refuse(json(413, { error: 'too-large' }));
+      if (err instanceof LockHeldError) return refuse(json(503, { error: 'busy' }, { 'Retry-After': '1' }));
       throw err;
     }
   };

@@ -29,6 +29,14 @@ export class EmptyBodyError extends Error {
   }
 }
 
+/** The upload doesn't exist (any more). */
+export class NotFoundError extends Error {
+  constructor() {
+    super('no such subtitle');
+    this.name = 'NotFoundError';
+  }
+}
+
 /** A file name that isn't a plain name with an allowed extension. */
 export class BadNameError extends Error {
   constructor() {
@@ -193,7 +201,7 @@ export class SubtitleStore {
     others: (s: StoredSubtitle) => number, commit: (cur: StoredSubtitle, size: number) => StoredSubtitle, afterCommit?: (before: StoredSubtitle) => void,
   ): Promise<StoredSubtitle> {
     const s = this.get(id);
-    if (!s) throw new Error('no such subtitle');
+    if (!s) throw new NotFoundError();
     const used = this.all().reduce((n, o) => n + (o.id === id ? others(o) : total(o)), 0);
     const { temp, size } = await this.stream(id, body, Math.min(limit, this.maxTotal - used));
     try {
@@ -206,7 +214,7 @@ export class SubtitleStore {
         afterCommit?.(cur);
         return { next, result: next };
       });
-      if (!result) throw new Error('no such subtitle');
+      if (!result) throw new NotFoundError();
       syncDir(join(this.root(), id, sub));
       return result;
     } catch (err) {
@@ -232,7 +240,7 @@ export class SubtitleStore {
   async writeFont(id: string, fontName: string, body: AsyncIterable<Buffer>, limit = FONTS_LIMIT_BYTES): Promise<StoredSubtitle> {
     checkName(fontName, FONT_EXT);
     const cur = this.get(id);
-    if (!cur) throw new Error('no such subtitle');
+    if (!cur) throw new NotFoundError();
     const others = cur.fonts.filter((f) => f.name !== fontName).reduce((n, f) => n + f.size, 0);
     return this.put(id, 'fonts', fontName, body, Math.min(limit, FONTS_LIMIT_BYTES - others),
       (o) => total(o) - o.fonts.filter((f) => f.name === fontName).reduce((n, f) => n + f.size, 0),

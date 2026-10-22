@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { request } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -224,5 +225,55 @@ describe('subtitle routes', () => {
     expect(existsSync(join(data, 'subtitles', s.id))).toBe(false);
     expect((await call('DELETE', `/api/subtitles/${s.id}`, owner)).status).toBe(404);
     expect((await call('GET', `/api/subtitles/${s.id}/file`, owner)).status).toBe(404);
+  });
+
+  it('answers every refused PUT with Connection: close, a declared length over the limit at once', async () => {
+    const owner = await tokenFor('Hana', true);
+    const s = await createSub(owner);
+    const refused = [
+      await call('PUT', `/api/subtitles/${s.id}/file/a.exe`, owner, 'x'),
+      await call('PUT', `/api/subtitles/${s.id}/file/e.srt`, owner, ''),
+      await call('PUT', '/api/subtitles/0000000000000000/file/a.srt', owner, 'x'),
+      await call('PUT', `/api/subtitles/${s.id}/file/big.srt`, owner, new Uint8Array(6 * 1024 * 1024)),
+    ];
+    expect(refused.map((r) => r.status)).toEqual([400, 400, 404, 413]);
+    for (const r of refused) expect(r.headers.get('connection')).toBe('close');
+    expect((await call('PUT', `/api/subtitles/${s.id}/file/ok.srt`, owner, 'fine')).headers.get('connection')).not.toBe('close');
+    // a declared length over the font room left is refused before any byte is read
+    await call('PUT', `/api/subtitles/${s.id}/fonts/a.ttf`, owner, new Uint8Array(40 * 1024 * 1024));
+    const res = await new Promise<{ status: number; connection: string | undefined }>((resolve, reject) => {
+      const req = request(`${base}/api/subtitles/${s.id}/fonts/b.ttf`, { method: 'PUT', headers: { Authorization: `Bearer ${owner}`, 'Content-Length': String(11 * 1024 * 1024) } }, (r) => {
+        resolve({ status: r.statusCode!, connection: r.headers.connection });
+        req.destroy();
+      });
+      req.on('error', () => {});
+      req.write(Buffer.alloc(1024));
+      void reject;
+    });
+    expect(res).toEqual({ status: 413, connection: 'close' });
+  }, 30_000);
+
+  it('survives a client that goes mid-body', async () => {
+    const owner = await tokenFor('Hana', true);
+    const s = await createSub(owner);
+    await new Promise<void>((resolve) => {
+      const req = request(`${base}/api/subtitles/${s.id}/file/a.srt`, { method: 'PUT', headers: { Authorization: `Bearer ${owner}`, 'Content-Length': '1000' } });
+      req.on('error', () => resolve());
+      req.write(Buffer.alloc(100), () => req.destroy());
+    });
+    expect((await call('GET', `/api/subtitles?discKey=${KEY}`, owner)).status).toBe(200);
+  });
+
+  it('hides a font from a guest under the closed gate, and refuses a guest write there', async () => {
+    const owner = await tokenFor('Hana', true);
+    const guest = await tokenFor('Mika', false);
+    const s = await createWithFile(owner);
+    await call('PUT', `/api/subtitles/${s.id}/fonts/Fancy.ttf`, owner, new Uint8Array(10));
+    gate = 'owners';
+    expect((await call('GET', `/api/subtitles/${s.id}/fonts/Fancy.ttf`, guest)).status).toBe(404);
+    expect((await call('PATCH', `/api/subtitles/${s.id}`, guest, { name: 'x' })).status).toBe(403);
+    expect((await call('DELETE', `/api/subtitles/${s.id}`, guest)).status).toBe(403);
+    expect((await call('GET', `/api/subtitles/${s.id}/fonts/Fancy.ttf`, owner)).status).toBe(200);
+    expect(((await (await call('GET', `/api/subtitles?discKey=${KEY}`, owner)).json()) as StoredSubtitle[])[0]).toMatchObject({ name: 'Fan subs' });
   });
 });
