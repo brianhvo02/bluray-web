@@ -1,8 +1,8 @@
-import { useEffect, useId, useState, type FormEvent, type ReactElement } from 'react';
-import type { DiscManifest, StoredSubtitle, SubtitleFor, SubtitlePatch } from '../../engine/disc/nas-api';
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactElement } from 'react';
+import type { DiscManifest, StoredSubtitle, SubtitleFor } from '../../engine/disc/nas-api';
 import { formatTime } from '../format';
 import type { NasClient } from './nas-client';
-import { LANGUAGES, parseOffset, playlistChoices, subtitleErrorMessage, uploadSubtitle, validateUpload, type PlaylistChoice, type SubtitleTarget } from './subtitle-model';
+import { LANGUAGES, editPatch, offsetFrom, playlistChoices, subtitleErrorMessage, uploadSubtitle, validateUpload, type PlaylistChoice, type SubtitleTarget } from './subtitle-model';
 
 /** A disc's manifest, fetched once per screen. */
 export type ManifestOf = (discId: string) => Promise<DiscManifest>;
@@ -48,6 +48,8 @@ interface SubtitleUploadProps {
   readonly discIdOfKey?: (discKey: string) => string | null;
   readonly onDone: (stored: StoredSubtitle) => void;
   readonly onCancel: () => void;
+  /** Told when a write starts and when it ends (the screen keeps the sheet open meanwhile). */
+  readonly onBusy?: (busy: boolean) => void;
 }
 
 /**
@@ -55,7 +57,7 @@ interface SubtitleUploadProps {
  * season, or a disc, playlist and chapter), a language, a name and a default offset. With `editing`, the same form
  * changes an upload's name, language, offset and attachment.
  */
-export function SubtitleUpload({ nas, target, manifestOf, editing, discIdOfKey = () => null, onDone, onCancel }: SubtitleUploadProps): ReactElement {
+export function SubtitleUpload({ nas, target, manifestOf, editing, discIdOfKey = () => null, onDone, onCancel, onBusy }: SubtitleUploadProps): ReactElement {
   const ids = useId();
   const [initial] = useState(() => prefillOf(editing, target, discIdOfKey));
   const [files, setFiles] = useState<File[]>([]);
@@ -67,6 +69,8 @@ export function SubtitleUpload({ nas, target, manifestOf, editing, discIdOfKey =
   const [language, setLanguage] = useState(editing?.language ?? '');
   const [name, setName] = useState(editing?.name ?? '');
   const [offset, setOffset] = useState(editing ? offsetText(editing.offsetMs) : '0');
+  /** The number field: its text may be one the browser can't read as a number (its value is then ''). */
+  const offsetField = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ readonly sent: number; readonly total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,12 +104,16 @@ export function SubtitleUpload({ nas, target, manifestOf, editing, discIdOfKey =
       if (discId === '') return 'Choose a disc.';
       if (!playlist) return 'Choose a playlist.';
       if (chapter >= playlist.chapters.length) return 'Choose a chapter.';
-      return { kind: 'chapter', discId, playlistId: playlist.id, chapter };
+      return { kind: 'chapter', discId, playlistId: playlist.id, chapter, titleId: target.titleId };
     }
     return 'Choose what the subtitles are for.';
   };
-  const sameFor = (f: SubtitleFor): boolean =>
-    f.kind === 'episode' ? forValue === initial.forValue : forValue === CHAPTER && initial.forValue === CHAPTER && f.discId === initial.discId && f.playlistId === initial.playlistId && f.chapter === initial.chapter;
+  /** The owner changed what the upload is for. */
+  const touched = forValue !== initial.forValue || (forValue === CHAPTER && (discId !== initial.discId || playlistId !== initial.playlistId || chapter !== initial.chapter));
+  const setWorking = (working: boolean): void => {
+    setBusy(working);
+    onBusy?.(working);
+  };
 
   const submit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
@@ -114,28 +122,30 @@ export function SubtitleUpload({ nas, target, manifestOf, editing, discIdOfKey =
     const picked = editing ? null : validateUpload(files);
     if (picked && 'error' in picked) return setError(picked.error);
     const f = forOf();
-    if (typeof f === 'string') return setError(f);
+    if (!editing && typeof f === 'string') return setError(f);
     const lang = language.trim();
     if (!LANGUAGE.test(lang)) return setError('Type a language, such as en or ja.');
-    const offsetMs = parseOffset(offset);
+    const offsetMs = offsetFrom(offset, offsetField.current?.validity.badInput ?? false);
     if (offsetMs === null) return setError('The offset is in seconds, from −600 to 600.');
     const chosenName = (name.trim() || (picked ? baseName(picked.subtitle.name) : '')).slice(0, MAX_NAME);
     if (chosenName === '') return setError('Give the subtitles a name.');
-    setBusy(true);
+    const patch = editing ? editPatch({ name: chosenName, language: lang, offsetMs }, f, { touched, attached: editing.attached !== false }) : null;
+    if (patch && 'error' in patch) return setError(patch.error);
+    setWorking(true);
     try {
       let stored: StoredSubtitle;
       if (editing) {
-        const patch: SubtitlePatch = { name: chosenName, language: lang, offsetMs, ...(editing.attached === false || !sameFor(f) ? { for: f } : {}) };
-        stored = await nas.updateSubtitle(editing.id, patch);
+        stored = await nas.updateSubtitle(editing.id, patch!);
       } else {
         setProgress({ sent: 0, total: 1 });
-        stored = await uploadSubtitle(nas, { name: chosenName, language: lang, offsetMs, for: f }, picked!, (sent, total) => setProgress({ sent, total }));
+        stored = await uploadSubtitle(nas, { name: chosenName, language: lang, offsetMs, for: f as SubtitleFor }, picked!, (sent, total) => setProgress({ sent, total }));
       }
+      onBusy?.(false);
       onDone(stored);
     } catch (err) {
       setError(subtitleErrorMessage(err));
       setProgress(null);
-      setBusy(false);
+      setWorking(false);
     }
   };
 
@@ -246,7 +256,7 @@ export function SubtitleUpload({ nas, target, manifestOf, editing, discIdOfKey =
         </label>
         <label className="owner-field subtitle-offset">
           Default offset (s)
-          <input type="number" step="0.1" min="-600" max="600" inputMode="decimal" data-testid="subtitle-upload-offset" value={offset} disabled={busy} onChange={(e) => setOffset(e.target.value)} />
+          <input type="number" step="0.1" min="-600" max="600" inputMode="decimal" data-testid="subtitle-upload-offset" value={offset} disabled={busy} ref={offsetField} onChange={(e) => setOffset(e.target.value)} />
         </label>
       </div>
       <label className="owner-field">

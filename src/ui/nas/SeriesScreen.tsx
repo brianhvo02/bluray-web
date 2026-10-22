@@ -6,7 +6,7 @@ import type { OwnerFiling } from './FileDifferently';
 import { DiscList, type OpenDisc } from './SeasonScreen';
 import { SubtitleList, useDiscKeys, useManifests, useStoredSubtitles } from './SubtitleList';
 import { SubtitleUpload } from './SubtitleUpload';
-import { subtitleTarget } from './subtitle-model';
+import { ownerListing, subtitleTarget } from './subtitle-model';
 import { displayName, seasonCounts, seasonLabel, secondaryName, titleMeta } from './title-model';
 
 interface SeriesScreenProps {
@@ -32,11 +32,12 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
   const isSeries = title.kind === 'series';
   // A movie's subtitles, for owners: the upload sheet and the list (attached to a disc and chapter).
   const movieOwner = title.kind === 'movie' ? owner : undefined;
-  const { subs, reload } = useStoredSubtitles(nas, title.id, movieOwner !== undefined);
+  const { subs, error: subsError, reload } = useStoredSubtitles(nas, title.id, movieOwner !== undefined);
   const target = useMemo(() => subtitleTarget(title.id, detail.seasons, { episodes: false, extras: detail.extras }), [title.id, detail.seasons, detail.extras]);
   const manifestOf = useManifests(movieOwner?.nas ?? null);
   const discKeys = useDiscKeys(manifestOf, target, movieOwner !== undefined && (subs ?? []).length > 0);
   const [adding, setAdding] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const uploadPanel = useId();
 
   return (
@@ -57,7 +58,7 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
           {native && native !== romaji && <span className="title-muted" lang="ja">{native}</span>}
           <span className="series-meta">{titleMeta(detail)}</span>
           {movieOwner && (
-            <button type="button" className="subtitle-add" data-testid="subtitle-add" aria-expanded={adding} aria-controls={uploadPanel} onClick={() => setAdding((a) => !a)}>
+            <button type="button" className="subtitle-add" data-testid="subtitle-add" aria-expanded={adding} aria-controls={uploadPanel} disabled={uploading} onClick={() => setAdding((a) => !a)}>
               ＋ Subtitles
             </button>
           )}
@@ -74,6 +75,7 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
               reload();
             }}
             onCancel={() => setAdding(false)}
+            onBusy={setUploading}
           />
         </div>
       )}
@@ -99,7 +101,9 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
       ) : (
         detail.seasons.map((s) => <DiscList key={s.id} season={s} discs={s.discs} onOpen={onOpen} owner={owner} />)
       )}
-      {movieOwner && subs && <SubtitleList nas={movieOwner.nas} target={target} subs={subs} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />}
+      {movieOwner && (subs || subsError) && (
+        <SubtitleList nas={movieOwner.nas} target={target} listing={subs ? ownerListing(subs, null) : null} error={subsError} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />
+      )}
       {detail.related.length > 0 && (
         <ul className="title-list">
           {detail.related.map((r) => (

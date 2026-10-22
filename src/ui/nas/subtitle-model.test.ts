@@ -5,7 +5,7 @@ import { CodingType } from '../../engine/bdmv/stream-types';
 import { buildMpls } from '../../../tests/helpers/bdmv-builders';
 import { NasHttpError } from './nas-client';
 import {
-  FONTS_LIMIT_BYTES, LANGUAGES, SUBTITLE_LIMIT_BYTES, forPlaylist, forSeason, formatOffset, languageTag, parseOffset, playlistChoices, sameLanguage, startFor,
+  FONTS_LIMIT_BYTES, LANGUAGES, editPatch, offsetFrom, ownerListing, SUBTITLE_LIMIT_BYTES, forPlaylist, forSeason, formatOffset, languageTag, parseOffset, playlistChoices, sameLanguage, startFor,
   subtitleErrorMessage, subtitleTarget, tagsByEpisode, uploadSubtitle, validateUpload, type SubtitleWriter,
 } from './subtitle-model';
 
@@ -258,5 +258,48 @@ describe('subtitleTarget', () => {
     const target = subtitleTarget('t', [movie], { episodes: false, extras: [{ number: null, label: 'Extras', copies: [copy('x', 'Movies/Harbor Extras')] }] });
     expect(target.season).toBeNull();
     expect(target.discs).toEqual([{ discId: 'm1', label: 'Harbor' }, { discId: 'x', label: 'Extras · Harbor Extras' }]);
+  });
+});
+
+describe('ownerListing', () => {
+  const off = (s: StoredSubtitle): StoredSubtitle => ({ ...s, attached: false });
+  const a = sub('a', 'en', ep(1, 's1'));
+  const b = off(sub('b', 'en', ep(1, 's-gone')));
+  const c = sub('c', 'en', ch(0, '00001', 'd.1'));
+  const d = off(sub('d', 'en', ch(0, '00001', 'd.gone')));
+  const e = sub('e', 'en', ep(2, 's2'));
+  it("lists a season's attached uploads, and every upload of the title that isn't attached", () => {
+    expect(ownerListing([a, b, c, d, e], { id: 's1', discKeys: new Set(['d.1']) })).toEqual({ attached: [a, c], notAttached: [b, d] });
+    expect(ownerListing([a, b, c, d, e], { id: 's2', discKeys: new Set() })).toEqual({ attached: [e], notAttached: [b, d] });
+  });
+  it("lists everything on a movie's screen, the unattached apart", () => {
+    expect(ownerListing([c, d], null)).toEqual({ attached: [c], notAttached: [d] });
+  });
+});
+
+describe('offsetFrom', () => {
+  it("refuses what the number field couldn't read, however it looks", () => {
+    expect(offsetFrom('', true)).toBeNull();
+    expect(offsetFrom('', false)).toBe(0);
+    expect(offsetFrom('0.4', false)).toBe(400);
+  });
+});
+
+describe('editPatch', () => {
+  const fields = { name: 'n', language: 'en', offsetMs: 0 };
+  const place = { kind: 'chapter', discId: 'x', playlistId: '00001', chapter: 0, titleId: 't' } as const;
+  it('sends no place when it was not touched', () => {
+    expect(editPatch(fields, place, { touched: false, attached: true })).toEqual(fields);
+    expect(editPatch(fields, 'Choose a disc.', { touched: false, attached: true })).toEqual(fields);
+  });
+  it("renames an upload that isn't attached and whose place the form can't name", () => {
+    expect(editPatch(fields, 'Choose a disc.', { touched: false, attached: false })).toEqual(fields);
+  });
+  it("re-attaches an upload that isn't attached to the place the form names", () => {
+    expect(editPatch(fields, place, { touched: false, attached: false })).toEqual({ ...fields, for: place });
+  });
+  it('sends a changed place, which must be complete', () => {
+    expect(editPatch(fields, place, { touched: true, attached: true })).toEqual({ ...fields, for: place });
+    expect(editPatch(fields, 'Choose a chapter.', { touched: true, attached: true })).toEqual({ error: 'Choose a chapter.' });
   });
 });

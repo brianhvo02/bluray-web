@@ -133,11 +133,15 @@ export interface PlaylistProgress { readonly timeUs: number; readonly durationUs
 /** What a stored subtitle is for: one episode's playlist, or the start of a chapter of a disc's playlist. */
 export type SubtitleAttachment =
   | { readonly kind: 'episode'; readonly discKey: string; readonly playlistId: string; readonly titleId: string; readonly seasonId: string; readonly episode: number }
-  | { readonly kind: 'chapter'; readonly discKey: string; readonly playlistId: string; readonly chapter: number };
-/** What a subtitle is for when it is registered or moved: an episode of a title's season, or a chapter of a disc's playlist. */
+  /** `titleId`: the title it was uploaded from, so its owners still find it there when the disc is gone (listing only). */
+  | { readonly kind: 'chapter'; readonly discKey: string; readonly playlistId: string; readonly chapter: number; readonly titleId?: string };
+/**
+ * What a subtitle is for when it is registered or moved: an episode of a title's season, or a chapter of a disc's
+ * playlist (with the title it is uploaded from, which the app always sends).
+ */
 export type SubtitleFor =
   | { readonly kind: 'episode'; readonly titleId: string; readonly seasonId: string; readonly episode: number }
-  | { readonly kind: 'chapter'; readonly discId: string; readonly playlistId: string; readonly chapter: number };
+  | { readonly kind: 'chapter'; readonly discId: string; readonly playlistId: string; readonly chapter: number; readonly titleId?: string };
 /** The body of `POST /api/subtitles`. */
 export interface SubtitleCreate { readonly name: string; readonly language: string; readonly offsetMs?: number; readonly for: SubtitleFor }
 /** The body of `PATCH /api/subtitles/<id>`: any of these. */

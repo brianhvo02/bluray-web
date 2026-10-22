@@ -5,7 +5,7 @@ import type { NasClient } from './nas-client';
 import { episodeProgress } from './resume-model';
 import { SubtitleList, useDiscKeys, useManifests, useStoredSubtitles } from './SubtitleList';
 import { SubtitleUpload } from './SubtitleUpload';
-import { forSeason, languageTag, subtitleTarget, tagsByEpisode } from './subtitle-model';
+import { languageTag, ownerListing, subtitleTarget, tagsByEpisode } from './subtitle-model';
 import type { PreflightDisc } from './Preflight';
 import { copiesLabel, discHeading, episodeMeta } from './title-model';
 
@@ -98,12 +98,14 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
     };
   }, [nas, titleId, episodes]);
   // Stored subtitles: language tags on the episodes for everyone; the upload sheet and the list for owners.
-  const { subs, reload } = useStoredSubtitles(nas, titleId, episodes !== null || owner !== undefined);
+  const { subs, error: subsError, reload } = useStoredSubtitles(nas, titleId, episodes !== null || owner !== undefined);
   const tags = useMemo(() => tagsByEpisode((subs ?? []).filter((s) => s.attached !== false), season.id), [subs, season.id]);
   const target = useMemo(() => subtitleTarget(titleId, [season], { episodes: true }), [titleId, season]);
   const manifestOf = useManifests(owner?.nas ?? null);
   const discKeys = useDiscKeys(manifestOf, target, owner !== undefined && (subs ?? []).some((s) => s.attachment.kind === 'chapter'));
+  const listing = useMemo(() => (subs ? ownerListing(subs, { id: season.id, discKeys: new Set(discKeys.keys.keys()) }) : null), [subs, season.id, discKeys]);
   const [adding, setAdding] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const uploadPanel = useId();
   const [tab, setTab] = useState<Tab>(episodes ? 'episodes' : 'discs');
   const ids = useId();
@@ -139,7 +141,7 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
           </h2>
         </div>
         {owner && (
-          <button type="button" className="subtitle-add" data-testid="subtitle-add" aria-expanded={adding} aria-controls={uploadPanel} onClick={() => setAdding((a) => !a)}>
+          <button type="button" className="subtitle-add" data-testid="subtitle-add" aria-expanded={adding} aria-controls={uploadPanel} disabled={uploading} onClick={() => setAdding((a) => !a)}>
             ＋ Subtitles
           </button>
         )}
@@ -155,6 +157,7 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
               reload();
             }}
             onCancel={() => setAdding(false)}
+            onBusy={setUploading}
           />
         </div>
       )}
@@ -228,7 +231,9 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, onBack
           </>
         )}
       </div>
-      {owner && subs && <SubtitleList nas={owner.nas} target={target} subs={forSeason(subs, season.id, new Set(discKeys.keys()))} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />}
+      {owner && (subs || subsError) && (
+        <SubtitleList nas={owner.nas} target={target} listing={listing} error={subsError} manifestOf={manifestOf} discKeys={discKeys} onChanged={reload} />
+      )}
     </section>
   );
 }

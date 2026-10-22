@@ -30,7 +30,7 @@ const isIndex = (v: unknown): v is number => typeof v === 'number' && Number.isI
 
 type For =
   | { kind: 'episode'; titleId: string; seasonId: string; episode: number }
-  | { kind: 'chapter'; discId: string; playlistId: string; chapter: number };
+  | { kind: 'chapter'; discId: string; playlistId: string; chapter: number; titleId?: string };
 
 function parseFor(v: unknown): For | null {
   if (!isObject(v)) return null;
@@ -38,8 +38,9 @@ function parseFor(v: unknown): For | null {
   if (v.kind === 'episode' && keys === 'episode,kind,seasonId,titleId' && isString(v.titleId) && isString(v.seasonId) && isIndex(v.episode)) {
     return { kind: 'episode', titleId: v.titleId, seasonId: v.seasonId, episode: v.episode };
   }
-  if (v.kind === 'chapter' && keys === 'chapter,discId,kind,playlistId' && isString(v.discId) && isString(v.playlistId) && isIndex(v.chapter)) {
-    return { kind: 'chapter', discId: v.discId, playlistId: v.playlistId, chapter: v.chapter };
+  if (v.kind === 'chapter' && (keys === 'chapter,discId,kind,playlistId' || (keys === 'chapter,discId,kind,playlistId,titleId' && isString(v.titleId)))
+    && isString(v.discId) && isString(v.playlistId) && isIndex(v.chapter)) {
+    return { kind: 'chapter', discId: v.discId, playlistId: v.playlistId, chapter: v.chapter, ...(typeof v.titleId === 'string' ? { titleId: v.titleId } : {}) };
   }
   return null;
 }
@@ -75,7 +76,9 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
       const ev = evidence().find((e) => e.discId === f.discId);
       const playlist = ev?.playlists.find((p) => p.id === f.playlistId);
       const discKey = keyOf(f.discId);
-      return playlist && discKey !== null && f.chapter < playlist.chapters ? { kind: 'chapter', discKey, playlistId: f.playlistId, chapter: f.chapter } : null;
+      return playlist && discKey !== null && f.chapter < playlist.chapters
+        ? { kind: 'chapter', discKey, playlistId: f.playlistId, chapter: f.chapter, ...(f.titleId !== undefined ? { titleId: f.titleId } : {}) }
+        : null;
     }
     const ep = titles?.service.catalogue().detail(f.titleId)?.seasons.find((s) => s.id === f.seasonId)?.episodes?.find((e) => e.number === f.episode);
     const discKey = ep ? keyOf(ep.discId) : null;
@@ -103,7 +106,7 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
     const keys = titleId === null ? new Set<string>() : titleKeys(titleId);
     const found = store.list()
       .filter((s) => (discKey !== null && s.attachment.discKey === discKey)
-        || (titleId !== null && (s.attachment.kind === 'episode' ? s.attachment.titleId === titleId : keys.has(s.attachment.discKey))))
+        || (titleId !== null && (s.attachment.titleId === titleId || (s.attachment.kind === 'chapter' && keys.has(s.attachment.discKey)))))
       .map(withAttached)
       .filter((s) => owner || s.attached !== false)
       .sort((a, b) => a.uploadedAt - b.uploadedAt || a.id.localeCompare(b.id));

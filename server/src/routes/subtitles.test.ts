@@ -134,6 +134,27 @@ describe('subtitle routes', () => {
     expect((await call('GET', `/api/subtitles/${ep.id}/fonts/Missing.ttf`, owner)).status).toBe(404);
   });
 
+  it('keeps the title a chapter upload came from, so its owners still list it by title once its disc is gone', async () => {
+    const owner = await tokenFor('Hana', true);
+    const guest = await tokenFor('Noor', false);
+    const DISC3 = 'fedcba9876543210';
+    discs.push({ discId: DISC3, fingerprint: null, playlists: [playlist('00900')] } as unknown as DiscEvidence);
+    const kept = await createWithFile(owner, { for: { kind: 'chapter', discId: DISC3, playlistId: '00900', chapter: 0, titleId: 'star' } });
+    expect(kept.attachment).toEqual({ kind: 'chapter', discKey: `d.${DISC3}`, playlistId: '00900', chapter: 0, titleId: 'star' });
+    const plain = await createWithFile(owner, { for: { kind: 'chapter', discId: DISC3, playlistId: '00900', chapter: 0 } });
+    const byTitle = async (token: string): Promise<StoredSubtitle[]> => (await (await call('GET', '/api/subtitles?titleId=star', token)).json()) as StoredSubtitle[];
+    // a disc outside the title: only the upload that names the title is listed by it
+    expect((await byTitle(owner)).map((s) => s.id)).toEqual([kept.id]);
+    discs.pop();
+    expect(await byTitle(owner)).toEqual([expect.objectContaining({ id: kept.id, attached: false })]);
+    expect(await byTitle(guest)).toEqual([]);
+    expect(plain.attachment).not.toHaveProperty('titleId');
+    // a move keeps the title it is sent with
+    const moved = await call('PATCH', `/api/subtitles/${kept.id}`, owner, { for: { ...chapterFor, titleId: 'star' } });
+    expect(await moved.json()).toMatchObject({ attached: true, attachment: { kind: 'chapter', discKey: KEY2, playlistId: '00800', chapter: 1, titleId: 'star' } });
+    expect((await call('POST', '/api/subtitles', owner, meta({ for: { ...chapterFor, titleId: '' } }))).status).toBe(400);
+  });
+
   it('does not list an upload that has no file yet', async () => {
     const owner = await tokenFor('Hana', true);
     await createSub(owner);

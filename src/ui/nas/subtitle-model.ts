@@ -1,4 +1,4 @@
-import type { DiscManifest, DiscSlot, EpisodeRef, SeasonDetail, StoredSubtitle, SubtitleCreate } from '../../engine/disc/nas-api';
+import type { DiscManifest, DiscSlot, EpisodeRef, SeasonDetail, StoredSubtitle, SubtitleCreate, SubtitleFor, SubtitlePatch } from '../../engine/disc/nas-api';
 import { Timeline, type Chapter } from '../../engine/nav/timeline';
 import { mainPlaylistId, playlistOf } from './library-model';
 import { NasHttpError, type NasClient } from './nas-client';
@@ -124,6 +124,42 @@ export function playlistChoices(manifest: DiscManifest, keep?: string): Playlist
 /** The subtitles a season's screen lists: its episodes', and those of a chapter of one of its discs (by disc key). */
 export function forSeason(subs: readonly StoredSubtitle[], seasonId: string, discKeys: ReadonlySet<string>): StoredSubtitle[] {
   return subs.filter((s) => (s.attachment.kind === 'episode' ? s.attachment.seasonId === seasonId : discKeys.has(s.attachment.discKey)));
+}
+
+/**
+ * The owner's list on a screen of a title, from the title's uploads: the attached ones of this season (`season`; all of
+ * them on a movie's screen, `season` null), and every upload of the title that is not attached, on each of its screens,
+ * so one whose disc, playlist or season went can always be re-attached or deleted.
+ */
+export function ownerListing(
+  subs: readonly StoredSubtitle[],
+  season: { readonly id: string; readonly discKeys: ReadonlySet<string> } | null,
+): { readonly attached: StoredSubtitle[]; readonly notAttached: StoredSubtitle[] } {
+  const live = subs.filter((s) => s.attached !== false);
+  return {
+    attached: season ? forSeason(live, season.id, season.discKeys) : live,
+    notAttached: subs.filter((s) => s.attached === false),
+  };
+}
+
+/** The default offset of the form's number field: null when the browser couldn't read it as a number (`badInput`). */
+export function offsetFrom(text: string, badInput: boolean): number | null {
+  return badInput ? null : parseOffset(text);
+}
+
+/**
+ * An edit's PATCH body. A `for` is sent when the owner changed what the upload is for (and must then be complete), or
+ * when the upload is not attached and the form names a complete place (re-attaching it); never otherwise, so a rename
+ * works while the attachment can't be shown. `f` is the form's place, or why it is incomplete.
+ */
+export function editPatch(
+  fields: { readonly name: string; readonly language: string; readonly offsetMs: number },
+  f: SubtitleFor | string,
+  opts: { readonly touched: boolean; readonly attached: boolean },
+): SubtitlePatch | { readonly error: string } {
+  if (opts.touched) return typeof f === 'string' ? { error: f } : { ...fields, for: f };
+  if (!opts.attached && typeof f !== 'string') return { ...fields, for: f };
+  return { ...fields };
 }
 
 /** What an upload sends: the client's subtitle writes. */
