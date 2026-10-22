@@ -54,7 +54,7 @@ export function levelRows(
         return { ...base, note: 'plays now' };
       case 'silent':
       case 'ask':
-        return { ...base, note: `about ${Math.ceil(plan.waitS / 60)} minutes` };
+        return { ...base, note: `about ${Math.ceil(plan.waitS / 60)} ${Math.ceil(plan.waitS / 60) === 1 ? 'minute' : 'minutes'}` };
       case 'too-big':
         return { ...base, note: 'plays with pauses' };
     }

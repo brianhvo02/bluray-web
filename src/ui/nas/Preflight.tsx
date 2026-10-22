@@ -258,7 +258,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
   const levelsKnown = auto !== null || (manifest !== null && original === null);
   const selected: LevelInfo = useMemo(() => {
     const usable = (id: LevelId | null): LevelInfo | undefined => levelList.find((l) => l.level === id && l.available);
-    return usable(picked) ?? usable(auto) ?? levelList.find((l) => l.level === (levelState.auto ?? 'original')) ?? ORIGINAL_ONLY[0]!;
+    return usable(picked) ?? usable(auto) ?? usable(levelState.auto) ?? levelList.find((l) => l.available) ?? levelList.find((l) => l.level === (levelState.auto ?? 'original')) ?? ORIGINAL_ONLY[0]!;
   }, [levelList, picked, auto, levelState.auto]);
   /**
    * The length and bytes of what plays at the selected level against this connection; null until both are known (or
@@ -460,7 +460,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
                 <legend>Quality</legend>
                 {rows.map((r) => (
                   <label key={r.level} className="level-option">
-                    <input type="radio" name="level" data-testid="level-option" data-level={r.level} value={r.level} checked={selected.level === r.level} disabled={!r.available} onChange={() => setPicked(r.level)} />
+                    <input type="radio" name="level" data-testid="level-option" data-level={r.level} value={r.level} checked={levelsKnown && selected.available && selected.level === r.level} disabled={!r.available} onChange={() => setPicked(r.level)} />
                     <span>{r.label}</span> · <span className="level-note">{r.note}</span>
                   </label>
                 ))}

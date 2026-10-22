@@ -30,6 +30,15 @@ describe('level model', () => {
     expect(levelRateMbps(film[1]!, 40)).toBe(10);
   });
 
+  it('a wait of one minute or less says "about 1 minute", longer ones the plural', () => {
+    const noteAt = (durationS: number, connectionMbps: number): string => {
+      const originalBytes = ((10 * 1e6) / 8) * durationS;
+      return levelRows([L('original', 0, true)], { durationS, originalBytes, connectionMbps, quotaBytes: 1e12 })[0]!.note;
+    };
+    expect(noteAt(600, 10)).toBe('about 1 minute');
+    expect(noteAt(7200, 10)).toMatch(/^about ([2-9]|\d\d+) minutes$/);
+  });
+
   it('rows say plays now or the wait, and why a level is unavailable', () => {
     const durationS = 7200;
     const o = { durationS, originalBytes: (40 * 1e6 / 8) * durationS, connectionMbps: 17, quotaBytes: 1e12 };
@@ -37,6 +46,7 @@ describe('level model', () => {
     const plan = bufferPlan({ durationS, playlistBytes: o.originalBytes, connectionMbps: 17, quotaBytes: 1e12 });
     if (plan.kind !== 'silent' && plan.kind !== 'ask') throw new Error('expected a wait');
     expect(rows[0]).toEqual({ level: 'original', label: 'original', available: true, note: `about ${Math.ceil(plan.waitS / 60)} minutes` });
+    expect(Math.ceil(plan.waitS / 60)).toBeGreaterThan(1);
     expect(rows[1]!.note).toBe('plays now');
     expect(rows[2]).toMatchObject({ available: false, note: "this device can't decode it" });
   });

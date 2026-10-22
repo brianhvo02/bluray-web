@@ -290,7 +290,7 @@ test('buffers first on a slow connection: the pre-flight asks, and Wait fills th
   await expect(preselected).toHaveCount(1);
   expect(await preselected.getAttribute('data-level')).not.toBe('original');
   // ?bufferask=1 makes every wait an ask, so the notes here are waits, not 'plays now'
-  await expect(page.getByTestId('level-list')).toContainText('about 1 minutes');
+  await expect(page.getByTestId('level-list')).toContainText('about 1 minute');
   await page.getByTestId('nas-wait').click();
   // disc1 opens to its playlists once the cache holds the wait's bytes
   await expect(page.getByTestId('playlist-00000')).toBeVisible({ timeout: 15_000 });
@@ -352,6 +352,7 @@ test('an MPEG-2 disc plays with a picture at a re-encoded level', async ({ page,
   const original = page.locator('[data-testid="level-option"][data-level="original"]');
   await expect(original).toBeDisabled();
   await expect(original.locator('xpath=ancestor::label[1]')).toContainText("can't play in this browser");
+  await expect(page.getByTestId('nas-play')).toBeEnabled({ timeout: 20_000 });
   await expect(page.locator('[data-testid="level-option"]:checked')).toHaveCount(1);
   await expect(page.locator('[data-testid="level-option"]:checked')).not.toHaveAttribute('data-level', 'original');
   await page.getByTestId('nas-play').click();
