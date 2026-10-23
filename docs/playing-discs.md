@@ -91,4 +91,4 @@ A disc remembers where you stopped, per playlist. The next time you open it:
 
 The place is saved every 10 seconds while playing and when you pause, seek or close. It includes the audio and subtitle choice, volume and shader set. A folder you open from your own drive keeps its place on that device. A NAS keeps places per person (see [NAS](nas.md)).
 
-Short clips (under five minutes) and menu loops do not make a place, unless it is the disc's main title.
+A playlist makes a place when you launched it yourself (an episode or a link), when it is the disc's main title, or when it lasts five minutes or more. Menu loops never do.

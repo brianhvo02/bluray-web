@@ -11,6 +11,8 @@ The player opens a decrypted Blu-ray folder in your browser. Nothing is uploaded
 | Chrome on Android | Yes |
 | Firefox on Android | No |
 
+Other Chromium browsers such as Edge may work but are not tested.
+
 The player needs WebCodecs, AudioWorklet and a few other modern features. A browser without them shows "This browser is missing: …" on the first screen and the Open button stays off.
 
 ## Open a disc
@@ -37,7 +39,7 @@ Safari and Firefox do not keep folder permissions, so you pick the folder each t
 
 The player installs as an app (a "progressive web app"):
 
-- Chrome on desktop and Android: use the install icon in the address bar, or **Install app** in the browser menu.
+- Chrome on desktop and Android: use the install option in the browser's menu or address bar.
 - Safari on iPhone and iPad: Share, then **Add to Home Screen**. Fullscreen on iPhone also needs this.
 - Safari on Mac: File, then **Add to Dock**.
 

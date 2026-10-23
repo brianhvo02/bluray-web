@@ -9,8 +9,8 @@ This page is for people who use a NAS. Someone else usually runs it and gives yo
 You need a pairing code or an invite link from the NAS owner.
 
 - **Code:** on the first screen, type the code (it looks like `XXXX-XXXX-XXXX`), give the device a name, and choose **Pair**. A code lasts 10 minutes. If it says "That code didn't work. Codes last 10 minutes; ask for a new one.", ask for another.
-- **Link or QR:** open the link, or scan the QR code with your phone's camera. The player asks you to confirm the address ("This link pairs with: … Only continue if you trust them."), then pairs. An invite lasts 3 days.
-- If your browser asks about **local network access**, allow it. Pairing waits until you answer. On a home network that is behind Tailscale, the device must be on the tailnet.
+- **Link or QR:** open the link, or scan the QR code with your phone's camera. The player opens with the code already filled in. Choose **Pair** to finish. If the link names a server or pairing service other than the player's own, the player first asks you to confirm it ("This link pairs with: … Only continue if you trust them."). An invite lasts 3 days.
+- If your browser asks about **local network access**, allow it. Pairing waits until you answer. If the NAS is reached over Tailscale at home, being on the tailnet gives the direct route. Without it the player falls back to WebRTC.
 
 When paired, the first screen shows who you are paired as, with **Open from NAS** and **Forget this NAS**. A device can be paired with one NAS at a time: pairing again replaces it.
 
@@ -62,7 +62,7 @@ Places are saved per person on the NAS, so each paired person has their own. **C
 
 ## Music
 
-The **Music** shelf lists artists. An artist has releases, and a release opens like any other disc. The letter index works here too.
+The **Music** shelf lists artists. An artist has releases, and a release opens like any other disc. A release with several discs opens its title page, listing them, first. The letter index works here too.
 
 ## Subtitles stored on the NAS
 

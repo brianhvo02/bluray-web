@@ -11,10 +11,10 @@ The browser lacks a feature the player needs (WebCodecs, AudioWorklet, Offscreen
 You picked a folder without all of the disc. Choose the whole disc folder, including `BDMV/STREAM` and `BDMV/CLIPINF`.
 
 **"Drop the disc folder itself (the folder that contains BDMV)."**
-You dropped a file, or a folder without `BDMV` inside it. Drop the disc folder, or the `BDMV` folder.
+You dropped files and no folder. Drop the disc folder, or the `BDMV` folder. (A folder without `BDMV` in it opens but then reports the disc's missing files.)
 
 **"Waiting for the files…" on iPhone or iPad**
-Safari copies the whole folder before the player can read it. A full disc from a USB drive can take an hour or more. Pick a smaller folder, or use a [NAS](nas.md).
+Safari copies the whole folder before the player can read it. A full disc from a USB drive can take an hour or more. The player needs the whole disc folder, so copy it to faster storage first, or use a [NAS](nas.md).
 
 **"Permission to read … was not granted."**
 For a disc in Recent discs, the browser asked for permission and it was refused. Choose the folder again.
@@ -34,7 +34,7 @@ Browsers start audio only after you click or tap. Click Play or the picture, or 
 The player plays LPCM, AC-3, E-AC-3, the AC-3 core of TrueHD and the DTS core of DTS and DTS-HD. Pick another track.
 
 **"Playback paused while the app was in the background."**
-The browser paused the player when you left it. Come back and press Play.
+The player pauses itself when the device suspends or interrupts its audio, for example in the background or during a call. Come back and press Play.
 
 **Frames are dropped with a shader on**
 The Shaders menu shows a warning. Try a Fast mode, or turn shaders off.
@@ -82,7 +82,7 @@ The owner removed this device from the NAS, or its pairing no longer works. Pair
 The code expired, was already used, or was mistyped. Ask for a new one. After too many tries, "Too many tries. Wait a minute and try again."
 
 **"This NAS isn't reachable from here yet."** or **"Couldn't reach the NAS. …"**
-The NAS may be off, or this device is not on the right network. If your browser asked about local network access, allow it (in the browser's site settings if you declined). If the NAS is at home behind Tailscale, make sure this device is on the tailnet.
+The NAS may be off, or this device is not on the right network. If your browser asked about local network access, allow it (in the browser's site settings if you declined). If you reach the NAS over Tailscale at home, being on the tailnet gives the direct route. Away from home the player tries WebRTC instead.
 
 **"Connection to the NAS lost."**
 Reopen the disc. Playback resumes where it stopped if you choose Resume.
@@ -91,13 +91,13 @@ Reopen the disc. Playback resumes where it stopped if you choose Resume.
 Files on the NAS changed while you watched. Open the disc again.
 
 **"Waiting for the NAS drive…"**
-The NAS is slow to answer the first read of the disc, for example while a drive starts up. Give it a moment.
+A read from the NAS has taken about 3 seconds, at the start or during playback, for example while a sleeping drive spins up. Give it a moment.
 
 **"The NAS is busy re-encoding for others. This will play at original quality." / "The NAS is busy. Try again in a few minutes."**
 The NAS's graphics card has no room for another re-encode. Play at Original, or try later.
 
 **"Couldn't buffer on this device, so it will play with pauses."**
-The device has no room to buffer ahead. Free some storage, or pick a lower quality level.
+Buffering ahead stopped early: the device's storage is unavailable, a read or write failed, or there is no on-device cache. The disc plays with pauses. A lower quality level needs less data. (If the device only lacks room, the pre-flight says so in other words and offers **Play now with pauses**.)
 
 **"The library is being prepared"**
 The NAS is still matching its discs to titles. Check again later, or use **Browse by folder instead**.
