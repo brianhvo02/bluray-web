@@ -95,7 +95,7 @@ describe('names', () => {
   });
 });
 
-const slot = (number: number, ...discIds: string[]): DiscSlot => ({ number, label: `Disc ${number}`, copies: discIds.map((discId) => ({ discId, root: 'drv1', folder: `Anime/${discId}`, displayName: null })) });
+const slot = (number: number, ...discIds: string[]): DiscSlot => ({ number, label: `Disc ${number}`, copies: discIds.map((discId) => ({ discId, root: 'media1', folder: `Anime/${discId}`, displayName: null })) });
 const SEASON: SeasonDetail = {
   id: 'a:1#s1',
   label: 'Starfall Wanderer',

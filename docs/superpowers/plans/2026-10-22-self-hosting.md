@@ -92,7 +92,7 @@
 - Produces: `.env.example` keys exactly: `LIBRARY_ROOTS`, `LIBRARY_MOUNT` (the host folder bound read-only at `/library`), `PUBLIC_BASE`, `APP_URL`, `RENDEZVOUS_URL`, `RTC_LAN_ADDRESS`, `RTC_PORT`, `TRUSTED_PROXY`, `TZ`, `NIGHTLY_SCAN_AT`, `TITLE_LIBRARY`, `TMDB_API_KEY`, `DISCOGS_TOKEN`, `LOOKUP_CONTACT`, `LEVELS_BACKEND`, `BLURAY_IMAGE` (default `ghcr.io/brianhvo02/bluray-server:latest`), each with a one-line comment; the compose file's image is `${BLURAY_IMAGE:-ghcr.io/brianhvo02/bluray-server:latest}`.
 
 - [ ] **Step 1:** Rewrite the compose file and write `.env.example`; keep `create_host_path: false` and read-only on the library mount, the data volume, the UDP port mapping `${RTC_PORT:-47998}`, and `env_file: .env`.
-- [ ] **Step 2: Verify** `docker compose -f server/deploy/compose.yaml --env-file server/deploy/.env.example config >/dev/null` exits 0, and `git grep -n -e tailnet-8e55 -e 192.168.1.98 -e drv0 server/deploy` prints nothing.
+- [ ] **Step 2: Verify** `docker compose -f server/deploy/compose.yaml --env-file server/deploy/.env.example config >/dev/null` exits 0, and a `git grep` of `server/deploy` for the owner's Tailscale host, LAN address and drive names prints nothing.
 - [ ] **Step 3:** CI job `publish-server-image` in `ci.yml`: `needs: [check, e2e, ass]`, `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`, `permissions: { contents: read, packages: write }`, `npm ci`, `npm run server:build`, `docker/login-action` with `GITHUB_TOKEN`, `docker/build-push-action` for `linux/amd64` with tags `ghcr.io/brianhvo02/bluray-server:latest` and `:${{ github.sha }}` short (first 7 characters), context `server`, file `server/Dockerfile`. Validate the YAML parses.
 - [ ] **Step 4: Commit** `feat(deploy): generic compose, .env.example and the published server image`.
 
@@ -113,10 +113,10 @@
 ### Task 6: The owner's values leave the current files
 
 **Files:**
-- Modify: every current file that names the owner's Tailscale host (`tailnet-8e55`), LAN address (`192.168.1.98`), drive layout (`drv0`…`drv8`, `BDMVs`, `Rips` as a root), Worker address (`bluray-rendezvous.brianhvo02.workers.dev`) or ssh host (`mediaserver` as a host name): including `src/ui/nas/nas-store.ts` (comment), `server/src/config.test.ts`, `tools/devices/live-check.ts`, `tools/bdj-library/sync.ts` (host from `--host` / `BDJ_LIBRARY_HOST`, no default), `CLAUDE.md`, `docs/known-issues.md`, and the specs and plans under `docs/superpowers/`.
+- Modify: every current file that names the owner's Tailscale host, LAN address, drive layout (drive names, `BDMVs` and `Rips` as a root), Worker address or ssh host name: including `src/ui/nas/nas-store.ts` (comment), `server/src/config.test.ts`, `tools/devices/live-check.ts`, `tools/bdj-library/sync.ts` (host from `--host` / `BDJ_LIBRARY_HOST`, no default), `CLAUDE.md`, `docs/known-issues.md`, and the specs and plans under `docs/superpowers/`.
 
 - [ ] **Step 1:** Replace each with a setting or a made-up example (`nas.example.com`, `192.168.1.20`, `media1`, `rendezvous.example.workers.dev`, `your-nas`). Where a doc records history ("deployed on the owner's NAS"), keep the fact and drop the address.
-- [ ] **Step 2: Verify** `git grep -n -i -e tailnet-8e55 -e 192.168.1.98 -e brianhvo02.workers.dev -e 'ssh mediaserver' -e '/mnt/drv'` prints nothing; `npm test`, `npm run typecheck` pass.
+- [ ] **Step 2: Verify** a `git grep` for the owner's Tailscale host, LAN address, Worker address, ssh host and `/mnt` drive paths prints nothing; `npm test`, `npm run typecheck` pass.
 - [ ] **Step 3: Commit** `chore: the owner's addresses and drive layout leave the repo`.
 
 ### Task 7: The guide

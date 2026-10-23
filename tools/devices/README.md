@@ -158,7 +158,7 @@ This check runs on real devices against the live NAS, on a **preview** origin of
    - Sora's second browser shows 1, never Mika's 2.
 
    `--store-disc place` (the default) places the disc on the NAS for the run:
-   - It copies the fixture (668 KB) over ssh into a new folder of its own, `<root>/zz-live-check-<run id>/disc-bdj-store`. `--place-root` picks the root and defaults to `drv8`, the one with free space. `mkdir` without `-p`, so the folder is always new.
+   - It copies the fixture (668 KB) over ssh into a new folder of its own, `<root>/zz-live-check-<run id>/disc-bdj-store`. `--place-root` names the library root (a `LIBRARY_ROOTS` name) to place it under and has no default; pick one with free space. `mkdir` without `-p`, so the folder is always new.
    - It rescans through the owner route (`POST admin/rescan`) and waits until the library lists the disc.
    - The clean-up deletes only that folder. It checks the path against the run id and the roots, and that the folder holds nothing but the disc. It then confirms the folder is gone and rescans. It waits until the disc is unlisted and the title matcher's filed and unsorted counts are back to where they were.
 
@@ -183,7 +183,7 @@ npx tsx tools/devices/live-check.ts --origin https://<branch>.bluray-web.pages.d
   --mika-phone "sim:iPhone 17" --mika-tablet "sim:iPad Air 11-inch (M4)" --rehearse-store <library-check id> --library
 ```
 
-Sora's browsers default to `chrome-profile` (installed Chrome with a fresh temporary profile) and `chrome` (a second Chrome with its own context). Use `--sora-a`/`--sora-b` to change them, or `none` to leave one out. Real devices go through safaridriver on `--wd-ports` (default `4211,4212`; ports above 4200 only, never 4191/4192). Simulators go through Appium. `--out` must lie outside the repository, because the screenshots show real discs. Results (`live-check.json`) name devices by role, and pairing codes and tokens are never printed or written. The NAS's API base comes from `--nas` or `$LIVE_CHECK_NAS`, with no default: the run stops at once when neither is given. The NAS host for ssh is `$BLURAY_NAS_HOST` (default `mediaserver`).
+Sora's browsers default to `chrome-profile` (installed Chrome with a fresh temporary profile) and `chrome` (a second Chrome with its own context). Use `--sora-a`/`--sora-b` to change them, or `none` to leave one out. Real devices go through safaridriver on `--wd-ports` (default `4211,4212`; ports above 4200 only, never 4191/4192). Simulators go through Appium. `--out` must lie outside the repository, because the screenshots show real discs. Results (`live-check.json`) name devices by role, and pairing codes and tokens are never printed or written. The NAS's API base comes from `--nas` or `$LIVE_CHECK_NAS`, with no default: the run stops at once when neither is given. The NAS host for ssh is `$BLURAY_NAS_HOST` (no default: the run stops at once without it).
 
 ## Not here
 

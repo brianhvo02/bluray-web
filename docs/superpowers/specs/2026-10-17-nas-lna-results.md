@@ -4,7 +4,7 @@ Date: 2026-10-17. This spike decides where remote disc reads run: in the engine 
 
 ## Setup
 
-- Server: `https://mediaserver.tailnet-8e55.ts.net/bluray/api/health`, which resolves to the Tailscale CGNAT address 100.124.127.85. Every browser classed it as a local or private address and applied its local-network checks.
+- Server: `https://nas.example.com/bluray/api/health` (the NAS's Tailscale name), which resolves to a Tailscale CGNAT address. Every browser classed it as a local or private address and applied its local-network checks.
 - Probe page: `https://device-test.bluray-web.pages.dev/lna` (`public/lna.html` and `public/lna-worker.js` on the throwaway `device-test` branch, commit 450d171). It runs under the app's COOP/COEP (`require-corp`), with `crossOriginIsolated` true everywhere. Pressing Run (a user gesture) fetches health from the page and from a module worker, once as a plain GET and once with `Range: bytes=0-15`. `?order=worker` runs the worker first, so the worker's request reaches the browser before any request from the page. Results are exposed as `window.__lna`.
 - Drivers: Playwright `channel: 'chrome'` with a persistent context (headed and headless), geckodriver (Firefox, with `--allow-system-access` so the prompt could be read and answered from the browser chrome), and safaridriver (Mac Safari and the iPad).
 

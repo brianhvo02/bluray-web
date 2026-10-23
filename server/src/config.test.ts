@@ -7,10 +7,10 @@ const REQUIRED = { PUBLIC_BASE: BASE };
 
 describe('loadConfig', () => {
   it('reads roots, data dir and port', () => {
-    expect(loadConfig({ LIBRARY_ROOTS: 'drv0=/library/drv0, drv2=/library/drv2', DATA_DIR: '/d', PORT: '4192', PUBLIC_BASE: BASE })).toEqual({
+    expect(loadConfig({ LIBRARY_ROOTS: 'media0=/library/media0, media2=/library/media2', DATA_DIR: '/d', PORT: '4192', PUBLIC_BASE: BASE })).toEqual({
       roots: [
-        { name: 'drv0', dir: '/library/drv0' },
-        { name: 'drv2', dir: '/library/drv2' },
+        { name: 'media0', dir: '/library/media0' },
+        { name: 'media2', dir: '/library/media2' },
       ],
       dataDir: '/d',
       port: 4192,
@@ -47,12 +47,12 @@ describe('loadConfig', () => {
     });
   });
 
-  it.each(['drv0', '=/library/drv0', 'drv0=', 'drv0=/a,=/b'])('rejects the malformed LIBRARY_ROOTS %j', (value) => {
+  it.each(['media0', '=/library/media0', 'media0=', 'media0=/a,=/b'])('rejects the malformed LIBRARY_ROOTS %j', (value) => {
     expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: value })).toThrow(/LIBRARY_ROOTS entry ".*" is not name=dir/);
   });
 
   it('rejects duplicate root names', () => {
-    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'drv0=/a,drv0=/b' })).toThrow('LIBRARY_ROOTS names "drv0" twice');
+    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'media0=/a,media0=/b' })).toThrow('LIBRARY_ROOTS names "media0" twice');
   });
 
   it('reads TMDB_API_KEY and TITLE_LIBRARY', () => {
@@ -119,19 +119,19 @@ describe('loadConfig', () => {
   });
 
   it('parses a root group written name=dir@group', () => {
-    const { roots } = loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'drv0=/a,drv0-dl=/b@Downloads' });
-    expect(roots).toEqual([{ name: 'drv0', dir: '/a' }, { name: 'drv0-dl', dir: '/b', group: 'Downloads' }]);
+    const { roots } = loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'media0=/a,media0-dl=/b@Downloads' });
+    expect(roots).toEqual([{ name: 'media0', dir: '/a' }, { name: 'media0-dl', dir: '/b', group: 'Downloads' }]);
   });
 
   it('rejects a group named like a root', () => {
-    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'drv0=/a,drv1=/b@drv0' })).toThrow('group "drv0" is also a root name');
+    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'media0=/a,media1=/b@media0' })).toThrow('group "media0" is also a root name');
   });
 
   it('reads RTC_PORT, RTC_LAN_ADDRESS and RTC_ADVERTISE', () => {
     expect(loadConfig(REQUIRED).rtc).toEqual({ port: 47998 });
-    expect(loadConfig({ ...REQUIRED, RTC_PORT: '47990', RTC_LAN_ADDRESS: '192.168.1.98', RTC_ADVERTISE: '127.0.0.1, 192.0.2.4' }).rtc).toEqual({
+    expect(loadConfig({ ...REQUIRED, RTC_PORT: '47990', RTC_LAN_ADDRESS: '192.168.1.20', RTC_ADVERTISE: '127.0.0.1, 192.0.2.4' }).rtc).toEqual({
       port: 47990,
-      lanAddress: '192.168.1.98',
+      lanAddress: '192.168.1.20',
       advertise: ['127.0.0.1', '192.0.2.4'],
     });
     expect(() => loadConfig({ ...REQUIRED, RTC_PORT: '0' })).toThrow('RTC_PORT');

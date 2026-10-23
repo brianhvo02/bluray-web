@@ -5,7 +5,7 @@ Status: design agreed in conversation 2026-10-22; not built.
 ## 1. Why
 
 The NAS server (`server/`) works with any library, but its deployment is written for one NAS: `server/deploy/deploy.sh`
-builds on the owner's Mac and ships over `ssh mediaserver`, `server/deploy/compose.yaml` names that NAS's drives,
+builds on the owner's Mac and ships over ssh to the owner's host, `server/deploy/compose.yaml` names that NAS's drives,
 Tailscale address, LAN address, Caddy and timezone, the server prints pairing links to the owner's site, and the public
 web app (`bluray-web.pages.dev`) pairs only through the owner's rendezvous Worker. Nobody else can run a server without
 reading the code. The goal is that an experienced self-hoster can run their own server from the repo, play from it on

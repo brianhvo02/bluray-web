@@ -7,7 +7,7 @@ Measures how many of the BD-J discs in the developer's NAS library work in our p
 ## Commands
 
 - `npm run bdj-library:sync -- [--roots auto|<dir>,<dir>...] [--host H] [--dry-run]` (`sync.ts`)
-  - Finds the BD-J discs on `ssh mediaserver` (`--host` or `$BDJ_LIBRARY_HOST`): a folder with `BDMV/index.bdmv` and at least one `BDMV/BDJO/*.bdjo`. `--roots auto` (the default) searches every `/mnt/drv*` folder, the server's library mounts.
+  - Finds the BD-J discs over ssh (`--host` or `$BDJ_LIBRARY_HOST`, no default): a folder with `BDMV/index.bdmv` and at least one `BDMV/BDJO/*.bdjo`. `--roots auto` (the default) searches every `/mnt/*` folder, where the server's library drives are mounted.
   - Read-only on the NAS: every `find` and `tar` runs under `ionice -c3 nice -n19`, `BDMV/STREAM` and `BDMV/BACKUP` are pruned from the search and `STREAM` from the copy (no clip is ever read), and discs are copied one at a time.
   - Copies `BDMV` (without `STREAM`) and `CERTIFICATE` with tar over ssh, the path going on stdin, because rsync skipped paths with spaces or non-ASCII characters. A copy goes to `discs/.tmp-<id>/` and replaces `discs/<id>/` only once its files match the NAS list.
   - Writes a stub `BDMV/STREAM/<clip>.m2ts` per `CLIPINF/<clip>.clpi`: one aligned unit (32 source packets) of null TS packets. The player's readability check passes and every playlist ends at once.

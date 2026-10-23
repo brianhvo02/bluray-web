@@ -12,16 +12,16 @@ Success: on the iPad, the user opens the app, picks "Open from NAS", browses the
 
 ## 2. The NAS as it is (recon, 2026-10-17)
 
-- Host `mediaserver` on the user's tailnet (`mediaserver.tailnet-8e55.ts.net`, 100.124.127.85). Ubuntu 24.04.5, kernel 6.8, Intel N150, Docker 29.9 with Compose v5. User `administrator`, in the `docker` group, no passwordless sudo.
-- Nine ext4 data drives at `/mnt/drv0`–`/mnt/drv8` (about 130 TB, mostly full). Disc rips live in a `BDMVs` folder on seven of them (`drv0, 2, 3, 5, 6, 7, 8`). Some of those folders hold a few hundred entries.
+- The NAS, on the user's tailnet (`nas.example.com` below stands for its Tailscale name). Ubuntu 24.04.5, kernel 6.8, Intel N150, Docker 29.9 with Compose v5. An ssh user in the `docker` group, no passwordless sudo.
+- Nine ext4 data drives at `/mnt/media0`–`/mnt/media8` (about 130 TB, mostly full). Disc rips live in a `BDMVs` folder on seven of them (`media0, 2, 3, 5, 6, 7, 8`). Some of those folders hold a few hundred entries.
 - About 1,200 discs (`BDMV/index.bdmv` within five levels of a `BDMVs` folder) and 15 `.iso` files. Layouts vary: a disc at the top level (`BDMVs/<disc>/BDMV`), discs grouped by series (`BDMVs/<series>/<volume>/BDMV`), CD+BD bundles with `BK` scan folders, and some `.mkv` remuxes and torrent files that aren't discs. UHD discs (HEVC, Dolby Vision, Atmos) are among them.
-- Caddy (container `caddy`, network `caddy_default`) terminates HTTPS on the tailnet address, ports 80/443, with a Tailscale certificate from `/home/administrator/ts-cert`, and routes by path prefix (`/jellyfin`, `/vault`, `/photos`, …). Its Caddyfile is `/home/administrator/caddy/Caddyfile`.
+- Caddy (container `caddy`, network `caddy_default`) terminates HTTPS on the tailnet address, ports 80/443, with a Tailscale certificate from `~/ts-cert`, and routes by path prefix (`/jellyfin`, `/vault`, `/photos`, …). Its Caddyfile is `/home/administrator/caddy/Caddyfile`.
 - The N150's GPU is present (Alder Lake-N) but its kernel driver isn't loaded (no `/dev/dri`). That only matters for step 4.
 
 ## 3. Goals, non-goals, anti-goals
 
 Goals:
-- A read-only disc server on the NAS, deployed and updated by Claude over SSH (user's choice), behind the existing Caddy at `https://mediaserver.tailnet-8e55.ts.net/bluray/`.
+- A read-only disc server on the NAS, deployed and updated by Claude over SSH (user's choice), behind the existing Caddy at `https://nas.example.com/bluray/`.
 - Folder browsing (user's choice): the seven `BDMVs` folders shown as one tree, as they sit on the drives, down to the discs.
 - Open and play any disc in the library from every supported browser, with everything the local player does (menus, BD-J, subtitles, audio switching), including `.iso` discs.
 - Paired devices only: nothing but "redeem a pairing code" answers an unpaired device (parent §2 anti-goal), even though the tailnet is private.
@@ -42,7 +42,7 @@ Anti-goals:
 
 | Question | Decision | By |
 |---|---|---|
-| Who deploys | Claude, over SSH as `administrator` (in the `docker` group) | User |
+| Who deploys | Claude, over SSH as an ssh user (in the `docker` group) | User |
 | How the library looks | Folders as they sit on the drives; the seven `BDMVs` folders merged into one tree | User (folders); my call (merged) |
 | Where it's served | Behind the existing Caddy, `handle_path /bluray/*`, on `caddy_default`; no new ports | My call (fits the NAS) |
 | App origin | Stays `bluray-web.pages.dev`; the server answers cross-origin with CORS and CORP | My call (parent §4.5) |
@@ -57,10 +57,10 @@ Anti-goals:
 ## 5. The server
 
 - **Package**: `server/` in this repo, built into a Docker image (`node:24-slim` base, pinned by digest). No native dependencies in step 2.
-- **Deploy**: `server/deploy/compose.yaml` on the NAS under `/home/administrator/bluray-server/`: one service, `restart: unless-stopped`, on the external network `caddy_default`, each drive's mount point `/mnt/drvN` mounted read-only at `/library-mnt/drvN` (`create_host_path: false`, `propagation: rslave`, so a missing drive neither stops the service nor gets a folder made under `/mnt`, and a late mount appears) with the library root `drvN=/library-mnt/drvN/BDMVs`, a named volume for state (`/data`: device keys, invites, scan cache). No published ports. A `server/deploy/deploy.sh` run from the Mac builds the image for `linux/amd64`, ships it with `docker save | ssh mediaserver docker load`, writes the compose file and restarts the service. No registry.
-- **Caddy**: one block added inside the existing `https://mediaserver.tailnet-8e55.ts.net` site, `handle_path /bluray/* { reverse_proxy bluray-server:8080 }`, then `docker exec caddy caddy reload`. The deploy script makes this edit idempotently and keeps a backup of the Caddyfile.
+- **Deploy**: `server/deploy/compose.yaml` on the NAS under `~/bluray-server/`: one service, `restart: unless-stopped`, on the external network `caddy_default`, each drive's mount point `/mnt/mediaN` mounted read-only at `/library-mnt/mediaN` (`create_host_path: false`, `propagation: rslave`, so a missing drive neither stops the service nor gets a folder made under `/mnt`, and a late mount appears) with the library root `mediaN=/library-mnt/mediaN/BDMVs`, a named volume for state (`/data`: device keys, invites, scan cache). No published ports. A `server/deploy/deploy.sh` run from the Mac builds the image for `linux/amd64`, ships it with `docker save | ssh your-nas docker load`, writes the compose file and restarts the service. No registry.
+- **Caddy**: one block added inside the existing `https://nas.example.com` site, `handle_path /bluray/* { reverse_proxy bluray-server:8080 }`, then `docker exec caddy caddy reload`. The deploy script makes this edit idempotently and keeps a backup of the Caddyfile.
 - **Library scan**: walks the mounted roots breadth-first, stopping at discs (a folder containing `BDMV/index.bdmv`, or an `.iso` whose UDF tree has one) and skipping `BK`, `lost+found` and non-disc files. It reads only directory entries and `index.bdmv`/ISO headers, at low I/O priority, and caches the result in `/data`; a rescan runs on start, on demand from the admin page, and nightly. With 1,200 discs a cold scan may take minutes on HDDs; the UI shows the cached tree meanwhile.
-- **Disc ID**: hash of the root-relative path (`drvN/…`) and `index.bdmv`'s size and mtime, so it survives rescans and changes when a disc is replaced.
+- **Disc ID**: hash of the root-relative path (`mediaN/…`) and `index.bdmv`'s size and mtime, so it survives rescans and changes when a disc is replaced.
 
 ## 6. API (all under `/bluray/api/`)
 

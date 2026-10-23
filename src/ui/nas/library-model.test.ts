@@ -4,8 +4,8 @@ import { fakeNas } from '../../../tests/helpers/fake-nas';
 import { fixtureDiscFiles } from '../../../tests/helpers/fixture-disc';
 import { breadcrumbs, discBadges, discFacts, folderMemory, formatSize, mainPlaylist, openFailed, playlistOf, preflightLines, sortRows } from './library-model';
 
-const folder = (name: string, path = `drv5/${name}`): FolderEntry => ({ name, path, discs: 1 });
-const disc = (name: string, kind: DiscEntry['kind'] = 'folder', sizeBytes = 1): DiscEntry => ({ id: name, name, path: `drv5/${name}`, kind, sizeBytes });
+const folder = (name: string, path = `media5/${name}`): FolderEntry => ({ name, path, discs: 1 });
+const disc = (name: string, kind: DiscEntry['kind'] = 'folder', sizeBytes = 1): DiscEntry => ({ id: name, name, path: `media5/${name}`, kind, sizeBytes });
 
 /** disc1's manifest, its clip info changed by `patch` (the first clip's CLPI, 00001.clpi) and `patchSecond` (00002.clpi). */
 function disc1Manifest(patch?: (clpi: Uint8Array) => void, patchSecond?: (clpi: Uint8Array) => void): DiscManifest {
@@ -33,9 +33,9 @@ function makeUhd(clpi: Uint8Array): void {
 
 describe('breadcrumbs', () => {
   it('names the NAS, then each folder of the path', () => {
-    const crumbs = breadcrumbs('drv5/[250226] きりの森');
-    expect(crumbs.map((c) => c.label).join(' › ')).toBe('NAS › drv5 › [250226] きりの森');
-    expect(crumbs.map((c) => c.path)).toEqual(['', 'drv5', 'drv5/[250226] きりの森']);
+    const crumbs = breadcrumbs('media5/[250226] きりの森');
+    expect(crumbs.map((c) => c.label).join(' › ')).toBe('NAS › media5 › [250226] きりの森');
+    expect(crumbs.map((c) => c.path)).toEqual(['', 'media5', 'media5/[250226] きりの森']);
   });
 
   it('is just the NAS at the top', () => {
@@ -43,7 +43,7 @@ describe('breadcrumbs', () => {
   });
 
   it('keeps names with #, ?, % and + whole', () => {
-    expect(breadcrumbs('drv0/a#1?/100% a+b').map((c) => c.label)).toEqual(['NAS', 'drv0', 'a#1?', '100% a+b']);
+    expect(breadcrumbs('media0/a#1?/100% a+b').map((c) => c.label)).toEqual(['NAS', 'media0', 'a#1?', '100% a+b']);
   });
 });
 
@@ -132,8 +132,8 @@ describe('folderMemory', () => {
     const storage = { getItem: (k: string) => items.get(k) ?? null, setItem: (k: string, v: string) => void items.set(k, v) };
     const memory = folderMemory(storage);
     expect(memory.get()).toBe('');
-    memory.set('drv5/[250226] きりの森');
-    expect(folderMemory(storage).get()).toBe('drv5/[250226] きりの森');
+    memory.set('media5/[250226] きりの森');
+    expect(folderMemory(storage).get()).toBe('media5/[250226] きりの森');
   });
 
   it('works without storage, or when it throws', () => {
@@ -147,7 +147,7 @@ describe('folderMemory', () => {
     };
     for (const storage of [undefined, throwing]) {
       const memory = folderMemory(storage);
-      memory.set('drv0');
+      memory.set('media0');
       expect(memory.get()).toBe('');
     }
   });

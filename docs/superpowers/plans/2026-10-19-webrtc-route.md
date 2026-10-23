@@ -24,7 +24,7 @@
 
 - **Anti-goal:** nothing answers an unpaired device except `POST /api/pair/redeem`, `POST /api/session/challenge`, `POST /api/session` and `GET /api/health`, on any route. Over WebRTC, a connection that hasn't completed `POST /api/session` within 30 s, or that fails one session attempt, is closed.
 - **Data channel layout:** one channel labelled `api`, ordered and reliable. Body chunks are at most 64 KB (65536 bytes) per message. Flow control uses `bufferedAmount` with `bufferedAmountLowThreshold` = 1 MB and a high-water mark of 4 MB.
-- **NAS UDP:** ICE uses only UDP port 47998, published by compose as `47998:47998/udp`. The NAS advertises only host candidates for its current public IPv4 (found by STUN at start and then hourly) and for `RTC_LAN_ADDRESS` (192.168.1.98 in the deployed compose), each on port 47998. It never advertises Docker (172.16.0.0/12) or Tailscale (100.64.0.0/10) addresses.
+- **NAS UDP:** ICE uses only UDP port 47998, published by compose as `47998:47998/udp`. The NAS advertises only host candidates for its current public IPv4 (found by STUN at start and then hourly) and for `RTC_LAN_ADDRESS` (the NAS's LAN address in the deployed compose), each on port 47998. It never advertises Docker (172.16.0.0/12) or Tailscale (100.64.0.0/10) addresses.
 - **STUN:** `stun:stun.cloudflare.com:3478`.
 - **Route choice:** HTTPS first with a 2 s timeout (`GET <https base>health`), then WebRTC. The choice is remembered per NAS for the page's life and retried when it breaks.
 - **Relay:**
@@ -171,7 +171,7 @@
 
 **Files:**
 - Create: `server/src/rtc/peer.ts`, `server/src/rtc/signalling-client.ts`, `server/src/rtc/public-address.ts`
-- Modify: `server/src/main.ts`, `server/src/config.ts` (`RTC_PORT` default 47998, `RTC_LAN_ADDRESS`, `RTC_ADVERTISE` for tests, which replaces discovery with a fixed list), `server/src/rendezvous-client.ts` (exposes its key for signing `signal-nas`), `server/deploy/compose.yaml` (`ports: ["47998:47998/udp"]`, `RTC_LAN_ADDRESS: 192.168.1.98`), `server/NOTICE` (werift, MIT), `package.json` (werift, pinned exact)
+- Modify: `server/src/main.ts`, `server/src/config.ts` (`RTC_PORT` default 47998, `RTC_LAN_ADDRESS`, `RTC_ADVERTISE` for tests, which replaces discovery with a fixed list), `server/src/rendezvous-client.ts` (exposes its key for signing `signal-nas`), `server/deploy/compose.yaml` (`ports: ["47998:47998/udp"]`, `RTC_LAN_ADDRESS: 192.168.1.20`), `server/NOTICE` (werift, MIT), `package.json` (werift, pinned exact)
 - Test: `server/src/rtc/peer.test.ts`, `server/src/rtc/public-address.test.ts`, `server/src/rtc/signalling-client.test.ts`
 
 **Interfaces:**

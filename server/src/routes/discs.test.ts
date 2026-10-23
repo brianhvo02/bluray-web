@@ -90,9 +90,9 @@ beforeAll(async () => {
   const root = join(tmp, 'root');
   cpSync(join(SYNTHETIC, 'disc-levels'), join(root, 'levels'), { recursive: true });
   cpSync(join(SYNTHETIC, 'disc-mpeg2'), join(root, 'mpeg2'), { recursive: true });
-  library = new Library([{ name: 'drvA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
+  library = new Library([{ name: 'mediaA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
   await library.scan();
-  for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
+  for (const d of library.list('mediaA')!.discs) ids[d.name] = d.id;
 });
 
 afterAll(() => {

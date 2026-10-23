@@ -152,7 +152,7 @@ Checked from the NAS on 2026-10-18 (read-only):
 - **Native public IPv6** on the NAS's LAN interface.
 
 So:
-- **IPv4:** the user forwards UDP 47998 on the gateway to the NAS (192.168.1.98), and `compose.yaml` publishes `47998:47998/udp`. The NAS advertises its public address as a host candidate learned from STUN. Most friends' networks then connect directly, and the relay is truly a fallback.
+- **IPv4:** the user forwards UDP 47998 on the gateway to the NAS (its LAN address), and `compose.yaml` publishes `47998:47998/udp`. The NAS advertises its public address as a host candidate learned from STUN. Most friends' networks then connect directly, and the relay is truly a fallback.
 - **IPv6** (optional, my call: after the spike, and only if it helps): Docker's bridge network has IPv6 off, and the gateway's IPv6 firewall probably blocks inbound traffic. Enabling it would mean a change to the `caddy_default` network, which other services share, so it isn't part of this step unless the spike shows IPv4 falls short.
 - The port forward is a manual step for the user, done once, and listed in the deploy notes. Until it exists, connections fall back to hole punching or the relay.
 

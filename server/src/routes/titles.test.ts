@@ -42,10 +42,10 @@ function ev(path: string, titles: Record<string, string> = {}, fingerprint: stri
 
 const POSTER = { small: 'https://s4.anilist.co/ember-s.jpg', large: 'https://s4.anilist.co/ember-l.jpg' };
 const EMBER = entry('anilist:100', { english: 'Ember Blade', romaji: 'Hinokiri no Ken', native: '火斬りの剣' }, { poster: POSTER });
-const A = ev('drv1/Anime/火斬りの剣/[BDMV][220629][火斬りの剣][Vol.1]', { jpn: '火斬りの剣' }, 'FA');
+const A = ev('media1/Anime/火斬りの剣/[BDMV][220629][火斬りの剣][Vol.1]', { jpn: '火斬りの剣' }, 'FA');
 // a box of three unnumbered-by-name discs, listed out of order
-const BOX = ['drv1/Misc/Quiet Harbor/Quiet Harbor Disc 3', 'drv1/Misc/Quiet Harbor/Quiet Harbor Disc 1', 'drv1/Misc/Quiet Harbor/Quiet Harbor Disc 2'].map((p, i) => ev(p, {}, `FB${i}`));
-const COPY = ev('drv2/Downloads/Quiet.Harbor.D1', {}, 'FB1');
+const BOX = ['media1/Misc/Quiet Harbor/Quiet Harbor Disc 3', 'media1/Misc/Quiet Harbor/Quiet Harbor Disc 1', 'media1/Misc/Quiet Harbor/Quiet Harbor Disc 2'].map((p, i) => ev(p, {}, `FB${i}`));
+const COPY = ev('media2/Downloads/Quiet.Harbor.D1', {}, 'FB1');
 
 type SearchOpts = Parameters<MetadataSource['search']>[1];
 
@@ -204,7 +204,7 @@ describe('title routes', () => {
     const dir = join(tmp, 'mnt', group);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'cover.png'), png);
-    await start({ gate: 'everyone', more: [ev(`drv1/${group}/BD`)], folderCover: async (d) => ({ path: join(d, 'cover.png'), size: png.length, mtimeMs: 1 }) });
+    await start({ gate: 'everyone', more: [ev(`media1/${group}/BD`)], folderCover: async (d) => ({ path: join(d, 'cover.png'), size: png.length, mtimeMs: 1 }) });
     const t = await token(false);
     const res = await get('/api/titles', t);
     const music = ((await res.json()) as { titles: TitleSummary[] }).titles.find((x) => x.kind === 'music')!;
@@ -531,7 +531,7 @@ describe('task 9 review', () => {
     const t = await token(true);
     const [d3, d1, d2] = BOX as [DiscEvidence, DiscEvidence, DiscEvidence];
     // a copy of A sits in the box's group
-    const copyOfA = ev('drv1/Misc/Quiet Harbor/Quiet Harbor Disc 4', {}, A.fingerprint);
+    const copyOfA = ev('media1/Misc/Quiet Harbor/Quiet Harbor Disc 4', {}, A.fingerprint);
     evidence = [...evidence, copyOfA];
     owner.setChoice(A.discId, A.fingerprint, { kind: 'hidden' });
     owner.reattach(evidence.map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
@@ -578,7 +578,7 @@ describe('final review', () => {
   it('I3: numbers the other discs of a folder by their own numbers, so a missing volume leaves a gap', async () => {
     await start();
     const t = await token(true);
-    const [v1, v2, v4] = ['Vol.1', 'Vol.2', 'Vol.4'].map((v) => ev(`drv1/Misc/Quiet Reel/Quiet Reel ${v}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const [v1, v2, v4] = ['Vol.1', 'Vol.2', 'Vol.4'].map((v) => ev(`media1/Misc/Quiet Reel/Quiet Reel ${v}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
     evidence = [v4, v1, v2];
     const title = await series(t, 'Quiet Reel');
     const choice = (disc: number): unknown => ({ choice: { kind: 'title', titleId: title.id, season: 1, disc }, applyToGroup: true });
@@ -602,8 +602,8 @@ describe('final review', () => {
   it('I3: skips the discs without a number when others in the folder have one, and numbers by position when none has', async () => {
     await start();
     const t = await token(true);
-    const [v1, v2, bonus] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Making Of'].map((n) => ev(`drv1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
-    const plain = ['AAA', 'BBB', 'CCC'].map((n) => ev(`drv1/Misc/Plain Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const [v1, v2, bonus] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Making Of'].map((n) => ev(`media1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const plain = ['AAA', 'BBB', 'CCC'].map((n) => ev(`media1/Misc/Plain Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
     evidence = [v1, v2, bonus, ...plain];
     const title = await series(t, 'Quiet Reel');
     const res = await put(t, v1, { choice: { kind: 'title', titleId: title.id, season: 1, disc: 1 }, applyToGroup: true });
@@ -620,7 +620,7 @@ describe('final review', () => {
     await start();
     const t = await token(true);
     const [v1, v2, v3, interviews, making] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Vol.3', 'Quiet Reel Interviews', 'Quiet Reel Making Of']
-      .map((n) => ev(`drv1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence];
+      .map((n) => ev(`media1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence];
     evidence = [making, v3, interviews, v1, v2];
     const title = await series(t, 'Quiet Reel');
     const res = await put(t, making, { choice: { kind: 'title', titleId: title.id, season: 1, disc: 3 }, applyToGroup: true });
@@ -644,14 +644,14 @@ describe('final review', () => {
   it("M8: a music title's new name is kept in its discs' choices, so it survives a move", async () => {
     await start();
     const t = await token(true);
-    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FM${i}`));
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FM${i}`));
     evidence = [...evidence, ...discs];
     await service.runNow();
     const music = service.catalogue().titles.find((x) => x.kind === 'music')!;
     expect((await send('PUT', `/api/admin/names/${encodeURIComponent(music.id)}`, t, { name: 'First Light Live' })).status).toBe(204);
     for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live' });
     // the release folder is tidied: new paths, same discs
-    evidence = [...evidence.filter((e) => !discs.includes(e)), ...discs.map((d, i) => ev(`drv1/Music/Lumen Choir/First Light/BD${i + 1}`, {}, d.fingerprint))];
+    evidence = [...evidence.filter((e) => !discs.includes(e)), ...discs.map((d, i) => ev(`media1/Music/Lumen Choir/First Light/BD${i + 1}`, {}, d.fingerprint))];
     clock += 60_000;
     await service.runNow();
     expect(service.catalogue().titles.filter((x) => x.kind === 'music').map((x) => x.names.display)).toEqual(['First Light Live']);
@@ -660,7 +660,7 @@ describe('final review', () => {
   it("sets a music release's artist and rejectMatch on every disc, keeping its name", async () => {
     await start();
     const t = await token(true);
-    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FA${i}`));
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FA${i}`));
     evidence = [...evidence, ...discs];
     await service.runNow();
     const music = service.catalogue().titles.find((x) => x.kind === 'music')!;
@@ -678,7 +678,7 @@ describe('final review', () => {
   it('refuses a bad music correction and an unknown id', async () => {
     await start();
     const t = await token(true);
-    const discs = ['DISC1'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FB${i}`));
+    const discs = ['DISC1'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FB${i}`));
     evidence = [...evidence, ...discs];
     await service.runNow();
     const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
@@ -692,7 +692,7 @@ describe('final review', () => {
   it('keeps artist and rejectMatch when a release is renamed, and when its name goes back to the folder', async () => {
     await start();
     const t = await token(true);
-    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FC${i}`));
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FC${i}`));
     evidence = [...evidence, ...discs];
     await service.runNow();
     const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
@@ -706,7 +706,7 @@ describe('final review', () => {
   it('writes no empty music choice for a correction that carries nothing', async () => {
     await start();
     const t = await token(true);
-    const discs = ['DISC1'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FD${i}`));
+    const discs = ['DISC1'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FD${i}`));
     evidence = [...evidence, ...discs];
     await service.runNow();
     const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);

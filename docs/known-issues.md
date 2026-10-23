@@ -505,7 +505,7 @@ Fill in from `probe.html` on each device.
 
 ## NAS server and title library (step 2)
 
-- **The Caddy Tailscale certificate is manual.** The certificate behind `https://mediaserver.tailnet-8e55.ts.net` was issued by hand on Aug 31 and may lapse around late November; when it does, every site behind Caddy stops, not only this app. *Revisit* before then: renew it, or let Caddy fetch and renew its own Tailscale certificate.
+- **The Caddy Tailscale certificate is manual.** The certificate behind the owner's Tailscale address was issued by hand on Aug 31 and may lapse around late November; when it does, every site behind Caddy stops, not only this app. *Revisit* before then: renew it, or let Caddy fetch and renew its own Tailscale certificate.
 - **A drive that is gone for good keeps showing its last discs.** A root whose folder is missing or empty keeps the discs of its last scan, so a drive that is briefly unmounted doesn't empty the library; a drive that is removed for good is never dropped. *Revisit if* that confuses the owner (a "remove this drive" action would fix it).
 - **A drive mounted late is writable inside the container.** `read_only: true` in the compose file covers only the binds present when the container starts; a late `nofail` mount that appears through `rslave` propagation is not read-only. The server only ever writes `/data`, so nothing is written there, but the guarantee is by code, not by the mount.
 - **An iPhone Home Screen web app has its own storage,** so it needs its own pairing (a pairing made in Safari does not carry over). Pairing links open in Safari, not in the installed app: type the code in the app instead.

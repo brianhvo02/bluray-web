@@ -142,7 +142,7 @@ export function libraryPath(hostPath: string, roots: readonly LibraryRoot[]): st
 /** The folder a run places its test disc in: `<root>/zz-live-check-<run id>` (run id: 8 lowercase hex digits). */
 export function testDiscFolder(root: LibraryRoot, runId: string): { hostDir: string; libraryPath: string } {
   if (!/^[0-9a-f]{8}$/.test(runId)) throw new Error(`bad run id ${runId}`);
-  if (!/^\/mnt\/drv\d+\/[A-Za-z]+$/.test(root.hostDir)) throw new Error(`root ${root.name} is not a /mnt/drv<n>/<folder> root`);
+  if (!/^\/mnt\/[\w-]+\/[A-Za-z]+$/.test(root.hostDir)) throw new Error(`root ${root.name} is not a /mnt/<drive>/<folder> root`);
   return { hostDir: `${root.hostDir}/zz-live-check-${runId}`, libraryPath: `${root.name}/zz-live-check-${runId}/${STORE_DISC_NAME}` };
 }
 
@@ -152,7 +152,7 @@ export function testDiscFolder(root: LibraryRoot, runId: string): { hostDir: str
  */
 export function ownTestFolder(dir: string, runId: string, roots: readonly LibraryRoot[]): boolean {
   if (!/^[0-9a-f]{8}$/.test(runId)) return false;
-  return roots.some((r) => /^\/mnt\/drv\d+\/[A-Za-z]+$/.test(r.hostDir) && dir === `${r.hostDir}/zz-live-check-${runId}`);
+  return roots.some((r) => /^\/mnt\/[\w-]+\/[A-Za-z]+$/.test(r.hostDir) && dir === `${r.hostDir}/zz-live-check-${runId}`);
 }
 
 export function parseMap(tsv: string): Map<string, string> {
@@ -192,11 +192,11 @@ export interface Options {
 
 const USAGE =
   'usage: live-check.ts --origin <preview origin> --out <dir> --nas <api base> (or $LIVE_CHECK_NAS) [--mika-phone <target>] [--mika-tablet <target>] [--sora-a chrome-profile] [--sora-b chrome] ' +
-  '[--store-disc place|auto|<library path>|none] [--place-root drv8] [--rehearse-store <library path>|<id>] [--library] [--places] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
+  '[--store-disc place|auto|<library path>|none] [--place-root media8] [--rehearse-store <library path>|<id>] [--library] [--places] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
 
 export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Options {
   const o: Options = {
-    origin: '', nas: env.LIVE_CHECK_NAS ?? '', out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'drv8', rehearseStore: null,
+    origin: '', nas: env.LIVE_CHECK_NAS ?? '', out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'media8', rehearseStore: null,
     library: false, places: false, discs: [], libraryDir: env.BDJ_LIBRARY_DIR ?? join(homedir(), '.cache/bluray-web/bdj-library'), wdPorts: [4211, 4212], headless: false, callTimeoutMs: 120_000,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -232,6 +232,7 @@ export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = 
   if (!o.origin || !o.out) throw new Error(USAGE);
   // no default: the NAS is the caller's to name
   if (!o.nas) throw new Error(`no NAS given: pass --nas <api base> or set LIVE_CHECK_NAS (for example https://<nas host>/bluray/api/)\n${USAGE}`);
+  if (o.storeDisc === 'place' && !o.placeRoot) throw new Error(`no root to place the test disc under: pass --place-root <library root name> (or --store-disc none)\n${USAGE}`);
   if (!o.nas.endsWith('/')) o.nas = `${o.nas}/`;
   o.origin = checkOrigin(o.origin);
   const out = resolve(o.out);
@@ -329,9 +330,16 @@ function sshOwnerCode(person: string): Promise<{ code: string; person: string | 
   );
 }
 
+/** The ssh host of the NAS, from $BLURAY_NAS_HOST: there is no default. */
+function nasHost(): string {
+  const host = process.env.BLURAY_NAS_HOST;
+  if (!host) throw new Error('no NAS ssh host given: set BLURAY_NAS_HOST (for example your-nas)');
+  return host;
+}
+
 /** Runs a read-only command on the NAS host. */
 function sshRead(script: string): Promise<string> {
-  const host = process.env.BLURAY_NAS_HOST ?? 'mediaserver';
+  const host = nasHost();
   return new Promise((res, rej) =>
     execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', host, script], { timeout: 60_000 }, (err, stdout, stderr) => (err ? rej(new Error(`ssh: ${err.message} ${String(stderr).slice(0, 200)}`)) : res(String(stdout)))),
   );
@@ -473,7 +481,7 @@ export interface PlacedDisc {
 
 /** Pipes a local tar of `disc` (its folder, by name) into `script` run over ssh on the NAS host. */
 function sshUntar(disc: PlacedDisc, script: string): Promise<void> {
-  const host = process.env.BLURAY_NAS_HOST ?? 'mediaserver';
+  const host = nasHost();
   return new Promise((res, rej) => {
     // no AppleDouble files or macOS extended attributes: the NAS gets the fixture's files and nothing else
     const tar = spawn('tar', ['--no-mac-metadata', '--no-xattrs', '-C', disc.parent, '-cf', '-', disc.name], { env: { ...process.env, COPYFILE_DISABLE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });

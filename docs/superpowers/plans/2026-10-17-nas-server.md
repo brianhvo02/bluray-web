@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A read-only disc server on the user's NAS, behind its Caddy at `https://mediaserver.tailnet-8e55.ts.net/bluray/`, and the player support to pair with it, browse its folders and play any disc (folder or `.iso`, HDMV or BD-J) from every supported browser by byte-range reads.
+**Goal:** A read-only disc server on the user's NAS, behind its Caddy at `https://nas.example.com/bluray/`, and the player support to pair with it, browse its folders and play any disc (folder or `.iso`, HDMV or BD-J) from every supported browser by byte-range reads.
 
 **Architecture:** Devices pair by a QR or short code, looked up through a small rendezvous Worker on Cloudflare (step 3 will add WebRTC signalling to it). `server/` is a small Node 24 HTTP server (no framework) bundled with esbuild into one file and shipped as a Docker image to the NAS over SSH. It shares the BDMV parsers and a new UDF reader with the engine. In the engine, a serialisable `DiscSpec` (`files` or `remote`) replaces the picked-file list wherever a disc is opened (engine worker and BD-J worker), and a `RemoteSource` implements `ByteSource` over an HTTP range transport with sequential read-ahead. The UI gains pairing (WebCrypto keys), a folder browser, a pre-flight throughput check and an admin screen.
 
@@ -12,9 +12,9 @@
 
 ## Global Constraints
 
-- The server never writes to the library: each `/mnt/drvN/BDMVs` is mounted read-only at `/library/drvN`; state lives in the named volume at `/data`.
-- Library roots on the NAS: `drv0, drv2, drv3, drv5, drv6, drv7, drv8` (each `/mnt/drvN/BDMVs`).
-- No published ports. The container `bluray-server` listens on 8080 on the external network `caddy_default`; Caddy gets exactly `handle_path /bluray/* { reverse_proxy bluray-server:8080 }` inside the existing `https://mediaserver.tailnet-8e55.ts.net` block; the Caddyfile is backed up before each edit and Caddy is reloaded (`docker exec caddy caddy reload --config /etc/caddy/Caddyfile`), never restarted.
+- The server never writes to the library: each `/mnt/mediaN/BDMVs` is mounted read-only at `/library/mediaN`; state lives in the named volume at `/data`.
+- Library roots on the NAS: `media0, media2, media3, media5, media6, media7, media8` (each `/mnt/mediaN/BDMVs`).
+- No published ports. The container `bluray-server` listens on 8080 on the external network `caddy_default`; Caddy gets exactly `handle_path /bluray/* { reverse_proxy bluray-server:8080 }` inside the existing `https://nas.example.com` block; the Caddyfile is backed up before each edit and Caddy is reloaded (`docker exec caddy caddy reload --config /etc/caddy/Caddyfile`), never restarted.
 - The server serves JSON and disc bytes only, never HTML.
 - CORS allow-list: `https://bluray-web.pages.dev`, any `https://<sub>.bluray-web.pages.dev`, `http://localhost:5173`, `http://localhost:4173`. Every response: `Access-Control-Allow-Origin: <origin>` (when allowed), `Vary: Origin`, `Cross-Origin-Resource-Policy: cross-origin`. Preflights: `Access-Control-Max-Age: 600`.
 - Disc reads (`files`, `probe`) carry the session token as query `t=` and only CORS-safelisted headers (a single `Range: bytes=a-b`), so they need no preflight.
@@ -48,9 +48,9 @@
 
 - [ ] **Step 1: Write failing tests** in `server/src/cors.test.ts`: allowed origins (`https://bluray-web.pages.dev`, `https://fix-x.bluray-web.pages.dev`, `http://localhost:4173`) get `Access-Control-Allow-Origin` echoed; `https://evil.pages.dev`, `https://bluray-web.pages.dev.evil.com` and missing origin get none; every result has `Vary: Origin` and `Cross-Origin-Resource-Policy: cross-origin`. A test starting `createServer([])` on port 0: `GET /api/health` → 200 `{"ok":true}`; `OPTIONS /api/x` with an allowed origin → 204 with `Access-Control-Max-Age: 600` and allowed methods `GET, POST, DELETE`; unknown path → 404 JSON.
 - [ ] **Step 2: Run** `npx vitest run server`. Expected: FAIL (modules missing).
-- [ ] **Step 3: Implement** the files above. `GET /api/health` is a built-in handler. `tsconfig.server.json`: strict like the app, `types: ["node"]`, `lib: ["ES2023"]`, includes `server/src` and the engine files it imports. `npm run server:build` bundles `server/src/main.ts` with esbuild (`--platform=node --format=esm --target=node24`) into `server/dist/server.mjs`. Dockerfile: `node:24-slim` pinned by digest (look up the current digest), copies `server/dist/server.mjs`, runs as the `node` user, `EXPOSE 8080`. `compose.yaml`: service `bluray-server`, `restart: unless-stopped`, network `caddy_default` (external), the seven read-only mounts and volume `bluray-data:/data`, env `LIBRARY_ROOTS=drv0=/library/drv0,…`, no `ports:`. `deploy.sh`: builds (`--platform linux/amd64`), `docker save | ssh mediaserver docker load`, copies `compose.yaml` to `~/bluray-server/`, `docker compose up -d`, then runs `caddy-route.sh` over SSH, which backs up the Caddyfile to `Caddyfile.bak-<timestamp>`, inserts the `/bluray/*` block before the site's closing brace only if absent, validates with `docker exec caddy caddy validate --config /etc/caddy/Caddyfile` (restoring the backup on failure), and reloads.
+- [ ] **Step 3: Implement** the files above. `GET /api/health` is a built-in handler. `tsconfig.server.json`: strict like the app, `types: ["node"]`, `lib: ["ES2023"]`, includes `server/src` and the engine files it imports. `npm run server:build` bundles `server/src/main.ts` with esbuild (`--platform=node --format=esm --target=node24`) into `server/dist/server.mjs`. Dockerfile: `node:24-slim` pinned by digest (look up the current digest), copies `server/dist/server.mjs`, runs as the `node` user, `EXPOSE 8080`. `compose.yaml`: service `bluray-server`, `restart: unless-stopped`, network `caddy_default` (external), the seven read-only mounts and volume `bluray-data:/data`, env `LIBRARY_ROOTS=media0=/library/media0,…`, no `ports:`. `deploy.sh`: builds (`--platform linux/amd64`), `docker save | ssh your-nas docker load`, copies `compose.yaml` to `~/bluray-server/`, `docker compose up -d`, then runs `caddy-route.sh` over SSH, which backs up the Caddyfile to `Caddyfile.bak-<timestamp>`, inserts the `/bluray/*` block before the site's closing brace only if absent, validates with `docker exec caddy caddy validate --config /etc/caddy/Caddyfile` (restoring the backup on failure), and reloads.
 - [ ] **Step 4: Run** the tests and `npm run typecheck`. Expected: PASS.
-- [ ] **Step 5: Deploy** with `npm run server:deploy`, then from the Mac `curl -s https://mediaserver.tailnet-8e55.ts.net/bluray/api/health` → `{"ok":true}`, and `curl -s -o /dev/null -w '%{http_code}' https://mediaserver.tailnet-8e55.ts.net/jellyfin/` is unchanged from before the deploy (other sites unaffected).
+- [ ] **Step 5: Deploy** with `npm run server:deploy`, then from the Mac `curl -s https://nas.example.com/bluray/api/health` → `{"ok":true}`, and `curl -s -o /dev/null -w '%{http_code}' https://nas.example.com/jellyfin/` is unchanged from before the deploy (other sites unaffected).
 - [ ] **Step 6: Commit** `feat(server): skeleton, image and deploy behind the NAS's Caddy`.
 
 ### Task 2: Local Network Access spike (go/no-go for where reads run)
@@ -61,7 +61,7 @@
 **Interfaces:**
 - Produces: a ruling recorded in the findings file and the SDD ledger: `transport: 'worker' | 'main-thread'`, consumed by Task 8.
 
-- [ ] **Step 1:** On the `device-test` branch (never merged), add `lna.html`: a button that fetches `https://mediaserver.tailnet-8e55.ts.net/bluray/api/health` from the page and from a module worker, also with `Range: bytes=0-15` against a known file once Task 6 exists (until then health only), and prints status, error, timing and whether a permission prompt appeared. Deploy it with `gh workflow run preview.yml --ref device-test`.
+- [ ] **Step 1:** On the `device-test` branch (never merged), add `lna.html`: a button that fetches `https://nas.example.com/bluray/api/health` from the page and from a module worker, also with `Range: bytes=0-15` against a known file once Task 6 exists (until then health only), and prints status, error, timing and whether a permission prompt appeared. Deploy it with `gh workflow run preview.yml --ref device-test`.
 - [ ] **Step 2:** Run it in Chrome (installed, real profile via Playwright `channel: 'chrome'` with a persistent context, and by hand), Safari and Firefox on the Mac, and on the iPad and iPhone through the safaridriver harness (`scratchpad` scripts from step 1, re-created if gone). Record per browser: page fetch OK?, worker fetch OK?, prompt shown?, works after granting?
 - [ ] **Step 3:** Decide: if every browser reaches the server from a worker (after at most one prompt granted on the page), `transport: 'worker'`; otherwise `'main-thread'`. Write the findings file with the table and the decision. If Chrome blocks with no way to grant, stop and raise it with the user (it decides whether the app must move origins, which the spec rules out).
 - [ ] **Step 4: Commit** `docs(step 2): local network access results`.
@@ -76,7 +76,7 @@
 - Produces:
   ```ts
   // src/engine/disc/nas-api.ts
-  interface DiscEntry { readonly id: string; readonly name: string; readonly path: string /* root-relative, e.g. 'drv5/[250226] きりの森' */; readonly kind: 'folder' | 'iso'; readonly sizeBytes: number }
+  interface DiscEntry { readonly id: string; readonly name: string; readonly path: string /* root-relative, e.g. 'media5/[250226] きりの森' */; readonly kind: 'folder' | 'iso'; readonly sizeBytes: number }
   interface FolderEntry { readonly name: string; readonly path: string; readonly discs: number /* below it */ }
   // server/src/library.ts
   class Library {
@@ -91,13 +91,13 @@
   Route: `GET /api/library?path=<root-relative folder, '' for the top>` → `{ folders, discs, scanning }` (the top level lists the merged children of all roots, each child's `path` prefixed by its root name; sorted by name with `localeCompare(…, 'ja')`).
 
 - [ ] **Step 1: Write failing tests**:
-  - a temp tree with root `drvA` holding `Series (シリーズ)/Vol 1/BDMV/index.bdmv`, `Series (シリーズ)/Vol 1/BK/01.png`, `[BDMV] Single #1 100%/BDMV/index.bdmv`, `movie.mkv`, `x.torrent`, `lost+found/`, `disc.iso` (size only; ISO validation is Task 7), and root `drvB` holding `Other/BDMV/index.bdmv`.
-  - `list('')` merges both roots: discs `[BDMV] Single #1 100%`, `disc.iso` (paths under `drvA/`) and `Other` (under `drvB/`), and the folder `Series (シリーズ)` with `discs: 1` (a folder that is itself a disc is listed as a disc); `movie.mkv`, `x.torrent`, `lost+found` and `BK` never appear.
-  - `list('drvA/Series (シリーズ)')` → no folders, `discs: [Vol 1]`.
+  - a temp tree with root `mediaA` holding `Series (シリーズ)/Vol 1/BDMV/index.bdmv`, `Series (シリーズ)/Vol 1/BK/01.png`, `[BDMV] Single #1 100%/BDMV/index.bdmv`, `movie.mkv`, `x.torrent`, `lost+found/`, `disc.iso` (size only; ISO validation is Task 7), and root `mediaB` holding `Other/BDMV/index.bdmv`.
+  - `list('')` merges both roots: discs `[BDMV] Single #1 100%`, `disc.iso` (paths under `mediaA/`) and `Other` (under `mediaB/`), and the folder `Series (シリーズ)` with `discs: 1` (a folder that is itself a disc is listed as a disc); `movie.mkv`, `x.torrent`, `lost+found` and `BK` never appear.
+  - `list('mediaA/Series (シリーズ)')` → no folders, `discs: [Vol 1]`.
   - `discId` stable across two scans; changes when `index.bdmv` changes size.
   - `nextNightly(new Date('2026-10-17T03:59:00'))` → `2026-10-17T04:00:00`; at `04:00:00` → the next day's 04:00.
   - Review Focus 4: with a scan in progress (a root whose directory reads are slowed by an injected `readdir`), `list('')` returns the cached tree from the previous scan immediately and `scanning: true`.
-  - Review Focus 1: through the HTTP route, `GET /api/library?path=` with `encodeURIComponent('drvA/Series (シリーズ)')` returns `Vol 1`.
+  - Review Focus 1: through the HTTP route, `GET /api/library?path=` with `encodeURIComponent('mediaA/Series (シリーズ)')` returns `Vol 1`.
 - [ ] **Step 2: Run** them. Expected: FAIL.
 - [ ] **Step 3: Implement.** The scan walks each root breadth-first with one directory read at a time (`fs.promises.opendir`), never descending into a disc, `BK`, `lost+found` or hidden entries, and caps depth at 6. The tree is written to `<dataDir>/library.json` after each scan and loaded at start. A scan runs at start, nightly at 04:00 server time (a `setTimeout` rescheduled after each run; test the next-run computation as a pure function `nextNightly(now: Date): Date`), and when `POST /api/admin/rescan` asks (Task 4 adds the route).
 - [ ] **Step 4: Run** `npx vitest run server`. Expected: PASS.
@@ -107,7 +107,7 @@
 
 **Files:**
 - Create: `server/src/auth.ts`, `server/src/auth.test.ts`, `server/src/codes.ts`, `server/src/codes.test.ts`, `server/src/store.ts`, `server/src/routes/pair.ts`, `server/src/routes/admin.ts`, `server/src/cli.ts`
-- Modify: `server/src/main.ts`, `server/deploy/deploy.sh` (`--owner-code`: `ssh mediaserver docker exec bluray-server node server.mjs owner-code`, which prints the code, the pairing link and a terminal QR)
+- Modify: `server/src/main.ts`, `server/deploy/deploy.sh` (`--owner-code`: `ssh your-nas docker exec bluray-server node server.mjs owner-code`, which prints the code, the pairing link and a terminal QR)
 
 **Interfaces:**
 - Produces:
@@ -283,7 +283,7 @@
 - Consumes: `NasClient` (Task 9), `PlayerController.openRemote(spec)` (Task 8).
 - Produces: `libraryModel` pure helpers: breadcrumbs from a path, sort (folders first, then `localeCompare(…, 'ja')`), badges (`ISO`, and `UHD` when the manifest's main clip is HEVC 2160p — computed lazily, not in the listing), last-folder memory.
 
-- [ ] **Step 1: Write failing tests**: `library-model` breadcrumbs for `drv5/[250226] きりの森` → `NAS › drv5 › [250226] きりの森`; sorting; E2E (`nas.spec.ts`, chromium, firefox, webkit — with `skipWithoutH264`): an owner code minted by `node server/dist/server.mjs owner-code` against the test server, opened as `/?pair=<code>`, pairs; the same with the code typed into the landing screen's field; browse to `syn` → `disc1` → plays to `playing`; `disc-menu` shows its menu; `disc-bdj` plays the playlist Java selects; `disc1.iso` plays; a pre-flight line shows `This connection:` with a number; Review Focus 2: delete a disc folder from a temp copy of the root between listing and opening → the error `This disc changed on the NAS. Open its folder again.`
+- [ ] **Step 1: Write failing tests**: `library-model` breadcrumbs for `media5/[250226] きりの森` → `NAS › media5 › [250226] きりの森`; sorting; E2E (`nas.spec.ts`, chromium, firefox, webkit — with `skipWithoutH264`): an owner code minted by `node server/dist/server.mjs owner-code` against the test server, opened as `/?pair=<code>`, pairs; the same with the code typed into the landing screen's field; browse to `syn` → `disc1` → plays to `playing`; `disc-menu` shows its menu; `disc-bdj` plays the playlist Java selects; `disc1.iso` plays; a pre-flight line shows `This connection:` with a number; Review Focus 2: delete a disc folder from a temp copy of the root between listing and opening → the error `This disc changed on the NAS. Open its folder again.`
 - [ ] **Step 2: Run** them. Expected: FAIL.
 - [ ] **Step 3: Implement.** Library screen: breadcrumbs, folder rows, disc rows with size and badges, 44 px rows on touch, "Rescanning…" when `scanning`. Pre-flight: probe once per open, show `This connection: N Mbps` and, when the main title's peak rate (CLPI `TS_recording_rate`, via the manifest's inlined clip info) exceeds it, `This disc needs about M Mbps; expect pauses.`; a Play button continues either way. Opening: `manifest` → `openRemote({ kind: 'remote', base, token, manifest })`.
 - [ ] **Step 4: Run** the unit tests and `npx playwright test nas`. Expected: PASS.

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - The repo is public: no real disc, series, folder or file names in any committed file, commit message, CI log or test name; made-up names only (A_NEW_ERA, RENTAL_FAMILY, TSURUNE may stay). Library results, the id→path map and copied disc files live only under `$BDJ_LIBRARY_DIR` (default `~/.cache/bluray-web/bdj-library`, outside the repo).
-- The NAS is read-only for 5e: `ssh mediaserver`, `ionice -c3 nice -n19` on every find/copy, never read `STREAM/*.m2ts` (stub streams), copies one at a time; never touch the `bluray-server` container or Caddy.
+- The NAS is read-only for 5e: `ssh your-nas`, `ionice -c3 nice -n19` on every find/copy, never read `STREAM/*.m2ts` (stub streams), copies one at a time; never touch the `bluray-server` container or Caddy.
 - `src/engine/disc/nas-api.ts`, `src/ui/nas/nas-client.ts`, `server/`, `rendezvous/`, `src/engine/disc/cors-policy.ts` belong to the NAS session: change only with its agreement.
 - Artifacts only through their scripts (`npm run bdj-classlib:build`, `bdj-trace:golden`, `vm-trace:golden`, `wasm:build`), CI diffs them; goldens never edited by hand; a divergence from libbluray is a porting bug.
 - Licensing per CLAUDE.md: OpenJDK-derived classes and intrinsics stay in `src/bdj-classlib/` (GPLv2+CE plus any third-party notice), libbluray-derived code in `src/engine` (NOTICE entry), no UI imports in `src/engine`.

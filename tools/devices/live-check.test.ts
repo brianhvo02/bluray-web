@@ -3,47 +3,47 @@ import { checkOrigin, clockLabel, countOf, libraryPath, ownTestFolder, parseLive
 
 const COMPOSE = `
     environment:
-      LIBRARY_ROOTS: drv0=/library-mnt/drv0/BDMVs,drv0-dl=/library-mnt/drv0/Downloads@Downloads,drv2-rips=/library-mnt/drv2/Rips@Rips
+      LIBRARY_ROOTS: media0=/library-mnt/media0/Movies,media0-dl=/library-mnt/media0/Downloads@Downloads,media2-extras=/library-mnt/media2/Rips@Rips
     volumes:
       - type: bind
-        source: /mnt/drv0
-        target: /library-mnt/drv0
+        source: /mnt/media0
+        target: /library-mnt/media0
         read_only: true
       - type: bind
-        source: /mnt/drv2
-        target: /library-mnt/drv2
+        source: /mnt/media2
+        target: /library-mnt/media2
 `;
 
 describe('live-check', () => {
   it('maps a host path to the library path of the root that holds it', () => {
     const roots = parseRoots(COMPOSE);
     expect(roots).toEqual([
-      { name: 'drv0', hostDir: '/mnt/drv0/BDMVs' },
-      { name: 'drv0-dl', hostDir: '/mnt/drv0/Downloads' },
-      { name: 'drv2-rips', hostDir: '/mnt/drv2/Rips' },
+      { name: 'media0', hostDir: '/mnt/media0/Movies' },
+      { name: 'media0-dl', hostDir: '/mnt/media0/Downloads' },
+      { name: 'media2-extras', hostDir: '/mnt/media2/Rips' },
     ]);
-    expect(libraryPath('/mnt/drv0/BDMVs/Some Disc', roots)).toBe('drv0/Some Disc');
-    expect(libraryPath('/mnt/drv0/Downloads/A Set/DISC1', roots)).toBe('drv0-dl/A Set/DISC1');
-    expect(libraryPath('/mnt/drv9/BDMVs/Elsewhere', roots)).toBeNull();
-    expect(libraryPath('/mnt/drv0/BDMVsX/Not a root', roots)).toBeNull();
+    expect(libraryPath('/mnt/media0/Movies/Some Disc', roots)).toBe('media0/Some Disc');
+    expect(libraryPath('/mnt/media0/Downloads/A Set/DISC1', roots)).toBe('media0-dl/A Set/DISC1');
+    expect(libraryPath('/mnt/media9/Movies/Elsewhere', roots)).toBeNull();
+    expect(libraryPath('/mnt/media0/MoviesX/Not a root', roots)).toBeNull();
   });
 
   it('places the test disc in a folder of its own and deletes only that folder', () => {
     const roots = parseRoots(COMPOSE);
     const f = testDiscFolder(roots[0]!, '0a1b2c3d');
-    expect(f).toEqual({ hostDir: '/mnt/drv0/BDMVs/zz-live-check-0a1b2c3d', libraryPath: 'drv0/zz-live-check-0a1b2c3d/disc-bdj-store' });
+    expect(f).toEqual({ hostDir: '/mnt/media0/Movies/zz-live-check-0a1b2c3d', libraryPath: 'media0/zz-live-check-0a1b2c3d/disc-bdj-store' });
     expect(() => testDiscFolder(roots[0]!, "x'; rm -rf /")).toThrow();
     expect(() => testDiscFolder({ name: 'odd', hostDir: '/srv/x y' }, '0a1b2c3d')).toThrow();
     expect(ownTestFolder(f.hostDir, '0a1b2c3d', roots)).toBe(true);
     expect(ownTestFolder(f.hostDir, 'ffffffff', roots)).toBe(false); // another run's folder
-    expect(ownTestFolder('/mnt/drv0/BDMVs', '0a1b2c3d', roots)).toBe(false);
-    expect(ownTestFolder('/mnt/drv0/BDMVs/zz-live-check-0a1b2c3d/disc-bdj-store', '0a1b2c3d', roots)).toBe(false);
-    expect(ownTestFolder('/mnt/drv0/BDMVs/zz-live-check-0a1b2c3d/..', '0a1b2c3d', roots)).toBe(false);
-    expect(ownTestFolder('/mnt/drv9/BDMVs/zz-live-check-0a1b2c3d', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/media0/Movies', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/media0/Movies/zz-live-check-0a1b2c3d/disc-bdj-store', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/media0/Movies/zz-live-check-0a1b2c3d/..', '0a1b2c3d', roots)).toBe(false);
+    expect(ownTestFolder('/mnt/media9/Movies/zz-live-check-0a1b2c3d', '0a1b2c3d', roots)).toBe(false);
   });
 
   it('reads map.tsv', () => {
-    expect(parseMap('id\tbdj\tfingerprint\tpath\nabc\t1\tf\t/mnt/drv0/BDMVs/X\n\n').get('abc')).toBe('/mnt/drv0/BDMVs/X');
+    expect(parseMap('id\tbdj\tfingerprint\tpath\nabc\t1\tf\t/mnt/media0/Movies/X\n\n').get('abc')).toBe('/mnt/media0/Movies/X');
   });
 
   it('reads the owner tooling output', () => {

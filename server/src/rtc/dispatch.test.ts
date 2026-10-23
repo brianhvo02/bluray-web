@@ -345,7 +345,7 @@ describe('serveChannel streams', () => {
       if (url.pathname === '/api/test/broken') {
         stream = new Readable({ read() {} });
         stream.push(Buffer.alloc(100));
-        setImmediate(() => stream!.destroy(new Error("ENOENT: no such file or directory, open '/mnt/drv/Starfall Wanderer/BDMV/STREAM/00001.m2ts'")));
+        setImmediate(() => stream!.destroy(new Error("ENOENT: no such file or directory, open '/mnt/media/Starfall Wanderer/BDMV/STREAM/00001.m2ts'")));
         return { status: 200, headers: {}, body: stream };
       }
       if (url.pathname === '/api/test/endless') {
@@ -367,7 +367,7 @@ describe('serveChannel streams', () => {
     const res = await conn.client.fetch('/api/test/broken', { headers: { Authorization: `Bearer ${token}` } });
     const failure = await res.arrayBuffer().then(() => null, (err: unknown) => err as Error);
     expect(failure?.message).toBe('read failed');
-    expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('/mnt/drv') }));
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('/mnt/media') }));
     expect(stream!.destroyed).toBe(true);
     error.mockRestore();
   });
