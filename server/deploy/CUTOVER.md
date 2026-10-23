@@ -38,16 +38,23 @@ Examples use made-up values: the NAS's ssh host `nas.example`, the Caddy site `h
 5. **Check what it wrote** on the NAS: `.env` has `PUBLIC_BASE`, `LIBRARY_ROOTS`, `LIBRARY_MOUNT`, `RENDEZVOUS_URL`,
    `RTC_LAN_ADDRESS`, `TRUSTED_PROXY` and the rest of the previous file's values, with your secrets untouched, and
    `compose.override.yaml` lists every drive mount (read-only) and the proxy's network as external. To see the service
-   the generic file will give, without writing or starting anything (the generic file goes in on stdin), and compare
-   it with the previous one:
+   the generic file will give, without writing or starting anything, and compare it with the previous one, print
+   only mounts, networks, ports and environment key names. Never print `docker compose config` as it is: it resolves
+   `.env` and `${...}` and would show `TMDB_API_KEY`, `DISCOGS_TOKEN` and the other secrets. `--no-interpolate` and
+   `--no-env-resolution` keep it from reading values, and the `jq` filter drops what is left of them (the generic file
+   goes in on stdin):
 
    ```sh
-   ssh nas.example 'cd ~/bluray-server && docker compose -f - -f compose.override.yaml config' < server/deploy/compose.yaml
-   ssh nas.example 'cd ~/bluray-server && docker compose -f compose.yaml.pre-generic config'
+   F='.services | map_values({image, ports, volumes, networks, env_keys: ((.environment // {}) | keys)})'
+   ssh nas.example 'cd ~/bluray-server && docker compose -f - -f compose.override.yaml config --no-interpolate --no-env-resolution --format json' < server/deploy/compose.yaml | jq -S "$F"
+   ssh nas.example 'cd ~/bluray-server && docker compose -f compose.yaml.pre-generic config --no-interpolate --no-env-resolution --format json' | jq -S "$F"
+   ssh nas.example "cd ~/bluray-server && sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env"
    ```
 
-   The same environment, mounts, network and UDP port in both; the generic one adds only the `/library` bind of
-   `LIBRARY_MOUNT`.
+   The last command lists the names in `.env` (names only). Do not paste any of this output into a chat, an issue or a
+   log, and if a value ever shows, treat that secret as exposed and replace it. Compare: the same mounts, networks and
+   UDP port in both, the same environment names (the generic file takes the `.env` names through `env_file`), and the
+   generic one adds only the `/library` bind of `LIBRARY_MOUNT`.
 
 6. **Deploy:** `server/deploy/deploy.sh`. It refuses while the migration is missing or half done (no `PUBLIC_BASE`,
    or `.env` migrated but no override, or the previous compose file with no override); run `--migrate` again then.
@@ -80,5 +87,7 @@ Examples use made-up values: the NAS's ssh host `nas.example`, the Caddy site `h
 11. **Make the image public:** on GitHub, the `bluray-server` package's settings, change its visibility to public (a new
     package is private), so self-hosters can pull `ghcr.io/brianhvo02/bluray-server`.
 
-If something goes wrong after step 6, the previous file is still on the NAS as `compose.yaml.pre-generic`:
-`cd ~/bluray-server && docker compose -f compose.yaml.pre-generic up -d` starts the service as it was.
+If something goes wrong after step 6, the previous file is still on the NAS as `compose.yaml.pre-generic`. This restores
+the previous configuration, not the previous image (the deploy replaced the image tag):
+`cd ~/bluray-server && docker compose -f compose.yaml.pre-generic [-f compose.gpu.yaml] up -d`, with `-f compose.gpu.yaml`
+only when `/dev/dri/renderD128` exists on the NAS.
