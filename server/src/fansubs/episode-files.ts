@@ -1,33 +1,40 @@
 /** Which episode a release's file name holds, and a movie's main file. Pure; original code. */
 import type { ToshoFile } from './tosho';
 
-const EXTRA_WORD = /\b(NC(OP|ED)\d*|OP\d*|ED\d*|PV|CM|Preview|Menu|Extras?|SP\d*|OVA)\b/i;
+const EXTRA_WORD = /\b(NC(OP|ED)\d*(v\d+)?|OP\d*(v\d+)?|ED\d*(v\d+)?|PV|CM|Preview|Menu|Extras?|SP\d*|OVA|Creditless|Clean[ .-]*(Opening|Ending|OP|ED))\b/i;
 const EXTRA_DIRS = new Set(['extras', 'bonus', 'nc', 'specials']);
 
 /** Patterns in order of confidence; each captures the episode number. */
 const PATTERNS: readonly RegExp[] = [
   /S\d{1,2}E(\d{1,3})(?!\d)/i,
-  /(?:^|[^A-Za-z])E(\d{2,3})(?!\d)/,
-  /第\s*(\d{1,3})\s*話/,
   / - (\d{1,3})(?:v\d+)?(?=[\s.[(]|$)/,
-  /(?:^|[\s_.])(\d{2,3})v\d+(?=[\s.[(_]|$)/,
+  /\bEP(?:isode)?\s*(\d{1,3})(?!\d)/i,
+  /(?:^|[^A-Za-z0-9])E(\d{2,3})(?!\d)/,
+  /第\s*(\d{1,3})\s*話/,
+  /(?:^|[\s.])(\d{2,3})v\d+(?=[\s.[(]|$)/,
   / (\d{1,3})(?:v\d+)? (?=[[(])/,
 ];
 
-function split(name: string): { dirs: string[]; base: string } {
-  const parts = name.split(/[\\/]/);
-  return { dirs: parts.slice(0, -1), base: parts[parts.length - 1] ?? '' };
+/** A release's CRC32 in brackets would read as an episode ("[5E12FA90]"). */
+const CRC = /[[(][0-9A-F]{8}[\])]/gi;
+
+/** The name's last segment with underscores as spaces, so word boundaries work. */
+function baseOf(name: string): string {
+  return (name.split(/[\\/]/).pop() ?? '').replace(/_/g, ' ');
+}
+
+function dirsOf(name: string): string[] {
+  return name.split(/[\\/]/).slice(0, -1);
 }
 
 /** True for creditless openings and endings, previews, menus and anything under an extras folder. */
 export function isExtraFile(name: string): boolean {
-  const { dirs, base } = split(name);
-  return dirs.some((d) => EXTRA_DIRS.has(d.trim().toLowerCase())) || EXTRA_WORD.test(base);
+  return dirsOf(name).some((d) => EXTRA_DIRS.has(d.trim().toLowerCase())) || EXTRA_WORD.test(baseOf(name));
 }
 
 export function episodeOfFile(name: string): number | null {
   if (isExtraFile(name)) return null;
-  const base = split(name).base.replace(/\.[A-Za-z0-9]{2,4}$/, '');
+  const base = baseOf(name).replace(/\.[A-Za-z0-9]{2,4}$/, '').replace(CRC, '');
   for (const p of PATTERNS) {
     const m = p.exec(base);
     if (m) {
@@ -50,4 +57,10 @@ export function mainFile(files: readonly ToshoFile[]): ToshoFile | null {
   let best: ToshoFile | null = null;
   for (const f of files) if (!isExtraFile(f.name) && (best === null || f.size > best.size)) best = f;
   return best;
+}
+
+/** The `vN` of a file name (`05v2` is 2), 1 when it has none. */
+export function fileVersion(name: string): number {
+  const m = /\dv(\d+)(?=[\s.[(_]|$)/.exec(baseOf(name).replace(CRC, ''));
+  return m ? Number(m[1]) : 1;
 }

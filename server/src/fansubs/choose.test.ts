@@ -67,6 +67,14 @@ describe('choosePerEpisode', () => {
     const d = cand('best', [ep(1, [track('en')])]);
     expect(choosePerEpisode([d], [1], season, ['eng']).get(1)?.tracks).toHaveLength(1);
   });
+  it('prefers the highest version of an episode, then the larger file', () => {
+    const v1 = file(1, '[GroupA] Starfall Wanderer - 05 [BD].mkv', [track('eng')], 5000);
+    const v2 = file(2, '[GroupA] Starfall Wanderer - 05v2 [BD].mkv', [track('eng')], 1000);
+    expect(choosePerEpisode([cand('best', [v1, v2])], [5], season, ['eng']).get(5)?.file).toBe(v2);
+    const big = file(3, '[GroupA] Starfall Wanderer - 06 [BD].mkv', [track('eng')], 9000);
+    const small = file(4, 'Alt/[GroupA] Starfall Wanderer - 06 [BD].mkv', [track('eng')], 100);
+    expect(choosePerEpisode([cand('best', [small, big])], [6], season, ['eng']).get(6)?.file).toBe(big);
+  });
   it('picks a movie file from the first candidate that has one', () => {
     const none = cand('best', [file(1, 'Extras/NCOP.mkv', [track('eng')])]);
     const film = file(2, 'Starfall Wanderer Movie.mkv', [track('eng')], 9e9);
@@ -84,5 +92,8 @@ describe('normalizeLanguage', () => {
     expect(normalizeLanguage('en')).toBe('eng');
     expect(normalizeLanguage('zho')).toBe('chi');
     expect(normalizeLanguage('xyz')).toBe('xyz');
+    expect(normalizeLanguage('en-US')).toBe('eng');
+    expect(normalizeLanguage('pt-BR')).toBe('por');
+    expect(normalizeLanguage('zh-Hans')).toBe('chi');
   });
 });

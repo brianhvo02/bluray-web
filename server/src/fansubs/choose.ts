@@ -1,6 +1,6 @@
 /** Ranks a SeaDex entry's releases and picks, per episode, the first with ASS/SSA subtitles in the wanted languages. Pure; original code. */
 import type { SeaDexRank } from '../../../src/engine/disc/nas-api';
-import { episodeOfFile, mainFile, seasonEpisode } from './episode-files';
+import { episodeOfFile, fileVersion, mainFile, seasonEpisode } from './episode-files';
 import type { SeaDexEntry, SeaDexRelease } from './seadex';
 import type { ToshoFile, ToshoRelease, ToshoTrack } from './tosho';
 
@@ -22,7 +22,7 @@ const LANGUAGES: Readonly<Record<string, string>> = {
 };
 
 export function normalizeLanguage(code: string): string {
-  const c = code.trim().toLowerCase();
+  const c = (code.trim().toLowerCase().split(/[-_]/)[0]) ?? '';
   return LANGUAGES[c] ?? c;
 }
 
@@ -61,10 +61,13 @@ export function choosePerEpisode(
     for (const candidate of candidates) {
       const files = season === null
         ? [mainFile(candidate.release.files)]
-        : candidate.release.files.filter((f) => {
-            const n = episodeOfFile(f.name);
-            return n !== null && seasonEpisode(n, season) === episode;
-          });
+        : candidate.release.files
+            .filter((f) => {
+              const n = episodeOfFile(f.name);
+              return n !== null && seasonEpisode(n, season) === episode;
+            })
+            // The highest vN, then the larger file.
+            .sort((a, b) => fileVersion(b.name) - fileVersion(a.name) || b.size - a.size);
       let found: EpisodeChoice | null = null;
       for (const file of files) {
         if (file === null) continue;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { episodeOfFile, mainFile, seasonEpisode } from './episode-files';
+import { episodeOfFile, fileVersion, mainFile, seasonEpisode } from './episode-files';
 import type { ToshoFile } from './tosho';
 
 describe('episodeOfFile', () => {
@@ -16,6 +16,16 @@ describe('episodeOfFile', () => {
     ['[GroupA] Starfall Wanderer - PV1 [BD].mkv', null],
     ['Specials/[GroupA] Starfall Wanderer - 01.mkv', null],
     ['[GroupA] Starfall Wanderer [BD 1080p].mkv', null],
+    ['[GroupB] Starfall Wanderer - 05 (1080p) [5E12FA90].mkv', 5],
+    ['[GroupB] Starfall Wanderer - 05 [1080p][A1E23B4C].mkv', 5],
+    ['Creditless Opening 01 [BD].mkv', null],
+    ['Clean Ending 02 [BD].mkv', null],
+    ['[GroupA] Starfall Wanderer - NCOP1v2 [BD].mkv', null],
+    ['[GroupA] Starfall Wanderer - NCED2v3 [BD].mkv', null],
+    ['Starfall Wanderer EP05.mkv', 5],
+    ['Starfall Wanderer Episode 05.mkv', 5],
+    ['Starfall_Wanderer_-_05_[BD].mkv', 5],
+    ['Starfall_Wanderer_-_NCOP1_[BD].mkv', null],
   ];
   it.each(cases)('%s', (name, want) => expect(episodeOfFile(name)).toBe(want));
 });
@@ -37,5 +47,12 @@ describe('mainFile', () => {
   });
   it('is null with only extras', () => {
     expect(mainFile([f(1, 'Extras/a.mkv', 5)])).toBeNull();
+  });
+});
+
+describe('fileVersion', () => {
+  it('reads vN', () => {
+    expect(fileVersion('Starfall Wanderer - 05v2 [BD].mkv')).toBe(2);
+    expect(fileVersion('Starfall Wanderer - 05 [BD].mkv')).toBe(1);
   });
 });
