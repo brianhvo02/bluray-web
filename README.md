@@ -2,6 +2,8 @@
 
 Client-side Blu-ray (BDMV) player for the browser. Supported: Safari 26 (macOS, iOS, iPadOS), Chrome and Firefox on desktop (stable and stable−2), Chrome on Android. Firefox on Android is not supported. It works by touch, installs as an app and runs offline. Design: `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`.
 
+**Run your own server:** the NAS server that serves your discs to the player, in Docker, is described in [docs/self-hosting.md](docs/self-hosting.md).
+
 - `src/engine/` is derived from libbluray and licensed LGPL-2.1 (see `src/engine/LICENSE`).
 - `npm run dev`: dev server (cross-origin isolated).
 - `npm test`: unit tests. `npm run test:e2e`: Playwright (the `chromium` and `mobile-chromium` projects require Google Chrome; all projects need a working audio output; `--project=firefox|webkit|mobile-chromium` runs the others).
