@@ -57,8 +57,12 @@ linking to `LICENSE`) and a "Try it" badge linking to https://bluray-web.pages.d
    - *Ported from* (code this project translates): libbluray, libass, DoppioJVM and fdlibm, and anything else
      `src/engine/NOTICE` records.
    - *Bundled* (shipped inside the app, the server image or the Worker): the FFmpeg decoders in `audio.wasm`, FreeType,
-     the OpenJDK-derived class library with its Xerces, SAX and ICU parts, jellyfin-ffmpeg and Intel's media driver, Anime4K,
-     the bundled and fixture fonts, werift, and the runtime npm dependencies of `package.json`, `server/` and `rendezvous/`.
+     the OpenJDK-derived class library with its Xerces, SAX and ICU parts, jellyfin-ffmpeg and Intel's media driver,
+     Anime4K's two mode-definition files (`src/ui/anime4k/input-*.conf`, MIT; the shaders themselves are not shipped:
+     players import their own), DejaVu Sans (`src/engine/ass/default-font.ttf`, the ASS and BD-J fallback font), werift,
+     and the runtime npm dependencies of `package.json`, `server/` and `rendezvous/`.
+   - *Used in tests* (in the repo, not shipped): Anime4K's shaders (`fixtures/shaders/anime4k/`), the fonts in
+     `fixtures/ass/` and the BD-J test disc's font (`fixtures/bdj-fonts/`), each with its licence.
    - *Services and data*: AniList, TMDB (with TMDB's required notice: "This product uses the TMDB API but is not endorsed
      or certified by TMDB."), TheDiscDB, MusicBrainz, the Cover Art Archive, Discogs, and Cloudflare (Pages, Workers,
      Durable Objects, TURN).
@@ -114,7 +118,7 @@ navigations) and add no third-party resources.
 - C4. Badges: six workflow statuses (CI, WASM, VM trace, BD-J trace, BD-J class library, ASS trace), licence, and a
   "Try it" link; no preview-deploy badge.
 - C5. Pages are converted at build time, not in the browser.
-- C9. "Built on" groups entries as ported, bundled, services and data, tools; dev-only npm packages appear only through
+- C9. "Built on" groups entries as ported, bundled, used in tests, services and data, tools; dev-only npm packages appear only through
   their tool (no list of every transitive package).
 - C6. `/help` and `/help/<page>` are real paths served by the app shell, the same way `/nas/…` deep links already are on
   Cloudflare Pages and offline through the service worker; the builder confirms a deep `/help/nas` link loads on a preview
