@@ -154,3 +154,42 @@ jobs:
           # wrangler-action's default (3.90.0) conflicts with @cloudflare/workers-types 5 in package.json
           wranglerVersion: '4.148.0'
           command: pages deploy dist --project-name=bluray-web --branch=main
+
+  # The NAS server image, for people who self-host it (docs/self-hosting.md). The package is made public once in GitHub's
+  # package settings. Its own job, so a failure here never blocks the site deploys.
+  publish-server-image:
+    name: Publish the server image
+    needs: [check, e2e, ass]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-server-image
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11.19.0
+      - run: npm ci
+      - run: npm run server:build
+      - id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: server
+          file: server/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/brianhvo02/bluray-server:latest
+            ghcr.io/brianhvo02/bluray-server:${{ steps.sha.outputs.short }}

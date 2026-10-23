@@ -1,0 +1,25 @@
+Notices for the GPL parts of the bluray-server image
+
+The image (server/Dockerfile, https://github.com/brianhvo02/bluray-web) ships the NAS server, a bundled
+Node program, together with software that is not part of this project and is licensed on its own terms. The server
+runs it only as a child process (it never links to it).
+
+jellyfin-ffmpeg 7 (package jellyfin-ffmpeg7, GPL-3.0-or-later build)
+  Jellyfin's build of FFmpeg, installed under /usr/lib/jellyfin-ffmpeg, used for the quality levels. It is licensed
+  under the GNU General Public License version 3 or later; the full text is in the image at
+  /usr/share/common-licenses/GPL-3 and /usr/share/doc/jellyfin-ffmpeg7/copyright, which also lists FFmpeg's own and
+  the bundled libraries' licences.
+  Source: https://github.com/jellyfin/jellyfin-ffmpeg (the tag of the installed version, see the Dockerfile's
+  JELLYFIN_FFMPEG_VERSION), and Jellyfin's apt repository at https://repo.jellyfin.org/debian, which holds the
+  source packages of its builds. FFmpeg itself: https://ffmpeg.org.
+
+Intel media driver (iHD, intel-media-driver) and oneVPL runtime
+  Bundled in the jellyfin-ffmpeg package under /usr/lib/jellyfin-ffmpeg/lib, for hardware encoding through
+  Quick Sync. The media driver is MIT-licensed, with parts of its Gmmlib under MIT as well; the oneVPL runtime is
+  MIT-licensed.
+  Source: https://github.com/intel/media-driver (and https://github.com/intel/libvpl for the runtime).
+
+Other bundled libraries are listed in the jellyfin-ffmpeg repository's build scripts and their upstreams.
+
+The server's own notices (TheDiscDB's MIT data and the rest) are in /app/NOTICE. To obtain the source of any GPL
+part for three years from your receipt of the image, use the locations above.
