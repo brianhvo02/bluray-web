@@ -24,7 +24,7 @@ const ENTRY = {
             dualAudio: false,
             tags: ['BD'],
             url: 'https://nyaa.example/view/1',
-            infoHash: '7a2c000000000000000000000000000000007d6',
+            infoHash: '7A2C00000000000000000000000000000000AbCd',
             files: [{ name: '[GroupA] Starfall Wanderer 01.mkv', length: 9637755340 }],
           },
           { tracker: 'AB', releaseGroup: 'GroupB', isBest: false, dualAudio: true, url: '/torrents.php?id=1', infoHash: '<redacted>', files: [] },
@@ -45,6 +45,7 @@ describe('SeaDex', () => {
     expect(entry?.releases[0]!.isBest).toBe(true);
     expect(entry?.releases[0]!.group).toBe('GroupA');
     expect(entry?.releases[0]!.files[0]!.name).toBe('[GroupA] Starfall Wanderer 01.mkv');
+    expect(entry?.releases[0]!.infoHash).toBe('7a2c00000000000000000000000000000000abcd');
     expect(entry?.releases[1]!.infoHash).toBeNull();
     expect(entry?.releases[1]!.tags).toEqual([]);
   });
