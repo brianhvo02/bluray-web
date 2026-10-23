@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { BUILT_IN_SETS, importedName, missingLabel, parseInputConf, resolveSets } from './shader-sets';
 
@@ -107,5 +108,14 @@ describe('missingLabel', () => {
   it('formats', () => {
     expect(missingLabel(['a'])).toBe('missing: a');
     expect(missingLabel(['a', 'b', 'c'])).toBe('missing: a +2 more');
+  });
+});
+
+describe('BUILT_IN_SETS with the bundled files', () => {
+  it('every built-in is available when the bundled names count as present', () => {
+    const bundled = new Set(readdirSync('src/ui/anime4k/shaders').filter((f) => f.endsWith('.glsl')));
+    const r = resolveSets([], bundled);
+    expect(r).toHaveLength(12);
+    expect(r.every((e) => e.available)).toBe(true);
   });
 });

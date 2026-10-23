@@ -151,6 +151,9 @@ semantics followed, not ported
 Anime4K (https://github.com/bloc97/Anime4K, commit 7684e95), MIT License
   Copyright (c) 2019 bloc97
   The built-in Anime4K mode lists are copied from md/Template/GLSL_*/input.conf.
+  The app ships unmodified copies of the 14 shaders those lists name, from
+  release v4.0.1 (commit 4029bf7, identical to them at 7684e95), in
+  src/ui/anime4k/shaders/ (README there; LICENSE in src/ui/anime4k/).
   fixtures/shaders/anime4k/ holds unmodified copies of its shaders, with its
   LICENSE next to them.
 

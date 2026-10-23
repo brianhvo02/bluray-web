@@ -4,3 +4,5 @@ https://github.com/bloc97/Anime4K at commit 7684e9586f8dcc738af08a1cdceb024cc184
 - `input-hq.conf`: `md/Template/GLSL_Mac_Linux_High-end/input.conf`
 - `input-fast.conf`: `md/Template/GLSL_Mac_Linux_Low-end/input.conf`
 - `LICENSE`: `LICENSE`
+
+The shaders these templates name are in `shaders/` (release v4.0.1; see the README there).

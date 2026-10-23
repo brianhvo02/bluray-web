@@ -14,6 +14,7 @@ import { placeMinDurationUs } from './place-model';
 import { idbPlaceStore } from './place-store';
 import { PlayerScreen } from './PlayerScreen';
 import { TOUCH_LOG, TouchLog } from './TouchLog';
+import { bundledAnime4k } from './bundled-shaders';
 import { idbShaderLibrary } from './shader-library';
 import { ShaderModel } from './shader-model';
 import { isWaitingWorker, reloadAction, shouldPromptUpdate } from './update-prompt';
@@ -82,7 +83,7 @@ function takePairLink(): PairLink | undefined {
 let sharedShaders: ShaderModel | null = null;
 
 function getShaderModel(controller: PlayerController): ShaderModel {
-  sharedShaders ??= new ShaderModel(idbShaderLibrary(), (set) => controller.setShaderSet(set));
+  sharedShaders ??= new ShaderModel(idbShaderLibrary(), (set) => controller.setShaderSet(set), bundledAnime4k());
   return sharedShaders;
 }
 

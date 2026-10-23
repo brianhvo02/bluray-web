@@ -286,8 +286,25 @@ test('Manage dialog takes focus and gives it back to the Shaders button', async 
   await expect(page.getByTestId('shader-menu')).toBeFocused();
 });
 
+test('lists the built-in Anime4K modes ready to pick with nothing imported', async ({ page }) => {
+  await openDisc1(page);
+  await page.getByTestId('player').hover();
+  await page.getByTestId('shader-menu').click();
+  for (const mode of ['A', 'B', 'C', 'A+A', 'B+B', 'C+A']) {
+    for (const tier of ['HQ', 'Fast']) await expect(page.getByTestId(`shader-set-Anime4K: Mode ${mode} (${tier})`)).toBeEnabled();
+  }
+});
+
 test.describe('on a GPU', () => {
   test.skip(!GPU, 'set SHADERS_GPU=1 to run the Anime4K and sync tests');
+
+  test('runs a built-in Anime4K mode with nothing imported', async ({ page }) => {
+    await openDisc1(page);
+    await chooseSet(page, 'Anime4K: Mode A (Fast)');
+    await expectShaded(page, 'Anime4K: Mode A (Fast)');
+    expect((await shaderTelemetry(page))!.shader!.passesRun).toBeGreaterThan(0);
+    await expect(page.getByTestId('shader-report')).toHaveCount(0);
+  });
 
   test('runs Anime4K Mode A (Fast)', async ({ page }) => {
     await openDisc1(page);

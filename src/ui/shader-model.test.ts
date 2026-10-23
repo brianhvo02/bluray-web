@@ -4,6 +4,8 @@ import type { ShaderSetData } from '../engine/protocol';
 import type { ShaderSetDef } from './shader-sets';
 import type { ShaderLibrary, StoredShaderFile } from './shader-library';
 import { ShaderModel } from './shader-model';
+import type { BundledShaders } from './bundled-shaders';
+import { BUILT_IN_SETS } from './shader-sets';
 
 const DIR = 'fixtures/shaders/anime4k';
 const MODE_A = 'Anime4K: Mode A (Fast)';
@@ -36,10 +38,20 @@ function memoryLibrary(): ShaderLibrary & { store: Map<string, StoredShaderFile>
 
 const fixture = (name: string, text = readFileSync(`${DIR}/${name}`, 'utf8')) => ({ name, text: async () => text, size: text.length });
 const modeAFiles = () => MODE_A_FILES.map((n) => fixture(n));
-const setup = () => {
+const ALL_BUNDLED = [...new Set(BUILT_IN_SETS.flatMap((s) => s.files))];
+/** A bundled set whose files read as `bundled:<name>`; `fail` names files whose load rejects. */
+function fakeBundled(names: readonly string[] = [], fail: readonly string[] = []) {
+  const load = vi.fn(async (name: string) => {
+    if (fail.includes(name)) throw new Error(`fetch failed for ${name}`);
+    return `bundled:${name}`;
+  });
+  const bundled: BundledShaders = { names: new Set(names), load };
+  return { bundled, load };
+}
+const setup = (bundled: BundledShaders = fakeBundled().bundled) => {
   const lib = memoryLibrary();
   const apply = vi.fn<(s: ShaderSetData | null) => void>();
-  const model = new ShaderModel(lib, apply, () => 100);
+  const model = new ShaderModel(lib, apply, bundled, () => 100);
   return { lib, apply, model };
 };
 
@@ -224,4 +236,65 @@ describe('ShaderModel', () => {
     }
     expect(seen).toEqual([MODE_A, renamed, null, MODE_A]);
   });
+
+  describe('with bundled files', () => {
+    it('built-in modes are available with nothing imported', async () => {
+      const { model } = setup(fakeBundled(ALL_BUNDLED).bundled);
+      await model.load();
+      const sets = model.getSnapshot().sets;
+      expect(sets).toHaveLength(12);
+      expect(sets.every((s) => s.available)).toBe(true);
+      expect(model.getSnapshot().files).toEqual([]);
+    });
+
+    it('an imported file wins over the bundled one', async () => {
+      const { bundled, load } = fakeBundled(ALL_BUNDLED);
+      const { model, apply } = setup(bundled);
+      await model.load();
+      await model.add([fixture('Anime4K_Restore_CNN_M.glsl', readFileSync(`${DIR}/Anime4K_Restore_CNN_M.glsl`, 'utf8') + '\n// MINE\n')]);
+      await model.select(MODE_A);
+      const arg = apply.mock.calls.at(-1)![0]!;
+      expect(arg.files.map((f) => f.name)).toEqual(MODE_A_FILES);
+      expect(arg.files[1]!.source).toMatch(/\/\/ MINE/);
+      expect(arg.files[0]!.source).toBe('bundled:Anime4K_Clamp_Highlights.glsl');
+      expect(load.mock.calls.map(([n]) => n)).not.toContain('Anime4K_Restore_CNN_M.glsl');
+    });
+
+    it('bundled files load only when a mode is applied', async () => {
+      const { bundled, load } = fakeBundled(ALL_BUNDLED);
+      const { model, apply } = setup(bundled);
+      expect(load).not.toHaveBeenCalled();
+      await model.load();
+      expect(load).not.toHaveBeenCalled();
+      await model.select(MODE_A);
+      expect([...new Set(load.mock.calls.map(([n]) => n))].sort()).toEqual([...MODE_A_FILES].sort());
+      expect(apply.mock.calls.at(-1)![0]!.files.map((f) => f.source)).toEqual(MODE_A_FILES.map((n) => `bundled:${n}`));
+      load.mockClear();
+      await model.select(null);
+      await model.select(MODE_A);
+      expect(load).not.toHaveBeenCalled(); // kept in memory once loaded
+    });
+
+    it('a saved built-in mode loads its bundled files at start', async () => {
+      const { bundled, load } = fakeBundled(ALL_BUNDLED);
+      const { lib, model, apply } = setup(bundled);
+      lib.sel.v = MODE_A;
+      await model.load();
+      expect(apply.mock.calls.at(-1)![0]!.name).toBe(MODE_A);
+      expect(new Set(load.mock.calls.map(([n]) => n)).size).toBe(MODE_A_FILES.length);
+    });
+
+    it('a bundled file that fails to load leaves the mode unavailable with a report', async () => {
+      const { bundled } = fakeBundled(ALL_BUNDLED, ['Anime4K_Upscale_CNN_x2_S.glsl']);
+      const { model, apply } = setup(bundled);
+      await model.load();
+      await model.select(MODE_A);
+      expect(apply.mock.calls.every(([a]) => a === null)).toBe(true);
+      const s = model.getSnapshot();
+      expect(s.selected).toBe(MODE_A);
+      expect(s.selectedMissing).toBe(true);
+      expect(s.report?.rejected).toEqual([{ name: 'Anime4K_Upscale_CNN_x2_S.glsl', reason: expect.stringMatching(/could not be loaded/) }]);
+    });
+  });
 });
+

@@ -193,10 +193,13 @@ export function ShaderMenu({ model, state, status, dropWarning, onOpenChange }: 
           <button type="button" aria-label="Dismiss" onClick={() => model.dismissReport()}>
             ×
           </button>
-          <div>
-            Added {report.added.length} {report.added.length === 1 ? 'file' : 'files'}
-            {report.importedSets > 0 && `, imported ${report.importedSets} ${report.importedSets === 1 ? 'set' : 'sets'}`}.
-          </div>
+          {/* A bundled file that failed to load is reported with nothing added. */}
+          {(report.added.length > 0 || report.importedSets > 0 || report.rejected.length === 0) && (
+            <div>
+              Added {report.added.length} {report.added.length === 1 ? 'file' : 'files'}
+              {report.importedSets > 0 && `, imported ${report.importedSets} ${report.importedSets === 1 ? 'set' : 'sets'}`}.
+            </div>
+          )}
           {report.rejected.map((r) => (
             <div key={r.name} className="shader-error">
               {r.name}: {r.reason}

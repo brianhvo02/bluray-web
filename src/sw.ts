@@ -67,6 +67,36 @@ registerRoute(
   ),
 );
 
+/** The runtime cache for bundled shader files (Anime4K), which are not precached. */
+const SHADER_CACHE = 'bundled-shaders';
+
+/** Vite's name for a built asset, `<name>-<8-character hash>.glsl`, without its hash. */
+function shaderKey(pathname: string): string {
+  const file = pathname.slice(pathname.lastIndexOf('/') + 1);
+  return file.replace(/-[\w-]{8}\.glsl$/, '.glsl');
+}
+
+// Bundled shader files are fetched only when a player picks a mode that uses them, so they are left out of the precache
+// (see vite.config.ts) and kept here after their first fetch, cache first: their URLs carry a content hash. A newer
+// build's copy of a file replaces the older one.
+registerRoute(
+  ({ url, request }) => request.method === 'GET' && url.origin === self.location.origin && /^\/assets\/[^/]+\.glsl$/.test(url.pathname),
+  async ({ request, url }) => {
+    const cache = await caches.open(SHADER_CACHE);
+    const hit = await cache.match(request);
+    if (hit) return withIsolation(hit);
+    const response = await fetch(request);
+    if (response.ok) {
+      const key = shaderKey(url.pathname);
+      for (const old of await cache.keys()) {
+        if (shaderKey(new URL(old.url).pathname) === key) await cache.delete(old);
+      }
+      await cache.put(request, response.clone());
+    }
+    return withIsolation(response);
+  },
+);
+
 addPlugins([{ handlerWillRespond: async ({ response }) => withIsolation(response) }]);
 precacheAndRoute(self.__WB_MANIFEST);
 
