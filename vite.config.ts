@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 import type { Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { defineConfig } from 'vitest/config';
+import { helpPages } from './vite/markdown.ts';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 
@@ -38,6 +39,7 @@ const isolateEveryResponse: Plugin = {
 export default defineConfig({
   plugins: [
     isolateEveryResponse,
+    helpPages(root),
     react(),
     VitePWA({
       strategies: 'injectManifest',
@@ -68,7 +70,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'unit',
-          include: ['src/**/*.test.ts', 'tests/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts', 'tools/**/*.test.ts', 'server/**/*.test.ts', 'rendezvous/**/*.test.ts'],
+          include: ['src/**/*.test.ts', 'tests/*.test.ts', 'tests/vm-trace/**/*.test.ts', 'tests/ass-trace/**/*.test.ts', 'tests/bdj/**/*.test.ts', 'tools/**/*.test.ts', 'server/**/*.test.ts', 'rendezvous/**/*.test.ts', 'vite/**/*.test.ts'],
           sequence: { groupOrder: 0 },
         },
       },

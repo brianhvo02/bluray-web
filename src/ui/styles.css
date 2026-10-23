@@ -445,3 +445,54 @@ a { color: #6ea8ff; }
 .level-option { display: flex; align-items: center; gap: 6px; }
 .level-option input:disabled + span { opacity: 0.5; }
 .level-note { color: #9a9aa5; }
+
+/* Help pages (/help): the docs/*.md pages, converted at build time. The app's dark palette, and a light one when the
+   system asks for it, since these are pages to read. */
+.landing-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.landing-head h1 { margin: 0; }
+.help-link { flex: none; }
+.titles-actions .help-link { align-self: center; padding: 6px 4px; }
+.help {
+  --help-bg: #0b0b0d; --help-fg: #e8e8ea; --help-muted: #8a8a96; --help-link: #6ea8ff;
+  --help-rule: #2a2a30; --help-code-bg: #18181d; --help-code-border: #2a2a30;
+  color-scheme: dark; min-height: 100%; box-sizing: border-box; background: var(--help-bg); color: var(--help-fg);
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left));
+}
+@media (prefers-color-scheme: light) {
+  .help {
+    --help-bg: #ffffff; --help-fg: #1d1d22; --help-muted: #5c5c66; --help-link: #1f5fcc;
+    --help-rule: #dcdce2; --help-code-bg: #f3f3f6; --help-code-border: #dcdce2;
+    color-scheme: light;
+  }
+}
+.help a { color: var(--help-link); }
+.help a:focus-visible, .help h1[tabindex='-1']:focus-visible { outline: 2px solid var(--help-link); outline-offset: 2px; }
+.help h1[tabindex='-1']:focus:not(:focus-visible) { outline: none; }
+.help-head { max-width: 1040px; margin: 0 auto 16px; }
+.help-home { font-weight: 600; text-decoration: none; }
+.help-layout { max-width: 1040px; margin: 0 auto; display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 32px; align-items: start; }
+.help-nav { position: sticky; top: 16px; }
+.help-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.help-nav a { display: block; padding: 6px 10px; border-radius: 6px; text-decoration: none; }
+.help-nav a[aria-current='page'] { background: var(--help-code-bg); color: var(--help-fg); font-weight: 600; }
+.help-page { min-width: 0; max-width: 72ch; line-height: 1.6; overflow-wrap: anywhere; }
+.help-page h1 { margin: 0 0 16px; font-size: 2em; line-height: 1.2; }
+.help-page h2 { margin: 32px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--help-rule); font-size: 1.4em; }
+.help-page h3 { margin: 24px 0 8px; font-size: 1.15em; }
+.help-page :is(h1, h2, h3, h4) { scroll-margin-top: 16px; }
+.help-page code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; background: var(--help-code-bg); border: 1px solid var(--help-code-border); border-radius: 4px; padding: 0 4px; }
+.help-page pre { background: var(--help-code-bg); border: 1px solid var(--help-code-border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; line-height: 1.45; }
+.help-page pre code { background: none; border: none; padding: 0; overflow-wrap: normal; }
+.help-page table { border-collapse: collapse; display: block; overflow-x: auto; }
+.help-page :is(th, td) { border: 1px solid var(--help-rule); padding: 6px 10px; text-align: left; vertical-align: top; }
+.help-page blockquote { margin: 0; padding: 0 14px; border-left: 3px solid var(--help-rule); color: var(--help-muted); }
+.help-page hr { border: none; border-top: 1px solid var(--help-rule); }
+.help-index { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
+.help-index a { font-size: 1.15em; font-weight: 600; }
+.help-index p { margin: 4px 0 0; color: var(--help-muted); }
+@media (max-width: 720px) {
+  .help-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .help-nav { position: static; }
+  .help-nav ul { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+  .help-nav a { padding: 6px 10px; border: 1px solid var(--help-rule); border-radius: 999px; }
+}

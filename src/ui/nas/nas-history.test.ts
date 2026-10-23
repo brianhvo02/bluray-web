@@ -182,4 +182,19 @@ describe('NasHistory', () => {
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
+
+  it('pushes a help path, with its hash, and the route outside /nas is null', () => {
+    const { win, h } = make('/');
+    const seen = vi.fn();
+    h.subscribe(seen);
+    h.pushPath('/help/nas#pairing');
+    expect(win.entries.map((e) => e.url)).toEqual(['/', '/help/nas#pairing']);
+    expect(h.depth()).toBe(1);
+    expect(h.route()).toBeNull();
+    expect(seen).toHaveBeenCalledTimes(1);
+    h.pushPath('/help/nas#pairing');
+    expect(win.entries).toHaveLength(2);
+    h.pushPath('/help/nas');
+    expect(win.entries).toHaveLength(3);
+  });
 });

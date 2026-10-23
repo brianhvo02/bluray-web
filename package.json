@@ -52,6 +52,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "esbuild": "0.28.2",
     "fake-indexeddb": "^6.2.5",
+    "marked": "18.1.0",
     "pixelmatch": "^7.1.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",

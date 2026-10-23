@@ -37,8 +37,16 @@ export class NasHistory {
   }
 
   push(route: NasRoute | null): void {
-    const url = pathOf(route);
-    if (this.isCurrent(url)) return;
+    this.pushUrl(pathOf(route), false);
+  }
+
+  /** Pushes a path outside the NAS routes (the help pages), hash included. */
+  pushPath(path: string): void {
+    this.pushUrl(path, true);
+  }
+
+  private pushUrl(url: string, withHash: boolean): void {
+    if (this.isCurrent(url, withHash)) return;
     if (!this.attempt(() => this.win.history.pushState({ ...this.stateObject(), nasDepth: this.depth() + 1 }, '', url))) return;
     this.changed('push');
   }
@@ -100,10 +108,10 @@ export class NasHistory {
     return typeof s === 'object' && s !== null ? (s as Record<string, unknown>) : {};
   }
 
-  private isCurrent(url: string): boolean {
+  private isCurrent(url: string, withHash = false): boolean {
     const cur = new URL(this.win.location.href);
     const next = new URL(url, cur);
-    return next.pathname === cur.pathname && next.search === cur.search;
+    return next.pathname === cur.pathname && next.search === cur.search && (!withHash || next.hash === cur.hash);
   }
 }
 

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { createController } from '../player/create-controller';
 import type { PlayerController } from '../player/player-controller';
 import { PlatformSession } from '../player/platform-session';
+import { parseHelpPath } from './help/help-pages';
 import { LandingScreen } from './LandingScreen';
 import { levelSessionOf } from './nas/level-session';
 import { NasClient } from './nas/nas-client';
@@ -18,6 +19,9 @@ import { bundledAnime4k } from './bundled-shaders';
 import { idbShaderLibrary } from './shader-library';
 import { ShaderModel } from './shader-model';
 import { isWaitingWorker, reloadAction, shouldPromptUpdate } from './update-prompt';
+
+/** The help pages load on their first visit, so the documentation stays out of the main bundle. */
+const HelpScreen = lazy(() => import('./help/HelpScreen').then((m) => ({ default: m.HelpScreen })));
 
 let sharedController: PlayerController | null = null;
 
@@ -149,6 +153,8 @@ export function App(): ReactElement {
   const [history] = useState(getNasHistory);
   // Kept subscribed for the app's life, so the history sees every popstate (its direction drives focus).
   useNasRoute(history);
+  const here = new URL(history.getSnapshot());
+  const help = parseHelpPath(here.pathname);
   const [playingRoute] = useState(() => new PlayingRoute(history, () => performance.now()));
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useEffect(() => {
@@ -189,7 +195,11 @@ export function App(): ReactElement {
     <div className="app" data-testid="app">
       {TOUCH_LOG && <TouchLog />}
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
-      {snapshot.playlists.length === 0 ? (
+      {snapshot.playlists.length === 0 && help !== null ? (
+        <Suspense fallback={<p className="status">Loading…</p>}>
+          <HelpScreen history={history} slug={help.slug} hash={here.hash} />
+        </Suspense>
+      ) : snapshot.playlists.length === 0 ? (
         <LandingScreen controller={controller} snapshot={snapshot} nas={nas} places={places} history={history} playingRoute={playingRoute} pairLink={pairLink} onPairLinkSpent={spendPairLink} />
       ) : (
         <PlayerScreen

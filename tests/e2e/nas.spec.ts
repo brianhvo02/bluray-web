@@ -378,6 +378,15 @@ test('a code typed with another rendezvous is looked up there', async ({ page, b
   expect(lookups).toEqual([]);
 });
 
+test("the title library's Help link opens the help pages, and Back returns to the library", async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await page.getByTestId('library-help').click();
+  await expect(page).toHaveURL(/\/help$/);
+  await expect(page.getByTestId('help-index')).toBeVisible();
+  await page.goBack();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+});
+
 test("plays disc1 from the NAS after a pre-flight showing this connection's throughput", async ({ page, browserName }) => {
   await openLibrary(page, browserName);
   await skipWithoutH264(page, { realtime: false });

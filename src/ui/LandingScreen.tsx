@@ -7,6 +7,7 @@ import { PairScreen } from './nas/PairScreen';
 import type { PairLink } from './nas/pair-link';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
+import { AppLink } from './help/HelpLink';
 import { useNasRoute, type NasHistory } from './nas/nas-history';
 import { nasRoutePath, type NasRoute } from './nas/nas-route';
 import type { PlayingRoute } from './nas/playing-route';
@@ -451,7 +452,12 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
 
   return (
     <main className="landing" data-testid="landing">
-      <h1>Blu-ray Player</h1>
+      <header className="landing-head">
+        <h1>Blu-ray Player</h1>
+        <AppLink history={history} to="/help" className="help-link" testId="help-link">
+          Help
+        </AppLink>
+      </header>
       {!capabilities.core.ok && (
         <div className="error-banner" role="alert">
           This browser is missing: {capabilities.core.missing.join(', ')}. Use Chrome, Edge, Safari or Firefox (desktop), or Chrome on Android.
