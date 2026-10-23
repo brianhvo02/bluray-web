@@ -6,6 +6,8 @@ export interface NasPairing {
   readonly base: string;
   /** The NAS's signalling id for WebRTC; absent on a pairing stored before WebRTC. */
   readonly nasId?: string;
+  /** The rendezvous Worker this pairing was made through, for its signalling; absent means the app's built-in Worker. */
+  readonly rendezvousUrl?: string;
   readonly deviceId: string;
   readonly deviceName: string;
   /** The person this device belongs to; absent on a pairing stored before people. */

@@ -998,6 +998,91 @@ describe('NasClient over WebRTC', () => {
   });
 });
 
+describe('NasClient pairing links', () => {
+  /** The app's own Worker in these tests, which the fake server doesn't answer: a lookup there fails. */
+  const BUILT_IN = 'https://builtin.example';
+  const counting = (server: FakeServer): { fetch: typeof fetch; lookups: string[] } => {
+    const lookups: string[] = [];
+    const counted = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith('/codes/lookup')) lookups.push(String(input));
+      return server.fetch(input, init);
+    }) as typeof server.fetch;
+    return { fetch: counted, lookups };
+  };
+
+  it('pair with nas skips the lookup', async () => {
+    const server = fakeServer();
+    const { fetch, lookups } = counting(server);
+    const store = memoryStore();
+    // a link with nas pairs even when the app has no Worker
+    const nas = new NasClient({ fetch, subtle: crypto.subtle, store, now, rendezvousUrl: undefined });
+    expect(nas.canPairByCode).toBe(false);
+    await nas.pair(await server.code(), 'iPad', { nas: BASE });
+    expect(lookups).toEqual([]);
+    expect(store.value).toMatchObject({ base: BASE, deviceName: 'iPad', owner: true });
+    expect(store.value).not.toHaveProperty('nasId');
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+    expect(server.hits['pair/redeem']).toBe(1);
+    expect((await nas.library('drv5')).folders).toHaveLength(1);
+  });
+
+  it('pair with rv looks up at rv and stores it', async () => {
+    const server = fakeServer();
+    const { fetch, lookups } = counting(server);
+    const store = memoryStore();
+    const nas = new NasClient({ fetch, subtle: crypto.subtle, store, now, rendezvousUrl: BUILT_IN });
+    await nas.pair(await server.code(), 'iPad', { rv: `${RENDEZVOUS}/` });
+    expect(lookups).toEqual([`${RENDEZVOUS}/codes/lookup`]);
+    expect(store.value).toMatchObject({ base: BASE, rendezvousUrl: RENDEZVOUS });
+  });
+
+  it('pair with rv naming the built-in Worker stores no Worker of its own', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad', { rv: RENDEZVOUS });
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+  });
+
+  it("signalling uses the pairing's own Worker", async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const deps = { fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: BUILT_IN, openRtc: world.openRtc };
+    const nas = new NasClient(deps);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone', { rv: RENDEZVOUS });
+    expect(store.value).toMatchObject({ base: '', nasId: NAS_ID, rendezvousUrl: RENDEZVOUS });
+    expect(world.opened[0]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS });
+    await nas.me();
+    expect(world.opened[1]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS });
+    // after a reload too
+    const again = new NasClient(deps);
+    await again.me();
+    expect(world.opened[2]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS });
+  });
+
+  it('an old pairing uses the built-in Worker', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    await rtcClient(server, world, store).pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+    const nas = new NasClient({ fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: BUILT_IN, openRtc: world.openRtc });
+    await nas.me();
+    expect(world.opened.at(-1)).toMatchObject({ nasId: NAS_ID, signallingUrl: BUILT_IN });
+  });
+
+  it("a nas link to a server that doesn't answer fails with noRoute", async () => {
+    const server = fakeServer();
+    server.nas = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    const store = memoryStore();
+    await expect(client(server, store).pair(await server.code(), 'iPad', { nas: BASE })).rejects.toThrow(NAS_MESSAGES.noRoute);
+    expect(store.value).toBeNull();
+  });
+});
+
 const PLACE_KEY = `f.${'C'.repeat(32)}`;
 const placeSettings: PlaceSettings = { audioLanguage: 'jpn', pgLanguage: null, textFiles: [], psr1: 1, psr2: 0, psr3: 1, textOn: false, textScale: 1, shaderSet: null, volume: 1, muted: false };
 const playbackPlace = (over: Partial<PlaybackPlace> = {}): PlaybackPlace => ({

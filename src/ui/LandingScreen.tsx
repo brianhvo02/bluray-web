@@ -4,6 +4,7 @@ import { checkCapabilities, showStorageHint } from './capabilities';
 import { NasNotFound } from './nas/NasNotFound';
 import { LibraryScreen, rememberedFolder } from './nas/LibraryScreen';
 import { PairScreen } from './nas/PairScreen';
+import type { PairLink } from './nas/pair-link';
 import { TitleLibrary } from './nas/TitleLibrary';
 import { NAS_MESSAGES, type NasClient } from './nas/nas-client';
 import { useNasRoute, type NasHistory } from './nas/nas-history';
@@ -121,13 +122,13 @@ interface LandingScreenProps {
   readonly history: NasHistory;
   /** Kept current by playback once a NAS pre-flight launches a disc. */
   readonly playingRoute: PlayingRoute;
-  /** A code from a `?pair=` link: the pair screen opens with it filled in. */
-  readonly pairCode?: string;
-  /** The `?pair=` code was used (or the NAS forgotten): it isn't offered again. */
-  readonly onPairCodeSpent?: () => void;
+  /** A `?pair=` link: the pair screen opens with its code filled in (after confirming a server or Worker it names). */
+  readonly pairLink?: PairLink;
+  /** The `?pair=` link was used (or the NAS forgotten): it isn't offered again. */
+  readonly onPairLinkSpent?: () => void;
 }
 
-export function LandingScreen({ controller, snapshot, nas, places, history, playingRoute, pairCode, onPairCodeSpent }: LandingScreenProps): ReactElement {
+export function LandingScreen({ controller, snapshot, nas, places, history, playingRoute, pairLink, onPairLinkSpent }: LandingScreenProps): ReactElement {
   const route = useNasRoute(history);
   /**
    * The screen a pre-flight launched its disc from, while the play route its Play pushed is shown: that screen stays
@@ -200,7 +201,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
 
   /** undefined while loading; null when this device isn't paired. */
   const [pairing, setPairing] = useState<NasPairing | null | undefined>(undefined);
-  const [pairRequested, setPairRequested] = useState(pairCode !== undefined);
+  const [pairRequested, setPairRequested] = useState(pairLink !== undefined);
   /**
    * The NAS view follows the address bar: no NAS route is closed, a folder route the folder browser, any other route
    * asks `me` whether the title library is open to this device (and whether it is an owner) first. A guest while the
@@ -274,7 +275,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
     shown !== null && (shown.kind === 'title' || shown.kind === 'season' || shown.kind === 'extras') && typeof access === 'object' && access !== null && !access.titles;
   const forgetNas = (): void => {
     setPairRequested(false);
-    onPairCodeSpent?.();
+    onPairLinkSpent?.();
     history.replace(null);
     nas.forget().then(loadPairing, (err: unknown) => setLocalError(err instanceof Error ? err.message : String(err)));
   };
@@ -546,10 +547,11 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
         (pairing === null || pairRequested ? (
           <PairScreen
             client={nas}
-            initialCode={pairCode}
+            link={pairLink}
+            onLinkDropped={onPairLinkSpent}
             onPaired={() => {
               setPairRequested(false);
-              onPairCodeSpent?.();
+              onPairLinkSpent?.();
               setLocalError(null);
               loadPairing();
             }}

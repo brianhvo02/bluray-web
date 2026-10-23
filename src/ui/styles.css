@@ -44,6 +44,9 @@ a { color: #6ea8ff; }
 .pair label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9em; }
 .pair label input { font-size: 1rem; }
 .pair label:first-child input { width: 12em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.05em; }
+.pair-other { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.pair-other .link-button { background: none; border: none; padding: 0; color: inherit; font: inherit; font-size: 0.9em; text-decoration: underline; cursor: pointer; }
+.pair-other label input { width: min(24em, calc(100vw - 80px)); }
 .library { display: flex; flex-direction: column; gap: 12px; }
 .library-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; }

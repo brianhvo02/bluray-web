@@ -3,7 +3,7 @@ import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, NAS_SERVER_KEY, OWNER_SERIES, PROJECTS, RENDEZVOUS_URL, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
+import { CHANGED_FOLDER, NAS_E2E_DIR, NAS_ENV, NAS_PORT, NAS_SERVER_KEY, OWNER_SERIES, PROJECTS, RENDEZVOUS_PORT, RENDEZVOUS_URL, SERVER, ownerDiscs, ownerStray, restoreChangedDisc } from './nas-server';
 import { discKeyOf } from '../../src/engine/disc/disc-key';
 import { normalizeCode } from '../../src/engine/disc/pairing-code';
 import { skipWithoutH264 } from './support';
@@ -174,9 +174,9 @@ async function countChannelBytes(page: Page): Promise<void> {
 
 const channelBytes = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __rtcBytes: number }).__rtcBytes);
 
-/** The rendezvous lookup as for a NAS whose HTTPS route this network can't use: its WebRTC route only. */
-async function webrtcOnlyLookup(page: Page): Promise<void> {
-  await page.route(`${RENDEZVOUS_URL}/codes/lookup`, async (route) => {
+/** The rendezvous lookup (at `worker`, the built-in one by default) as for a NAS whose HTTPS route this network can't use: its WebRTC route only. */
+async function webrtcOnlyLookup(page: Page, worker = RENDEZVOUS_URL): Promise<void> {
+  await page.route(`${worker}/codes/lookup`, async (route) => {
     if (route.request().method() !== 'POST') return route.continue();
     const response = await route.fetch();
     const body = (await response.json()) as { routes?: { webrtc?: unknown } };
@@ -252,6 +252,97 @@ test("pairs with a code typed into the landing screen's field", async ({ page, b
   await expect(page.getByTestId('pair-code')).toHaveValue(code);
   await page.getByTestId('pair-button').click();
   await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+});
+
+/** Counts the lookups that reach the app's built-in Worker, and refuses them. */
+async function refuseBuiltInLookups(page: Page): Promise<string[]> {
+  const lookups: string[] = [];
+  await page.route(`${RENDEZVOUS_URL}/codes/lookup`, (route) => {
+    lookups.push(route.request().url());
+    return route.abort('connectionrefused');
+  });
+  return lookups;
+}
+
+test("a link carrying the server's address pairs without the Worker", async ({ page, browserName }) => {
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  const lookups = await refuseBuiltInLookups(page);
+  const code = ownerCode();
+  await page.goto(`/?pair=${code}&nas=${encodeURIComponent(NAS_API)}`);
+  // nothing is sent before the person has seen where the link leads
+  await expect(page.getByTestId('pair-confirm')).toBeVisible();
+  await expect(page.getByTestId('pair-confirm-hosts')).toHaveText(`localhost:${NAS_PORT}`);
+  await expect(page.getByTestId('pair-confirm')).toContainText('Only continue if you trust them.');
+  const params = new URL(page.url()).searchParams;
+  expect(['pair', 'nas', 'rv'].filter((name) => params.has(name))).toEqual([]);
+  await page.getByTestId('pair-confirm-continue').click();
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+  await page.getByTestId('nas-open').click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+  expect(lookups).toEqual([]);
+});
+
+test('Cancel on a pairing link that names a server sends nothing to it', async ({ page }) => {
+  const sent: string[] = [];
+  await page.context().route(`http://localhost:${NAS_PORT}/**`, (route) => {
+    sent.push(route.request().url());
+    return route.abort('connectionrefused');
+  });
+  await page.goto(`/?pair=ABCD-EFGH-JKMN&nas=${encodeURIComponent(NAS_API)}`);
+  await page.getByTestId('pair-confirm-cancel').click();
+  await expect(page.getByTestId('pair-confirm')).toBeHidden();
+  await expect(page.getByTestId('pair-code')).toHaveValue('');
+  expect(sent).toEqual([]);
+});
+
+test('a link carrying another Worker pairs through it', async ({ page, browserName }) => {
+  test.skip(browserName === 'firefox' && process.platform === 'linux', 'Playwright Firefox on Linux gathers no ICE candidates');
+  test.setTimeout(120_000);
+  await libraryReady();
+  await allowLocalNetwork(page, browserName);
+  // The same stand-in Worker under another host: a Worker other than the app's built-in one (localhost) as far as the
+  // app can tell (ruling R1). The NAS answers over WebRTC only, so the pairing's signalling has to go through it.
+  const other = `http://127.0.0.1:${RENDEZVOUS_PORT}`;
+  const lookups = await refuseBuiltInLookups(page);
+  const httpsTried: string[] = [];
+  await page.context().route(`http://localhost:${NAS_PORT}/**`, (route) => {
+    httpsTried.push(route.request().url());
+    return route.abort('connectionrefused');
+  });
+  await webrtcOnlyLookup(page, other);
+  const sockets: string[] = [];
+  page.on('websocket', (ws) => sockets.push(new URL(ws.url()).host));
+  const code = serverOwnerCode();
+  await page.goto(`/?pair=${code}&rv=${encodeURIComponent(other)}`);
+  await expect(page.getByTestId('pair-confirm-hosts')).toHaveText(`127.0.0.1:${RENDEZVOUS_PORT}`);
+  await page.getByTestId('pair-confirm-continue').click();
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 30_000 });
+  // after a reload too: the pairing remembers its Worker
+  await page.reload();
+  await page.getByTestId('nas-open').click();
+  await expect(page.getByTestId('title-library')).toBeVisible({ timeout: 30_000 });
+  expect(sockets.length).toBeGreaterThanOrEqual(2); // the redeem's connection, then the library's
+  expect(new Set(sockets)).toEqual(new Set([`127.0.0.1:${RENDEZVOUS_PORT}`]));
+  expect(lookups).toEqual([]);
+  expect(httpsTried).toEqual([]);
+});
+
+test('a code typed with another rendezvous is looked up there', async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  const lookups = await refuseBuiltInLookups(page);
+  const code = ownerCode();
+  await page.goto('/');
+  await expect(page.getByTestId('pair-rendezvous-url')).toBeHidden();
+  await page.getByTestId('pair-other-rendezvous').click();
+  await page.getByTestId('pair-rendezvous-url').fill(`http://127.0.0.1:${RENDEZVOUS_PORT}/`);
+  await page.getByTestId('pair-code').fill(code);
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+  expect(lookups).toEqual([]);
 });
 
 test("plays disc1 from the NAS after a pre-flight showing this connection's throughput", async ({ page, browserName }) => {
