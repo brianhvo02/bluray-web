@@ -19,6 +19,7 @@ import {
   deinterlaces,
   IntervalDoesNotFit,
   encodeIntervalAt,
+  encodedFrameDts,
   epFramePts,
   frameTicks,
   probeScan,
@@ -95,6 +96,21 @@ describe('qsvBackend arguments', () => {
     ]);
   });
 
+  it('a VC-1 source is decoded in software and uploaded, since the QSV VC-1 decoder drops frames, at a lower priority', () => {
+    const input = argsInput(levelDefFor('phone-720', { height: 1080 }), { sourceCoding: CodingType.VC1 });
+    expect(qsvBackend.args(input)).toEqual([
+      '-hide_banner', '-nostats', '-loglevel', 'error', '-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw', '-copyts', '-c:v', 'vc1',
+      ...FILE_IN, ...MAP,
+      '-vf', 'format=nv12,hwupload=extra_hw_frames=64,scale_qsv=w=1280:h=720',
+      '-c:v', 'h264_qsv', '-preset', 'medium', '-b:v', '3000000', '-maxrate', '3750000', '-bufsize', '6000000',
+      ...TAIL,
+    ]);
+    expect(qsvBackend.nice?.(input)).toBe(10);
+    expect(qsvBackend.nice?.(argsInput(levelDefFor('phone-720', { height: 1080 })))).toBe(0);
+    // an interlaced VC-1 source is deinterlaced on the GPU after the upload
+    expect(qsvBackend.args({ ...input, interlaced: true })).toContain('format=nv12,hwupload=extra_hw_frames=64,vpp_qsv=deinterlace=2:w=1280:h=720');
+  });
+
   it('phone-720, and the standard-definition size for a 576-line source', () => {
     expect(qsvBackend.args(argsInput(levelDefFor('phone-720', { height: 1080 })))).toEqual([
       ...QSV_HEAD, ...FILE_IN, ...MAP,
@@ -151,7 +167,8 @@ describe('qsvBackend arguments', () => {
     expect(decoderOf(CodingType.AVC)).toBe('h264_qsv');
     expect(decoderOf(CodingType.HEVC)).toBe('hevc_qsv');
     expect(decoderOf(CodingType.MPEG2_VIDEO)).toBe('mpeg2_qsv');
-    expect(decoderOf(CodingType.VC1)).toBe('vc1_qsv');
+    // VC-1 is decoded in software: the QSV VC-1 decoder drops frames
+    expect(decoderOf(CodingType.VC1)).toBe('vc1');
     expect(() => qsvBackend.args(argsInput(level, { sourceCoding: CodingType.MPEG1_VIDEO }))).toThrow(/QSV decoder/);
   });
 
@@ -668,6 +685,67 @@ describe('encodeIntervalAt: tied to its run', () => {
     controller.abort();
     expect(await settled).toBeInstanceOf(Error);
     expect(signals).toContain('SIGKILL');
+  });
+});
+
+describe('ClipEncoder: the encoder process priority', () => {
+  it("lowers its ffmpeg's priority by the backend's nice value, and leaves it alone at 0", async () => {
+    const reniced: Array<[number, number]> = [];
+    let spawned: () => void = () => undefined;
+    const spawn = (() => {
+      setImmediate(() => spawned());
+      const child = Object.assign(new EventEmitter(), {
+        pid: 4242,
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        stdin: new PassThrough().resume(),
+        kill: (): boolean => {
+          setImmediate(() => child.emit('close', null, 'SIGKILL'));
+          return true;
+        },
+      });
+      return child;
+    }) as unknown as typeof nodeSpawn;
+    const intervals = intervalsOf('disc-levels');
+    const level = levelDefFor('h264-1080', { height: 1080 });
+    const base: ClipEncoderOptions = { input: { path: clipPath('disc-levels') }, intervals, videoPid: VIDEO, sourceCoding: CodingType.AVC, level, interlaced: false, hdr: false, frameTicks: 3750, spawn, setPriority: (pid, nice) => reniced.push([pid, nice]) };
+    const niced: EncoderBackend = { ...x264Backend, nice: () => 10 };
+    for (const [backend, expected] of [[niced, [[4242, 10]]], [x264Backend, []]] as const) {
+      reniced.length = 0;
+      const encoder = new ClipEncoder(backend, base);
+      encoder.on('error', () => undefined);
+      const started = new Promise<void>((resolve) => (spawned = resolve));
+      encoder.start(0);
+      await started;
+      expect(reniced).toEqual(expected);
+      encoder.stop();
+    }
+  });
+});
+
+describe('encodedFrameDts', () => {
+  it("keeps the encoder's own DTS, which stays at or before the restored PTS, where per-frame shifts would cross them", () => {
+    // A VC-1 film at 23.976p through jellyfin-ffmpeg's QSV (a real disc's numbers): the decoder dropped two source frames,
+    // the encoder squeezed its DTS to 1-tick steps there, and the frames' PTS restore by 1263, 1263 and 1261 ticks.
+    const frames = [
+      { encPts: 1133633, encDts: 1114864, sourcePts: 1134896 },
+      { encPts: 1118618, encDts: 1114865, sourcePts: 1119881 },
+      { encPts: 1114866, encDts: 1114866, sourcePts: 1116127 },
+      { encPts: 1122371, encDts: 1118617, sourcePts: 1123635 },
+    ];
+    let last = -Infinity;
+    const out = frames.map((f) => (last = encodedFrameDts(f.encDts, f.sourcePts, last)));
+    expect(out).toEqual([1114864, 1114865, 1114866, 1118617]);
+    out.forEach((dts, i) => expect(dts).toBeLessThanOrEqual(frames[i]!.sourcePts));
+  });
+
+  it('decodes a frame whose PES has no DTS at its restored PTS', () => {
+    expect(encodedFrameDts(null, 1059159, 1050000)).toBe(1059159);
+  });
+
+  it('moves a DTS that would repeat the last one a tick on, and refuses one that would pass its PTS', () => {
+    expect(encodedFrameDts(100, 200, 100)).toBe(101);
+    expect(() => encodedFrameDts(100, 100, 100)).toThrow(/at most its PTS/);
   });
 });
 

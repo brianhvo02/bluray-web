@@ -5,13 +5,16 @@
  */
 import { createHash } from 'node:crypto';
 import type {
-  DiscRef, DiscSlot, EpisodeRef, OwnTitle, SeasonDetail, TitleDetail, TitleKind, TitleNames, TitleSummary, UnsortedItem, UnsortedReason, UnsortedSuggestion,
+  DiscRef, DiscSlot, EpisodeRef, OwnerChoice, OwnTitle, SeasonDetail, TitleDetail, TitleKind, TitleMusic, TitleNames, TitleSummary, UnsortedItem, UnsortedReason,
+  UnsortedSuggestion,
 } from '../../../src/engine/disc/nas-api';
 import type { DiscDbHit } from './discdb';
 import { guessEpisodes } from './episodes';
 import type { DiscEvidence } from './evidence';
 import { groupKey, musicRelease } from './match';
 import type { DiscMatch } from './match';
+import { artistKey, musicInfo, VARIOUS_ID } from './music-info';
+import type { MusicRelease } from './music-sources';
 import type { OwnerSnapshot } from './owner-store';
 import { parseName } from './parse-name';
 import type { Entry } from './sources';
@@ -21,7 +24,8 @@ export interface Catalogue {
   detail(id: string): TitleDetail | null;
   readonly unsorted: readonly UnsortedItem[];
   readonly hidden: readonly DiscRef[];
-  art(id: string): { small: string; large: string } | null;
+  /** A source's URLs, or a folder cover's file (only covers this catalogue found itself); null for an unknown id. */
+  art(id: string): { small: string; large: string } | { file: string } | null;
   /** AniList series whose chain isn't loaded back to its root: their id may change once it is (ruling T7h). */
   readonly provisional: readonly string[];
 }
@@ -36,6 +40,50 @@ export interface CatalogueInput {
   readonly addedAt: ReadonlyMap<string, number>;
   /** Roots in the Downloads group: their copies come after the others. */
   readonly downloadRoots: ReadonlySet<string>;
+  /** Music lookups by catalogue number: a release, or null for a miss. */
+  readonly music: ReadonlyMap<string, MusicRelease | null>;
+  /** The image in each music release folder, by release group, or null for none. */
+  readonly folderCovers: ReadonlyMap<string, FolderCover | null>;
+}
+
+/** An image in a music release folder (from `findFolderCover`), with the size and time that tell a changed file. */
+export interface FolderCover {
+  readonly path: string;
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+
+type MusicChoice = Extract<OwnerChoice, { kind: 'music' }>;
+
+/**
+ * The music release group of a disc, or null when it isn't music: its music match's release folder, else, for a disc
+ * the owner marked as Music, the release folder the matcher would find, else the disc folder itself.
+ */
+export function musicGroupOf(e: DiscEvidence, match: DiscMatch | undefined, choice: OwnerChoice | undefined): string | null {
+  if (choice && choice.kind !== 'music') return null;
+  if (match?.status === 'music') return match.group;
+  if (choice) return musicRelease(e) ?? e.segments.join('/');
+  return null;
+}
+
+/** A release's discs in path order (`Disc 2` before `Disc 10`): the first whose lookup hit speaks for the release. */
+export const byDiscPath = (a: DiscEvidence, b: DiscEvidence): number => naturalOrder(a.path, b.path);
+
+/** The lookup that speaks for a release: the first hit of its discs' catalogue numbers, discs in path order. */
+export function releaseLookup(discs: readonly DiscEvidence[], music: ReadonlyMap<string, MusicRelease | null>): MusicRelease | null {
+  for (const e of [...discs].sort(byDiscPath)) {
+    for (const c of e.catalogueNumbers) {
+      const hit = music.get(c);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+/** The art id of a folder cover: from its path, size and modification time, so a replaced file gets a new id. */
+export function folderCoverArtId(cover: FolderCover): string {
+  const source = `file:${cover.path}#${cover.size}:${cover.mtimeMs}`;
+  return artIdOf({ small: source, large: source });
 }
 
 const TV_FORMATS = new Set(['TV', 'TV_SHORT']);
@@ -351,8 +399,11 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
 
   /** The name in an owner's music choice on any disc of a music title, by title id. */
   const musicChoiceNames = new Map<string, string>();
+  /** Each music title's release group. */
+  const musicGroups = new Map<string, string>();
   const music = (e: DiscEvidence, group: string, name: string, choiceName: string | null): void => {
     const id = `music:${hash(group, 16)}`;
+    musicGroups.set(id, group);
     const b = builds.get(id) ?? newTitle({
       id, kind: 'music', names: { english: name, romaji: null, native: null, synonyms: [], display: null },
       poster: null, banner: null, year: null, own: false, single: true,
@@ -386,8 +437,7 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
         continue;
       }
       if (choice.kind === 'music') {
-        // the music release folder, as the matcher finds it, else the disc folder itself
-        const group = match?.status === 'music' ? match.group : (musicRelease(e) ?? e.segments.join('/'));
+        const group = musicGroupOf(e, match, choice)!;
         music(e, group, match?.status === 'music' ? match.name : lastSegment(group), choice.name);
         continue;
       }
@@ -478,6 +528,13 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     return guessEpisodes(s.info, firsts.map((e) => ({ discId: e.discId, playlists: e.playlists })), 1);
   };
 
+  const fileArt = new Map<string, string>();
+  const releases = musicReleaseInfo(musicGroups, builds, input, artId, (cover) => {
+    const id = folderCoverArtId(cover);
+    fileArt.set(id, cover.path);
+    return id;
+  });
+
   const details = new Map<string, Omit<TitleDetail, 'related'>>();
   const summaries = new Map<string, TitleSummary>();
   for (const b of builds.values()) {
@@ -490,14 +547,16 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
       });
     const extras = slots(b.extras);
     const placed = [...[...b.seasons.values()].flatMap((s) => [...s.discs, ...s.extras]), ...b.extras];
+    const release = releases.get(b.id);
     const summary: TitleSummary = {
-      id: b.id, kind: b.kind, poster: b.poster, year: b.year,
+      id: b.id, kind: b.kind, poster: release ? release.poster : b.poster, year: b.year,
       // a name in a disc's music choice follows the disc when its folder moves (M8), so it comes first
       names: b.kind === 'music' && !b.own ? { ...b.names, display: musicChoiceNames.get(b.id) ?? owner.displayNames.get(b.id) ?? null } : b.names,
       seasons: b.single ? 0 : seasons.length,
       discs: seasons.reduce((n, s) => n + s.discs.length + s.extras.length, extras.length),
       addedAt: placed.reduce((max, p) => Math.max(max, input.addedAt.get(p.e.discId) ?? 0), 0),
       own: b.own,
+      ...(release ? { music: release.music } : {}),
     };
     summaries.set(b.id, summary);
     details.set(b.id, { title: summary, banner: b.banner, seasons, extras });
@@ -546,9 +605,53 @@ export function buildCatalogue(input: CatalogueInput): Catalogue {
     },
     unsorted,
     hidden,
-    art: (id) => artById.get(id) ?? null,
+    art: (id) => {
+      const file = fileArt.get(id);
+      return artById.get(id) ?? (file !== undefined ? { file } : null);
+    },
     provisional: [...new Set([...seriesOf.values()].filter((x) => x.provisional && builds.has(x.id)).map((x) => x.id))],
   };
+}
+
+/**
+ * Each music title's music info and poster (spec §3): the lookup that speaks for the release unless the owner rejected
+ * it, the owner's artist, and the folder cover before the lookup's. Then a name-only artist whose name normalizes the
+ * same as a looked-up artist's name or alias anywhere in the catalogue takes that artist (ruling R4), so it is one tile.
+ */
+function musicReleaseInfo(
+  groups: ReadonlyMap<string, string>, builds: ReadonlyMap<string, TitleBuild>, input: CatalogueInput,
+  artId: (art: { small: string; large: string } | null) => string | null, fileArtId: (cover: FolderCover) => string,
+): Map<string, { music: TitleMusic; poster: string | null }> {
+  const out = new Map<string, { music: TitleMusic; poster: string | null }>();
+  const known = new Map<string, TitleMusic['artist']>();
+  for (const [id, group] of [...groups].sort((a, b) => naturalOrder(a[0], b[0]))) {
+    const discs = [...builds.get(id)!.seasons.values()].flatMap((s) => s.discs.map((p) => p.e)).sort(byDiscPath);
+    const choices = discs.map((e) => input.owner.choices.get(e.discId)).filter((c): c is MusicChoice => c?.kind === 'music');
+    const rejectMatch = choices.some((c) => c.rejectMatch === true);
+    const ownerArtist = choices.find((c) => typeof c.artist === 'string')?.artist ?? null;
+    const lookup = rejectMatch ? null : releaseLookup(discs, input.music);
+    const segments = group.split('/');
+    const info = musicInfo({
+      releaseFolder: segments[segments.length - 1]!, parentFolder: segments.length > 1 ? segments[segments.length - 2]! : null,
+      evidence: discs, lookup, ownerArtist, rejectMatch,
+    });
+    const folder = input.folderCovers.get(group) ?? null;
+    out.set(id, { music: info, poster: folder !== null ? fileArtId(folder) : artId(lookup?.cover ?? null) });
+    const credited = lookup?.artists[0];
+    if (credited && info.artist.id !== VARIOUS_ID && !info.artist.id.startsWith('name:')) {
+      for (const name of [credited.name, ...credited.aliases.map((a) => a.name), info.artist.name, info.artist.otherName]) {
+        if (name === null || name.trim() === '') continue;
+        const key = artistKey(name);
+        if (!known.has(key)) known.set(key, info.artist);
+      }
+    }
+  }
+  for (const [id, r] of out) {
+    if (!r.music.artist.id.startsWith('name:')) continue;
+    const joined = known.get(r.music.artist.id.slice('name:'.length));
+    if (joined) out.set(id, { ...r, music: { ...r.music, artist: joined } });
+  }
+  return out;
 }
 
 /** The matcher's seasons for an Unsorted match's suggestions, or for a filed match's entry. */

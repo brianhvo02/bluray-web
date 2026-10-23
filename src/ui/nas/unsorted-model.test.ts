@@ -56,7 +56,7 @@ describe('blurayComSearchUrl', () => {
 
 describe('discPlace', () => {
   it("splits a disc's path into its folder name and where it is", () => {
-    expect(discPlace('drv5/Ember Tide/Ember Tide Vol.1')).toEqual({ name: 'Ember Tide Vol.1', parent: 'drv5/Ember Tide' });
+    expect(discPlace('media5/Ember Tide/Ember Tide Vol.1')).toEqual({ name: 'Ember Tide Vol.1', parent: 'media5/Ember Tide' });
     expect(discPlace('disc1')).toEqual({ name: 'disc1', parent: '' });
   });
 });

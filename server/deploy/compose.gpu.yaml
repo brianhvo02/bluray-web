@@ -1,9 +1,11 @@
-# Lives on the NAS as ~/bluray-server/compose.gpu.yaml; written by deploy.sh, and used with compose.yaml only when the
-# NAS has /dev/dri/renderD128 (a hard `devices:` entry for a missing node would stop the service from starting).
+# Used with compose.yaml only on a host that has /dev/dri/renderD128 (a hard `devices:` entry for a missing node
+# would stop the service from starting):
+#   docker compose -f compose.yaml -f compose.gpu.yaml up -d
 services:
   bluray-server:
-    # The GPU's render node for Quick Sync, and its group (render, GID 993 on the NAS) so the `node` user may open it.
+    # The GPU's render node for Quick Sync, and its group so the `node` user may open it. RENDER_GID (in .env) is that
+    # group's id on your host: stat -c %g /dev/dri/renderD128
     devices:
       - "/dev/dri/renderD128:/dev/dri/renderD128"
     group_add:
-      - "993"
+      - "${RENDER_GID:-993}"

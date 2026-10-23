@@ -11,7 +11,7 @@ export interface Crumb {
   readonly path: string;
 }
 
-/** 'drv5/[250226] きりの森' → NAS › drv5 › [250226] きりの森, each with the folder it opens. */
+/** 'media5/[250226] Starfall Wanderer' → NAS › media5 › [250226] Starfall Wanderer, each with the folder it opens. */
 export function breadcrumbs(path: string): Crumb[] {
   const crumbs: Crumb[] = [{ label: 'NAS', path: '' }];
   const parts = path.split('/').filter((p) => p !== '');
@@ -142,11 +142,14 @@ export function discFacts(manifest: DiscManifest): DiscFacts {
   }
 }
 
-/** `This connection: N Mbps`, and a warning when the disc's peak rate is above it; nothing without a measurement. */
-export function preflightLines(connectionMbps: number | null, peakMbps: number | null): string[] {
+/**
+ * `This connection: N Mbps`, and a warning when what plays needs more: the disc's peak rate, or the selected level's
+ * rate (named by `levelLabel`); nothing without a measurement.
+ */
+export function preflightLines(connectionMbps: number | null, peakMbps: number | null, levelLabel?: string): string[] {
   if (connectionMbps === null) return [];
   const lines = [`This connection: ${Math.round(connectionMbps)} Mbps`];
-  if (peakMbps !== null && peakMbps > connectionMbps) lines.push(`This disc needs about ${Math.round(peakMbps)} Mbps; expect pauses.`);
+  if (peakMbps !== null && peakMbps > connectionMbps) lines.push(`${levelLabel ?? 'This disc'} needs about ${Math.round(peakMbps)} Mbps; expect pauses.`);
   return lines;
 }
 

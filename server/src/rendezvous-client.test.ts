@@ -103,6 +103,26 @@ describe('RendezvousClient', () => {
   });
 });
 
+describe('RendezvousClient, a NAS off the Worker allowlist', () => {
+  it('logs the refusal once, however often it is refused', async () => {
+    const refusing = vi.fn(async () => new Response(JSON.stringify({ error: 'nas-not-allowed' }), { status: 403 })) as unknown as typeof fetch;
+    const log = vi.fn();
+    const client = new RendezvousClient(BASE, keyFile, refusing, Date.now, log);
+    await expect(client.ensureRegistered()).rejects.toThrow(/403/);
+    await expect(client.ensureRegistered()).rejects.toThrow(/403/);
+    await expect(client.registerCode(codeHash('K7QM4XP2R9TD'), ROUTES, Date.now() + 60_000)).rejects.toThrow(/403/);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith("rendezvous refused this NAS (nas-not-allowed): add its id to the Worker's NAS_IDS");
+  });
+
+  it('says nothing for other refusals', async () => {
+    const other = vi.fn(async () => new Response(JSON.stringify({ error: 'rate-limited' }), { status: 403 })) as unknown as typeof fetch;
+    const log = vi.fn();
+    await expect(new RendezvousClient(BASE, keyFile, other, Date.now, log).ensureRegistered()).rejects.toThrow(/403/);
+    expect(log).not.toHaveBeenCalled();
+  });
+});
+
 describe('RendezvousClient.localNasId', () => {
   it('is the id the Worker registers this NAS under, read from the key without the network', async () => {
     const offline = vi.fn(async () => Promise.reject(new TypeError('fetch failed'))) as unknown as typeof fetch;

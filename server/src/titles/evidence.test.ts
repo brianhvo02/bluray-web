@@ -25,7 +25,7 @@ beforeEach(() => {
 afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 describe('readFolderEvidence', () => {
-  const rel = 'drv0-dl/[BDMV][Foo][Vol.1-6 Fin]/Vol.3/BD';
+  const rel = 'media0-dl/[BDMV][Foo][Vol.1-6 Fin]/Vol.3/BD';
   const entry: DiscEntry = { id: 'disc-3', name: 'BD', path: rel, kind: 'folder', sizeBytes: 0 };
 
   beforeEach(() => {
@@ -93,15 +93,15 @@ describe('readFolderEvidence', () => {
 
   it('copes with a disc that has no playlists, streams or metadata', async () => {
     put(join(tmp, 'Bare/BDMV/index.bdmv'), 'x');
-    const ev = await readFolderEvidence({ ...entry, path: 'drv0/Bare' }, join(tmp, 'Bare'));
-    expect(ev).toEqual({ discId: 'disc-3', path: 'drv0/Bare', fingerprint: null, discTitles: [], segments: ['Bare'], catalogueNumbers: [], playlists: [] });
+    const ev = await readFolderEvidence({ ...entry, path: 'media0/Bare' }, join(tmp, 'Bare'));
+    expect(ev).toEqual({ discId: 'disc-3', path: 'media0/Bare', fingerprint: null, discTitles: [], segments: ['Bare'], catalogueNumbers: [], playlists: [] });
   });
 });
 
 describe('readIsoEvidence', () => {
   it('reads an ISO disc like its folder', async () => {
     const abs = join(FIXTURES, 'disc1.iso');
-    const entry: DiscEntry = { id: 'iso-1', name: 'disc1.iso', path: 'drv0/Foo/disc1.iso', kind: 'iso', sizeBytes: 0 };
+    const entry: DiscEntry = { id: 'iso-1', name: 'disc1.iso', path: 'media0/Foo/disc1.iso', kind: 'iso', sizeBytes: 0 };
     const iso = await readIsoEvidence(entry, abs, await new IsoTrees().get('iso-1', abs));
     const folder = await readFolderEvidence({ ...entry, kind: 'folder' }, join(FIXTURES, 'disc1'));
     expect(iso.segments).toEqual(['Foo', 'disc1.iso']);
@@ -112,7 +112,7 @@ describe('readIsoEvidence', () => {
 
   it('leaves out just a file the image is too short for', async () => {
     const abs = join(FIXTURES, 'disc1.iso');
-    const entry: DiscEntry = { id: 'iso-1', name: 'disc1.iso', path: 'drv0/disc1.iso', kind: 'iso', sizeBytes: 0 };
+    const entry: DiscEntry = { id: 'iso-1', name: 'disc1.iso', path: 'media0/disc1.iso', kind: 'iso', sizeBytes: 0 };
     const tree = new Map(await new IsoTrees().get('iso-1', abs));
     const whole = await readIsoEvidence(entry, abs, tree);
     const past = statSync(abs).size + 2048;

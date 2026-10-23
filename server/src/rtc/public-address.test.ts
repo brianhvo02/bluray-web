@@ -68,7 +68,7 @@ describe('discoverPublicIpv4', () => {
 describe('advertisable', () => {
   it('takes public and 10/8 or 192.168/16 addresses only, never Docker, Tailscale, loopback or link-local', () => {
     expect(advertisable('203.0.113.9')).toBe(true);
-    expect(advertisable('192.168.1.98')).toBe(true);
+    expect(advertisable('192.168.1.20')).toBe(true);
     expect(advertisable('10.1.2.3')).toBe(true);
     expect(advertisable('127.0.0.1')).toBe(false);
     expect(advertisable('169.254.1.1')).toBe(false);
@@ -97,13 +97,13 @@ describe('AddressAdvertiser', () => {
     let answer = '198.51.100.23';
     const stun = await fakeStun(() => answer);
     sockets.push(stun.socket);
-    const advertiser = new AddressAdvertiser({ log: () => {}, stun: stun.url, lan: '192.168.1.98', timeoutMs: 1000 });
-    expect(advertiser.advertise()).toEqual(['192.168.1.98']);
+    const advertiser = new AddressAdvertiser({ log: () => {}, stun: stun.url, lan: '192.168.1.20', timeoutMs: 1000 });
+    expect(advertiser.advertise()).toEqual(['192.168.1.20']);
     await advertiser.refresh();
-    expect(advertiser.advertise()).toEqual(['198.51.100.23', '192.168.1.98']);
+    expect(advertiser.advertise()).toEqual(['198.51.100.23', '192.168.1.20']);
     answer = '203.0.113.40';
     await advertiser.refresh();
-    expect(advertiser.advertise()).toEqual(['203.0.113.40', '192.168.1.98']);
+    expect(advertiser.advertise()).toEqual(['203.0.113.40', '192.168.1.20']);
   });
 
   it('keeps the last public address when a refresh gets no answer', async () => {

@@ -1,0 +1,11 @@
+{
+  "id": 9000002,
+  "title": "Lantern Parade Live",
+  "released": "2021-03-06",
+  "artists": [{ "id": 777001, "name": "Aoi Hoshino (2)", "anv": "", "join": "" }],
+  "formats": [{ "name": "Blu-ray", "qty": "1", "descriptions": ["NTSC", "Live"] }],
+  "images": [
+    { "type": "secondary", "uri": "https://img.example/secondary.jpg", "uri150": "https://img.example/secondary-150.jpg" },
+    { "type": "primary", "uri": "https://img.example/primary.jpg", "uri150": "https://img.example/primary-150.jpg" }
+  ]
+}

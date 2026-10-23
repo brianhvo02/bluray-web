@@ -234,8 +234,8 @@
 - [ ] **Step 2:** Update the docs and commit `docs: people and the BD-J store are in`.
 - [ ] **Step 3 (controller, needs the user's approval):** merge to main and push. CI deploys the rendezvous Worker with the 3-day expiry.
 - [ ] **Step 4 (controller):**
-  - Back up the NAS's `auth.json`: `ssh mediaserver docker exec bluray-server cp /data/auth.json /data/auth.json.pre-people`.
+  - Back up the NAS's `auth.json`: `ssh your-nas docker exec bluray-server cp /data/auth.json /data/auth.json.pre-people`.
   - Then run `npm run server:deploy`.
-  - Check `ssh mediaserver docker exec bluray-server node -e` to read `people` from `/data/auth.json` and print only the count of people and devices per person. No keys.
+  - Check `ssh your-nas docker exec bluray-server node -e` to read `people` from `/data/auth.json` and print only the count of people and devices per person. No keys.
   - Check that `/bluray/api/health` is 200 and that the user's iPhone still opens the library.
 - [ ] **Step 5 (controller):** tell the BD-J session (`bluray-web-47`) that people and the store are deployed, with the commit.

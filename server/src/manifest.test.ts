@@ -109,9 +109,9 @@ describe('disc routes', () => {
     const fd = openSync(join(root, 'multi.iso'), 'w');
     for (const [lba, block] of multi.image.blocks) writeSync(fd, block, 0, block.length, lba * 2048);
     closeSync(fd);
-    library = new Library([{ name: 'drvA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
+    library = new Library([{ name: 'mediaA', dir: root }], join(tmp, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
     await library.scan();
-    for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
+    for (const d of library.list('mediaA')!.discs) ids[d.name] = d.id;
     server = createServer([discRoutes(library)]);
     await new Promise<void>((r) => server.listen(0, r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/discs`;
@@ -252,7 +252,7 @@ describe('disc routes', () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'disc-changed' });
     await library.scan();
-    for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
+    for (const d of library.list('mediaA')!.discs) ids[d.name] = d.id;
   });
 
   it('serves the bytes of a disc whose name has #, %, + and Japanese text', async () => {
@@ -357,7 +357,7 @@ describe('disc routes', () => {
     // A whole-second mtime, so that putting it back is exact; rescanned so the id matches it.
     utimesSync(path, 1_700_000_000, 1_700_000_000);
     await library.scan();
-    for (const d of library.list('drvA')!.discs) ids[d.name] = d.id;
+    for (const d of library.list('mediaA')!.discs) ids[d.name] = d.id;
     writeFileSync(path, Buffer.alloc(statSync(path).size)); // same size, same mtime: unchanged to the server
     utimesSync(path, 1_700_000_000, 1_700_000_000);
     const res = await fetch(`${base}/${ids['swap.iso']}/manifest`);

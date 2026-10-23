@@ -21,6 +21,8 @@ describe('printNasId', () => {
     const lines: string[] = [];
     expect(await printNasId(keyFile, (line) => lines.push(line))).toBe(expected);
     expect(lines[0]).toBe(`NAS id: ${expected}`);
+    // The id goes on the Worker's NAS_IDS (registration, lookups, signalling) and, for the relay, TURN_NAS_IDS.
+    expect(lines.join('\n')).toMatch(/secret put NAS_IDS\b/);
     expect(lines.join('\n')).toContain('TURN_NAS_IDS');
     expect(expected).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });

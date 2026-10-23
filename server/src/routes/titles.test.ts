@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import { RelayState } from '../rtc/relay';
 import { Store } from '../store';
 import { ArtCache } from '../titles/art';
 import { artIdOf } from '../titles/catalogue';
+import type { FolderCover } from '../titles/catalogue';
 import type { DiscEvidence } from '../titles/evidence';
 import { OwnerStore } from '../titles/owner-store';
 import { TitleService } from '../titles/service';
@@ -41,10 +42,10 @@ function ev(path: string, titles: Record<string, string> = {}, fingerprint: stri
 
 const POSTER = { small: 'https://s4.anilist.co/ember-s.jpg', large: 'https://s4.anilist.co/ember-l.jpg' };
 const EMBER = entry('anilist:100', { english: 'Ember Blade', romaji: 'Hinokiri no Ken', native: '火斬りの剣' }, { poster: POSTER });
-const A = ev('drv1/Anime/火斬りの剣/[BDMV][220629][火斬りの剣][Vol.1]', { jpn: '火斬りの剣' }, 'FA');
+const A = ev('media1/Anime/火斬りの剣/[BDMV][220629][火斬りの剣][Vol.1]', { jpn: '火斬りの剣' }, 'FA');
 // a box of three unnumbered-by-name discs, listed out of order
-const BOX = ['drv1/Misc/Quiet Harbor/Quiet Harbor Disc 3', 'drv1/Misc/Quiet Harbor/Quiet Harbor Disc 1', 'drv1/Misc/Quiet Harbor/Quiet Harbor Disc 2'].map((p, i) => ev(p, {}, `FB${i}`));
-const COPY = ev('drv2/Downloads/Quiet.Harbor.D1', {}, 'FB1');
+const BOX = ['media1/Misc/Quiet Harbor/Quiet Harbor Disc 3', 'media1/Misc/Quiet Harbor/Quiet Harbor Disc 1', 'media1/Misc/Quiet Harbor/Quiet Harbor Disc 2'].map((p, i) => ev(p, {}, `FB${i}`));
+const COPY = ev('media2/Downloads/Quiet.Harbor.D1', {}, 'FB1');
 
 type SearchOpts = Parameters<MetadataSource['search']>[1];
 
@@ -97,18 +98,19 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number; nasId?: string | null } = {}): Promise<void> {
+async function start(opts: { gate?: 'owners' | 'everyone'; lookupTimeoutMs?: number; nasId?: string | null; more?: DiscEvidence[]; folderCover?: (dir: string) => Promise<FolderCover | null> } = {}): Promise<void> {
   const data = join(tmp, 'data');
   auth = new Auth(new Store(data), () => clock);
   relay = new RelayState(data, () => clock);
   const library = new Library([], join(data, 'library.json'), { scanPauseMs: 0 });
-  evidence = [A, ...BOX, COPY];
+  evidence = [A, ...BOX, COPY, ...(opts.more ?? [])];
   vi.spyOn(library, 'evidence').mockImplementation(() => evidence);
   owner = new OwnerStore(data);
   anilist = fakeSource({ 火斬りの剣: [EMBER], 'Ember Blade': [EMBER] });
   artFetch = vi.fn(async () => new Response(Buffer.from('PNGDATA'), { headers: { 'Content-Type': 'image/png' } }));
   service = new TitleService({
-    library, owner, dataDir: data, anilist, tmdb: null, discdb: { lookup: () => null },
+    library, owner, dataDir: data, anilist, tmdb: null, discdb: { lookup: () => null }, musicbrainz: null, discogs: null,
+    folderCover: opts.folderCover ?? (async () => null), locateRelease: (_id, group) => join(tmp, 'mnt', group),
     art: new ArtCache(join(data, 'art'), artFetch as unknown as typeof fetch), titleLibrary: opts.gate ?? 'owners',
     now: () => clock, setTimer: () => () => {},
   });
@@ -196,6 +198,24 @@ describe('title routes', () => {
     expect(artFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('serves a music release\'s folder cover from the file the catalogue found', async () => {
+    const group = 'Music/Lantern Parade - Night Lights';
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const dir = join(tmp, 'mnt', group);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'cover.png'), png);
+    await start({ gate: 'everyone', more: [ev(`media1/${group}/BD`)], folderCover: async (d) => ({ path: join(d, 'cover.png'), size: png.length, mtimeMs: 1 }) });
+    const t = await token(false);
+    const res = await get('/api/titles', t);
+    const music = ((await res.json()) as { titles: TitleSummary[] }).titles.find((x) => x.kind === 'music')!;
+    expect(music.poster).toMatch(/^[0-9a-f]{32}$/);
+    const art = await get(`/api/art/${music.poster}?size=large`, t);
+    expect(art.status).toBe(200);
+    expect(art.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await art.arrayBuffer())).toEqual(png);
+    expect(artFetch).not.toHaveBeenCalled();
+  });
+
   it('reports both flags and the person on GET /api/me', async () => {
     await start();
     const person = expect.any(String);
@@ -232,6 +252,7 @@ describe('owner title routes', () => {
       ['PUT', `/api/admin/discs/${encodeURIComponent(A.discId)}/choice`, { choice: { kind: 'hidden' } }],
       ['DELETE', `/api/admin/discs/${encodeURIComponent(A.discId)}/choice`],
       ['PUT', `/api/admin/names/${encodeURIComponent(A.discId)}`, { name: 'x' }],
+      ['PUT', '/api/admin/music/music:x', { artist: 'x' }],
       ['POST', '/api/admin/titles', { kind: 'movie', name: 'x' }],
       ['PATCH', '/api/admin/titles/own:x', { name: 'x' }],
       ['DELETE', '/api/admin/titles/own:x'],
@@ -280,6 +301,14 @@ describe('owner title routes', () => {
     await send('PUT', `/api/admin/discs/${encodeURIComponent(disc.discId)}/choice`, t, { choice: { kind: 'hidden' } });
     expect(run).not.toHaveBeenCalled();
     await send('PUT', `/api/admin/discs/${encodeURIComponent(disc.discId)}/choice`, t, { choice: { kind: 'title', titleId: 'anilist:777', season: 1, disc: 1 } });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('starts a run when the owner files a disc as Music, so its lookups and cover follow', async () => {
+    await start();
+    const t = await token(true);
+    const run = vi.spyOn(service, 'runNow');
+    await send('PUT', `/api/admin/discs/${encodeURIComponent(BOX[1]!.discId)}/choice`, t, { choice: { kind: 'music', name: null } });
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -502,7 +531,7 @@ describe('task 9 review', () => {
     const t = await token(true);
     const [d3, d1, d2] = BOX as [DiscEvidence, DiscEvidence, DiscEvidence];
     // a copy of A sits in the box's group
-    const copyOfA = ev('drv1/Misc/Quiet Harbor/Quiet Harbor Disc 4', {}, A.fingerprint);
+    const copyOfA = ev('media1/Misc/Quiet Harbor/Quiet Harbor Disc 4', {}, A.fingerprint);
     evidence = [...evidence, copyOfA];
     owner.setChoice(A.discId, A.fingerprint, { kind: 'hidden' });
     owner.reattach(evidence.map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
@@ -549,7 +578,7 @@ describe('final review', () => {
   it('I3: numbers the other discs of a folder by their own numbers, so a missing volume leaves a gap', async () => {
     await start();
     const t = await token(true);
-    const [v1, v2, v4] = ['Vol.1', 'Vol.2', 'Vol.4'].map((v) => ev(`drv1/Misc/Quiet Reel/Quiet Reel ${v}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const [v1, v2, v4] = ['Vol.1', 'Vol.2', 'Vol.4'].map((v) => ev(`media1/Misc/Quiet Reel/Quiet Reel ${v}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
     evidence = [v4, v1, v2];
     const title = await series(t, 'Quiet Reel');
     const choice = (disc: number): unknown => ({ choice: { kind: 'title', titleId: title.id, season: 1, disc }, applyToGroup: true });
@@ -573,8 +602,8 @@ describe('final review', () => {
   it('I3: skips the discs without a number when others in the folder have one, and numbers by position when none has', async () => {
     await start();
     const t = await token(true);
-    const [v1, v2, bonus] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Making Of'].map((n) => ev(`drv1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
-    const plain = ['AAA', 'BBB', 'CCC'].map((n) => ev(`drv1/Misc/Plain Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const [v1, v2, bonus] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Making Of'].map((n) => ev(`media1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
+    const plain = ['AAA', 'BBB', 'CCC'].map((n) => ev(`media1/Misc/Plain Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence];
     evidence = [v1, v2, bonus, ...plain];
     const title = await series(t, 'Quiet Reel');
     const res = await put(t, v1, { choice: { kind: 'title', titleId: title.id, season: 1, disc: 1 }, applyToGroup: true });
@@ -591,7 +620,7 @@ describe('final review', () => {
     await start();
     const t = await token(true);
     const [v1, v2, v3, interviews, making] = ['Quiet Reel Vol.1', 'Quiet Reel Vol.2', 'Quiet Reel Vol.3', 'Quiet Reel Interviews', 'Quiet Reel Making Of']
-      .map((n) => ev(`drv1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence];
+      .map((n) => ev(`media1/Misc/Quiet Reel/${n}`)) as [DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence, DiscEvidence];
     evidence = [making, v3, interviews, v1, v2];
     const title = await series(t, 'Quiet Reel');
     const res = await put(t, making, { choice: { kind: 'title', titleId: title.id, season: 1, disc: 3 }, applyToGroup: true });
@@ -615,16 +644,74 @@ describe('final review', () => {
   it("M8: a music title's new name is kept in its discs' choices, so it survives a move", async () => {
     await start();
     const t = await token(true);
-    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`drv1/Music/Lumen Choir - First Light/${n}`, {}, `FM${i}`));
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FM${i}`));
     evidence = [...evidence, ...discs];
     await service.runNow();
     const music = service.catalogue().titles.find((x) => x.kind === 'music')!;
     expect((await send('PUT', `/api/admin/names/${encodeURIComponent(music.id)}`, t, { name: 'First Light Live' })).status).toBe(204);
     for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live' });
     // the release folder is tidied: new paths, same discs
-    evidence = [...evidence.filter((e) => !discs.includes(e)), ...discs.map((d, i) => ev(`drv1/Music/Lumen Choir/First Light/BD${i + 1}`, {}, d.fingerprint))];
+    evidence = [...evidence.filter((e) => !discs.includes(e)), ...discs.map((d, i) => ev(`media1/Music/Lumen Choir/First Light/BD${i + 1}`, {}, d.fingerprint))];
     clock += 60_000;
     await service.runNow();
     expect(service.catalogue().titles.filter((x) => x.kind === 'music').map((x) => x.names.display)).toEqual(['First Light Live']);
+  });
+
+  it("sets a music release's artist and rejectMatch on every disc, keeping its name", async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FA${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const music = service.catalogue().titles.find((x) => x.kind === 'music')!;
+    const id = encodeURIComponent(music.id);
+    await send('PUT', `/api/admin/names/${id}`, t, { name: 'First Light Live' });
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { artist: 'Aoi Hoshino', rejectMatch: true })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: 'Aoi Hoshino', rejectMatch: true });
+    // writing one field keeps the other; null clears the artist, false clears rejectMatch
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { artist: null })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: null, rejectMatch: true });
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { rejectMatch: false })).status).toBe(204);
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: null });
+  });
+
+  it('refuses a bad music correction and an unknown id', async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FB${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
+    for (const body of [{}, { artist: '  ' }, { artist: 'x'.repeat(201) }, { artist: 3 }, { rejectMatch: 'yes' }, { other: 1 }]) {
+      expect((await send('PUT', `/api/admin/music/${id}`, t, body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect((await send('PUT', '/api/admin/music/nope', t, { artist: 'x' })).status).toBe(404);
+    expect((await send('PUT', `/api/admin/music/${encodeURIComponent(A.discId)}`, t, { artist: 'x' })).status).toBe(404);
+  });
+
+  it('keeps artist and rejectMatch when a release is renamed, and when its name goes back to the folder', async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1', 'DISC2'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FC${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
+    await send('PUT', `/api/admin/music/${id}`, t, { artist: 'Aoi Hoshino', rejectMatch: true });
+    await send('PUT', `/api/admin/names/${id}`, t, { name: 'First Light Live' });
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: 'First Light Live', artist: 'Aoi Hoshino', rejectMatch: true });
+    await send('PUT', `/api/admin/names/${id}`, t, { name: null });
+    for (const d of discs) expect(owner.snapshot().choices.get(d.discId)).toEqual({ kind: 'music', name: null, artist: 'Aoi Hoshino', rejectMatch: true });
+  });
+
+  it('writes no empty music choice for a correction that carries nothing', async () => {
+    await start();
+    const t = await token(true);
+    const discs = ['DISC1'].map((n, i) => ev(`media1/Music/Lumen Choir - First Light/${n}`, {}, `FD${i}`));
+    evidence = [...evidence, ...discs];
+    await service.runNow();
+    const id = encodeURIComponent(service.catalogue().titles.find((x) => x.kind === 'music')!.id);
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { rejectMatch: false })).status).toBe(204);
+    expect((await send('PUT', `/api/admin/music/${id}`, t, { artist: null })).status).toBe(204);
+    expect(owner.snapshot().choices.has(discs[0]!.discId)).toBe(false);
   });
 });

@@ -1,0 +1,8 @@
+# The build context is server/ (see Dockerfile). The image needs only dist/server.mjs, data/discdb-index.json, NOTICE
+# and deploy/IMAGE-NOTICE; keep the NAS's own settings and secrets out of the context.
+node_modules
+**/node_modules
+deploy/.env
+deploy/.env.*
+!deploy/.env.example
+deploy/compose.override.yaml

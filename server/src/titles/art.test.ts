@@ -142,4 +142,100 @@ describe('ArtCache', () => {
     expect(existsSync(join(dir, `${ID2}-small`))).toBe(false);
     expect(existsSync(join(dir, `${ID1}-small`))).toBe(true);
   });
+
+  describe('Cover Art Archive redirects and local files', () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+    function redirecting(to: string): typeof globalThis.fetch & { urls: string[] } {
+      const urls: string[] = [];
+      const f = vi.fn(async (url: string | URL | Request) => {
+        urls.push(String(url));
+        if (String(url).startsWith('https://coverartarchive.org/')) return new Response(null, { status: 307, headers: { location: to } });
+        return new Response(new Uint8Array(10).fill(7), { headers: { 'content-type': 'image/jpeg' } });
+      });
+      return Object.assign(f as unknown as typeof globalThis.fetch, { urls });
+    }
+
+    it('follows a redirect to an archive.org host', async () => {
+      const fetch = redirecting('https://ia800000.us.archive.org/1/items/x/front-250.jpg');
+      const got = await new ArtCache(dir, fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250');
+      expect(got).not.toBeNull();
+      expect(fetch.urls).toEqual(['https://coverartarchive.org/release/abc/front-250', 'https://ia800000.us.archive.org/1/items/x/front-250.jpg']);
+    });
+
+    it('follows the real chain: coverartarchive.org, then archive.org itself, then a data node', async () => {
+      const urls: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request) => {
+        const u = String(url);
+        urls.push(u);
+        if (u.startsWith('https://coverartarchive.org/')) return new Response(null, { status: 307, headers: { location: 'https://archive.org/download/mbid-abc/mbid-abc-1_thumb250.jpg' } });
+        if (u.startsWith('https://archive.org/')) return new Response(null, { status: 302, headers: { location: 'https://dn711103.ca.archive.org/0/items/mbid-abc/mbid-abc-1_thumb250.jpg' } });
+        return new Response(new Uint8Array(10).fill(7), { headers: { 'content-type': 'image/jpeg' } });
+      });
+      const got = await new ArtCache(dir, fetch as unknown as typeof globalThis.fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250');
+      expect(got).not.toBeNull();
+      expect(urls).toEqual([
+        'https://coverartarchive.org/release/abc/front-250',
+        'https://archive.org/download/mbid-abc/mbid-abc-1_thumb250.jpg',
+        'https://dn711103.ca.archive.org/0/items/mbid-abc/mbid-abc-1_thumb250.jpg',
+      ]);
+    });
+
+    it('refuses hosts that only look like archive.org', async () => {
+      for (const to of ['https://evilarchive.org/a.jpg', 'https://archive.org.evil.example/a.jpg', 'http://archive.org/a.jpg', 'https://archive.org:8443/a.jpg', 'https://u:p@archive.org/a.jpg']) {
+        const fetch = redirecting(to);
+        expect(await new ArtCache(dir, fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250')).toBeNull();
+        expect(fetch.urls).toEqual(['https://coverartarchive.org/release/abc/front-250']);
+      }
+    });
+
+    it('cancels each redirect\'s body before following it', async () => {
+      const cancelled: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request) => {
+        if (String(url).startsWith('https://coverartarchive.org/')) {
+          const body = new ReadableStream({ cancel: () => { cancelled.push(String(url)); } });
+          return new Response(body, { status: 307, headers: { location: 'https://ia800000.us.archive.org/1/items/x/front-250.jpg' } });
+        }
+        return new Response(new Uint8Array(10).fill(7), { headers: { 'content-type': 'image/jpeg' } });
+      });
+      expect(await new ArtCache(dir, fetch as unknown as typeof globalThis.fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250')).not.toBeNull();
+      expect(cancelled).toEqual(['https://coverartarchive.org/release/abc/front-250']);
+    });
+
+    it('refuses a redirect to another host', async () => {
+      const fetch = redirecting('https://evil.example/a.jpg');
+      expect(await new ArtCache(dir, fetch).get(ID1, 'small', 'https://coverartarchive.org/release/abc/front-250')).toBeNull();
+      expect(fetch.urls).toEqual(['https://coverartarchive.org/release/abc/front-250']);
+    });
+
+    it('allows Discogs images', async () => {
+      expect(await new ArtCache(dir, fetcher()).get(ID1, 'small', 'https://i.discogs.com/a.jpg')).not.toBeNull();
+    });
+
+    it('serves a local PNG with the type from its bytes, whatever its name', async () => {
+      const file = join(dir, '..', 'cover.jpg');
+      writeFileSync(file, png);
+      const fetch = fetcher();
+      const got = await new ArtCache(dir, fetch).get(ID1, 'large', { file });
+      expect(got).toEqual({ path: join(dir, `${ID1}-large`), type: 'image/png' });
+      expect(readFileSync(got!.path)).toEqual(png);
+      expect(fetch.urls).toEqual([]);
+    });
+
+    it('serves JPEG and WebP by magic, and refuses SVG, text, missing and oversized files', async () => {
+      const art = new ArtCache(dir, fetcher(), undefined, { maxBytes: 100 });
+      const put = (name: string, b: Buffer) => {
+        const f = join(dir, '..', name);
+        writeFileSync(f, b);
+        return f;
+      };
+      const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.from([4, 0, 0, 0]), Buffer.from('WEBPVP8 ')]);
+      expect((await art.get(ID1, 'small', { file: put('a.bin', Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1])) }))?.type).toBe('image/jpeg');
+      expect((await art.get(ID2, 'small', { file: put('b.bin', webp) }))?.type).toBe('image/webp');
+      expect(await art.get(ID3, 'small', { file: put('c.png', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')) })).toBeNull();
+      expect(await art.get('d'.repeat(32), 'small', { file: put('d.png', Buffer.from('hello world')) })).toBeNull();
+      expect(await art.get('e'.repeat(32), 'small', { file: join(dir, '..', 'missing.png') })).toBeNull();
+      expect(await art.get('f'.repeat(32), 'small', { file: put('f.png', Buffer.concat([png, Buffer.alloc(200)])) })).toBeNull();
+    });
+  });
 });

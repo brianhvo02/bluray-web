@@ -1,255 +1,40 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
-import type { DiscRef, TitleDetail, TitleSummary } from '../../engine/disc/nas-api';
-import { filingDisc } from './FileDifferently';
+import { useEffect, type ReactElement } from 'react';
+import type { TitleSummary } from '../../engine/disc/nas-api';
+import type { ArtistGroup } from './artist-model';
+import { ArtistGrid } from './ArtistGrid';
+import { ArtistPage, type MusicOwner } from './ArtistPage';
 import type { NasClient } from './nas-client';
-import { displayName } from './title-model';
-import { DiscCard } from './UnsortedScreen';
 
 interface MusicScreenProps {
   readonly nas: NasClient;
-  /** The Music shelf's titles, A–Z. */
-  readonly titles: readonly TitleSummary[];
-  /** Owners can rename, and file a title's discs differently. */
-  readonly owner: boolean;
-  /** Whether the NAS has a TMDB key, for the filing card's search. */
-  readonly tmdb: boolean;
-  readonly onOpen: (id: string) => void;
-  /** A title's detail, from the library's session cache: where its first disc is. */
-  readonly loadDetail: (id: string) => Promise<TitleDetail>;
-  /** A rename changed the catalogue: the library fetches its titles again. */
-  readonly onChanged: () => void;
+  /** The Music shelf's artists (or those a search found), in the grid's order. */
+  readonly groups: readonly ArtistGroup[];
+  /** The artist page shown, or null for the grid. */
+  readonly artistId: string | null;
+  readonly onOpenArtist: (artistId: string) => void;
+  /** Back from an artist page to the shelf. */
+  readonly onBack: () => void;
+  /** The open artist is no longer on the shelf (a correction moved its last release): back to the shelf. */
+  readonly onArtistGone: () => void;
+  readonly onOpenRelease: (title: TitleSummary) => void;
+  /** The alphabet bar key each artist is the first of, by its index title's id. */
+  readonly jumpOf?: ReadonlyMap<string, string>;
+  /** Owners get each release's "⋯" menu. */
+  readonly owner?: MusicOwner;
+  /** Shown on the grid when there are no artists. */
+  readonly emptyText?: string;
 }
 
-const MAX_NAME = 200;
-const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
-/** Where a music title's first disc is: `drive · folder`. */
-function firstCopy(d: TitleDetail): string | null {
-  const slot = [...d.seasons.flatMap((s) => s.discs), ...d.extras][0];
-  const copy = slot?.copies[0];
-  return copy ? `${copy.root} · ${copy.folder}` : null;
-}
-
-/** The row's muted line: the folder name a rename replaced, else where the title's discs are (loaded once near view). */
-function MusicPlace({ title, loadDetail }: { title: TitleSummary; loadDetail: (id: string) => Promise<TitleDetail> }): ReactElement | null {
-  const renamed = !title.own && title.names.display !== null && title.names.english !== null && title.names.display !== title.names.english;
-  const [place, setPlace] = useState<string | null>(null);
-  const [near, setNear] = useState(false);
-  const holder = useRef<HTMLSpanElement>(null);
-
+/** The Music shelf (spec §3): the artist grid, or one artist's page. */
+export function MusicScreen({ nas, groups, artistId, onOpenArtist, onBack, onArtistGone, onOpenRelease, jumpOf, owner, emptyText }: MusicScreenProps): ReactElement {
+  const group = artistId === null ? null : (groups.find((g) => g.id === artistId) ?? null);
+  const gone = artistId !== null && group === null;
   useEffect(() => {
-    if (renamed || title.own || near) return;
-    const el = holder.current;
-    if (!el || typeof IntersectionObserver === 'undefined') {
-      setNear(true);
-      return;
-    }
-    const observer = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && setNear(true), { rootMargin: '200px' });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [renamed, title.own, near]);
-
-  useEffect(() => {
-    if (!near) return;
-    let live = true;
-    loadDetail(title.id).then(
-      (d) => {
-        if (live) setPlace(firstCopy(d));
-      },
-      () => {},
-    );
-    return () => {
-      live = false;
-    };
-  }, [near, title.id, loadDetail]);
-
-  if (renamed) return <span className="title-muted">Renamed · was {title.names.english}</span>;
-  if (title.own) return <span className="title-muted">Own title</span>;
-  return (
-    <span ref={holder} className="title-muted">
-      {place ?? ' '}
-    </span>
-  );
-}
-
-function RenameForm({ nas, title, onDone, onCancel }: { nas: NasClient; title: TitleSummary; onDone: () => void; onCancel: () => void }): ReactElement {
-  const [name, setName] = useState(displayName(title));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const input = useRef<HTMLInputElement>(null);
-  useEffect(() => input.current?.focus(), []);
-
-  const save = (value: string | null): void => {
-    setBusy(true);
-    setError(null);
-    // an own title's name is the title's; any other music title's is a display name over its folder name
-    const done = title.own ? nas.admin.updateTitle(title.id, { name: value! }) : nas.admin.setName(title.id, value);
-    done.then(
-      () => {
-        setBusy(false);
-        onDone();
-      },
-      (err: unknown) => {
-        setBusy(false);
-        setError(message(err));
-      },
-    );
-  };
-  const submit = (e: FormEvent): void => {
-    e.preventDefault();
-    const trimmed = name.trim();
-    if (trimmed === '') {
-      if (title.own) setError('Give the title a name.');
-      else save(null);
-      return;
-    }
-    save(trimmed);
-  };
-
-  return (
-    <form className="owner-form" data-testid="music-rename-form" onSubmit={submit}>
-      <label className="owner-field">
-        <span>Display name</span>
-        <input ref={input} type="text" data-testid="music-name" value={name} maxLength={MAX_NAME} onChange={(e) => setName(e.target.value)} />
-      </label>
-      {error && (
-        <p className="owner-message" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="owner-buttons">
-        {!title.own && (
-          <button type="button" data-testid="music-folder-name" disabled={busy} onClick={() => save(null)}>
-            Use folder name
-          </button>
-        )}
-        <button type="submit" className="owner-primary" data-testid="music-save" disabled={busy}>
-          Save
-        </button>
-        <button type="button" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-    </form>
-  );
-}
-
-/**
- * The owner's "File differently…" on a music title (ruling F3): a filing card for each of its discs, to file it under a
- * title (out of Music) or leave it out with "Don't list".
- */
-function MusicRefile({ nas, tmdb, title, loadDetail, onChanged }: { nas: NasClient; tmdb: boolean; title: TitleSummary; loadDetail: (id: string) => Promise<TitleDetail>; onChanged: () => void }): ReactElement {
-  const [discs, setDiscs] = useState<DiscRef[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    loadDetail(title.id).then(
-      (d) => {
-        if (live) setDiscs([...d.seasons.flatMap((s) => [...s.discs, ...s.extras]), ...d.extras].flatMap((slot) => slot.copies));
-      },
-      (err: unknown) => {
-        if (live) setError(message(err));
-      },
-    );
-    return () => {
-      live = false;
-    };
-  }, [title.id, loadDetail]);
-  if (error) return <p className="owner-message" role="alert">{error}</p>;
-  if (discs === null) return <p className="status">Loading…</p>;
-  return (
-    <div className="owner-cards" data-testid="music-refile">
-      {discs.map((d) => (
-        <DiscCard key={d.discId} nas={nas} tmdb={tmdb} disc={filingDisc(d)} onFiled={onChanged} onCreated={onChanged} />
-      ))}
-    </div>
-  );
-}
-
-/** The Music shelf (spec §9, mockup 5): each title with where it is or what it was renamed from, and owners' renames. */
-export function MusicScreen({ nas, titles, owner, tmdb, onOpen, loadDetail, onChanged }: MusicScreenProps): ReactElement {
-  const [editing, setEditing] = useState<string | null>(null);
-  const [refiling, setRefiling] = useState<string | null>(null);
-  /** After a rename is saved or cancelled, focus goes back to that row's pencil. */
-  const focusPencil = useRef<string | null>(null);
-  const listRef = useRef<HTMLUListElement>(null);
-  useEffect(() => {
-    if (focusPencil.current === null) return;
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-rename-id="${CSS.escape(focusPencil.current)}"]`);
-    if (!el) return;
-    focusPencil.current = null;
-    el.focus();
-  });
-  const closeEditor = (id: string): void => {
-    focusPencil.current = id;
-    setEditing(null);
-  };
-  if (titles.length === 0) return <p className="status">Nothing here yet.</p>;
-  return (
-    <ul className="title-list" data-testid="music-list" ref={listRef}>
-      {titles.map((t) => {
-        const name = displayName(t);
-        return (
-          <li key={t.id} className="owner-row" data-testid="music-row" data-name={name}>
-            <div className="owner-row-main">
-              <button type="button" className="title-row" data-title-id={t.id} onClick={() => onOpen(t.id)}>
-                <span className="title-row-text">
-                  <span className="title-row-name">{name}</span>
-                  <MusicPlace title={t} loadDetail={loadDetail} />
-                </span>
-              </button>
-              {owner && (
-                <button
-                  type="button"
-                  className="title-icon-button"
-                  data-testid="music-rename"
-                  data-rename-id={t.id}
-                  aria-label={`Rename ${name}`}
-                  aria-expanded={editing === t.id}
-                  onClick={() => setEditing((e) => (e === t.id ? null : t.id))}
-                >
-                  <span aria-hidden="true">✎</span>
-                </button>
-              )}
-              {owner && (
-                <button
-                  type="button"
-                  className="title-link"
-                  data-testid="music-refile-open"
-                  aria-label={`File ${name} differently`}
-                  aria-expanded={refiling === t.id}
-                  onClick={() => setRefiling((r) => (r === t.id ? null : t.id))}
-                >
-                  File differently…
-                </button>
-              )}
-            </div>
-            {refiling === t.id && (
-              <MusicRefile
-                nas={nas}
-                tmdb={tmdb}
-                title={t}
-                loadDetail={loadDetail}
-                onChanged={() => {
-                  setRefiling(null);
-                  onChanged();
-                }}
-              />
-            )}
-            {editing === t.id && (
-              <RenameForm
-                nas={nas}
-                title={t}
-                onCancel={() => closeEditor(t.id)}
-                onDone={() => {
-                  closeEditor(t.id);
-                  onChanged();
-                }}
-              />
-            )}
-          </li>
-        );
-      })}
-    </ul>
-  );
+    if (gone) onArtistGone();
+  }, [gone, onArtistGone]);
+  if (artistId !== null) {
+    return group ? <ArtistPage nas={nas} group={group} onBack={onBack} onOpen={onOpenRelease} owner={owner} /> : <p className="status">Loading…</p>;
+  }
+  if (groups.length === 0) return <p className="status">{emptyText ?? 'Nothing here yet.'}</p>;
+  return <ArtistGrid nas={nas} groups={groups} onOpen={onOpenArtist} jumpOf={jumpOf} />;
 }

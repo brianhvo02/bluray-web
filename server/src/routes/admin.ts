@@ -2,6 +2,7 @@ import type { OwnerChoice, TitleKind } from '../../../src/engine/disc/nas-api';
 import { AuthConflict, AuthNotFound } from '../auth';
 import type { Auth, Device, Person, PersonRef } from '../auth';
 import type { BdjStore } from '../bdj-store';
+import { DEFAULT_APP_URL } from '../config';
 import { formatCode, pairingLink, unregisterCodes } from '../codes';
 import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
@@ -22,6 +23,10 @@ export interface AdminOptions {
   bdjStore: BdjStore;
   /** The `https` route registered with each code: this server's public API base. */
   publicBase: string;
+  /** The player pairing links open (ends in `/`); the hosted app by default. */
+  appUrl?: string;
+  /** The rendezvous Worker pairing links name; without one they name this server. */
+  rendezvousUrl?: string;
   /** Absent until the rendezvous client exists: codes then come back with `rendezvous: false`. */
   registrar?: CodeRegistrar;
   /** How long a code waits for its rendezvous registration before it is returned with `rendezvous: false`. */
@@ -249,7 +254,7 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
           }
         }
         return json(200, {
-          code: formatCode(code), link: pairingLink(code), expiresAt: record.expiresAt, rendezvous, personId: person.id, personName: person.name, invite: record.invite,
+          code: formatCode(code), link: pairingLink(code, { appUrl: opts.appUrl ?? DEFAULT_APP_URL, publicBase: opts.publicBase, rendezvousUrl: opts.rendezvousUrl }), expiresAt: record.expiresAt, rendezvous, personId: person.id, personName: person.name, invite: record.invite,
         });
       }
       case 'DELETE devices/:id': {
@@ -399,12 +404,17 @@ const naturalOrder = (a: string, b: string): number => a.localeCompare(b, undefi
 
 /**
  * After an owner change: the catalogue is built again at once (ruling T9a); a choice naming an entry that isn't loaded
- * (its disc stays Unsorted as `no-title`) also starts a run in the background to load it.
+ * (its disc stays Unsorted as `no-title`) also starts a run in the background to load it, and so does filing a disc as
+ * Music, so its release is looked up and its folder cover found.
  */
 function rebuildAfter(titles: TitleLibrary, library: Library, discId?: string, choice?: OwnerChoice): void {
   // copies follow at once (ruling T9g)
   titles.owner.reattach(library.evidence().map((e) => ({ id: e.discId, fingerprint: e.fingerprint })));
   titles.service.rebuild();
+  if (choice?.kind === 'music') {
+    titles.service.runNow().catch((err: unknown) => console.error('title matching failed', err));
+    return;
+  }
   if (discId === undefined || choice === undefined || (choice.kind !== 'title' && choice.kind !== 'extras') || choice.titleId.startsWith('own:')) return;
   if (titles.service.catalogue().unsorted.some((u) => u.discId === discId && u.reason === 'no-title')) {
     titles.service.runNow().catch((err: unknown) => console.error('title matching failed', err));
@@ -479,6 +489,20 @@ async function choiceRoute(method: string | undefined, discId: string, req: Para
   return applyToGroup ? json(200, { skipped }) : { status: 204 };
 }
 
+/** The discs of a music release with the origin a new choice on each takes; a copy that follows its source is left out. */
+function musicReleaseDiscs(titles: TitleLibrary, library: Library, id: string): { discId: string; fingerprint: string | null; origin: 'group' | 'direct' }[] {
+  const byId = new Map(library.evidence().map((e) => [e.discId, e]));
+  const detail = titles.service.catalogue().detail(id);
+  const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
+  const out: { discId: string; fingerprint: string | null; origin: 'group' | 'direct' }[] = [];
+  for (const discId of discIds) {
+    const origin = titles.owner.choiceOrigin(discId);
+    if (origin?.kind === 'copy' && origin.source !== null) continue;
+    out.push({ discId, fingerprint: byId.get(discId)?.fingerprint ?? null, origin: origin?.kind === 'group' ? 'group' : 'direct' });
+  }
+  return out;
+}
+
 /** The owner's title routes (spec §9, §11), or null for another route. `id` is decoded. */
 async function titleAdminRoute(route: string, id: string | undefined, req: Parameters<Handler>[0], url: URL, library: Library, titles: TitleLibrary): Promise<Response | null> {
   const { service, owner } = titles;
@@ -509,16 +533,31 @@ async function titleAdminRoute(route: string, id: string | undefined, req: Param
       // a music title's id comes from its folder; the name is also kept in each disc's music choice, which follows the
       // disc when the folder moves (M8). A copy keeps following its source.
       if (music) {
-        const byId = new Map(library.evidence().map((e) => [e.discId, e]));
-        const detail = service.catalogue().detail(id!);
-        const discIds = [...(detail?.seasons ?? []).flatMap((s) => s.discs), ...(detail?.extras ?? [])].flatMap((slot) => slot.copies.map((c) => c.discId));
-        for (const discId of discIds) {
-          const origin = owner.choiceOrigin(discId);
-          if (origin?.kind === 'copy' && origin.source !== null) continue;
-          const had = owner.snapshot().choices.get(discId);
+        for (const d of musicReleaseDiscs(titles, library, id!)) {
+          const had = owner.snapshot().choices.get(d.discId);
           if (value === null && had?.kind !== 'music') continue;
-          owner.setChoice(discId, byId.get(discId)?.fingerprint ?? null, { kind: 'music', name: value }, origin?.kind === 'group' ? 'group' : 'direct');
+          owner.setChoice(d.discId, d.fingerprint, { ...(had?.kind === 'music' ? had : {}), kind: 'music', name: value }, d.origin);
         }
+      }
+      rebuildAfter(titles, library);
+      return { status: 204 };
+    }
+    case 'PUT music/:id': {
+      const body = await readJson(req);
+      if (!isObject(body) || !hasKeys(body, [], ['artist', 'rejectMatch']) || (body.artist === undefined && body.rejectMatch === undefined)) throw new HttpError(400, 'bad music');
+      const artist = body.artist === undefined || body.artist === null ? body.artist : name(body.artist);
+      if (artist === undefined && body.artist !== undefined) throw new HttpError(400, 'bad music');
+      if (body.rejectMatch !== undefined && typeof body.rejectMatch !== 'boolean') throw new HttpError(400, 'bad music');
+      if (!service.catalogue().titles.some((t) => t.id === id && t.kind === 'music' && !t.own)) return json(404, { error: 'unknown id' });
+      // every disc of the release keeps its own name; only the fields sent change
+      for (const d of musicReleaseDiscs(titles, library, id!)) {
+        const had = owner.snapshot().choices.get(d.discId);
+        const prev = had?.kind === 'music' ? had : null;
+        const keptArtist = artist !== undefined ? artist : prev?.artist;
+        const reject = body.rejectMatch !== undefined ? body.rejectMatch : prev?.rejectMatch;
+        if (prev === null && (keptArtist === undefined || keptArtist === null) && reject !== true) continue;
+        const next: OwnerChoice = { kind: 'music', name: prev?.name ?? null, ...(keptArtist !== undefined ? { artist: keptArtist } : {}), ...(reject === true ? { rejectMatch: true } : {}) };
+        owner.setChoice(d.discId, d.fingerprint, next, d.origin);
       }
       rebuildAfter(titles, library);
       return { status: 204 };

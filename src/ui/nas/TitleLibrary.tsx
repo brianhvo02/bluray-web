@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import type { SeasonDetail, TitleDetail, TitleKind, TitleSummary } from '../../engine/disc/nas-api';
 import type { PlayerController } from '../../player/player-controller';
 import { AdminScreen } from './AdminScreen';
+import { artistIndex, artistNames, groupArtists, searchArtists, type ArtistGroup } from './artist-model';
+import type { MusicOwner } from './ArtistPage';
 import { AlphabetRail } from './AlphabetRail';
 import { ContinueRow } from './ContinueRow';
 import { HiddenScreen } from './HiddenScreen';
@@ -14,7 +16,7 @@ import { Poster } from './Poster';
 import type { PlayingRoute } from './playing-route';
 import type { PlaceSaver } from '../place-saver';
 import { Preflight, type PreflightDisc } from './Preflight';
-import { SeasonScreen } from './SeasonScreen';
+import { preflightDisc, SeasonScreen } from './SeasonScreen';
 import { SeriesScreen } from './SeriesScreen';
 import { ENGLISH_KEYS, englishKey, firstOfEach, japaneseOrder, KANA_ROWS, kanaRow } from './title-index';
 import type { OwnerFiling } from './FileDifferently';
@@ -46,6 +48,7 @@ interface TitleLibraryProps {
 type Shelf = TitleKind | 'unsorted';
 
 const LIBRARY: NasRoute = { kind: 'library', shelf: null, q: '' };
+const MUSIC_SHELF: NasRoute = { kind: 'library', shelf: 'music', q: '' };
 const HEADING = '[data-focus-heading]';
 /** The search goes into the address bar this long after the last keystroke. */
 const SEARCH_WRITE_DELAY_MS = 300;
@@ -55,7 +58,9 @@ const byAttr = (name: string, value: string): string => `[${name}="${CSS.escape(
 function openerOf(route: NasRoute): string | null {
   switch (route.kind) {
     case 'title':
-      return byAttr('data-title-id', route.titleId);
+      return `button${byAttr('data-title-id', route.titleId)}`;
+    case 'artist':
+      return `button${byAttr('data-artist-id', route.artistId)}`;
     case 'season':
       return byAttr('data-season-id', seasonIdOf(route.titleId, route.seasonKey));
     case 'extras':
@@ -336,6 +341,9 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
     return () => clearInterval(timer);
   }, [nas, owner, empty, progress?.running, changed]);
   const loadDetail = useCallback((id: string) => loadTitle(nas, id), [nas]);
+  /** The Music shelf as artist tiles (spec §3). */
+  const musicGroups = useMemo(() => (titles === null ? [] : groupArtists(shelf(titles, 'music'))), [titles]);
+  const artistId = route.kind === 'artist' ? route.artistId : null;
 
   useEffect(() => {
     setLoaded(null);
@@ -419,6 +427,26 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
     if (openId !== null) history.back({ kind: 'title', titleId: openId });
   };
   const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
+  const openArtist = (id: string): void => history.push({ kind: 'artist', artistId: id });
+  const artistGone = useCallback(() => history.back(MUSIC_SHELF), [history]);
+  /**
+   * A release with one disc opens that disc's pre-flight; one with more, or with several copies of its disc, opens its
+   * title page, which lists them (spec call C5).
+   */
+  const openRelease = (t: TitleSummary): void => {
+    if (t.discs !== 1) return openTitle(t.id);
+    const from = routeKey;
+    loadTitle(nas, t.id).then(
+      (d) => {
+        if (history.route() === null || nasRoutePath(history.route()!) !== from) return;
+        const copies = [...d.seasons.flatMap((s) => [...s.discs, ...s.extras]), ...d.extras].flatMap((slot) => slot.copies);
+        if (copies.length === 1) setSelected({ disc: preflightDisc(copies[0]!) });
+        else openTitle(t.id);
+      },
+      () => openTitle(t.id),
+    );
+  };
+  const musicOwner: MusicOwner | undefined = owner ? { tmdb, artists: artistNames(musicGroups), onChanged: changed, loadDetail } : undefined;
   const filing: OwnerFiling | undefined = owner ? { nas, tmdb, onChanged: changed } : undefined;
 
   if (owner && route.kind === 'settings') {
@@ -462,6 +490,37 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
     );
   }
 
+  if (artistId !== null) {
+    if (titles === null) {
+      return (
+        <section className="titles" data-testid="title-library">
+          <button type="button" className="title-back" aria-label="Back to Music" onClick={() => history.back(MUSIC_SHELF)}>
+            <span aria-hidden="true">‹</span>
+          </button>
+          {error ? (
+            <div className="error-banner" role="alert" data-testid="nas-error">
+              {error}
+            </div>
+          ) : (
+            <p className="status">Loading…</p>
+          )}
+        </section>
+      );
+    }
+    return (
+      <MusicScreen
+        nas={nas}
+        groups={musicGroups}
+        artistId={artistId}
+        onOpenArtist={openArtist}
+        onBack={() => history.back(MUSIC_SHELF)}
+        onArtistGone={artistGone}
+        onOpenRelease={openRelease}
+        owner={musicOwner}
+      />
+    );
+  }
+
   if (openId !== null) {
     if (!detail) {
       return (
@@ -495,16 +554,50 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
     unsorted,
   };
   const searching = draft.trim() !== '';
-  const results = titles && searching ? searchTitles(titles, draft) : [];
-  /** The list the alphabet bars index: a Series or Movies shelf, or the library's Series A–Z; none under a search or on Music. */
+  const onMusic = picked === 'music';
+  const results = titles && searching && !onMusic ? searchTitles(titles, draft) : [];
+  /** On the Music shelf the search finds artists, by their names or a release's title. */
+  const artistResults = onMusic && searching ? searchArtists(musicGroups, draft) : [];
+  /**
+   * The list the alphabet bars index: a Series or Movies shelf, the Music shelf's artists, or the library's Series A–Z;
+   * none under a search.
+   */
   const indexBase =
-    titles === null || searching ? null : picked === 'series' || picked === 'movie' ? shelf(titles, picked) : picked === null && counts.series! > 0 ? shelf(titles, 'series') : null;
+    titles === null || searching
+      ? null
+      : picked === 'series' || picked === 'movie'
+        ? shelf(titles, picked)
+        : onMusic
+          ? musicGroups.map((g) => g.index)
+          : picked === null && counts.series! > 0
+            ? shelf(titles, 'series')
+            : null;
   const indexing = indexBase !== null && indexBase.length > 0;
-  const indexed = !indexing ? null : order === 'ja' ? japaneseOrder(indexBase) : indexBase;
+  const indexed = !indexing ? null : onMusic ? artistIndex(musicGroups, order) : order === 'ja' ? japaneseOrder(indexBase) : indexBase;
   /** Each title id that is the first of its key in the shown order, with that key. */
   const jumpOf = new Map<string, string>();
   if (indexed) for (const [key, id] of firstOfEach(indexed, order === 'ja' ? kanaRow : englishKey)) jumpOf.set(id, key);
   const orderLabel = order === 'ja' ? '五十音順' : 'A–Z';
+  /** The Music shelf's artists in the shown order. */
+  let shownArtists: readonly ArtistGroup[] = musicGroups;
+  if (onMusic && indexed) {
+    const byIndex = new Map(musicGroups.map((g) => [g.index.id, g]));
+    shownArtists = indexed.map((t) => byIndex.get(t.id)!);
+  }
+  const musicScreen = (groups: readonly ArtistGroup[], emptyText?: string): ReactElement => (
+    <MusicScreen
+      nas={nas}
+      groups={groups}
+      artistId={null}
+      onOpenArtist={openArtist}
+      onBack={() => {}}
+      onArtistGone={artistGone}
+      onOpenRelease={openRelease}
+      jumpOf={jumpOf}
+      owner={musicOwner}
+      emptyText={emptyText}
+    />
+  );
 
   return (
     <section className="titles title-library" data-testid="title-library">
@@ -576,6 +669,8 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
           )}
           {titles === null ? (
             !error && <p className="status">Loading…</p>
+          ) : searching && onMusic ? (
+            musicScreen(artistResults, `No artists match “${draft.trim()}”.`)
           ) : searching ? (
             results.length === 0 ? (
               <p className="status">No titles match “{draft.trim()}”.</p>
@@ -586,10 +681,12 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
                 ))}
               </ul>
             )
-          ) : picked === 'music' ? (
+          ) : onMusic ? (
             <>
-              <h3 className="title-section">Music</h3>
-              <MusicScreen nas={nas} titles={shelf(titles, 'music')} owner={owner} tmdb={tmdb} onOpen={openTitle} loadDetail={loadDetail} onChanged={changed} />
+              <h3 className="title-section">
+                Music{indexed && ` · ${orderLabel}`}
+              </h3>
+              {musicScreen(shownArtists)}
             </>
           ) : picked !== null ? (
             <>

@@ -34,8 +34,8 @@ beforeEach(() => {
 afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 const roots = () => [
-  { name: 'drvA', dir: join(tmp, 'a') },
-  { name: 'drvB', dir: join(tmp, 'b') },
+  { name: 'mediaA', dir: join(tmp, 'a') },
+  { name: 'mediaB', dir: join(tmp, 'b') },
 ];
 
 describe('Library', () => {
@@ -44,27 +44,27 @@ describe('Library', () => {
     await lib.scan();
     const top = lib.list('')!;
     expect(top.discs.map((d) => [d.name, d.path, d.kind])).toEqual([
-      ['[BDMV] Single #1 100%', 'drvA/[BDMV] Single #1 100%', 'folder'],
-      ['disc.iso', 'drvA/disc.iso', 'iso'],
-      ['Other', 'drvB/Other', 'folder'],
+      ['[BDMV] Single #1 100%', 'mediaA/[BDMV] Single #1 100%', 'folder'],
+      ['disc.iso', 'mediaA/disc.iso', 'iso'],
+      ['Other', 'mediaB/Other', 'folder'],
     ]);
-    expect(top.folders).toEqual([{ name: 'Series (シリーズ)', path: 'drvA/Series (シリーズ)', discs: 1 }]);
-    const a = lib.list('drvA')!;
-    expect(a.folders).toEqual([{ name: 'Series (シリーズ)', path: 'drvA/Series (シリーズ)', discs: 1 }]);
-    expect(lib.list('drvA/Series (シリーズ)')).toMatchObject({ folders: [], discs: [{ name: 'Vol 1' }] });
+    expect(top.folders).toEqual([{ name: 'Series (シリーズ)', path: 'mediaA/Series (シリーズ)', discs: 1 }]);
+    const a = lib.list('mediaA')!;
+    expect(a.folders).toEqual([{ name: 'Series (シリーズ)', path: 'mediaA/Series (シリーズ)', discs: 1 }]);
+    expect(lib.list('mediaA/Series (シリーズ)')).toMatchObject({ folders: [], discs: [{ name: 'Vol 1' }] });
     expect(lib.list('nope')).toBeNull();
   });
 
   it('keeps ids stable across scans and changes them when index.bdmv changes', async () => {
     const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
     await lib.scan();
-    const id = lib.list('drvB')!.discs[0]!.id;
+    const id = lib.list('mediaB')!.discs[0]!.id;
     await lib.scan();
-    expect(lib.list('drvB')!.discs[0]!.id).toBe(id);
+    expect(lib.list('mediaB')!.discs[0]!.id).toBe(id);
     expect(lib.disc(id)?.name).toBe('Other');
     touch(join(tmp, 'b/Other/BDMV/index.bdmv'), 'longer content');
     await lib.scan();
-    expect(lib.list('drvB')!.discs[0]!.id).not.toBe(id);
+    expect(lib.list('mediaB')!.discs[0]!.id).not.toBe(id);
     expect(discId('p', 1, 2)).toMatch(/^[0-9a-f]{16}$/);
   });
 
@@ -72,7 +72,7 @@ describe('Library', () => {
     const file = join(tmp, 'library.json');
     await new Library(roots(), file, FAST).scan();
     const fresh = new Library(roots(), file, FAST);
-    expect(fresh.list('drvB')!.discs).toHaveLength(1);
+    expect(fresh.list('mediaB')!.discs).toHaveLength(1);
   });
 
   it('answers from the previous tree while a scan is running', async () => {
@@ -99,13 +99,13 @@ describe('Library scan behaviour', () => {
     const spy = async (p: string) => (opened.push(p), opendir(p));
     const lib = new Library(roots(), join(tmp, 'library.json'), { ...FAST, opendir: spy });
     await lib.scan();
-    const size = lib.list('drvA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.sizeBytes;
+    const size = lib.list('mediaA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.sizeBytes;
     expect(size).toBe(5);
     expect(opened.some((p) => p.endsWith('STREAM'))).toBe(true);
     opened.length = 0;
     await lib.scan();
     expect(opened.some((p) => p.endsWith('STREAM'))).toBe(false);
-    expect(lib.list('drvA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.sizeBytes).toBe(5);
+    expect(lib.list('mediaA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.sizeBytes).toBe(5);
   });
 
   it('spaces directory reads by scanPauseMs', async () => {
@@ -132,8 +132,8 @@ describe('Library scan behaviour', () => {
       },
     });
     await lib.scan();
-    expect(lib.list('drvB')!.discs.map((d) => d.name)).toEqual(['Other']);
-    expect(new Library(roots(), file, FAST).list('drvB')!.discs).toHaveLength(1);
+    expect(lib.list('mediaB')!.discs.map((d) => d.name)).toEqual(['Other']);
+    expect(new Library(roots(), file, FAST).list('mediaB')!.discs).toHaveLength(1);
   });
 
   it('keeps a root previous entries when it lists zero entries (a drive that is not mounted)', async () => {
@@ -144,34 +144,34 @@ describe('Library scan behaviour', () => {
     mkdirSync(bDir);
     const lib = new Library(roots(), file, FAST);
     await lib.scan();
-    expect(lib.list('drvB')!.discs.map((d) => d.name)).toEqual(['Other']);
-    expect(new Library(roots(), file, FAST).list('drvB')!.discs).toHaveLength(1);
+    expect(lib.list('mediaB')!.discs.map((d) => d.name)).toEqual(['Other']);
+    expect(new Library(roots(), file, FAST).list('mediaB')!.discs).toHaveLength(1);
   });
 
-  it("keeps a root previous entries when its BDMVs folder doesn't exist (a drive whose mount point is empty)", async () => {
+  it("keeps a root previous entries when its Movies folder doesn't exist (a drive whose mount point is empty)", async () => {
     const file = join(tmp, 'library.json');
-    const mounted = [{ name: 'drvB', dir: join(tmp, 'mnt/drvB/BDMVs') }];
+    const mounted = [{ name: 'mediaB', dir: join(tmp, 'mnt/mediaB/Movies') }];
     cpSync(join(tmp, 'b'), mounted[0]!.dir, { recursive: true, preserveTimestamps: true });
     await new Library(mounted, file, FAST).scan();
-    rmSync(join(tmp, 'mnt/drvB/BDMVs'), { recursive: true });
+    rmSync(join(tmp, 'mnt/mediaB/Movies'), { recursive: true });
     const lib = new Library(mounted, file, FAST);
     await lib.scan();
-    expect(lib.list('drvB')!.discs.map((d) => d.name)).toEqual(['Other']);
-    expect(new Library(mounted, file, FAST).list('drvB')!.discs).toHaveLength(1);
+    expect(lib.list('mediaB')!.discs.map((d) => d.name)).toEqual(['Other']);
+    expect(new Library(mounted, file, FAST).list('mediaB')!.discs).toHaveLength(1);
   });
 
-  it("keeps disc ids and library paths when a root's directory moves (/library/drvN to /library-mnt/drvN/BDMVs)", async () => {
+  it("keeps disc ids and library paths when a root's directory moves (/library/mediaN to /library-mnt/mediaN/Movies)", async () => {
     const before = new Library(roots(), join(tmp, 'before.json'), FAST);
     await before.scan();
-    const moved = roots().map((r) => ({ name: r.name, dir: join(tmp, 'library-mnt', r.name, 'BDMVs') }));
+    const moved = roots().map((r) => ({ name: r.name, dir: join(tmp, 'library-mnt', r.name, 'Movies') }));
     for (const [i, r] of moved.entries()) cpSync(roots()[i]!.dir, r.dir, { recursive: true, preserveTimestamps: true });
     const after = new Library(moved, join(tmp, 'after.json'), FAST);
     await after.scan();
-    const discs = (lib: Library) => [...lib.list('drvA')!.discs, ...lib.list('drvB')!.discs, ...lib.list('drvA/Series (シリーズ)')!.discs].map(({ id, path }) => ({ id, path }));
+    const discs = (lib: Library) => [...lib.list('mediaA')!.discs, ...lib.list('mediaB')!.discs, ...lib.list('mediaA/Series (シリーズ)')!.discs].map(({ id, path }) => ({ id, path }));
     expect(discs(after)).toEqual(discs(before));
     expect(discs(before).length).toBeGreaterThan(2);
-    const disc = after.list('drvB')!.discs[0]!;
-    expect(after.locate(disc)).toBe(join(tmp, 'library-mnt/drvB/BDMVs/Other'));
+    const disc = after.list('mediaB')!.discs[0]!;
+    expect(after.locate(disc)).toBe(join(tmp, 'library-mnt/mediaB/Movies/Other'));
   });
 
   it('installs the tree after each root on a first scan', async () => {
@@ -196,26 +196,26 @@ describe('Library scan behaviour', () => {
     touch(join(tmp, 'a/Odd/BDMV/Nested/BDMV/index.bdmv'));
     const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
     await lib.scan();
-    expect(lib.list('drvA/Odd')).toBeNull();
+    expect(lib.list('mediaA/Odd')).toBeNull();
   });
 
   it('lists an .iso only when its UDF tree has BDMV/INDEX.BDMV, and reads each image once', async () => {
     touch(join(tmp, 'a/no-bdmv.iso'), '');
     const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
     await lib.scan();
-    const isos = lib.list('drvA')!.discs.filter((d) => d.kind === 'iso');
+    const isos = lib.list('mediaA')!.discs.filter((d) => d.kind === 'iso');
     expect(isos.map((d) => d.name)).toEqual(['disc.iso']);
     expect(isos[0]!.sizeBytes).toBe(statSync(join(tmp, 'a/disc.iso')).size);
     const reads = vi.spyOn(udf.UdfImage, 'open');
     await lib.scan();
     expect(reads).not.toHaveBeenCalled();
-    expect(lib.list('drvA')!.discs.filter((d) => d.kind === 'iso').map((d) => d.name)).toEqual(['disc.iso']);
+    expect(lib.list('mediaA')!.discs.filter((d) => d.kind === 'iso').map((d) => d.name)).toEqual(['disc.iso']);
     reads.mockRestore();
   });
 
   it('drops invalid cache entries and entries of unconfigured roots', () => {
     const file = join(tmp, 'library.json');
-    const good = { id: 'a', name: 'X', path: 'drvA/X', kind: 'folder', sizeBytes: 1 };
+    const good = { id: 'a', name: 'X', path: 'mediaA/X', kind: 'folder', sizeBytes: 1 };
     writeFileSync(
       file,
       JSON.stringify([good, { ...good, id: 'b', path: 'gone/X' }, { ...good, id: 'c', kind: 'zip' }, { id: 'd' }, null, { ...good, id: 'e', path: 5 }]),
@@ -238,13 +238,13 @@ describe('Library evidence', () => {
     const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
     await lib.scan();
     const byPath = new Map(lib.evidence().map((e) => [e.path, e]));
-    expect([...byPath.keys()].sort()).toEqual(['drvA/Series (シリーズ)/Vol 1', 'drvA/[BDMV] Single #1 100%', 'drvA/disc.iso', 'drvB/Other']);
-    const folder = byPath.get('drvA/[BDMV] Single #1 100%')!;
+    expect([...byPath.keys()].sort()).toEqual(['mediaA/Series (シリーズ)/Vol 1', 'mediaA/[BDMV] Single #1 100%', 'mediaA/disc.iso', 'mediaB/Other']);
+    const folder = byPath.get('mediaA/[BDMV] Single #1 100%')!;
     expect(folder.discTitles).toEqual([{ lang: 'eng', name: 'Single One' }]);
     expect(folder.fingerprint).toMatch(/^[0-9A-F]{32}$/);
-    expect(folder.discId).toBe(lib.list('drvA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.id);
-    expect(byPath.get('drvA/disc.iso')!.playlists.length).toBeGreaterThan(0);
-    expect(lib.list('drvA')!.discs.every((d) => !('evidence' in d))).toBe(true);
+    expect(folder.discId).toBe(lib.list('mediaA')!.discs.find((d) => d.name.startsWith('[BDMV]'))!.id);
+    expect(byPath.get('mediaA/disc.iso')!.playlists.length).toBeGreaterThan(0);
+    expect(lib.list('mediaA')!.discs.every((d) => !('evidence' in d))).toBe(true);
   });
 
   it('caches evidence in library.json and does not read it again for an unchanged disc', async () => {
@@ -254,7 +254,7 @@ describe('Library evidence', () => {
     rmSync(join(tmp, 'a/junk.iso')); // A new Library would probe this non-disc again.
     const opened: string[] = [];
     const lib = new Library(roots(), file, { ...FAST, opendir: async (p) => (opened.push(p), opendir(p)) });
-    const title = (): string | undefined => lib.evidence().find((e) => e.path === 'drvA/[BDMV] Single #1 100%')?.discTitles[0]?.name;
+    const title = (): string | undefined => lib.evidence().find((e) => e.path === 'mediaA/[BDMV] Single #1 100%')?.discTitles[0]?.name;
     expect(title()).toBe('Single One');
     const reads = vi.spyOn(udf.UdfImage, 'open');
     await lib.scan();
@@ -273,7 +273,7 @@ describe('Library evidence', () => {
   });
 
   it('parses a new ISO image once', async () => {
-    const only = [{ name: 'drvA', dir: join(tmp, 'iso') }];
+    const only = [{ name: 'mediaA', dir: join(tmp, 'iso') }];
     mkdirSync(only[0]!.dir);
     copyFileSync(join(tmp, 'a/disc.iso'), join(only[0]!.dir, 'disc.iso'));
     const reads = vi.spyOn(udf.UdfImage, 'open');
@@ -288,11 +288,11 @@ describe('Library evidence', () => {
     const file = join(tmp, 'library.json');
     await new Library(roots(), file, FAST).scan();
     const cached = JSON.parse(readFileSync(file, 'utf8')) as { path: string; evidence: Record<string, unknown> }[];
-    const entry = cached.find((d) => d.path === 'drvA/[BDMV] Single #1 100%')!;
+    const entry = cached.find((d) => d.path === 'mediaA/[BDMV] Single #1 100%')!;
     entry.evidence = { ...entry.evidence, playlists: [{ id: 1 }], discTitles: ['x'] };
     writeFileSync(file, JSON.stringify(cached));
     const lib = new Library(roots(), file, FAST);
-    expect(lib.list('drvA')!.discs.some((d) => d.path === entry.path)).toBe(true);
+    expect(lib.list('mediaA')!.discs.some((d) => d.path === entry.path)).toBe(true);
     expect(lib.evidence().some((e) => e.path === entry.path)).toBe(false);
     await lib.scan();
     expect(lib.evidence().find((e) => e.path === entry.path)?.discTitles).toEqual([{ lang: 'eng', name: 'Single One' }]);
@@ -344,11 +344,11 @@ describe('GET /api/library', () => {
     try {
       const port = (server.address() as AddressInfo).port;
       for (const name of ['A+B #1 100%?', nfd]) {
-        const listed = lib.list('drvA')!.folders.find((f) => f.name === name);
-        expect(listed?.path).toBe(`drvA/${name}`);
-        const res = await fetch(`http://127.0.0.1:${port}/api/library?path=${encodeURIComponent(`drvA/${name}`)}`);
+        const listed = lib.list('mediaA')!.folders.find((f) => f.name === name);
+        expect(listed?.path).toBe(`mediaA/${name}`);
+        const res = await fetch(`http://127.0.0.1:${port}/api/library?path=${encodeURIComponent(`mediaA/${name}`)}`);
         expect(res.status).toBe(200);
-        expect(((await res.json()) as { discs: { path: string }[] }).discs[0]!.path).toBe(`drvA/${name}/Vol`);
+        expect(((await res.json()) as { discs: { path: string }[] }).discs[0]!.path).toBe(`mediaA/${name}/Vol`);
       }
     } finally {
       server.close();
@@ -363,7 +363,7 @@ describe('GET /api/library', () => {
     await new Promise<void>((r) => server.listen(0, r));
     try {
       const port = (server.address() as AddressInfo).port;
-      const res = await fetch(`http://127.0.0.1:${port}/api/library?path=${encodeURIComponent('drvA/Series (シリーズ)')}`);
+      const res = await fetch(`http://127.0.0.1:${port}/api/library?path=${encodeURIComponent('mediaA/Series (シリーズ)')}`);
       const body = (await res.json()) as { discs: { name: string }[]; scanning: boolean };
       expect(body.discs.map((d) => d.name)).toEqual(['Vol 1']);
       expect(body.scanning).toBe(false);
@@ -378,9 +378,9 @@ describe('GET /api/library', () => {
 describe('Downloads group', () => {
   const MIN = 60_000;
   const dl = (): { name: string; dir: string; group?: string }[] => [
-    { name: 'drvA', dir: join(tmp, 'a') },
-    { name: 'drvA-dl', dir: join(tmp, 'dl1'), group: 'Downloads' },
-    { name: 'drvB-dl', dir: join(tmp, 'dl2'), group: 'Downloads' },
+    { name: 'mediaA', dir: join(tmp, 'a') },
+    { name: 'mediaA-dl', dir: join(tmp, 'dl1'), group: 'Downloads' },
+    { name: 'mediaB-dl', dir: join(tmp, 'dl2'), group: 'Downloads' },
   ];
   const age = (path: string, atMs: number): void => utimesSync(path, atMs / 1000, atMs / 1000);
 
@@ -395,22 +395,22 @@ describe('Downloads group', () => {
     await lib.scan();
     const top = lib.list('')!;
     expect(top.folders).toContainEqual({ name: 'Downloads', path: 'Downloads', discs: 3 });
-    expect(top.folders.map((f) => f.path)).not.toContain('drvA-dl/Show');
-    expect(top.discs.map((d) => d.path)).not.toContain('drvA-dl/Loose');
+    expect(top.folders.map((f) => f.path)).not.toContain('mediaA-dl/Show');
+    expect(top.discs.map((d) => d.path)).not.toContain('mediaA-dl/Loose');
     const group = lib.list('Downloads')!;
     expect(group.folders).toEqual([{ name: 'Show', path: 'Downloads/Show', discs: 2 }]);
-    expect(group.discs.map((d) => d.path)).toEqual(['drvA-dl/Loose']);
-    expect(lib.list('Downloads/Show')!.discs.map((d) => d.path)).toEqual(['drvA-dl/Show/Vol 1', 'drvB-dl/Show/Vol 2']);
+    expect(group.discs.map((d) => d.path)).toEqual(['mediaA-dl/Loose']);
+    expect(lib.list('Downloads/Show')!.discs.map((d) => d.path)).toEqual(['mediaA-dl/Show/Vol 1', 'mediaB-dl/Show/Vol 2']);
     expect(lib.list('Downloads/Nope')).toBeNull();
   });
 
   it('keeps root-based disc paths and ids', async () => {
-    const plain = new Library([{ name: 'drvA-dl', dir: join(tmp, 'dl1') }], join(tmp, 'p.json'), FAST);
+    const plain = new Library([{ name: 'mediaA-dl', dir: join(tmp, 'dl1') }], join(tmp, 'p.json'), FAST);
     await plain.scan();
     const grouped = new Library(dl(), join(tmp, 'g.json'), FAST);
     await grouped.scan();
-    const id = plain.list('drvA-dl')!.discs[0]!.id;
-    expect(grouped.disc(id)?.path).toBe('drvA-dl/Loose');
+    const id = plain.list('mediaA-dl')!.discs[0]!.id;
+    expect(grouped.disc(id)?.path).toBe('mediaA-dl/Loose');
   });
 
   it('skips a disc still downloading until it settles, and keeps an earlier entry', async () => {
@@ -426,11 +426,11 @@ describe('Downloads group', () => {
     expect(lib.list('Downloads')!.folders[0]!.discs).toBe(2);
     now = t0 + 51 * MIN; // The clip is 61 minutes old.
     await lib.scan();
-    expect(lib.list('Downloads')!.discs.map((d) => d.path)).toEqual(['drvA-dl/Loose']);
+    expect(lib.list('Downloads')!.discs.map((d) => d.path)).toEqual(['mediaA-dl/Loose']);
     // Written to again, the disc is unsettled but stays listed from the previous scan.
     age(clip, now - MIN);
     await lib.scan();
-    expect(lib.list('Downloads')!.discs.map((d) => d.path)).toEqual(['drvA-dl/Loose']);
+    expect(lib.list('Downloads')!.discs.map((d) => d.path)).toEqual(['mediaA-dl/Loose']);
   });
 
   it('applies the settle time to ISO files in a group', async () => {
@@ -455,18 +455,18 @@ describe('settle time on every root', () => {
     expect(lib.list('')).toMatchObject({ discs: [], folders: [] });
     now += SETTLE_MS + 1;
     await lib.scan();
-    expect(lib.list('drvB')!.discs).toHaveLength(1);
+    expect(lib.list('mediaB')!.discs).toHaveLength(1);
     now = Date.now(); // index.bdmv rewritten: unsettled again, previous entry stays.
     touch(join(tmp, 'b/Other/BDMV/index.bdmv'), 'changed');
     await lib.scan();
-    expect(lib.list('drvB')!.discs).toHaveLength(1);
+    expect(lib.list('mediaB')!.discs).toHaveLength(1);
   });
 });
 
 describe('Downloads group, more', () => {
   const dl = (): { name: string; dir: string; group?: string }[] => [
-    { name: 'drvA', dir: join(tmp, 'a') },
-    { name: 'drvA-dl', dir: join(tmp, 'dl1'), group: 'Downloads' },
+    { name: 'mediaA', dir: join(tmp, 'a') },
+    { name: 'mediaA-dl', dir: join(tmp, 'dl1'), group: 'Downloads' },
   ];
 
   it('locates and finds a Downloads disc', async () => {
@@ -485,6 +485,6 @@ describe('Downloads group, more', () => {
     await lib.scan();
     expect(lib.list('')!.folders.filter((f) => f.name === 'Downloads')).toEqual([{ name: 'Downloads', path: 'Downloads', discs: 2 }]);
     const group = lib.list('Downloads')!;
-    expect(group.discs.map((d) => d.path).sort()).toEqual(['drvA-dl/Show', 'drvA/Downloads/Old']);
+    expect(group.discs.map((d) => d.path).sort()).toEqual(['mediaA-dl/Show', 'mediaA/Downloads/Old']);
   });
 });

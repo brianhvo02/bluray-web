@@ -1,0 +1,9 @@
+{
+  "pagination": { "page": 1, "pages": 1, "per_page": 25, "items": 4 },
+  "results": [
+    { "id": 9000001, "type": "release", "title": "Aoi Hoshino - Lantern Parade Live", "catno": "ZQCL-2468", "country": "US", "year": "2022", "format": ["DVD", "NTSC"] },
+    { "id": 9000002, "type": "release", "title": "Aoi Hoshino (2) - Lantern Parade Live", "catno": "ZQCL 2468", "country": "Japan", "year": "2021", "format": ["Blu-ray", "NTSC"] },
+    { "id": 9000003, "type": "release", "title": "Aoi Hoshino - Lantern Parade Live", "catno": "ZQCL-2468", "country": "Japan", "year": "2021", "format": ["DVD"] },
+    { "id": 9000004, "type": "release", "title": "Neon Harbor - Night Tide", "catno": "ZQCL-2469", "country": "Japan", "year": "2020", "format": ["Blu-ray"] }
+  ]
+}

@@ -24,7 +24,7 @@ export async function ownerCode(
   dataDir: string,
   now: () => number = Date.now,
   print: (line: string) => void = console.log,
-  rendezvous?: { registrar: CodeRegistrar; publicBase: string },
+  links: { appUrl: string; publicBase: string; rendezvousUrl: string | undefined; registrar?: CodeRegistrar },
   personName?: string,
 ): Promise<void> {
   const auth = new Auth(new Store(dataDir), now);
@@ -36,19 +36,20 @@ export async function ownerCode(
         return found ? { personId: found.id } : { newPerson: { name: named, owner: true } };
       })();
   const { code, record, person } = auth.createCode(target);
-  const link = pairingLink(code);
+  const link = pairingLink(code, links);
   print(`Owner pairing code: ${formatCode(code)}`);
   print(`Pairing link: ${link}`);
   print(`Expires: ${new Date(record.expiresAt).toLocaleString('sv-SE')} (single use, 10 minutes)`);
   print(`Person: ${person.name}`);
   print('');
   print(terminalQr(link));
+  const rendezvous = links.registrar;
   if (!rendezvous) {
     print('Rendezvous: not configured (RENDEZVOUS_URL is unset)');
     return;
   }
   try {
-    await rendezvous.registrar.registerCode(record.hash, { https: rendezvous.publicBase }, record.expiresAt);
+    await rendezvous.registerCode(record.hash, { https: links.publicBase }, record.expiresAt);
     print('Rendezvous: registered');
   } catch (err) {
     print(`Rendezvous: not registered (${err instanceof Error ? err.message : String(err)})`);
@@ -57,7 +58,7 @@ export async function ownerCode(
 
 /**
  * `node server.mjs nas-id`: prints this NAS's rendezvous id (its key's thumbprint), the id the owner puts on the
- * Worker's `TURN_NAS_IDS` allowlist so the relay can mint for it. Makes no key: before the server has run with
+ * Worker's `NAS_IDS` allowlist (and on `TURN_NAS_IDS`, so the relay can mint for it). Makes no key: before the server has run with
  * `RENDEZVOUS_URL` there is none, and it says so. Gives the id, or null.
  */
 export async function printNasId(keyFile: string, print: (line: string) => void = console.log): Promise<string | null> {
@@ -67,6 +68,7 @@ export async function printNasId(keyFile: string, print: (line: string) => void 
   }
   const nasId = await new RendezvousClient('https://rendezvous.invalid/', keyFile).localNasId();
   print(`NAS id: ${nasId}`);
-  print('For the relay, add it to the rendezvous Worker\'s allowlist: npx wrangler secret put TURN_NAS_IDS (comma-separated ids).');
+  print('Add it to the rendezvous Worker\'s allowlist (comma-separated ids), from rendezvous/: npx wrangler secret put NAS_IDS');
+  print('For the relay, add it to TURN_NAS_IDS as well: npx wrangler secret put TURN_NAS_IDS');
   return nasId;
 }

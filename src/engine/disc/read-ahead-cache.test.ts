@@ -210,7 +210,7 @@ describe('ReadAheadCache', () => {
     expect(safeName('..')).not.toBe('..');
     expect(safeName('a/b')).not.toBe(safeName('a_b'));
     expect(safeName('abc-123')).toBe('abc-123');
-    for (const id of ['a/b', 'a_b', 'BDMV/STREAM/00001.M2TS', 'きりの森', '..']) expect(unsafeName(safeName(id))).toBe(id);
+    for (const id of ['a/b', 'a_b', 'BDMV/STREAM/00001.M2TS', 'Starfall Wanderer', '..']) expect(unsafeName(safeName(id))).toBe(id);
     expect(unsafeName('bad_zz')).toBeNull();
   });
 });

@@ -1,0 +1,23 @@
+name: Set up ffmpeg
+description: >-
+  A pinned static ffmpeg and ffprobe (with libx264) on PATH, kept in the Actions cache, so CI never waits on the Ubuntu
+  mirror for them (an apt install of ffmpeg took 14 minutes on 2026-10-22 and timed jobs out).
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ffmpeg-static
+        key: ffmpeg-static-6.0.1-amd64
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/.cache/ffmpeg-static
+        curl -fsSL --retry 3 -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-6.0.1-amd64-static.tar.xz
+        echo '28268bf402f1083833ea269331587f60a242848880073be8016501d864bd07a5  /tmp/ffmpeg.tar.xz' | sha256sum -c -
+        tar -xJf /tmp/ffmpeg.tar.xz -C ~/.cache/ffmpeg-static --strip-components=1 ffmpeg-6.0.1-amd64-static/ffmpeg ffmpeg-6.0.1-amd64-static/ffprobe
+    - shell: bash
+      run: |
+        echo ~/.cache/ffmpeg-static >> "$GITHUB_PATH"
+        ~/.cache/ffmpeg-static/ffmpeg -hide_banner -encoders | grep -q libx264

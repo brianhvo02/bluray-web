@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
-# Runs on the NAS (deploy.sh pipes it over SSH). Adds the /bluray/* route to
-# the tailnet site in Caddy's Caddyfile if it is missing, keeping a backup,
-# then validates and reloads Caddy. Never restarts Caddy.
+# Runs on the NAS (deploy.sh pipes it over SSH with the site as its argument, from BLURAY_CADDY_SITE on the Mac).
+# Adds the /bluray/* route to that site in Caddy's Caddyfile if it is missing, keeping a backup, then validates and
+# reloads Caddy. Never restarts Caddy.
+#   bash -s -- https://nas.example.com < caddy-route.sh
 set -euo pipefail
+
+if [ -z "${1:-}" ]; then
+  echo "caddy-route.sh: no site given (the Caddyfile's site address, e.g. https://nas.example.com)." >&2
+  exit 1
+fi
 
 CADDY_DIR="$HOME/caddy"
 CADDYFILE="$CADDY_DIR/Caddyfile"
-SITE='https://mediaserver.tailnet-8e55.ts.net'
+SITE="$1"
 CONFIG=(--config /etc/caddy/Caddyfile --adapter caddyfile)
 
 if grep -q 'handle_path /bluray/\*' "$CADDYFILE"; then

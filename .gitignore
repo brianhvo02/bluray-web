@@ -10,3 +10,11 @@ tools/vm-trace/out/
 tools/bdj-trace/out/
 .DS_Store
 tools/ass-trace/out/
+
+# Self-hosting settings and local compose overrides (values stay on the host)
+.env
+server/deploy/.env
+server/deploy/compose.override.yaml
+
+# The owner deploy's settings on the Mac (BLURAY_NAS_HOST, BLURAY_CADDY_SITE; read by server/deploy/deploy.sh)
+.env.local

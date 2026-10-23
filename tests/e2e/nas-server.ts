@@ -6,10 +6,13 @@
  *
  * The title library's AniList and TMDB are the recorded entries of tests/e2e/fixtures/nas-metadata.json
  * (`METADATA_FIXTURE`, ruling R3), made-up titles that match the folders TITLE_DISCS puts synthetic discs in. Starfall
- * Wanderer's runtime of 0.0667 minutes (4 s) makes disc1's 4-second playlist 00001 its one episode.
+ * Wanderer's runtime of 0.0667 minutes (4 s) makes disc1's 4-second playlist 00001 its one episode. The Music shelf's
+ * lookups are the recorded releases of tests/e2e/fixtures/nas-music.json (`MUSIC_FIXTURE`), made up as well, and its one
+ * release folder holds a generated `cover.png` (`MUSIC_COVER`).
  */
 import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
 import { createServer, request, type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { join } from 'node:path';
@@ -31,12 +34,16 @@ export const PROJECTS = ['chromium', 'firefox', 'webkit'] as const;
 export const SERVER = join(REPO, 'server/dist/server.mjs');
 /** The recorded metadata entries the server matches discs against. */
 export const METADATA_FIXTURE = join(REPO, 'tests/e2e/fixtures/nas-metadata.json');
+/** The recorded music releases (catalogue number → MusicBrainz-shaped release) the server looks music discs up in. */
+export const MUSIC_FIXTURE = join(REPO, 'tests/e2e/fixtures/nas-music.json');
+/** The Music shelf's release folder, recorded in MUSIC_FIXTURE by its catalogue number. */
+export const MUSIC_RELEASE = 'Music/[2024.05.01] Lantern Parade - Night Lights [CD][ZQCL-2468]';
 /** Copies of synthetic discs in the folders the metadata fixture's titles match: root-relative folder → fixture disc. */
 export const TITLE_DISCS: Readonly<Record<string, string>> = {
   'Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.1': 'disc1',
   'Anime/Starfall Wanderer (星降りの旅人)/Starfall Wanderer Vol.2': 'disc-subs',
   'Anime/Moonlit Harbor (月影の港)/Moonlit Harbor': 'disc2',
-  'Music/Lantern Parade Live 2024': 'disc3',
+  [MUSIC_RELEASE]: 'disc3',
 };
 
 /**
@@ -111,6 +118,7 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   // Nothing proxies here; the default ('caddy') would only log that it does not resolve.
   TRUSTED_PROXY: '127.0.0.1',
   METADATA_FIXTURE,
+  MUSIC_FIXTURE,
   // The WebRTC route on loopback: no STUN discovery, and a UDP port of its own.
   RTC_ADVERTISE: '127.0.0.1',
   RTC_PORT: '47990',
@@ -205,6 +213,36 @@ async function startRendezvous(): Promise<void> {
   server.listen(RENDEZVOUS_PORT);
 }
 
+/** A small made-up PNG (a 4×4 square of one colour), the music release's folder cover. */
+function coverPng(): Buffer {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf: Buffer): number => {
+    let c = 0xffffffff;
+    for (const b of buf) c = crcTable[(c ^ b) & 0xff]! ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const size = 4;
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header.set([8, 2, 0, 0, 0], 8); // 8-bit RGB
+  const row = Buffer.from([0, ...Array.from({ length: size }, () => [0xe0, 0x7a, 0x3c]).flat()]);
+  const pixels = Buffer.concat(Array.from({ length: size }, () => row));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
+}
+
 /** Sets every file and folder under `dir` to `when`, deepest first. */
 function backdateTree(dir: string, when: Date): void {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -223,6 +261,9 @@ async function main(): Promise<void> {
   cpSync(join(REPO, 'fixtures/synthetic'), NAS_ROOT, { recursive: true, preserveTimestamps: true });
   for (const project of PROJECTS) for (const name of [project, `${project}-open`]) restoreChangedDisc(name);
   for (const [folder, disc] of Object.entries(TITLE_DISCS)) cpSync(join(REPO, 'fixtures/synthetic', disc), join(NAS_ROOT, folder), { recursive: true, preserveTimestamps: true });
+  const cover = join(NAS_ROOT, MUSIC_RELEASE, 'cover.png');
+  writeFileSync(cover, coverPng());
+  for (const path of [cover, join(NAS_ROOT, MUSIC_RELEASE)]) utimesSync(path, new Date('2024-01-01T00:00:00Z'), new Date('2024-01-01T00:00:00Z'));
   // Minimal discs: index.bdmv and one clip whose size is unique, so no two share a content fingerprint (copies would
   // share owner choices). Their times are set in the past: the scan leaves out discs written moments ago (a download
   // still in progress).

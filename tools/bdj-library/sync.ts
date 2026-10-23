@@ -57,10 +57,10 @@ function remote(host: string, script: string, input = ''): Promise<Buffer> {
   });
 }
 
-/** The library roots: the given ones, or (auto) every /mnt/drv* folder on the host. */
+/** The library roots: the given ones, or (auto) every /mnt/* folder on the host. */
 async function roots(host: string, arg: string): Promise<string[]> {
   if (arg !== 'auto') return arg.split(',').filter(Boolean);
-  const out = (await remote(host, 'for d in /mnt/drv*/; do [ -d "$d" ] && printf "%s\\0" "${d%/}"; done')).toString('utf8');
+  const out = (await remote(host, 'for d in /mnt/*/; do [ -d "$d" ] && printf "%s\\0" "${d%/}"; done')).toString('utf8');
   return out.split('\0').filter(Boolean);
 }
 
@@ -318,6 +318,11 @@ async function syncVideo(host: string, lib: string, only: readonly string[]): Pr
   );
 }
 
+function requireHost(host: string | undefined): string {
+  if (!host) throw new Error('no NAS ssh host given: pass --host <host> or set BDJ_LIBRARY_HOST (for example your-nas)');
+  return host;
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.includes('--video')) {
@@ -325,13 +330,13 @@ async function main(): Promise<void> {
     const i = argv.indexOf('--only');
     if (i >= 0) for (let k = i + 1; k < argv.length && !argv[k]!.startsWith('--'); k++) only.push(argv[k]!);
     const h = argv.indexOf('--host');
-    return syncVideo(h >= 0 && argv[h + 1] ? argv[h + 1]! : (process.env.BDJ_LIBRARY_HOST ?? 'mediaserver'), libraryDir(), only);
+    return syncVideo(h >= 0 && argv[h + 1] ? argv[h + 1]! : requireHost(process.env.BDJ_LIBRARY_HOST), libraryDir(), only);
   }
   const opt = (name: string, dflt: string): string => {
     const i = argv.indexOf(name);
     return i >= 0 && argv[i + 1] ? argv[i + 1]! : dflt;
   };
-  const host = opt('--host', process.env.BDJ_LIBRARY_HOST ?? 'mediaserver');
+  const host = requireHost(opt('--host', process.env.BDJ_LIBRARY_HOST ?? ''));
   const dry = argv.includes('--dry-run');
   const lib = libraryDir();
   const discsDir = join(lib, 'discs');

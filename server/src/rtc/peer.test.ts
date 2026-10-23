@@ -273,10 +273,10 @@ describe('answerWithCandidates', () => {
   ].join('\r\n');
 
   it('replaces every candidate with the advertised addresses on the port', () => {
-    const out = answerWithCandidates(sdp, ['203.0.113.9', '192.168.1.98'], 47998);
+    const out = answerWithCandidates(sdp, ['203.0.113.9', '192.168.1.20'], 47998);
     expect(candidateLines(out)).toEqual([
       'a=candidate:1 1 udp 2130706431 203.0.113.9 47998 typ host generation 0',
-      'a=candidate:2 1 udp 2130706175 192.168.1.98 47998 typ host generation 0',
+      'a=candidate:2 1 udp 2130706175 192.168.1.20 47998 typ host generation 0',
     ]);
     expect(out).toContain('c=IN IP4 203.0.113.9');
     expect(out).not.toContain('172.18.');
@@ -286,8 +286,8 @@ describe('answerWithCandidates', () => {
   });
 
   it('never advertises a Docker or Tailscale address even when told to', () => {
-    const out = answerWithCandidates(sdp, ['172.20.0.2', '100.64.1.1', '192.168.1.98'], 47998);
-    expect(candidateLines(out)).toEqual(['a=candidate:1 1 udp 2130706431 192.168.1.98 47998 typ host generation 0']);
+    const out = answerWithCandidates(sdp, ['172.20.0.2', '100.64.1.1', '192.168.1.20'], 47998);
+    expect(candidateLines(out)).toEqual(['a=candidate:1 1 udp 2130706431 192.168.1.20 47998 typ host generation 0']);
   });
 });
 

@@ -234,7 +234,7 @@ export class OwnerStore {
       const ok =
         isObj(c) &&
         ((c!.kind === 'title' && str(c!.titleId) && num(c!.season) && num(c!.disc)) ||
-          (c!.kind === 'music' && (c!.name === null || str(c!.name))) ||
+          (c!.kind === 'music' && (c!.name === null || str(c!.name)) && (c!.artist === undefined || c!.artist === null || str(c!.artist)) && (c!.rejectMatch === undefined || typeof c!.rejectMatch === 'boolean')) ||
           (c!.kind === 'extras' && str(c!.titleId) && num(c!.season)) ||
           c!.kind === 'hidden');
       if (!ok) bad(`choices.${id}.choice`);

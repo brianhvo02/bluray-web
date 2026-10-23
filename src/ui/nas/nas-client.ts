@@ -7,6 +7,7 @@ import { RTC_BASE, RTC_UNREACHABLE, RtcConnection } from './rtc/rtc-connection';
 import type { DeviceProof, RtcLink, RtcOpenOptions } from './rtc/rtc-connection';
 import { chooseRoute, chooseWebRtc, routeKey } from './route-choice';
 import { countingBody, type SendWithProgress, xhrSend } from './upload-progress';
+import { workerBase } from './pair-link';
 import type { Route, RouteDeps } from './route-choice';
 
 export const NAS_MESSAGES = {
@@ -14,6 +15,8 @@ export const NAS_MESSAGES = {
   tooMany: 'Too many tries. Wait a minute and try again.',
   noRoute: "This NAS isn't reachable from here yet.",
   noRendezvous: "Pairing by code isn't available right now.",
+  badRendezvous: 'That rendezvous address must be an https:// address.',
+  badLink: "This pairing link names an address this app can't use (it must be https://). Ask for a new link.",
   unpaired: 'This device is no longer paired with the NAS.',
   /** Shown while the first request to the NAS is pending: browsers hold it until local network access is answered. */
   allowLocalNetwork: 'Allow local network access if your browser asks.',
@@ -234,12 +237,14 @@ export interface SkippedDisc {
  */
 function isPairing(value: unknown): value is NasPairing {
   if (typeof value !== 'object' || value === null) return false;
-  const { base, nasId, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
+  const { base, nasId, rendezvousUrl, direct, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
   const k = key as Partial<CryptoKeyPair> | null | undefined;
   return (
     typeof base === 'string' &&
     (nasId === undefined || typeof nasId === 'string') &&
     (base !== '' || typeof nasId === 'string') &&
+    (rendezvousUrl === undefined || typeof rendezvousUrl === 'string') &&
+    (direct === undefined || direct === true) &&
     typeof deviceId === 'string' &&
     typeof deviceName === 'string' &&
     (personName === undefined || typeof personName === 'string') &&
@@ -331,6 +336,10 @@ export class NasClient {
     setName: async (id: string, name: string | null): Promise<void> => {
       await this.ok(`admin/names/${encodeURIComponent(id)}`, jsonBody('PUT', { name }));
     },
+    /** A music release's artist (null clears it) or whether its lookup match is rejected. */
+    setMusic: async (titleId: string, change: { readonly artist?: string | null; readonly rejectMatch?: boolean }): Promise<void> => {
+      await this.ok(`admin/music/${encodeURIComponent(titleId)}`, jsonBody('PUT', change));
+    },
     createTitle: async (kind: TitleKind, name: string, seasons: number | null): Promise<OwnTitle> =>
       (await this.json('admin/titles', jsonBody('POST', kind === 'series' ? { kind, name, seasons } : { kind, name }))) as OwnTitle,
     /** Renames an own title, or changes an own series' number of seasons. */
@@ -350,6 +359,11 @@ export class NasClient {
   /** Whether a rendezvous service is configured, without which codes can't be looked up. */
   get canPairByCode(): boolean {
     return Boolean(this.deps.rendezvousUrl?.trim());
+  }
+
+  /** The app's built-in rendezvous Worker, if it has one. */
+  get builtInRendezvousUrl(): string | undefined {
+    return this.deps.rendezvousUrl?.trim() || undefined;
   }
 
   /** The pairing, or null when this device isn't paired. Read from the store once; a damaged record is cleared. */
@@ -394,11 +408,11 @@ export class NasClient {
     await this.deps.store.clear();
   }
 
-  /** Where a code leads, from the rendezvous service; the code is normalized first. */
-  async lookup(code: string): Promise<CodeLookup> {
+  /** Where a code leads, from the rendezvous service (`rv`, else the built-in one); the code is normalized first. */
+  async lookup(code: string, rv?: string): Promise<CodeLookup> {
     const normalized = normalizeCode(code);
     if (normalized === null) throw new Error(NAS_MESSAGES.invalidCode);
-    const service = this.deps.rendezvousUrl?.trim().replace(/\/+$/, '');
+    const service = workerBase(rv ?? this.deps.rendezvousUrl ?? '');
     if (!service) throw new Error(NAS_MESSAGES.noRendezvous);
     const { fetch: doFetch } = this.deps;
     let res: Response;
@@ -416,17 +430,35 @@ export class NasClient {
   /**
    * Looks the code up, makes this device's non-extractable P-256 key pair and redeems the code with the NAS: over HTTPS
    * when it answers its check, else over a WebRTC connection opened with the code's hash (so an invite may use the
-   * relay), which is closed once the code is redeemed.
+   * relay), which is closed once the code is redeemed. `via` is what a pairing link named (checked by the caller,
+   * `parsePairLink`): with `nas` the code is redeemed at that base without a lookup; with `rv` it is looked up and
+   * signalled through that Worker, which the pairing keeps for its signalling when it isn't the built-in one (also
+   * with `nas`, for when the NAS later names its WebRTC id).
    */
-  async pair(code: string, deviceName: string): Promise<void> {
-    const found = await this.lookup(code);
-    const https = found.routes.https;
-    const nasId = found.routes.webrtc?.nasId;
+  async pair(code: string, deviceName: string, via: { readonly nas?: string; readonly rv?: string } = {}): Promise<void> {
+    const builtIn = this.builtInRendezvousUrl === undefined ? undefined : workerBase(this.builtInRendezvousUrl);
+    const rv = via.rv === undefined ? undefined : workerBase(via.rv);
+    let https: string | undefined;
+    let nasId: string | undefined;
+    if (via.nas !== undefined) {
+      if (normalizeCode(code) === null) throw new Error(NAS_MESSAGES.invalidCode);
+      https = via.nas;
+    } else {
+      const found = await this.lookup(code, rv);
+      https = found.routes.https;
+      nasId = found.routes.webrtc?.nasId;
+    }
     if (!https && nasId === undefined) throw new Error(NAS_MESSAGES.noRoute);
     const base = !https ? '' : https.endsWith('/') ? https : `${https}/`;
-    const target = { base, ...(nasId === undefined ? {} : { nasId }) };
+    const ownWorker = rv !== undefined && rv !== builtIn ? rv : undefined;
+    const target = {
+      base,
+      ...(nasId === undefined ? {} : { nasId }),
+      ...(ownWorker === undefined ? {} : { rendezvousUrl: ownWorker }),
+      ...(via.nas !== undefined && rv === undefined ? { direct: true as const } : {}),
+    };
     const inviteHash = (await codeHashOf(code)) ?? undefined;
-    const route = await chooseRoute(target, { fetch: this.deps.fetch, connect: (id) => this.connect(id, { inviteHash }) });
+    const route = await chooseRoute(target, { fetch: this.deps.fetch, connect: (id) => this.connect(id, { inviteHash }, rv) });
     let pairing: NasPairing;
     try {
       const apiBase = route.kind === 'https' ? route.base : RTC_BASE(nasId!);
@@ -437,7 +469,10 @@ export class NasClient {
         `${apiBase}pair/redeem`,
         jsonPost({ code: normalizeCode(code), deviceName: name, publicKeyJwk: { kty, crv, x, y } }),
         FIRST_REQUEST_TIMEOUT_MS,
-      );
+      ).catch((err: unknown) => {
+        // a server named by a link that doesn't answer: there is no other route to try
+        throw via.nas !== undefined && err instanceof Error && err.message === NAS_MESSAGES.unreachable ? new Error(NAS_MESSAGES.noRoute) : err;
+      });
       if (res.status === 401) throw new Error(NAS_MESSAGES.invalidCode);
       if (res.status === 429) throw new Error(NAS_MESSAGES.tooMany);
       if (!res.ok) throw new NasHttpError(res.status, await errorCode(res));
@@ -489,8 +524,9 @@ export class NasClient {
     if (!pairing || generation !== this.generation) return me;
     const personName = typeof me.personName === 'string' ? me.personName : pairing.personName;
     const owner = typeof me.owner === 'boolean' ? me.owner : pairing.owner;
-    // a pairing made before the WebRTC route has no NAS id, so route choice could only ever pick HTTPS
-    const nasId = isNasId(me.nasId) ? me.nasId : pairing.nasId;
+    // a pairing made before the WebRTC route has no NAS id, so route choice could only ever pick HTTPS; one made
+    // straight at the server (`direct`) keeps none, so it never signals through a Worker nobody chose for it
+    const nasId = isNasId(me.nasId) && pairing.direct !== true ? me.nasId : pairing.nasId;
     if (personName !== pairing.personName || owner !== pairing.owner || nasId !== pairing.nasId) {
       const updated: NasPairing = {
         ...pairing,
@@ -812,17 +848,18 @@ export class NasClient {
   private routeDeps(pairing: NasPairing): RouteDeps {
     return {
       fetch: this.deps.fetch,
-      connect: (nasId) => this.connect(nasId, { deviceProof: (sid) => this.deviceProof(pairing, sid) }),
+      connect: (nasId) => this.connect(nasId, { deviceProof: (sid) => this.deviceProof(pairing, sid) }, pairing.rendezvousUrl),
       cache: this.routes,
     };
   }
 
   /**
-   * Opens a WebRTC connection to `nasId` and routes its `rtc://` URLs through it until it closes. The session is
-   * dropped, as the NAS lets a new channel's requests through only after a session on it.
+   * Opens a WebRTC connection to `nasId`, signalled through `worker` (a pairing's own Worker) or else the built-in one,
+   * and routes its `rtc://` URLs through it until it closes. The session is dropped, as the NAS lets a new channel's
+   * requests through only after a session on it.
    */
-  private async connect(nasId: string, auth: Pick<RtcOpenOptions, 'deviceProof' | 'inviteHash'>): Promise<RtcLink> {
-    const service = this.deps.rendezvousUrl?.trim();
+  private async connect(nasId: string, auth: Pick<RtcOpenOptions, 'deviceProof' | 'inviteHash'>, worker?: string): Promise<RtcLink> {
+    const service = (worker ?? this.deps.rendezvousUrl)?.trim();
     if (!service) throw new Error(NAS_MESSAGES.noRoute);
     const generation = this.generation;
     const open = this.deps.openRtc ?? ((opts: RtcOpenOptions) => RtcConnection.open(opts));

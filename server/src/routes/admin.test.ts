@@ -357,9 +357,9 @@ describe('admin encoding', () => {
     const data = join(tmp, 'data2');
     const root = join(tmp, 'root');
     cpSync(join(import.meta.dirname, '../../../fixtures/synthetic/disc-levels'), join(root, 'Starfall Wanderer Vol 1'), { recursive: true });
-    const lib = new Library([{ name: 'drvA', dir: root }], join(data, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
+    const lib = new Library([{ name: 'mediaA', dir: root }], join(data, 'library.json'), { scanPauseMs: 0, now: () => Date.now() + 3_600_001 });
     await lib.scan();
-    const discId = lib.list('drvA')!.discs[0]!.id;
+    const discId = lib.list('mediaA')!.discs[0]!.id;
     const owner = await ownerToken();
     const guest = await paired({ newPerson: { name: 'Mika', owner: false } }, 'Phone');
     const ownerDevice = auth.verify(owner)!;

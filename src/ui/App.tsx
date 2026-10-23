@@ -7,6 +7,7 @@ import { levelSessionOf } from './nas/level-session';
 import { NasClient } from './nas/nas-client';
 import { getNasHistory, useNasRoute } from './nas/nas-history';
 import { idbNasStore } from './nas/nas-store';
+import { isLoopbackHost, parsePairLink, type PairLink } from './nas/pair-link';
 import { PlayingRoute } from './nas/playing-route';
 import { PlaceSaver } from './place-saver';
 import { placeMinDurationUs } from './place-model';
@@ -58,20 +59,24 @@ function getPlaceSaver(controller: PlayerController, nas: NasClient): PlaceSaver
   return sharedPlaces;
 }
 
-let pairCodeTaken = false;
-let takenPairCode: string | undefined;
+let pairLinkTaken = false;
+let takenPairLink: PairLink | undefined;
 
-/** The code of a `?pair=<code>` link, taken out of the address bar (once) so a reload doesn't pair again. */
-function takePairCode(): string | undefined {
-  if (pairCodeTaken) return takenPairCode;
-  pairCodeTaken = true;
+/**
+ * A `?pair=<code>` link (with the `nas=` or `rv=` it may carry), taken out of the address bar (once) so a reload doesn't
+ * pair again. `http:` addresses count only while the app itself is on a loopback origin (ruling R1).
+ */
+function takePairLink(): PairLink | undefined {
+  if (pairLinkTaken) return takenPairLink;
+  pairLinkTaken = true;
   const url = new URL(window.location.href);
-  takenPairCode = url.searchParams.get('pair') ?? undefined;
-  if (takenPairCode !== undefined) {
-    url.searchParams.delete('pair');
+  takenPairLink = parsePairLink(url, { dev: isLoopbackHost(url.hostname) }) ?? undefined;
+  const params = ['pair', 'nas', 'rv'].filter((name) => url.searchParams.has(name));
+  if (params.length > 0) {
+    for (const name of params) url.searchParams.delete(name);
     window.history.replaceState(window.history.state, '', url);
   }
-  return takenPairCode;
+  return takenPairLink;
 }
 
 let sharedShaders: ShaderModel | null = null;
@@ -138,8 +143,8 @@ export function App(): ReactElement {
   const [controller] = useState(getController);
   const [nas] = useState(getNasClient);
   // Spent once paired (or the NAS forgotten), so the landing screen shown again after a disc closes doesn't ask again.
-  const [pairCode, setPairCode] = useState(takePairCode);
-  const spendPairCode = useCallback(() => setPairCode(undefined), []);
+  const [pairLink, setPairLink] = useState(takePairLink);
+  const spendPairLink = useCallback(() => setPairLink(undefined), []);
   const [history] = useState(getNasHistory);
   // Kept subscribed for the app's life, so the history sees every popstate (its direction drives focus).
   useNasRoute(history);
@@ -184,7 +189,7 @@ export function App(): ReactElement {
       {TOUCH_LOG && <TouchLog />}
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 ? (
-        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} places={places} history={history} playingRoute={playingRoute} pairCode={pairCode} onPairCodeSpent={spendPairCode} />
+        <LandingScreen controller={controller} snapshot={snapshot} nas={nas} places={places} history={history} playingRoute={playingRoute} pairLink={pairLink} onPairLinkSpent={spendPairLink} />
       ) : (
         <PlayerScreen
           controller={controller}

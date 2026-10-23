@@ -1,0 +1,17 @@
+{
+  "count": 4,
+  "releases": [
+    { "id": "11111111-0000-4000-8000-000000000001", "title": "Lantern Parade", "date": "2019-03-06", "country": "JP",
+      "media": [{ "format": "CD" }], "label-info": [{ "catalog-number": "ZQCL-2468" }],
+      "artist-credit": [{ "artist": { "id": "aaaaaaaa-0000-4000-8000-000000000001", "name": "Aoi Hoshino" } }] },
+    { "id": "11111111-0000-4000-8000-000000000002", "title": "Lantern Parade", "date": "2020-03-06", "country": "US",
+      "media": [{ "format": "CD" }, { "format": "Blu-ray" }], "label-info": [{ "catalog-number": "ZQCL-2468" }],
+      "artist-credit": [{ "artist": { "id": "aaaaaaaa-0000-4000-8000-000000000001", "name": "Aoi Hoshino" } }] },
+    { "id": "11111111-0000-4000-8000-000000000003", "title": "Lantern Parade", "date": "2021-03-06", "country": "JP",
+      "media": [{ "format": "CD" }, { "format": "Blu-ray" }], "label-info": [{ "catalog-number": "zqcl 2468" }],
+      "artist-credit": [{ "artist": { "id": "aaaaaaaa-0000-4000-8000-000000000001", "name": "Aoi Hoshino" } }] },
+    { "id": "11111111-0000-4000-8000-000000000004", "title": "Neon Harbor", "date": "2018-01-01", "country": "JP",
+      "media": [{ "format": "Blu-ray" }], "label-info": [{ "catalog-number": "ZQCL-2469" }],
+      "artist-credit": [{ "artist": { "id": "aaaaaaaa-0000-4000-8000-000000000009", "name": "Other Person" } }] }
+  ]
+}

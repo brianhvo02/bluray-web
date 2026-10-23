@@ -208,6 +208,16 @@ describe('OwnerStore', () => {
     }
   });
 
+  it('keeps a music choice\'s artist and rejected match, and refuses malformed ones', () => {
+    const music: OwnerChoice = { kind: 'music', name: null, artist: 'Neon Harbor', rejectMatch: true };
+    new OwnerStore(dir).setChoice('A', 'F', music);
+    expect(new OwnerStore(dir).snapshot().choices.get('A')).toEqual(music);
+    for (const choice of ['{"kind":"music","name":null,"artist":42}', '{"kind":"music","name":null,"rejectMatch":"yes"}']) {
+      writeFileSync(join(dir, 'owner.json'), `{"choices":{"A":{"choice":${choice},"fingerprint":null,"setAt":1,"propagated":false,"origin":"direct"}},"ownTitles":[],"displayNames":{},"gate":null}`);
+      expect(() => new OwnerStore(dir).snapshot()).toThrow(/owner\.json is corrupt/);
+    }
+  });
+
   it('M10: reads the gate again only when owner.json changes', () => {
     const s = new OwnerStore(dir);
     expect(s.gate()).toBeNull();

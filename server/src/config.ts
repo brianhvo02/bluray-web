@@ -15,14 +15,20 @@ export interface Config {
   nightlyScanAt: { hour: number; minute: number };
   /** Pause between directory reads of a scan. */
   scanPauseMs: number;
-  /** This server's API as devices reach it, registered with each pairing code. */
+  /** `PUBLIC_BASE` (required): this server's API as devices reach it, registered with each pairing code. */
   publicBase: string;
+  /** `APP_URL`: the player pairing links open, always ending in `/`. */
+  appUrl: string;
+  /** `LOOKUP_CONTACT`: named in the User-Agent of the MusicBrainz and Discogs lookups; null when unset. */
+  lookupContact: string | null;
   /** IP or hostname of the reverse proxy whose `X-Forwarded-For` is believed. */
-  trustedProxy: string;
+  trustedProxy: string | null;
   /** The rendezvous Worker's base URL; unset (or empty) means codes aren't registered with it. */
   rendezvousUrl: string | undefined;
   /** `TMDB_API_KEY`; null (unset or empty) means AniList and TheDiscDB only. Never logged. */
   tmdbApiKey: string | null;
+  /** `DISCOGS_TOKEN`; null (unset or empty) means MusicBrainz only. Never logged. */
+  discogsToken: string | null;
   /** `TITLE_LIBRARY`: who gets the title routes until the owner sets it. */
   titleLibrary: 'owners' | 'everyone';
   /** The WebRTC route, served while `rendezvousUrl` is set. */
@@ -51,9 +57,10 @@ export interface RtcConfig {
   advertise?: string[];
 }
 
-const DEFAULT_PUBLIC_BASE = 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/';
+/** The hosted player, which pairing links open unless `APP_URL` says otherwise. */
+export const DEFAULT_APP_URL = 'https://bluray-web.pages.dev/';
 
-/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE`, `TRUSTED_PROXY`, `RENDEZVOUS_URL`, `TMDB_API_KEY`, `TITLE_LIBRARY`, `RTC_PORT`, `RTC_LAN_ADDRESS`, `RTC_ADVERTISE`, `LEVELS_BACKEND`, `TRANSCODE_CACHE_BYTES`, `FFMPEG_PATH` and `FFPROBE_PATH`. */
+/** Reads `LIBRARY_ROOTS` (comma-separated `name=dir` or `name=dir@group`), `DATA_DIR`, `PORT`, `NIGHTLY_SCAN_AT` (`HH:MM`), `SCAN_PAUSE_MS`, `PUBLIC_BASE` (required), `APP_URL`, `LOOKUP_CONTACT`, `TRUSTED_PROXY`, `RENDEZVOUS_URL`, `TMDB_API_KEY`, `DISCOGS_TOKEN`, `TITLE_LIBRARY`, `RTC_PORT`, `RTC_LAN_ADDRESS`, `RTC_ADVERTISE`, `LEVELS_BACKEND`, `TRANSCODE_CACHE_BYTES`, `FFMPEG_PATH` and `FFPROBE_PATH`. */
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const roots = (env.LIBRARY_ROOTS ?? '')
     .split(',')
@@ -77,7 +84,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   for (const { group } of roots) {
     if (group !== undefined && seen.has(group)) throw new Error(`LIBRARY_ROOTS group "${group}" is also a root name`);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), appUrl: parseAppUrl(env.APP_URL), lookupContact: parseContact(env.LOOKUP_CONTACT), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, discogsToken: env.DISCOGS_TOKEN?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env) };
 }
 
 function parseRtc(env: Record<string, string | undefined>): RtcConfig {
@@ -137,8 +144,26 @@ function parsePause(value: string | undefined): number {
 }
 
 function parseBase(value: string | undefined): string {
-  if (value === undefined) return DEFAULT_PUBLIC_BASE;
+  if (value === undefined || value === '') {
+    throw new Error("PUBLIC_BASE is not set: the server's HTTPS API base as devices reach it, e.g. https://nas.example.com/bluray/api/");
+  }
   return httpUrl('PUBLIC_BASE', value);
+}
+
+/** Goes into a User-Agent header, where anything but printable ASCII makes every lookup throw. */
+function parseContact(value: string | undefined): string | null {
+  const contact = value?.trim() ?? '';
+  if (contact === '') return null;
+  if (!/^[\x20-\x7e]+$/.test(contact)) throw new Error('LOOKUP_CONTACT must be printable ASCII (an email address or a URL)');
+  return contact;
+}
+
+function parseAppUrl(value: string | undefined): string {
+  if (value === undefined || value === '') return DEFAULT_APP_URL;
+  const url = httpUrl('APP_URL', value);
+  // Pairing links append ?pair=… to it, so it can carry neither a query nor a fragment.
+  if (/[?#]/.test(url)) throw new Error(`APP_URL "${value}" has a query or fragment; pairing links add their own query`);
+  return url.endsWith('/') ? url : `${url}/`;
 }
 
 function parseRendezvous(value: string | undefined): string | undefined {
@@ -156,8 +181,8 @@ function httpUrl(name: string, value: string): string {
   return value;
 }
 
-function parseProxy(value: string | undefined): string {
-  if (value === undefined) return 'caddy';
+function parseProxy(value: string | undefined): string | null {
+  if (value === undefined || value === '') return null;
   if (!/^[A-Za-z0-9.:_-]+$/.test(value)) throw new Error(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   return value;
 }

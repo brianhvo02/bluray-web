@@ -10,8 +10,8 @@
 import { PREFLIGHT_MAX_AGE, corsHeaders } from '../../src/engine/disc/cors-policy';
 import { boundedBody } from './body';
 import { INTERNAL, REGISTRY_NAME, json } from './code-registry';
-import { isNasId } from './protocol';
-import { turnRoute } from './turn';
+import { isNasId, nasIdOf } from './protocol';
+import { nasAllowed, turnRoute } from './turn';
 
 export { CodeRegistry } from './code-registry';
 export { Signalling } from './signalling';
@@ -30,7 +30,14 @@ export interface Env {
   TURN_KEY_API_TOKEN?: string;
   /** The NAS ids `POST /turn` mints for, comma-separated (a Worker secret); unset or empty, it mints for none. */
   TURN_NAS_IDS?: string;
+  /**
+   * The NAS ids this Worker serves, comma-separated (a Worker secret). Unset or empty, it is open to any NAS, as a
+   * self-hoster's own Worker is; set, `POST /nas`, lookup, signalling and `/turn` refuse every other NAS.
+   */
+  NAS_IDS?: string;
 }
+
+const NOT_ALLOWED = { error: 'nas-not-allowed' };
 
 const ROUTES = new Set(['/nas', '/codes', '/codes/lookup']);
 const SIGNAL_ROUTES = new Set(['/signal/nas', '/signal/device']);
@@ -55,8 +62,34 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (body === null) return json(413, { error: 'body too large' });
   const headers = new Headers(request.headers);
   headers.delete('Content-Length');
+  // Refused before the registry sees the request, so it counts against no limit and stores nothing.
+  if (path === '/nas' && env.NAS_IDS !== undefined && !(await nasRegistrationAllowed(body, env.NAS_IDS))) return json(403, NOT_ALLOWED);
   const registry = env.CODE_REGISTRY;
-  return registry.get(registry.idFromName(REGISTRY_NAME)).fetch(new Request(request.url, { method: request.method, headers, body }));
+  const answer = await registry.get(registry.idFromName(REGISTRY_NAME)).fetch(new Request(request.url, { method: request.method, headers, body }));
+  if (path === '/codes/lookup' && env.NAS_IDS !== undefined && answer.status === 200) {
+    // A code of a NAS off the list reads as an unknown one (a NAS registered before the list was set).
+    const found = (await answer.clone().json().catch(() => null)) as { nasId?: unknown } | null;
+    if (typeof found?.nasId === 'string' && !nasAllowed(env.NAS_IDS, found.nasId)) {
+      await answer.body?.cancel();
+      return json(404, { error: 'unknown code' });
+    }
+  }
+  return answer;
+}
+
+/**
+ * Whether the key in a `POST /nas` body has an id on the list. A body that doesn't hold a key goes on to the
+ * registry, which answers 400.
+ */
+async function nasRegistrationAllowed(body: Uint8Array | ArrayBuffer | null, raw: string): Promise<boolean> {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(body ?? new Uint8Array())) as { publicKeyJwk?: { kty?: string; crv?: string; x?: string; y?: string } };
+    const jwk = parsed.publicKeyJwk;
+    if (typeof jwk?.kty !== 'string' || typeof jwk.crv !== 'string' || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') return true;
+    return nasAllowed(raw, await nasIdOf({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y } as Parameters<typeof nasIdOf>[0]));
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -72,6 +105,7 @@ async function signal(request: Request, env: Env): Promise<Response> {
   if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return json(426, { error: 'expected a WebSocket upgrade' });
   const nasId = new URL(request.url).searchParams.get('nasId');
   if (!isNasId(nasId)) return json(400, { error: 'bad request' });
+  if (!nasAllowed(env.NAS_IDS, nasId)) return json(403, NOT_ALLOWED);
   const registry = env.CODE_REGISTRY;
   const attempt = await registry.get(registry.idFromName(REGISTRY_NAME)).fetch(
     new Request(`https://registry.internal${INTERNAL.signalAttempt}`, {

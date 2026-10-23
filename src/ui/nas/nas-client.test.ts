@@ -91,7 +91,7 @@ function fakeServer(): FakeServer {
     scanning: false,
     list: (path: string) => {
       listed.push(path);
-      return { folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [] };
+      return { folders: [{ name: 'media5', path: 'media5', discs: 1 }], discs: [] };
     },
     evidence: () => [],
   } as unknown as Library;
@@ -179,9 +179,9 @@ describe('NasClient', () => {
     expect(server.auth.devices().map((d) => d.name)).toEqual(['Mac Safari']);
     const session = await nas.session();
     expect(server.auth.verify(session.token)?.id).toBe(store.value!.deviceId);
-    const listing = await nas.library('drv5/[BD] 鋼の旅団 #1? 100% a+b');
-    expect(listing).toEqual({ folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [], scanning: false });
-    expect(server.listed).toEqual(['drv5/[BD] 鋼の旅団 #1? 100% a+b']);
+    const listing = await nas.library('media5/[BD] 鋼の旅団 #1? 100% a+b');
+    expect(listing).toEqual({ folders: [{ name: 'media5', path: 'media5', discs: 1 }], discs: [], scanning: false });
+    expect(server.listed).toEqual(['media5/[BD] 鋼の旅団 #1? 100% a+b']);
   });
 
   it('asks the NAS who this device is, and reads titles, a title and art', async () => {
@@ -220,7 +220,7 @@ describe('NasClient', () => {
     const server = fakeServer();
     const nas = client(server);
     await nas.pair(await server.code(), 'iPad');
-    const disc = { id: '0123456789abcdef', name: 'Disc', path: 'drv5/Disc', kind: 'folder' };
+    const disc = { id: '0123456789abcdef', name: 'Disc', path: 'media5/Disc', kind: 'folder' };
     await nas.session();
     server.nas = async (url) => {
       const route = url.pathname.slice(new URL(BASE).pathname.length);
@@ -263,7 +263,7 @@ describe('NasClient', () => {
       }
       sent.push(`${init?.method ?? 'GET'} ${route}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`);
       if (route.startsWith('admin/unsorted')) return Response.json({ items: [], total: 0 });
-      if (route === 'admin/hidden') return Response.json({ discs: [{ discId: 'd1', root: 'drv5', folder: 'A/B', displayName: null }] });
+      if (route === 'admin/hidden') return Response.json({ discs: [{ discId: 'd1', root: 'media5', folder: 'A/B', displayName: null }] });
       if (route.startsWith('admin/lookup?q=Ember') && url.searchParams.get('source') === 'tmdb') return Response.json({ error: 'too-many-lookups' }, { status: 429, headers: { 'Retry-After': '7' } });
       if (route.startsWith('admin/lookup')) return Response.json({ titles: [{ id: 'anilist:1' }] });
       if (route === 'admin/discs/d%2F1/choice' && init?.method === 'PUT') {
@@ -278,7 +278,7 @@ describe('NasClient', () => {
     server.nas = answer;
 
     expect(await nas.admin.unsorted(50, 50)).toEqual({ items: [], total: 0 });
-    expect(await nas.admin.hidden()).toEqual([{ discId: 'd1', root: 'drv5', folder: 'A/B', displayName: null }]);
+    expect(await nas.admin.hidden()).toEqual([{ discId: 'd1', root: 'media5', folder: 'A/B', displayName: null }]);
     expect(await nas.admin.lookup('星 & co', 'anilist')).toEqual([{ id: 'anilist:1' }]);
     await expect(nas.admin.lookup('Ember', 'tmdb')).rejects.toMatchObject({ status: 429, code: 'too-many-lookups', detail: { retryAfter: 7 } });
     const choice = { kind: 'title', titleId: 'anilist:1', season: 1, disc: 2 } as const;
@@ -287,6 +287,7 @@ describe('NasClient', () => {
     await expect(nas.admin.clearChoice('d/1')).rejects.toMatchObject({ status: 409, code: 'copy-follows-source', detail: { source: 'd0' } });
     await nas.admin.setName('music:ab', 'Spring Live');
     await nas.admin.setName('music:ab', null);
+    await nas.admin.setMusic('music:ab', { artist: 'Aoi Hoshino', rejectMatch: true });
     await nas.admin.createTitle('music', 'Live 2024', null);
     await nas.admin.createTitle('series', 'Ember Tide', 2);
     await nas.admin.updateTitle('own:x', { name: 'Live 2025' });
@@ -303,6 +304,7 @@ describe('NasClient', () => {
       'DELETE admin/discs/d%2F1/choice',
       'PUT admin/names/music%3Aab {"name":"Spring Live"}',
       'PUT admin/names/music%3Aab {"name":null}',
+      'PUT admin/music/music%3Aab {"artist":"Aoi Hoshino","rejectMatch":true}',
       'POST admin/titles {"kind":"music","name":"Live 2024"}',
       'POST admin/titles {"kind":"series","name":"Ember Tide","seasons":2}',
       'PATCH admin/titles/own%3Ax {"name":"Live 2025"}',
@@ -496,7 +498,7 @@ describe('NasClient', () => {
     const server = fakeServer();
     const nas = client(server);
     await nas.pair(await server.code(), 'iPad');
-    await Promise.all([nas.library(''), nas.library('drv5'), nas.session()]);
+    await Promise.all([nas.library(''), nas.library('media5'), nas.session()]);
     expect(server.hits.session).toBe(1);
   });
 
@@ -796,7 +798,7 @@ describe('NasClient over WebRTC', () => {
     expect(world.peers[0].closed).toBe(true); // the redeem connection is only for the redeem
 
     expect(await nas.me()).toMatchObject({ owner: true, titleLibrary: true });
-    expect(await nas.library('drv5')).toEqual({ folders: [{ name: 'drv5', path: 'drv5', discs: 1 }], discs: [], scanning: false });
+    expect(await nas.library('media5')).toEqual({ folders: [{ name: 'media5', path: 'media5', discs: 1 }], discs: [], scanning: false });
     expect(world.peers).toHaveLength(2);
     expect(world.opened[1].inviteHash).toBeUndefined();
     expect(world.opened[1].deviceProof).toBeTypeOf('function');
@@ -817,7 +819,7 @@ describe('NasClient over WebRTC', () => {
     await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
     expect(store.value).toMatchObject({ base: BASE, nasId: NAS_ID });
     expect(tried).toEqual([`${BASE}health`]);
-    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect((await nas.library('media5')).folders).toHaveLength(1);
     expect(tried).toEqual([`${BASE}health`, `${BASE}health`]);
   });
 
@@ -840,14 +842,14 @@ describe('NasClient over WebRTC', () => {
     await nas.me();
     let release!: () => void;
     server.holdLibrary = new Promise<void>((resolve) => (release = resolve));
-    const listing = nas.library('drv5');
+    const listing = nas.library('media5');
     const outcome = expect(listing).rejects.toMatchObject({ reason: 'nas-lost', message: NAS_LOST_MESSAGE });
     await new Promise((r) => setTimeout(r, 0));
     world.peers[1].fail(); // Wi-Fi to cellular
     await outcome;
     server.holdLibrary = null;
     release();
-    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect((await nas.library('media5')).folders).toHaveLength(1);
     expect(world.peers).toHaveLength(3);
   });
 
@@ -874,12 +876,12 @@ describe('NasClient over WebRTC', () => {
     await nas.me();
     world.peers.at(-1)!.fail(); // first drop
     dropAfterSession = 1; // second drop, as the new connection's session answers
-    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect((await nas.library('media5')).folders).toHaveLength(1);
     expect(store.value).not.toBeNull();
     expect(server.auth.devices()).toHaveLength(1);
     world.peers.at(-1)!.fail();
     world.peers.at(-2)!.fail();
-    expect((await nas.library('drv5')).folders).toHaveLength(1);
+    expect((await nas.library('media5')).folders).toHaveLength(1);
     expect(store.value).not.toBeNull();
   });
 
@@ -909,7 +911,7 @@ describe('NasClient over WebRTC', () => {
     const world = rtcWorld(server);
     const nas = rtcClient(server, world);
     await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
-    const url = `rtc://${NAS_ID}/api/library?path=drv5`;
+    const url = `rtc://${NAS_ID}/api/library?path=media5`;
     const read = (token: string): Promise<Response> => nas.discFetch(url, { headers: { Authorization: `Bearer ${token}` } });
     const { token } = await nas.session();
     expect((await read(token)).status).toBe(200);
@@ -941,7 +943,7 @@ describe('NasClient over WebRTC', () => {
     await nas.pair(await server.code({ https: BASE, webrtc: { nasId: NAS_ID } }), 'iPhone');
     const base = await nas.discBase('d1');
     expect(base).toBe(`rtc://${NAS_ID}/api/discs/d1/`);
-    const url = `rtc://${NAS_ID}/api/library?path=drv5`;
+    const url = `rtc://${NAS_ID}/api/library?path=media5`;
     const read = (token: string): Promise<Response> => nas.discFetch(url, { headers: { Authorization: `Bearer ${token}` } });
     const { token } = await nas.session();
     expect((await read(token)).status).toBe(200);
@@ -993,6 +995,138 @@ describe('NasClient over WebRTC', () => {
       turnProofMessage({ sid, ts: Number(proof.ts) }),
     );
     expect(ok).toBe(true);
+  });
+});
+
+describe('NasClient pairing links', () => {
+  /** The app's own Worker in these tests, which the fake server doesn't answer: a lookup there fails. */
+  const BUILT_IN = 'https://builtin.example';
+  const counting = (server: FakeServer): { fetch: typeof fetch; lookups: string[] } => {
+    const lookups: string[] = [];
+    const counted = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith('/codes/lookup')) lookups.push(String(input));
+      return server.fetch(input, init);
+    }) as typeof server.fetch;
+    return { fetch: counted, lookups };
+  };
+
+  it('pair with nas skips the lookup', async () => {
+    const server = fakeServer();
+    const { fetch, lookups } = counting(server);
+    const store = memoryStore();
+    // a link with nas pairs even when the app has no Worker
+    const nas = new NasClient({ fetch, subtle: crypto.subtle, store, now, rendezvousUrl: undefined });
+    expect(nas.canPairByCode).toBe(false);
+    await nas.pair(await server.code(), 'iPad', { nas: BASE });
+    expect(lookups).toEqual([]);
+    expect(store.value).toMatchObject({ base: BASE, deviceName: 'iPad', owner: true });
+    expect(store.value).not.toHaveProperty('nasId');
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+    expect(server.hits['pair/redeem']).toBe(1);
+    expect((await nas.library('media5')).folders).toHaveLength(1);
+  });
+
+  it('pair with rv looks up at rv and stores it', async () => {
+    const server = fakeServer();
+    const { fetch, lookups } = counting(server);
+    const store = memoryStore();
+    const nas = new NasClient({ fetch, subtle: crypto.subtle, store, now, rendezvousUrl: BUILT_IN });
+    await nas.pair(await server.code(), 'iPad', { rv: `${RENDEZVOUS}/` });
+    expect(lookups).toEqual([`${RENDEZVOUS}/codes/lookup`]);
+    expect(store.value).toMatchObject({ base: BASE, rendezvousUrl: RENDEZVOUS });
+  });
+
+  it('pair with rv naming the built-in Worker stores no Worker of its own', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = client(server, store);
+    await nas.pair(await server.code(), 'iPad', { rv: RENDEZVOUS });
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+  });
+
+  it("signalling uses the pairing's own Worker", async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    const deps = { fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: BUILT_IN, openRtc: world.openRtc };
+    const nas = new NasClient(deps);
+    await nas.pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone', { rv: RENDEZVOUS });
+    expect(store.value).toMatchObject({ base: '', nasId: NAS_ID, rendezvousUrl: RENDEZVOUS });
+    expect(world.opened[0]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS });
+    await nas.me();
+    expect(world.opened[1]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS });
+    // after a reload too
+    const again = new NasClient(deps);
+    await again.me();
+    expect(world.opened[2]).toMatchObject({ nasId: NAS_ID, signallingUrl: RENDEZVOUS });
+  });
+
+  it('an old pairing uses the built-in Worker', async () => {
+    const server = fakeServer();
+    const world = rtcWorld(server);
+    const store = memoryStore();
+    await rtcClient(server, world, store).pair(await server.code({ webrtc: { nasId: NAS_ID } }), 'iPhone');
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+    const nas = new NasClient({ fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: BUILT_IN, openRtc: world.openRtc });
+    await nas.me();
+    expect(world.opened.at(-1)).toMatchObject({ nasId: NAS_ID, signallingUrl: BUILT_IN });
+  });
+
+  it('a pairing made straight at a server takes no NAS id from me, so it never signals through the built-in Worker', async () => {
+    const server = fakeServer();
+    const withNasId = (async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await server.fetch(input, init);
+      if (!String(input).endsWith('/api/me')) return res;
+      return Response.json({ ...((await res.json()) as object), nasId: NAS_ID });
+    }) as typeof server.fetch;
+    const direct = memoryStore();
+    const nas = new NasClient({ fetch: withNasId, subtle: crypto.subtle, store: direct, now, rendezvousUrl: BUILT_IN });
+    await nas.pair(await server.code(), 'iPad', { nas: BASE });
+    expect(direct.value).toMatchObject({ direct: true });
+    await nas.me();
+    expect(direct.value).not.toHaveProperty('nasId');
+    // one that names a Worker (here with nas too) takes it, as a looked-up one does
+    const named = memoryStore();
+    const nas2 = new NasClient({ fetch: withNasId, subtle: crypto.subtle, store: named, now, rendezvousUrl: BUILT_IN });
+    await nas2.pair(await server.code(), 'iPad', { nas: BASE, rv: RENDEZVOUS });
+    expect(named.value).not.toHaveProperty('direct');
+    await nas2.me();
+    expect(named.value).toMatchObject({ nasId: NAS_ID, rendezvousUrl: RENDEZVOUS });
+    const looked = memoryStore();
+    const nas3 = new NasClient({ fetch: withNasId, subtle: crypto.subtle, store: looked, now, rendezvousUrl: RENDEZVOUS });
+    await nas3.pair(await server.code(), 'iPad');
+    await nas3.me();
+    expect(looked.value).toMatchObject({ nasId: NAS_ID });
+  });
+
+  it('clears a stored pairing whose Worker or direct mark is damaged', async () => {
+    const server = fakeServer();
+    for (const damage of [{ rendezvousUrl: 42 }, { direct: 'yes' }]) {
+      const store = memoryStore();
+      await client(server, store).pair(await server.code(), 'iPad');
+      store.value = { ...store.value!, ...damage } as unknown as NasPairing;
+      const nas = client(server, store);
+      expect(await nas.pairing()).toBeNull();
+      expect(store.value).toBeNull();
+    }
+  });
+
+  it('compares the built-in Worker as a URL: case, :443 and a trailing slash name the same Worker', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = new NasClient({ fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: 'https://Rendezvous.Example:443/' });
+    await nas.pair(await server.code(), 'iPad', { rv: RENDEZVOUS });
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+  });
+
+  it("a nas link to a server that doesn't answer fails with noRoute", async () => {
+    const server = fakeServer();
+    server.nas = async () => {
+      throw new TypeError('Failed to fetch');
+    };
+    const store = memoryStore();
+    await expect(client(server, store).pair(await server.code(), 'iPad', { nas: BASE })).rejects.toThrow(NAS_MESSAGES.noRoute);
+    expect(store.value).toBeNull();
   });
 });
 

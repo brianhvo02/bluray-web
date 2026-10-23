@@ -31,6 +31,8 @@ COPY dist/server.mjs ./server.mjs
 COPY data/discdb-index.json ./data/discdb-index.json
 # The notices for what the image ships, TheDiscDB's MIT data and jellyfin-ffmpeg among them.
 COPY NOTICE ./NOTICE
+# The notice for the GPL parts (jellyfin-ffmpeg, Intel's media driver) and where their sources are.
+COPY deploy/IMAGE-NOTICE /usr/share/doc/bluray-server/NOTICE
 # Created here so the named volume mounted on /data starts out owned by `node`.
 RUN mkdir -p /data && chown node:node /data
 

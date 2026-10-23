@@ -1,7 +1,7 @@
 # NAS Library by Title (Step 2, part 2) — Design Spec
 
 Date: 2026-10-17
-Status: Done, 2026-10-18. On the real library (2,349 discs, after adding the Downloads and Rips folders) matching files 1,079 discs, puts 67 on the Music shelf and leaves 1,202 in Unsorted (more than one title fits 481, no title 281, no disc number 243, no season 101, sources disagree 93, episode past the season 3), after three tuning rounds on the real run, each checked by an adversarial review. The owner's spot-check of 50 random filed discs found none wrong, so the gate is open to everyone.
+Status: Done, 2026-10-18. On the real library (2,349 discs, after adding the Downloads and rips folders) matching files 1,079 discs, puts 67 on the Music shelf and leaves 1,202 in Unsorted (more than one title fits 481, no title 281, no disc number 243, no season 101, sources disagree 93, episode past the season 3), after three tuning rounds on the real run, each checked by an adversarial review. The owner's spot-check of 50 random filed discs found none wrong, so the gate is open to everyone.
 Parent spec: `2026-10-17-nas-server-design.md` (step 2). This document adds a title library on top of step 2's server and folder browser. Where the two disagree, this one wins for the library.
 
 ## 1. Intent
@@ -27,9 +27,9 @@ These words are used in the UI and in this document (the user asked for terms th
 ## 3. The library as it is (recon, 2026-10-17, read-only)
 
 - **Disc counts.** 2,456 discs:
-  - 795 under the seven `/mnt/drvN/BDMVs` roots that step 2 already scans.
-  - 1,661 under the drives' `Downloads` folders, which nothing scans today: drv0 183, drv1 75, drv2 250, drv3 520, drv4 633, drv8 none.
-  - 183 of the 2,456 are ISOs. drv1 and drv4 are not mounted into the container today.
+  - 795 under the rips roots that step 2 already scans.
+  - 1,661 under the drives' `Downloads` folders, which nothing scans today.
+  - 183 of the 2,456 are ISOs. Two drives are not mounted into the container today.
 - **Discs carry their own titles.** 1,963 of the 2,456 (80%) have `BDMV/META/DL/bdmt_<lang>.xml`. Japanese appears on 1,509, English on 935, others rarely. Its `di:name` holds a title plus a volume or disc number: `星降りの旅人 2`, `Deep Orbit: Frontier Season 2 Disc 2`, `月影の教室 2nd Season VOL.1`, `KAZEGURUMA Blu-ray Box Season3 Disc3`.
 - **Folder name styles** (classified by a heuristic):
 
@@ -41,7 +41,7 @@ These words are used in the UI and in this document (the user asked for terms th
   | Loose | ~420, 190 of them without a disc title | `BRASSWICK S02/BRASSWICK S02 VOL.2`, `夏の終わりの灯台/BD`, `Harbor Line 7/HARBOR_L7_02` |
 
   Seasons, volumes and box sets nest up to six levels.
-- **Music.** 72 music Blu-rays (concerts, live shows, CD bonus discs), all in `drv1/Downloads/Music`.
+- **Music.** 72 music Blu-rays (concerts, live shows, CD bonus discs), all in one drive's `Downloads/Music`.
 - **Bonus discs.** About 60 bonus or special discs (`[Bonus] Volume 3`, `特典DISC`, `Reading&Live Event`).
 - **Catalogue numbers.** Many folders carry the release's catalogue number (`ABCD-12345`, `EFGH-6789`, `IJKL-24680`, `MNOP 1357`).
 - **Duplicates.** The same volume exists twice in places, for example a scene copy and a Japanese release copy, or an Italian release.
@@ -56,7 +56,7 @@ These words are used in the UI and in this document (the user asked for terms th
 
 Goals:
 - Browse and search by title: title → season, movie or extras → episode or disc. Search matches English, romaji and Japanese titles (user).
-- Cover all discs: the BDMVs roots plus the Downloads folders of drv0–drv4 (user).
+- Cover all discs: the BDMVs roots plus every drive's Downloads folder, for example media1 and media2 (user).
 - **Cautious matching.** A disc is filed only when the title, the season, and the disc's place in it are unambiguous. Everything else goes to Unsorted (user).
 - **Unsorted** is owner-only. The owner files a disc by picking a title, or by creating an own title (user), then a season and a disc number. The NAS keeps that choice for good. A rescan, a metadata refresh, or the disc moving to another folder never loses it (§9).
 - **Season pages** show both episodes and discs (user). Two copies of one disc are both shown, labelled by drive and folder; the app doesn't pick one.
@@ -95,7 +95,7 @@ Anti-goals:
 | Music | Music shelf, named by folder, renamable with a NAS-stored value | User |
 | Bonus discs | Extras with the season, or with the title | User (confirmed my guess) |
 | Folder view | Kept as a second way in | User |
-| Downloads folders | Scanned: drv0–drv4 `Downloads` added as roots | User |
+| Downloads folders | Scanned: every drive's `Downloads` (e.g. media1, media2) added as roots | User |
 | Order | Step 2 as built (folder view) is deployed and the devices paired first. The title library follows, spot-checked owner-only, then turned on for everyone | User |
 | Moved discs | Owner choices follow the disc by its content fingerprint | My call |
 | Hiding a disc | Hidden from the title library only; owners can unhide from a Hidden list | My call |
@@ -108,8 +108,8 @@ Mockups (approved by the user): `https://claude.ai/artifact/JT3HaZAxQ1K4x7uTkSqY
 
 ## 6. Sources and roots
 
-- **New roots in `LIBRARY_ROOTS`.** Add `drv0-dl=/library-mnt/drv0/Downloads` and the same for drv1–drv4 (names are the builder's; root names are the first segment of disc paths and IDs).
-  - Mount `/mnt/drv1` and `/mnt/drv4` the same way as the others.
+- **New roots in `LIBRARY_ROOTS`.** Add `media1-dl=/library-mnt/media1/Downloads` and the same for every other drive with a Downloads folder (media2 in the example) (names are the builder's; root names are the first segment of disc paths and IDs).
+  - Mount the drives that had no BDMVs root yet (their `/mnt/mediaN`) the same way as the others.
   - Existing roots and disc IDs don't change.
   - The folder view shows the Downloads roots as one top-level "Downloads" folder, merging the five, beside the BDMVs content. That needs a small change to the top-level merge, which today merges every root's children together.
 - **Discs still downloading.** A disc whose files changed in the last hour is not added yet, and is picked up by a later scan. Use the newest mtime of `index.bdmv`, the `.mpls`/`.clpi` files and the `.m2ts` sizes and mtimes (my call).

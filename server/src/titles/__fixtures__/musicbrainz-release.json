@@ -1,0 +1,15 @@
+{
+  "id": "11111111-0000-4000-8000-000000000003",
+  "title": "Lantern Parade Live",
+  "date": "2021-03-06",
+  "country": "JP",
+  "cover-art-archive": { "front": true, "back": false, "count": 1 },
+  "release-group": { "primary-type": "Album", "secondary-types": ["Live"] },
+  "artist-credit": [
+    { "name": "Aoi Hoshino", "artist": { "id": "aaaaaaaa-0000-4000-8000-000000000001", "name": "Aoi Hoshino", "sort-name": "Hoshino, Aoi",
+      "aliases": [
+        { "name": "星野あおい", "locale": "ja", "primary": true },
+        { "name": "A. Hoshino", "locale": null, "primary": false }
+      ] } }
+  ]
+}

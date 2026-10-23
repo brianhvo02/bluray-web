@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { PAIRING_ALPHABET, codeHash, formatCode, newCode, normalizeCode } from './codes';
+import { PAIRING_ALPHABET, codeHash, formatCode, newCode, normalizeCode, pairingLink } from './codes';
 
 describe('pairing codes', () => {
   it('newCode gives 12 characters from the Crockford alphabet', () => {
@@ -43,5 +43,15 @@ describe('pairing codes', () => {
   it('codeHash matches the rendezvous Worker on the shared test vector', () => {
     // Same vector as rendezvous/src/worker.test.ts, which hashes with WebCrypto.
     expect(codeHash('k7qm-4xp2-r9td')).toBe('0f54f555d41af4fe0469424a47ffcbfb19a84d3629a0cbc0ffa8385557ea6dbf');
+  });
+
+  it('pairingLink names the Worker when there is one, else the server itself', () => {
+    const o = { appUrl: 'https://bluray-web.pages.dev/', publicBase: 'https://nas.example.com/bluray/api/' };
+    expect(pairingLink('ABCD-2345-EFGH', { ...o, rendezvousUrl: 'https://rendezvous.example.workers.dev' })).toBe(
+      'https://bluray-web.pages.dev/?pair=ABCD2345EFGH&rv=https%3A%2F%2Frendezvous.example.workers.dev',
+    );
+    expect(pairingLink('ABCD2345EFGH', { ...o, rendezvousUrl: undefined })).toBe(
+      'https://bluray-web.pages.dev/?pair=ABCD2345EFGH&nas=https%3A%2F%2Fnas.example.com%2Fbluray%2Fapi%2F',
+    );
   });
 });

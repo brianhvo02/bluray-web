@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { setPriority } from 'node:os';
 import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
 import type { Readable } from 'node:stream';
@@ -47,6 +48,8 @@ export interface EncoderBackend {
   readonly id: string;
   readonly binary: string;
   args(input: EncoderArgsInput): string[];
+  /** How far to lower the encoder process's priority (a nice value; 0 or absent leaves it as it is). */
+  nice?(input: EncoderArgsInput): number;
 }
 
 /** A long GOP: the forced keyframes at EP entries are the ones that matter. */
@@ -100,6 +103,8 @@ function rateArgs(rateBps: number): string[] {
  */
 const OUTPUT = ['-fps_mode', 'passthrough', '-enc_time_base', '1/90000', '-mpegts_copyts', '1', '-f', 'mpegts', 'pipe:1'];
 const HEAD = ['-hide_banner', '-nostats', '-loglevel', 'error'];
+/** The nice value of a VC-1 encode, whose software decode takes about 0.45 of a core per viewing (bursts of 1.35): the NAS's other services come first. */
+const VC1_SOFTWARE_NICE = 10;
 
 const QSV_DECODERS = new Map<number, string>([
   [CodingType.AVC, 'h264_qsv'],
@@ -145,15 +150,22 @@ export const qsvBackend: EncoderBackend = {
       : tonemaps(input)
         ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']
         : [];
+    // The QSV VC-1 decoder drops frames (a disc's first I-frame among them, so its first interval never starts):
+    // VC-1 is decoded in software and uploaded to the GPU for the filters and the encoder, at a lower priority (`nice`).
+    const vc1 = input.sourceCoding === CodingType.VC1;
+    const decode = vc1
+      ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw', '-copyts', '-c:v', 'vc1']
+      : ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-copyts', '-c:v', decoder];
     return [
-      ...HEAD, '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv', '-copyts', '-c:v', decoder,
+      ...HEAD, ...decode,
       ...inputArgs(input), ...mapArgs(input),
-      '-vf', qsvFilter(input),
+      '-vf', `${vc1 ? 'format=nv12,hwupload=extra_hw_frames=64,' : ''}${qsvFilter(input)}`,
       ...codec, '-preset', preset, ...rateArgs(input.rateBps), ...colour,
       '-forced_idr', '1', '-force_key_frames', keyframeTimes(input), '-g', String(GOP_FRAMES),
       ...OUTPUT,
     ];
   },
+  nice: (input) => (input.sourceCoding === CodingType.VC1 ? VC1_SOFTWARE_NICE : 0),
 };
 
 /** Software H.264 (libx264), for machines without Quick Sync, such as CI. HDR sources and HEVC levels aren't supported. */
@@ -204,6 +216,8 @@ export interface ClipEncoderOptions {
   readonly maxIntervalsPerRun?: number;
   /** Injectable for tests. */
   readonly spawn?: typeof nodeSpawn;
+  /** Lowers a process's priority (`os.setPriority`); for tests. */
+  readonly setPriority?: (pid: number, nice: number) => void;
 }
 
 export const MAX_INTERVALS_PER_RUN = 300;
@@ -306,7 +320,7 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
     const startByte = first.srcSpnStart * SOURCE_PACKET_BYTES;
     const endByte = endSpn * SOURCE_PACKET_BYTES;
     const ticks = options.frameTicks;
-    const args = this.backend.args({
+    const argsInput: EncoderArgsInput = {
       file: 'pipe:0',
       startByte,
       endByte,
@@ -318,8 +332,17 @@ export class ClipEncoder extends EventEmitter<ClipEncoderEvents> {
       interlaced: options.interlaced,
       hdr: options.hdr,
       rateBps: options.rateBps ?? options.level.targetBps,
-    });
+    };
+    const args = this.backend.args(argsInput);
     const child = (options.spawn ?? nodeSpawn)(this.backend.binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const nice = this.backend.nice?.(argsInput) ?? 0;
+    if (nice !== 0 && child.pid !== undefined) {
+      try {
+        (options.setPriority ?? setPriority)(child.pid, nice);
+      } catch (err) {
+        console.warn('levels: could not lower the encoder priority', err);
+      }
+    }
     this.process = child;
     const live = (): boolean => run === this.run;
     const fail = (err: Error): void => {
@@ -593,6 +616,22 @@ interface EncodedFrame {
  * (`SourceFrames`: the PTS restored, the DTS moved with it, kept increasing and at most the PTS), then splits them into
  * the run's intervals. A PES waits while its source frame isn't known yet.
  */
+/**
+ * An encoded frame's DTS once its PTS is the source frame's (`pts`): the encoder's own DTS, kept as it is. It already
+ * rises with every frame and is at or before the encoder's PTS, which the restore only ever moves later (to the source
+ * frame at or after it), so it stays at or before the restored PTS. Shifting each DTS by its own frame's restore does
+ * not: the shifts differ by a tick or two with the QSV filters' rounding, and where the encoder packs DTS a tick apart
+ * (around frames a VC-1 decoder dropped) a later frame's DTS would have to pass its PTS. A DTS that doesn't rise past
+ * `lastDts` moves a tick on; one that would then pass `pts` is refused. A PES with no DTS field (`encodedDts` null) decodes
+ * at its PTS, which it can't say otherwise.
+ */
+export function encodedFrameDts(encodedDts: number | null, pts: number, lastDts: number): number {
+  const wanted = encodedDts ?? pts;
+  const dts = wanted <= lastDts ? lastDts + 1 : wanted;
+  if (dts > pts) throw new Error(`levels: an encoded frame's DTS can't stay increasing and at most its PTS ${pts}`);
+  return dts;
+}
+
 class IntervalSplitter {
   private videoPid: number | null = null;
   private chunks: Uint8Array[] = [];
@@ -690,12 +729,11 @@ class IntervalSplitter {
   private place(frame: EncodedFrame, pts: number): { index: number; video: EncodedPes[] } | null {
     const { pes } = frame;
     const shift = pts - frame.pts;
-    let dts90 = frame.dts + shift;
-    if (dts90 <= this.lastDts) dts90 = this.lastDts + 1;
-    if (dts90 > pts) throw new Error(`levels: an encoded frame's DTS can't stay increasing and at most its PTS ${pts}`);
+    const hasDts = pes[7]! >> 6 === 3;
+    const dts90 = encodedFrameDts(hasDts ? frame.dts : null, pts, this.lastDts);
     this.lastDts = dts90;
     if (shift !== 0) writeTimestamp(pes, 9, pts);
-    if (pes[7]! >> 6 === 3) writeTimestamp(pes, 14, dts90);
+    if (hasDts) writeTimestamp(pes, 14, dts90);
     else if (dts90 !== pts) throw new Error(`levels: an encoded frame without a DTS would decode at ${dts90}, before its PTS ${pts}`);
 
     const plan = this.starts.get(Math.floor(pts / EP_PTS_GRAIN));
