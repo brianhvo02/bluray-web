@@ -164,6 +164,10 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...REQUIRED, APP_URL: 'nope' })).toThrow('APP_URL "nope" is not an http(s) URL');
   });
 
+  it('rejects a LOOKUP_CONTACT a header cannot carry', () => {
+    for (const bad of ['mé@example.com', 'a\nb', '連絡先']) expect(() => loadConfig({ ...REQUIRED, LOOKUP_CONTACT: bad })).toThrow('LOOKUP_CONTACT must be printable ASCII');
+  });
+
   it('reads LOOKUP_CONTACT, null when unset or empty', () => {
     expect(loadConfig(REQUIRED).lookupContact).toBeNull();
     expect(loadConfig({ ...REQUIRED, LOOKUP_CONTACT: ' ' }).lookupContact).toBeNull();

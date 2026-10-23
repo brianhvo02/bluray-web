@@ -769,6 +769,7 @@ describe('owner-code', () => {
     await ownerCode(tmp, now, (line) => lines.push(line), { ...LINKS, registrar, rendezvousUrl: 'https://rendezvous.example.workers.dev' });
     const code = /([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)![1]!;
     expect(registrar.registerCode).toHaveBeenCalledWith(codeHash(code), { https: 'https://nas.example/bluray/api/' }, clock + 10 * MINUTE);
+    expect(lines[1]).toContain('&rv=https%3A%2F%2Frendezvous.example.workers.dev');
     expect(lines.at(-1)).toBe('Rendezvous: registered');
 
     lines.length = 0;

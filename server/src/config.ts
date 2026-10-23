@@ -84,7 +84,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   for (const { group } of roots) {
     if (group !== undefined && seen.has(group)) throw new Error(`LIBRARY_ROOTS group "${group}" is also a root name`);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), appUrl: parseAppUrl(env.APP_URL), lookupContact: env.LOOKUP_CONTACT?.trim() || null, trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, discogsToken: env.DISCOGS_TOKEN?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), appUrl: parseAppUrl(env.APP_URL), lookupContact: parseContact(env.LOOKUP_CONTACT), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, discogsToken: env.DISCOGS_TOKEN?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env) };
 }
 
 function parseRtc(env: Record<string, string | undefined>): RtcConfig {
@@ -148,6 +148,14 @@ function parseBase(value: string | undefined): string {
     throw new Error("PUBLIC_BASE is not set: the server's HTTPS API base as devices reach it, e.g. https://nas.example.com/bluray/api/");
   }
   return httpUrl('PUBLIC_BASE', value);
+}
+
+/** Goes into a User-Agent header, where anything but printable ASCII makes every lookup throw. */
+function parseContact(value: string | undefined): string | null {
+  const contact = value?.trim() ?? '';
+  if (contact === '') return null;
+  if (!/^[\x20-\x7e]+$/.test(contact)) throw new Error('LOOKUP_CONTACT must be printable ASCII (an email address or a URL)');
+  return contact;
 }
 
 function parseAppUrl(value: string | undefined): string {
