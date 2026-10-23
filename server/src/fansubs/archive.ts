@@ -13,6 +13,8 @@ export class TooLargeArchive extends Error {
 const FONT_NAME = /\.(ttf|otf|ttc|woff2?)$/i;
 const MAX_FONT_ENTRIES = 200;
 const MAX_FONT_BYTES = 200 * 1024 * 1024;
+/** Everything in a pack is extracted before filtering, so the whole archive is bounded too (a test lowers these). */
+export const PACK_LIMITS = { entries: 2000, bytes: 512 * 1024 * 1024 };
 
 /** The WASM sits next to the bundle (`dist/7zz.wasm`); unbundled (tests, tsx) it is in node_modules. */
 async function loadWasm(): Promise<Buffer> {
@@ -130,14 +132,20 @@ export function fontsIn7z(data: Buffer): Promise<{ name: string; data: Buffer }[
       // List first, so a bomb is refused before anything is written to the in-memory file system.
       run(inst, ['l', '-slt', '-ba', 'in.7z']);
       let count = 0;
+      let entries = 0;
+      let allBytes = 0;
       let total = 0;
       // The progress line is overwritten with backspaces and shares a line with the first entry.
       const listing = inst.text.replace(/^.*\x08/gm, '');
       for (const block of listing.split(/\n\n+/)) {
         const path = /^Path = (.*)$/m.exec(block)?.[1];
-        if (path === undefined || /^Folder = \+/m.test(block) || !FONT_NAME.test(path)) continue;
+        if (path === undefined) continue;
+        const size = Number(/^Size = (\d+)$/m.exec(block)?.[1] ?? 0);
+        if (++entries > PACK_LIMITS.entries) throw new TooLargeArchive(`more than ${PACK_LIMITS.entries} entries`);
+        if ((allBytes += size) > PACK_LIMITS.bytes) throw new TooLargeArchive(`over ${PACK_LIMITS.bytes} bytes in all`);
+        if (/^Folder = \+/m.test(block) || !FONT_NAME.test(path)) continue;
         count++;
-        total += Number(/^Size = (\d+)$/m.exec(block)?.[1] ?? 0);
+        total += size;
         if (count > MAX_FONT_ENTRIES) throw new TooLargeArchive(`more than ${MAX_FONT_ENTRIES} fonts`);
         if (total > MAX_FONT_BYTES) throw new TooLargeArchive(`fonts over ${MAX_FONT_BYTES} bytes`);
       }

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import SevenZip from '7z-wasm';
 import { describe, expect, it } from 'vitest';
-import { fontsIn7z, TooLargeArchive, unxz } from './archive';
+import { fontsIn7z, PACK_LIMITS, TooLargeArchive, unxz } from './archive';
 
 async function makePack(files: Record<string, Buffer>): Promise<Buffer> {
   const sz = await SevenZip({ wasmBinary: readFileSync(new URL('../../../node_modules/7z-wasm/7zz.wasm', import.meta.url)).buffer as ArrayBuffer, print: () => {}, printErr: () => {}, stdout: () => {} });
@@ -45,5 +45,20 @@ describe('archives', () => {
     const pack = await makePack({ 'A.TTF': font, 'd/b.Otf': font, 'd/c.ttf': font, 'd/notes.txt': Buffer.from('x') });
     const fonts = await fontsIn7z(pack);
     expect(fonts.map((f) => f.name).sort()).toEqual(['A.TTF', 'b.Otf', 'c.ttf']);
+  });
+
+  it('fontsIn7z refuses a pack whose entries or total size pass the limits, fonts or not', async () => {
+    const pack = await makePack({ 'a.txt': Buffer.alloc(1000, 1), 'b.txt': Buffer.alloc(1000, 2), 'c.ttf': Buffer.alloc(10, 3) });
+    const saved = { ...PACK_LIMITS };
+    try {
+      PACK_LIMITS.entries = 2;
+      await expect(fontsIn7z(pack)).rejects.toBeInstanceOf(TooLargeArchive);
+      PACK_LIMITS.entries = saved.entries;
+      PACK_LIMITS.bytes = 1500;
+      await expect(fontsIn7z(pack)).rejects.toBeInstanceOf(TooLargeArchive);
+    } finally {
+      Object.assign(PACK_LIMITS, saved);
+    }
+    expect((await fontsIn7z(pack)).map((f) => f.name)).toEqual(['c.ttf']);
   });
 });
