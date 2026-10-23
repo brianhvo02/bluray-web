@@ -86,9 +86,21 @@ nas.example.com {
 }
 ```
 
-`PUBLIC_BASE=https://nas.example.com/bluray/api/`, `TRUSTED_PROXY=caddy` (the proxy's container name or IP, as the server sees it). A proxy on the host instead: publish `127.0.0.1:8080:8080` in `compose.override.yaml` and proxy to that. A whole host name for the server works too (`PUBLIC_BASE=https://bluray.example.com/api/`, no prefix).
+`PUBLIC_BASE=https://nas.example.com/bluray/api/`, `TRUSTED_PROXY=caddy` (the proxy's container name or IP, as the server sees it). Override for that case (it replaces the service's default network, so list the default too if something else needs it):
 
-Tailscale: `tailscale serve` (or Funnel for friends off your tailnet) with HTTPS to the published loopback port gives `https://<machine>.<tailnet>.ts.net/`. Serve it at the root, so `PUBLIC_BASE=https://<machine>.<tailnet>.ts.net/api/`; devices must be on the tailnet unless you use Funnel.
+```yaml
+# compose.override.yaml
+services:
+  bluray-server:
+    networks: [proxy]
+networks:
+  proxy:
+    external: true
+```
+
+A proxy on the host instead: publish `127.0.0.1:8080:8080` in `compose.override.yaml` and proxy to that. A whole host name for the server works too (`PUBLIC_BASE=https://bluray.example.com/api/`, no prefix).
+
+Tailscale: `tailscale serve` (or Funnel for friends off your tailnet) with HTTPS to the loopback port (publish 8080 on 127.0.0.1 as above) gives `https://<machine>.<tailnet>.ts.net/`. Serve it at the root, so `PUBLIC_BASE=https://<machine>.<tailnet>.ts.net/api/`; devices must be on the tailnet unless you use Funnel.
 
 The server answers CORS for the public app's origin by itself. Set `TRUSTED_PROXY` only to your proxy; with it empty, no `X-Forwarded-For` is believed and every request counts as coming from the proxy.
 
@@ -102,7 +114,7 @@ npx wrangler@4.148.0 login
 npx wrangler@4.148.0 deploy
 ```
 
-(`npx wrangler` below stands for the same pinned version.)
+All Worker commands run from `rendezvous/`.
 
 Note the printed `https://bluray-rendezvous.<account>.workers.dev` URL. Then:
 
@@ -116,17 +128,17 @@ A pairing remembers the Worker it was made through, so WebRTC reconnects use you
 
 ```sh
 docker exec bluray-server node server.mjs nas-id        # exists after the first start with RENDEZVOUS_URL set
-cd rendezvous && npx wrangler secret put NAS_IDS        # comma-separated NAS ids
+cd rendezvous && npx wrangler@4.148.0 secret put NAS_IDS     # comma-separated NAS ids
 ```
 
 With `NAS_IDS` set, any other NAS gets 403 `nas-not-allowed` at registration, and lookups, signalling and `/turn` refuse it.
 
-**Cloudflare TURN relay (optional, for peers behind strict NATs).** Create a TURN key in the Cloudflare dashboard, then:
+**Cloudflare TURN relay (optional, for peers behind strict NATs).** Create a TURN key in the Cloudflare dashboard, then, from `rendezvous/`:
 
 ```sh
-npx wrangler secret put TURN_KEY_ID
-npx wrangler secret put TURN_KEY_API_TOKEN
-npx wrangler secret put TURN_NAS_IDS     # your NAS id from `nas-id`
+npx wrangler@4.148.0 secret put TURN_KEY_ID
+npx wrangler@4.148.0 secret put TURN_KEY_API_TOKEN
+npx wrangler@4.148.0 secret put TURN_NAS_IDS     # your NAS id from `nas-id`
 ```
 
 Without all three, `/turn` answers 503 `turn-not-configured`; a NAS not on `TURN_NAS_IDS` gets 403. The relay is off in the server until the owner switches it on in the app (it has a monthly allowance and asks before paid use).
@@ -145,13 +157,21 @@ Always include `compose.gpu.yaml` in later restarts, or the container loses the 
 
 ## Data and backups
 
-Everything the server keeps is in the `bluray-data` volume (`/data`): `auth.json` and the paired devices' keys, `owner.json` (the owner's choices), per-person resume points and BD-J saved data under `users/`, uploaded subtitles in `subtitles/`, the rendezvous key, metadata and art caches, and `transcode/` (cache, safe to delete). Back it up with the container stopped or from a snapshot:
+Everything the server keeps is in the `bluray-data` volume (`/data`): `auth.json` and the paired devices' keys, `owner.json` (the owner's choices), per-person resume points and BD-J saved data under `users/`, uploaded subtitles in `subtitles/`, the rendezvous key, metadata and art caches, and `transcode/` (cache, safe to delete). Compose names the volume `<project>_bluray-data`, the project being the folder holding `compose.yaml` (for example `bluray-server_bluray-data` in a folder named `bluray-server`). Find the real name first:
 
 ```sh
-docker run --rm -v bluray-data:/data -v "$PWD":/backup busybox tar czf /backup/bluray-data.tgz -C /data --exclude=transcode .
+docker volume ls | grep bluray-data
 ```
 
-Losing the volume unpairs every device and loses resume points and saved data (the library itself is read-only and untouched). Compose prefixes the volume name with the project name (`docker volume ls`).
+Then back it up with the container stopped or from a snapshot (a wrong name makes Docker create an empty volume and back that up):
+
+```sh
+docker run --rm -v <project>_bluray-data:/data -v "$PWD":/backup busybox tar czf /backup/bluray-data.tgz -C /data --exclude=transcode .
+```
+
+Restore into the same volume with the service stopped: `docker run --rm -v <project>_bluray-data:/data -v "$PWD":/backup busybox tar xzf /backup/bluray-data.tgz -C /data`.
+
+Losing the volume unpairs every device and loses resume points and saved data (the library itself is read-only and untouched).
 
 ## Update
 
