@@ -164,7 +164,7 @@ This check runs on real devices against the live NAS, on a **preview** origin of
 
    `--store-disc auto` looks for a disc already in the library instead. `--rehearse-store <library path or library-check id>` runs the same steps on another disc without expecting counts, as a dry run.
 3. **Library** (`--library`, Mika's phone). Each id (by default the 14 unconfirmed ones; or `--disc <id>`):
-   - goes through `$BDJ_LIBRARY_DIR/map.tsv` and the roots in `server/deploy/compose.yaml` to its NAS library disc;
+   - goes through `$BDJ_LIBRARY_DIR/map.tsv` and the roots read from the NAS (the `LIBRARY_ROOTS` line of `~/bluray-server/.env` and the bind mounts of its `compose.override.yaml`, over ssh, read-only) to its NAS library disc;
    - is opened from the NAS;
    - is driven with `tools/bdj-library/generic.keys` through the on-screen remote. The remote is opened with a tap off the picture, so the disc never sees the tap.
 

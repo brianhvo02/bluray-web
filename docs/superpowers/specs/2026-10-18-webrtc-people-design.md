@@ -148,7 +148,7 @@ Question: does a data channel carry a Blu-ray's rate (about 20–40 Mbps, UHD 60
 ### 6.5 The home connection
 
 Checked from the NAS on 2026-10-18 (read-only):
-- **Not behind carrier-grade NAT.** The user believed it was, but the home gateway (192.168.1.254) reports the same broadband IPv4 address that the NAS's outbound requests show from outside. So the gateway's port forward works.
+- **Not behind carrier-grade NAT.** The user believed it was, but the home gateway reports the same broadband IPv4 address that the NAS's outbound requests show from outside. So the gateway's port forward works.
 - **Native public IPv6** on the NAS's LAN interface.
 
 So:

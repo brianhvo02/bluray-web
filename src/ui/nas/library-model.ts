@@ -11,7 +11,7 @@ export interface Crumb {
   readonly path: string;
 }
 
-/** 'media5/[250226] きりの森' → NAS › media5 › [250226] きりの森, each with the folder it opens. */
+/** 'media5/[250226] Starfall Wanderer' → NAS › media5 › [250226] Starfall Wanderer, each with the folder it opens. */
 export function breadcrumbs(path: string): Crumb[] {
   const crumbs: Crumb[] = [{ label: 'NAS', path: '' }];
   const parts = path.split('/').filter((p) => p !== '');

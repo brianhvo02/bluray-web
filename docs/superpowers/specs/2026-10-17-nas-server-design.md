@@ -13,9 +13,9 @@ Success: on the iPad, the user opens the app, picks "Open from NAS", browses the
 ## 2. The NAS as it is (recon, 2026-10-17)
 
 - The NAS, on the user's tailnet (`nas.example.com` below stands for its Tailscale name). Ubuntu 24.04.5, kernel 6.8, Intel N150, Docker 29.9 with Compose v5. An ssh user in the `docker` group, no passwordless sudo.
-- Nine ext4 data drives at `/mnt/media0`–`/mnt/media8` (about 130 TB, mostly full). Disc rips live in a `BDMVs` folder on seven of them (`media0, 2, 3, 5, 6, 7, 8`). Some of those folders hold a few hundred entries.
+- Several ext4 data drives mounted under `/mnt` (about 130 TB, mostly full). Disc rips live in a rips folder on most of them. Some of those folders hold a few hundred entries.
 - About 1,200 discs (`BDMV/index.bdmv` within five levels of a `BDMVs` folder) and 15 `.iso` files. Layouts vary: a disc at the top level (`BDMVs/<disc>/BDMV`), discs grouped by series (`BDMVs/<series>/<volume>/BDMV`), CD+BD bundles with `BK` scan folders, and some `.mkv` remuxes and torrent files that aren't discs. UHD discs (HEVC, Dolby Vision, Atmos) are among them.
-- Caddy (container `caddy`, network `caddy_default`) terminates HTTPS on the tailnet address, ports 80/443, with a Tailscale certificate from `~/ts-cert`, and routes by path prefix (`/jellyfin`, `/vault`, `/photos`, …). Its Caddyfile is `/home/administrator/caddy/Caddyfile`.
+- Caddy (container `caddy`, network `caddy_default`) terminates HTTPS on the tailnet address, ports 80/443, with a Tailscale certificate, and routes by path prefix (`/jellyfin`, `/vault`, `/photos`, …). Its Caddyfile lives in the Caddy container's folder on the NAS.
 - The N150's GPU is present (Alder Lake-N) but its kernel driver isn't loaded (no `/dev/dri`). That only matters for step 4.
 
 ## 3. Goals, non-goals, anti-goals

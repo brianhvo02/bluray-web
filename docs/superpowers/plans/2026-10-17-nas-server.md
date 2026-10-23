@@ -76,7 +76,7 @@
 - Produces:
   ```ts
   // src/engine/disc/nas-api.ts
-  interface DiscEntry { readonly id: string; readonly name: string; readonly path: string /* root-relative, e.g. 'media5/[250226] きりの森' */; readonly kind: 'folder' | 'iso'; readonly sizeBytes: number }
+  interface DiscEntry { readonly id: string; readonly name: string; readonly path: string /* root-relative, e.g. 'media5/[250226] Starfall Wanderer' */; readonly kind: 'folder' | 'iso'; readonly sizeBytes: number }
   interface FolderEntry { readonly name: string; readonly path: string; readonly discs: number /* below it */ }
   // server/src/library.ts
   class Library {
@@ -283,7 +283,7 @@
 - Consumes: `NasClient` (Task 9), `PlayerController.openRemote(spec)` (Task 8).
 - Produces: `libraryModel` pure helpers: breadcrumbs from a path, sort (folders first, then `localeCompare(…, 'ja')`), badges (`ISO`, and `UHD` when the manifest's main clip is HEVC 2160p — computed lazily, not in the listing), last-folder memory.
 
-- [ ] **Step 1: Write failing tests**: `library-model` breadcrumbs for `media5/[250226] きりの森` → `NAS › media5 › [250226] きりの森`; sorting; E2E (`nas.spec.ts`, chromium, firefox, webkit — with `skipWithoutH264`): an owner code minted by `node server/dist/server.mjs owner-code` against the test server, opened as `/?pair=<code>`, pairs; the same with the code typed into the landing screen's field; browse to `syn` → `disc1` → plays to `playing`; `disc-menu` shows its menu; `disc-bdj` plays the playlist Java selects; `disc1.iso` plays; a pre-flight line shows `This connection:` with a number; Review Focus 2: delete a disc folder from a temp copy of the root between listing and opening → the error `This disc changed on the NAS. Open its folder again.`
+- [ ] **Step 1: Write failing tests**: `library-model` breadcrumbs for `media5/[250226] Starfall Wanderer` → `NAS › media5 › [250226] Starfall Wanderer`; sorting; E2E (`nas.spec.ts`, chromium, firefox, webkit — with `skipWithoutH264`): an owner code minted by `node server/dist/server.mjs owner-code` against the test server, opened as `/?pair=<code>`, pairs; the same with the code typed into the landing screen's field; browse to `syn` → `disc1` → plays to `playing`; `disc-menu` shows its menu; `disc-bdj` plays the playlist Java selects; `disc1.iso` plays; a pre-flight line shows `This connection:` with a number; Review Focus 2: delete a disc folder from a temp copy of the root between listing and opening → the error `This disc changed on the NAS. Open its folder again.`
 - [ ] **Step 2: Run** them. Expected: FAIL.
 - [ ] **Step 3: Implement.** Library screen: breadcrumbs, folder rows, disc rows with size and badges, 44 px rows on touch, "Rescanning…" when `scanning`. Pre-flight: probe once per open, show `This connection: N Mbps` and, when the main title's peak rate (CLPI `TS_recording_rate`, via the manifest's inlined clip info) exceeds it, `This disc needs about M Mbps; expect pauses.`; a Play button continues either way. Opening: `manifest` → `openRemote({ kind: 'remote', base, token, manifest })`.
 - [ ] **Step 4: Run** the unit tests and `npx playwright test nas`. Expected: PASS.

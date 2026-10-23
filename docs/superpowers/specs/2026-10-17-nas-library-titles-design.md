@@ -1,7 +1,7 @@
 # NAS Library by Title (Step 2, part 2) — Design Spec
 
 Date: 2026-10-17
-Status: Done, 2026-10-18. On the real library (2,349 discs, after adding the Downloads and Rips folders) matching files 1,079 discs, puts 67 on the Music shelf and leaves 1,202 in Unsorted (more than one title fits 481, no title 281, no disc number 243, no season 101, sources disagree 93, episode past the season 3), after three tuning rounds on the real run, each checked by an adversarial review. The owner's spot-check of 50 random filed discs found none wrong, so the gate is open to everyone.
+Status: Done, 2026-10-18. On the real library (2,349 discs, after adding the Downloads and rips folders) matching files 1,079 discs, puts 67 on the Music shelf and leaves 1,202 in Unsorted (more than one title fits 481, no title 281, no disc number 243, no season 101, sources disagree 93, episode past the season 3), after three tuning rounds on the real run, each checked by an adversarial review. The owner's spot-check of 50 random filed discs found none wrong, so the gate is open to everyone.
 Parent spec: `2026-10-17-nas-server-design.md` (step 2). This document adds a title library on top of step 2's server and folder browser. Where the two disagree, this one wins for the library.
 
 ## 1. Intent
@@ -27,9 +27,9 @@ These words are used in the UI and in this document (the user asked for terms th
 ## 3. The library as it is (recon, 2026-10-17, read-only)
 
 - **Disc counts.** 2,456 discs:
-  - 795 under the seven `/mnt/mediaN/BDMVs` roots that step 2 already scans.
-  - 1,661 under the drives' `Downloads` folders, which nothing scans today: media0 183, media1 75, media2 250, media3 520, media4 633, media8 none.
-  - 183 of the 2,456 are ISOs. media1 and media4 are not mounted into the container today.
+  - 795 under the rips roots that step 2 already scans.
+  - 1,661 under the drives' `Downloads` folders, which nothing scans today.
+  - 183 of the 2,456 are ISOs. Two drives are not mounted into the container today.
 - **Discs carry their own titles.** 1,963 of the 2,456 (80%) have `BDMV/META/DL/bdmt_<lang>.xml`. Japanese appears on 1,509, English on 935, others rarely. Its `di:name` holds a title plus a volume or disc number: `星降りの旅人 2`, `Deep Orbit: Frontier Season 2 Disc 2`, `月影の教室 2nd Season VOL.1`, `KAZEGURUMA Blu-ray Box Season3 Disc3`.
 - **Folder name styles** (classified by a heuristic):
 
@@ -41,7 +41,7 @@ These words are used in the UI and in this document (the user asked for terms th
   | Loose | ~420, 190 of them without a disc title | `BRASSWICK S02/BRASSWICK S02 VOL.2`, `夏の終わりの灯台/BD`, `Harbor Line 7/HARBOR_L7_02` |
 
   Seasons, volumes and box sets nest up to six levels.
-- **Music.** 72 music Blu-rays (concerts, live shows, CD bonus discs), all in `media1/Downloads/Music`.
+- **Music.** 72 music Blu-rays (concerts, live shows, CD bonus discs), all in one drive's `Downloads/Music`.
 - **Bonus discs.** About 60 bonus or special discs (`[Bonus] Volume 3`, `特典DISC`, `Reading&Live Event`).
 - **Catalogue numbers.** Many folders carry the release's catalogue number (`ABCD-12345`, `EFGH-6789`, `IJKL-24680`, `MNOP 1357`).
 - **Duplicates.** The same volume exists twice in places, for example a scene copy and a Japanese release copy, or an Italian release.

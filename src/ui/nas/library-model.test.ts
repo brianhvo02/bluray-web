@@ -33,9 +33,9 @@ function makeUhd(clpi: Uint8Array): void {
 
 describe('breadcrumbs', () => {
   it('names the NAS, then each folder of the path', () => {
-    const crumbs = breadcrumbs('media5/[250226] きりの森');
-    expect(crumbs.map((c) => c.label).join(' › ')).toBe('NAS › media5 › [250226] きりの森');
-    expect(crumbs.map((c) => c.path)).toEqual(['', 'media5', 'media5/[250226] きりの森']);
+    const crumbs = breadcrumbs('media5/[250226] Starfall Wanderer');
+    expect(crumbs.map((c) => c.label).join(' › ')).toBe('NAS › media5 › [250226] Starfall Wanderer');
+    expect(crumbs.map((c) => c.path)).toEqual(['', 'media5', 'media5/[250226] Starfall Wanderer']);
   });
 
   it('is just the NAS at the top', () => {
@@ -51,12 +51,12 @@ describe('sortRows', () => {
   it('lists folders first, then discs, each in Japanese collation order', () => {
     const rows = sortRows({
       folders: [folder('鋼の旅団'), folder('Anime'), folder('あの丘')],
-      discs: [disc('[BDMV] Rena - unknown'), disc('きりの森'), disc('Amber'), disc('10 Lanterns'), disc('2001')],
+      discs: [disc('[BDMV] Rena - unknown'), disc('Starfall Wanderer'), disc('Amber'), disc('10 Lanterns'), disc('2001')],
     });
     const names = (list: string[]) => [...list].sort((a, b) => a.localeCompare(b, 'ja'));
     expect(rows.map((r) => r.kind)).toEqual(['folder', 'folder', 'folder', 'disc', 'disc', 'disc', 'disc', 'disc']);
     expect(rows.slice(0, 3).map((r) => (r.kind === 'folder' ? r.folder.name : ''))).toEqual(names(['鋼の旅団', 'Anime', 'あの丘']));
-    expect(rows.slice(3).map((r) => (r.kind === 'disc' ? r.disc.name : ''))).toEqual(names(['[BDMV] Rena - unknown', 'きりの森', 'Amber', '10 Lanterns', '2001']));
+    expect(rows.slice(3).map((r) => (r.kind === 'disc' ? r.disc.name : ''))).toEqual(names(['[BDMV] Rena - unknown', 'Starfall Wanderer', 'Amber', '10 Lanterns', '2001']));
   });
 });
 
@@ -132,8 +132,8 @@ describe('folderMemory', () => {
     const storage = { getItem: (k: string) => items.get(k) ?? null, setItem: (k: string, v: string) => void items.set(k, v) };
     const memory = folderMemory(storage);
     expect(memory.get()).toBe('');
-    memory.set('media5/[250226] きりの森');
-    expect(folderMemory(storage).get()).toBe('media5/[250226] きりの森');
+    memory.set('media5/[250226] Starfall Wanderer');
+    expect(folderMemory(storage).get()).toBe('media5/[250226] Starfall Wanderer');
   });
 
   it('works without storage, or when it throws', () => {

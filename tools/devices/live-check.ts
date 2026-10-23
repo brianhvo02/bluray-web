@@ -113,14 +113,15 @@ export interface LibraryRoot {
 }
 
 /**
- * The library roots from server/deploy/compose.yaml's LIBRARY_ROOTS (`name=dir` or `name=dir@group`), with the bind
- * mounts' container targets mapped back to their host sources.
+ * The library roots from the NAS's own settings: LIBRARY_ROOTS (`name=dir` or `name=dir@group`) from its .env and the
+ * bind mounts of its compose.override.yaml (`source:` then `target:`), with the container targets mapped back to the
+ * host sources.
  */
-export function parseRoots(compose: string): LibraryRoot[] {
-  const line = /LIBRARY_ROOTS:\s*(\S+)/.exec(compose)?.[1];
-  if (!line) throw new Error('compose.yaml has no LIBRARY_ROOTS');
+export function parseRoots(env: string, override: string): LibraryRoot[] {
+  const line = /^LIBRARY_ROOTS=(\S+)\s*$/m.exec(env)?.[1]?.replace(/^(["'])(.*)\1$/, '$2');
+  if (!line) throw new Error('the NAS .env has no LIBRARY_ROOTS');
   const binds = new Map<string, string>();
-  for (const m of compose.matchAll(/source:\s*(\S+)\s*\n\s*target:\s*(\S+)/g)) binds.set(m[2]!, m[1]!);
+  for (const m of override.matchAll(/source:\s*(\S+)\s*\n\s*target:\s*(\S+)/g)) binds.set(m[2]!.replace(/^["']|["']$/g, ''), m[1]!.replace(/^["']|["']$/g, ''));
   return line.split(',').map((entry) => {
     const eq = entry.indexOf('=');
     const name = entry.slice(0, eq);
@@ -142,7 +143,7 @@ export function libraryPath(hostPath: string, roots: readonly LibraryRoot[]): st
 /** The folder a run places its test disc in: `<root>/zz-live-check-<run id>` (run id: 8 lowercase hex digits). */
 export function testDiscFolder(root: LibraryRoot, runId: string): { hostDir: string; libraryPath: string } {
   if (!/^[0-9a-f]{8}$/.test(runId)) throw new Error(`bad run id ${runId}`);
-  if (!/^\/mnt\/[\w-]+\/[A-Za-z]+$/.test(root.hostDir)) throw new Error(`root ${root.name} is not a /mnt/<drive>/<folder> root`);
+  if (!/^\/mnt\/[A-Za-z0-9]+\/[A-Za-z]+$/.test(root.hostDir)) throw new Error(`root ${root.name} is not a /mnt/<drive>/<folder> root`);
   return { hostDir: `${root.hostDir}/zz-live-check-${runId}`, libraryPath: `${root.name}/zz-live-check-${runId}/${STORE_DISC_NAME}` };
 }
 
@@ -152,7 +153,7 @@ export function testDiscFolder(root: LibraryRoot, runId: string): { hostDir: str
  */
 export function ownTestFolder(dir: string, runId: string, roots: readonly LibraryRoot[]): boolean {
   if (!/^[0-9a-f]{8}$/.test(runId)) return false;
-  return roots.some((r) => /^\/mnt\/[\w-]+\/[A-Za-z]+$/.test(r.hostDir) && dir === `${r.hostDir}/zz-live-check-${runId}`);
+  return roots.some((r) => /^\/mnt\/[A-Za-z0-9]+\/[A-Za-z]+$/.test(r.hostDir) && dir === `${r.hostDir}/zz-live-check-${runId}`);
 }
 
 export function parseMap(tsv: string): Map<string, string> {
@@ -192,11 +193,11 @@ export interface Options {
 
 const USAGE =
   'usage: live-check.ts --origin <preview origin> --out <dir> --nas <api base> (or $LIVE_CHECK_NAS) [--mika-phone <target>] [--mika-tablet <target>] [--sora-a chrome-profile] [--sora-b chrome] ' +
-  '[--store-disc place|auto|<library path>|none] [--place-root media8] [--rehearse-store <library path>|<id>] [--library] [--places] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
+  '[--store-disc place|auto|<library path>|none] --place-root <root> [--rehearse-store <library path>|<id>] [--library] [--places] [--disc <id>]… [--library-dir dir] [--wd-ports 4211,4212] [--headless] [--call-timeout ms]';
 
 export function parseLiveArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): Options {
   const o: Options = {
-    origin: '', nas: env.LIVE_CHECK_NAS ?? '', out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: 'media8', rehearseStore: null,
+    origin: '', nas: env.LIVE_CHECK_NAS ?? '', out: '', mikaPhone: null, mikaTablet: null, soraA: 'chrome-profile', soraB: 'chrome', storeDisc: 'place', placeRoot: '', rehearseStore: null,
     library: false, places: false, discs: [], libraryDir: env.BDJ_LIBRARY_DIR ?? join(homedir(), '.cache/bluray-web/bdj-library'), wdPorts: [4211, 4212], headless: false, callTimeoutMs: 120_000,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -343,6 +344,18 @@ function sshRead(script: string): Promise<string> {
   return new Promise((res, rej) =>
     execFile('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', host, script], { timeout: 60_000 }, (err, stdout, stderr) => (err ? rej(new Error(`ssh: ${err.message} ${String(stderr).slice(0, 200)}`)) : res(String(stdout)))),
   );
+}
+
+let rootsCache: LibraryRoot[] | null = null;
+
+/** The library roots, read once from the NAS: only the LIBRARY_ROOTS line of its .env (the file holds secrets) and its compose.override.yaml. */
+async function nasRoots(): Promise<LibraryRoot[]> {
+  if (rootsCache) return rootsCache;
+  const SEP = '---override---';
+  const out = await sshRead(`grep '^LIBRARY_ROOTS=' ~/bluray-server/.env; echo '${SEP}'; cat ~/bluray-server/compose.override.yaml`);
+  const [env, override] = out.split(SEP);
+  rootsCache = parseRoots(env ?? '', override ?? '');
+  return rootsCache;
 }
 
 class People {
@@ -516,8 +529,8 @@ class TestDisc {
   statusBefore: MetadataStatus | null = null;
   readonly report: { placed?: boolean; listedAfterMs?: number; removed?: boolean; gone?: boolean; unlisted?: boolean; countsRestored?: boolean; detail: string[] } = { detail: [] };
 
-  constructor(rootName: string, private readonly log: (m: string) => void, private readonly discs: readonly PlacedDisc[]) {
-    this.roots = parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'));
+  constructor(rootName: string, roots: LibraryRoot[], private readonly log: (m: string) => void, private readonly discs: readonly PlacedDisc[]) {
+    this.roots = roots;
     const root = this.roots.find((r) => r.name === rootName);
     if (!root) throw new Error(`--place-root ${rootName}: not a library root (${this.roots.map((r) => r.name).join(', ')})`);
     ({ hostDir: this.hostDir, libraryPath: this.libraryPath } = testDiscFolder(root, this.runId));
@@ -1028,7 +1041,7 @@ class LiveCheck {
     if (/^[0-9a-f]{10}$/.test(spec)) {
       // a library-check id (map.tsv), so no disc name goes on the command line
       const host = parseMap(readFileSync(join(this.o.libraryDir, 'map.tsv'), 'utf8')).get(spec);
-      const path = host ? libraryPath(host, parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'))) : null;
+      const path = host ? libraryPath(host, await nasRoots()) : null;
       return path ? this.discAt(path) : null;
     }
     if (spec === 'place') return this.testDisc?.places(STORE_DISC_NAME) ? this.discAt(this.testDisc.pathOf(STORE_DISC_NAME)) : null;
@@ -1420,7 +1433,7 @@ class LiveCheck {
       return;
     }
     const map = parseMap(readFileSync(join(this.o.libraryDir, 'map.tsv'), 'utf8'));
-    const roots = parseRoots(readFileSync(join(REPO, 'server/deploy/compose.yaml'), 'utf8'));
+    const roots = await nasRoots();
     const steps = parseKeyScript(readFileSync(join(REPO, 'tools/bdj-library/generic.keys'), 'utf8'));
     this.r.library.ran = true;
     try {
@@ -1517,7 +1530,7 @@ async function main(): Promise<void> {
       placed.push(placesDisc);
     }
     if (placed.length > 0) {
-      check.testDisc = new TestDisc(o.placeRoot, (m) => check.log(m), placed);
+      check.testDisc = new TestDisc(o.placeRoot, await nasRoots(), (m) => check.log(m), placed);
       await check.testDisc.place(check.people.mika!);
     }
     await check.store();
