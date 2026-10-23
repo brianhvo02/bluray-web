@@ -1,66 +1,107 @@
 # bluray-web
 
-Client-side Blu-ray (BDMV) player for the browser. Supported: Safari 26 (macOS, iOS, iPadOS), Chrome and Firefox on desktop (stable and stable−2), Chrome on Android. Firefox on Android is not supported. It works by touch, installs as an app and runs offline. Design: `docs/superpowers/specs/2026-10-12-bluray-web-player-design.md`.
+[![CI](https://github.com/brianhvo02/bluray-web/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/brianhvo02/bluray-web/actions/workflows/ci.yml)
+[![WASM](https://github.com/brianhvo02/bluray-web/actions/workflows/wasm.yml/badge.svg?branch=main)](https://github.com/brianhvo02/bluray-web/actions/workflows/wasm.yml)
+[![VM trace](https://github.com/brianhvo02/bluray-web/actions/workflows/vm-trace.yml/badge.svg?branch=main)](https://github.com/brianhvo02/bluray-web/actions/workflows/vm-trace.yml)
+[![BD-J trace](https://github.com/brianhvo02/bluray-web/actions/workflows/bdj-trace.yml/badge.svg?branch=main)](https://github.com/brianhvo02/bluray-web/actions/workflows/bdj-trace.yml)
+[![BD-J class library](https://github.com/brianhvo02/bluray-web/actions/workflows/bdj-classlib.yml/badge.svg?branch=main)](https://github.com/brianhvo02/bluray-web/actions/workflows/bdj-classlib.yml)
+[![ASS trace](https://github.com/brianhvo02/bluray-web/actions/workflows/ass-trace.yml/badge.svg?branch=main)](https://github.com/brianhvo02/bluray-web/actions/workflows/ass-trace.yml)
+[![License: LGPL-2.1-or-later](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](LICENSE)
+[![Try it](https://img.shields.io/badge/try%20it-bluray--web.pages.dev-brightgreen)](https://bluray-web.pages.dev)
 
-**Run your own server:** the NAS server that serves your discs to the player, in Docker, is described in [docs/self-hosting.md](docs/self-hosting.md).
+A Blu-ray player that runs in your browser. It plays decrypted disc folders with their menus (HDMV and BD-J), subtitles and audio tracks, on desktop and on phones. Nothing is uploaded: the disc is read on your device, and an optional server on your own NAS can stream a whole library to it.
 
-- `src/engine/` is derived from libbluray and licensed LGPL-2.1 (see `src/engine/LICENSE`).
-- `npm run dev`: dev server (cross-origin isolated).
-- `npm test`: unit tests. `npm run test:e2e`: Playwright (the `chromium` and `mobile-chromium` projects require Google Chrome; all projects need a working audio output; `--project=firefox|webkit|mobile-chromium` runs the others).
-  The A/V sync checks allow 20 ms mean and 50 ms max offset; `SYNC_TOLERANCE_SCALE=2` doubles both on slower machines.
-- `npm run wasm:build` rebuilds `src/wasm/audio/audio.wasm` (FFmpeg n9.0.2 AC-3, E-AC-3 and DTS decoders plus `shim.c`) and
-  `src/wasm/freetype/freetype.wasm` (FreeType 2.13.2 as Ubuntu 24.04 ships it, for BD-J text) in Docker
-  (`wasm:build:audio` / `wasm:build:freetype` build one). It needs Docker. The builds are reproducible, and
-  `.github/workflows/wasm.yml` checks that the committed `.wasm` files match. `npm run bdj-trace:freetype-golden`
-  regenerates `tests/bdj/fonts/freetype-golden.json` from the BD-J harness image's system FreeType.
-- `npm run fixture:synthetic` regenerates `fixtures/synthetic/`. It needs `ffmpeg` on PATH, because the audio fixtures and
-  `disc3` use its ac3, eac3, dca and truehd encoders. Their bytes depend on the host ffmpeg version (currently 9.0.2).
-  `fixtures/synthetic/disc3` is the four-codec audio disc (LPCM, AC-3 5.1, TrueHD with an AC-3 core, DTS).
-- `scripts/fetch-libbluray.sh` clones libbluray at the commit the engine is ported from into `.cache/libbluray` (gitignored),
-  the reference for every ported function.
-- The libbluray trace harness (`tools/vm-trace/`, Docker): `npm run vm-trace:build` builds patched libbluray and the harness,
-  `npm run vm-trace:golden` regenerates `tests/vm-trace/golden/` from it (never edit those by hand), and
-  `npm run vm-trace -- <disc> <script> [--dump-pages]` runs libbluray and our replay live and prints the first divergence.
-  `npm test` replays the golden traces without Docker.
-- Put your own decrypted discs under `fixtures/local/<name>/BDMV/...` to enable `tests/local`.
-  `LOCAL_DISCS=1 npx playwright test local-discs` also plays each one in Chrome, seeks around it, switches audio tracks
-  and checks every PG subtitle track. It decodes the PG streams in Node first to know where subtitles are due, and caches
-  that in `fixtures/local/.pgscan-<name>.json`.
+## Get started
 
-## Subtitles
+1. Open [bluray-web.pages.dev](https://bluray-web.pages.dev).
+2. Pick a disc folder (a decrypted `BDMV` disc, or the folder that holds it).
+3. Or pair the player with a NAS server, if you or a friend run one.
 
-Disc PG subtitles are picked from the Subtitles menu in the control bar. Forced captions show even with subtitles off.
-An `.srt` file can be loaded from the same menu ("Load subtitle file…") or dropped on the player; files that are not
-UTF-8 ask for their encoding. With a file loaded, the menu shifts its timing and changes its size. Keys: `S` cycles
-Off, each disc track and the file; `[` and `]` move the file's subtitles 100 ms earlier or later.
+Supported browsers: Safari 26 (macOS, iOS, iPadOS), Chrome and Firefox on desktop (stable and stable−2), and Chrome on Android. Firefox on Android is not supported. The player works by touch, installs as an app and runs offline.
 
-## CI
+## Documentation
 
-`.github/workflows/ci.yml` runs typecheck and unit tests, then the Playwright suite in Chrome on `ubuntu-latest`.
-`scripts/ci-audio.sh` gives the runner a PulseAudio null sink, because the sync tests need a running audio output.
-CI uses `SYNC_TOLERANCE_SCALE=1.5`; local runs keep the default bounds.
+- [Getting started](docs/getting-started.md): browsers, opening a disc, installing, offline use.
+- [Playing discs](docs/playing-discs.md): menus, audio and subtitles, shaders, controls, resume.
+- [NAS](docs/nas.md): pairing, the title library, quality levels, playing from away.
+- [Troubleshooting](docs/troubleshooting.md): the notices you may see and what to do.
+- [Run your own server](docs/self-hosting.md)
+- [Contributing](docs/contributing.md)
 
-To try the Linux setup locally in Docker, install Chrome from `dl.google.com/linux/direct/google-chrome-stable_current_<arch>.deb`.
-Google ships arm64 builds, but `npx playwright install chrome` (Playwright 1.64) still refuses to run on Linux arm64.
+The same pages are on the site under [/help](https://bluray-web.pages.dev/help).
 
-## Nightly sync test
+## Run your own server
 
-    npx tsx scripts/make-fixture-disc.ts fixtures/local/long-disc --seconds-per-clip 300
-    NIGHTLY=1 npx playwright test -g "ten minutes"
+The NAS server runs in Docker next to your discs, behind your own HTTPS address. It serves discs, lists them by title and keeps each person's resume points and saved data. See [docs/self-hosting.md](docs/self-hosting.md).
 
-## Deployment
+## Contributing
 
-The player needs `SharedArrayBuffer` (audio ring buffer), which browsers only expose to cross-origin isolated pages. A static deploy of `dist/` must therefore send these response headers on every file:
+Commands, tests and how the project is laid out are in [docs/contributing.md](docs/contributing.md). [CLAUDE.md](CLAUDE.md) describes the architecture and conventions in depth.
 
-    Cross-Origin-Opener-Policy: same-origin
-    Cross-Origin-Embedder-Policy: require-corp
+## Built on
 
-`public/_headers` (copied into `dist/` by `npm run build`) does this on Netlify and Cloudflare Pages:
+bluray-web stands on a lot of other work. Each entry links to the project and names its licence.
 
-    /*
-      Cross-Origin-Opener-Policy: same-origin
-      Cross-Origin-Embedder-Policy: require-corp
+### Ported from
 
-Hosts must serve `.wasm` as `application/wasm`.
+Code this project translates to TypeScript (the files are listed in [src/engine/NOTICE](src/engine/NOTICE)).
 
-Other hosts need the equivalent in their own configuration. Without the headers the app shows an error and cannot play.
+- [libbluray](https://www.videolan.org/developers/libbluray.html), LGPL-2.1-or-later: disc parsing, the HDMV virtual machine, menus, and the BD-J Java stack.
+- [libudfread](https://code.videolan.org/videolan/libudfread), LGPL-2.1-or-later: the UDF reader for ISO discs.
+- [libass](https://github.com/libass/libass), ISC: the ASS subtitle renderer.
+- [DoppioJVM](https://github.com/plasma-umass/doppio), MIT: parts of the JVM.
+- fdlibm 5.3, the C library behind the JDK's StrictMath (Sun Microsystems, free to use with its notice): `exp` and `remainder` in the JVM.
+- [FFmpeg](https://ffmpeg.org), LGPL-2.1-or-later: the Blu-ray LPCM decoder.
+
+Followed, with no code copied: [libplacebo](https://code.videolan.org/videolan/libplacebo) (mpv user shader behaviour) and [TheDiscDB](https://github.com/TheDiscDb/web) (Apache-2.0; the disc fingerprint algorithm).
+
+### Bundled
+
+Shipped inside the app, the server image or the Worker.
+
+- [FFmpeg](https://ffmpeg.org) n9.0.2 AC-3, E-AC-3 and DTS decoders, LGPL-2.1-or-later, compiled to `audio.wasm`.
+- [FreeType](https://freetype.org) 2.13.2, FreeType License, compiled to `freetype.wasm` for BD-J text.
+- The OpenJDK 8 class library (GPLv2 with the Classpath Exception), trimmed for BD-J, with [Apache Xerces](https://xerces.apache.org) (Apache-2.0), the [SAX](http://www.saxproject.org) classes (public domain notice) and ICU4J-derived classes ([ICU](https://icu.unicode.org)), as listed in [src/bdj-classlib/NOTICE](src/bdj-classlib/NOTICE).
+- [Anime4K](https://github.com/bloc97/Anime4K) v4.0.1, MIT: the shaders and mode definitions behind the built-in shader sets.
+- [DejaVu Sans](https://dejavu-fonts.github.io) 2.37, Bitstream Vera / DejaVu licence: the fallback font for ASS subtitles and BD-J text.
+- [React](https://react.dev) (with react-dom), MIT: the user interface.
+- [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator), MIT: pairing QR codes.
+- [werift](https://github.com/shinyoshiaki/werift-webrtc), MIT: WebRTC in the server, with the packages it uses (see [server/NOTICE](server/NOTICE)).
+- [Workbox](https://developers.google.com/web/tools/workbox) (precaching and routing), MIT: the service worker.
+- [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg) 7, GPL-3.0-or-later, in the server image for quality levels. It runs as a separate process. [server/deploy/IMAGE-NOTICE](server/deploy/IMAGE-NOTICE) has the source and its bundled libraries, and the server image is not to be redistributed.
+- [Intel media driver](https://github.com/intel/media-driver) and [oneVPL](https://github.com/intel/libvpl), MIT: hardware encoding inside jellyfin-ffmpeg.
+- [Node.js](https://nodejs.org), MIT: the server image's base.
+
+### Used in tests
+
+In the repository, not shipped.
+
+- [DejaVu fonts](https://dejavu-fonts.github.io), Bitstream Vera / DejaVu licence: ASS test fonts in `fixtures/ass/`.
+- [Source Sans 3](https://github.com/adobe-fonts/source-sans), SIL Open Font License 1.1: the BD-J test disc's font in `fixtures/bdj-fonts/`.
+- [Anime4K](https://github.com/bloc97/Anime4K), MIT: shader parser test data in `fixtures/shaders/anime4k/`.
+- [TheDiscDB data](https://github.com/TheDiscDb/data), MIT: test vectors and the server's disc index (`server/data/discdb-index.json`).
+- [Playwright](https://playwright.dev), [Vitest](https://vitest.dev), [pixelmatch](https://github.com/mapbox/pixelmatch) and [fake-indexeddb](https://github.com/dumbmatter/fakeIndexedDB): the test runners and helpers.
+
+### Services and data
+
+- [AniList](https://anilist.co): anime titles and art, under its [terms](https://docs.anilist.co/guide/terms-of-use).
+- [TMDB](https://www.themoviedb.org): film and series titles and art. This product uses the TMDB API but is not endorsed or certified by TMDB.
+- [TheDiscDB](https://github.com/TheDiscDb/data): disc fingerprints to titles, MIT.
+- [MusicBrainz](https://musicbrainz.org), the [Cover Art Archive](https://coverartarchive.org) and [Discogs](https://www.discogs.com): music lookups and covers.
+- [Cloudflare](https://www.cloudflare.com): Pages (the site), Workers and Durable Objects (the pairing rendezvous) and TURN (the optional relay).
+
+### Tools
+
+- [Vite](https://vite.dev) with [vite-plugin-pwa](https://github.com/vite-pwa/vite-plugin-pwa) and [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react), [TypeScript](https://www.typescriptlang.org), [esbuild](https://esbuild.github.io), [tsx](https://tsx.is) and [marked](https://marked.js.org) (the help pages): the build.
+- [Emscripten](https://emscripten.org) (`emscripten/emsdk`): builds the two WASM modules.
+- [Docker](https://www.docker.com) with Ubuntu 24.04 images: the libbluray, libass and class library harnesses.
+- [Wrangler](https://developers.cloudflare.com/workers/wrangler/): deploys the Worker.
+
+## License
+
+LGPL-2.1-or-later (see [LICENSE](LICENSE)), except:
+
+- `src/bdj-classlib/`: GPLv2 with the Classpath Exception, with the Apache, SAX and ICU notices its [NOTICE](src/bdj-classlib/NOTICE) lists.
+- `src/wasm/freetype/`: the FreeType License.
+
+The server image also contains jellyfin-ffmpeg (GPL-3.0); see [server/deploy/IMAGE-NOTICE](server/deploy/IMAGE-NOTICE).
