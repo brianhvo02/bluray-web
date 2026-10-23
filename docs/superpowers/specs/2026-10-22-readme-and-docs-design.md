@@ -58,10 +58,9 @@ linking to `LICENSE`) and a "Try it" badge linking to https://bluray-web.pages.d
      `src/engine/NOTICE` records.
    - *Bundled* (shipped inside the app, the server image or the Worker): the FFmpeg decoders in `audio.wasm`, FreeType,
      the OpenJDK-derived class library with its Xerces, SAX and ICU parts, jellyfin-ffmpeg and Intel's media driver,
-     Anime4K's two mode-definition files (`src/ui/anime4k/input-*.conf`, MIT; the shaders themselves are not shipped:
-     players import their own), DejaVu Sans (`src/engine/ass/default-font.ttf`, the ASS and BD-J fallback font), werift,
+     Anime4K (its shaders and mode definitions, MIT), DejaVu Sans (`src/engine/ass/default-font.ttf`, the ASS and BD-J fallback font), werift,
      and the runtime npm dependencies of `package.json`, `server/` and `rendezvous/`.
-   - *Used in tests* (in the repo, not shipped): Anime4K's shaders (`fixtures/shaders/anime4k/`), the fonts in
+   - *Used in tests* (in the repo, not shipped): the fonts in
      `fixtures/ass/` and the BD-J test disc's font (`fixtures/bdj-fonts/`), each with its licence.
    - *Services and data*: AniList, TMDB (with TMDB's required notice: "This product uses the TMDB API but is not endorsed
      or certified by TMDB."), TheDiscDB, MusicBrainz, the Cover Art Archive, Discogs, and Cloudflare (Pages, Workers,
@@ -95,6 +94,22 @@ GitHub; the site maps them to `/help/<page>`). Links to repo-only pages (`contri
 from the site. The help pages work offline like the rest of the app (the service worker serves the shell for `/help`
 navigations) and add no third-party resources.
 
+**Anime4K ships with the app (owner's call).** Today only Anime4K's two mode-definition files ship, so the 12 built-in
+modes show as missing until a player imports the shader files. The app now bundles every shader file those two files
+name, so the modes work out of the box:
+- The files come from one pinned Anime4K release (MIT, © bloc97); its commit and the list of files are recorded in a
+  README beside them, with Anime4K's `LICENSE`, in `src/ui/anime4k/` (or a `shaders/` folder next to it), and
+  `src/engine/NOTICE` or the README's Built on credits them.
+- They are loaded on demand: a mode's files are fetched the first time it is picked (as asset URLs from the build), not
+  precached by the service worker, so a player who never uses Anime4K downloads nothing more; once fetched they stay
+  cached for offline use.
+- Importing shader files keeps working as now; a file the player imported with the same name as a bundled one is used
+  instead of the bundled one (my call: the player's choice wins).
+- A unit test checks that every file named in `input-hq.conf` and `input-fast.conf` is bundled; the shader browser
+  tests (`SHADERS_GPU=1`) run a built-in mode without importing anything.
+- `fixtures/shaders/anime4k/` stays as test data; if the bundled set covers it, the tests may read the bundled copies
+  instead.
+
 ## 4. Constraints
 
 - Cross-origin isolation stays intact: no external images, fonts or scripts on the help pages (shields.io badges live
@@ -118,6 +133,7 @@ navigations) and add no third-party resources.
 - C4. Badges: six workflow statuses (CI, WASM, VM trace, BD-J trace, BD-J class library, ASS trace), licence, and a
   "Try it" link; no preview-deploy badge.
 - C5. Pages are converted at build time, not in the browser.
+- C10. Bundled Anime4K shaders load on demand and are cached after first use; a same-named imported file wins.
 - C9. "Built on" groups entries as ported, bundled, used in tests, services and data, tools; dev-only npm packages appear only through
   their tool (no list of every transitive package).
 - C6. `/help` and `/help/<page>` are real paths served by the app shell, the same way `/nas/…` deep links already are on
