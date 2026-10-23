@@ -52,7 +52,7 @@ While waiting you see "Buffering… N%". You can switch to **Play now with pause
 
 If the NAS has a graphics card for it, it can re-encode a disc to a lower quality as you watch. The Quality list can offer **Original**, **1080p**, **1080p HEVC**, **1080p HDR**, **1080p SDR** and **Phone** (720p), each with a note such as "plays now", "about N minutes" or "plays with pauses". A level your browser cannot play is greyed out with the reason. Phones and small screens start on **Phone**.
 
-During playback the **Quality** menu switches level at the same place. A badge reads "<level> · re-encoded on the NAS". If the NAS is busy re-encoding for others, the player says "The NAS is busy re-encoding for others. This will play at original quality." or "The NAS is busy. Try again in a few minutes."
+During playback the **Quality** menu switches level at the same place. A badge reads `<level> · re-encoded on the NAS`. If the NAS is busy re-encoding for others, the player says "The NAS is busy re-encoding for others. This will play at original quality." or "The NAS is busy. Try again in a few minutes."
 
 The audio track menu on a re-encoded level reopens the level with that track.
 

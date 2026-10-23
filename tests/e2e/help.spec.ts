@@ -37,6 +37,16 @@ test("the landing screen's Help link opens the index, and the index opens a page
   await expect(page.getByTestId('landing')).toBeVisible();
 });
 
+test("a help screen that can't load says so and offers a reload", async ({ page }) => {
+  await page.route(/\/assets\/HelpScreen-[^/]*\.js$/, (route) => route.abort());
+  await page.goto('/help/nas');
+  const failed = page.getByTestId('help-load-failed');
+  await expect(failed).toContainText("Couldn't load the help pages.");
+  await page.unroute(/\/assets\/HelpScreen-[^/]*\.js$/);
+  await failed.getByRole('button', { name: 'Reload' }).click();
+  await expect(page.getByTestId('help-page').getByRole('heading', { level: 1 })).toHaveText('NAS');
+});
+
 test('an unknown help page shows the index', async ({ page }) => {
   await page.goto('/help/no-such-page');
   await expect(page.getByTestId('help-index')).toBeVisible();

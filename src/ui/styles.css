@@ -446,8 +446,7 @@ a { color: #6ea8ff; }
 .level-option input:disabled + span { opacity: 0.5; }
 .level-note { color: #9a9aa5; }
 
-/* Help pages (/help): the docs/*.md pages, converted at build time. The app's dark palette, and a light one when the
-   system asks for it, since these are pages to read. */
+/* Help pages (/help): the docs/*.md pages, converted at build time, in the app's dark palette. */
 .landing-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .landing-head h1 { margin: 0; }
 .help-link { flex: none; }
@@ -457,13 +456,6 @@ a { color: #6ea8ff; }
   --help-rule: #2a2a30; --help-code-bg: #18181d; --help-code-border: #2a2a30;
   color-scheme: dark; min-height: 100%; box-sizing: border-box; background: var(--help-bg); color: var(--help-fg);
   padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 48px max(16px, env(safe-area-inset-left));
-}
-@media (prefers-color-scheme: light) {
-  .help {
-    --help-bg: #ffffff; --help-fg: #1d1d22; --help-muted: #5c5c66; --help-link: #1f5fcc;
-    --help-rule: #dcdce2; --help-code-bg: #f3f3f6; --help-code-border: #dcdce2;
-    color-scheme: light;
-  }
 }
 .help a { color: var(--help-link); }
 .help a:focus-visible, .help h1[tabindex='-1']:focus-visible { outline: 2px solid var(--help-link); outline-offset: 2px; }

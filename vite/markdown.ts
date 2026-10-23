@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Marked, TextRenderer, type Token, type Tokens } from 'marked';
+import { Marked, Parser, TextRenderer, type Token, type Tokens } from 'marked';
 import type { Plugin } from 'vite';
 import { HELP_PAGES, helpHref, uniqueSlugger } from '../src/ui/help/help-pages.ts';
 
@@ -18,6 +18,20 @@ function plainText(markdown: string): string {
     .trim();
 }
 
+/** A heading's text as GitHub slugs it: the visible text, with link text kept and no Markdown marks. */
+export function headingText(tokens: Token[]): string {
+  return new Parser().parseInline(tokens, new TextRenderer());
+}
+
+/** The ids of a page's headings, in order, as the site (and GitHub) give them. */
+export function headingIds(markdown: string): string[] {
+  const slug = uniqueSlugger();
+  return new Marked({ gfm: true })
+    .lexer(markdown)
+    .filter((t): t is Tokens.Heading => t.type === 'heading')
+    .map((t) => slug(headingText(t.tokens)));
+}
+
 export interface RenderedHelpPage {
   readonly html: string;
   /** The first paragraph, as plain text, for the index. */
@@ -25,18 +39,23 @@ export interface RenderedHelpPage {
 }
 
 /**
- * One help page's Markdown as HTML: links rewritten with `helpHref`, headings given GitHub's ids, and raw HTML shown as
+ * One help page's Markdown as HTML: links rewritten with `helpHref` (one it refuses shows as its text), headings given GitHub's ids, and raw HTML shown as
  * text (the pages are Markdown only, and nothing on the site may load from another origin).
  */
 export function renderHelpPage(markdown: string, file: string): RenderedHelpPage {
   const slug = uniqueSlugger();
-  const plain = new TextRenderer();
   const marked = new Marked({
     gfm: true,
     renderer: {
       heading({ tokens, depth }: Tokens.Heading) {
-        const id = slug(this.parser.parseInline(tokens, plain));
+        const id = slug(headingText(tokens));
         return `<h${depth} id="${escapeHtml(id)}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
+      },
+      link({ href, title, tokens }: Tokens.Link) {
+        const text = this.parser.parseInline(tokens);
+        const to = helpHref(href, file);
+        if (to === null) return text;
+        return `<a href="${escapeHtml(to)}"${title ? ` title="${escapeHtml(title)}"` : ''}>${text}</a>`;
       },
       html({ text }: Tokens.HTML | Tokens.Tag) {
         return escapeHtml(text);
@@ -47,9 +66,6 @@ export function renderHelpPage(markdown: string, file: string): RenderedHelpPage
     },
   });
   const tokens = marked.lexer(markdown);
-  marked.walkTokens(tokens, (token: Token) => {
-    if (token.type === 'link') token.href = helpHref(token.href, file);
-  });
   const first = tokens.find((t): t is Tokens.Paragraph => t.type === 'paragraph');
   const summary = first ? plainText(first.text) : '';
   return { html: marked.parser(tokens), summary };

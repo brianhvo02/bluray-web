@@ -3,6 +3,7 @@ import { createController } from '../player/create-controller';
 import type { PlayerController } from '../player/player-controller';
 import { PlatformSession } from '../player/platform-session';
 import { parseHelpPath } from './help/help-pages';
+import { HelpLoadBoundary } from './help/HelpLoadBoundary';
 import { LandingScreen } from './LandingScreen';
 import { levelSessionOf } from './nas/level-session';
 import { NasClient } from './nas/nas-client';
@@ -196,9 +197,11 @@ export function App(): ReactElement {
       {TOUCH_LOG && <TouchLog />}
       {waitingWorker && shouldPromptUpdate({ waiting: true, engineState: snapshot.engineState }) && <UpdatePrompt worker={waitingWorker} />}
       {snapshot.playlists.length === 0 && help !== null ? (
-        <Suspense fallback={<p className="status">Loading…</p>}>
-          <HelpScreen history={history} slug={help.slug} hash={here.hash} />
-        </Suspense>
+        <HelpLoadBoundary>
+          <Suspense fallback={<p className="status">Loading…</p>}>
+            <HelpScreen history={history} slug={help.slug} hash={here.hash} />
+          </Suspense>
+        </HelpLoadBoundary>
       ) : snapshot.playlists.length === 0 ? (
         <LandingScreen controller={controller} snapshot={snapshot} nas={nas} places={places} history={history} playingRoute={playingRoute} pairLink={pairLink} onPairLinkSpent={spendPairLink} />
       ) : (

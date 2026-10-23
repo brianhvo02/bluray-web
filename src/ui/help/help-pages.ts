@@ -25,18 +25,29 @@ const REPO_BASE = 'https://repo.invalid/';
 
 /**
  * Where a link in a help page's Markdown goes on the site: another help page → `/help/<slug>[#hash]`; any other repo
- * file → that file on GitHub; absolute URLs and in-page anchors unchanged.
+ * file → that file on GitHub; `http(s):` and `mailto:` URLs and in-page anchors unchanged. Anything else (another
+ * scheme such as `javascript:`, a scheme-relative `//host` link) is null: the site shows the link's text with no link.
  */
-export function helpHref(link: string, fromFile: string): string {
-  if (/^[a-z][a-z0-9+.-]*:/i.test(link) || link.startsWith('//') || link.startsWith('#')) return link;
-  // A leading `/` is the repo root, as GitHub reads it.
-  const target = new URL(link, REPO_BASE + fromFile);
+export function helpHref(link: string, fromFile: string): string | null {
+  if (link.startsWith('#')) return link;
+  if (/^(https?|mailto):/i.test(link)) return link;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(link) || /^[\\/]{2}/.test(link)) return null;
+  const base = new URL(REPO_BASE + fromFile);
+  let target: URL;
+  try {
+    // A leading `/` is the repo root, as GitHub reads it.
+    target = new URL(link, base);
+  } catch {
+    return null;
+  }
+  // the URL parser drops tabs and newlines, so a scheme can still appear here: only a path in the repo goes on
+  if (target.origin !== base.origin) return null;
   const path = target.pathname.slice(1);
   let decoded: string;
   try {
     decoded = decodeURIComponent(path);
   } catch {
-    return link;
+    return null;
   }
   const page = HELP_PAGES.find((p) => p.file === decoded);
   if (page) return helpPath(page.slug) + target.hash;

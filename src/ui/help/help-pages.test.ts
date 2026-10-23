@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { marked, type Token } from 'marked';
 import { describe, expect, it } from 'vitest';
+import { headingIds } from '../../../vite/markdown.ts';
 import { githubSlug, HELP_PAGES, helpHref, helpPath, parseHelpPath, uniqueSlugger } from './help-pages';
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
@@ -15,11 +16,8 @@ function tokensOf(file: string): Token[] {
 
 const isAbsolute = (href: string): boolean => /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//');
 
-/** The heading ids a page gets, as the site (and GitHub) make them. */
-function anchorsOf(file: string): Set<string> {
-  const slug = uniqueSlugger();
-  return new Set(tokensOf(file).flatMap((t) => (t.type === 'heading' ? [slug(t.text.replace(/[`*_]/g, ''))] : [])));
-}
+/** The heading ids a page gets, from the renderer's own helper. */
+const anchorsOf = (file: string): Set<string> => new Set(headingIds(read(file)));
 
 describe('help pages', () => {
   it('lists the five pages, each titled by its own heading', () => {
@@ -49,7 +47,8 @@ describe('help pages', () => {
     for (const page of HELP_PAGES) {
       for (const t of tokensOf(page.file)) {
         if (t.type === 'image') expect(isAbsolute((t as { href: string }).href), `${page.file}: ${t.raw}`).toBe(false);
-        if (t.type === 'html') expect(t.raw, `${page.file}: ${t.raw}`).not.toMatch(/<(img|script|iframe|link|video|audio|source)\b/i);
+        // no raw HTML at all: GitHub drops a bare <placeholder>, and the site would show it as text
+        expect(t.type, `${page.file}: ${t.raw}`).not.toBe('html');
       }
     }
   });
@@ -72,10 +71,20 @@ describe('helpHref', () => {
     expect(helpHref('/LICENSE', 'docs/nas.md')).toBe('https://github.com/brianhvo02/bluray-web/blob/main/LICENSE');
   });
 
-  it('leaves absolute URLs and in-page anchors unchanged', () => {
+  it('leaves http(s) and mailto URLs and in-page anchors unchanged', () => {
     expect(helpHref('https://bluray-web.pages.dev', 'docs/nas.md')).toBe('https://bluray-web.pages.dev');
+    expect(helpHref('HTTP://example.com/a', 'docs/nas.md')).toBe('HTTP://example.com/a');
     expect(helpHref('mailto:someone@example.com', 'docs/nas.md')).toBe('mailto:someone@example.com');
     expect(helpHref('#pairing', 'docs/nas.md')).toBe('#pairing');
+  });
+
+  it('refuses any other scheme', () => {
+    expect(helpHref('javascript:alert(1)', 'docs/nas.md')).toBeNull();
+    expect(helpHref('JavaScript:alert(1)', 'docs/nas.md')).toBeNull();
+    expect(helpHref('java\tscript:alert(1)', 'docs/nas.md')).toBeNull();
+    expect(helpHref(' javascript:alert(1)', 'docs/nas.md')).toBeNull();
+    expect(helpHref('data:text/html,hi', 'docs/nas.md')).toBeNull();
+    expect(helpHref('//evil.example/x', 'docs/nas.md')).toBeNull();
   });
 });
 
