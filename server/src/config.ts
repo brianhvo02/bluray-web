@@ -22,7 +22,7 @@ export interface Config {
   /** `LOOKUP_CONTACT`: named in the User-Agent of the MusicBrainz and Discogs lookups; null when unset. */
   lookupContact: string | null;
   /** IP or hostname of the reverse proxy whose `X-Forwarded-For` is believed. */
-  trustedProxy: string;
+  trustedProxy: string | null;
   /** The rendezvous Worker's base URL; unset (or empty) means codes aren't registered with it. */
   rendezvousUrl: string | undefined;
   /** `TMDB_API_KEY`; null (unset or empty) means AniList and TheDiscDB only. Never logged. */
@@ -179,8 +179,8 @@ function httpUrl(name: string, value: string): string {
   return value;
 }
 
-function parseProxy(value: string | undefined): string {
-  if (value === undefined) return 'caddy';
+function parseProxy(value: string | undefined): string | null {
+  if (value === undefined || value === '') return null;
   if (!/^[A-Za-z0-9.:_-]+$/.test(value)) throw new Error(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   return value;
 }

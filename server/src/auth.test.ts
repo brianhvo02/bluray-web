@@ -453,6 +453,11 @@ describe('trustedProxy', () => {
     expect(lookup).toHaveBeenCalledOnce();
   });
 
+  it('trusts nobody when no proxy is set', async () => {
+    const trust = await trustedProxy(null, async () => Promise.reject(new Error('no lookups')));
+    expect(trust('172.18.0.2')).toBe(false);
+  });
+
   it('trusts nobody when the hostname does not resolve', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const trust = await trustedProxy('caddy', async () => Promise.reject(new Error('ENOTFOUND')));

@@ -19,7 +19,7 @@ describe('loadConfig', () => {
       publicBase: BASE,
       appUrl: 'https://bluray-web.pages.dev/',
       lookupContact: null,
-      trustedProxy: 'caddy',
+      trustedProxy: null,
       tmdbApiKey: null,
       discogsToken: null,
       titleLibrary: 'owners',
@@ -38,7 +38,7 @@ describe('loadConfig', () => {
       publicBase: BASE,
       appUrl: 'https://bluray-web.pages.dev/',
       lookupContact: null,
-      trustedProxy: 'caddy',
+      trustedProxy: null,
       tmdbApiKey: null,
       discogsToken: null,
       titleLibrary: 'owners',
@@ -96,7 +96,13 @@ describe('loadConfig', () => {
     expect(loadConfig({ ...REQUIRED, TRUSTED_PROXY: '172.18.0.2' }).trustedProxy).toBe('172.18.0.2');
   });
 
-  it.each(['', 'a b', 'caddy,evil'])('rejects TRUSTED_PROXY=%j', (value) => {
+  it('trusts no proxy when TRUSTED_PROXY is unset or empty', () => {
+    expect(loadConfig(REQUIRED).trustedProxy).toBeNull();
+    expect(loadConfig({ ...REQUIRED, TRUSTED_PROXY: '' }).trustedProxy).toBeNull();
+    expect(loadConfig({ ...REQUIRED, TRUSTED_PROXY: 'caddy' }).trustedProxy).toBe('caddy');
+  });
+
+  it.each(['a b', 'caddy,evil'])('rejects TRUSTED_PROXY=%j', (value) => {
     expect(() => loadConfig({ ...REQUIRED, TRUSTED_PROXY: value })).toThrow(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   });
 

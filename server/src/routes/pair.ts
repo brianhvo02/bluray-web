@@ -75,14 +75,16 @@ export class FailureLimiter {
 
 /**
  * Whether a peer address is the reverse proxy: `proxy` is an IP or a hostname (Caddy's container name),
- * resolved once here. A name that doesn't resolve trusts nobody.
+ * resolved once here. `null` (TRUSTED_PROXY unset or empty) and a name that doesn't resolve trust nobody.
  */
 export async function trustedProxy(
-  proxy: string,
+  proxy: string | null,
   lookup: (host: string) => Promise<{ address: string }[]> = (host) => dnsLookup(host, { all: true }),
 ): Promise<(address: string) => boolean> {
   let addresses: string[];
-  if (isIP(proxy)) {
+  if (proxy === null) {
+    addresses = [];
+  } else if (isIP(proxy)) {
     addresses = [proxy];
   } else {
     try {
