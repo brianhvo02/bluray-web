@@ -1,13 +1,19 @@
 import { spawn } from 'node:child_process';
 import type { Readable } from 'node:stream';
-import { findEpAfter, findEpBefore, parseClpi, type Clpi } from '../../../src/engine/bdmv/clpi-parser';
+import { findEpAfter, findEpBefore, parseClpi, stcSpnRange, type Clpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseMpls, type PlayItem } from '../../../src/engine/bdmv/mpls-parser';
-import { readTimestamp } from '../../../src/engine/demux/pes-assembler';
+import { CodingType } from '../../../src/engine/bdmv/stream-types';
+import { PesAssembler, readTimestamp } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
 import type { LevelDiscSource } from '../levels/level-discs';
 
 const SOURCE_PACKET = 192;
 const SAMPLES_PER_MS = 16;
+const SAMPLE_RATE_OUT = 16_000;
+/** PES stream_id_extension of the AC-3 core inside a Blu-ray TrueHD PID. */
+const AC3_CORE_EXTENSION = 0x76;
+/** The most of a play item's share of a window that decoded audio may leave empty (at its ends) before the window is refused. */
+const MAX_UNCOVERED_MS = 2000;
 const PTS_WRAP = 2 ** 33;
 /** How far outside a window the byte range reaches, in 45 kHz ticks: audio is muxed a little before or after its video. */
 const MARGIN_45 = 22_500;
@@ -25,12 +31,13 @@ export interface TimeWindow {
 
 /**
  * Up to six windows of a minute, evenly spread over the middle of an episode (the first and last minute and a half hold
- * openings, endings and previews): fewer and shorter ones when it is under nine minutes, the whole of it when under three.
+ * openings, endings and previews): fewer and shorter ones (never under 30 s) when it is under nine minutes, the whole of it
+ * when under three and a half.
  */
 export function windowsFor(durationMs: number): TimeWindow[] {
   const margin = 90_000;
   const span = durationMs - 2 * margin;
-  if (durationMs < 180_000 || span <= 0) return [{ fromMs: 0, toMs: durationMs }];
+  if (durationMs < 210_000 || span <= 0) return [{ fromMs: 0, toMs: durationMs }];
   const count = Math.max(1, Math.min(6, Math.floor(span / 30_000)));
   const length = Math.min(60_000, Math.floor(span / count));
   const step = count === 1 ? 0 : (span - length) / (count - 1);
@@ -40,10 +47,32 @@ export function windowsFor(durationMs: number): TimeWindow[] {
   });
 }
 
-/** Cuts an m2ts stream into whole source packets, drops the audio PID's packets before its first PES start, and reports that PES's PTS. */
-async function feed(stream: Readable, pid: number, write: (bytes: Uint8Array) => Promise<void>, signal?: AbortSignal): Promise<number | null> {
+/** Hands bytes to ffmpeg: false once ffmpeg is gone (it exited, or its input closed), so the feeder stops. */
+type Write = (bytes: Uint8Array) => Promise<boolean>;
+
+/**
+ * Cuts an m2ts stream into whole source packets, drops the audio PID's packets before its first PES start, and reports
+ * that PES's PTS. For TrueHD only the AC-3 core is wanted: the result is that core as a raw AC-3 stream (`core`), since
+ * ffmpeg would take the PID for TrueHD and wait for a major sync, or map two streams.
+ */
+async function feed(stream: Readable, pid: number, core: boolean, write: Write, pesPts: number[], signal?: AbortSignal): Promise<number | null> {
   let carry: Buffer = Buffer.alloc(0);
   let firstPts: number | null = null;
+  const cores: Uint8Array[] = [];
+  const assembler = new PesAssembler((pes) => {
+    if (pes.pts === undefined) return;
+    const ac3 = pes.streamIdExtension === AC3_CORE_EXTENSION || (pes.streamIdExtension === undefined && pes.payload[0] === 0x0b && pes.payload[1] === 0x77);
+    if (!ac3) return;
+    firstPts ??= pes.pts;
+    pesPts.push(pes.pts);
+    cores.push(pes.payload);
+  });
+  const flushCores = async (): Promise<boolean> => {
+    if (!cores.length) return true;
+    const bytes = Buffer.concat(cores);
+    cores.length = 0;
+    return write(bytes);
+  };
   for await (const chunk of stream as AsyncIterable<Buffer>) {
     if (signal?.aborted) break;
     const bytes = carry.length ? Buffer.concat([carry, chunk]) : chunk;
@@ -51,37 +80,93 @@ async function feed(stream: Readable, pid: number, write: (bytes: Uint8Array) =>
     carry = bytes.subarray(whole);
     const kept: Buffer[] = [];
     for (let at = 0; at < whole; at += SOURCE_PACKET) {
-      if (firstPts === null) {
-        const p = parseSourcePacket(bytes, at);
-        if (p && p.pid === pid) {
-          const pl = p.payload;
-          const startsPes = p.payloadUnitStart && pl.length >= 14 && pl[0] === 0 && pl[1] === 0 && pl[2] === 1 && (pl[7] & 0x80) !== 0;
-          if (!startsPes) continue;
-          firstPts = readTimestamp(pl, 9);
+      const p = parseSourcePacket(bytes, at);
+      if (core) {
+        if (p && p.pid === pid) assembler.push(p);
+        continue;
+      }
+      if (p && p.pid === pid) {
+        const pl = p.payload;
+        const startsPes = p.payloadUnitStart && pl.length >= 14 && pl[0] === 0 && pl[1] === 0 && pl[2] === 1 && (pl[7] & 0x80) !== 0;
+        if (startsPes) {
+          const pts = readTimestamp(pl, 9);
+          firstPts ??= pts;
+          pesPts.push(pts);
+        } else if (firstPts === null) {
+          continue; // the tail of a PES that began before the range
         }
       }
       kept.push(bytes.subarray(at, at + SOURCE_PACKET));
     }
-    if (kept.length) await write(Buffer.concat(kept));
+    if (core ? !(await flushCores()) : kept.length > 0 && !(await write(Buffer.concat(kept)))) break;
+  }
+  if (core) {
+    assembler.flush();
+    await flushCores();
   }
   return firstPts;
 }
 
-/** Decodes the audio PID of a byte range of a clip to 16 kHz mono s16le. */
-async function decodeRange(read: Readable, pid: number, ffmpegPath: string, signal?: AbortSignal): Promise<{ firstPts: number; pcm: Int16Array } | null> {
+/**
+ * Whether the decoded audio is as long as the PES timestamps say: ffmpeg gives decoded frames contiguous times whatever the
+ * stream's timestamps are, so a frame it dropped (a damaged PES) would silently shift every later sample. Throws when
+ * the decode is short of the span the PES packets cover (plus one PES, the last one's length) by more than two PES.
+ */
+function checkNoGap(pesPts: readonly number[], decodedSamples: number, pid: number): void {
+  if (pesPts.length < 3) return;
+  const steps = pesPts.slice(1).map((p, i) => ((p - pesPts[i] + PTS_WRAP) % PTS_WRAP) / 90).sort((x, y) => x - y);
+  const typical = steps[steps.length >> 1];
+  const expectedMs = ((pesPts[pesPts.length - 1] - pesPts[0] + PTS_WRAP) % PTS_WRAP) / 90 + typical;
+  const decodedMs = decodedSamples / SAMPLES_PER_MS;
+  if (expectedMs - decodedMs > 2 * typical + 20) {
+    throw new Error(`disc audio: PID 0x${pid.toString(16)} decoded ${Math.round(decodedMs)} ms of the ${Math.round(expectedMs)} ms its PES packets span (a damaged or lost packet)`);
+  }
+}
+
+/** Decodes one audio PID of a byte range of a clip to 16 kHz mono s16le. Throws when it can't, or when frames were lost. */
+async function decodeRange(read: Readable, audio: { pid: number; coding: number }, ffmpegPath: string, signal?: AbortSignal): Promise<{ firstPts: number; pcm: Int16Array }> {
+  const pesPts: number[] = [];
+  const core = audio.coding === CodingType.TRUEHD;
+  const input = core ? ['-f', 'ac3'] : ['-f', 'mpegts'];
+  const map = core ? [] : ['-map', `0:#0x${audio.pid.toString(16)}`];
   const ff = spawn(ffmpegPath, [
-    '-hide_banner', '-nostdin', '-loglevel', 'error', '-f', 'mpegts', '-i', 'pipe:0', '-map', `0:#0x${pid.toString(16)}`,
-    '-ac', '1', '-ar', '16000', '-f', 's16le', 'pipe:1',
+    '-hide_banner', '-nostdin', '-loglevel', 'error', ...input, '-i', 'pipe:0', ...map,
+    '-ac', '1', '-ar', String(SAMPLE_RATE_OUT), '-f', 's16le', 'pipe:1',
   ], { stdio: ['pipe', 'pipe', 'pipe'] });
   const out: Buffer[] = [];
-  let stderr = '';
+  const tail: string[] = [];
+  let pending = '';
   ff.stdout.on('data', (d: Buffer) => out.push(d));
-  ff.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+  ff.stderr.on('data', (d: Buffer) => {
+    const lines = (pending + d.toString()).split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) if (line.trim()) tail.push(line);
+    tail.splice(0, Math.max(0, tail.length - 8));
+  });
   ff.stdin.on('error', () => {}); // ffmpeg may stop reading early; its exit code says why
   const closed = new Promise<number | null>((resolve, reject) => {
     ff.on('error', reject);
     ff.on('close', resolve);
   });
+  closed.catch(() => {}); // a failed spawn is reported where `closed` is awaited, never as an unhandled rejection
+  let alive = true;
+  const gone = new Promise<void>((resolve) => {
+    const end = (): void => {
+      alive = false;
+      resolve();
+    };
+    ff.on('exit', end);
+    ff.on('close', end);
+    ff.on('error', end);
+    ff.stdin.on('close', end);
+  });
+  const write: Write = async (bytes) => {
+    if (!alive) return false;
+    if (ff.stdin.write(bytes)) return true;
+    await Promise.race([new Promise<void>((resolve) => ff.stdin.once('drain', resolve)), gone]);
+    return alive;
+  };
+  const aborted = new Promise<null>((resolve) => signal?.addEventListener('abort', () => resolve(null), { once: true }));
   const onAbort = (): void => {
     ff.kill('SIGKILL');
     read.destroy();
@@ -89,37 +174,38 @@ async function decodeRange(read: Readable, pid: number, ffmpegPath: string, sign
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
     if (signal?.aborted) onAbort();
-    const write = (bytes: Uint8Array): Promise<void> =>
-      new Promise((resolve) => {
-        if (ff.stdin.write(bytes)) resolve();
-        else ff.stdin.once('drain', () => resolve());
-      });
-    let firstPts: number | null;
+    let firstPts: number | null = null;
     try {
-      firstPts = await feed(read, pid, write, signal);
+      firstPts = await feed(read, audio.pid, core, write, pesPts, signal);
     } catch (err) {
       if (!signal?.aborted) throw err;
-      firstPts = null;
     }
     ff.stdin.end();
-    const code = await closed;
+    // An aborted run doesn't wait for the pipes to close: a child of ffmpeg could hold them open.
+    const code = await Promise.race([closed, aborted]);
     signal?.throwIfAborted();
-    if (firstPts === null) return null;
+    if (pending.trim()) tail.push(pending);
+    if (code !== 0) throw new Error(`disc audio: ffmpeg exited ${code}: ${tail.join(' | ').slice(0, 300)}`);
+    if (firstPts === null) throw new Error(`disc audio: no audio PES on PID 0x${audio.pid.toString(16)} in the byte range`);
     const bytes = Buffer.concat(out);
-    if (code !== 0 && bytes.length === 0) throw new Error(`disc audio: ffmpeg exited ${code}: ${stderr.trim().slice(0, 300)}`);
-    const pcm = new Int16Array(bytes.length >> 1);
-    for (let i = 0; i < pcm.length; i++) pcm[i] = bytes.readInt16LE(i * 2);
-    return { firstPts, pcm };
+    const raw = new Int16Array(bytes.length >> 1);
+    for (let i = 0; i < raw.length; i++) raw[i] = bytes.readInt16LE(i * 2);
+    checkNoGap(pesPts, raw.length, audio.pid);
+    return { firstPts, pcm: raw };
   } finally {
     signal?.removeEventListener('abort', onAbort);
-    if (ff.exitCode === null) ff.kill('SIGKILL');
+    read.destroy();
+    if (ff.exitCode === null && ff.signalCode === null) ff.kill('SIGKILL');
   }
 }
 
 /**
- * 16 kHz mono PCM of windows of a playlist's first audio stream, reading only the bytes each window needs (from the EP
- * entry before it to the one after it). A window is `[fromMs, toMs)` in playlist time, clamped to the playlist; `startMs`
- * is its start, exact to 10 ms: each decoded stretch is placed by the PTS of its first audio PES, and gaps are silence.
+ * 16 kHz mono PCM of windows of a playlist's audio stream (each play item's own STN entry number `audioIndex`, the first
+ * by default), reading only the bytes each window needs (from the EP entry before it to the one after it, inside the play
+ * item's STC sequence). A window is `[fromMs, toMs)` in playlist time, clamped to the playlist; `startMs` is its start,
+ * exact to 10 ms: each decoded stretch is placed by the PTS of its first audio PES.
+ * It throws, never returning silence for audio it could not read: when the stream isn't there, ffmpeg fails, frames were
+ * lost inside a stretch (`checkNoGap`), or what was decoded leaves more than `MAX_UNCOVERED_MS` of a play item's share of the window empty.
  */
 export async function episodeAudio(
   disc: LevelDiscSource,
@@ -127,6 +213,7 @@ export async function episodeAudio(
   windows: readonly TimeWindow[] | 'whole',
   ffmpegPath: string,
   signal?: AbortSignal,
+  options: { readonly audioIndex?: number } = {},
 ): Promise<AudioWindow[]> {
   const mplsBytes = await disc.readFile(`BDMV/PLAYLIST/${playlistId}.mpls`);
   if (!mplsBytes) throw new Error(`disc audio: no playlist ${playlistId}`);
@@ -139,8 +226,6 @@ export async function episodeAudio(
     at += ms;
   }
   const durationMs = at;
-  const pid = items[0]?.item.stn.audio[0]?.pid;
-  if (pid === undefined) throw new Error(`disc audio: playlist ${playlistId} has no audio stream`);
   const clpis = new Map<string, Clpi>();
   const clpiOf = async (clipId: string): Promise<Clpi> => {
     let clpi = clpis.get(clipId);
@@ -164,18 +249,20 @@ export async function episodeAudio(
       const itemTo = Math.min(toMs, endMs);
       if (itemFrom >= itemTo) continue;
       signal?.throwIfAborted();
+      const audio = item.stn.audio[options.audioIndex ?? 0];
+      if (!audio) throw new Error(`disc audio: playlist ${playlistId} has no audio stream ${options.audioIndex ?? 0} on clip ${item.clipId}`);
       const clpi = await clpiOf(item.clipId);
       const map = clpi.epMaps[0];
+      const range = stcSpnRange(clpi, item.stcId);
       const clip = await disc.clip(`BDMV/STREAM/${item.clipId}.m2ts`);
       if (!clip) throw new Error(`disc audio: no clip ${item.clipId}`);
       const from45 = item.inTime + (itemFrom - startMs) * 45;
       const to45 = item.inTime + (itemTo - startMs) * 45;
-      const first = map && findEpBefore(map, from45 - MARGIN_45);
-      const last = map && findEpAfter(map, to45 + MARGIN_45);
-      const fromByte = (first?.spn ?? 0) * SOURCE_PACKET;
-      const toByte = last ? last.spn * SOURCE_PACKET : clpi.numSourcePackets * SOURCE_PACKET;
-      const decoded = await decodeRange(clip.read(fromByte, toByte), pid, ffmpegPath, signal);
-      if (!decoded) continue;
+      const first = map && findEpBefore(map, from45 - MARGIN_45, range);
+      const last = map && findEpAfter(map, to45 + MARGIN_45, range);
+      const fromByte = (first?.spn ?? (Number.isFinite(range.startSpn) ? range.startSpn : 0)) * SOURCE_PACKET;
+      const toByte = (last?.spn ?? Math.min(range.endSpn, clpi.numSourcePackets)) * SOURCE_PACKET;
+      const decoded = await decodeRange(clip.read(fromByte, toByte), { pid: audio.pid, coding: audio.codingType }, ffmpegPath, signal);
       // PTS of the first sample, as playlist time (33-bit wrap folded into the nearest side of the play item's in-time).
       let delta = (decoded.firstPts - item.inTime * 2) % PTS_WRAP;
       if (delta > PTS_WRAP / 2) delta -= PTS_WRAP;
@@ -184,7 +271,12 @@ export async function episodeAudio(
       const pieceStart = Math.round((pieceStartMs - fromMs) * SAMPLES_PER_MS);
       const lo = Math.max(pieceStart, Math.round((itemFrom - fromMs) * SAMPLES_PER_MS), 0);
       const hi = Math.min(pieceStart + decoded.pcm.length, Math.round((itemTo - fromMs) * SAMPLES_PER_MS), pcm.length);
-      if (lo < hi) pcm.set(decoded.pcm.subarray(lo - pieceStart, hi - pieceStart), lo);
+      const covers = (hi - lo) / SAMPLES_PER_MS;
+      const wanted = itemTo - itemFrom;
+      if (lo >= hi || wanted - covers > MAX_UNCOVERED_MS) {
+        throw new Error(`disc audio: the audio of clip ${item.clipId} covers ${Math.round(covers)} of ${Math.round(wanted)} ms of the window`);
+      }
+      pcm.set(decoded.pcm.subarray(lo - pieceStart, hi - pieceStart), lo);
     }
     result.push({ startMs: fromMs, pcm });
   }

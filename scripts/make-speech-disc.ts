@@ -12,15 +12,24 @@ if (!outDir) {
   process.exit(1);
 }
 
-/** Stereo AC-3 at 192 kb/s: pink noise at -20 dBFS inside the bursts that fall in [fromS, fromS + seconds), silence elsewhere. */
+/** The AC-3 encoder's delay: its output sounds this many samples after its input, which the encoded signal leads by. */
+const AC3_PRIMING_SAMPLES = 256;
+
+/**
+ * Stereo AC-3 at 192 kb/s: pink noise at -20 dBFS inside the bursts that fall in [fromS, fromS + seconds), silence
+ * elsewhere. The gate follows the bursts to the millisecond (the source makes 48-sample frames, which `volume` gates
+ * whole) and the signal is cut 256 samples early, so the encoder's delay puts each burst at its time in the decode.
+ */
 function speechAudio(fromS: number, seconds: number): Uint8Array {
   const gate = SPEECH_BURSTS.map((b) => [b.fromMs / 1000 - fromS, b.toMs / 1000 - fromS] as const)
     .filter(([a, b]) => b > 0 && a < seconds)
     .map(([a, b]) => `between(t,${Math.max(a, 0)},${b})`)
     .join('+');
+  const extra = AC3_PRIMING_SAMPLES / 48_000;
   return new Uint8Array(execFileSync('ffmpeg', [
-    '-v', 'error', '-f', 'lavfi', '-i', `anoisesrc=color=pink:amplitude=0.3:sample_rate=48000:duration=${seconds}:seed=${fromS + 1}`,
-    '-af', `volume='if(${gate},1,0)':eval=frame,pan=stereo|FL=c0|FR=c0`, '-c:a', 'ac3', '-b:a', '192k', '-f', 'ac3', '-',
+    '-v', 'error', '-f', 'lavfi', '-i', `anoisesrc=color=pink:amplitude=0.3:sample_rate=48000:nb_samples=48:duration=${seconds + extra}:seed=${fromS + 1}`,
+    '-af', `volume='if(${gate},1,0)':eval=frame,atrim=start_sample=${AC3_PRIMING_SAMPLES},asetpts=N/SR/TB,pan=stereo|FL=c0|FR=c0`,
+    '-c:a', 'ac3', '-b:a', '192k', '-f', 'ac3', '-',
   ], { maxBuffer: 1 << 28 }));
 }
 

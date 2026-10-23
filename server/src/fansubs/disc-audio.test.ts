@@ -1,8 +1,11 @@
 import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { Readable } from 'node:stream';
+import { afterAll, describe, expect, it } from 'vitest';
 import { SPEECH_BURSTS } from '../../../tests/helpers/speech-bursts';
-import { folderDiscSource } from '../levels/level-discs';
+import { folderDiscSource, type LevelDiscSource } from '../levels/level-discs';
 import { episodeAudio, windowsFor, type AudioWindow } from './disc-audio';
 
 const hasAc3 = spawnSync('ffmpeg', ['-hide_banner', '-decoders'], { encoding: 'utf8' }).stdout?.includes(' ac3 ') ?? false;
@@ -28,11 +31,11 @@ function agreement(w: AudioWindow): { frames: number; share: number } {
   return { frames, share: agree / frames };
 }
 
-/** The shift of the window's start (a multiple of 10 ms, within 100 ms) at which its loud frames agree best with the bursts. */
+/** The shift of the window's start (a multiple of 5 ms, within 100 ms) at which its loud frames agree best with the bursts. */
 function bestShiftMs(w: AudioWindow): number {
   let best = 0;
   let bestAgree = -1;
-  for (let shift = -100; shift <= 100; shift += 10) {
+  for (let shift = -100; shift <= 100; shift += 5) {
     let agree = 0;
     for (let i = 0; i < Math.floor(w.pcm.length / 160); i++) {
       let sum = 0;
@@ -65,10 +68,10 @@ describe.skipIf(!runFfmpegTests)('episodeAudio', () => {
     expect(agreement(w).share).toBeGreaterThanOrEqual(0.95);
   });
 
-  it('places samples within 20 ms of their playlist time, in both clips', async () => {
+  it('places samples within 10 ms of their playlist time, in both clips', async () => {
     for (const window of [{ fromMs: 20_000, toMs: 50_000 }, { fromMs: 90_000, toMs: 140_000 }]) {
       const [w] = await episodeAudio(disc, '00000', [window], 'ffmpeg');
-      expect(Math.abs(bestShiftMs(w))).toBeLessThanOrEqual(20);
+      expect(Math.abs(bestShiftMs(w))).toBeLessThanOrEqual(10);
     }
   });
 
@@ -80,9 +83,109 @@ describe.skipIf(!runFfmpegTests)('episodeAudio', () => {
   });
 });
 
+/** The disc with the packets of one PID dropped from a byte range of the first clip: a stretch of audio the clip lost. */
+function withoutAudio(from: number, to: number): LevelDiscSource {
+  return {
+    ...disc,
+    manifest: () => disc.manifest(),
+    readFile: (path) => disc.readFile(path),
+    readRange: (path, offset, length) => disc.readRange(path, offset, length),
+    async clip(path) {
+      const clip = await disc.clip(path);
+      if (!clip || !path.endsWith('00001.m2ts')) return clip;
+      return {
+        ...clip,
+        read: (a, b) =>
+          Readable.from((async function* () {
+            const chunks: Buffer[] = [];
+            for await (const chunk of clip.read(a, b) as AsyncIterable<Buffer>) chunks.push(chunk);
+            const bytes = Buffer.concat(chunks);
+            const kept: Buffer[] = [];
+            for (let o = 0; o < bytes.length; o += 192) {
+              const pid = ((bytes[o + 5] & 0x1f) << 8) | bytes[o + 6];
+              const spn = a / 192 + o / 192;
+              if (!(pid === 0x1100 && spn >= from && spn < to)) kept.push(bytes.subarray(o, o + 192));
+            }
+            yield Buffer.concat(kept);
+          })()),
+      };
+    },
+  };
+}
+
+describe.skipIf(!runFfmpegTests)('episodeAudio failures', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'disc-audio-test-'));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const script = (name: string, body: string): string => {
+    const path = join(scratch, name);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  };
+  const window = [{ fromMs: 20_000, toMs: 50_000 }];
+
+  it('rejects, without hanging, when ffmpeg exits before reading its input', async () => {
+    await expect(episodeAudio(disc, '00000', window, script('exit1.sh', 'exit 1'))).rejects.toThrow(/ffmpeg exited 1/);
+  });
+
+  it('rejects when ffmpeg cannot be started', async () => {
+    await expect(episodeAudio(disc, '00000', window, join(scratch, 'no-such-ffmpeg'))).rejects.toThrow();
+  });
+
+  it('rejects when the audio stream is not on the clip', async () => {
+    const source: LevelDiscSource = { ...disc, readFile: async (path) => {
+      const bytes = await disc.readFile(path);
+      if (!bytes || !path.endsWith('.mpls')) return bytes;
+      const copy = new Uint8Array(bytes);
+      // The one stream entry for PID 0x1100 names a PID the clip doesn't carry.
+      for (let i = 0; i + 1 < copy.length; i++) if (copy[i] === 0x11 && copy[i + 1] === 0x00) copy[i + 1] = 0x77;
+      return copy;
+    } };
+    await expect(episodeAudio(source, '00000', window, 'ffmpeg')).rejects.toThrow(/ffmpeg exited|no audio PES/);
+  });
+
+  it('kills ffmpeg and rejects when aborted mid-window', async () => {
+    const pidFile = join(scratch, 'pid');
+    const slow = script('slow.sh', `echo $$ > ${pidFile}\nsleep 30`);
+    const controller = new AbortController();
+    const run = episodeAudio(disc, '00000', window, slow, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    controller.abort();
+    await expect(run).rejects.toThrow();
+    const pid = Number(spawnSync('cat', [pidFile], { encoding: 'utf8' }).stdout);
+    expect(pid).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it('refuses a window whose audio lost frames, instead of shifting what follows', async () => {
+    // About 0.2 s of audio packets are gone from the middle of the window.
+    const lossy = withoutAudio(5000, 5030);
+    await expect(episodeAudio(lossy, '00000', [{ fromMs: 20_000, toMs: 60_000 }], 'ffmpeg')).rejects.toThrow(/damaged or lost/);
+    // The same window of the whole disc decodes.
+    await expect(episodeAudio(disc, '00000', [{ fromMs: 20_000, toMs: 60_000 }], 'ffmpeg')).resolves.toHaveLength(1);
+  });
+
+  it('decodes the AC-3 core of a TrueHD stream, placed by its PTS', async () => {
+    const truehd = folderDiscSource(join(import.meta.dirname, '../../../fixtures/synthetic/disc3'), { id: 'd3', name: 'Audio' });
+    const [w] = await episodeAudio(truehd, '00000', [{ fromMs: 2_000, toMs: 8_000 }], 'ffmpeg', undefined, { audioIndex: 2 });
+    expect(w.startMs).toBe(2_000);
+    expect(w.pcm.length).toBe(6_000 * 16);
+    let peak = 0;
+    for (const v of w.pcm) peak = Math.max(peak, Math.abs(v));
+    expect(peak).toBeGreaterThan(3000);
+    const head = w.pcm.subarray(0, 160);
+    expect(head.some((v) => Math.abs(v) > 100)).toBe(true); // sound from the first 10 ms: no leading silence from a late sync
+  });
+});
+
 describe('windowsFor', () => {
   it('takes the whole of an episode under three minutes', () => {
     expect(windowsFor(150_000)).toEqual([{ fromMs: 0, toMs: 150_000 }]);
+  });
+
+  it('takes the whole of an episode under three and a half minutes', () => {
+    expect(windowsFor(209_000)).toEqual([{ fromMs: 0, toMs: 209_000 }]);
   });
 
   it('spreads six minutes-long windows over a full episode', () => {
@@ -96,6 +199,7 @@ describe('windowsFor', () => {
   it('takes fewer and shorter windows of a short episode', () => {
     const ws = windowsFor(300_000);
     expect(ws.length).toBeLessThan(6);
+    for (const w of ws) expect(w.toMs - w.fromMs).toBeGreaterThanOrEqual(30_000);
     expect(ws[0].fromMs).toBe(90_000);
     expect(ws[ws.length - 1].toMs).toBeLessThanOrEqual(210_000);
     for (const w of ws) expect(w.toMs - w.fromMs).toBeLessThanOrEqual(60_000);
