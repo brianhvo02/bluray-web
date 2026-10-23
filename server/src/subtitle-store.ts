@@ -1,13 +1,14 @@
-import { randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { StoredSubtitle } from '../../src/engine/disc/nas-api';
-import { isCode, lockFile, replaceAtomically, syncDir } from './atomic-json';
+import type { FansubSource, StoredSubtitle } from '../../src/engine/disc/nas-api';
+import { isCode, lockFile, replaceAtomically, syncDir, writeSynced } from './atomic-json';
 
 export const SUBTITLE_LIMIT_BYTES = 5 * 1024 * 1024;
 export const FONTS_LIMIT_BYTES = 50 * 1024 * 1024;
 export const TOTAL_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+export const FANSUB_LIMIT_BYTES = 20 * 1024 ** 3;
 const STALE_UPLOAD_MS = 60 * 60_000;
 const ID_RE = /^[0-9a-f]{16}$/;
 const SUBTITLE_EXT = /\.(?:srt|ass|ssa)$/i;
@@ -51,15 +52,22 @@ function checkName(name: string, ext: RegExp): void {
   if (name.length < 1 || Buffer.byteLength(name) > 255 || /[/\\\0]/.test(name) || name === '.' || name === '..' || !ext.test(name)) throw new BadNameError();
 }
 
-const total = (s: StoredSubtitle): number => s.fileSize + s.fonts.reduce((n, f) => n + f.size, 0);
+/** What counts against the 2 GB total: owner uploads only; fansubs have their own budget. */
+const total = (s: StoredSubtitle): number => (s.source ? 0 : s.fileSize + s.fonts.reduce((n, f) => n + f.size, 0));
+const sha256 = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
 
-/** Owner-uploaded subtitles under `subtitles/<id>/`: `meta.json`, the file in `sub/`, fonts in `fonts/`. */
+/**
+ * Subtitles under `subtitles/<id>/`: `meta.json`, the file in `sub/`, fonts in `fonts/`. A fansub also keeps
+ * its unaligned `original/` file, and its fonts live in the shared pool `subtitles/.fonts/<sha256>`.
+ */
 export class SubtitleStore {
   private readonly maxTotal: number;
+  private readonly maxFansub: number;
   private readonly now: () => number;
 
-  constructor(private readonly dataDir: string, opts: { maxTotalBytes?: number; now?: () => number } = {}) {
+  constructor(private readonly dataDir: string, opts: { maxTotalBytes?: number; maxFansubBytes?: number; now?: () => number } = {}) {
     this.maxTotal = opts.maxTotalBytes ?? TOTAL_LIMIT_BYTES;
+    this.maxFansub = opts.maxFansubBytes ?? FANSUB_LIMIT_BYTES;
     this.now = opts.now ?? Date.now;
   }
 
@@ -160,9 +168,107 @@ export class SubtitleStore {
       if (isCode(err, 'ENOENT')) return false;
       throw err;
     }
+    const gone = this.read(dir);
     rmSync(dir, { recursive: true, force: true });
     syncDir(this.root());
+    const hashes = (gone?.fonts ?? []).flatMap((f) => (f.hash ? [f.hash] : []));
+    if (hashes.length > 0) {
+      const used = this.pooledHashes();
+      for (const h of hashes) if (!used.has(h)) rmSync(this.poolFile(h), { force: true });
+    }
     return true;
+  }
+
+  private poolFile(hash: string): string {
+    return join(this.root(), '.fonts', hash);
+  }
+
+  /** The hashes of every pooled font some fansub still uses, with their sizes. */
+  private pooledHashes(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const s of this.all()) for (const f of s.fonts) if (f.hash) out.set(f.hash, f.size);
+    return out;
+  }
+
+  /** Bytes the fansubs hold: each one's file and original, and each pooled font once. */
+  private fansubBytes(): number {
+    let n = 0;
+    for (const s of this.all()) {
+      if (!s.source) continue;
+      n += s.fileSize;
+      try {
+        n += statSync(join(this.root(), s.id, 'original', s.fileName)).size;
+      } catch (err) {
+        if (!isCode(err, 'ENOENT')) throw err;
+      }
+    }
+    for (const size of this.pooledHashes().values()) n += size;
+    return n;
+  }
+
+  /**
+   * Stores a fansub whole: the aligned file, the original, and its fonts in the shared pool (each written
+   * once). No per-file limits; the fansubs together stay under their own budget.
+   */
+  createFansub(
+    meta: SubtitleMeta & { source: FansubSource },
+    file: { name: string; data: Buffer; original: Buffer },
+    fonts: readonly { name: string; data: Buffer }[],
+  ): StoredSubtitle {
+    checkName(file.name, SUBTITLE_EXT);
+    if (file.data.length === 0) throw new EmptyBodyError();
+    const byName = new Map(fonts.map((f) => [f.name, { name: f.name, size: f.data.length, hash: sha256(f.data), data: f.data }]));
+    const entries = [...byName.values()];
+    const pooled = this.pooledHashes();
+    const fresh = new Map<string, Buffer>();
+    for (const f of entries) if (!pooled.has(f.hash)) fresh.set(f.hash, f.data);
+    let add = file.data.length + file.original.length;
+    for (const d of fresh.values()) add += d.length;
+    if (this.fansubBytes() + add > this.maxFansub) throw new TooLargeError();
+
+    const id = randomBytes(8).toString('hex');
+    const dir = join(this.root(), id);
+    try {
+      mkdirSync(join(dir, 'sub'), { recursive: true });
+      mkdirSync(join(dir, 'original'), { recursive: true });
+      writeFileSync(join(dir, 'sub', file.name), file.data, { mode: 0o600 });
+      writeFileSync(join(dir, 'original', file.name), file.original, { mode: 0o600 });
+      mkdirSync(join(this.root(), '.fonts'), { recursive: true });
+      for (const [hash, data] of fresh) {
+        const dest = this.poolFile(hash);
+        if (existsSync(dest)) continue;
+        const temp = `${dest}.tmp-${randomBytes(6).toString('hex')}`;
+        writeFileSync(temp, data, { mode: 0o600 });
+        renameSync(temp, dest);
+      }
+      const stored: StoredSubtitle = {
+        ...meta, id, fileName: file.name, fileSize: file.data.length,
+        fonts: entries.map(({ name, size, hash }) => ({ name, size, hash })), uploadedAt: this.now(),
+      };
+      replaceAtomically(join(dir, 'meta.json'), JSON.stringify(stored));
+      return stored;
+    } catch (err) {
+      rmSync(dir, { recursive: true, force: true });
+      throw err;
+    }
+  }
+
+  /** Rewrites a fansub's aligned file (a re-alignment) and its source; the original stays. */
+  replaceFile(id: string, data: Buffer, source: FansubSource): StoredSubtitle | null {
+    return this.edit(id, (cur) => {
+      if (!cur.source || data.length === 0) return { next: null, result: null };
+      const dest = join(this.root(), id, 'sub', cur.fileName);
+      const temp = `${dest}.tmp-${randomBytes(6).toString('hex')}`;
+      writeSynced(temp, data);
+      renameSync(temp, dest);
+      const next = { ...cur, fileSize: data.length, source };
+      return { next, result: next };
+    });
+  }
+
+  originalPath(id: string): string | null {
+    const s = this.get(id);
+    return s?.source && s.fileSize > 0 ? join(this.root(), id, 'original', s.fileName) : null;
   }
 
   filePath(id: string): string | null {
@@ -172,7 +278,9 @@ export class SubtitleStore {
 
   fontPath(id: string, name: string): string | null {
     const s = this.get(id);
-    return s && s.fonts.some((f) => f.name === name) ? join(this.root(), id, 'fonts', name) : null;
+    const font = s?.fonts.find((f) => f.name === name);
+    if (!font) return null;
+    return font.hash ? this.poolFile(font.hash) : join(this.root(), id, 'fonts', name);
   }
 
   /** Streams `body` into a temp file in the upload's folder, at most `limit` bytes; a failure removes it. */

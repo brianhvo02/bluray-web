@@ -166,12 +166,41 @@ export type SubtitlePatch = Partial<SubtitleCreate>;
 /** A subtitle file (SRT or ASS) an owner uploaded to the NAS, with its fonts. */
 export interface StoredSubtitle {
   readonly id: string; readonly name: string; readonly language: string; readonly offsetMs: number;
-  readonly fileName: string; readonly fileSize: number; readonly fonts: readonly { readonly name: string; readonly size: number }[];
+  readonly fileName: string; readonly fileSize: number; readonly fonts: readonly { readonly name: string; readonly size: number; /** sha256 hex of a pooled font (fansubs); owner uploads have none. */ readonly hash?: string }[];
   readonly attachment: SubtitleAttachment; readonly uploadedAt: number;
   /** Who uploaded it; in answers to owners only. */
   readonly uploaderPersonId?: string;
   /** Set by the route: false when the attachment's disc or playlist no longer resolves (owners only see these). */
   readonly attached?: boolean;
+  /** Set by the route for owners: a fansub lined up on a disc or playlist the episode no longer resolves to. */
+  readonly stale?: boolean;
+  /** Where a fansub came from; absent for an owner upload. */
+  readonly source?: FansubSource;
+  /** A fansub whose script names fonts its archive didn't carry. */
+  readonly fontsMissing?: boolean;
+}
+
+/** How SeaDex rates a release: its best pick, a web release, or any other. */
+export type SeaDexRank = 'best' | 'web' | 'other';
+
+/** How a fansub's timing was lined up with the disc's audio. */
+export type FansubAlignment =
+  | { readonly kind: 'offset'; readonly offsetMs: number; readonly confidence: number }
+  | { readonly kind: 'split'; readonly parts: readonly { readonly fromMs: number; readonly offsetMs: number }[]; readonly confidence: number }
+  | { readonly kind: 'none'; readonly reason: 'no-speech' | 'low-confidence' }
+  | { readonly kind: 'original' };
+
+/** A subtitle track fetched from Anime Tosho, and the disc and playlist it was lined up on. */
+export interface FansubSource {
+  readonly kind: 'fansub';
+  readonly group: string;
+  readonly tracker: string;
+  readonly rank: SeaDexRank;
+  readonly toshoFileId: number;
+  readonly track: number;
+  readonly trackName: string;
+  readonly alignment: FansubAlignment;
+  readonly linedUpOn: { readonly discKey: string; readonly playlistId: string };
 }
 
 /** The quality levels a disc can be served at; `original` is the disc's own bytes. */

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { StoredSubtitle } from '../../src/engine/disc/nas-api';
+import type { FansubSource, StoredSubtitle } from '../../src/engine/disc/nas-api';
 import { BadNameError, EmptyBodyError, SubtitleStore, TooLargeError, type SubtitleMeta } from './subtitle-store';
 
 const META: SubtitleMeta = {
@@ -200,5 +200,56 @@ describe('SubtitleStore', () => {
     expect(s.get(stale.id)).toBeNull();
     expect(existsSync(join(dir, 'subtitles', stale.id))).toBe(false);
     expect(s.get(fresh.id)).not.toBeNull();
+  });
+
+  describe('fansubs', () => {
+    const SOURCE: FansubSource = {
+      kind: 'fansub', group: 'Grp', tracker: 'nyaa', rank: 'best', toshoFileId: 7, track: 2, trackName: 'English',
+      alignment: { kind: 'offset', offsetMs: 120, confidence: 0.9 }, linedUpOn: { discKey: 'd.1', playlistId: '00001' },
+    };
+    const FMETA = { ...META, source: SOURCE };
+    const pool = (): string[] => readdirSync(join(dir, 'subtitles', '.fonts'));
+
+    it('stores a fansub with its original and pooled fonts', () => {
+      const s = make();
+      const f = s.createFansub(FMETA, { name: 'a.ass', data: Buffer.from('aligned'), original: Buffer.from('o') }, [{ name: 'F.ttf', data: Buffer.from('X') }]);
+      expect(readFileSync(s.filePath(f.id)!, 'utf8')).toBe('aligned');
+      expect(readFileSync(s.originalPath(f.id)!, 'utf8')).toBe('o');
+      expect(readFileSync(s.fontPath(f.id, 'F.ttf')!, 'utf8')).toBe('X');
+      expect(s.list()[0].source!.kind).toBe('fansub');
+      expect(s.originalPath(s.create(META).id)).toBeNull();
+    });
+
+    it('shares a font between fansubs', () => {
+      const s = make();
+      const file = { name: 'a.ass', data: Buffer.from('a'), original: Buffer.from('o') };
+      const font = [{ name: 'F.ttf', data: Buffer.from('X') }];
+      const a = s.createFansub(FMETA, file, font);
+      const b = s.createFansub(FMETA, file, font);
+      expect(pool()).toHaveLength(1);
+      s.delete(a.id);
+      expect(readFileSync(s.fontPath(b.id, 'F.ttf')!, 'utf8')).toBe('X');
+      s.delete(b.id);
+      expect(pool()).toEqual([]);
+    });
+
+    it('counts fansubs against their own budget', async () => {
+      const s = new SubtitleStore(dir, { maxTotalBytes: 100, maxFansubBytes: 1000, now: () => clock });
+      s.createFansub(FMETA, { name: 'a.ass', data: Buffer.alloc(250), original: Buffer.alloc(250) }, []);
+      const { id } = s.create(META);
+      await s.writeFile(id, 'u.srt', bytes(80));
+      expect(() => s.createFansub(FMETA, { name: 'b.ass', data: Buffer.alloc(300), original: Buffer.alloc(300) }, [])).toThrow(TooLargeError);
+      expect(readdirSync(join(dir, 'subtitles')).filter((n) => /^[0-9a-f]{16}$/.test(n))).toHaveLength(2);
+    });
+
+    it('replaceFile keeps the original', () => {
+      const s = make();
+      const f = s.createFansub(FMETA, { name: 'a.ass', data: Buffer.from('a'), original: Buffer.from('o') }, []);
+      const r = s.replaceFile(f.id, Buffer.from('b'), { ...SOURCE, alignment: { kind: 'original' } });
+      expect(r!.source!.alignment.kind).toBe('original');
+      expect(readFileSync(s.filePath(f.id)!, 'utf8')).toBe('b');
+      expect(readFileSync(s.originalPath(f.id)!, 'utf8')).toBe('o');
+      expect(s.get(f.id)!.source!.alignment.kind).toBe('original');
+    });
   });
 });
