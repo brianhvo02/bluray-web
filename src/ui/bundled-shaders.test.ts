@@ -30,4 +30,21 @@ describe('bundledAnime4k', () => {
     await expect(bundled.load('nope.glsl')).rejects.toThrow(/not bundled/);
     await expect(bundled.load('Anime4K_Clamp_Highlights.glsl')).rejects.toThrow(/404/);
   });
+
+  it('gives up on a fetch that never answers, so the shader queue is freed', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      const fetchFn = (_url: string, signal?: AbortSignal): Promise<Response> =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason));
+        });
+      const result = bundledAnime4k(fetchFn).load('Anime4K_Clamp_Highlights.glsl');
+      expect(timeout).toHaveBeenCalledWith(15_000);
+      clock.abort(new Error('timed out'));
+      await expect(result).rejects.toThrow(/timed out/);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
 });

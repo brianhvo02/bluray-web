@@ -15,16 +15,19 @@ const ANIME4K_URLS: Readonly<Record<string, string>> = import.meta.glob<string>(
   eager: true,
 });
 
+/** A stalled fetch fails after this long, so the shader queue behind it is freed. */
+const FETCH_TIMEOUT_MS = 15_000;
+
 const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
-export function bundledAnime4k(fetchFn: (url: string) => Promise<Response> = (url) => fetch(url)): BundledShaders {
+export function bundledAnime4k(fetchFn: (url: string, signal: AbortSignal) => Promise<Response> = (url, signal) => fetch(url, { signal })): BundledShaders {
   const urls = new Map(Object.entries(ANIME4K_URLS).map(([path, url]) => [baseName(path), url]));
   return {
     names: new Set(urls.keys()),
     async load(name) {
       const url = urls.get(name);
       if (url === undefined) throw new Error(`${name} is not bundled`);
-      const response = await fetchFn(url);
+      const response = await fetchFn(url, AbortSignal.timeout(FETCH_TIMEOUT_MS));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.text();
     },

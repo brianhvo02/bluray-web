@@ -2,7 +2,7 @@
 
 `CLAUDE.md` at the repository root is the full developer reference: the architecture, every command, the constraints (licensing, supported browsers, test fixtures) and the specs under `docs/superpowers/specs/`. Read it first. This page keeps the everyday commands and notes.
 
-The engine in `src/engine/` is derived from libbluray and licensed LGPL-2.1 (see `src/engine/LICENSE`). Some other directories have their own licences, listed in `CLAUDE.md`.
+The engine in `src/engine/` is derived from libbluray and licensed LGPL-2.1 (see `src/engine/LICENSE`). Some other directories have their own licences: see the top-level `LICENSE` and the License section of the README.
 
 ## Run and build
 
