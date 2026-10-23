@@ -59,11 +59,11 @@
 - Produces: `Library.isSettled(abs: string, nowMs: number): Promise<boolean>`, used by the scan. Exported constant `SETTLE_MS = 3_600_000`.
 
 - [ ] **Step 1: Write failing tests.**
-  - `config.test.ts`: `loadConfig({LIBRARY_ROOTS: 'media0=/a,media0-dl=/b@Downloads'})` gives `roots[1].group === 'Downloads'`. A group equal to a root name throws.
+  - `config.test.ts`: `loadConfig({LIBRARY_ROOTS: 'media1=/a,media1-dl=/b@Downloads'})` gives `roots[1].group === 'Downloads'`. A group equal to a root name throws.
   - `library.test.ts`:
-    - With roots `media0` and `media0-dl@Downloads`, `list('')` has a folder `{ name: 'Downloads', path: 'Downloads' }` with the summed disc count, and no `media0-dl` children at the top level.
+    - With roots `media1` and `media1-dl@Downloads`, `list('')` has a folder `{ name: 'Downloads', path: 'Downloads' }` with the summed disc count, and no `media1-dl` children at the top level.
     - `list('Downloads')` merges the group's children.
-    - A disc's `path` still starts with `media0-dl/`, and its ID is unchanged from a scan without the group.
+    - A disc's `path` still starts with `media1-dl/`, and its ID is unchanged from a scan without the group.
     - A folder disc whose `.m2ts` mtime is 10 minutes before `now` is not listed. At 61 minutes it is listed, at the next scan with an injected `now`.
 - [ ] **Step 2: Run** `npx vitest run server/src/library.test.ts server/src/config.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -71,8 +71,8 @@
   - An unsettled disc is skipped, and the cache keeps its previous entry if it had one.
   - Add an injectable `now` to `LibraryOptions`.
 - [ ] **Step 4: Update `compose.yaml`.**
-  - Add `/mnt/media1` and `/mnt/media4` binds, the same form as the others.
-  - Append `media0-dl=/library-mnt/media0/Downloads@Downloads,media1-dl=/library-mnt/media1/Downloads@Downloads,media2-dl=/library-mnt/media2/Downloads@Downloads,media3-dl=/library-mnt/media3/Downloads@Downloads,media4-dl=/library-mnt/media4/Downloads@Downloads` to `LIBRARY_ROOTS`.
+  - Add a bind for each drive that has a Downloads folder but no BDMVs root yet (its `/mnt/mediaN`), the same form as the others.
+  - Append one `-dl` root per drive's Downloads folder, for example `media1-dl=/library-mnt/media1/Downloads@Downloads,media2-dl=/library-mnt/media2/Downloads@Downloads`, to `LIBRARY_ROOTS`.
   - Add `TMDB_API_KEY: ${TMDB_API_KEY:-}` and `TITLE_LIBRARY: owners` under `environment`, plus `env_file: [{ path: .env, required: false }]`.
 - [ ] **Step 5: Run** the tests and `npm run typecheck`. Expected: PASS.
 - [ ] **Step 6: Commit** `feat(server): scan the Downloads folders and skip discs still downloading`.
@@ -109,7 +109,7 @@
     - empty → `null`.
   - `evidence.test.ts`, against a temp disc folder built with `tests/helpers` plus a `META/DL/bdmt_jpn.xml` and a `bdmt_eng.xml`:
     - `discTitles` holds both languages;
-    - `segments` for `media0-dl/[BDMV][Foo][Vol.1-6 Fin]/Vol.3/BD` is `['[BDMV][Foo][Vol.1-6 Fin]', 'Vol.3', 'BD']`;
+    - `segments` for `media1-dl/[BDMV][Foo][Vol.1-6 Fin]/Vol.3/BD` is `['[BDMV][Foo][Vol.1-6 Fin]', 'Vol.3', 'BD']`;
     - `playlists` lists each `.mpls` with its duration in seconds (from the play items' in/out times) and its chapter (entry mark) count.
   - `catalogueNumbers('[BDMV][240315][EFGH-6789][白い鳥の約束]')` → `['EFGH-6789']`.
   - An ISO case using `fixtures/synthetic/disc1.iso`.
@@ -547,7 +547,7 @@ This is the controller's stop point. It needs the user's approval for the merge,
   - health, and that the other Caddy sites are unaffected;
   - the cold scan of both trees, timed;
   - the matching run's progress at `GET admin/metadata/status`, with its duration recorded;
-  - `docker exec bluray-server touch /library-mnt/media0/x`, which must fail (read-only; carried from the step 2 review, N1).
+  - `docker exec bluray-server touch /library-mnt/media1/x`, which must fail (read-only; carried from the step 2 review, N1).
 - [ ] **Step 3: Write the match report** for the user:
   - filed, Unsorted by reason, Music, extras;
   - 50 filed discs drawn at random (their path, then the title, season and disc they were filed under), as a private page or file.

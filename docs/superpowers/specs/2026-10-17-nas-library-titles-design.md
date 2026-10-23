@@ -56,7 +56,7 @@ These words are used in the UI and in this document (the user asked for terms th
 
 Goals:
 - Browse and search by title: title → season, movie or extras → episode or disc. Search matches English, romaji and Japanese titles (user).
-- Cover all discs: the BDMVs roots plus the Downloads folders of media0–media4 (user).
+- Cover all discs: the BDMVs roots plus every drive's Downloads folder, for example media1 and media2 (user).
 - **Cautious matching.** A disc is filed only when the title, the season, and the disc's place in it are unambiguous. Everything else goes to Unsorted (user).
 - **Unsorted** is owner-only. The owner files a disc by picking a title, or by creating an own title (user), then a season and a disc number. The NAS keeps that choice for good. A rescan, a metadata refresh, or the disc moving to another folder never loses it (§9).
 - **Season pages** show both episodes and discs (user). Two copies of one disc are both shown, labelled by drive and folder; the app doesn't pick one.
@@ -95,7 +95,7 @@ Anti-goals:
 | Music | Music shelf, named by folder, renamable with a NAS-stored value | User |
 | Bonus discs | Extras with the season, or with the title | User (confirmed my guess) |
 | Folder view | Kept as a second way in | User |
-| Downloads folders | Scanned: media0–media4 `Downloads` added as roots | User |
+| Downloads folders | Scanned: every drive's `Downloads` (e.g. media1, media2) added as roots | User |
 | Order | Step 2 as built (folder view) is deployed and the devices paired first. The title library follows, spot-checked owner-only, then turned on for everyone | User |
 | Moved discs | Owner choices follow the disc by its content fingerprint | My call |
 | Hiding a disc | Hidden from the title library only; owners can unhide from a Hidden list | My call |
@@ -108,8 +108,8 @@ Mockups (approved by the user): `https://claude.ai/artifact/JT3HaZAxQ1K4x7uTkSqY
 
 ## 6. Sources and roots
 
-- **New roots in `LIBRARY_ROOTS`.** Add `media0-dl=/library-mnt/media0/Downloads` and the same for media1–media4 (names are the builder's; root names are the first segment of disc paths and IDs).
-  - Mount `/mnt/media1` and `/mnt/media4` the same way as the others.
+- **New roots in `LIBRARY_ROOTS`.** Add `media1-dl=/library-mnt/media1/Downloads` and the same for every other drive with a Downloads folder (media2 in the example) (names are the builder's; root names are the first segment of disc paths and IDs).
+  - Mount the drives that had no BDMVs root yet (their `/mnt/mediaN`) the same way as the others.
   - Existing roots and disc IDs don't change.
   - The folder view shows the Downloads roots as one top-level "Downloads" folder, merging the five, beside the BDMVs content. That needs a small change to the top-level merge, which today merges every root's children together.
 - **Discs still downloading.** A disc whose files changed in the last hour is not added yet, and is picked up by a later scan. Use the newest mtime of `index.bdmv`, the `.mpls`/`.clpi` files and the `.m2ts` sizes and mtimes (my call).
