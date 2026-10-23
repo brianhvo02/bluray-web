@@ -286,11 +286,21 @@ License.txt:
   The GNU LGPL + unRAR restriction means that you must follow both
   GNU LGPL rules and unRAR restriction rules.
 
-  The GNU LGPL is the GNU Lesser General Public License, version 2.1 or (at
-  your option) any later version. The unRAR restriction: the decompression
-  engine for RAR archives was developed using source code of the unRAR
-  program, whose copyright is Alexander Roshal's. The unRAR sources cannot be
-  used to re-create the RAR compression algorithm, which is proprietary, and
-  this code may not be used to develop a RAR (WinRAR) compatible archiver.
+  unRAR restriction
+  -----------------
+
+    The decompression engine for RAR archives was developed using source
+    code of unRAR program.
+    All copyrights to original unRAR code are owned by Alexander Roshal.
+
+    The license for original unRAR code has the following restriction:
+
+      The unRAR sources cannot be used to re-create the RAR compression algorithm,
+      which is proprietary. Distribution of modified unRAR sources in separate form
+      or as a part of other software is permitted, provided that it is clearly
+      stated in the documentation and source comments that the code may
+      not be used to develop a RAR (WinRAR) compatible archiver.
+
+  (7-Zip is under the GNU LGPL, version 2.1 or later; see LICENSE.)
 
 The server only reads xz and 7z archives and never creates RAR archives.

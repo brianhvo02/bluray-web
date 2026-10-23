@@ -1,6 +1,6 @@
 /** Anime Tosho's xz tracks and 7z font packs, unpacked with 7-Zip's WASM build (no native code). Original code. */
 import { readFile } from 'node:fs/promises';
-import SevenZip from '7z-wasm';
+import SevenZip from '7z-wasm/7zz.es6.js';
 import type { SevenZipModule } from '7z-wasm';
 
 export class TooLargeArchive extends Error {
@@ -94,22 +94,30 @@ function removeTree(fs: SevenZipModule['FS'], path: string): void {
 export function unxz(data: Buffer, maxBytes: number): Promise<Buffer> {
   return serialized((inst) => {
     const { FS } = inst.sz;
-    const chunks: number[] = [];
-    let over = false;
+    // Grows as output arrives, never past maxBytes; the sink throws at the cap to abort 7-Zip.
+    let out = Buffer.alloc(Math.min(maxBytes, 64 * 1024));
+    let length = 0;
     inst.sink = (c) => {
       if (c === null) return;
-      if (chunks.length >= maxBytes) over = true;
-      else chunks.push(c & 0xff);
+      if (length >= maxBytes) throw new TooLargeArchive(`more than ${maxBytes} bytes`);
+      if (length === out.length) {
+        const bigger = Buffer.alloc(Math.min(maxBytes, out.length * 2));
+        out.copy(bigger);
+        out = bigger;
+      }
+      out[length++] = c & 0xff;
     };
     try {
       FS.writeFile('in.xz', data);
       run(inst, ['e', '-so', '-bd', '-y', 'in.xz']);
+    } catch (e) {
+      if (e instanceof TooLargeArchive || length >= maxBytes) throw new TooLargeArchive(`more than ${maxBytes} bytes`);
+      throw e;
     } finally {
       inst.sink = null;
       removeTree(FS, 'in.xz');
     }
-    if (over) throw new TooLargeArchive(`more than ${maxBytes} bytes`);
-    return Buffer.from(chunks);
+    return out.subarray(0, length);
   });
 }
 
@@ -134,7 +142,8 @@ export function fontsIn7z(data: Buffer): Promise<{ name: string; data: Buffer }[
         if (total > MAX_FONT_BYTES) throw new TooLargeArchive(`fonts over ${MAX_FONT_BYTES} bytes`);
       }
       if (count === 0) return [];
-      run(inst, ['x', '-bd', '-y', '-oout', 'in.7z', '-r', '*.ttf', '*.otf', '*.ttc', '*.woff', '*.woff2']);
+      // Everything is extracted and filtered in the walk: 7-Zip's wildcards are case-sensitive here (A.TTF, b.Otf).
+      run(inst, ['x', '-bd', '-y', '-oout', 'in.7z']);
       const fonts: { name: string; data: Buffer }[] = [];
       const walk = (dir: string): void => {
         for (const n of FS.readdir(dir)) {

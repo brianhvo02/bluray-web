@@ -1,6 +1,17 @@
 import { readFileSync } from 'node:fs';
+import SevenZip from '7z-wasm';
 import { describe, expect, it } from 'vitest';
 import { fontsIn7z, TooLargeArchive, unxz } from './archive';
+
+async function makePack(files: Record<string, Buffer>): Promise<Buffer> {
+  const sz = await SevenZip({ wasmBinary: readFileSync(new URL('../../../node_modules/7z-wasm/7zz.wasm', import.meta.url)).buffer as ArrayBuffer, print: () => {}, printErr: () => {}, stdout: () => {} });
+  for (const [n, d] of Object.entries(files)) {
+    if (n.includes('/') && !sz.FS.readdir('.').includes('d')) sz.FS.mkdir('d');
+    sz.FS.writeFile(n, d);
+  }
+  sz.callMain(['a', '-t7z', 'p.7z', ...Object.keys(files)]);
+  return Buffer.from(sz.FS.readFile('p.7z'));
+}
 
 const fixture = (name: string): Buffer => readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url));
 
@@ -27,5 +38,12 @@ describe('archives', () => {
     const pack = fixture('pack.7z');
     await expect(fontsIn7z(pack.subarray(0, 100))).rejects.toThrow();
     expect((await fontsIn7z(pack)).length).toBe(1);
+  });
+
+  it('fontsIn7z finds mixed-case extensions in subfolders', async () => {
+    const font = readFileSync(new URL('../../../src/engine/ass/default-font.ttf', import.meta.url));
+    const pack = await makePack({ 'A.TTF': font, 'd/b.Otf': font, 'd/c.ttf': font, 'd/notes.txt': Buffer.from('x') });
+    const fonts = await fontsIn7z(pack);
+    expect(fonts.map((f) => f.name).sort()).toEqual(['A.TTF', 'b.Otf', 'c.ttf']);
   });
 });
