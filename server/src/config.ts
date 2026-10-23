@@ -161,6 +161,8 @@ function parseContact(value: string | undefined): string | null {
 function parseAppUrl(value: string | undefined): string {
   if (value === undefined || value === '') return DEFAULT_APP_URL;
   const url = httpUrl('APP_URL', value);
+  // Pairing links append ?pair=… to it, so it can carry neither a query nor a fragment.
+  if (/[?#]/.test(url)) throw new Error(`APP_URL "${value}" has a query or fragment; pairing links add their own query`);
   return url.endsWith('/') ? url : `${url}/`;
 }
 

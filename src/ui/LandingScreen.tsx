@@ -548,6 +548,7 @@ export function LandingScreen({ controller, snapshot, nas, places, history, play
           <PairScreen
             client={nas}
             link={pairLink}
+            paired={pairing !== null}
             onLinkDropped={() => {
               // back to the paired view when this device was already paired
               setPairRequested(false);

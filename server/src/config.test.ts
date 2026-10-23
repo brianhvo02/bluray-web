@@ -170,6 +170,12 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ...REQUIRED, APP_URL: 'nope' })).toThrow('APP_URL "nope" is not an http(s) URL');
   });
 
+  it('refuses an APP_URL with a query or a fragment, since pairing links append ?pair= to it', () => {
+    expect(() => loadConfig({ ...REQUIRED, APP_URL: 'https://player.example.org/?x=1' })).toThrow(/APP_URL .* query or fragment/);
+    expect(() => loadConfig({ ...REQUIRED, APP_URL: 'https://player.example.org/#top' })).toThrow(/APP_URL .* query or fragment/);
+    expect(() => loadConfig({ ...REQUIRED, APP_URL: 'https://player.example.org/?' })).toThrow(/APP_URL .* query or fragment/);
+  });
+
   it('rejects a LOOKUP_CONTACT a header cannot carry', () => {
     for (const bad of ['mé@example.com', 'a\nb', '連絡先']) expect(() => loadConfig({ ...REQUIRED, LOOKUP_CONTACT: bad })).toThrow('LOOKUP_CONTACT must be printable ASCII');
   });

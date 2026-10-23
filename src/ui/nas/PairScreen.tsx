@@ -12,6 +12,8 @@ interface PairScreenProps {
   readonly onLinkDropped?: () => void;
   /** Whether `http:` loopback addresses are accepted (the app served from a loopback origin, ruling R1). */
   readonly dev?: boolean;
+  /** This device is already paired, so pairing again replaces that pairing (said on the confirmation). */
+  readonly paired?: boolean;
 }
 
 /**
@@ -19,7 +21,7 @@ interface PairScreenProps {
  * own is shown to the person first (`pair-confirm`), and nothing is sent until they continue. A typed code goes to the
  * built-in Worker, or to the one entered under "Use another rendezvous" (folded away by default).
  */
-export function PairScreen({ client, link, onPaired, onLinkDropped, dev = isLoopbackHost(window.location.hostname) }: PairScreenProps): ReactElement {
+export function PairScreen({ client, link, onPaired, onLinkDropped, dev = isLoopbackHost(window.location.hostname), paired = false }: PairScreenProps): ReactElement {
   const [code, setCode] = useState(() => groupCodeInput(link?.code ?? ''));
   const [deviceName, setDeviceName] = useState(() => defaultDeviceName(navigator.userAgent, navigator.maxTouchPoints));
   const [busy, setBusy] = useState(false);
@@ -67,6 +69,7 @@ export function PairScreen({ client, link, onPaired, onLinkDropped, dev = isLoop
           <p id="pair-confirm-text">
             This link pairs with: <strong data-testid="pair-confirm-hosts">{hosts.join(', ')}</strong>. Only continue if you trust them.
           </p>
+          {paired && <p data-testid="pair-confirm-replaces">This device is already paired: continuing replaces its current pairing.</p>}
           <p>
             <button type="button" data-testid="pair-confirm-continue" onClick={() => setConfirming(false)}>
               Continue

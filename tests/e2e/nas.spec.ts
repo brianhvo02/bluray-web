@@ -274,6 +274,8 @@ test("a link carrying the server's address pairs without the Worker", async ({ p
   await expect(page.getByTestId('pair-confirm')).toBeVisible();
   await expect(page.getByTestId('pair-confirm-hosts')).toHaveText(`localhost:${NAS_PORT}`);
   await expect(page.getByTestId('pair-confirm')).toContainText('Only continue if you trust them.');
+  // not paired yet: nothing to replace
+  await expect(page.getByTestId('pair-confirm-replaces')).toBeHidden();
   const params = new URL(page.url()).searchParams;
   expect(['pair', 'nas', 'rv'].filter((name) => params.has(name))).toEqual([]);
   await page.getByTestId('pair-confirm-continue').click();
@@ -304,6 +306,7 @@ test('Cancel on a pairing link leaves a paired device as it was', async ({ page,
   await pairByLink(page);
   await page.goto(`/?pair=ABCD-EFGH-JKMN&nas=${encodeURIComponent('https://nas.example.com/bluray/api/')}`);
   await expect(page.getByTestId('pair-confirm-hosts')).toHaveText('nas.example.com');
+  await expect(page.getByTestId('pair-confirm-replaces')).toHaveText('This device is already paired: continuing replaces its current pairing.');
   await page.getByTestId('pair-confirm-cancel').click();
   await expect(page.getByTestId('nas-paired')).toBeVisible();
   await expect(page.getByTestId('pair-screen')).toBeHidden();

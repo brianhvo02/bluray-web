@@ -193,3 +193,6 @@ jobs:
           tags: |
             ghcr.io/brianhvo02/bluray-server:latest
             ghcr.io/brianhvo02/bluray-server:${{ steps.sha.outputs.short }}
+          # Links the package to this repository on GitHub (its page, README and source).
+          labels: |
+            org.opencontainers.image.source=https://github.com/brianhvo02/bluray-web

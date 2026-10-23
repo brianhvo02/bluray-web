@@ -39,7 +39,7 @@ Edit `.env`. Empty values mean unset.
 | `LIBRARY_MOUNT` | Host folder bound read-only at `/library` (compose default `/srv/bluray`). |
 | `LIBRARY_ROOTS` | Roots as above, e.g. `movies=/library/Movies,downloads=/library/Downloads@Downloads`. A second host folder goes in `compose.override.yaml` (same read-only bind options, own target such as `/library2`) and in `LIBRARY_ROOTS`. |
 | `PUBLIC_BASE` | **Required.** The HTTPS API base as devices reach it, ending in `/api/`, e.g. `https://nas.example.com/bluray/api/`. The server and every subcommand refuse to start without it. |
-| `APP_URL` | The player pairing links open. Default `https://bluray-web.pages.dev/`. |
+| `APP_URL` | The player pairing links open, with no query or fragment. Default `https://bluray-web.pages.dev/`. Normally left as is: the server's CORS lets only the hosted player (`bluray-web.pages.dev` and its preview subdomains) talk to it, so a player served from anywhere else can't reach it. |
 | `RENDEZVOUS_URL` | Your Worker's base URL. Empty: pairing links only. |
 | `RTC_LAN_ADDRESS` | This host's LAN IPv4 (10/8, 192.168/16 or public), advertised to WebRTC peers on your network, e.g. `192.168.1.20`. Used with `RENDEZVOUS_URL`. |
 | `RTC_PORT` | The UDP port of the WebRTC route, default `47998`. Compose publishes it as given. |
@@ -122,7 +122,7 @@ Note the printed `https://bluray-rendezvous.<account>.workers.dev` URL. Then:
 2. Forward UDP `RTC_PORT` (47998) on your router to this host. ICE uses only that port; the server advertises its public IPv4 (found by STUN) and `RTC_LAN_ADDRESS`, never Docker's address. Keep the compose port and `RTC_PORT` equal.
 3. `docker exec bluray-server node server.mjs owner-code` now prints a link with `rv=` (your Worker), and registers the code with it. Typed codes work at the pair screen only through the app's built-in Worker, or yours entered under "Use another rendezvous" there. Prefer links and QR.
 
-A pairing remembers the Worker it was made through, so WebRTC reconnects use yours.
+A pairing remembers the Worker it was made through, so WebRTC reconnects use yours. A pairing made from a `nas=` link (before you had a Worker) has none and stays HTTPS-only: after adding a Worker, pair that device again for typed codes and WebRTC.
 
 **Allowlist (`NAS_IDS`).** By default a Worker registers any NAS, which is fine for a Worker only you know the address of. To lock it to your server, get the id and set the secret:
 
