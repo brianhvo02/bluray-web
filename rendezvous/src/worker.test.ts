@@ -455,3 +455,61 @@ describe('CORS', () => {
     expect(res.headers.get('Access-Control-Max-Age')).toBe('600');
   });
 });
+
+describe('NAS_IDS allowlist', () => {
+  const upgrade = (path: string, ip = '203.0.113.7'): Promise<Response> =>
+    worker.fetch(new Request(`https://rendezvous.example${path}`, { headers: { Upgrade: 'websocket', 'CF-Connecting-IP': ip } }), env);
+  const refusal = { error: 'nas-not-allowed' };
+
+  it('with NAS_IDS unset any NAS registers', async () => {
+    delete env.NAS_IDS;
+    expect(await registerNas(await nasKey())).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    env.NAS_IDS = ' , ';
+    expect(await registerNas(await nasKey())).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('with NAS_IDS set a NAS off the list gets 403 nas-not-allowed, without counting against the limits', async () => {
+    env.NAS_IDS = 'L'.repeat(43);
+    const { kty, crv, x, y } = (await crypto.subtle.exportKey('jwk', (await nasKey()).publicKey)) as JsonWebKey;
+    for (let i = 0; i < 8; i++) {
+      const res = await call('/nas', { publicKeyJwk: { kty, crv, x, y } });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual(refusal);
+    }
+    expect(keys_('')).toEqual([]);
+    // a malformed body is still a 400, listed or not
+    expect((await call('/nas', { publicKeyJwk: 1 })).status).toBe(400);
+    // the refused tries left this client's budget whole
+    const keys = await nasKey();
+    env.NAS_IDS = undefined;
+    await registerNas(keys);
+  });
+
+  it('an allowed NAS keeps lookup, signalling and TURN', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    env.NAS_IDS = `${'L'.repeat(43)}, ${nasId}`;
+    expect((await registerNas(keys))).toBe(nasId);
+    expect((await registerCode(keys, nasId)).status).toBe(204);
+    expect((await lookup(CODE)).status).toBe(200);
+    expect((await upgrade(`/signal/nas?nasId=${nasId}`)).status).toBe(200);
+    expect((await upgrade(`/signal/device?nasId=${nasId}`)).status).toBe(200);
+  });
+
+  it('a NAS registered before NAS_IDS was set is refused at lookup (404) and signalling (403) once it is set', async () => {
+    const keys = await nasKey();
+    const nasId = await registerNas(keys);
+    expect((await registerCode(keys, nasId)).status).toBe(204);
+    expect((await lookup(CODE)).status).toBe(200);
+    env.NAS_IDS = 'L'.repeat(43);
+    const res = await lookup(CODE);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown code' });
+    for (const kind of ['nas', 'device']) {
+      const refused = await upgrade(`/signal/${kind}?nasId=${nasId}`);
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toEqual(refusal);
+    }
+    expect(signalled).toEqual([]);
+  });
+});

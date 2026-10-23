@@ -135,6 +135,17 @@ describe('POST /turn', () => {
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
+  it('also needs NAS_IDS to list the NAS when it is set, answering 403 nas-not-allowed', async () => {
+    const { keys, nasId } = await registeredNas();
+    env.NAS_IDS = 'L'.repeat(43);
+    const refused = await turn(await signedBody(keys, nasId));
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: 'nas-not-allowed' });
+    expect(upstream).not.toHaveBeenCalled();
+    env.NAS_IDS = nasId;
+    expect((await turn(await signedBody(keys, nasId))).status).toBe(200);
+  });
+
   it('answers 429 after 30 mintings in an hour for one NAS, without counting refusals, and again an hour later', async () => {
     const { keys, nasId } = await registeredNas();
     const other = await registeredNas();

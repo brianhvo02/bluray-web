@@ -8,6 +8,10 @@ compatibility_date = "2026-10-17"
 # `wrangler secret put TURN_KEY_API_TOKEN` and `wrangler secret put TURN_NAS_IDS` (the comma-separated NAS ids it
 # mints for; `server/deploy/deploy.sh --nas-id` prints the NAS's); never here. Without them, /turn answers 503
 # turn-not-configured.
+#
+# `NAS_IDS` (a secret or a [vars] entry; comma-separated NAS ids) locks the Worker to those NAS servers: any other
+# NAS gets 403 nas-not-allowed at registration and signalling, and its codes read as unknown. Unset or empty, the
+# Worker is open to every NAS, which is what a self-hoster's own Worker wants.
 
 [[durable_objects.bindings]]
 name = "CODE_REGISTRY"

@@ -28,6 +28,8 @@ export interface TurnEnv {
   TURN_KEY_API_TOKEN?: string;
   /** The NAS ids allowed to mint, comma-separated. */
   TURN_NAS_IDS?: string;
+  /** The Worker-wide allowlist (`nasIdAllowlist`); a NAS off it gets no credentials either. */
+  NAS_IDS?: string;
 }
 
 export interface TurnDeps {
@@ -37,9 +39,18 @@ export interface TurnDeps {
 
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
+/**
+ * The NAS ids of a comma-separated allowlist (`NAS_IDS`): a set, or null when it is unset or has no ids, meaning
+ * the Worker is open to every NAS (a self-hoster's own Worker).
+ */
+export function nasIdAllowlist(raw: string | undefined): ReadonlySet<string> | null {
+  const ids = new Set((raw ?? '').split(',').map((id) => id.trim()).filter((id) => id !== ''));
+  return ids.size === 0 ? null : ids;
+}
+
 /** The NAS ids on the `TURN_NAS_IDS` allowlist. */
-export function turnNasIds(value: string | undefined): Set<string> {
-  return new Set((value ?? '').split(',').map((id) => id.trim()).filter((id) => id !== ''));
+export function turnNasIds(value: string | undefined): ReadonlySet<string> {
+  return nasIdAllowlist(value) ?? new Set();
 }
 
 /**
@@ -65,6 +76,7 @@ export async function turnRoute(request: Request, env: TurnEnv, deps: TurnDeps):
   if (!isNasId(nasId) || typeof ts !== 'number' || !Number.isSafeInteger(ts) || typeof signature !== 'string') return json(400, { error: 'bad request' });
   if (Math.abs(deps.now() - ts) > TURN_MAX_SKEW_MS) return json(401, { error: 'unauthorized' });
   if (!allowed.has(nasId)) return json(403, { error: 'turn-not-allowed' });
+  if (!nasAllowed(env.NAS_IDS, nasId)) return json(403, { error: 'nas-not-allowed' });
   if (!(await verifiedByNas(env.CODE_REGISTRY, nasId, ts, signature))) return json(401, { error: 'unauthorized' });
   const attempt = await counted(env.CODE_REGISTRY, nasId);
   if (attempt !== null) return attempt;
@@ -88,6 +100,12 @@ export async function turnRoute(request: Request, env: TurnEnv, deps: TurnDeps):
   const servers = iceServersOf(iceServers);
   if (servers === null) return json(502, { error: 'turn-upstream' });
   return json(200, { iceServers: servers });
+}
+
+/** Whether `NAS_IDS` lets `nasId` use this Worker: always while it is unset. */
+export function nasAllowed(raw: string | undefined, nasId: string): boolean {
+  const list = nasIdAllowlist(raw);
+  return list === null || list.has(nasId);
 }
 
 /** The body as a JSON object of at most `MAX_BODY_BYTES` (`boundedBody`), or null. */
