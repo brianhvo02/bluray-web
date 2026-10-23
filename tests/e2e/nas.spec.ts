@@ -1245,6 +1245,11 @@ async function finishedOn(api: (path: string, init?: RequestInit) => Promise<Res
   return res.status === 200 ? ((await res.json()) as { places: Record<string, { finished: boolean }> }).places[playlistId]?.finished ?? null : null;
 }
 
+async function placeTimeUs(api: (path: string, init?: RequestInit) => Promise<Response>, playlistId: string): Promise<number | null> {
+  const res = await api(`me/playback/${encodeURIComponent(disc1Key())}`);
+  return res.status === 200 ? ((await res.json()) as { places: Record<string, { timeUs: number }> }).places[playlistId]?.timeUs ?? null : null;
+}
+
 test('reopening a NAS episode offers to resume it', async ({ page, browserName }) => {
   const api = await openTitlesAsResumePerson(page, browserName);
   await skipWithoutH264(page);
@@ -1252,22 +1257,25 @@ test('reopening a NAS episode offers to resume it', async ({ page, browserName }
   await expect(page.getByTestId('resume-prompt')).toHaveCount(0);
   await page.getByTestId('nas-play').click();
   await waitForPlaying(page);
-  // past 0:03 with room to spare, so the place saved at the pause reads 0:03
-  await expect.poll(() => clockUs(page), { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(3_300_000);
+  // well clear of the short place (0.2 s) and of finished (95%, 3.8 s), however late the pause lands on a slow runner
+  await expect.poll(() => clockUs(page), { timeout: 10_000, intervals: [50] }).toBeGreaterThanOrEqual(1_500_000);
   await page.getByTestId('video-canvas').click(); // a pause saves at once
   await expect(playerState(page)).toHaveAttribute('data-state', 'paused');
   await page.goBack();
   await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });
 
+  // the label follows the place the pause saved (telemetry's clock can lag the snapshot it was saved from)
+  await expect.poll(() => placeTimeUs(api, '00001'), { timeout: 5_000 }).toBeGreaterThanOrEqual(1_500_000);
+  const pausedS = Math.floor((await placeTimeUs(api, '00001'))! / 1_000_000);
   await page.locator('[data-testid="episode-row"][data-number="1"]').click();
   const prompt = page.getByTestId('resume-prompt');
   await expect(prompt).toContainText('Pick up where you left off?', { timeout: 10_000 });
-  await expect(page.getByTestId('resume-at')).toHaveText('Resume at 0:03');
+  await expect(page.getByTestId('resume-at')).toHaveText(`Resume at 0:0${pausedS}`);
   await expect(page.getByTestId('nas-play')).toHaveCount(0);
   await page.getByTestId('resume-at').click();
   await expect(playerState(page)).toHaveAttribute('data-playlist', '00001', { timeout: 15_000 });
-  await expect.poll(() => clockUs(page), { timeout: 1_000, intervals: [50] }).toBeGreaterThanOrEqual(3_000_000);
-  // The 4 s episode ends a moment after 0:03, which finishes its place: another device stops at 0:03 again.
+  await expect.poll(() => clockUs(page), { timeout: 1_000, intervals: [50] }).toBeGreaterThanOrEqual(pausedS * 1_000_000);
+  // The 4 s episode plays to its end, which finishes its place: another device stops at 0:03 again.
   await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 10_000 });
   await page.goBack();
   await expect(page.getByTestId('season-screen')).toBeVisible({ timeout: 15_000 });

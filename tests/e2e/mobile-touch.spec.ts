@@ -87,10 +87,13 @@ test('portrait, HDMV menu: a tap in the top or the bottom letterbox brings back 
   const low = await bottomEdge(page, 100);
   await page.touchscreen.tap(low.x, low.y);
   await expectBarShown(bar, 1_000);
-  // a tap on button A still activates it
+  // a tap on button A still activates it; after the two idle-outs the 10 s menu loop may be restarting, and a tap
+  // while its page is redisplayed is dropped (as in libbluray), so the tap is tried again until the menu takes it
   const a = await menuPoint(page, 232, 216);
-  await page.touchscreen.tap(a.x, a.y);
-  await expectMenu(page, false);
+  await expect(async () => {
+    await page.touchscreen.tap(a.x, a.y);
+    await expect(page.getByTestId('player')).toHaveAttribute('data-menu-active', 'false', { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
 });
 
 test('landscape, HDMV menu: a tap on empty picture brings back the controls; a tap on a button activates it at once (R13)', async ({ page }) => {
