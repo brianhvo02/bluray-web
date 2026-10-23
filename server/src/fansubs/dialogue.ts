@@ -1,9 +1,15 @@
 /** The spans of an ASS script that are spoken dialogue, not signs, songs or typesetting. Pure; original code. */
 import { parseAss } from '../../../src/engine/ass/parse';
 
-const NON_DIALOGUE_STYLE = /sign|song|op|ed|kara|title|insert|note/i;
+const NON_DIALOGUE_TOKEN = /^(signs?|songs?|op|ed|opening|ending|kara(oke)?|titles?|inserts?|notes?|tl|lyrics?|romaji|kanji)\d*$/i;
 const POSITIONED = /\\(?:pos|move)\s*\(/;
-const KARAOKE = /\\k[fo]?\d/;
+const KARAOKE = /\\[kK][fFoO]?\d/;
+const DRAWING = /\\p[1-9]/;
+
+/** A style is not dialogue when any word of its name (split at non-alphanumerics and camelCase humps) names signs, songs or notes. */
+function isNonDialogueStyle(name: string): boolean {
+  return name.replace(/([a-z])([A-Z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).some((t) => NON_DIALOGUE_TOKEN.test(t));
+}
 const MIN_MS = 300;
 const MAX_MS = 10_000;
 
@@ -13,8 +19,8 @@ export function dialogueIntervals(ass: string): { fromMs: number; toMs: number }
   const spans: { fromMs: number; toMs: number }[] = [];
   for (const e of track.events) {
     if (e.duration < MIN_MS || e.duration > MAX_MS) continue;
-    if (NON_DIALOGUE_STYLE.test(track.styles[e.style]?.name ?? '')) continue;
-    if (POSITIONED.test(e.text) || KARAOKE.test(e.text)) continue;
+    if (isNonDialogueStyle(track.styles[e.style]?.name ?? '')) continue;
+    if (POSITIONED.test(e.text) || KARAOKE.test(e.text) || DRAWING.test(e.text)) continue;
     spans.push({ fromMs: e.start, toMs: e.start + e.duration });
   }
   spans.sort((a, b) => a.fromMs - b.fromMs);

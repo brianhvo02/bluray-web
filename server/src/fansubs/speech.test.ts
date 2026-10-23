@@ -31,9 +31,10 @@ describe('speechMask', () => {
   });
 
   it('closes gaps under 200 ms and drops runs under 150 ms', () => {
-    const w = noiseWindow(6, [[1000, 1500], [1600, 2100], [4000, 4100]]);
+    const w = noiseWindow(6, [[1000, 1500], [1600, 2100], [2400, 2900], [4000, 4100]]);
     const mask = speechMask(w);
-    expect(mask[175]).toBe(1); // 100 ms gap closed
+    for (const f of [150, 155, 159]) expect(mask[f], `frame ${f}`).toBe(1); // 100 ms gap closed
+    for (const f of [215, 225]) expect(mask[f], `frame ${f}`).toBe(0); // 300 ms gap kept
     expect(mask[405]).toBe(0); // 100 ms burst dropped
   });
 });
