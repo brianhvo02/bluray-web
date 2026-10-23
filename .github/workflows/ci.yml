@@ -4,14 +4,55 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Every job, weekly and by hand, for whatever the path groups in scripts/ci-changes.sh miss. A manual run on main
+  # deploys too.
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
 
+# The event is in the group, so the weekly run never cancels a push's run on main (or the other way round).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
+  # Which jobs this change needs. A push compares with the last push to main whose run succeeded, so the changes of a
+  # cancelled or failed run are tested (and deployed) by the next one; a pull request compares with its base branch.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      unit: ${{ steps.groups.outputs.unit }}
+      e2e: ${{ steps.groups.outputs.e2e }}
+      ass: ${{ steps.groups.outputs.ass }}
+      site: ${{ steps.groups.outputs.site }}
+      worker: ${{ steps.groups.outputs.worker }}
+      image: ${{ steps.groups.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the whole history without file contents: enough for git diff --name-only against any earlier commit
+          fetch-depth: 0
+          filter: blob:none
+      - id: groups
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request) base="$(git rev-parse HEAD^1)" ;;
+            push) base="$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+                    --jq '.workflow_runs[0].head_sha // empty')" ;;
+            *) base='' ;;
+          esac
+          scripts/ci-changes.sh "$base" >> "$GITHUB_OUTPUT"
+
   check:
     name: Typecheck and unit tests
+    needs: changes
+    if: needs.changes.outputs.unit == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +71,8 @@ jobs:
   # no GPU), whose playback clock and page then fell seconds behind the tests' waits.
   e2e:
     name: Browser tests (${{ matrix.project }})
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     # The installs can be slow when the Ubuntu mirror is; the tests themselves have their own limit below.
     timeout-minutes: 35
@@ -72,6 +115,8 @@ jobs:
   # the native ASS renderer against the libass goldens (layout traces and frames)
   ass:
     name: ASS renderer vs libass (Chrome)
+    needs: changes
+    if: needs.changes.outputs.ass == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -97,8 +142,11 @@ jobs:
   # The pairing-code rendezvous Worker (rendezvous/wrangler.toml). Its own job, so a failure here never blocks the Pages deploy.
   deploy-rendezvous:
     name: Deploy the rendezvous Worker
-    needs: [check, e2e, ass]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, check, e2e, ass]
+    # a skipped test job (nothing of its own changed) doesn't hold a deploy back; a failed or cancelled one does
+    if: >-
+      !cancelled() && !failure() && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-rendezvous
@@ -124,8 +172,11 @@ jobs:
 
   deploy:
     name: Deploy to Cloudflare Pages
-    needs: [check, e2e, ass]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, check, e2e, ass]
+    # a skipped test job (nothing of its own changed) doesn't hold a deploy back; a failed or cancelled one does
+    if: >-
+      !cancelled() && !failure() && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.site == 'true'
     runs-on: ubuntu-latest
     # a newer push to main must not cancel an upload halfway; deploys queue instead
     concurrency:
@@ -159,8 +210,11 @@ jobs:
   # package settings. Its own job, so a failure here never blocks the site deploys.
   publish-server-image:
     name: Publish the server image
-    needs: [check, e2e, ass]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [changes, check, e2e, ass]
+    # a skipped test job (nothing of its own changed) doesn't hold a deploy back; a failed or cancelled one does
+    if: >-
+      !cancelled() && !failure() && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.image == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: publish-server-image
