@@ -65,7 +65,7 @@ linking to `LICENSE`) and a "Try it" badge linking to https://bluray-web.pages.d
    - *Tools*: the build and test tools the repo depends on (Vite, React, vite-plugin-pwa, Vitest, Playwright, Emscripten,
      Docker images used by the trace harnesses).
    The list is built from the repo's own records (`src/engine/NOTICE`, `src/bdj-classlib/NOTICE`,
-   `src/wasm/freetype/NOTICE`, `server/deploy/IMAGE-NOTICE`, the `package.json` files, `fixtures/` licence files,
+   `src/wasm/freetype/NOTICE`, `server/NOTICE`, `server/deploy/IMAGE-NOTICE`, the `package.json` files, `fixtures/` licence files,
    `tools/*/Dockerfile`), so nothing is listed that isn't used and nothing used is left out; each entry links to the
    project's home or repository.
 7. License: as above.
