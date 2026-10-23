@@ -52,7 +52,23 @@ linking to `LICENSE`) and a "Try it" badge linking to https://bluray-web.pages.d
 3. Documentation: links to each page in `docs/` (and that the same pages are on the site under `/help`).
 4. Run your own server: two lines and a link to `docs/self-hosting.md`.
 5. Contributing: links to `docs/contributing.md` (today's README commands, moved there) and `CLAUDE.md`.
-6. License: as above.
+6. Built on (owner's request): every project, library, service, data source and asset the player, the server and the
+   Worker rely on, each with a link and, where it applies, its licence, in groups:
+   - *Ported from* (code this project translates): libbluray, libass, DoppioJVM and fdlibm, and anything else
+     `src/engine/NOTICE` records.
+   - *Bundled* (shipped inside the app, the server image or the Worker): the FFmpeg decoders in `audio.wasm`, FreeType,
+     the OpenJDK-derived class library with its Xerces, SAX and ICU parts, jellyfin-ffmpeg and Intel's media driver, Anime4K,
+     the bundled and fixture fonts, werift, and the runtime npm dependencies of `package.json`, `server/` and `rendezvous/`.
+   - *Services and data*: AniList, TMDB (with TMDB's required notice: "This product uses the TMDB API but is not endorsed
+     or certified by TMDB."), TheDiscDB, MusicBrainz, the Cover Art Archive, Discogs, and Cloudflare (Pages, Workers,
+     Durable Objects, TURN).
+   - *Tools*: the build and test tools the repo depends on (Vite, React, vite-plugin-pwa, Vitest, Playwright, Emscripten,
+     Docker images used by the trace harnesses).
+   The list is built from the repo's own records (`src/engine/NOTICE`, `src/bdj-classlib/NOTICE`,
+   `src/wasm/freetype/NOTICE`, `server/deploy/IMAGE-NOTICE`, the `package.json` files, `fixtures/` licence files,
+   `tools/*/Dockerfile`), so nothing is listed that isn't used and nothing used is left out; each entry links to the
+   project's home or repository.
+7. License: as above.
 
 **Documentation pages (in `docs/`).**
 - `getting-started.md`: supported browsers (Safari 26 on macOS, iOS and iPadOS; Chrome and Firefox desktop; Chrome
@@ -98,6 +114,8 @@ navigations) and add no third-party resources.
 - C4. Badges: six workflow statuses (CI, WASM, VM trace, BD-J trace, BD-J class library, ASS trace), licence, and a
   "Try it" link; no preview-deploy badge.
 - C5. Pages are converted at build time, not in the browser.
+- C9. "Built on" groups entries as ported, bundled, services and data, tools; dev-only npm packages appear only through
+  their tool (no list of every transitive package).
 - C6. `/help` and `/help/<page>` are real paths served by the app shell, the same way `/nas/…` deep links already are on
   Cloudflare Pages and offline through the service worker; the builder confirms a deep `/help/nas` link loads on a preview
   deploy.
