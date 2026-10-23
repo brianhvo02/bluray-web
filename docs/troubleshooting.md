@@ -11,7 +11,7 @@ The browser lacks a feature the player needs (WebCodecs, AudioWorklet, Offscreen
 You picked a folder without all of the disc. Choose the whole disc folder, including `BDMV/STREAM` and `BDMV/CLIPINF`.
 
 **"Drop the disc folder itself (the folder that contains BDMV)."**
-You dropped files and no folder. Drop the disc folder, or the `BDMV` folder. (A folder without `BDMV` in it opens but then reports the disc's missing files.)
+You dropped files and no folder. Drop the disc folder, or the `BDMV` folder.
 
 **"Waiting for the files…" on iPhone or iPad**
 Safari copies the whole folder before the player can read it. A full disc from a USB drive can take an hour or more. The player needs the whole disc folder, so copy it to faster storage first, or use a [NAS](nas.md).
