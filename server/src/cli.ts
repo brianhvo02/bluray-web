@@ -58,7 +58,7 @@ export async function ownerCode(
 
 /**
  * `node server.mjs nas-id`: prints this NAS's rendezvous id (its key's thumbprint), the id the owner puts on the
- * Worker's `TURN_NAS_IDS` allowlist so the relay can mint for it. Makes no key: before the server has run with
+ * Worker's `NAS_IDS` allowlist (and on `TURN_NAS_IDS`, so the relay can mint for it). Makes no key: before the server has run with
  * `RENDEZVOUS_URL` there is none, and it says so. Gives the id, or null.
  */
 export async function printNasId(keyFile: string, print: (line: string) => void = console.log): Promise<string | null> {
@@ -68,6 +68,7 @@ export async function printNasId(keyFile: string, print: (line: string) => void 
   }
   const nasId = await new RendezvousClient('https://rendezvous.invalid/', keyFile).localNasId();
   print(`NAS id: ${nasId}`);
-  print('For the relay, add it to the rendezvous Worker\'s allowlist: npx wrangler secret put TURN_NAS_IDS (comma-separated ids).');
+  print('Add it to the rendezvous Worker\'s allowlist (comma-separated ids), from rendezvous/: npx wrangler secret put NAS_IDS');
+  print('For the relay, add it to TURN_NAS_IDS as well: npx wrangler secret put TURN_NAS_IDS');
   return nasId;
 }

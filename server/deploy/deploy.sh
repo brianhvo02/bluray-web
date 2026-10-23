@@ -12,8 +12,11 @@
 #
 # With --migrate it deploys nothing: once, before the first deploy of the generic compose file, it reads the NAS's
 # previous (hard-coded) compose.yaml and writes its values into the NAS's .env (keeping every line already there) and
-# its drive mounts into compose.override.yaml (see migrate-env.sh). A deploy refuses while the NAS's .env has no
-# PUBLIC_BASE, so a missed migration can't take the server down.
+# its drive mounts into compose.override.yaml (see migrate-env.sh). It keeps the previous file as
+# compose.yaml.pre-generic and reads that copy once compose.yaml is generic, so a rerun can always repair. A deploy
+# refuses while the NAS's .env has no PUBLIC_BASE, while .env is migrated but compose.override.yaml is missing, and
+# while compose.yaml is still the previous one with no override, so a missed or half-done migration can't take the
+# server down. The order of the one-time cutover is in CUTOVER.md beside this script.
 # With --owner-code it deploys nothing: it mints one owner pairing code on the running server and prints it with its
 # link and a terminal QR. Extra args go to the command: --owner-code --person <name> mints for that owner person.
 # With --nas-id it deploys nothing: it prints the running server's rendezvous NAS id, for the Worker's NAS_IDS and
@@ -43,17 +46,21 @@ if [ -z "$HOST" ]; then
   echo "Set BLURAY_NAS_HOST (the NAS's ssh host) in the environment or in $REPO/.env.local." >&2
   exit 1
 fi
+# A host that starts with - would be read as an ssh option (every call also passes it after --).
+case "$HOST" in
+  -*) echo "BLURAY_NAS_HOST must not start with '-': $HOST" >&2; exit 1 ;;
+esac
 
 if [ "${1:-}" = "--owner-code" ]; then
   shift
   # Extra args (such as --person <name>) pass through, quoted for the remote shell.
   ARGS=""
   if [ $# -gt 0 ]; then ARGS="$(printf ' %q' "$@")"; fi
-  exec ssh "$HOST" "docker exec bluray-server node server.mjs owner-code$ARGS"
+  exec ssh -- "$HOST" "docker exec bluray-server node server.mjs owner-code$ARGS"
 fi
 
 if [ "${1:-}" = "--nas-id" ]; then
-  exec ssh "$HOST" "docker exec bluray-server node server.mjs nas-id"
+  exec ssh -- "$HOST" "docker exec bluray-server node server.mjs nas-id"
 fi
 
 REMOTE_DIR='~/bluray-server'
@@ -63,29 +70,35 @@ if [ "${1:-}" = "--migrate" ]; then
   trap 'rm -rf "$WORK"' EXIT
   MIGRATE="$REPO/server/deploy/migrate-env.sh"
 
-  echo "==> Reading $REMOTE_DIR/compose.yaml on $HOST"
-  ssh "$HOST" "cat $REMOTE_DIR/compose.yaml" > "$WORK/compose.yaml"
-  if ssh "$HOST" "test -e $REMOTE_DIR/compose.override.yaml"; then
+  # The previous (hard-coded) compose.yaml is the migration's only source, and a deploy replaces it, so it is kept
+  # first as compose.yaml.pre-generic (never replaced once there). When compose.yaml is already the generic one (a
+  # deploy ran after a half-done migration), the kept copy is read instead, so a rerun can always repair.
+  echo "==> Reading the previous compose.yaml in $REMOTE_DIR on $HOST (kept as compose.yaml.pre-generic)"
+  ssh -- "$HOST" "cd $REMOTE_DIR && if grep -Eq '^[[:space:]]*PUBLIC_BASE:' compose.yaml; then \
+      { test -e compose.yaml.pre-generic || ( set -C && cat compose.yaml > compose.yaml.pre-generic ); } && cat compose.yaml; \
+    elif test -f compose.yaml.pre-generic; then cat compose.yaml.pre-generic; \
+    else cat compose.yaml; fi" > "$WORK/compose.yaml"
+  if ssh -- "$HOST" "test -e $REMOTE_DIR/compose.override.yaml"; then
     echo "$REMOTE_DIR/compose.override.yaml already exists on $HOST: the migration has run already. Nothing changed." >&2
     exit 1
   fi
   KEYS="$("$MIGRATE" keys "$WORK/compose.yaml")"
   # Only the lines of the keys the migration may write come back: never TMDB_API_KEY, DISCOGS_TOKEN or other secrets.
   PATTERN="^[[:space:]]*(export[[:space:]]+)?($(printf '%s' "$KEYS" | paste -s -d '|' -))[[:space:]]*="
-  ssh "$HOST" "if test -f $REMOTE_DIR/.env; then grep -E '$PATTERN' $REMOTE_DIR/.env || true; fi" > "$WORK/present.env"
+  ssh -- "$HOST" "if test -f $REMOTE_DIR/.env; then grep -E '$PATTERN' $REMOTE_DIR/.env || true; fi" > "$WORK/present.env"
   "$MIGRATE" build "$WORK/compose.yaml" "$WORK/present.env" "$WORK/out"
 
   if [ -s "$WORK/out/env-additions" ]; then
     echo "==> Appending to $REMOTE_DIR/.env (a copy of the old one is kept beside it)"
     # umask 077: a new .env (and the copy) is readable by its owner only. A last line without a newline gets one first.
-    ssh "$HOST" "umask 077 && cd $REMOTE_DIR && touch .env && cp -p .env \".env.bak-\$(date +%Y%m%d-%H%M%S)\" \
+    ssh -- "$HOST" "umask 077 && cd $REMOTE_DIR && touch .env && cp -p .env \".env.bak-\$(date +%Y%m%d-%H%M%S)\" \
       && { test ! -s .env || test -z \"\$(tail -c 1 .env)\" || echo >> .env; } && cat >> .env" < "$WORK/out/env-additions"
   else
     echo "    $REMOTE_DIR/.env already has every value; unchanged."
   fi
   echo "==> Writing $REMOTE_DIR/compose.override.yaml"
   # noclobber: never replace an override that appeared meanwhile.
-  ssh "$HOST" "set -C && cat > $REMOTE_DIR/compose.override.yaml" < "$WORK/out/compose.override.yaml"
+  ssh -- "$HOST" "set -C && cat > $REMOTE_DIR/compose.override.yaml" < "$WORK/out/compose.override.yaml"
   echo "==> Migrated. The running service is unchanged; the next deploy.sh starts it from the generic compose file."
   exit 0
 fi
@@ -96,6 +109,8 @@ if [ $# -gt 0 ]; then
 fi
 
 CADDY_SITE="$(setting BLURAY_CADDY_SITE)"
+# The Caddyfile's site address has no trailing slash (https://nas.example.com, not https://nas.example.com/).
+while [ "${CADDY_SITE%/}" != "$CADDY_SITE" ]; do CADDY_SITE="${CADDY_SITE%/}"; done
 if [ -z "$CADDY_SITE" ]; then
   echo "Set BLURAY_CADDY_SITE (the Caddy site for the /bluray/* route, e.g. https://nas.example.com) in the environment or in $REPO/.env.local." >&2
   exit 1
@@ -103,12 +118,20 @@ fi
 
 # Before anything is built or shipped: the generic compose file takes every value from the NAS's .env, so without
 # PUBLIC_BASE there (the migration not run) the new service would not start. Only key names come back, never values.
+# A half-done migration (.env written, compose.override.yaml not) is refused too: the deploy would replace the
+# previous compose.yaml and start the service without the drive mounts and the proxy's network.
 echo "==> Checking $REMOTE_DIR/.env on $HOST"
 env_keys() {
-  ssh "$HOST" 'bash -s' <<'SH'
-# Prints the names of the keys .env gives a non-empty value, one per line.
-f="$HOME/bluray-server/.env"
+  ssh -- "$HOST" 'bash -s' <<'SH'
+# Prints @override when compose.override.yaml exists, @migrated when .env has the migration's marker line,
+# @previous-compose when compose.yaml is the previous hard-coded one (it sets PUBLIC_BASE itself), then the names of
+# the keys .env gives a non-empty value, one per line.
+d="$HOME/bluray-server"
+test -e "$d/compose.override.yaml" && echo @override
+test -f "$d/compose.yaml" && grep -Eq '^[[:space:]]*PUBLIC_BASE:' "$d/compose.yaml" && echo @previous-compose
+f="$d/.env"
 test -f "$f" || exit 0
+grep -qx '# Moved from the previous compose.yaml by deploy.sh --migrate' "$f" && echo @migrated
 awk '
   /^[ \t]*(export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*=/ {
     line = $0; sub(/^[ \t]*(export[ \t]+)?/, "", line)
@@ -119,6 +142,16 @@ awk '
 SH
 }
 ENV_KEYS="$(env_keys)" || { echo "Could not read $REMOTE_DIR/.env on $HOST." >&2; exit 1; }
+if ! printf '%s\n' "$ENV_KEYS" | grep -qx '@override'; then
+  if printf '%s\n' "$ENV_KEYS" | grep -qx '@migrated'; then
+    echo "the NAS's .env was migrated but $REMOTE_DIR/compose.override.yaml is missing: run deploy.sh --migrate again" >&2
+    exit 1
+  fi
+  if printf '%s\n' "$ENV_KEYS" | grep -qx '@previous-compose'; then
+    echo "the NAS's compose.yaml is the previous hard-coded one and there is no compose.override.yaml: run deploy.sh --migrate first" >&2
+    exit 1
+  fi
+fi
 if ! printf '%s\n' "$ENV_KEYS" | grep -qx 'PUBLIC_BASE'; then
   echo "the NAS's .env has no PUBLIC_BASE: run deploy.sh --migrate first" >&2
   exit 1
@@ -138,34 +171,34 @@ docker buildx build --platform linux/amd64 --load \
   -f server/Dockerfile server
 
 echo "==> Shipping the image to $HOST"
-docker save "bluray-server:$TAG" bluray-server:latest | gzip | ssh "$HOST" 'gunzip | docker load'
+docker save "bluray-server:$TAG" bluray-server:latest | gzip | ssh -- "$HOST" 'gunzip | docker load'
 
 echo "==> Writing $REMOTE_DIR/compose.yaml and compose.gpu.yaml and starting the service"
-ssh "$HOST" "mkdir -p $REMOTE_DIR && cat > $REMOTE_DIR/compose.yaml" < server/deploy/compose.yaml
-ssh "$HOST" "cat > $REMOTE_DIR/compose.gpu.yaml" < server/deploy/compose.gpu.yaml
+ssh -- "$HOST" "mkdir -p $REMOTE_DIR && cat > $REMOTE_DIR/compose.yaml" < server/deploy/compose.yaml
+ssh -- "$HOST" "cat > $REMOTE_DIR/compose.gpu.yaml" < server/deploy/compose.gpu.yaml
 # The GPU override only when the render node exists: a missing device would stop the container from starting, while
 # without it the server's self-test offers only Original.
 COMPOSE_FILES="-f compose.yaml"
-if ssh "$HOST" "test -e /dev/dri/renderD128"; then
+if ssh -- "$HOST" "test -e /dev/dri/renderD128"; then
   COMPOSE_FILES="$COMPOSE_FILES -f compose.gpu.yaml"
   echo "    /dev/dri/renderD128 found: with compose.gpu.yaml (quality levels on the GPU)"
 else
   echo "    no /dev/dri/renderD128: without compose.gpu.yaml (Original only)"
 fi
 # The NAS's own drive mounts and networks. With -f, Compose no longer picks it up by itself, so name it.
-if ssh "$HOST" "test -e $REMOTE_DIR/compose.override.yaml"; then
+if ssh -- "$HOST" "test -e $REMOTE_DIR/compose.override.yaml"; then
   COMPOSE_FILES="$COMPOSE_FILES -f compose.override.yaml"
   echo "    with compose.override.yaml"
 fi
 # Keep the step-2 auth.json (before people) beside the migrated one, so the step-2 image can be rolled back to. Run in
 # the old container, which holds the data volume; when it isn't running there is nothing to copy from, so carry on.
-ssh "$HOST" "docker exec bluray-server sh -c 'test -f /data/auth.step2.json || ! test -f /data/auth.json || cp /data/auth.json /data/auth.step2.json'" \
+ssh -- "$HOST" "docker exec bluray-server sh -c 'test -f /data/auth.step2.json || ! test -f /data/auth.json || cp /data/auth.json /data/auth.step2.json'" \
   || echo "    (no running bluray-server: no rollback copy of auth.json made)"
 # The image just shipped, whatever BLURAY_IMAGE the .env names (the shell's value wins over .env in Compose).
-ssh "$HOST" "cd $REMOTE_DIR && BLURAY_IMAGE=bluray-server:latest docker compose $COMPOSE_FILES up -d"
+ssh -- "$HOST" "cd $REMOTE_DIR && BLURAY_IMAGE=bluray-server:latest docker compose $COMPOSE_FILES up -d"
 echo "    A manual restart must name the same files: cd $REMOTE_DIR && docker compose $COMPOSE_FILES up -d"
 
 echo "==> Routing /bluray/* in Caddy"
-ssh "$HOST" "bash -s -- $(printf '%q' "$CADDY_SITE")" < server/deploy/caddy-route.sh
+ssh -- "$HOST" "bash -s -- $(printf '%q' "$CADDY_SITE")" < server/deploy/caddy-route.sh
 
-echo "==> Done: ${CADDY_SITE%/}/bluray/api/health"
+echo "==> Done: $CADDY_SITE/bluray/api/health"
