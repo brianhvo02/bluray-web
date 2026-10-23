@@ -22,7 +22,7 @@ jobs:
       - run: npm install -g npm@11.19.0 # allowScripts in package.json needs npm 11.19
       - run: npm ci
       # The NAS encoder's tests run ffmpeg with libx264 (server/src/levels/encoder.test.ts).
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - uses: ./.github/actions/setup-ffmpeg
       - run: npm run typecheck
       - run: npm test
 
@@ -31,7 +31,8 @@ jobs:
   e2e:
     name: Browser tests (${{ matrix.project }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The installs can be slow when the Ubuntu mirror is; the tests themselves have their own limit below.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -48,11 +49,12 @@ jobs:
           cache: npm
       - run: npm install -g npm@11.19.0
       - run: npm ci
-      # The NAS stand-in encodes quality levels with ffmpeg and libx264.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # The NAS stand-in encodes quality levels with ffmpeg and libx264 (bdj-store.spec.ts starts it on mobile-chromium too).
+      - uses: ./.github/actions/setup-ffmpeg
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: scripts/ci-audio.sh
       - run: npm run test:e2e -- --project ${{ matrix.project }}
+        timeout-minutes: 20
         env:
           # Linux containers measured up to 19 ms mean / 41 ms max offset against the 20/50 ms bounds; 1.5 gives headroom.
           SYNC_TOLERANCE_SCALE: '1.5'
@@ -71,7 +73,7 @@ jobs:
   ass:
     name: ASS renderer vs libass (Chrome)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,6 +84,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chrome
       - run: npm run test:ass
+        timeout-minutes: 20
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

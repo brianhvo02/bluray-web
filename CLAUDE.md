@@ -34,7 +34,7 @@ A client-side Blu-ray (BDMV) player for desktop and mobile browsers (Safari, Chr
 - `tests/local/library-parse.test.ts` runs the folder-name parser over `fixtures/local/library-paths.txt` (one disc path per line, gitignored, never committed); it skips when the file is absent.
 - Probe page: `probe.html` (`src/probe/`) is a device go/no-go check: open it on a device, pick a disc folder, and it reports sample rate, `audioSession`, worker rAF, HEVC, WebGL2 float targets, `ctx.filter`, `letterSpacing`, fullscreen, `webkitdirectory`, Blob slicing over 4 GiB and `relative-path`. It is excluded from the service worker. Preview deploys use `.github/workflows/preview.yml` (once PR #3 is on main): `gh workflow run preview.yml --ref <branch>`.
 - `npx tsx scripts/make-icons.ts` renders `public/favicon.svg` to the PNG app icons in `public/icons/` (commit the output).
-- CI (`.github/workflows/ci.yml`) runs Node 24 and needs npm ≥ 11.19 because `package.json` uses `allowScripts`. `scripts/ci-audio.sh` sets up a PulseAudio null sink for the sync tests.
+- CI (`.github/workflows/ci.yml`) runs Node 24 and needs npm ≥ 11.19 because `package.json` uses `allowScripts`. ffmpeg comes from a pinned static build kept in the Actions cache (`.github/actions/setup-ffmpeg`, checked by SHA-256), not apt, and the browser and ASS jobs put their 20-minute limit on the test step, with 35 minutes for the whole job, so a slow Ubuntu mirror delays a run instead of cancelling it. `scripts/ci-audio.sh` sets up a PulseAudio null sink for the sync tests.
 
 ## Architecture
 
