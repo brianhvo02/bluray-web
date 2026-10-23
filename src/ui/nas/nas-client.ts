@@ -16,6 +16,7 @@ export const NAS_MESSAGES = {
   noRoute: "This NAS isn't reachable from here yet.",
   noRendezvous: "Pairing by code isn't available right now.",
   badRendezvous: 'That rendezvous address must be an https:// address.',
+  badLink: "This pairing link names an address this app can't use (it must be https://). Ask for a new link.",
   unpaired: 'This device is no longer paired with the NAS.',
   /** Shown while the first request to the NAS is pending: browsers hold it until local network access is answered. */
   allowLocalNetwork: 'Allow local network access if your browser asks.',
@@ -236,12 +237,14 @@ export interface SkippedDisc {
  */
 function isPairing(value: unknown): value is NasPairing {
   if (typeof value !== 'object' || value === null) return false;
-  const { base, nasId, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
+  const { base, nasId, rendezvousUrl, direct, deviceId, deviceName, personName, owner, key } = value as Partial<Record<keyof NasPairing, unknown>>;
   const k = key as Partial<CryptoKeyPair> | null | undefined;
   return (
     typeof base === 'string' &&
     (nasId === undefined || typeof nasId === 'string') &&
     (base !== '' || typeof nasId === 'string') &&
+    (rendezvousUrl === undefined || typeof rendezvousUrl === 'string') &&
+    (direct === undefined || direct === true) &&
     typeof deviceId === 'string' &&
     typeof deviceName === 'string' &&
     (personName === undefined || typeof personName === 'string') &&
@@ -433,7 +436,7 @@ export class NasClient {
    * with `nas`, for when the NAS later names its WebRTC id).
    */
   async pair(code: string, deviceName: string, via: { readonly nas?: string; readonly rv?: string } = {}): Promise<void> {
-    const builtIn = this.deps.rendezvousUrl?.trim() ? workerBase(this.deps.rendezvousUrl) : undefined;
+    const builtIn = this.builtInRendezvousUrl === undefined ? undefined : workerBase(this.builtInRendezvousUrl);
     const rv = via.rv === undefined ? undefined : workerBase(via.rv);
     let https: string | undefined;
     let nasId: string | undefined;
@@ -448,7 +451,12 @@ export class NasClient {
     if (!https && nasId === undefined) throw new Error(NAS_MESSAGES.noRoute);
     const base = !https ? '' : https.endsWith('/') ? https : `${https}/`;
     const ownWorker = rv !== undefined && rv !== builtIn ? rv : undefined;
-    const target = { base, ...(nasId === undefined ? {} : { nasId }), ...(ownWorker === undefined ? {} : { rendezvousUrl: ownWorker }) };
+    const target = {
+      base,
+      ...(nasId === undefined ? {} : { nasId }),
+      ...(ownWorker === undefined ? {} : { rendezvousUrl: ownWorker }),
+      ...(via.nas !== undefined && rv === undefined ? { direct: true as const } : {}),
+    };
     const inviteHash = (await codeHashOf(code)) ?? undefined;
     const route = await chooseRoute(target, { fetch: this.deps.fetch, connect: (id) => this.connect(id, { inviteHash }, rv) });
     let pairing: NasPairing;
@@ -516,8 +524,9 @@ export class NasClient {
     if (!pairing || generation !== this.generation) return me;
     const personName = typeof me.personName === 'string' ? me.personName : pairing.personName;
     const owner = typeof me.owner === 'boolean' ? me.owner : pairing.owner;
-    // a pairing made before the WebRTC route has no NAS id, so route choice could only ever pick HTTPS
-    const nasId = isNasId(me.nasId) ? me.nasId : pairing.nasId;
+    // a pairing made before the WebRTC route has no NAS id, so route choice could only ever pick HTTPS; one made
+    // straight at the server (`direct`) keeps none, so it never signals through a Worker nobody chose for it
+    const nasId = isNasId(me.nasId) && pairing.direct !== true ? me.nasId : pairing.nasId;
     if (personName !== pairing.personName || owner !== pairing.owner || nasId !== pairing.nasId) {
       const updated: NasPairing = {
         ...pairing,

@@ -8,6 +8,8 @@ export interface PairLink {
   readonly code: string;
   readonly nas?: string;
   readonly rv?: string;
+  /** The parameters the link carried whose address isn't allowed: the link is not to be used then. */
+  readonly dropped?: readonly ('nas' | 'rv')[];
 }
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -41,19 +43,42 @@ export function allowedPairUrl(raw: string | null | undefined, o: { readonly dev
 /** A `nas=` base as the client keeps it: ending in '/'. */
 const withSlash = (base: string): string => (base.endsWith('/') ? base : `${base}/`);
 
-/** A Worker's base URL without trailing slashes, how two of them are compared. */
-export const workerBase = (url: string): string => url.trim().replace(/\/+$/, '');
+/**
+ * A Worker's base URL as two of them are compared: parsed (so the host is lower case and a default port dropped),
+ * without query, fragment or trailing slashes. Something that isn't a URL is only trimmed of spaces and slashes.
+ */
+export function workerBase(raw: string): string {
+  const trimmed = raw.trim();
+  try {
+    const url = new URL(trimmed);
+    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
 
 /**
- * The pairing link in `url`, or null without `pair`. A `nas` or `rv` that isn't an allowed address is dropped, so the
- * code then goes to the built-in Worker as a typed one would.
+ * The pairing link in `url`, or null without `pair`. A `nas` or `rv` that isn't an allowed address is left out and
+ * named in `dropped`, so the pair screen refuses the link rather than sending its code to the built-in Worker.
  */
 export function parsePairLink(url: URL, o: { readonly dev: boolean }): PairLink | null {
   const code = url.searchParams.get('pair');
   if (code === null) return null;
-  const nas = allowedPairUrl(url.searchParams.get('nas'), o);
-  const rv = allowedPairUrl(url.searchParams.get('rv'), o);
-  return { code, ...(nas === null ? {} : { nas: withSlash(nas) }), ...(rv === null ? {} : { rv: workerBase(rv) }) };
+  const dropped: ('nas' | 'rv')[] = [];
+  const checked = (name: 'nas' | 'rv'): string | null => {
+    if (!url.searchParams.has(name)) return null;
+    const allowed = allowedPairUrl(url.searchParams.get(name), o);
+    if (allowed === null) dropped.push(name);
+    return allowed;
+  };
+  const nas = checked('nas');
+  const rv = checked('rv');
+  return {
+    code,
+    ...(nas === null ? {} : { nas: withSlash(nas) }),
+    ...(rv === null ? {} : { rv: workerBase(rv) }),
+    ...(dropped.length === 0 ? {} : { dropped }),
+  };
 }
 
 /**

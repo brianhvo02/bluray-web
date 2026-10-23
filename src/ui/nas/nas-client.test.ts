@@ -1072,6 +1072,53 @@ describe('NasClient pairing links', () => {
     expect(world.opened.at(-1)).toMatchObject({ nasId: NAS_ID, signallingUrl: BUILT_IN });
   });
 
+  it('a pairing made straight at a server takes no NAS id from me, so it never signals through the built-in Worker', async () => {
+    const server = fakeServer();
+    const withNasId = (async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await server.fetch(input, init);
+      if (!String(input).endsWith('/api/me')) return res;
+      return Response.json({ ...((await res.json()) as object), nasId: NAS_ID });
+    }) as typeof server.fetch;
+    const direct = memoryStore();
+    const nas = new NasClient({ fetch: withNasId, subtle: crypto.subtle, store: direct, now, rendezvousUrl: BUILT_IN });
+    await nas.pair(await server.code(), 'iPad', { nas: BASE });
+    expect(direct.value).toMatchObject({ direct: true });
+    await nas.me();
+    expect(direct.value).not.toHaveProperty('nasId');
+    // one that names a Worker (here with nas too) takes it, as a looked-up one does
+    const named = memoryStore();
+    const nas2 = new NasClient({ fetch: withNasId, subtle: crypto.subtle, store: named, now, rendezvousUrl: BUILT_IN });
+    await nas2.pair(await server.code(), 'iPad', { nas: BASE, rv: RENDEZVOUS });
+    expect(named.value).not.toHaveProperty('direct');
+    await nas2.me();
+    expect(named.value).toMatchObject({ nasId: NAS_ID, rendezvousUrl: RENDEZVOUS });
+    const looked = memoryStore();
+    const nas3 = new NasClient({ fetch: withNasId, subtle: crypto.subtle, store: looked, now, rendezvousUrl: RENDEZVOUS });
+    await nas3.pair(await server.code(), 'iPad');
+    await nas3.me();
+    expect(looked.value).toMatchObject({ nasId: NAS_ID });
+  });
+
+  it('clears a stored pairing whose Worker or direct mark is damaged', async () => {
+    const server = fakeServer();
+    for (const damage of [{ rendezvousUrl: 42 }, { direct: 'yes' }]) {
+      const store = memoryStore();
+      await client(server, store).pair(await server.code(), 'iPad');
+      store.value = { ...store.value!, ...damage } as unknown as NasPairing;
+      const nas = client(server, store);
+      expect(await nas.pairing()).toBeNull();
+      expect(store.value).toBeNull();
+    }
+  });
+
+  it('compares the built-in Worker as a URL: case, :443 and a trailing slash name the same Worker', async () => {
+    const server = fakeServer();
+    const store = memoryStore();
+    const nas = new NasClient({ fetch: server.fetch, subtle: crypto.subtle, store, now, rendezvousUrl: 'https://Rendezvous.Example:443/' });
+    await nas.pair(await server.code(), 'iPad', { rv: RENDEZVOUS });
+    expect(store.value).not.toHaveProperty('rendezvousUrl');
+  });
+
   it("a nas link to a server that doesn't answer fails with noRoute", async () => {
     const server = fakeServer();
     server.nas = async () => {

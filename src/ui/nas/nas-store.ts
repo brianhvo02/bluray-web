@@ -8,6 +8,11 @@ export interface NasPairing {
   readonly nasId?: string;
   /** The rendezvous Worker this pairing was made through, for its signalling; absent means the app's built-in Worker. */
   readonly rendezvousUrl?: string;
+  /**
+   * Paired straight at the server from a `nas=` link, with no Worker named: its signalling id from `me` is not taken,
+   * as the app's built-in Worker isn't one the person chose for it.
+   */
+  readonly direct?: true;
   readonly deviceId: string;
   readonly deviceName: string;
   /** The person this device belongs to; absent on a pairing stored before people. */

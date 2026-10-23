@@ -295,7 +295,37 @@ test('Cancel on a pairing link that names a server sends nothing to it', async (
   await page.getByTestId('pair-confirm-cancel').click();
   await expect(page.getByTestId('pair-confirm')).toBeHidden();
   await expect(page.getByTestId('pair-code')).toHaveValue('');
+  await page.waitForTimeout(1_000); // anything sent on Cancel would have gone by now
   expect(sent).toEqual([]);
+});
+
+test('Cancel on a pairing link leaves a paired device as it was', async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  await pairByLink(page);
+  await page.goto(`/?pair=ABCD-EFGH-JKMN&nas=${encodeURIComponent('https://nas.example.com/bluray/api/')}`);
+  await expect(page.getByTestId('pair-confirm-hosts')).toHaveText('nas.example.com');
+  await page.getByTestId('pair-confirm-cancel').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible();
+  await expect(page.getByTestId('pair-screen')).toBeHidden();
+});
+
+test("a link naming the app's own Worker asks nothing", async ({ page, browserName }) => {
+  await allowLocalNetwork(page, browserName);
+  const code = ownerCode();
+  await page.goto(`/?pair=${code}&rv=${encodeURIComponent(`${RENDEZVOUS_URL}/`)}`);
+  await expect(page.getByTestId('pair-code')).toHaveValue(code);
+  await expect(page.getByTestId('pair-confirm')).toBeHidden();
+  await page.getByTestId('pair-button').click();
+  await expect(page.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+});
+
+test('a link whose address fails its check is refused, and its code goes nowhere', async ({ page }) => {
+  const lookups = await refuseBuiltInLookups(page);
+  await page.goto(`/?pair=ABCD-EFGH-JKMN&nas=${encodeURIComponent('http://nas.example.com/bluray/api/')}`);
+  await expect(page.getByTestId('pair-error')).toHaveText("This pairing link names an address this app can't use (it must be https://). Ask for a new link.");
+  await expect(page.getByTestId('pair-confirm')).toBeHidden();
+  await expect(page.getByTestId('pair-button')).toBeDisabled();
+  expect(lookups).toEqual([]);
 });
 
 test('a link carrying another Worker pairs through it', async ({ page, browserName }) => {

@@ -24,20 +24,24 @@ export function PairScreen({ client, link, onPaired, onLinkDropped, dev = isLoop
   const [deviceName, setDeviceName] = useState(() => defaultDeviceName(navigator.userAgent, navigator.maxTouchPoints));
   const [busy, setBusy] = useState(false);
   /** What the link named (cleared by Cancel), and whether the person still has to confirm its hosts. */
-  const [via, setVia] = useState(() => ({
-    ...(link?.nas === undefined ? {} : { nas: link.nas }),
-    ...(link?.rv === undefined ? {} : { rv: link.rv }),
-  }));
-  const [hosts] = useState(() => (link ? foreignHosts(link, client.builtInRendezvousUrl) : []));
+  const [via, setVia] = useState<{ readonly nas?: string; readonly rv?: string }>(() =>
+    (link?.dropped?.length ?? 0) > 0
+      ? {}
+      : { ...(link?.nas === undefined ? {} : { nas: link.nas }), ...(link?.rv === undefined ? {} : { rv: link.rv }) },
+  );
+  /** A link with an address that failed its check: its code goes nowhere until the person changes it. */
+  const [refused, setRefused] = useState(() => (link?.dropped?.length ?? 0) > 0);
+  const [hosts] = useState(() => (link && !refused ? foreignHosts(link, client.builtInRendezvousUrl) : []));
   const [confirming, setConfirming] = useState(hosts.length > 0);
   const [otherOpen, setOtherOpen] = useState(false);
   const [otherRv, setOtherRv] = useState('');
   const [error, setError] = useState<string | null>(() =>
-    link && link.nas === undefined && link.rv === undefined && !client.canPairByCode ? NAS_MESSAGES.noRendezvous : null,
+    refused ? NAS_MESSAGES.badLink : link && link.nas === undefined && link.rv === undefined && !client.canPairByCode ? NAS_MESSAGES.noRendezvous : null,
   );
 
   const onSubmit = (e: FormEvent<HTMLFormElement>): void => {
     e.preventDefault();
+    if (refused) return;
     setError(null);
     let target = via;
     if (via.nas === undefined && via.rv === undefined && otherOpen && otherRv.trim() !== '') {
@@ -95,7 +99,13 @@ export function PairScreen({ client, link, onPaired, onLinkDropped, dev = isLoop
           <input
             data-testid="pair-code"
             value={code}
-            onChange={(e) => setCode(groupCodeInput(e.target.value))}
+            onChange={(e) => {
+              setCode(groupCodeInput(e.target.value));
+              if (refused) {
+                setRefused(false);
+                setError(null);
+              }
+            }}
             placeholder="XXXX-XXXX-XXXX"
             inputMode="text"
             autoCapitalize="characters"
@@ -109,7 +119,7 @@ export function PairScreen({ client, link, onPaired, onLinkDropped, dev = isLoop
           Device name{' '}
           <input data-testid="pair-device-name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} maxLength={100} disabled={busy} />
         </label>{' '}
-        <button type="submit" data-testid="pair-button" disabled={busy || normalizeCode(code) === null || deviceName.trim() === ''}>
+        <button type="submit" data-testid="pair-button" disabled={busy || refused || normalizeCode(code) === null || deviceName.trim() === ''}>
           Pair
         </button>
       </form>
