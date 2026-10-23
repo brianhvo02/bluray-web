@@ -294,11 +294,12 @@ export function alignWhole(input: AlignInput, perWindow: readonly WindowOffset[]
     const endMs = reliable[i + 2]?.startMs ?? w.startMs + w.mask.length * FRAME_MS;
     pairs.push({ lo: a.startMs - Math.max(a.offsetMs, b.offsetMs), hi: endMs - Math.min(a.offsetMs, b.offsetMs), gap: Math.abs(a.offsetMs - b.offsetMs) });
   }
-  // Windows that disagree with no cut to place between them (a gradual drift, or too little dialogue to split): one offset
-  // would leave its ends off, so there is no answer.
+  // Windows that disagree mean one offset is wrong somewhere: unless a split is taken (no cut to place, as in a gradual
+  // drift; too little dialogue to split; no split that fits clearly better), there is no answer.
   const mid = reliable.length ? median(reliable.map((p) => p.offsetMs)) : 0;
   const disagree = reliable.some((p) => Math.abs(p.offsetMs - mid) > AGREE_MS);
-  if (!pairs.length || n < 2 * MIN_INTERVALS) return disagree ? LOW : singleVerdict();
+  const noSplit = (): FansubAlignment => (disagree ? LOW : singleVerdict());
+  if (!pairs.length || n < 2 * MIN_INTERVALS) return noSplit();
   const ranges = pairs.sort((a, b) => b.gap - a.gap).slice(0, MAX_SPLITS).sort((a, b) => a.lo - b.lo);
 
   // A split point at track time s puts the intervals starting before s in the earlier part: points are interval indices.
@@ -398,12 +399,12 @@ export function alignWhole(input: AlignInput, perWindow: readonly WindowOffset[]
     }
     if (valid && total > 0) candidates.push({ score: (2 * matched) / (total + speech), parts });
   }
-  if (!candidates.length) return singleVerdict();
+  if (!candidates.length) return noSplit();
   const top = Math.max(...candidates.map((c) => c.score));
   const pick = candidates
     .filter((c) => c.score >= top - SPLIT_TIE)
     .sort((a, b) => a.parts.length - b.parts.length || b.score - a.score)[0]!;
-  if (pick.score < single.score + SPLIT_GAIN) return singleVerdict();
+  if (pick.score < single.score + SPLIT_GAIN) return noSplit();
   // The split fits clearly better than one offset: the single offset is wrong, so an unsure split is no answer at all.
   if (pick.parts.some((p) => decide(p.score, p.margin) !== 'confident')) return LOW;
   return { kind: 'split', parts: pick.parts.map(({ fromMs, offsetMs }) => ({ fromMs, offsetMs })), confidence: round2(pick.score) };

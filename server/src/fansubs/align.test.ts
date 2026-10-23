@@ -86,6 +86,38 @@ describe('alignWindows', () => {
   });
 });
 
+describe('alignWhole', () => {
+  it('refuses when windows disagree and the split gains less than 0.08', () => {
+    // 100 bursts; lines start 300 ms early and run 30 % past, and from the 50th on they are 700 ms later. The lines'
+    // slack lets one offset fit both halves nearly as well as a split at the 50th line (which is taken by the search but
+    // gains about 0.003), while three windows disagree by 700 ms.
+    let seed = 11;
+    const rnd = (): number => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
+    const bursts: { fromMs: number; toMs: number }[] = [];
+    let at = 1000;
+    while (bursts.length < 100) {
+      const len = 1000 + Math.round(rnd() * 150) * 10;
+      bursts.push({ fromMs: at, toMs: at + len });
+      at += len + 1200 + Math.round(rnd() * 300) * 10;
+    }
+    const whole = noiseWindow(0, Math.ceil(at / 1000) + 1, bursts);
+    const dialogue = bursts.map((b, i) => {
+      const late = i >= 50 ? 700 : 0;
+      return { fromMs: b.fromMs - 300 + late, toMs: b.toMs + Math.round((0.3 * (b.toMs - b.fromMs)) / 10) * 10 + late };
+    });
+    const middle = bursts[50]!.fromMs;
+    const perWindow = [
+      { startMs: middle - 60_000, offsetMs: 0, score: 0.9 },
+      { startMs: middle + 1_000, offsetMs: -700, score: 0.9 },
+      { startMs: middle + 61_000, offsetMs: -700, score: 0.9 },
+    ];
+    expect(alignWhole({ windows: [whole], dialogue }, perWindow)).toEqual({ kind: 'none', reason: 'low-confidence' });
+    // The same track with windows that agree is one confident offset.
+    const agreeing = perWindow.map((w) => ({ ...w, offsetMs: -300 }));
+    expect(alignWhole({ windows: [whole], dialogue }, agreeing).kind).toBe('offset');
+  });
+});
+
 describe('decide', () => {
   it('is confident only with a high score and a clear margin', () => {
     expect(decide(0.8, 0.3)).toBe('confident');
@@ -176,6 +208,13 @@ describe.skipIf(!runFfmpegTests)('align', () => {
     const drift = script(SPEECH_BURSTS, (fromMs) => Math.round(fromMs / 1500) * 10);
     const windows = [0, 30_000, 60_000, 90_000, 120_000].map((fromMs) => ({ fromMs, toMs: fromMs + 30_000 }));
     expect(await align(disc, '00000', DURATION_MS, drift, 'ffmpeg', undefined, { windows })).toEqual({ kind: 'none', reason: 'low-confidence' });
+  });
+
+  it('refuses when windows disagree and no split is taken', async () => {
+    const windows = [0, 30_000, 60_000, 90_000, 120_000].map((fromMs) => ({ fromMs, toMs: fromMs + 30_000 }));
+    // The last four lines are 1 s late: the last window disagrees, but too few lines follow the cut to split on.
+    const tail = script(SPEECH_BURSTS, (fromMs) => (fromMs >= 123_000 ? 1000 : 0));
+    expect(await align(disc, '00000', DURATION_MS, tail, 'ffmpeg', undefined, { windows })).toEqual({ kind: 'none', reason: 'low-confidence' });
   });
 
   it('refuses signs only', async () => {
