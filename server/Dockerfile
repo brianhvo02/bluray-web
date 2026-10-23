@@ -27,6 +27,8 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 COPY dist/server.mjs ./server.mjs
+# 7-Zip's WASM build (LGPL + unRAR restriction, see NOTICE), read by the fansub archive code from next to the bundle.
+COPY dist/7zz.wasm ./7zz.wasm
 # TheDiscDB index (MIT, see NOTICE), read from env DISCDB_INDEX, default /app/data/discdb-index.json.
 COPY data/discdb-index.json ./data/discdb-index.json
 # The notices for what the image ships, TheDiscDB's MIT data and jellyfin-ffmpeg among them.

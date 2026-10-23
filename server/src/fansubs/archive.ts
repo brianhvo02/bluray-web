@@ -1,0 +1,154 @@
+/** Anime Tosho's xz tracks and 7z font packs, unpacked with 7-Zip's WASM build (no native code). Original code. */
+import { readFile } from 'node:fs/promises';
+import SevenZip from '7z-wasm';
+import type { SevenZipModule } from '7z-wasm';
+
+export class TooLargeArchive extends Error {
+  constructor(what: string) {
+    super(`archive too large: ${what}`);
+    this.name = 'TooLargeArchive';
+  }
+}
+
+const FONT_NAME = /\.(ttf|otf|ttc|woff2?)$/i;
+const MAX_FONT_ENTRIES = 200;
+const MAX_FONT_BYTES = 200 * 1024 * 1024;
+
+/** The WASM sits next to the bundle (`dist/7zz.wasm`); unbundled (tests, tsx) it is in node_modules. */
+async function loadWasm(): Promise<Buffer> {
+  for (const url of [new URL('./7zz.wasm', import.meta.url), new URL('../../../node_modules/7z-wasm/7zz.wasm', import.meta.url)]) {
+    try {
+      return await readFile(url);
+    } catch {
+      // try the next place
+    }
+  }
+  throw new Error('7zz.wasm not found');
+}
+
+interface Instance {
+  readonly sz: SevenZipModule;
+  /** What 7-Zip printed since the last `run` (Latin-1 decoded; entry names are not needed in full). `sink` takes stdout's bytes instead. */
+  text: string;
+  sink: ((byte: number | null) => void) | null;
+}
+
+let instance: Promise<Instance> | null = null;
+let chain: Promise<unknown> = Promise.resolve();
+
+function getInstance(): Promise<Instance> {
+  instance ??= (async () => {
+    const wasm = await loadWasm();
+    const inst: Instance = { sz: undefined as unknown as SevenZipModule, text: '', sink: null };
+    const sz = await SevenZip({
+      wasmBinary: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength) as ArrayBuffer,
+      printErr: (s: string) => { inst.text += `${s}\n`; },
+      // Giving `stdout` a callback routes everything 7-Zip prints through it, as raw bytes.
+      stdout: (c: number | null) => {
+        if (inst.sink) inst.sink(c);
+        else if (c !== null) inst.text += String.fromCharCode(c & 0xff);
+      },
+    });
+    (inst as { sz: SevenZipModule }).sz = sz;
+    return inst;
+  })();
+  instance.catch(() => { instance = null; });
+  return instance;
+}
+
+/** One module instance, one call at a time: its file system is shared. */
+function serialized<T>(job: (inst: Instance) => Promise<T> | T): Promise<T> {
+  const next = chain.then(async () => job(await getInstance()));
+  chain = next.catch(() => undefined);
+  return next;
+}
+
+function run(inst: Instance, args: string[]): void {
+  inst.text = '';
+  let code: unknown;
+  try {
+    code = inst.sz.callMain(args);
+  } catch (e) {
+    const status = (e as { status?: number }).status;
+    if (status === 0) return;
+    throw new Error(`7-Zip failed: ${inst.text.trim().split('\n').slice(-3).join(' ') || String(e)}`);
+  }
+  if (typeof code === 'number' && code !== 0) {
+    throw new Error(`7-Zip failed (${code}): ${inst.text.trim().split('\n').slice(-3).join(' ')}`);
+  }
+}
+
+function removeTree(fs: SevenZipModule['FS'], path: string): void {
+  let entries: string[];
+  try {
+    entries = fs.readdir(path).filter((n) => n !== '.' && n !== '..');
+  } catch {
+    try { fs.unlink(path); } catch { /* already gone */ }
+    return;
+  }
+  for (const n of entries) removeTree(fs, `${path}/${n}`);
+  try { fs.rmdir(path); } catch { /* not a directory or gone */ }
+}
+
+/** Decompresses an .xz stream. Bytes past `maxBytes` are dropped as they arrive and the call throws TooLargeArchive. */
+export function unxz(data: Buffer, maxBytes: number): Promise<Buffer> {
+  return serialized((inst) => {
+    const { FS } = inst.sz;
+    const chunks: number[] = [];
+    let over = false;
+    inst.sink = (c) => {
+      if (c === null) return;
+      if (chunks.length >= maxBytes) over = true;
+      else chunks.push(c & 0xff);
+    };
+    try {
+      FS.writeFile('in.xz', data);
+      run(inst, ['e', '-so', '-bd', '-y', 'in.xz']);
+    } finally {
+      inst.sink = null;
+      removeTree(FS, 'in.xz');
+    }
+    if (over) throw new TooLargeArchive(`more than ${maxBytes} bytes`);
+    return Buffer.from(chunks);
+  });
+}
+
+/** The font files in a 7z pack (base names only), at most 200 entries and 200 MB. */
+export function fontsIn7z(data: Buffer): Promise<{ name: string; data: Buffer }[]> {
+  return serialized((inst) => {
+    const { FS } = inst.sz;
+    try {
+      FS.writeFile('in.7z', data);
+      // List first, so a bomb is refused before anything is written to the in-memory file system.
+      run(inst, ['l', '-slt', '-ba', 'in.7z']);
+      let count = 0;
+      let total = 0;
+      // The progress line is overwritten with backspaces and shares a line with the first entry.
+      const listing = inst.text.replace(/^.*\x08/gm, '');
+      for (const block of listing.split(/\n\n+/)) {
+        const path = /^Path = (.*)$/m.exec(block)?.[1];
+        if (path === undefined || /^Folder = \+/m.test(block) || !FONT_NAME.test(path)) continue;
+        count++;
+        total += Number(/^Size = (\d+)$/m.exec(block)?.[1] ?? 0);
+        if (count > MAX_FONT_ENTRIES) throw new TooLargeArchive(`more than ${MAX_FONT_ENTRIES} fonts`);
+        if (total > MAX_FONT_BYTES) throw new TooLargeArchive(`fonts over ${MAX_FONT_BYTES} bytes`);
+      }
+      if (count === 0) return [];
+      run(inst, ['x', '-bd', '-y', '-oout', 'in.7z', '-r', '*.ttf', '*.otf', '*.ttc', '*.woff', '*.woff2']);
+      const fonts: { name: string; data: Buffer }[] = [];
+      const walk = (dir: string): void => {
+        for (const n of FS.readdir(dir)) {
+          if (n === '.' || n === '..') continue;
+          const p = `${dir}/${n}`;
+          if (FS.isDir(FS.stat(p).mode)) walk(p);
+          else if (FONT_NAME.test(n)) fonts.push({ name: n, data: Buffer.from(FS.readFile(p)) });
+        }
+      };
+      walk('out');
+      return fonts;
+    } finally {
+      removeTree(FS, 'in.7z');
+      removeTree(FS, 'out');
+    }
+  });
+}

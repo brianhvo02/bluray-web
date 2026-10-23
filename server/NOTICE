@@ -266,3 +266,31 @@ under the Apache License, Version 2.0:
   9. Accepting Warranty or Additional Liability. While redistributing the Work or Derivative Works thereof, You may choose to offer, and charge a fee for, acceptance of support, warranty, indemnity, or other liability obligations and/or rights consistent with this License. However, in accepting such obligations, You may act only on Your own behalf and on Your sole responsibility, not on behalf of any other Contributor, and only if You agree to indemnify, defend, and hold each Contributor harmless for any liability incurred by, or claims asserted against, such Contributor by reason of your accepting any such warranty or additional liability.
 
   END OF TERMS AND CONDITIONS
+
+7-Zip WASM (server/src/fansubs/archive.ts, server/dist/7zz.wasm)
+----------------------------------------------------------------
+
+The server unpacks Anime Tosho's .xz subtitle tracks and 7z font packs with
+7-Zip compiled to WebAssembly (the npm package 7z-wasm 1.2.0,
+https://github.com/use-strict/7z-wasm, based on 7-Zip 24.09). The bundle
+copies 7zz.wasm next to server.mjs and the image ships it. From the package's
+License.txt:
+
+  7-Zip Copyright (C) 1999-2015 Igor Pavlov.
+
+  Licenses for files are:
+
+    1) 7zz.*.js, 7zz.wasm: GNU LGPL + unRAR restriction
+    2) All other files:  GNU LGPL
+
+  The GNU LGPL + unRAR restriction means that you must follow both
+  GNU LGPL rules and unRAR restriction rules.
+
+  The GNU LGPL is the GNU Lesser General Public License, version 2.1 or (at
+  your option) any later version. The unRAR restriction: the decompression
+  engine for RAR archives was developed using source code of the unRAR
+  program, whose copyright is Alexander Roshal's. The unRAR sources cannot be
+  used to re-create the RAR compression algorithm, which is proprietary, and
+  this code may not be used to develop a RAR (WinRAR) compatible archiver.
+
+The server only reads xz and 7z archives and never creates RAR archives.
