@@ -74,3 +74,8 @@ export function withSharperPoster(entry: Entry): Entry {
   const poster = sharperPoster(entry.poster);
   return poster === entry.poster ? entry : { ...entry, poster };
 }
+
+/** The User-Agent of MusicBrainz and Discogs requests; both ask to be able to reach whoever runs the client. */
+export function lookupUserAgent(contact: string | null): string {
+  return `bluray-web/1.0 (https://github.com/brianhvo02/bluray-web${contact === null ? '' : `; ${contact}`})`;
+}

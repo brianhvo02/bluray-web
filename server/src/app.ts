@@ -29,6 +29,9 @@ export interface AppOptions {
   /** Owner-uploaded subtitles; without it, their routes answer 404. */
   subtitleStore?: SubtitleStore;
   publicBase: string;
+  /** See `AdminOptions`. */
+  appUrl?: string;
+  rendezvousUrl?: string;
   registrar?: CodeRegistrar;
   registrarDeadlineMs?: number;
   now?: () => number;
@@ -66,7 +69,7 @@ export function appHandlers(opts: AppOptions): Handler[] {
     ...(opts.playbackStore ? [playbackRoutes(auth, opts.playbackStore, { titles: opts.titles, library: opts.library })] : []),
     ...(opts.subtitleStore ? [subtitleRoutes(auth, opts.subtitleStore, { titles: opts.titles, library: opts.library })] : []),
     adminRoutes(auth, {
-      library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
+      library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, appUrl: opts.appUrl, rendezvousUrl: opts.rendezvousUrl, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
       titles: opts.titles, relay: opts.relay, levels: opts.levels, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
     }),
     libraryRoute(opts.library),

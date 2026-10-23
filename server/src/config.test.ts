@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config';
 
+const BASE = 'https://nas.example.com/bluray/api/';
+/** The one setting with no default. */
+const REQUIRED = { PUBLIC_BASE: BASE };
+
 describe('loadConfig', () => {
   it('reads roots, data dir and port', () => {
-    expect(loadConfig({ LIBRARY_ROOTS: 'drv0=/library/drv0, drv2=/library/drv2', DATA_DIR: '/d', PORT: '4192' })).toEqual({
+    expect(loadConfig({ LIBRARY_ROOTS: 'drv0=/library/drv0, drv2=/library/drv2', DATA_DIR: '/d', PORT: '4192', PUBLIC_BASE: BASE })).toEqual({
       roots: [
         { name: 'drv0', dir: '/library/drv0' },
         { name: 'drv2', dir: '/library/drv2' },
@@ -12,7 +16,9 @@ describe('loadConfig', () => {
       port: 4192,
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
-      publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
+      publicBase: BASE,
+      appUrl: 'https://bluray-web.pages.dev/',
+      lookupContact: null,
       trustedProxy: 'caddy',
       tmdbApiKey: null,
       discogsToken: null,
@@ -23,13 +29,15 @@ describe('loadConfig', () => {
   });
 
   it('defaults to no roots, /data and port 8080 when unset', () => {
-    expect(loadConfig({})).toEqual({
+    expect(loadConfig({ PUBLIC_BASE: BASE })).toEqual({
       roots: [],
       dataDir: '/data',
       port: 8080,
       nightlyScanAt: { hour: 4, minute: 0 },
       scanPauseMs: 10,
-      publicBase: 'https://mediaserver.tailnet-8e55.ts.net/bluray/api/',
+      publicBase: BASE,
+      appUrl: 'https://bluray-web.pages.dev/',
+      lookupContact: null,
       trustedProxy: 'caddy',
       tmdbApiKey: null,
       discogsToken: null,
@@ -40,105 +48,125 @@ describe('loadConfig', () => {
   });
 
   it.each(['drv0', '=/library/drv0', 'drv0=', 'drv0=/a,=/b'])('rejects the malformed LIBRARY_ROOTS %j', (value) => {
-    expect(() => loadConfig({ LIBRARY_ROOTS: value })).toThrow(/LIBRARY_ROOTS entry ".*" is not name=dir/);
+    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: value })).toThrow(/LIBRARY_ROOTS entry ".*" is not name=dir/);
   });
 
   it('rejects duplicate root names', () => {
-    expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv0=/b' })).toThrow('LIBRARY_ROOTS names "drv0" twice');
+    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'drv0=/a,drv0=/b' })).toThrow('LIBRARY_ROOTS names "drv0" twice');
   });
 
   it('reads TMDB_API_KEY and TITLE_LIBRARY', () => {
-    expect(loadConfig({ TMDB_API_KEY: 'k123', TITLE_LIBRARY: 'everyone' })).toMatchObject({ tmdbApiKey: 'k123', titleLibrary: 'everyone' });
-    expect(loadConfig({ TMDB_API_KEY: '', TITLE_LIBRARY: 'owners' })).toMatchObject({ tmdbApiKey: null, titleLibrary: 'owners' });
-    expect(() => loadConfig({ TITLE_LIBRARY: 'all' })).toThrow('TITLE_LIBRARY "all" is not owners or everyone');
+    expect(loadConfig({ ...REQUIRED, TMDB_API_KEY: 'k123', TITLE_LIBRARY: 'everyone' })).toMatchObject({ tmdbApiKey: 'k123', titleLibrary: 'everyone' });
+    expect(loadConfig({ ...REQUIRED, TMDB_API_KEY: '', TITLE_LIBRARY: 'owners' })).toMatchObject({ tmdbApiKey: null, titleLibrary: 'owners' });
+    expect(() => loadConfig({ ...REQUIRED, TITLE_LIBRARY: 'all' })).toThrow('TITLE_LIBRARY "all" is not owners or everyone');
   });
 
   it('reads DISCOGS_TOKEN, null when empty', () => {
-    expect(loadConfig({ DISCOGS_TOKEN: ' d-tok ' }).discogsToken).toBe('d-tok');
-    expect(loadConfig({ DISCOGS_TOKEN: '' }).discogsToken).toBeNull();
+    expect(loadConfig({ ...REQUIRED, DISCOGS_TOKEN: ' d-tok ' }).discogsToken).toBe('d-tok');
+    expect(loadConfig({ ...REQUIRED, DISCOGS_TOKEN: '' }).discogsToken).toBeNull();
   });
 
   it('reads NIGHTLY_SCAN_AT and SCAN_PAUSE_MS', () => {
-    const c = loadConfig({ NIGHTLY_SCAN_AT: '3:30', SCAN_PAUSE_MS: '0' });
+    const c = loadConfig({ ...REQUIRED, NIGHTLY_SCAN_AT: '3:30', SCAN_PAUSE_MS: '0' });
     expect(c.nightlyScanAt).toEqual({ hour: 3, minute: 30 });
     expect(c.scanPauseMs).toBe(0);
   });
 
   it.each(['', '24:00', '4', '04:60', 'ab:cd'])('rejects NIGHTLY_SCAN_AT=%j', (value) => {
-    expect(() => loadConfig({ NIGHTLY_SCAN_AT: value })).toThrow(`NIGHTLY_SCAN_AT "${value}" is not HH:MM`);
+    expect(() => loadConfig({ ...REQUIRED, NIGHTLY_SCAN_AT: value })).toThrow(`NIGHTLY_SCAN_AT "${value}" is not HH:MM`);
   });
 
   it.each(['', '-1', '1.5', 'x'])('rejects SCAN_PAUSE_MS=%j', (value) => {
-    expect(() => loadConfig({ SCAN_PAUSE_MS: value })).toThrow('is not a number of milliseconds');
+    expect(() => loadConfig({ ...REQUIRED, SCAN_PAUSE_MS: value })).toThrow('is not a number of milliseconds');
   });
 
   it.each(['', 'abc', '80x', '-1', '1.5', '65536'])('rejects PORT=%j', (value) => {
-    expect(() => loadConfig({ PORT: value })).toThrow(`PORT "${value}" is not a port number`);
+    expect(() => loadConfig({ ...REQUIRED, PORT: value })).toThrow(`PORT "${value}" is not a port number`);
   });
 
   it('reads PUBLIC_BASE', () => {
     expect(loadConfig({ PUBLIC_BASE: 'http://localhost:4192/api/' }).publicBase).toBe('http://localhost:4192/api/');
   });
 
-  it.each(['', 'nas/api', 'ftp://nas/api/'])('rejects PUBLIC_BASE=%j', (value) => {
+  it.each(['nas/api', 'ftp://nas/api/'])('rejects PUBLIC_BASE=%j', (value) => {
     expect(() => loadConfig({ PUBLIC_BASE: value })).toThrow(`PUBLIC_BASE "${value}" is not an http(s) URL`);
   });
 
   it('reads TRUSTED_PROXY', () => {
-    expect(loadConfig({ TRUSTED_PROXY: '172.18.0.2' }).trustedProxy).toBe('172.18.0.2');
+    expect(loadConfig({ ...REQUIRED, TRUSTED_PROXY: '172.18.0.2' }).trustedProxy).toBe('172.18.0.2');
   });
 
   it.each(['', 'a b', 'caddy,evil'])('rejects TRUSTED_PROXY=%j', (value) => {
-    expect(() => loadConfig({ TRUSTED_PROXY: value })).toThrow(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
+    expect(() => loadConfig({ ...REQUIRED, TRUSTED_PROXY: value })).toThrow(`TRUSTED_PROXY "${value}" is not an IP or hostname`);
   });
 
   it('reads RENDEZVOUS_URL, treating unset or empty as no rendezvous', () => {
-    expect(loadConfig({ RENDEZVOUS_URL: 'https://bluray-rendezvous.example.workers.dev' }).rendezvousUrl).toBe(
+    expect(loadConfig({ ...REQUIRED, RENDEZVOUS_URL: 'https://bluray-rendezvous.example.workers.dev' }).rendezvousUrl).toBe(
       'https://bluray-rendezvous.example.workers.dev',
     );
-    expect(loadConfig({}).rendezvousUrl).toBeUndefined();
-    expect(loadConfig({ RENDEZVOUS_URL: '' }).rendezvousUrl).toBeUndefined();
+    expect(loadConfig(REQUIRED).rendezvousUrl).toBeUndefined();
+    expect(loadConfig({ ...REQUIRED, RENDEZVOUS_URL: '' }).rendezvousUrl).toBeUndefined();
   });
 
   it.each(['rendezvous', 'ftp://r.example/'])('rejects RENDEZVOUS_URL=%j', (value) => {
-    expect(() => loadConfig({ RENDEZVOUS_URL: value })).toThrow(`RENDEZVOUS_URL "${value}" is not an http(s) URL`);
+    expect(() => loadConfig({ ...REQUIRED, RENDEZVOUS_URL: value })).toThrow(`RENDEZVOUS_URL "${value}" is not an http(s) URL`);
   });
 
   it('parses a root group written name=dir@group', () => {
-    const { roots } = loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv0-dl=/b@Downloads' });
+    const { roots } = loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'drv0=/a,drv0-dl=/b@Downloads' });
     expect(roots).toEqual([{ name: 'drv0', dir: '/a' }, { name: 'drv0-dl', dir: '/b', group: 'Downloads' }]);
   });
 
   it('rejects a group named like a root', () => {
-    expect(() => loadConfig({ LIBRARY_ROOTS: 'drv0=/a,drv1=/b@drv0' })).toThrow('group "drv0" is also a root name');
+    expect(() => loadConfig({ ...REQUIRED, LIBRARY_ROOTS: 'drv0=/a,drv1=/b@drv0' })).toThrow('group "drv0" is also a root name');
   });
 
   it('reads RTC_PORT, RTC_LAN_ADDRESS and RTC_ADVERTISE', () => {
-    expect(loadConfig({}).rtc).toEqual({ port: 47998 });
-    expect(loadConfig({ RTC_PORT: '47990', RTC_LAN_ADDRESS: '192.168.1.98', RTC_ADVERTISE: '127.0.0.1, 192.0.2.4' }).rtc).toEqual({
+    expect(loadConfig(REQUIRED).rtc).toEqual({ port: 47998 });
+    expect(loadConfig({ ...REQUIRED, RTC_PORT: '47990', RTC_LAN_ADDRESS: '192.168.1.98', RTC_ADVERTISE: '127.0.0.1, 192.0.2.4' }).rtc).toEqual({
       port: 47990,
       lanAddress: '192.168.1.98',
       advertise: ['127.0.0.1', '192.0.2.4'],
     });
-    expect(() => loadConfig({ RTC_PORT: '0' })).toThrow('RTC_PORT');
-    expect(() => loadConfig({ RTC_PORT: '65535' })).toThrow('RTC_PORT');
-    expect(() => loadConfig({ RTC_LAN_ADDRESS: '172.18.0.2' })).toThrow('RTC_LAN_ADDRESS');
-    expect(() => loadConfig({ RTC_ADVERTISE: '100.100.1.1' })).toThrow('RTC_ADVERTISE');
-    expect(() => loadConfig({ RTC_LAN_ADDRESS: 'nas.local' })).toThrow('RTC_LAN_ADDRESS');
-    expect(() => loadConfig({ RTC_LAN_ADDRESS: '127.0.0.1' })).toThrow('RTC_LAN_ADDRESS');
-    expect(loadConfig({ RTC_LAN_ADDRESS: '10.0.0.8' }).rtc.lanAddress).toBe('10.0.0.8');
+    expect(() => loadConfig({ ...REQUIRED, RTC_PORT: '0' })).toThrow('RTC_PORT');
+    expect(() => loadConfig({ ...REQUIRED, RTC_PORT: '65535' })).toThrow('RTC_PORT');
+    expect(() => loadConfig({ ...REQUIRED, RTC_LAN_ADDRESS: '172.18.0.2' })).toThrow('RTC_LAN_ADDRESS');
+    expect(() => loadConfig({ ...REQUIRED, RTC_ADVERTISE: '100.100.1.1' })).toThrow('RTC_ADVERTISE');
+    expect(() => loadConfig({ ...REQUIRED, RTC_LAN_ADDRESS: 'nas.local' })).toThrow('RTC_LAN_ADDRESS');
+    expect(() => loadConfig({ ...REQUIRED, RTC_LAN_ADDRESS: '127.0.0.1' })).toThrow('RTC_LAN_ADDRESS');
+    expect(loadConfig({ ...REQUIRED, RTC_LAN_ADDRESS: '10.0.0.8' }).rtc.lanAddress).toBe('10.0.0.8');
   });
 
   it('reads the quality levels’ encoder settings', () => {
-    expect(loadConfig({ LEVELS_BACKEND: 'x264', TRANSCODE_CACHE_BYTES: '1000000', FFMPEG_PATH: '/usr/lib/jellyfin-ffmpeg/ffmpeg', FFPROBE_PATH: '/usr/lib/jellyfin-ffmpeg/ffprobe' }).levels).toEqual({
+    expect(loadConfig({ ...REQUIRED, LEVELS_BACKEND: 'x264', TRANSCODE_CACHE_BYTES: '1000000', FFMPEG_PATH: '/usr/lib/jellyfin-ffmpeg/ffmpeg', FFPROBE_PATH: '/usr/lib/jellyfin-ffmpeg/ffprobe' }).levels).toEqual({
       backend: 'x264',
       cacheBytes: 1_000_000,
       ffmpegPath: '/usr/lib/jellyfin-ffmpeg/ffmpeg',
       ffprobePath: '/usr/lib/jellyfin-ffmpeg/ffprobe',
     });
-    expect(loadConfig({ LEVELS_BACKEND: 'off' }).levels.backend).toBe('off');
-    expect(loadConfig({ LEVELS_BACKEND: '' }).levels.backend).toBe('qsv');
-    expect(() => loadConfig({ LEVELS_BACKEND: 'nvenc' })).toThrow('LEVELS_BACKEND "nvenc" is not qsv, x264 or off');
-    expect(() => loadConfig({ TRANSCODE_CACHE_BYTES: '50GB' })).toThrow('TRANSCODE_CACHE_BYTES');
+    expect(loadConfig({ ...REQUIRED, LEVELS_BACKEND: 'off' }).levels.backend).toBe('off');
+    expect(loadConfig({ ...REQUIRED, LEVELS_BACKEND: '' }).levels.backend).toBe('qsv');
+    expect(() => loadConfig({ ...REQUIRED, LEVELS_BACKEND: 'nvenc' })).toThrow('LEVELS_BACKEND "nvenc" is not qsv, x264 or off');
+    expect(() => loadConfig({ ...REQUIRED, TRANSCODE_CACHE_BYTES: '50GB' })).toThrow('TRANSCODE_CACHE_BYTES');
+  });
+
+  it('requires PUBLIC_BASE', () => {
+    const message = "PUBLIC_BASE is not set: the server's HTTPS API base as devices reach it, e.g. https://nas.example.com/bluray/api/";
+    expect(() => loadConfig({})).toThrow(message);
+    expect(() => loadConfig({ PUBLIC_BASE: '' })).toThrow(message);
+  });
+
+  it('defaults APP_URL to the hosted app and keeps a trailing slash', () => {
+    expect(loadConfig(REQUIRED).appUrl).toBe('https://bluray-web.pages.dev/');
+    expect(loadConfig({ ...REQUIRED, APP_URL: '' }).appUrl).toBe('https://bluray-web.pages.dev/');
+    expect(loadConfig({ ...REQUIRED, APP_URL: 'https://player.example.org' }).appUrl).toBe('https://player.example.org/');
+    expect(loadConfig({ ...REQUIRED, APP_URL: 'https://player.example.org/app/' }).appUrl).toBe('https://player.example.org/app/');
+    expect(() => loadConfig({ ...REQUIRED, APP_URL: 'nope' })).toThrow('APP_URL "nope" is not an http(s) URL');
+  });
+
+  it('reads LOOKUP_CONTACT, null when unset or empty', () => {
+    expect(loadConfig(REQUIRED).lookupContact).toBeNull();
+    expect(loadConfig({ ...REQUIRED, LOOKUP_CONTACT: ' ' }).lookupContact).toBeNull();
+    expect(loadConfig({ ...REQUIRED, LOOKUP_CONTACT: ' me@example.com ' }).lookupContact).toBe('me@example.com');
   });
 });

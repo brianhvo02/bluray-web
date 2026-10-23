@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createMusicBrainz } from './musicbrainz';
 import { Pacer } from './pacer';
-import { SourceUnavailable } from './sources';
+import { SourceUnavailable, lookupUserAgent } from './sources';
 
 const fixture = (name: string): { releases?: { id: string; 'label-info': { 'catalog-number': string }[]; [k: string]: unknown }[]; [k: string]: unknown } =>
   JSON.parse(readFileSync(join(import.meta.dirname, '__fixtures__', name), 'utf8'));
@@ -115,5 +115,21 @@ describe('createMusicBrainz', () => {
   it('a 404 whose body fails to cancel is still a miss', async () => {
     const fetch = (async () => new Response(new ReadableStream({ cancel: () => { throw new Error('stream gone'); } }), { status: 404 })) as typeof globalThis.fetch;
     await expect(createMusicBrainz(fetch, new Pacer(100, 10)).byCatalogue('ZQCL-2468')).resolves.toBeNull();
+  });
+
+  it('sends the user agent with the contact when one is set', async () => {
+    const { fetch, calls } = fakeFetch(fixture('musicbrainz-search.json'));
+    await createMusicBrainz(fetch, pacer(), 'me@example.com').byCatalogue('ZQCL-2468');
+    expect((calls[0]!.init!.headers as Record<string, string>)['User-Agent']).toBe('bluray-web/1.0 (https://github.com/brianhvo02/bluray-web; me@example.com)');
+    const bare = fakeFetch(fixture('musicbrainz-search.json'));
+    await createMusicBrainz(bare.fetch, pacer(), null).byCatalogue('ZQCL-2468');
+    expect((bare.calls[0]!.init!.headers as Record<string, string>)['User-Agent']).toBe('bluray-web/1.0 (https://github.com/brianhvo02/bluray-web)');
+  });
+});
+
+describe('lookupUserAgent', () => {
+  it('adds the contact inside the parentheses', () => {
+    expect(lookupUserAgent(null)).toBe('bluray-web/1.0 (https://github.com/brianhvo02/bluray-web)');
+    expect(lookupUserAgent('me@example.com')).toBe('bluray-web/1.0 (https://github.com/brianhvo02/bluray-web; me@example.com)');
   });
 });

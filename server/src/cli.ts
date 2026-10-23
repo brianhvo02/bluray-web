@@ -24,7 +24,7 @@ export async function ownerCode(
   dataDir: string,
   now: () => number = Date.now,
   print: (line: string) => void = console.log,
-  rendezvous?: { registrar: CodeRegistrar; publicBase: string },
+  links: { appUrl: string; publicBase: string; rendezvousUrl: string | undefined; registrar?: CodeRegistrar },
   personName?: string,
 ): Promise<void> {
   const auth = new Auth(new Store(dataDir), now);
@@ -36,19 +36,20 @@ export async function ownerCode(
         return found ? { personId: found.id } : { newPerson: { name: named, owner: true } };
       })();
   const { code, record, person } = auth.createCode(target);
-  const link = pairingLink(code);
+  const link = pairingLink(code, links);
   print(`Owner pairing code: ${formatCode(code)}`);
   print(`Pairing link: ${link}`);
   print(`Expires: ${new Date(record.expiresAt).toLocaleString('sv-SE')} (single use, 10 minutes)`);
   print(`Person: ${person.name}`);
   print('');
   print(terminalQr(link));
+  const rendezvous = links.registrar;
   if (!rendezvous) {
     print('Rendezvous: not configured (RENDEZVOUS_URL is unset)');
     return;
   }
   try {
-    await rendezvous.registrar.registerCode(record.hash, { https: rendezvous.publicBase }, record.expiresAt);
+    await rendezvous.registerCode(record.hash, { https: links.publicBase }, record.expiresAt);
     print('Rendezvous: registered');
   } catch (err) {
     print(`Rendezvous: not registered (${err instanceof Error ? err.message : String(err)})`);

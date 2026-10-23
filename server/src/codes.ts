@@ -30,7 +30,8 @@ export function codeHash(code: string): string {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
-/** What the QR encodes and the app opens straight into pairing. */
-export function pairingLink(code: string): string {
-  return `https://bluray-web.pages.dev/?pair=${normalizeCode(code) ?? code}`;
+/** What the QR encodes and the app opens straight into pairing. It names the Worker (`rv`) or, without one, this server (`nas`), so the app needs no built-in address. */
+export function pairingLink(code: string, o: { appUrl: string; publicBase: string; rendezvousUrl: string | undefined }): string {
+  const route = o.rendezvousUrl === undefined ? `nas=${encodeURIComponent(o.publicBase)}` : `rv=${encodeURIComponent(o.rendezvousUrl)}`;
+  return `${o.appUrl}?pair=${normalizeCode(code) ?? code}&${route}`;
 }

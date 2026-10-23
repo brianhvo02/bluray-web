@@ -3,10 +3,9 @@ import { chooseRelease, normalizeCatalogue } from './music-sources';
 import type { MusicRelease, MusicSource, ReleaseCandidate } from './music-sources';
 import { RateLimited } from './pacer';
 import type { Pacer } from './pacer';
-import { retryAfterMs, SourceUnavailable } from './sources';
+import { lookupUserAgent, retryAfterMs, SourceUnavailable } from './sources';
 
 const BASE = 'https://api.discogs.com';
-const USER_AGENT = 'bluray-web/1.0 (https://github.com/brianhvo02/bluray-web)';
 
 interface DgHit {
   readonly id: number;
@@ -37,13 +36,14 @@ function toDate(released: string | null | undefined): string | null {
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
-export function createDiscogs(fetch: typeof globalThis.fetch, pacer: Pacer, token: string): MusicSource {
+export function createDiscogs(fetch: typeof globalThis.fetch, pacer: Pacer, token: string, contact: string | null = null): MusicSource {
+  const userAgent = lookupUserAgent(contact);
   /** One paced GET; null on 404. Errors never carry the token or the request's headers. */
   const get = (url: string): Promise<unknown> =>
     pacer.run(async () => {
       let res: Response;
       try {
-        res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json', Authorization: `Discogs token=${token}` } });
+        res = await fetch(url, { headers: { 'User-Agent': userAgent, Accept: 'application/json', Authorization: `Discogs token=${token}` } });
       } catch {
         throw new SourceUnavailable('discogs: network error');
       }

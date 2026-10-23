@@ -3,10 +3,9 @@ import { chooseRelease, normalizeCatalogue } from './music-sources';
 import type { MusicArtist, MusicRelease, MusicSource, ReleaseCandidate } from './music-sources';
 import { RateLimited } from './pacer';
 import type { Pacer } from './pacer';
-import { retryAfterMs, SourceUnavailable } from './sources';
+import { lookupUserAgent, retryAfterMs, SourceUnavailable } from './sources';
 
 const BASE = 'https://musicbrainz.org/ws/2/release';
-const USER_AGENT = 'bluray-web/1.0 (https://github.com/brianhvo02/bluray-web)';
 
 interface MbArtist {
   readonly id: string;
@@ -26,13 +25,14 @@ interface MbRelease {
   readonly 'cover-art-archive'?: { readonly front?: boolean | null } | null;
 }
 
-export function createMusicBrainz(fetch: typeof globalThis.fetch, pacer: Pacer): MusicSource {
+export function createMusicBrainz(fetch: typeof globalThis.fetch, pacer: Pacer, contact: string | null = null): MusicSource {
+  const userAgent = lookupUserAgent(contact);
   /** One paced GET; null on 404. */
   const get = (url: string): Promise<unknown> =>
     pacer.run(async () => {
       let res: Response;
       try {
-        res = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' } });
+        res = await fetch(url, { headers: { 'User-Agent': userAgent, Accept: 'application/json' } });
       } catch {
         throw new SourceUnavailable('musicbrainz: network error');
       }

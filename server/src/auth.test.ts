@@ -557,7 +557,7 @@ describe('HTTP', () => {
     expect(minted.status).toBe(200);
     const body = (await minted.json()) as { code: string; link: string; expiresAt: number; rendezvous: boolean };
     expect(body.code).toMatch(/^[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
-    expect(body.link).toBe(`https://bluray-web.pages.dev/?pair=${body.code.replaceAll('-', '')}`);
+    expect(body.link).toBe(`https://bluray-web.pages.dev/?pair=${body.code.replaceAll('-', '')}&nas=https%3A%2F%2Fnas.example%2Fbluray%2Fapi%2F`);
     expect(body.expiresAt).toBe(clock + 10 * MINUTE);
     expect(body.rendezvous).toBe(true);
     const codeHashArg = registrar.registerCode.mock.calls[0] as unknown as [string, { https: string }, number];
@@ -728,13 +728,15 @@ describe('HTTP', () => {
   });
 });
 
+const LINKS = { publicBase: 'https://nas.example/bluray/api/', appUrl: 'https://bluray-web.pages.dev/', rendezvousUrl: undefined };
+
 describe('owner-code', () => {
   it('prints an owner code that the server in the same data dir redeems', async () => {
     const lines: string[] = [];
-    await ownerCode(tmp, now, (line) => lines.push(line));
+    await ownerCode(tmp, now, (line) => lines.push(line), { publicBase: 'https://nas.example/bluray/api/', appUrl: 'https://bluray-web.pages.dev/', rendezvousUrl: undefined });
     const code = /^Owner pairing code: ([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)?.[1];
     expect(code).toBeDefined();
-    expect(lines[1]).toBe(`Pairing link: https://bluray-web.pages.dev/?pair=${code!.replaceAll('-', '')}`);
+    expect(lines[1]).toBe(`Pairing link: https://bluray-web.pages.dev/?pair=${code!.replaceAll('-', '')}&nas=https%3A%2F%2Fnas.example%2Fbluray%2Fapi%2F`);
     expect(lines[2]).toMatch(/^Expires: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d /);
     expect(lines[3]).toBe('Person: Owner');
     expect(lines[5]).toMatch(/^[█▀▄ \n]+$/);
@@ -748,7 +750,7 @@ describe('owner-code', () => {
     const auth = new Auth(new Store(tmp), now);
     auth.firstOwnerPerson();
     auth.createPerson('Mika', false);
-    await ownerCode(tmp, now, (line) => lines.push(line), undefined, 'Mika');
+    await ownerCode(tmp, now, (line) => lines.push(line), LINKS, 'Mika');
     expect(lines[3]).toBe('Person: Mika');
     const mikas = auth.people().filter((p) => p.name === 'Mika');
     expect(mikas.map((p) => p.owner)).toEqual([false, true]);
@@ -756,7 +758,7 @@ describe('owner-code', () => {
     expect(auth.redeem(code, 'Laptop', (await deviceKey()).jwk)).toMatchObject({ owner: true, personId: mikas[1]!.id });
 
     lines.length = 0;
-    await ownerCode(tmp, now, (line) => lines.push(line), undefined, 'Mika');
+    await ownerCode(tmp, now, (line) => lines.push(line), LINKS, 'Mika');
     expect(auth.people().filter((p) => p.name === 'Mika')).toHaveLength(2);
     expect(lines[3]).toBe('Person: Mika');
   });
@@ -764,14 +766,14 @@ describe('owner-code', () => {
   it('registers the code with the rendezvous service, and still prints it when that fails', async () => {
     const lines: string[] = [];
     const registrar = { registerCode: vi.fn(async () => {}), unregisterCode: vi.fn(async () => {}) };
-    await ownerCode(tmp, now, (line) => lines.push(line), { registrar, publicBase: 'https://nas.example/bluray/api/' });
+    await ownerCode(tmp, now, (line) => lines.push(line), { ...LINKS, registrar, rendezvousUrl: 'https://rendezvous.example.workers.dev' });
     const code = /([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})$/.exec(lines[0]!)![1]!;
     expect(registrar.registerCode).toHaveBeenCalledWith(codeHash(code), { https: 'https://nas.example/bluray/api/' }, clock + 10 * MINUTE);
     expect(lines.at(-1)).toBe('Rendezvous: registered');
 
     lines.length = 0;
     const down = { registerCode: async () => Promise.reject(new Error('fetch failed')), unregisterCode: async () => {} };
-    await ownerCode(tmp, now, (line) => lines.push(line), { registrar: down, publicBase: 'https://nas.example/bluray/api/' });
+    await ownerCode(tmp, now, (line) => lines.push(line), { ...LINKS, registrar: down });
     expect(lines[0]).toMatch(/^Owner pairing code: /);
     expect(lines.at(-1)).toBe('Rendezvous: not registered (fetch failed)');
   });

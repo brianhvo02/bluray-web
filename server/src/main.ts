@@ -64,12 +64,12 @@ function metadataSources(config: Config): { anilist: MetadataSource; tmdb: Metad
 function musicSources(config: Config): { musicbrainz: MusicSource; discogs: MusicSource | null } {
   const fixture = process.env.MUSIC_FIXTURE;
   if (fixture) return { musicbrainz: fixtureMusicSource(JSON.parse(readFileSync(fixture, 'utf8')) as Record<string, MusicRelease>), discogs: null };
-  const musicbrainz = createMusicBrainz(fetch, new Pacer(1, 1_100));
+  const musicbrainz = createMusicBrainz(fetch, new Pacer(1, 1_100), config.lookupContact);
   if (config.discogsToken === null) {
     console.log('Discogs token not set: music lookups use MusicBrainz only');
     return { musicbrainz, discogs: null };
   }
-  return { musicbrainz, discogs: createDiscogs(fetch, new Pacer(50, 60_000), config.discogsToken) };
+  return { musicbrainz, discogs: createDiscogs(fetch, new Pacer(50, 60_000), config.discogsToken, config.lookupContact) };
 }
 
 /** The image in a music release folder, with its size and modification time, read from the read-only mount. */
@@ -192,7 +192,7 @@ async function serve(config: Config): Promise<void> {
   const nasId = rendezvous ? await rendezvous.localNasId() : null;
   const isoTrees = new IsoTrees(ISO_TREES);
   const levels = await levelService(config, library, isoTrees);
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), playbackStore: new PlaybackStore(config.dataDir), subtitleStore: new SubtitleStore(config.dataDir), publicBase: config.publicBase, registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, isoTrees, ...(levels ? { levels } : {}) });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), playbackStore: new PlaybackStore(config.dataDir), subtitleStore: new SubtitleStore(config.dataDir), publicBase: config.publicBase, appUrl: config.appUrl, ...(config.rendezvousUrl !== undefined ? { rendezvousUrl: config.rendezvousUrl } : {}), registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, isoTrees, ...(levels ? { levels } : {}) });
   const server = createServer(handlers);
   const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 
@@ -241,7 +241,7 @@ if (command === undefined) {
   await serve(config);
 } else if (ownerArgs !== null) {
   const registrar = rendezvousRegistrar(config);
-  await ownerCode(config.dataDir, Date.now, console.log, registrar && { registrar, publicBase: config.publicBase }, ownerArgs.person);
+  await ownerCode(config.dataDir, Date.now, console.log, { publicBase: config.publicBase, appUrl: config.appUrl, rendezvousUrl: config.rendezvousUrl, registrar }, ownerArgs.person);
 } else if (command === 'nas-id' && process.argv.length === 3) {
   await printNasId(rendezvousKeyFile(config));
 } else {

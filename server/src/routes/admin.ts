@@ -2,6 +2,7 @@ import type { OwnerChoice, TitleKind } from '../../../src/engine/disc/nas-api';
 import { AuthConflict, AuthNotFound } from '../auth';
 import type { Auth, Device, Person, PersonRef } from '../auth';
 import type { BdjStore } from '../bdj-store';
+import { DEFAULT_APP_URL } from '../config';
 import { formatCode, pairingLink, unregisterCodes } from '../codes';
 import type { CodeRegistrar } from '../codes';
 import { HttpError, json, readJson } from '../http';
@@ -22,6 +23,10 @@ export interface AdminOptions {
   bdjStore: BdjStore;
   /** The `https` route registered with each code: this server's public API base. */
   publicBase: string;
+  /** The player pairing links open (ends in `/`); the hosted app by default. */
+  appUrl?: string;
+  /** The rendezvous Worker pairing links name; without one they name this server. */
+  rendezvousUrl?: string;
   /** Absent until the rendezvous client exists: codes then come back with `rendezvous: false`. */
   registrar?: CodeRegistrar;
   /** How long a code waits for its rendezvous registration before it is returned with `rendezvous: false`. */
@@ -249,7 +254,7 @@ export function adminRoutes(auth: Auth, opts: AdminOptions): Handler {
           }
         }
         return json(200, {
-          code: formatCode(code), link: pairingLink(code), expiresAt: record.expiresAt, rendezvous, personId: person.id, personName: person.name, invite: record.invite,
+          code: formatCode(code), link: pairingLink(code, { appUrl: opts.appUrl ?? DEFAULT_APP_URL, publicBase: opts.publicBase, rendezvousUrl: opts.rendezvousUrl }), expiresAt: record.expiresAt, rendezvous, personId: person.id, personName: person.name, invite: record.invite,
         });
       }
       case 'DELETE devices/:id': {

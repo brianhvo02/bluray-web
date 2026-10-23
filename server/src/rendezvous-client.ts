@@ -23,12 +23,14 @@ export class RendezvousClient implements CodeRegistrar {
   private readonly base: string;
   private key: Promise<NasKey> | undefined;
   private nasId: Promise<string> | undefined;
+  private loggedNotAllowed = false;
 
   constructor(
     base: string,
     private readonly keyFile: string,
     private readonly fetchFn: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    private readonly log: (line: string) => void = console.error,
   ) {
     this.base = base.endsWith('/') ? base : `${base}/`;
   }
@@ -112,13 +114,22 @@ export class RendezvousClient implements CodeRegistrar {
     const { publicKeyJwk } = await this.loadKey();
     const res = await this.post('nas', { publicKeyJwk });
     if (!res.ok) {
-      await res.body?.cancel();
+      if (res.status === 403) await this.noteRefusal(res);
+      else await res.body?.cancel();
       throw new Error(`rendezvous POST /nas answered ${res.status}`);
     }
     const { nasId } = (await res.json()) as { nasId?: unknown };
     const expected = await nasIdOf(publicKeyJwk);
     if (nasId !== expected) throw new Error('rendezvous POST /nas answered an unexpected id');
     return expected;
+  }
+
+  /** Says once that the Worker's allowlist (`NAS_IDS`) does not hold this NAS, which would otherwise show only as 403s. */
+  private async noteRefusal(res: Response): Promise<void> {
+    const error = ((await res.json().catch(() => null)) as { error?: unknown } | null)?.error;
+    if (error !== 'nas-not-allowed' || this.loggedNotAllowed) return;
+    this.loggedNotAllowed = true;
+    this.log("rendezvous refused this NAS (nas-not-allowed): add its id to the Worker's NAS_IDS");
   }
 
   private async postCode(nasId: string, codeHash: string, routes: { https: string }, expiresAt: number): Promise<number> {
