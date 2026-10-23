@@ -1064,7 +1064,16 @@ test('the folder browser has its folder in the address bar', async ({ page, brow
   expect(pathOf(page)).toBe('/nas/folders');
 });
 
+/** A 1×1 PNG, standing in for posters where a test must not reach the NAS for them. */
+const ONE_PIXEL_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+
 test('a device unpaired while on a NAS path goes back to the landing page', async ({ page, browserName }) => {
+  // Posters load in the background and can still be in flight when the device is revoked: one answered 401 fails to load,
+  // and the poster's retry opens a new session, which finds the device gone before the click does. They are answered
+  // here (with the NAS's CORP header, as the page is cross-origin isolated), so the click is the first to reach the NAS.
+  await page.route('**/api/art/**', (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', headers: { 'Cross-Origin-Resource-Policy': 'cross-origin' }, body: ONE_PIXEL_PNG }),
+  );
   await libraryReady();
   await allowLocalNetwork(page, browserName);
   const redeemed = page.waitForResponse((r) => r.url().endsWith('/api/pair/redeem') && r.request().method() === 'POST');
