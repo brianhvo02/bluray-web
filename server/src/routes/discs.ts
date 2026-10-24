@@ -157,7 +157,7 @@ export function discRoutes(library: Library, levels?: DiscLevels, isoTrees: IsoT
       return levels ? release(levels, req, url, id) : notFound();
     }
     if (!(req.method === 'GET' || (read && req.method === 'HEAD'))) return null;
-    if (action === 'files') activity?.note();
+    if (read) activity?.note();
     const level = url.searchParams.get('level');
     // `level=original`, an empty `level=` or none: the original disc.
     const atLevel = action === 'levels' || ((action === 'manifest' || action === 'files') && level !== null && level !== '' && level !== 'original');

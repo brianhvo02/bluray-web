@@ -4,11 +4,33 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FetchCache } from './fetch-cache';
 
+const holdReads: { gate: Promise<void> | null } = { gate: null };
+vi.mock('node:fs/promises', async (original) => {
+  const real = await original<typeof import('node:fs/promises')>();
+  return {
+    ...real,
+    readFile: async (...args: Parameters<typeof real.readFile>) => {
+      const bytes = await real.readFile(...args);
+      await holdReads.gate;
+      return bytes;
+    },
+  };
+});
+
+function deferred(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((r) => (release = r));
+  return { promise, release };
+}
+
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'fetch-cache-'));
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  holdReads.gate = null;
+  rmSync(dir, { recursive: true, force: true });
+});
 
 const bytes = (n: number, fill = 1): Buffer => Buffer.alloc(n, fill);
 
@@ -78,15 +100,14 @@ describe('FetchCache', () => {
 
   it('does not evict an entry a get is returning', async () => {
     const cache = new FetchCache(dir, 10);
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const slow = cache.get('slow', async () => {
-      await gate;
-      return bytes(10, 1);
-    });
-    const other = await cache.get('other', async () => bytes(10, 2));
-    release();
-    expect(await slow).toEqual(bytes(10, 1));
-    expect(other).toEqual(bytes(10, 2));
+    const slow = vi.fn(async () => bytes(10, 1));
+    await cache.get('slow', slow); // the older entry, so the first to go under pressure
+    const gate = deferred();
+    holdReads.gate = gate.promise;
+    const reading = cache.get('slow', slow); // now reading its file, held open
+    await cache.get('other', async () => bytes(10, 2)); // 20 > 10: slow would be evicted if it weren't pinned
+    gate.release();
+    expect(await reading).toEqual(bytes(10, 1));
+    expect(slow).toHaveBeenCalledTimes(1);
   });
 });

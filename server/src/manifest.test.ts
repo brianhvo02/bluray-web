@@ -138,7 +138,7 @@ describe('disc routes', () => {
     }
   });
 
-  it('tells the activity of every file range read, folder and ISO, but not of a manifest', async () => {
+  it('tells the activity of every file range read and probe, folder and ISO, but not of a manifest', async () => {
     const activity = new DiscActivity();
     const note = vi.spyOn(activity, 'note');
     const watched = createServer([discRoutes(library, undefined, undefined, activity)]);
@@ -151,6 +151,10 @@ describe('disc routes', () => {
       expect(note).toHaveBeenCalledTimes(1);
       await (await fetch(`${at}/${ids['disc.iso']}/files/BDMV/STREAM/00001.M2TS`, { headers: { Range: 'bytes=0-191' } })).arrayBuffer();
       expect(note).toHaveBeenCalledTimes(2);
+      await (await fetch(`${at}/${ids.menu}/probe`)).arrayBuffer();
+      expect(note).toHaveBeenCalledTimes(3);
+      await (await fetch(`${at}/${ids['disc.iso']}/probe`)).arrayBuffer();
+      expect(note).toHaveBeenCalledTimes(4);
       expect(activity.busy()).toBe(true);
     } finally {
       await new Promise((r) => watched.close(r));

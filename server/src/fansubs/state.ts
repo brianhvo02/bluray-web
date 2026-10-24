@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FansubTitleState } from '../../../src/engine/disc/nas-api';
 import { isCode, lockFile, replaceAtomically } from '../atomic-json';
@@ -12,11 +12,20 @@ interface StateFile {
   languages: string[];
 }
 
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** `eng` first, then the others, lower-cased and without repeats. */
+function normalizeLanguages(codes: readonly unknown[]): string[] {
+  const rest = codes.filter((c): c is string => typeof c === 'string').map((c) => c.trim().toLowerCase()).filter((c) => c !== '');
+  return [...new Set(['eng', ...rest])];
+}
+
 const trackKey = (toshoFileId: number, track: number): string => `${toshoFileId}:${track}`;
 
 /** The fansub run's memory: per-title results, tracks the owner deleted and the languages wanted. `<dataDir>/fansubs/state.json`. */
 export class FansubState {
   private readonly file: string;
+  private warned = false;
 
   constructor(dataDir: string) {
     const dir = join(dataDir, 'fansubs');
@@ -61,7 +70,7 @@ export class FansubState {
 
   setLanguages(codes: readonly string[]): void {
     this.change((s) => {
-      s.languages = [...codes];
+      s.languages = normalizeLanguages(codes);
     });
   }
 
@@ -75,15 +84,35 @@ export class FansubState {
   }
 
   private read(): StateFile {
-    let parsed: Partial<StateFile> = {};
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<StateFile>;
+      parsed = JSON.parse(readFileSync(this.file, 'utf8'));
     } catch (err) {
-      // Missing is normal; damaged starts over (the run redoes what it forgot).
-      if (!isCode(err, 'ENOENT') && !(err instanceof SyntaxError)) throw err;
+      if (isCode(err, 'ENOENT')) return { titles: {}, deleted: {}, languages: ['eng'] };
+      if (!(err instanceof SyntaxError)) throw err;
+      return this.setAside();
     }
-    const languages = Array.isArray(parsed.languages) && parsed.languages.length > 0 ? parsed.languages : ['eng'];
-    return { titles: parsed.titles ?? {}, deleted: parsed.deleted ?? {}, languages };
+    if (!isObject(parsed)) return this.setAside();
+    return {
+      titles: isObject(parsed.titles) ? (parsed.titles as Record<string, FansubTitleState>) : {},
+      deleted: isObject(parsed.deleted) ? (parsed.deleted as Record<string, string[]>) : {},
+      languages: normalizeLanguages(Array.isArray(parsed.languages) ? parsed.languages : []),
+    };
+  }
+
+  /** A damaged file is kept as `state.json.bad-<time>` (deleted tracks would otherwise come back unnoticed), and the state starts empty. */
+  private setAside(): StateFile {
+    const bad = `${this.file}.bad-${Date.now()}`;
+    try {
+      renameSync(this.file, bad);
+    } catch (err) {
+      if (!isCode(err, 'ENOENT')) throw err;
+    }
+    if (!this.warned) {
+      this.warned = true;
+      console.warn(`fansub state: ${this.file} is damaged; moved to ${bad}, starting empty`);
+    }
+    return { titles: {}, deleted: {}, languages: ['eng'] };
   }
 
   private change(edit: (s: StateFile) => void): void {

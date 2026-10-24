@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FansubTitleState } from '../../../src/engine/disc/nas-api';
 import { FansubState } from './state';
 
@@ -55,10 +55,30 @@ describe('FansubState', () => {
     expect(new FansubState(dir).languages()).toEqual(['eng', 'jpn']);
   });
 
-  it('starts empty on a damaged file', async () => {
-    const { writeFileSync, mkdirSync } = await import('node:fs');
+  it('always keeps eng first, lower-cased and without repeats', () => {
+    const s = new FansubState(dir);
+    s.setLanguages(['jpn']);
+    expect(s.languages()).toEqual(['eng', 'jpn']);
+    s.setLanguages(['JPN', 'fre', 'eng', 'jpn']);
+    expect(new FansubState(dir).languages()).toEqual(['eng', 'jpn', 'fre']);
+  });
+
+  it.each(['{nope', '[1,2]', 'null', '42', '"text"'])('moves a damaged state.json (%s) aside, logs once and starts empty', (text) => {
     mkdirSync(join(dir, 'fansubs'), { recursive: true });
-    writeFileSync(join(dir, 'fansubs', 'state.json'), '{nope');
-    expect(new FansubState(dir).languages()).toEqual(['eng']);
+    writeFileSync(join(dir, 'fansubs', 'state.json'), text);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const s = new FansubState(dir);
+      expect(s.languages()).toEqual(['eng']);
+      expect(s.isDeleted(1, 1)).toBe(false);
+      s.markDeleted('a', 1, 1);
+      expect(s.isDeleted(1, 1)).toBe(true);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const aside = readdirSync(join(dir, 'fansubs')).filter((f) => f.startsWith('state.json.bad-'));
+      expect(aside).toHaveLength(1);
+      expect(readFileSync(join(dir, 'fansubs', aside[0]!), 'utf8')).toBe(text);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
