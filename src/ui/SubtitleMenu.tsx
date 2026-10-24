@@ -7,6 +7,7 @@ import { languageName } from '../player/language';
 import { formatSubtitleOffset, MAX_SUBTITLE_SCALE, MIN_SUBTITLE_SCALE, type SubtitlesState } from '../player/player-controller';
 import { FONT_EXTENSIONS, SUBTITLE_EXTENSIONS } from '../player/drop-files';
 import { startChoices, startLabel } from './subtitle-starts';
+import { ToshoSearchView, type ToshoSearch } from './ToshoSearch';
 
 const OFFSET_STEP_MS = 100;
 const SCALE_STEP = 0.1;
@@ -31,6 +32,8 @@ interface SubtitleMenuProps {
   readonly showingFile: number | null;
   /** A NAS disc's stored subtitles ("From the NAS"); null for other discs. */
   readonly stored?: StoredSubtitles | null;
+  /** A NAS disc's Anime Tosho search ("Search Anime Tosho…", spec §9); null for other discs. */
+  readonly search?: ToshoSearch | null;
   onSelect(choice: SubtitleChoice): void;
   onLoadFiles(files: readonly File[]): void;
   onAddFonts(files: readonly File[]): void;
@@ -46,8 +49,13 @@ interface SubtitleMenuProps {
  * Disc PG tracks, the user's subtitle files (each placed at an episode start, with its own timing), size, fonts,
  * Off, and loading files. Keyboard handling as AudioMenu.
  */
-export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored = null, isMasked, onSelect, onLoadFiles, onAddFonts, onShift, onStart, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
+export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored = null, search = null, isMasked, onSelect, onLoadFiles, onAddFonts, onShift, onStart, onScale, onRemove, onOpenChange }: SubtitleMenuProps): ReactElement | null {
   const [open, setOpen] = useState(false);
+  /** The menu's own rows, or the Anime Tosho search's steps in their place. */
+  const [view, setView] = useState<'main' | 'tosho'>('main');
+  const toshoRef = useRef<HTMLButtonElement>(null);
+  /** Back from the search: the focus goes to its entry once the menu's rows are back. */
+  const backFromSearch = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -55,9 +63,10 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
   const fontRef = useRef<HTMLInputElement>(null);
   const shown = subtitles !== null;
 
-  const items = (): HTMLButtonElement[] => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
+  const items = (): HTMLElement[] => [...(listRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input[type="search"]') ?? [])];
   const close = (refocus: boolean): void => {
     setOpen(false);
+    setView('main');
     if (refocus) buttonRef.current?.focus();
   };
   const choose = (choice: SubtitleChoice): void => {
@@ -68,6 +77,16 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
   useEffect(() => {
     if (!shown) setOpen(false);
   }, [shown]);
+
+  useEffect(() => {
+    if (!open || search === null) setView('main');
+  }, [open, search]);
+
+  useEffect(() => {
+    if (view !== 'main' || !backFromSearch.current) return;
+    backFromSearch.current = false;
+    toshoRef.current?.focus();
+  }, [view]);
 
   useEffect(() => onOpenChange(open), [open, onOpenChange]);
 
@@ -80,7 +99,10 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
   useEffect(() => {
     if (!open) return;
     const outside = (e: PointerEvent): void => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+        setView('main');
+      }
     };
     const escape = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') close(true);
@@ -96,7 +118,9 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
   const moveFocus = (e: ReactKeyboardEvent): void => {
     const list = items();
     if (list.length === 0) return;
-    const at = list.indexOf(document.activeElement as HTMLButtonElement);
+    // the search box keeps Home and End for its own text
+    if ((e.key === 'Home' || e.key === 'End') && e.target instanceof HTMLInputElement) return;
+    const at = list.indexOf(document.activeElement as HTMLElement);
     const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: list.length - 1 }[e.key];
     if (next === undefined) return;
     e.preventDefault();
@@ -143,7 +167,18 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
           if (files.length) onAddFonts(files);
         }}
       />
-      {open && (
+      {open && view === 'tosho' && search && (
+        <ul ref={listRef} role="menu" aria-label="Search Anime Tosho" className="audio-menu-list tosho-menu" onKeyDown={moveFocus}>
+          <ToshoSearchView
+            search={search}
+            onExit={() => {
+              backFromSearch.current = true;
+              setView('main');
+            }}
+          />
+        </ul>
+      )}
+      {open && view === 'main' && (
         <ul ref={listRef} role="menu" className="audio-menu-list" onKeyDown={moveFocus}>
           <li role="none">
             <button type="button" role="menuitemradio" aria-checked={selected === 'off'} data-testid="subtitle-off" disabled={offMasked} title={offMasked ? MASKED_TOOLTIP : undefined} onClick={() => choose({ kind: 'off' })}>
@@ -230,7 +265,7 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
               </button>
             </li>
           )}
-          {stored && stored.items.length > 0 && (
+          {((stored && stored.items.length > 0) || search) && (
             <li role="presentation" className="subtitle-group" data-testid="subtitle-stored">
               From the NAS
             </li>
@@ -253,6 +288,18 @@ export function SubtitleMenu({ subtitles, chapters, nowUs, showingFile, stored =
               </button>
             </li>
           ))}
+          {search && stored?.items.length === 0 && (
+            <li role="none" className="subtitle-group" data-testid="subtitle-stored-none">
+              Nothing for this episode
+            </li>
+          )}
+          {search && (
+            <li role="none">
+              <button ref={toshoRef} type="button" role="menuitem" data-testid="subtitle-tosho" onClick={() => setView('tosho')}>
+                Search Anime Tosho…
+              </button>
+            </li>
+          )}
           <li role="none">
             <button type="button" role="menuitem" data-testid="subtitle-load" onClick={() => { close(false); fileRef.current?.click(); }}>
               Load subtitle files…
