@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -297,6 +297,17 @@ describe('SubtitleStore', () => {
       const other = s.create(META);
       await expect(s.writeFile(other.id, 'v.srt', bytes(41))).rejects.toBeInstanceOf(TooLargeError);
       await s.writeFile(other.id, 'v.srt', bytes(40));
+    });
+
+    it('sweeps pooled fonts no fansub uses at start-up', () => {
+      const first = make();
+      const f = first.createFansub(FMETA, { name: 'a.ass', data: Buffer.from('a'), original: Buffer.from('o') }, [{ name: 'F.ttf', data: Buffer.from('X') }]);
+      // What a createFansub that failed after writing its fonts leaves behind.
+      writeFileSync(join(dir, 'subtitles', '.fonts', 'a'.repeat(64)), 'orphan');
+      writeFileSync(join(dir, 'subtitles', '.fonts', `${'b'.repeat(64)}.tmp-123456`), 'half');
+      const s = make();
+      expect(pool()).toEqual([s.get(f.id)!.fonts[0].hash]);
+      expect(readFileSync(s.fontPath(f.id, 'F.ttf')!, 'utf8')).toBe('X');
     });
 
     it('replaceFile keeps the original', () => {

@@ -74,7 +74,7 @@ export class SubtitleStore {
     this.load();
   }
 
-  /** Reads every `meta.json` once (and each fansub's original's size, which the meta doesn't hold) into the index. */
+  /** Reads every `meta.json` once (and each fansub's original's size, which the meta doesn't hold) into the index, then sweeps the font pool. */
   private load(): void {
     let names: string[];
     try {
@@ -96,6 +96,21 @@ export class SubtitleStore {
       }
       this.index.set(s, original);
     }
+    this.sweepPool();
+  }
+
+  /** Removes pooled fonts no fansub uses (left by a fansub whose store failed midway) and temp files. */
+  private sweepPool(): void {
+    const dir = join(this.root(), '.fonts');
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch (err) {
+      if (isCode(err, 'ENOENT')) return;
+      throw err;
+    }
+    const used = this.index.pooled();
+    for (const name of names) if (!used.has(name)) rmSync(join(dir, name), { force: true });
   }
 
   private root(): string {
