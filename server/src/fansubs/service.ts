@@ -24,7 +24,7 @@ import { episodeOfFile, mainFile, seasonEpisode } from './episode-files';
 import type { FetchCache } from './fetch-cache';
 import type { SeaDex, SeaDexRelease } from './seadex';
 import type { FansubState } from './state';
-import { NotFoundOnTosho } from './tosho';
+import { NotFoundOnTosho, PACK_DOWNLOAD_BYTES } from './tosho';
 import type { Tosho, ToshoFile, ToshoRelease, ToshoTrack } from './tosho';
 import { fetchTrack, languageName, mostDialogue } from './tracks';
 import { titleUnits } from './units';
@@ -516,7 +516,7 @@ export class FansubService {
     const pack = async (fileId: number): Promise<{ name: string; data: Buffer }[] | null> => {
       const url = this.opts.tosho.fontPackUrl(fileId);
       try {
-        return await fontsIn7z(await this.opts.cache.get(url, () => this.opts.tosho.download(url, paced)));
+        return await fontsIn7z(await this.opts.cache.get(url, () => this.opts.tosho.download(url, paced, PACK_DOWNLOAD_BYTES)));
       } catch (e) {
         if (job.controller.signal.aborted) throw e;
         if (isServiceError(e)) down = true;

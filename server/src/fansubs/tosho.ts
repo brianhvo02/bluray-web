@@ -1,7 +1,13 @@
 /** Anime Tosho client: the JSON feed (https://feed.animetosho.net/json) and the storage downloads. Original code. */
 import { RateLimited } from '../titles/pacer';
+import { TooLargeArchive } from './archive';
 import type { PacedOptions, Pacer } from '../titles/pacer';
 import { retryAfterMs, SourceUnavailable } from '../titles/sources';
+
+/** The most a track's .xz download may be. */
+export const TRACK_DOWNLOAD_BYTES = 64 * 1024 * 1024;
+/** The most a font pack's download may be. */
+export const PACK_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 
 export interface ToshoTrack {
   /** Index among the file's subtitle attachments, from 0. */
@@ -38,7 +44,8 @@ export interface Tosho {
   byId(id: number, opts?: PacedOptions): Promise<ToshoRelease | null>;
   /** The first page (at most 30 releases), files not loaded. */
   search(query: string, opts?: PacedOptions): Promise<readonly ToshoRelease[]>;
-  download(url: string, opts?: PacedOptions): Promise<Buffer>;
+  /** The bytes at `url`; past `maxBytes` (declared or as they arrive) it throws `TooLargeArchive`. */
+  download(url: string, opts?: PacedOptions, maxBytes?: number): Promise<Buffer>;
   fontPackUrl(fileId: number): string;
 }
 
@@ -104,6 +111,35 @@ function toRelease(r: RawRelease): ToshoRelease {
   };
 }
 
+/** A response's body, refused by its Content-Length or once more than `maxBytes` have arrived. */
+async function readCapped(res: Response, maxBytes: number): Promise<Buffer> {
+  const tooLarge = (): TooLargeArchive => new TooLargeArchive(`download over ${maxBytes} bytes`);
+  if (Number(res.headers.get('Content-Length') ?? 0) > maxBytes) {
+    await res.body?.cancel().catch(() => {});
+    throw tooLarge();
+  }
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  } catch (e) {
+    if (e instanceof TooLargeArchive) throw e;
+    throw new SourceUnavailable('animetosho: download interrupted');
+  }
+  return Buffer.concat(chunks, size);
+}
+
 export function createTosho(fetch: typeof globalThis.fetch, pacer: Pacer, userAgent: string, bases: { feed: string; site: string }): Tosho {
   /** One paced GET; the raw response when it is fine. */
   const get = async (url: string, accept: string, notFound: () => Error): Promise<Response> => {
@@ -151,14 +187,10 @@ export function createTosho(fetch: typeof globalThis.fetch, pacer: Pacer, userAg
       }
       return (body as RawRelease[]).slice(0, 30).map((r) => toRelease({ ...r, files: [] }));
     },
-    download: (url, opts) =>
+    download: (url, opts, maxBytes = PACK_DOWNLOAD_BYTES) =>
       pacer.run(async () => {
         const res = await get(url, '*/*', () => new NotFoundOnTosho(url));
-        try {
-          return Buffer.from(await res.arrayBuffer());
-        } catch {
-          throw new SourceUnavailable('animetosho: download interrupted');
-        }
+        return readCapped(res, maxBytes);
       }, opts),
     fontPackUrl: (fileId) => `${bases.site}/download/file/${fileId}/attachments`,
   };

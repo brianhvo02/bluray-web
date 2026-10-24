@@ -401,6 +401,21 @@ describe('FansubService', () => {
     expect(fansubsOf(store, 2)).toHaveLength(2);
   });
 
+  it('caps downloads at 64 MB a track and 256 MB a font pack; a track past its cap is too large', async () => {
+    const caps = new Map<string, number | undefined>();
+    const { svc } = setup({
+      tosho: (t) => ({ ...t, download: async (url, o, max) => {
+        caps.set(url, max);
+        // the fixture refuses past the cap as the real client does: 10 bytes stands in for a huge download
+        return t.download(url, o, url === trackUrl(202, 1) || url === trackUrl(202, 0) ? 10 : max);
+      } }),
+    });
+    const result = await svc.runTitle(TITLE);
+    expect(caps.get(trackUrl(101, 0))).toBe(64 * 1024 * 1024);
+    expect(caps.get('https://animetosho.net/download/file/101/attachments')).toBe(256 * 1024 * 1024);
+    expect(result.episodes[`${SEASON}#2`]).toEqual({ status: 'not-found', reason: 'too-large' });
+  });
+
   it("a track Tosho can't serve leaves its episode for the next run", async () => {
     const { svc, store, state, clock } = setup({
       tosho: (t) => ({ ...t, download: async (url, o) => { if (url === trackUrl(202, 1)) throw new SourceUnavailable('animetosho: HTTP 503'); return t.download(url, o); } }),

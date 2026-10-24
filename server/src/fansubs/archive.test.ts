@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import SevenZip from '7z-wasm';
 import { describe, expect, it } from 'vitest';
-import { fontsIn7z, PACK_LIMITS, TooLargeArchive, unxz } from './archive';
+import { ARCHIVE_MODULE, fontsIn7z, PACK_LIMITS, TooLargeArchive, unxz } from './archive';
 
 async function makePack(files: Record<string, Buffer>): Promise<Buffer> {
   const sz = await SevenZip({ wasmBinary: readFileSync(new URL('../../../node_modules/7z-wasm/7zz.wasm', import.meta.url)).buffer as ArrayBuffer, print: () => {}, printErr: () => {}, stdout: () => {} });
@@ -60,5 +60,28 @@ describe('archives', () => {
       Object.assign(PACK_LIMITS, saved);
     }
     expect((await fontsIn7z(pack)).map((f) => f.name)).toEqual(['c.ttf']);
+  });
+
+  it('drops the 7-Zip module after a job whose input or output passed the recycle size, and keeps it otherwise', async () => {
+    const track = fixture('track.ass.xz');
+    const saved = ARCHIVE_MODULE.recycleBytes;
+    try {
+      await unxz(track, 1 << 20);
+      const loads = ARCHIVE_MODULE.loads;
+      await unxz(track, 1 << 20);
+      expect(ARCHIVE_MODULE.loads).toBe(loads);
+      // the output is past it, the input not: the next job loads a fresh module
+      const out = await unxz(track, 1 << 20);
+      ARCHIVE_MODULE.recycleBytes = Math.max(track.length, out.length - 1);
+      await unxz(track, 1 << 20);
+      await unxz(track, 1 << 20);
+      expect(ARCHIVE_MODULE.loads).toBe(loads + 1);
+      ARCHIVE_MODULE.recycleBytes = 10;
+      await fontsIn7z(fixture('pack.7z'));
+      expect((await fontsIn7z(fixture('pack.7z'))).length).toBe(1);
+      expect(ARCHIVE_MODULE.loads).toBe(loads + 3);
+    } finally {
+      ARCHIVE_MODULE.recycleBytes = saved;
+    }
   });
 });

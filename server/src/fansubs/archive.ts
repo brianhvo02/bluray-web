@@ -15,6 +15,11 @@ const MAX_FONT_ENTRIES = 200;
 const MAX_FONT_BYTES = 200 * 1024 * 1024;
 /** Everything in a pack is extracted before filtering, so the whole archive is bounded too (a test lowers these). */
 export const PACK_LIMITS = { entries: 2000, bytes: 512 * 1024 * 1024 };
+/**
+ * The WASM heap grows to the largest job and never shrinks, so after a job whose input or output passed `recycleBytes`
+ * the module is dropped and the next job loads a fresh one (`loads` counts them, for the tests).
+ */
+export const ARCHIVE_MODULE = { recycleBytes: 32 * 1024 * 1024, loads: 0 };
 
 /** The WASM sits next to the bundle (`dist/7zz.wasm`); unbundled (tests, tsx) it is in node_modules. */
 async function loadWasm(): Promise<Buffer> {
@@ -33,6 +38,8 @@ interface Instance {
   /** What 7-Zip printed since the last `run` (Latin-1 decoded; entry names are not needed in full). `sink` takes stdout's bytes instead. */
   text: string;
   sink: ((byte: number | null) => void) | null;
+  /** The largest input or output of the running job. */
+  peak: number;
 }
 
 let instance: Promise<Instance> | null = null;
@@ -41,7 +48,8 @@ let chain: Promise<unknown> = Promise.resolve();
 function getInstance(): Promise<Instance> {
   instance ??= (async () => {
     const wasm = await loadWasm();
-    const inst: Instance = { sz: undefined as unknown as SevenZipModule, text: '', sink: null };
+    ARCHIVE_MODULE.loads++;
+    const inst: Instance = { sz: undefined as unknown as SevenZipModule, text: '', sink: null, peak: 0 };
     const sz = await SevenZip({
       wasmBinary: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength) as ArrayBuffer,
       printErr: (s: string) => { inst.text += `${s}\n`; },
@@ -58,9 +66,17 @@ function getInstance(): Promise<Instance> {
   return instance;
 }
 
-/** One module instance, one call at a time: its file system is shared. */
+/** One module instance, one call at a time: its file system is shared. A job past the recycle size drops the instance. */
 function serialized<T>(job: (inst: Instance) => Promise<T> | T): Promise<T> {
-  const next = chain.then(async () => job(await getInstance()));
+  const next = chain.then(async () => {
+    const inst = await getInstance();
+    inst.peak = 0;
+    try {
+      return await job(inst);
+    } finally {
+      if (inst.peak > ARCHIVE_MODULE.recycleBytes) instance = null;
+    }
+  });
   chain = next.catch(() => undefined);
   return next;
 }
@@ -109,6 +125,7 @@ export function unxz(data: Buffer, maxBytes: number): Promise<Buffer> {
       }
       out[length++] = c & 0xff;
     };
+    inst.peak = data.length;
     try {
       FS.writeFile('in.xz', data);
       run(inst, ['e', '-so', '-bd', '-y', 'in.xz']);
@@ -117,6 +134,7 @@ export function unxz(data: Buffer, maxBytes: number): Promise<Buffer> {
       throw e;
     } finally {
       inst.sink = null;
+      inst.peak = Math.max(inst.peak, length);
       removeTree(FS, 'in.xz');
     }
     return out.subarray(0, length);
@@ -127,6 +145,7 @@ export function unxz(data: Buffer, maxBytes: number): Promise<Buffer> {
 export function fontsIn7z(data: Buffer): Promise<{ name: string; data: Buffer }[]> {
   return serialized((inst) => {
     const { FS } = inst.sz;
+    inst.peak = data.length;
     try {
       FS.writeFile('in.7z', data);
       // List first, so a bomb is refused before anything is written to the in-memory file system.
@@ -150,6 +169,7 @@ export function fontsIn7z(data: Buffer): Promise<{ name: string; data: Buffer }[
         if (total > MAX_FONT_BYTES) throw new TooLargeArchive(`fonts over ${MAX_FONT_BYTES} bytes`);
       }
       if (count === 0) return [];
+      inst.peak = Math.max(inst.peak, allBytes);
       // Everything is extracted and filtered in the walk: 7-Zip's wildcards are case-sensitive here (A.TTF, b.Otf).
       run(inst, ['x', '-bd', '-y', '-oout', 'in.7z']);
       const fonts: { name: string; data: Buffer }[] = [];

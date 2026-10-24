@@ -2,7 +2,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SeaDex, SeaDexEntry } from './seadex';
-import { NotFoundOnTosho } from './tosho';
+import { TooLargeArchive } from './archive';
+import { NotFoundOnTosho, PACK_DOWNLOAD_BYTES } from './tosho';
 import type { Tosho, ToshoRelease } from './tosho';
 
 /**
@@ -24,16 +25,19 @@ export function fixtureFansubSources(dir: string): { seadex: SeaDex; tosho: Tosh
           .slice(0, 30)
           .map((r) => ({ ...r, files: [] }));
       },
-      download: async (url) => {
+      download: async (url, _opts, maxBytes = PACK_DOWNLOAD_BYTES) => {
         const path = new URL(url, 'https://x.invalid').pathname;
         const pack = /^\/download\/file\/(\d+)\/attachments$/.exec(path);
         const name = pack ? `pack-${pack[1]}.7z` : decodeURIComponent(path.split('/').pop() ?? '');
         if (name === '' || name.includes('/') || name.startsWith('.')) throw new NotFoundOnTosho(url);
+        let data: Buffer;
         try {
-          return readFileSync(join(dir, 'files', name));
+          data = readFileSync(join(dir, 'files', name));
         } catch {
           throw new NotFoundOnTosho(url);
         }
+        if (data.length > maxBytes) throw new TooLargeArchive(`download over ${maxBytes} bytes`);
+        return data;
       },
       fontPackUrl: (fileId) => `https://animetosho.net/download/file/${fileId}/attachments`,
     },

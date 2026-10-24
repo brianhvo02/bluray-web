@@ -16,7 +16,7 @@ import type { FansubDiscs } from './disc-lookup';
 import type { FetchCache } from './fetch-cache';
 import { PickStore } from './pick-store';
 import { retime } from './retime';
-import { NotFoundOnTosho } from './tosho';
+import { NotFoundOnTosho, PACK_DOWNLOAD_BYTES } from './tosho';
 import type { Tosho, ToshoRelease, ToshoTrack } from './tosho';
 import { fetchTrack, languageName, mostDialogue } from './tracks';
 
@@ -163,7 +163,7 @@ export class FansubPicks {
     let fonts: { name: string; data: Buffer }[] | null = null;
     const packUrl = tosho.fontPackUrl(file.id);
     try {
-      fonts = (await fontsIn7z(await cache.get(packUrl, () => tosho.download(packUrl, paced)))).filter((f) => FONT_NAME.test(f.name) && f.name !== '.' && f.name !== '..');
+      fonts = (await fontsIn7z(await cache.get(packUrl, () => tosho.download(packUrl, paced, PACK_DOWNLOAD_BYTES)))).filter((f) => FONT_NAME.test(f.name) && f.name !== '.' && f.name !== '..');
     } catch (e) {
       if (!(e instanceof NotFoundOnTosho)) this.log(`fansub pick: font pack of file ${file.id}: ${e instanceof Error ? e.message : String(e)}`);
     }

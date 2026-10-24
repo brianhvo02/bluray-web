@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Pacer, RateLimited } from '../titles/pacer';
+import { TooLargeArchive } from './archive';
 import { NotFoundOnTosho, createTosho } from './tosho';
 
 const BASES = { feed: 'https://feed.example', site: 'https://animetosho.net' };
@@ -69,6 +70,20 @@ describe('Anime Tosho', () => {
     expect([...(await ok.download('https://s.example/a.xz'))]).toEqual([1, 2, 3]);
     const missing = make(async () => new Response('no', { status: 404 }));
     await expect(missing.download('https://s.example/a.xz')).rejects.toBeInstanceOf(NotFoundOnTosho);
+  });
+
+  it('refuses a download past its cap, by Content-Length or by the bytes that arrive', async () => {
+    let cancelled = false;
+    const declared = make(async () => new Response(new ReadableStream({ cancel: () => { cancelled = true; } }), { headers: { 'Content-Length': '11' } }));
+    await expect(declared.download('https://s.example/a.xz', undefined, 10)).rejects.toBeInstanceOf(TooLargeArchive);
+    expect(cancelled).toBe(true);
+    // an endless body with no Content-Length stops at the cap
+    let pulled = 0;
+    const streamed = make(async () => new Response(new ReadableStream({ pull: (c) => { pulled++; c.enqueue(new Uint8Array(6)); } })));
+    await expect(streamed.download('https://s.example/a.xz', undefined, 10)).rejects.toBeInstanceOf(TooLargeArchive);
+    expect(pulled).toBeLessThan(5);
+    const fits = make(async () => new Response(new Uint8Array(10)));
+    expect((await fits.download('https://s.example/a.xz', undefined, 10)).length).toBe(10);
   });
 
   it('429 throws RateLimited with retryAfterMs 3000', async () => {
