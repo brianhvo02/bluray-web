@@ -12,6 +12,7 @@ import type { LevelService } from './levels/level-service';
 import type { Library } from './library';
 import { adminRoutes, bearerToken } from './routes/admin';
 import { bdjStoreRoutes } from './routes/bdj-store';
+import type { DiscActivity } from './disc-activity';
 import { discRoutes } from './routes/discs';
 import { libraryRoute } from './routes/library';
 import { pairRoutes } from './routes/pair';
@@ -49,6 +50,8 @@ export interface AppOptions {
   levels?: LevelService;
   /** The parsed ISO trees, shared with the quality levels' disc sources. */
   isoTrees?: IsoTrees;
+  /** Told of every disc file read, so background work can wait while someone watches. */
+  activity?: DiscActivity;
 }
 
 /** Answers 401 to any request without a valid token (`t=` query or `Authorization: Bearer`); lets the rest through. */
@@ -74,6 +77,6 @@ export function appHandlers(opts: AppOptions): Handler[] {
     }),
     libraryRoute(opts.library),
     ...(opts.titles ? [titleRoutes(auth, opts.titles, opts.relay, opts.nasId ?? null, opts.levels !== undefined)] : []),
-    discRoutes(opts.library, opts.levels && { service: opts.levels, auth }, opts.isoTrees),
+    discRoutes(opts.library, opts.levels && { service: opts.levels, auth }, opts.isoTrees, opts.activity),
   ];
 }

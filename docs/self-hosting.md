@@ -50,6 +50,9 @@ Edit `.env`. Empty values mean unset.
 | `DISCOGS_TOKEN` | Adds Discogs to music lookups (MusicBrainz otherwise). |
 | `LOOKUP_CONTACT` | An email address or URL named in the User-Agent of music lookups, as MusicBrainz asks. Printable ASCII only. |
 | `LEVELS_BACKEND` | `qsv` (Quick Sync, needs `compose.gpu.yaml`) or `off`. `x264` exists for development and CI. The server's own default, if unset, is `qsv`; `.env.example` sets `off`. A failed encoder self-test at start also leaves Original only. |
+| `FANSUB_WINDOW_END` | `HH:MM` (default `08:00`), the local time the overnight fansub run stops. |
+| `FANSUB_STORE_BYTES`, `FANSUB_CACHE_BYTES` | Byte budgets of the stored fansub subtitles (default 20 GB) and of the download cache (default 5 GB). |
+| `SEADEX_URL`, `TOSHO_FEED_URL`, `TOSHO_URL` | Where SeaDex and Anime Tosho are reached; `https` only (defaults `https://seadex.moe`, `https://feed.animetosho.net`, `https://animetosho.net`). |
 | `RENDER_GID` | Group id of the render node on the host, for `compose.gpu.yaml` (`stat -c %g /dev/dri/renderD128`, default 993). |
 | `BLURAY_IMAGE` | Image, default `ghcr.io/brianhvo02/bluray-server:latest`. Pin a tag (a short commit hash) for a fixed version. |
 

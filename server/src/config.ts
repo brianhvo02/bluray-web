@@ -35,6 +35,23 @@ export interface Config {
   rtc: RtcConfig;
   /** The quality levels' encoder (spec §6 of the lower-quality spec). */
   levels: LevelsConfig;
+  /** Fansubs from SeaDex and Anime Tosho (spec 2026-10-23-fansubs-design). */
+  fansubs: FansubsConfig;
+}
+
+export interface FansubsConfig {
+  /** `SEADEX_URL`: the SeaDex site, `https://seadex.moe` by default. */
+  seadexUrl: string;
+  /** `TOSHO_FEED_URL`: Anime Tosho's JSON feed, `https://feed.animetosho.net` by default. */
+  toshoFeedUrl: string;
+  /** `TOSHO_URL`: Anime Tosho's site (font packs), `https://animetosho.net` by default. */
+  toshoUrl: string;
+  /** `FANSUB_WINDOW_END` (`HH:MM`, 08:00 by default): the overnight run stops here. */
+  windowEnd: { hour: number; minute: number };
+  /** `FANSUB_STORE_BYTES`: the fansub subtitles' byte budget, 20 GB by default. */
+  storeBytes: number;
+  /** `FANSUB_CACHE_BYTES`: the download cache's byte budget, 5 GB by default. */
+  cacheBytes: number;
 }
 
 export interface LevelsConfig {
@@ -84,7 +101,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   for (const { group } of roots) {
     if (group !== undefined && seen.has(group)) throw new Error(`LIBRARY_ROOTS group "${group}" is also a root name`);
   }
-  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), appUrl: parseAppUrl(env.APP_URL), lookupContact: parseContact(env.LOOKUP_CONTACT), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, discogsToken: env.DISCOGS_TOKEN?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env) };
+  return { roots, dataDir: env.DATA_DIR ?? '/data', port: parsePort(env.PORT), nightlyScanAt: parseTime(env.NIGHTLY_SCAN_AT), scanPauseMs: parsePause(env.SCAN_PAUSE_MS), publicBase: parseBase(env.PUBLIC_BASE), appUrl: parseAppUrl(env.APP_URL), lookupContact: parseContact(env.LOOKUP_CONTACT), trustedProxy: parseProxy(env.TRUSTED_PROXY), rendezvousUrl: parseRendezvous(env.RENDEZVOUS_URL), tmdbApiKey: env.TMDB_API_KEY?.trim() || null, discogsToken: env.DISCOGS_TOKEN?.trim() || null, titleLibrary: parseTitleLibrary(env.TITLE_LIBRARY), rtc: parseRtc(env), levels: parseLevels(env), fansubs: parseFansubs(env) };
 }
 
 function parseRtc(env: Record<string, string | undefined>): RtcConfig {
@@ -121,6 +138,41 @@ function parseLevels(env: Record<string, string | undefined>): LevelsConfig {
     cacheBytes = Number(cache);
   }
   return { backend, cacheBytes, ffmpegPath: env.FFMPEG_PATH || 'ffmpeg', ffprobePath: env.FFPROBE_PATH || 'ffprobe' };
+}
+
+function parseBytes(env: Record<string, string | undefined>, name: string, fallback: number): number {
+  const value = env[name];
+  if (value === undefined || value === '') return fallback;
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error(`${name} "${value}" is not a number of bytes`);
+  return Number(value);
+}
+
+/** An https base, or http only for the loopback stand-in of the tests. */
+function secureBase(env: Record<string, string | undefined>, name: string, fallback: string): string {
+  const value = env[name] === undefined || env[name] === '' ? fallback : env[name]!;
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    url = undefined;
+  }
+  const loopback = url !== undefined && url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
+  if (!url || (url.protocol !== 'https:' && !loopback)) throw new Error(`${name} "${value}" is not an https URL`);
+  return value.replace(/\/+$/, '');
+}
+
+function parseFansubs(env: Record<string, string | undefined>): FansubsConfig {
+  const end = env.FANSUB_WINDOW_END === undefined || env.FANSUB_WINDOW_END === '' ? '08:00' : env.FANSUB_WINDOW_END;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(end);
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) throw new Error(`FANSUB_WINDOW_END "${end}" is not HH:MM`);
+  return {
+    seadexUrl: secureBase(env, 'SEADEX_URL', 'https://seadex.moe'),
+    toshoFeedUrl: secureBase(env, 'TOSHO_FEED_URL', 'https://feed.animetosho.net'),
+    toshoUrl: secureBase(env, 'TOSHO_URL', 'https://animetosho.net'),
+    windowEnd: { hour: Number(m[1]), minute: Number(m[2]) },
+    storeBytes: parseBytes(env, 'FANSUB_STORE_BYTES', 20_000_000_000),
+    cacheBytes: parseBytes(env, 'FANSUB_CACHE_BYTES', 5_000_000_000),
+  };
 }
 
 function parsePort(value: string | undefined): number {

@@ -183,6 +183,28 @@ export interface StoredSubtitle {
 /** How SeaDex rates a release: its best pick, a web release, or any other. */
 export type SeaDexRank = 'best' | 'web' | 'other';
 
+/** One line of a season's summary: the group that fits best and the groups whose tracks were used. */
+export interface FansubSeasonLine {
+  readonly bestGroup: string | null;
+  readonly usedGroups: readonly { readonly group: string; readonly rank: SeaDexRank }[];
+}
+
+/** What the fansub run found for one episode. */
+export interface FansubEpisodeMark {
+  readonly status: 'attached' | 'not-found';
+  readonly reason?: 'no-release' | 'no-tracks' | 'service-unavailable' | 'too-large';
+}
+
+/** The fansub run's state for one title; `seasons` is keyed by season id, `episodes` by `"<seasonId>#<episode>"`. */
+export interface FansubTitleState {
+  readonly titleId: string;
+  readonly lastRunAt: number | null;
+  readonly running: boolean;
+  readonly nothingFound: boolean;
+  readonly seasons: Readonly<Record<string, FansubSeasonLine>>;
+  readonly episodes: Readonly<Record<string, FansubEpisodeMark>>;
+}
+
 /** How a fansub's timing was lined up with the disc's audio. */
 export type FansubAlignment =
   | { readonly kind: 'offset'; readonly offsetMs: number; readonly confidence: number }

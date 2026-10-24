@@ -13,6 +13,7 @@ import { createServer } from './http';
 import { IsoTrees } from './iso';
 import { Library } from './library';
 import { buildManifest } from './manifest';
+import { DiscActivity } from './disc-activity';
 import { discRoutes } from './routes/discs';
 
 const FIXTURES = join(import.meta.dirname, '../../fixtures/synthetic');
@@ -134,6 +135,25 @@ describe('disc routes', () => {
       expect(get).toHaveBeenCalled();
     } finally {
       await new Promise((r) => shared.close(r));
+    }
+  });
+
+  it('tells the activity of every file range read, folder and ISO, but not of a manifest', async () => {
+    const activity = new DiscActivity();
+    const note = vi.spyOn(activity, 'note');
+    const watched = createServer([discRoutes(library, undefined, undefined, activity)]);
+    await new Promise<void>((r) => watched.listen(0, r));
+    const at = `http://127.0.0.1:${(watched.address() as AddressInfo).port}/api/discs`;
+    try {
+      await (await fetch(`${at}/${ids.menu}/manifest`)).arrayBuffer();
+      expect(note).not.toHaveBeenCalled();
+      await (await fetch(`${at}/${ids.menu}/files/BDMV/STREAM/00001.M2TS`, { headers: { Range: 'bytes=0-191' } })).arrayBuffer();
+      expect(note).toHaveBeenCalledTimes(1);
+      await (await fetch(`${at}/${ids['disc.iso']}/files/BDMV/STREAM/00001.M2TS`, { headers: { Range: 'bytes=0-191' } })).arrayBuffer();
+      expect(note).toHaveBeenCalledTimes(2);
+      expect(activity.busy()).toBe(true);
+    } finally {
+      await new Promise((r) => watched.close(r));
     }
   });
 

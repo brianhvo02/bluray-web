@@ -5,6 +5,7 @@ import type { Readable } from 'node:stream';
 import { parseDiscKey } from '../../../src/engine/disc/disc-key';
 import type { DiscEntry } from '../../../src/engine/disc/nas-api';
 import type { Auth } from '../auth';
+import type { DiscActivity } from '../disc-activity';
 import { json, requestSignal } from '../http';
 import type { Handler, Response } from '../http';
 import { IsoTrees, isoFileStream, isoUnchanged } from '../iso';
@@ -88,8 +89,9 @@ export const ISO_TREES = 32;
  * `GET|HEAD /api/discs/<id>/probe` (the first 4 MiB of the largest clip); `appHandlers` puts the token guard in front.
  * With `levels`, also the quality levels (`levelRoute`) and `DELETE /api/discs/<id>/viewing`; without, those are 404.
  * `level=original`, or no level, is the original disc. `isoTrees` is shared with the quality levels' disc sources.
+ * `activity` is told of every file read (original or level, folder or ISO), for work that waits while someone watches.
  */
-export function discRoutes(library: Library, levels?: DiscLevels, isoTrees: IsoTrees = new IsoTrees(ISO_TREES)): Handler {
+export function discRoutes(library: Library, levels?: DiscLevels, isoTrees: IsoTrees = new IsoTrees(ISO_TREES), activity?: DiscActivity): Handler {
 
   /** The same three actions for an ISO disc, from its UDF tree (parsed once per disc id). */
   const isoRoute = async (req: IncomingMessage, disc: DiscEntry, action: string, encodedPath: string | undefined): Promise<Response> => {
@@ -155,6 +157,7 @@ export function discRoutes(library: Library, levels?: DiscLevels, isoTrees: IsoT
       return levels ? release(levels, req, url, id) : notFound();
     }
     if (!(req.method === 'GET' || (read && req.method === 'HEAD'))) return null;
+    if (action === 'files') activity?.note();
     const level = url.searchParams.get('level');
     // `level=original`, an empty `level=` or none: the original disc.
     const atLevel = action === 'levels' || ((action === 'manifest' || action === 'files') && level !== null && level !== '' && level !== 'original');
