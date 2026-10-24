@@ -60,8 +60,21 @@ describe('episodeMark', () => {
   it('none is red', () => {
     expect(episodeMark([sub({ kind: 'none', reason: 'no-speech' })], undefined, false)).toEqual({ text: "couldn't line up · set by hand", tone: 'bad' });
   });
-  it('original timing is ok', () => {
-    expect(episodeMark([sub({ kind: 'original' })], undefined, false)).toEqual({ text: 'original timing', tone: 'ok' });
+  it('original timing has no mark, but a mixed episode marks on its other tracks', () => {
+    expect(episodeMark([sub({ kind: 'original' })], undefined, false)).toBeNull();
+    expect(episodeMark([sub({ kind: 'original' }), sub({ kind: 'offset', offsetMs: 1234, confidence: 1 })], undefined, false)?.text).toBe('lined up · +1.2 s');
+  });
+  it('original timing with missing fonts still says no fonts', () => {
+    expect(episodeMark([sub({ kind: 'original' }, { fontsMissing: true })], undefined, false)).toEqual({ text: 'no fonts', tone: 'warn' });
+  });
+  it('the worst track decides', () => {
+    const ok = sub({ kind: 'offset', offsetMs: 0, confidence: 1 });
+    const fonts = sub({ kind: 'offset', offsetMs: 0, confidence: 1 }, { fontsMissing: true });
+    const split = sub({ kind: 'split', parts: [{ fromMs: 0, offsetMs: 0 }, { fromMs: 60_000, offsetMs: 500 }], confidence: 1 });
+    const none = sub({ kind: 'none', reason: 'low-confidence' });
+    expect(episodeMark([ok, fonts], undefined, false)?.text).toBe('no fonts');
+    expect(episodeMark([ok, fonts, split], undefined, false)?.text).toBe('split at 1:00 · check');
+    expect(episodeMark([split, none, ok], undefined, false)?.text).toBe("couldn't line up · set by hand");
   });
   it('missing fonts warn', () => {
     expect(episodeMark([sub({ kind: 'offset', offsetMs: 0, confidence: 1 }, { fontsMissing: true })], undefined, false)).toEqual({ text: 'no fonts', tone: 'warn' });

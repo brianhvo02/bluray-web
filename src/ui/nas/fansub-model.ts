@@ -37,7 +37,7 @@ const clock = (ms: number): string => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
 
-function trackMark(s: StoredSubtitle): { text: string; tone: MarkTone; rank: number } {
+function trackMark(s: StoredSubtitle): { text: string; tone: MarkTone; rank: number } | null {
   const a = s.source!.alignment;
   if (a.kind === 'none') return { text: "couldn't line up · set by hand", tone: 'bad', rank: 3 };
   if (a.kind === 'split') {
@@ -45,7 +45,7 @@ function trackMark(s: StoredSubtitle): { text: string; tone: MarkTone; rank: num
     return { text: `split at ${clock(first?.fromMs ?? 0)} · check`, tone: 'warn', rank: 2 };
   }
   if (s.fontsMissing === true) return { text: 'no fonts', tone: 'warn', rank: 1 };
-  if (a.kind === 'original') return { text: 'original timing', tone: 'ok', rank: 0 };
+  if (a.kind === 'original') return null; // the release's own timing says nothing worth a mark
   if (Math.abs(a.offsetMs) < NEGLIGIBLE_OFFSET_MS) return { text: 'lined up', tone: 'ok', rank: 0 };
   const sign = a.offsetMs < 0 ? '−' : '+';
   return { text: `lined up · ${sign}${(Math.abs(a.offsetMs) / 1000).toFixed(1)} s`, tone: 'ok', rank: 0 };
@@ -56,7 +56,9 @@ export function episodeMark(subs: readonly StoredSubtitle[], mark: FansubEpisode
   const fansubs = subs.filter((s) => s.source !== undefined);
   if (fansubs.length === 0) return mark?.status === 'not-found' ? { text: 'not found', tone: 'bad' } : null;
   if (stale) return { text: 'lined up on another disc', tone: 'warn' };
-  const worst = fansubs.map(trackMark).reduce((a, b) => (b.rank > a.rank ? b : a));
+  const marks = fansubs.map(trackMark).filter((m) => m !== null);
+  if (marks.length === 0) return null;
+  const worst = marks.reduce((a, b) => (b.rank > a.rank ? b : a));
   return { text: worst.text, tone: worst.tone };
 }
 
