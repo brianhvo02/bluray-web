@@ -2301,6 +2301,84 @@ test('owner finds fansubs for a season', async ({ page, browserName }) => {
   });
 });
 
+/** Moves the seek bar to `us` (as a drag would). */
+async function seekTo(page: Page, us: number): Promise<void> {
+  await page.getByTestId('seek').evaluate((el, value) => {
+    const input = el as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, String(value));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, us);
+}
+
+test('a guest searches Anime Tosho from the player', async ({ page, browser, browserName }) => {
+  await libraryReady();
+  await skipWithoutH264(page, { realtime: false });
+  const minted = await ownerApi('admin/codes', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPerson: { name: `Tosho Guest ${browserName}`, owner: false }, invite: true }),
+  });
+  expect(minted.status).toBe(200);
+  const { code, personId } = (await minted.json()) as { code: string; personId: string };
+  // the guest's browser is this project's (a phone's screen and touch, when the project is one)
+  const { viewport, screen, hasTouch, isMobile, deviceScaleFactor, userAgent } = test.info().project.use;
+  const guestContext = await browser.newContext({ viewport, screen, hasTouch, isMobile, deviceScaleFactor, userAgent });
+  try {
+    const guest = await guestContext.newPage();
+    await allowLocalNetwork(guest, browserName);
+    await guest.goto('/?telemetry=1');
+    await guest.getByTestId('pair-code').fill(code);
+    await guest.getByTestId('pair-button').click();
+    await expect(guest.getByTestId('nas-paired')).toBeVisible({ timeout: 25_000 });
+    await withStarfallSubtitles(() =>
+      exclusivelyAsync('gate', async () => {
+        try {
+          await setGate('everyone');
+          await guest.getByTestId('nas-open').click();
+          await expect(guest.getByTestId('title-library')).toBeVisible({ timeout: 15_000 });
+          await openEpisode1(guest);
+          await guest.getByTestId('nas-play').click();
+          await waitForPlaying(guest);
+          await guest.getByTestId('play-toggle').click();
+          await expect(playerState(guest)).toHaveAttribute('data-state', 'paused');
+          await guest.getByTestId('subtitle-menu').click();
+          // nothing is attached to the episode: the search is the way to subtitles
+          await expect(guest.getByTestId('subtitle-stored-none')).toHaveText('Nothing for this episode');
+          await guest.getByTestId('subtitle-tosho').click();
+          await expect(guest.getByTestId('tosho-query')).toHaveValue('Starfall Wanderer');
+          const first = guest.locator('[data-testid^="tosho-release-"]').first();
+          await expect(first).toContainText('[GroupA] Starfall Wanderer (BD 1080p)', { timeout: 15_000 });
+          await expect(first).toContainText('SeaDex best');
+          await first.click();
+          const full = guest.getByTestId('tosho-track-7101-0');
+          await expect(full).toHaveText('English · Full', { timeout: 15_000 });
+          await full.click();
+          await expect(full).toHaveAttribute('aria-checked', 'true', { timeout: 90_000 });
+          await guest.keyboard.press('Escape');
+          await expect(guest.getByTestId('tosho-query')).toHaveCount(0);
+          // within the first line (0.2–1.9 s), through 0 so the sample is a fresh one
+          for (const us of [0, 1_000_000]) {
+            await seekTo(guest, us);
+            await expect.poll(async () => (await telemetry(guest))?.clockUs ?? -1, { timeout: 5_000, intervals: [50] }).toBe(us);
+          }
+          await expect
+            .poll(async () => {
+              const t = (await telemetry(guest)) as { textCue?: boolean; ass?: { events: number } | null } | null;
+              return t?.textCue === true && (t.ass?.events ?? 0) > 0;
+            }, { timeout: 10_000 })
+            .toBe(true);
+          await guest.getByTestId('subtitle-menu').click();
+          await expect(guest.getByTestId('subtitle-text')).toHaveAttribute('aria-checked', 'true');
+        } finally {
+          await setGate('owners');
+        }
+      }),
+    );
+  } finally {
+    await guestContext.close();
+    await ownerApi(`admin/people/${encodeURIComponent(personId)}`, { method: 'DELETE' });
+  }
+});
+
 test('a stored subtitle and my offset come back when I resume', async ({ page, browserName }) => {
   const api = await openTitlesAsResumePerson(page, browserName);
   await skipWithoutH264(page);
