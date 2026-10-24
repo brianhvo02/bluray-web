@@ -7,6 +7,12 @@ const JUMP_US = 2_000_000;
 /** A seek-triggered write waits for this floor (Safari refuses about 100 history changes in 30 s); a trailing write lands the final position. */
 const JUMP_FLOOR_MS = 1000;
 
+/** What the launch knew of the disc: its name, and the catalogue title it was opened from (null: a folder or a link). */
+export interface PlayingAbout {
+  readonly discName: string;
+  readonly title: { readonly id: string; readonly name: string } | null;
+}
+
 export interface PlayingState {
   readonly currentPlaylistId: string | null;
   readonly timeUs: number;
@@ -20,6 +26,7 @@ export interface PlayingState {
  */
 export class PlayingRoute {
   private key: string | null = null;
+  private aboutNow: PlayingAbout | null = null;
   private lastReplaceMs = -Infinity;
   private lastWriteMs = -Infinity;
   private trailing: ReturnType<typeof setTimeout> | null = null;
@@ -35,8 +42,14 @@ export class PlayingRoute {
     return this.key;
   }
 
-  start(discKey: string): void {
+  /** The playing disc's name and title, as its launch gave them (for the player's Anime Tosho search); null when stopped. */
+  get about(): PlayingAbout | null {
+    return this.aboutNow;
+  }
+
+  start(discKey: string, about: PlayingAbout | null = null): void {
     this.key = discKey;
+    this.aboutNow = about;
     this.lastReplaceMs = -Infinity;
     this.lastWriteMs = -Infinity;
     this.last = null;
@@ -89,6 +102,7 @@ export class PlayingRoute {
 
   stop(): void {
     this.key = null;
+    this.aboutNow = null;
     this.last = null;
     this.clearTrailing();
   }

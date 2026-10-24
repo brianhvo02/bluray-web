@@ -235,7 +235,8 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
   const [detailError, setDetailError] = useState<string | null>(null);
   /** An owner's title that answered 404 (its last disc filed differently): its screens are left, back to the library. */
   const [gone, setGone] = useState<string | null>(null);
-  const [selected, setSelected] = useState<{ disc: PreflightDisc; playlistId?: string } | null>(null);
+  /** The disc whose pre-flight is open, at an episode's playlist, with the title it was opened from. */
+  const [selected, setSelected] = useState<{ disc: PreflightDisc; playlistId?: string; title?: { id: string; name: string } } | null>(null);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   /** The indexed list's order: A–Z by the displayed name, or gojūon by reading; the alphabet bar last used sets it. */
   const [order, setOrder] = useState<'en' | 'ja'>('en');
@@ -427,7 +428,10 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
   const closeSeason = (): void => {
     if (openId !== null) history.back({ kind: 'title', titleId: openId });
   };
-  const openDisc = (disc: PreflightDisc, playlistId?: string): void => setSelected(playlistId === undefined ? { disc } : { disc, playlistId });
+  const openDisc = (disc: PreflightDisc, playlistId?: string): void => {
+    const title = loaded !== null && loaded.id === openId ? { id: loaded.id, name: displayName(loaded.detail.title) } : undefined;
+    setSelected({ disc, ...(playlistId === undefined ? {} : { playlistId }), ...(title ? { title } : {}) });
+  };
   const openArtist = (id: string): void => history.push({ kind: 'artist', artistId: id });
   const artistGone = useCallback(() => history.back(MUSIC_SHELF), [history]);
   /**
@@ -441,7 +445,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
       (d) => {
         if (history.route() === null || nasRoutePath(history.route()!) !== from) return;
         const copies = [...d.seasons.flatMap((s) => [...s.discs, ...s.extras]), ...d.extras].flatMap((slot) => slot.copies);
-        if (copies.length === 1) setSelected({ disc: preflightDisc(copies[0]!) });
+        if (copies.length === 1) setSelected({ disc: preflightDisc(copies[0]!), title: { id: t.id, name: displayName(t) } });
         else openTitle(t.id);
       },
       () => openTitle(t.id),
@@ -480,6 +484,7 @@ export function TitleLibrary({ nas, controller, history, playingRoute, places, o
           controller={controller}
           disc={selected.disc}
           playlistId={selected.playlistId}
+          title={selected.title}
           history={history}
           playingRoute={playingRoute}
           places={places}

@@ -9,6 +9,7 @@ import { QualityMenu } from './QualityMenu';
 import { ShaderMenu } from './ShaderMenu';
 import type { ShaderModel, ShaderModelState } from './shader-model';
 import { SubtitleMenu, type StoredSubtitles } from './SubtitleMenu';
+import type { ToshoSearch } from './ToshoSearch';
 import { formatTime } from './format';
 
 const MASKED_TOOLTIP = "The disc doesn't allow this here";
@@ -122,11 +123,13 @@ interface ControlBarProps {
   onSubtitleFiles?(files: readonly File[]): void;
   /** A NAS disc's stored subtitles for the playing playlist, for the Subtitles menu; absent for other discs. */
   readonly storedSubtitles?: StoredSubtitles | null;
+  /** A NAS disc's Anime Tosho search, in the Subtitles menu. */
+  readonly toshoSearch?: ToshoSearch | null;
   /** A NAS disc's quality level: the Quality menu, and the Audio menu's original tracks at a re-encoded level. */
   readonly quality?: { readonly state: LevelState; onPick(level: LevelId): void; readonly audio: LevelAudio | null } | null;
 }
 
-export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange, onSubtitleFiles, storedSubtitles = null, quality = null }: ControlBarProps): ReactElement {
+export function ControlBar({ controller, snapshot, shaderModel, shaderState, visible, onOpenPlaylists, onFullscreen, onMenuKey, remoteOpen, onToggleRemote, onMenuOpenChange, onSubtitleFiles, storedSubtitles = null, toshoSearch = null, quality = null }: ControlBarProps): ReactElement {
   const playing = snapshot.engineState === 'playing' || snapshot.engineState === 'buffering';
   const silent = snapshot.muted || snapshot.volume === 0;
   const masked = (op: UoOp): boolean => snapshot.uoMask.includes(op);
@@ -190,6 +193,7 @@ export function ControlBar({ controller, snapshot, shaderModel, shaderState, vis
           nowUs={snapshot.timeUs}
           showingFile={snapshot.telemetry?.textFile ?? null}
           stored={storedSubtitles}
+          search={toshoSearch}
           onSelect={(choice) => controller.selectSubtitle(choice)}
           onLoadFiles={(files) => {
             void controller.loadSubtitleFiles(files);

@@ -29,6 +29,8 @@ interface PreflightProps {
   readonly disc: PreflightDisc;
   /** An episode's playlist: the disc opens playing it (StartPoint), without running First Play. */
   readonly playlistId?: string;
+  /** The catalogue title it is opened from, which the player's Anime Tosho search starts with; absent from a folder or a link. */
+  readonly title?: { readonly id: string; readonly name: string };
   /** A play link's time in the playlist, where it starts (from the beginning past its end, ignored without a playlist). */
   readonly startTimeS?: number;
   /** From a Continue watching card: the place resumes without the question (Resume is the one way on). */
@@ -72,7 +74,7 @@ const ASK_EVERY_WAIT = new URLSearchParams(globalThis.location?.search ?? '').ge
  * connection is slower than the main title (buffer first), Play buffers ahead first: silently for a short wait, else
  * after asking (Wait, or Play now with pauses); a device that can't hold the wait offers pauses.
  */
-export function Preflight({ nas, controller, disc, playlistId, startTimeS, resume = false, history, playingRoute, places, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
+export function Preflight({ nas, controller, disc, playlistId, title, startTimeS, resume = false, history, playingRoute, places, onLaunch, onFacts, onCancel }: PreflightProps): ReactElement {
   const route = useNasRoute(history);
   const [manifest, setManifest] = useState<DiscManifest | null>(null);
   /** The disc's link key, from its manifest: `f.<fingerprint>`, else `d.<disc id>`. */
@@ -329,7 +331,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
     const pushRoute = !onPlayRoute;
     const from = history.route();
     const fromPath = from ? nasRoutePath(from) : null;
-    if (!pushRoute) playingRoute.start(discKey);
+    if (!pushRoute) playingRoute.start(discKey, { discName: disc.name, title: title ?? null });
     const id = ++launch.current;
     Promise.all([nas.discBase(disc.id), nas.session(), nas.pairing()]).then(
       async ([base, session, pairing]) => {
@@ -354,7 +356,7 @@ export function Preflight({ nas, controller, disc, playlistId, startTimeS, resum
         if (pushRoute) {
           // The play route, pushed from a title or folder (so Back returns there) once the disc opens: a refusal before
           // (the NAS busy, a failed request) leaves the address bar where the viewer was. A link is already on it.
-          playingRoute.start(discKey);
+          playingRoute.start(discKey, { discName: disc.name, title: title ?? null });
           onLaunch?.();
           history.push({ kind: 'play', discKey, playlistId: start?.playlistId ?? null, timeS: null, resume: false });
         }

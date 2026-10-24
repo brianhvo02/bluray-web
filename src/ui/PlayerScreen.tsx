@@ -21,9 +21,11 @@ import { classifyTap, controlsMayIdle, controlsShown, DOUBLE_TAP_MS, idleAfterTa
 import { PlaylistPicker } from './PlaylistPicker';
 import { RemotePad } from './RemotePad';
 import type { MenuKey } from '../engine/protocol';
-import type { LevelId, StoredSubtitle } from '../engine/disc/nas-api';
+import type { FansubPick, FansubPickRequest, LevelId, StoredSubtitle } from '../engine/disc/nas-api';
 import { replacesTextSet, StoredSubtitlePicker } from './nas/stored-subtitle-pick';
 import { forPlaylist, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
+import { defaultQuery, type ToshoTrack } from './nas/tosho-search-model';
+import type { ToshoSearch } from './ToshoSearch';
 
 const HIDE_CONTROLS_MS = 3000;
 const OFFSET_NOTICE_MS = 2000;
@@ -201,6 +203,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
       storedPicker?.supersede();
       launchSettings.supersede();
       setStoredActive(null);
+      setFansubActive(null);
     }
     places.addTextFiles(files).catch((err: unknown) => console.warn('keeping the subtitle files failed', err));
   };
@@ -210,9 +213,12 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   const discOpens = controller.discOpens;
   const [stored, setStored] = useState<{ readonly discKey: string; readonly items: readonly StoredSubtitle[] } | null>(null);
   const [storedActive, setStoredActive] = useState<string | null>(null);
+  /** The viewer's Anime Tosho pick placed last (its file, and the file and track it is), checked in the search's tracks. */
+  const [fansubActive, setFansubActive] = useState<{ readonly fileName: string; readonly fileId: number; readonly track: number } | null>(null);
   useEffect(() => {
     setStored(null);
     setStoredActive(null);
+    setFansubActive(null);
     if (!nas || nasDiscKey === null) return;
     let live = true;
     nas.subtitlesForDisc(nasDiscKey, { timeoutMs: STORED_LIST_TIMEOUT_MS }).then(
@@ -229,7 +235,19 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   /** A stored subtitle picked from the menu (or for Up next): checked once placed. */
   const pickStoredWith = (picker: StoredSubtitlePicker, s: StoredSubtitle): Promise<boolean> =>
     picker.pick(s).then((placed) => {
-      if (placed) setStoredActive(s.id);
+      if (placed) {
+        setStoredActive(s.id);
+        setFansubActive(null);
+      }
+      return placed;
+    });
+  /** An Anime Tosho track lined up and loaded as the viewer's own pick (the search, or Up next): checked once placed. */
+  const pickFansubWith = (picker: StoredSubtitlePicker, req: FansubPickRequest, releaseId: number): Promise<FansubPick | null> =>
+    picker.pickFansub(req, releaseId).then((placed) => {
+      if (placed) {
+        setFansubActive({ fileName: placed.fileName, fileId: req.fileId, track: req.track });
+        setStoredActive(null);
+      }
       return placed;
     });
   /** The menu's pick: it replaces any files still being re-added for a resume. */
@@ -246,8 +264,17 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
         selectShader: (name) => {
           if (name === null || shaderStateRef.current.sets.some((set) => set.name === name && set.available)) void shaderModel.select(name);
         },
-        ...(nas && storedPicker ? { nas, pickStored: (s: StoredSubtitle) => pickStoredWith(storedPicker, s) } : {}),
-        onStoredSubtitle: setStoredActive,
+        ...(nas && storedPicker
+          ? { nas, pickStored: (s: StoredSubtitle) => pickStoredWith(storedPicker, s), pickFansub: (req: FansubPickRequest, releaseId: number) => pickFansubWith(storedPicker, req, releaseId) }
+          : {}),
+        onStoredSubtitle: (id: string) => {
+          setStoredActive(id);
+          setFansubActive(null);
+        },
+        onFansubPick: (pick, fansub) => {
+          setFansubActive({ fileName: pick.fileName, fileId: fansub.fileId, track: fansub.track });
+          setStoredActive(null);
+        },
         log: (message, err) => console.warn(message, err),
       }),
   );
@@ -256,6 +283,24 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
   // checked while its file is still the text set's (Remove takes it away)
   const storedActiveId = storedHere?.find((s) => s.id === storedActive && snapshot.subtitles?.text?.files.some((f) => f.name === s.fileName))?.id ?? null;
   const storedSubtitles = storedHere ? { items: storedHere, activeId: storedActiveId, onPick: pickStored } : null;
+  // A NAS disc's Anime Tosho search (spec §9), for the playlist playing: its box starts with the catalogue title's name
+  // when the disc was opened from it (this person sees titles), else the disc's name.
+  const about = playingRoute.about;
+  const fansubHere = fansubActive && snapshot.subtitles?.text?.files.some((f) => f.name === fansubActive.fileName) ? fansubActive : null;
+  const toshoSearch: ToshoSearch | null =
+    nas && storedPicker && nasDiscKey !== null && currentPlaylistId !== null
+      ? {
+          query: defaultQuery(about?.title?.name ?? null, about?.discName ?? ''),
+          search: (q) => nas.searchTosho(q, about?.title?.id),
+          release: (id) => nas.toshoRelease(id, nasDiscKey, currentPlaylistId),
+          pick: (releaseId: number, fileId: number, t: ToshoTrack) => {
+            // the search's pick replaces any files still being re-added for a resume
+            launchSettings.supersede();
+            return pickFansubWith(storedPicker, { fileId, track: t.track, discKey: nasDiscKey, playlistId: currentPlaylistId }, releaseId).then((p) => p !== null);
+          },
+          active: fansubHere,
+        }
+      : null;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -728,6 +773,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
         onMenuOpenChange={setMenuOpen}
         onSubtitleFiles={rememberSubtitleFiles}
         storedSubtitles={storedSubtitles}
+        toshoSearch={toshoSearch}
         quality={quality}
       />
     </div>
