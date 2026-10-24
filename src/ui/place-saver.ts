@@ -1,4 +1,4 @@
-import type { DiscPlaces, PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
+import type { DiscPlaces, PlaceFansub, PlaceSettings, PlaybackPlace } from '../engine/disc/nas-api';
 import type { PlaceState } from '../engine/protocol';
 import { isFontName, pickedSubtitles, splitPick } from '../player/drop-files';
 import type { PlayerSnapshot } from '../player/player-controller';
@@ -143,7 +143,7 @@ export class PlaceSaver {
   private drainAgain = false;
   /** Byte sizes of the text files added to this disc, by name (the engine's snapshot has none). */
   private sizes: Record<string, number> = {};
-  /** The NAS subtitle in the text set, by its file name (a stored pick replaces the set, so there is at most one). */
+  /** The NAS subtitle (stored or a viewer's pick) in the text set, by its file name (a pick replaces the set, so there is at most one). */
   private readonly stored = new Map<string, StoredSubtitleNote>();
   /** `pairingKey` of the NAS pairing as last read (null: none; undefined: not read yet), for a send that can't wait. */
   private pairingNow: string | null | undefined = undefined;
@@ -199,6 +199,13 @@ export class PlaceSaver {
     if (!this.target) return; // no disc is being saved
     this.stored.clear();
     this.stored.set(fileName, { id, size, language });
+  }
+
+  /** A viewer's own Anime Tosho pick became the text set (picked, or picked again on a resume or for Up next). */
+  noteFansubPick(fileName: string, fansub: PlaceFansub, size: number, language: string): void {
+    if (!this.target) return;
+    this.stored.clear();
+    this.stored.set(fileName, { fansub, size, language });
   }
 
   /** The stored subtitle noted for the text set, by file name. */

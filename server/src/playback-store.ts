@@ -21,9 +21,18 @@ const strOrNull = (v: unknown): v is string | null => v === null || typeof v ===
 
 const optionalString = (v: unknown, max: number): boolean => v === undefined || (typeof v === 'string' && v.length >= 1 && v.length <= max);
 
-/** A text file of a place; a stored subtitle's also carries its id (1–64 chars) and language (a BCP 47 tag, 1–35). */
+const index = (v: unknown): boolean => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+
+/** A viewer's Anime Tosho pick in a place: its release, file and track, and the track's name (at most 256 chars). */
+const optionalFansub = (v: unknown): boolean => v === undefined
+  || (isObject(v) && index(v.releaseId) && index(v.fileId) && index(v.track) && typeof v.trackName === 'string' && v.trackName.length <= 256);
+
+/**
+ * A text file of a place; a stored subtitle's also carries its id (1–64 chars) and language (a BCP 47 tag, 1–35), and a
+ * viewer's Anime Tosho pick its language and `fansub`.
+ */
 const isTextFile = (f: unknown): boolean => isObject(f) && typeof f.name === 'string' && f.name.length <= 512 && num(f.size) && (f.startUs === null || num(f.startUs)) && num(f.offsetMs)
-  && optionalString(f.subtitleId, 64) && optionalString(f.language, 35);
+  && optionalString(f.subtitleId, 64) && optionalString(f.language, 35) && optionalFansub(f.fansub);
 
 function isSettings(v: unknown): v is PlaceSettings {
   return isObject(v) && strOrNull(v.audioLanguage) && strOrNull(v.pgLanguage) && Array.isArray(v.textFiles) && v.textFiles.length <= 64 && v.textFiles.every(isTextFile) && num(v.psr1) && num(v.psr2) && num(v.psr3) && typeof v.textOn === 'boolean'

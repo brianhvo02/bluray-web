@@ -518,6 +518,19 @@ describe('PlaceSaver', () => {
     ]);
   });
 
+  it("saves a viewer's Anime Tosho pick with its release, file and track, never as a stored subtitle", async () => {
+    const t = setup();
+    t.saver.noteStoredSubtitle('ep1.ass', 'sub-1', 120, 'en');
+    // a pick replaces the set, and so the stored subtitle's note
+    t.saver.noteFansubPick('pick.ass', { releaseId: 7001, fileId: 7101, track: 0, trackName: 'Full' }, 90, 'eng');
+    const files: TextFileInfo[] = [{ name: 'pick.ass', format: 'ass', cues: 1, startUs: 0, offsetMs: 200 }];
+    t.show({ subtitles: { pg: [], text: { files, missingFonts: [], episodeStarts: [] }, selected: 'text', scale: 1 } });
+    await settle();
+    expect(t.nas.sent.at(-1)!.place.settings.textFiles).toEqual([
+      { name: 'pick.ass', size: 90, startUs: 0, offsetMs: 200, language: 'eng', fansub: { releaseId: 7001, fileId: 7101, track: 0, trackName: 'Full' } },
+    ]);
+  });
+
   it('keeps the stored subtitle and sizes in the save a close starts, though the disc ends before it is written', async () => {
     const t = setup();
     await t.saver.addTextFiles([new File(['abc'], 'mine.srt')]);

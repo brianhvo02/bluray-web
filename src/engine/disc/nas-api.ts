@@ -120,9 +120,11 @@ export interface PlaceTextFile {
   readonly name: string; readonly size: number; readonly startUs: number | null; readonly offsetMs: number;
   /** A subtitle stored on the NAS (piece 3): its id, fetched again on a resume, and its language, which Up next carries. */
   readonly subtitleId?: string; readonly language?: string;
-  /** A viewer's own Anime Tosho pick: fetched again from the NAS's picks on a resume. */
-  readonly fansub?: { readonly fileId: number; readonly track: number };
+  /** A viewer's own Anime Tosho pick: picked again from the NAS on a resume (its release listed first), carried by track name to Up next. */
+  readonly fansub?: PlaceFansub;
 }
+/** The Anime Tosho release, file and track of a viewer's own pick. */
+export interface PlaceFansub { readonly releaseId: number; readonly fileId: number; readonly track: number; readonly trackName: string }
 export interface PlaceSettings { readonly audioLanguage: string | null; readonly pgLanguage: string | null; readonly textFiles: readonly PlaceTextFile[]; readonly psr1: number; readonly psr2: number; readonly psr3: number; readonly textOn: boolean; readonly textScale: number; readonly shaderSet: string | null; readonly volume: number; readonly muted: boolean }
 /** Where one person stopped in one playlist of a disc (spec: resume). `finished` places stay for Up next, and go first when the store is full. */
 export interface PlaybackPlace {

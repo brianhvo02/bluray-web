@@ -113,4 +113,14 @@ describe('isPlaybackPlace', () => {
     expect(isPlaybackPlace(withFile({ subtitleId: 's1', language: 'x'.repeat(36) }))).toBe(false);
     expect(isPlaybackPlace(withFile({ subtitleId: 's1', language: null }))).toBe(false);
   });
+  it("takes a viewer's Anime Tosho pick and refuses a malformed one", () => {
+    const fansub = { releaseId: 7001, fileId: 7101, track: 0, trackName: 'Full' };
+    expect(isPlaybackPlace(withFile({ language: 'eng', fansub }))).toBe(true);
+    expect(isPlaybackPlace(withFile({ fansub: { ...fansub, trackName: '' } }))).toBe(true);
+    expect(isPlaybackPlace(withFile({ fansub: { ...fansub, fileId: -1 } }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ fansub: { ...fansub, track: 0.5 } }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ fansub: { fileId: 7101, track: 0, trackName: 'Full' } }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ fansub: { ...fansub, trackName: 'x'.repeat(257) } }))).toBe(false);
+    expect(isPlaybackPlace(withFile({ fansub: null }))).toBe(false);
+  });
 });
