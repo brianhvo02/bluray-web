@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { setPriority } from 'node:os';
 import type { Readable } from 'node:stream';
 import { findEpAfter, findEpBefore, parseClpi, stcSpnRange, type Clpi } from '../../../src/engine/bdmv/clpi-parser';
 import { parseMpls, type PlayItem } from '../../../src/engine/bdmv/mpls-parser';
@@ -6,6 +7,7 @@ import { CodingType } from '../../../src/engine/bdmv/stream-types';
 import { PesAssembler, readTimestamp } from '../../../src/engine/demux/pes-assembler';
 import { parseSourcePacket } from '../../../src/engine/demux/ts-packet';
 import type { LevelDiscSource } from '../levels/level-discs';
+import { Semaphore } from './semaphore';
 
 const SOURCE_PACKET = 192;
 const SAMPLES_PER_MS = 16;
@@ -17,6 +19,10 @@ const MAX_UNCOVERED_MS = 2000;
 const PTS_WRAP = 2 ** 33;
 /** How far outside a window the byte range reaches, in 45 kHz ticks: audio is muxed a little before or after its video. */
 const MARGIN_45 = 22_500;
+/** The nice value of an alignment's ffmpeg, as of the levels' software decode: the NAS's other services come first. */
+const ALIGN_NICE = 10;
+/** The alignments' ffmpeg runs, shared by the title runs, re-alignments and viewers' picks: two at a time. */
+export const ALIGN_FFMPEG = new Semaphore(2);
 
 /** 16 kHz mono PCM of one stretch of a playlist; `startMs` is the playlist time of `pcm[0]`. */
 export interface AudioWindow {
@@ -133,6 +139,13 @@ async function decodeRange(read: Readable, audio: { pid: number; coding: number 
     '-hide_banner', '-nostdin', '-loglevel', 'error', ...input, '-i', 'pipe:0', ...map,
     '-ac', '1', '-ar', String(SAMPLE_RATE_OUT), '-f', 's16le', 'pipe:1',
   ], { stdio: ['pipe', 'pipe', 'pipe'] });
+  if (ff.pid !== undefined) {
+    try {
+      setPriority(ff.pid, ALIGN_NICE);
+    } catch {
+      // the priority stays as it is where the NAS doesn't allow lowering it
+    }
+  }
   const out: Buffer[] = [];
   const tail: string[] = [];
   let pending = '';
@@ -262,7 +275,7 @@ export async function episodeAudio(
       const last = map && findEpAfter(map, to45 + MARGIN_45, range);
       const fromByte = (first?.spn ?? (Number.isFinite(range.startSpn) ? range.startSpn : 0)) * SOURCE_PACKET;
       const toByte = (last?.spn ?? Math.min(range.endSpn, clpi.numSourcePackets)) * SOURCE_PACKET;
-      const decoded = await decodeRange(clip.read(fromByte, toByte), { pid: audio.pid, coding: audio.codingType }, ffmpegPath, signal);
+      const decoded = await ALIGN_FFMPEG.run(() => decodeRange(clip.read(fromByte, toByte), { pid: audio.pid, coding: audio.codingType }, ffmpegPath, signal), signal);
       // PTS of the first sample, as playlist time (33-bit wrap folded into the nearest side of the play item's in-time).
       let delta = (decoded.firstPts - item.inTime * 2) % PTS_WRAP;
       if (delta > PTS_WRAP / 2) delta -= PTS_WRAP;

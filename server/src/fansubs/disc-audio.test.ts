@@ -3,10 +3,16 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { SPEECH_BURSTS } from '../../../tests/helpers/speech-bursts';
 import { folderDiscSource, type LevelDiscSource } from '../levels/level-discs';
-import { episodeAudio, windowsFor, type AudioWindow } from './disc-audio';
+import { ALIGN_FFMPEG, episodeAudio, windowsFor, type AudioWindow } from './disc-audio';
+
+const priorities = vi.hoisted(() => [] as [number, number][]);
+vi.mock('node:os', async (importOriginal) => {
+  const os = await importOriginal<typeof import('node:os')>();
+  return { ...os, setPriority: (pid: number, nice: number) => { priorities.push([pid, nice]); } };
+});
 
 const hasAc3 = spawnSync('ffmpeg', ['-hide_banner', '-decoders'], { encoding: 'utf8' }).stdout?.includes(' ac3 ') ?? false;
 /** CI installs ffmpeg: there, a missing AC-3 decoder fails these tests instead of skipping them. */
@@ -53,6 +59,22 @@ function bestShiftMs(w: AudioWindow): number {
 }
 
 describe.skipIf(!runFfmpegTests)('episodeAudio', () => {
+  it('waits for one of the two alignment slots, and runs ffmpeg at nice 10', async () => {
+    const releases: (() => void)[] = [];
+    const held = [0, 1].map(() => ALIGN_FFMPEG.run(() => new Promise<void>((r) => { releases.push(r); })));
+    priorities.length = 0;
+    const work = episodeAudio(disc, '00000', [{ fromMs: 20_000, toMs: 25_000 }], 'ffmpeg');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(ALIGN_FFMPEG.queued).toBe(1);
+    expect(priorities).toEqual([]);
+    releases[0]!();
+    const [w] = await work;
+    expect(w.pcm.length).toBe(5_000 * 16);
+    expect(priorities).toEqual([[expect.any(Number), 10]]);
+    releases[1]!();
+    await Promise.all(held);
+  });
+
   it("a window's loud samples sit on the bursts", async () => {
     const [w] = await episodeAudio(disc, '00000', [{ fromMs: 20_000, toMs: 50_000 }], 'ffmpeg');
     expect(w.startMs).toBe(20_000);
