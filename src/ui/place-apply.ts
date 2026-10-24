@@ -6,7 +6,7 @@ import { settingsForUpNext } from './place-model';
 import type { PlaceSaver } from './place-saver';
 import type { StoredTextFile } from './place-store';
 import { NasHttpError, type NasClient } from './nas/nas-client';
-import { PICK_FAILED } from './nas/tosho-search-model';
+import { PICK_FAILED, sameTrack, type FansubOrigin } from './nas/tosho-search-model';
 import { forPlaylist, sameLanguage, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
 
 const PG_DISPLAY_FLAG = 0x80000000;
@@ -40,7 +40,7 @@ export interface LaunchSettingsDeps {
   /** Picks a stored subtitle as the Subtitles menu does (StoredSubtitlePicker.pick), for Up next; true once placed. */
   readonly pickStored?: (s: StoredSubtitle) => Promise<boolean>;
   /** Picks an Anime Tosho track as the search does (StoredSubtitlePicker.pickFansub), for Up next; the pick once placed. */
-  readonly pickFansub?: (req: FansubPickRequest, releaseId: number) => Promise<FansubPick | null>;
+  readonly pickFansub?: (req: FansubPickRequest, origin: FansubOrigin) => Promise<FansubPick | null>;
   /** A resumed stored subtitle is in the text set again (the menu checks its row). */
   readonly onStoredSubtitle?: (id: string) => void;
   /** A resumed Anime Tosho pick is in the text set again (the search checks its track). */
@@ -152,18 +152,22 @@ export class LaunchSettingsApplier {
     const opens = controller.discOpens;
     const gen = this.generation;
     let req: FansubPickRequest | null = null;
+    let trackName = '';
     if (nas && pickFansub) {
       try {
         const listed = await within(nas.toshoRelease(fansub.releaseId, discKey, playlistId), STORED_FETCH_TIMEOUT_MS);
         const file = listed.files.find((f) => f.id === listed.matchedFileId);
-        const track = file?.tracks.find((t) => t.name === fansub.trackName);
-        if (file && track) req = { fileId: file.id, track: track.track, discKey, playlistId };
+        const track = file?.tracks.find((t) => sameTrack(t, fansub.trackName));
+        if (file && track) {
+          req = { fileId: file.id, track: track.track, discKey, playlistId };
+          trackName = track.name;
+        }
       } catch (err) {
         this.deps.log?.('listing the Anime Tosho release failed', err);
       }
     }
     if (controller.discOpens !== opens || this.generation !== gen) return;
-    if (req) void pickFansub!(req, fansub.releaseId);
+    if (req) void pickFansub!(req, { releaseId: fansub.releaseId, trackName });
     else await this.pickNext(discKey, playlistId, language, pg);
   }
 

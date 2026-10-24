@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FansubPick, FansubPickRequest, PlaceFansub, StoredSubtitle } from '../../engine/disc/nas-api';
 import { NasHttpError } from './nas-client';
-import { PICK_FAILED } from './tosho-search-model';
+import { EPISODE_CHANGED, PICK_FAILED } from './tosho-search-model';
 import type { SubtitleChoice, TextFileInfo } from '../../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../../player/player-controller';
 import { replacesTextSet, STORED_PICK_FAILED, StoredSubtitlePicker } from './stored-subtitle-pick';
@@ -229,7 +229,7 @@ describe('StoredSubtitlePicker waits', () => {
 describe("StoredSubtitlePicker with a viewer's Anime Tosho pick", () => {
   it('lines the track up on the NAS, loads it and notes the release, file and track for the place', async () => {
     const t = setup();
-    const done = t.picker.pickFansub(pickRequest, 7001);
+    const done = t.picker.pickFansub(pickRequest, { releaseId: 7001, trackName: 'Full' });
     await settle();
     expect(t.calls).toEqual([['pickFansub', 7101, 0], ['fetch', 'pick-1'], ['load', ['pick.ass']]]);
     t.engineLists(file('pick.ass'));
@@ -237,22 +237,49 @@ describe("StoredSubtitlePicker with a viewer's Anime Tosho pick", () => {
     expect(t.calls.slice(3)).toEqual([['start', 0, 0], ['select', { kind: 'text' }], ['noteFansub', 'pick.ass', { releaseId: 7001, fileId: 7101, track: 0, trackName: 'Full' }, 90, 'eng']]);
   });
 
+  it("notes the track's listed name, clipped to what the NAS takes, never the NAS's fallback name", async () => {
+    for (const trackName of ['', 'x'.repeat(300)]) {
+      const t = setup();
+      const done = t.picker.pickFansub(pickRequest, { releaseId: 7001, trackName });
+      await settle();
+      t.engineLists(file('pick.ass'));
+      await done;
+      expect(t.calls.find((c) => c[0] === 'noteFansub')?.[2]).toEqual({ releaseId: 7001, fileId: 7101, track: 0, trackName: trackName.slice(0, 256) });
+    }
+  });
+
+  it('says the episode changed when another playlist plays before or while the pick lines up', async () => {
+    const before = setup();
+    before.show({ currentPlaylistId: '00002' });
+    expect(await before.picker.pickFansub(pickRequest, { releaseId: 7001, trackName: 'Full' })).toBeNull();
+    expect(before.calls).toEqual([['notice', 'fansub-pick', EPISODE_CHANGED]]);
+
+    let release!: () => void;
+    const during = setup({ pickGate: new Promise((r) => (release = r)) });
+    const done = during.picker.pickFansub(pickRequest, { releaseId: 7001, trackName: 'Full' });
+    await settle();
+    during.show({ currentPlaylistId: '00002' });
+    release();
+    expect(await done).toBeNull();
+    expect(during.calls).toEqual([['pickFansub', 7101, 0], ['notice', 'fansub-pick', EPISODE_CHANGED]]);
+  });
+
   it("says Anime Tosho's subtitles couldn't be loaded when the NAS refuses the pick, and loads nothing", async () => {
     const t = setup({ pickFails: new NasHttpError(429, 'too-many') });
-    expect(await t.picker.pickFansub(pickRequest, 7001)).toBeNull();
+    expect(await t.picker.pickFansub(pickRequest, { releaseId: 7001, trackName: 'Full' })).toBeNull();
     expect(t.calls).toEqual([['pickFansub', 7101, 0], ['notice', 'fansub-pick', PICK_FAILED]]);
   });
 
   it('says so too when the lined-up file fails to download', async () => {
     const t = setup({ fetchFails: true });
-    expect(await t.picker.pickFansub(pickRequest, 7001)).toBeNull();
+    expect(await t.picker.pickFansub(pickRequest, { releaseId: 7001, trackName: 'Full' })).toBeNull();
     expect(t.calls).toEqual([['pickFansub', 7101, 0], ['fetch', 'pick-1'], ['notice', 'fansub-pick', PICK_FAILED]]);
   });
 
   it('a newer pick while the NAS lines an older one up abandons the older one', async () => {
     let release!: () => void;
     const t = setup({ pickGate: new Promise((r) => (release = r)) });
-    const older = t.picker.pickFansub(pickRequest, 7001);
+    const older = t.picker.pickFansub(pickRequest, { releaseId: 7001, trackName: 'Full' });
     await settle();
     t.picker.supersede();
     release();

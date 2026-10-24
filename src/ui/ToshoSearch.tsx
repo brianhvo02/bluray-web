@@ -21,7 +21,7 @@ type Step =
   /** `viaFiles`: Back goes to the release's files (no file matched the episode), else to the search. */
   | { readonly kind: 'tracks'; readonly listed: ToshoReleaseFiles; readonly file: ToshoFile; readonly viaFiles: boolean };
 
-type Results = { readonly kind: 'loading' } | { readonly kind: 'failed' } | { readonly kind: 'done'; readonly items: readonly ToshoSearchResult[] };
+type Results = { readonly kind: 'idle' } | { readonly kind: 'loading' } | { readonly kind: 'failed' } | { readonly kind: 'done'; readonly items: readonly ToshoSearchResult[] };
 
 /** The release's group, as its title's leading bracket names it (else the whole title), for the Back rows. */
 const shortName = (r: ToshoSearchResult): string => /^\s*\[([^\]]+)\]/.exec(r.title)?.[1] ?? r.title;
@@ -34,7 +34,8 @@ const shortName = (r: ToshoSearchResult): string => /^\s*\[([^\]]+)\]/.exec(r.ti
 export function ToshoSearchView({ search, onExit }: { readonly search: ToshoSearch; onExit(): void }): ReactElement {
   const [step, setStep] = useState<Step>({ kind: 'query' });
   const [query, setQuery] = useState(search.query);
-  const [results, setResults] = useState<Results>({ kind: 'loading' });
+  // nothing to search with (no title or disc name): the empty box waits for words
+  const [results, setResults] = useState<Results>(search.query.trim() === '' ? { kind: 'idle' } : { kind: 'loading' });
   const [opening, setOpening] = useState<number | null>(null);
   const [openFailed, setOpenFailed] = useState(false);
   const [liningUp, setLiningUp] = useState<string | null>(null);
@@ -54,8 +55,11 @@ export function ToshoSearchView({ search, onExit }: { readonly search: ToshoSear
 
   const run = (q: string): void => {
     const words = q.trim();
-    if (words === '') return;
     const n = ++asked.current;
+    if (words === '') {
+      setResults({ kind: 'idle' });
+      return;
+    }
     setResults({ kind: 'loading' });
     search.search(words).then(
       (items) => {
@@ -102,6 +106,8 @@ export function ToshoSearchView({ search, onExit }: { readonly search: ToshoSear
   };
 
   const pick = (listed: ToshoReleaseFiles, file: ToshoFile, t: ToshoTrack): void => {
+    // one pick at a time; the rows stay enabled so the focus stays on the one picked
+    if (liningUp !== null) return;
     const key = `${file.id}-${t.track}`;
     setLiningUp(key);
     void search.pick(listed.release.id, file.id, t).finally(() => {
@@ -154,7 +160,7 @@ export function ToshoSearchView({ search, onExit }: { readonly search: ToshoSear
                 role="menuitemradio"
                 aria-checked={search.active?.fileId === file.id && search.active.track === t.track}
                 data-testid={`tosho-track-${key}`}
-                disabled={liningUp !== null}
+                aria-busy={liningUp === key}
                 onClick={() => pick(listed, file, t)}
               >
                 {trackLabel(t)}

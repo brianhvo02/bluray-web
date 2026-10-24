@@ -24,7 +24,7 @@ import type { MenuKey } from '../engine/protocol';
 import type { FansubPick, FansubPickRequest, LevelId, StoredSubtitle } from '../engine/disc/nas-api';
 import { replacesTextSet, StoredSubtitlePicker } from './nas/stored-subtitle-pick';
 import { forPlaylist, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
-import { defaultQuery, type ToshoTrack } from './nas/tosho-search-model';
+import { defaultQuery, type FansubOrigin, type ToshoTrack } from './nas/tosho-search-model';
 import type { ToshoSearch } from './ToshoSearch';
 
 const HIDE_CONTROLS_MS = 3000;
@@ -242,8 +242,8 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
       return placed;
     });
   /** An Anime Tosho track lined up and loaded as the viewer's own pick (the search, or Up next): checked once placed. */
-  const pickFansubWith = (picker: StoredSubtitlePicker, req: FansubPickRequest, releaseId: number): Promise<FansubPick | null> =>
-    picker.pickFansub(req, releaseId).then((placed) => {
+  const pickFansubWith = (picker: StoredSubtitlePicker, req: FansubPickRequest, origin: FansubOrigin): Promise<FansubPick | null> =>
+    picker.pickFansub(req, origin).then((placed) => {
       if (placed) {
         setFansubActive({ fileName: placed.fileName, fileId: req.fileId, track: req.track });
         setStoredActive(null);
@@ -265,7 +265,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
           if (name === null || shaderStateRef.current.sets.some((set) => set.name === name && set.available)) void shaderModel.select(name);
         },
         ...(nas && storedPicker
-          ? { nas, pickStored: (s: StoredSubtitle) => pickStoredWith(storedPicker, s), pickFansub: (req: FansubPickRequest, releaseId: number) => pickFansubWith(storedPicker, req, releaseId) }
+          ? { nas, pickStored: (s: StoredSubtitle) => pickStoredWith(storedPicker, s), pickFansub: (req: FansubPickRequest, origin: FansubOrigin) => pickFansubWith(storedPicker, req, origin) }
           : {}),
         onStoredSubtitle: (id: string) => {
           setStoredActive(id);
@@ -296,7 +296,7 @@ export function PlayerScreen({ controller, snapshot, shaderModel, shaderState, n
           pick: (releaseId: number, fileId: number, t: ToshoTrack) => {
             // the search's pick replaces any files still being re-added for a resume
             launchSettings.supersede();
-            return pickFansubWith(storedPicker, { fileId, track: t.track, discKey: nasDiscKey, playlistId: currentPlaylistId }, releaseId).then((p) => p !== null);
+            return pickFansubWith(storedPicker, { fileId, track: t.track, discKey: nasDiscKey, playlistId: currentPlaylistId }, { releaseId, trackName: t.name }).then((p) => p !== null);
           },
           active: fansubHere,
         }

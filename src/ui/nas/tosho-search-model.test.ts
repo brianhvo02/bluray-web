@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ToshoSearchResult } from '../../engine/disc/nas-api';
-import { defaultQuery, fileLabel, releaseDate, releaseLabel, sortTracks, trackLabel } from './tosho-search-model';
+import { defaultQuery, fileLabel, placeTrackName, releaseDate, releaseLabel, sameTrack, sortTracks, trackLabel } from './tosho-search-model';
 
 const release = (seadex: ToshoSearchResult['seadex']): ToshoSearchResult => ({ id: 1, title: '[GroupA] Starfall Wanderer (BD 1080p)', date: 1_700_000_000, seadex });
 
@@ -34,6 +34,14 @@ describe('tosho search model', () => {
     expect(trackLabel({ track: 0, language: '', name: 'Full' })).toBe('Full');
     expect(fileLabel({ id: 1, name: 'a.mkv', episode: 5, tracks: [] })).toBe('Episode 5');
     expect(fileLabel({ id: 1, name: 'a.mkv', episode: null, tracks: [] })).toBe('a.mkv');
+  });
+
+  it("keeps a track's listed name for a place, clipped to what the NAS takes, and finds the track again by it", () => {
+    expect(placeTrackName('Full')).toBe('Full');
+    expect(placeTrackName('x'.repeat(300))).toBe('x'.repeat(256));
+    expect(sameTrack({ track: 3, language: 'eng', name: '' }, '')).toBe(true);
+    expect(sameTrack({ track: 3, language: 'eng', name: 'x'.repeat(300) }, 'x'.repeat(256))).toBe(true);
+    expect(sameTrack({ track: 3, language: 'eng', name: 'Signs' }, 'Full')).toBe(false);
   });
 
   it("searches by the title's name, else the disc's name without its tags", () => {

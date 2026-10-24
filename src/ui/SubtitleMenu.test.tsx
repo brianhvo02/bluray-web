@@ -114,6 +114,32 @@ describe('SubtitleMenu: Search Anime Tosho', () => {
     expect(document.activeElement).toBe(screen.getByTestId('tosho-release-7001'));
   });
 
+  it('waits with an empty box when there are no words to search with', async () => {
+    const { search } = menu({ query: '' });
+    fireEvent.click(screen.getByTestId('subtitle-tosho'));
+    expect((screen.getByTestId('tosho-query') as HTMLInputElement).value).toBe('');
+    expect(screen.queryByTestId('tosho-message')).toBeNull();
+    expect(search!.search).not.toHaveBeenCalled();
+  });
+
+  it('keeps the focus on the picked track while it lines up, and takes no second pick meanwhile', async () => {
+    let finish!: (placed: boolean) => void;
+    const pick = vi.fn(() => new Promise<boolean>((r) => (finish = r)));
+    menu({ pick });
+    fireEvent.click(screen.getByTestId('subtitle-tosho'));
+    fireEvent.click(await screen.findByTestId('tosho-release-7001'));
+    const full = await screen.findByTestId('tosho-track-7101-0');
+    full.focus();
+    fireEvent.click(full);
+    expect(document.activeElement).toBe(full);
+    expect(full.getAttribute('aria-busy')).toBe('true');
+    fireEvent.click(screen.getByTestId('tosho-track-7101-1'));
+    expect(pick).toHaveBeenCalledTimes(1);
+    finish(true);
+    await waitFor(() => expect(screen.queryByTestId('tosho-status')).toBeNull());
+    expect(document.activeElement).toBe(full);
+  });
+
   it("says so when Anime Tosho can't be reached", async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     menu({ search: vi.fn(async () => { throw new Error('offline'); }) });

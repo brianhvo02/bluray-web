@@ -5,6 +5,14 @@ import { languageName } from '../../player/language';
 export const PICK_FAILED = "Couldn't load the subtitles from Anime Tosho.";
 /** The tracks step says this while the NAS fetches and lines up a pick. */
 export const LINING_UP = 'Lining up…';
+/** Another playlist plays than the one the search listed for: the pick isn't lined up on it. */
+export const EPISODE_CHANGED = 'This episode changed; search again.';
+
+/** The longest track name a place keeps (server/src/playback-store.ts refuses longer). */
+export const MAX_TRACK_NAME = 256;
+
+/** The release a pick was listed from and its track's name as `toshoRelease` lists it, kept in the place. */
+export interface FansubOrigin { readonly releaseId: number; readonly trackName: string }
 
 export type ToshoFile = ToshoReleaseFiles['files'][number];
 export type ToshoTrack = ToshoFile['tracks'][number];
@@ -36,6 +44,19 @@ const isEnglish = (language: string): boolean => {
 export function sortTracks<T extends Pick<ToshoTrack, 'track' | 'language'>>(tracks: readonly T[]): T[] {
   const name = (t: T): string => languageName(t.language) || t.language;
   return [...tracks].sort((a, b) => Number(isEnglish(b.language)) - Number(isEnglish(a.language)) || name(a).localeCompare(name(b)) || a.track - b.track);
+}
+
+/**
+ * A track's name as a place keeps it: the name `toshoRelease` lists (empty for an unnamed track, never the NAS's
+ * language fallback), clipped to MAX_TRACK_NAME, so Up next finds the track again with `sameTrack`.
+ */
+export function placeTrackName(name: string): string {
+  return name.slice(0, MAX_TRACK_NAME);
+}
+
+/** Whether a listed track is the one a place names (`placeTrackName` on both sides). */
+export function sameTrack(t: ToshoTrack, trackName: string): boolean {
+  return placeTrackName(t.name) === trackName;
 }
 
 /** "English · Full"; the language or the name alone when the other is missing. */

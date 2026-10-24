@@ -99,8 +99,8 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
       calls.push(['pick', sub.id]);
       return true;
     },
-    pickFansub: async (req, releaseId) => {
-      calls.push(['pickNextFansub', req.fileId, req.track, releaseId]);
+    pickFansub: async (req, origin) => {
+      calls.push(['pickNextFansub', req.fileId, req.track, origin.releaseId, origin.trackName]);
       return null;
     },
     onFansubPick: (pick) => void calls.push(['activeFansub', pick.id]),
@@ -451,8 +451,18 @@ describe("LaunchSettingsApplier with a viewer's Anime Tosho pick", () => {
     });
     t.show({ engineState: 'playing', currentPlaylistId: '00002' });
     await settle();
-    expect(t.calls.filter((c) => c[0] === 'release' || c[0] === 'pickNextFansub')).toEqual([['release', 7001, KEY, '00002'], ['pickNextFansub', 8, 1, 7001]]);
+    expect(t.calls.filter((c) => c[0] === 'release' || c[0] === 'pickNextFansub')).toEqual([['release', 7001, KEY, '00002'], ['pickNextFansub', 8, 1, 7001, 'Full']]);
     expect(t.calls.filter((c) => c[0] === 'subtitle' || c[0] === 'pick')).toEqual([]);
+  });
+
+  it('Up next carries a pick of an unnamed track to the unnamed track of the same language', async () => {
+    const unnamed = { ...picked, fansub: { ...fansub, trackName: '' } };
+    const t = setup({ settings: { ...base, textFiles: [unnamed], textOn: true }, byLanguage: true }, [], {
+      nasList: [], release: nextRelease([{ track: 0, language: 'eng', name: 'Signs' }, { track: 2, language: 'eng', name: '' }]),
+    });
+    t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pickNextFansub')).toEqual([['pickNextFansub', 8, 2, 7001, '']]);
   });
 
   it('Up next with no track of that name carries as before: a stored subtitle in its language, else PG', async () => {
