@@ -47,6 +47,7 @@ export class Library {
   private byId = new Map<string, DiscEntry>();
   /** Evidence of the installed discs, by id. */
   private evidenceById = new Map<string, DiscEvidence>();
+  private evidenceList: { readonly from: ReadonlyMap<string, DiscEvidence>; readonly list: readonly DiscEvidence[] } | null = null;
   /** During a scan: the evidence it started with, and what it has gathered so far. */
   private previousEvidence = new Map<string, DiscEvidence>();
   private nextEvidence = new Map<string, DiscEvidence>();
@@ -130,9 +131,10 @@ export class Library {
     return this.roots.map((r) => (r.group === group ? r.name : r.group === undefined ? `${r.name}/${group}` : null)).filter((b): b is string => b !== null);
   }
 
-  /** The evidence of every listed disc whose evidence has been read. */
+  /** The evidence of every listed disc whose evidence has been read: the same list until a scan installs new evidence. */
   evidence(): readonly DiscEvidence[] {
-    return [...this.evidenceById.values()];
+    if (this.evidenceList?.from !== this.evidenceById) this.evidenceList = { from: this.evidenceById, list: [...this.evidenceById.values()] };
+    return this.evidenceList.list;
   }
 
   /** Calls `listener` after every completed scan. */

@@ -247,6 +247,17 @@ describe('Library evidence', () => {
     expect(lib.list('mediaA')!.discs.every((d) => !('evidence' in d))).toBe(true);
   });
 
+  it('hands out the same evidence list until a scan installs new evidence', async () => {
+    const lib = new Library(roots(), join(tmp, 'library.json'), FAST);
+    await lib.scan();
+    const first = lib.evidence();
+    expect(lib.evidence()).toBe(first);
+    rmSync(join(tmp, 'a/disc.iso'));
+    await lib.scan();
+    expect(lib.evidence()).not.toBe(first);
+    expect(lib.evidence().length).toBe(first.length - 1);
+  });
+
   it('caches evidence in library.json and does not read it again for an unchanged disc', async () => {
     const file = join(tmp, 'library.json');
     await new Library(roots(), file, FAST).scan();
