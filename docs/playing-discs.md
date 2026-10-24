@@ -40,7 +40,7 @@ You can load one file per episode and place each at where its episode starts. Wi
 
 ### Search Anime Tosho
 
-On a disc opened from the NAS, the Subtitles menu has **Search Anime Tosho…**. It starts from the title's name; pick a release, a file and a subtitle track, and the NAS fetches the track with its fonts and lines it up with the episode you are playing. The pick is yours alone: others don't see it. It comes back when you resume, and **Up next** carries it to the next episode by the track's name.
+On a disc opened from the NAS, the Subtitles menu has **Search Anime Tosho…**. It starts from the title's name; pick a release, a file and a subtitle track, and the NAS fetches the track with its fonts and lines it up with the episode you are playing. The pick is yours alone: others don't see it. It comes back when you resume, and **Up next** carries it to the next episode when the next episode's file in the same release has a track of the same name. Otherwise Up next falls back as it does for any subtitle from the NAS: a stored subtitle in the same language, else the disc's own.
 
 ## Video shaders (Anime4K)
 

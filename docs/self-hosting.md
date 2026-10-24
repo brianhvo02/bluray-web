@@ -57,7 +57,7 @@ Edit `.env`. Empty values mean unset.
 | `RENDER_GID` | Group id of the render node on the host, for `compose.gpu.yaml` (`stat -c %g /dev/dri/renderD128`, default 993). |
 | `BLURAY_IMAGE` | Image, default `ghcr.io/brianhvo02/bluray-server:latest`. Pin a tag (a short commit hash) for a fixed version. |
 
-The fansub search makes outbound requests to `seadex.moe` and `animetosho.net` (and its `feed.` host), one request every 2.5 seconds to each. Nothing else leaves the NAS for it.
+The fansub search makes outbound requests to `seadex.moe` and `animetosho.net`: its `feed.` host for the listings and `storage.animetosho.net` for the subtitle track and font pack downloads, one request every 2.5 seconds to each service. Nothing else leaves the NAS for it.
 
 Other server settings (`TRANSCODE_CACHE_BYTES`, 50 GB by default, `SCAN_PAUSE_MS`) can be added to `.env`; compose passes the whole file.
 

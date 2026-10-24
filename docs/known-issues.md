@@ -552,7 +552,7 @@ Fill in from `probe.html` on each device.
 - **Fansubs: alignment reads sampled stretches of the audio,** so a cut between two sampled stretches can be missed.
 - **Fansubs: with real fansub timing (lead-in and lead-out), split alignment rarely fires,** so an episode with a cut usually comes out "couldn't line up · set by hand".
 - **Fansubs: font packs are fetched through `animetosho.net/download/`,** which its robots.txt asks crawlers to avoid. The owner approved fetching each pack once, paced and cached.
-- **Fansubs: Anime Tosho skips most torrents over 25 GB and never mirrors private trackers,** so many of SeaDex's best Blu-ray batches have nothing there; the WEB fallback covers many.
+- **Fansubs: Anime Tosho skips most torrents over 25 GB and never mirrors private trackers,** so many of SeaDex's best Blu-ray batches have nothing there. When the best release isn't on Anime Tosho, the NAS falls back to the WEB release SeaDex lists for the title (the streaming-service release fansubbers often start from), then to SeaDex's other releases; the WEB release is usually there.
 - **Fansubs: both services are volunteer-run.** animetosho.org stopped in May 2026 and .net is its successor. The base URLs are settings (`SEADEX_URL`, `TOSHO_FEED_URL`, `TOSHO_URL`). *Revisit if* either moves again.
 - **Fansubs: resuming after the NAS dropped a viewer's Anime Tosho pick is bounded by 15 s,** while rebuilding it (fetch and line up) can take longer. The first resume may say it couldn't load the subtitle; the next works.
 - **Fansubs: the `mobile-chromium` Playwright project doesn't run `tests/e2e/nas.spec.ts`,** so the player search's phone layout was checked by hand once.

@@ -75,10 +75,10 @@ Owners upload from a season or movie screen. A file must be an `.srt`, `.ass` or
 The NAS can find fansub subtitles for your discs, as ranked by SeaDex (seadex.moe) and extracted by Anime Tosho (animetosho.net), line them up with your own disc's audio and attach them to the episodes for everyone paired. Owners only start it; viewers just pick the result in the **Subtitles** menu, in the **From the NAS** group.
 
 - On a season or movie screen an owner presses **Find fansubs** (**Find fansubs again** once it has run). The NAS works through the title's seasons, fetches the chosen release's subtitle tracks and fonts, and lines each episode up. It runs one title at a time.
-- Each episode row shows a mark for what was found: lined up, lined up by a rougher match, or **couldn't line up · set by hand**. The row itself plays. The **Fansubs for episode N** button beside it opens a panel with the episode's tracks: **Line up again**, **Use original timing** (the track as released, with no alignment) and a timing offset.
+- Each episode row shows a mark for what was found: **lined up** (with the shift it took, such as **lined up · +1.2 s**, when there was one), **split at m:ss · check** (the timing changes partway through, worth a look), **no fonts** (the release carried none, so the text shows in a default font), **couldn't line up · set by hand**, **lined up on another disc** (the episode now plays from a different disc than the one the track was lined up on), or **not found**. The row itself plays. The **Fansubs for episode N** button beside it opens a panel with the episode's tracks: **Line up again**, **Use original timing** (the track as released, with no alignment) and a timing offset.
 - Running again keeps your edits. Tracks you deleted stay deleted unless you answer yes to **Bring back the tracks you deleted?**.
 - A nightly pass does the same for titles with none yet. It only runs at night: it starts if the scan ends at 18:00 or later, or before `FANSUB_WINDOW_END` (08:00 by default), and stops at that time. It pauses while a disc is being read or a quality level is encoding. A title where nothing was found is tried again after 30 days; one that hit a service error, the next night.
-- **Languages** on the admin screen sets which subtitle languages are kept. English is always included.
+- **Fansub languages** on the admin screen sets which subtitle languages are kept. English is always included.
 
 Anime Tosho skips most torrents over 25 GB and never mirrors private trackers, so a title can come back with nothing.
 
