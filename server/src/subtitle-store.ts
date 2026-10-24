@@ -4,6 +4,7 @@ import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FansubSource, StoredSubtitle } from '../../src/engine/disc/nas-api';
 import { isCode, lockFile, replaceAtomically, syncDir, writeSynced } from './atomic-json';
+import { SubtitleIndex } from './subtitle-index';
 
 export const SUBTITLE_LIMIT_BYTES = 5 * 1024 * 1024;
 export const FONTS_LIMIT_BYTES = 50 * 1024 * 1024;
@@ -64,11 +65,37 @@ export class SubtitleStore {
   private readonly maxTotal: number;
   private readonly maxFansub: number;
   private readonly now: () => number;
+  private readonly index = new SubtitleIndex();
 
   constructor(private readonly dataDir: string, opts: { maxTotalBytes?: number; maxFansubBytes?: number; now?: () => number } = {}) {
     this.maxTotal = opts.maxTotalBytes ?? TOTAL_LIMIT_BYTES;
     this.maxFansub = opts.maxFansubBytes ?? FANSUB_LIMIT_BYTES;
     this.now = opts.now ?? Date.now;
+    this.load();
+  }
+
+  /** Reads every `meta.json` once (and each fansub's original's size, which the meta doesn't hold) into the index. */
+  private load(): void {
+    let names: string[];
+    try {
+      names = readdirSync(this.root());
+    } catch (err) {
+      if (isCode(err, 'ENOENT')) return;
+      throw err;
+    }
+    for (const name of names) {
+      const s = ID_RE.test(name) ? this.read(join(this.root(), name)) : null;
+      if (!s) continue;
+      let original = 0;
+      if (s.source && s.fileName) {
+        try {
+          original = statSync(join(this.root(), s.id, 'original', s.fileName)).size;
+        } catch (err) {
+          if (!isCode(err, 'ENOENT')) throw err;
+        }
+      }
+      this.index.set(s, original);
+    }
   }
 
   private root(): string {
@@ -105,27 +132,14 @@ export class SubtitleStore {
       const cur = this.read(dir);
       if (!cur) return null;
       const { next, result } = fn(cur);
-      if (next) replaceAtomically(file, JSON.stringify(next));
+      if (next) {
+        replaceAtomically(file, JSON.stringify(next));
+        this.index.set(next);
+      }
       return result;
     } finally {
       unlock();
     }
-  }
-
-  private all(): StoredSubtitle[] {
-    let names: string[];
-    try {
-      names = readdirSync(this.root());
-    } catch (err) {
-      if (isCode(err, 'ENOENT')) return [];
-      throw err;
-    }
-    const out: StoredSubtitle[] = [];
-    for (const name of names) {
-      const s = ID_RE.test(name) ? this.read(join(this.root(), name)) : null;
-      if (s) out.push(s);
-    }
-    return out;
   }
 
   create(meta: SubtitleMeta): StoredSubtitle {
@@ -134,18 +148,18 @@ export class SubtitleStore {
     const dir = join(this.root(), id);
     mkdirSync(dir, { recursive: true });
     replaceAtomically(join(dir, 'meta.json'), JSON.stringify(stored));
+    this.index.set(stored);
     return stored;
   }
 
   get(id: string): StoredSubtitle | null {
-    const dir = this.dir(id);
-    return dir === null ? null : this.read(dir);
+    return ID_RE.test(id) ? this.index.get(id) : null;
   }
 
   /** Uploads that have a file. Uploads that never got one are removed after an hour. */
   list(): StoredSubtitle[] {
     const out: StoredSubtitle[] = [];
-    for (const s of this.all()) {
+    for (const s of this.index.values()) {
       if (s.fileSize > 0) out.push(s);
       else if (this.now() - s.uploadedAt > STALE_UPLOAD_MS) this.delete(s.id);
     }
@@ -161,49 +175,20 @@ export class SubtitleStore {
 
   delete(id: string): boolean {
     const dir = this.dir(id);
-    if (dir === null) return false;
-    try {
-      statSync(dir);
-    } catch (err) {
-      if (isCode(err, 'ENOENT')) return false;
-      throw err;
+    if (dir === null || !existsSync(dir)) {
+      if (dir !== null) this.index.remove(id);
+      return false;
     }
-    const gone = this.read(dir);
+    const gone = this.index.remove(id);
     rmSync(dir, { recursive: true, force: true });
     syncDir(this.root());
-    const hashes = (gone?.fonts ?? []).flatMap((f) => (f.hash ? [f.hash] : []));
-    if (hashes.length > 0) {
-      const used = this.pooledHashes();
-      for (const h of hashes) if (!used.has(h)) rmSync(this.poolFile(h), { force: true });
-    }
+    const used = this.index.pooled();
+    for (const f of gone?.fonts ?? []) if (f.hash && !used.has(f.hash)) rmSync(this.poolFile(f.hash), { force: true });
     return true;
   }
 
   private poolFile(hash: string): string {
     return join(this.root(), '.fonts', hash);
-  }
-
-  /** The hashes of every pooled font some fansub still uses, with their sizes. */
-  private pooledHashes(): Map<string, number> {
-    const out = new Map<string, number>();
-    for (const s of this.all()) for (const f of s.fonts) if (f.hash) out.set(f.hash, f.size);
-    return out;
-  }
-
-  /** Bytes the fansubs hold: each one's file and original, and each pooled font once. */
-  private fansubBytes(): number {
-    let n = 0;
-    for (const s of this.all()) {
-      if (!s.source) continue;
-      n += s.fileSize;
-      try {
-        n += statSync(join(this.root(), s.id, 'original', s.fileName)).size;
-      } catch (err) {
-        if (!isCode(err, 'ENOENT')) throw err;
-      }
-    }
-    for (const size of this.pooledHashes().values()) n += size;
-    return n;
   }
 
   /**
@@ -213,38 +198,32 @@ export class SubtitleStore {
   fansubSwap(
     oldIds: readonly string[], files: readonly { data: Buffer; original: Buffer }[], fonts: readonly { data: Buffer }[],
   ): { room: number; keep: number; swap: number } {
-    const all = this.all();
-    const old = new Set(oldIds);
-    const usedByOthers = new Set<string>();
-    const usedByOld = new Map<string, number>();
-    const pooled = new Set<string>();
+    const usedByOld = new Map<string, { size: number; refs: number }>();
     let oldFiles = 0;
-    for (const s of all) {
-      if (!s.source) continue;
+    for (const id of new Set(oldIds)) {
+      const s = this.index.get(id);
+      if (!s?.source) continue;
+      oldFiles += s.fileSize + this.index.originalSize(id);
       for (const f of s.fonts) {
         if (!f.hash) continue;
-        pooled.add(f.hash);
-        if (old.has(s.id)) usedByOld.set(f.hash, f.size);
-        else usedByOthers.add(f.hash);
-      }
-      if (!old.has(s.id)) continue;
-      oldFiles += s.fileSize;
-      try {
-        oldFiles += statSync(join(this.root(), s.id, 'original', s.fileName)).size;
-      } catch (err) {
-        if (!isCode(err, 'ENOENT')) throw err;
+        const u = usedByOld.get(f.hash) ?? { size: f.size, refs: 0 };
+        u.refs++;
+        usedByOld.set(f.hash, u);
       }
     }
+    // A pooled font is used by others when more fansubs reference it than the old ones do.
+    const pooled = this.index.pooled();
+    const usedByOthers = (hash: string): boolean => (pooled.get(hash)?.refs ?? 0) > (usedByOld.get(hash)?.refs ?? 0);
     const newFiles = files.reduce((n, f) => n + f.data.length + f.original.length, 0);
     const newFonts = new Map(fonts.map((f) => [sha256(f.data), f.data.length]));
     let keep = newFiles;
     let swap = newFiles - oldFiles;
     for (const [hash, size] of newFonts) {
       if (!pooled.has(hash)) keep += size;
-      if (!usedByOthers.has(hash)) swap += size;
+      if (!usedByOthers(hash)) swap += size;
     }
-    for (const [hash, size] of usedByOld) if (!usedByOthers.has(hash)) swap -= size;
-    return { room: this.maxFansub - this.fansubBytes(), keep, swap };
+    for (const [hash, { size }] of usedByOld) if (!usedByOthers(hash)) swap -= size;
+    return { room: this.maxFansub - this.index.fansubBytes(), keep, swap };
   }
 
   /**
@@ -260,12 +239,12 @@ export class SubtitleStore {
     if (file.data.length === 0) throw new EmptyBodyError();
     const byName = new Map(fonts.map((f) => [f.name, { name: f.name, size: f.data.length, hash: sha256(f.data), data: f.data }]));
     const entries = [...byName.values()];
-    const pooled = this.pooledHashes();
+    const pooled = this.index.pooled();
     const fresh = new Map<string, Buffer>();
     for (const f of entries) if (!pooled.has(f.hash)) fresh.set(f.hash, f.data);
     let add = file.data.length + file.original.length;
     for (const d of fresh.values()) add += d.length;
-    if (this.fansubBytes() + add > this.maxFansub) throw new TooLargeError();
+    if (this.index.fansubBytes() + add > this.maxFansub) throw new TooLargeError();
 
     const id = randomBytes(8).toString('hex');
     const dir = join(this.root(), id);
@@ -287,6 +266,7 @@ export class SubtitleStore {
         fonts: entries.map(({ name, size, hash }) => ({ name, size, hash })), uploadedAt: this.now(),
       };
       replaceAtomically(join(dir, 'meta.json'), JSON.stringify(stored));
+      this.index.set(stored, file.original.length);
       return stored;
     } catch (err) {
       rmSync(dir, { recursive: true, force: true });
@@ -351,13 +331,13 @@ export class SubtitleStore {
   ): Promise<StoredSubtitle> {
     const s = this.get(id);
     if (!s) throw new NotFoundError();
-    const used = this.all().reduce((n, o) => n + (o.id === id ? others(o) : total(o)), 0);
+    const used = this.index.ownerBytes() - total(s) + others(s);
     const { temp, size } = await this.stream(id, body, Math.min(limit, this.maxTotal - used));
     try {
       const dest = join(this.root(), id, sub, name);
       const result = this.edit(id, (cur) => {
         const next = commit(cur, size);
-        if (this.all().reduce((n, o) => n + (o.id === id ? 0 : total(o)), 0) + total(next) > this.maxTotal) throw new TooLargeError();
+        if (this.index.ownerBytes() - total(this.index.get(id) ?? cur) + total(next) > this.maxTotal) throw new TooLargeError();
         mkdirSync(join(this.root(), id, sub), { recursive: true });
         renameSync(temp, dest);
         afterCommit?.(cur);

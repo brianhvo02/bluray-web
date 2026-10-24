@@ -1,9 +1,20 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FansubSource, StoredSubtitle } from '../../src/engine/disc/nas-api';
 import { BadNameError, EmptyBodyError, SubtitleStore, TooLargeError, type SubtitleMeta } from './subtitle-store';
+
+// Counts the store's disk reads, so a test can say a listing or a budget check never walks the folders.
+const reads = vi.hoisted(() => ({ n: 0 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const fs = await importOriginal<typeof import('node:fs')>();
+  const counted = <F extends (...a: never[]) => unknown>(f: F): F => ((...a: Parameters<F>) => {
+    reads.n++;
+    return f(...a);
+  }) as F;
+  return { ...fs, readdirSync: counted(fs.readdirSync), readFileSync: counted(fs.readFileSync), statSync: counted(fs.statSync) };
+});
 
 const META: SubtitleMeta = {
   name: 'Fan subs', language: 'en', offsetMs: 0, uploaderPersonId: 'p1',
@@ -254,6 +265,38 @@ describe('SubtitleStore', () => {
       expect(s.fansubSwap([old.id], files, [shared, fresh])).toEqual({ room: 670, keep: 305, swap: 305 - 200 - 20 });
       // A font only the old one used comes back with the new one: kept, it costs nothing; swapped, it is freed and added again.
       expect(s.fansubSwap([old.id], files, [own])).toEqual({ room: 670, keep: 300, swap: 300 - 200 - 20 + 20 });
+    });
+
+    it('lists, prices and stores fansubs without reading the disk', async () => {
+      const s = new SubtitleStore(dir, { maxFansubBytes: 1000, now: () => clock });
+      const font = { name: 'F.ttf', data: Buffer.alloc(10, 1) };
+      const a = s.createFansub(FMETA, { name: 'a.ass', data: Buffer.alloc(100), original: Buffer.alloc(50) }, [font]);
+      const { id } = s.create(META);
+      await s.writeFile(id, 'u.srt', body('x'));
+      reads.n = 0;
+      expect(s.list()).toHaveLength(2);
+      const files = [{ data: Buffer.alloc(10), original: Buffer.alloc(10) }];
+      expect(s.fansubSwap([a.id], files, [font])).toEqual({ room: 840, keep: 20, swap: 20 - 150 });
+      const b = s.createFansub(FMETA, { name: 'b.ass', data: Buffer.alloc(10), original: Buffer.alloc(10) }, [font]);
+      expect(s.get(b.id)).not.toBeNull();
+      s.delete(a.id);
+      expect(s.fansubSwap([], [], [])).toMatchObject({ room: 1000 - 20 - 10 });
+      expect(reads.n).toBe(0);
+    });
+
+    it('a fresh instance loads what an earlier one wrote, originals and pooled fonts included', async () => {
+      const first = new SubtitleStore(dir, { maxTotalBytes: 100, maxFansubBytes: 1000, now: () => clock });
+      const font = { name: 'F.ttf', data: Buffer.alloc(10, 1) };
+      const a = first.createFansub(FMETA, { name: 'a.ass', data: Buffer.alloc(100), original: Buffer.alloc(50) }, [font]);
+      first.createFansub(FMETA, { name: 'b.ass', data: Buffer.alloc(20), original: Buffer.alloc(20) }, [font]);
+      const { id } = first.create(META);
+      await first.writeFile(id, 'u.srt', bytes(60));
+      const s = new SubtitleStore(dir, { maxTotalBytes: 100, maxFansubBytes: 1000, now: () => clock });
+      expect(s.list().map((x) => x.id).sort()).toEqual(first.list().map((x) => x.id).sort());
+      expect(s.fansubSwap([a.id], [], [])).toEqual({ room: 1000 - 190 - 10, keep: 0, swap: -150 });
+      const other = s.create(META);
+      await expect(s.writeFile(other.id, 'v.srt', bytes(41))).rejects.toBeInstanceOf(TooLargeError);
+      await s.writeFile(other.id, 'v.srt', bytes(40));
     });
 
     it('replaceFile keeps the original', () => {
