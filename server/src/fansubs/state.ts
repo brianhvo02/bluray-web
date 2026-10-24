@@ -21,6 +21,12 @@ function normalizeLanguages(codes: readonly unknown[]): string[] {
   return [...new Set(['eng', ...rest])];
 }
 
+/** An entry with every field a run writes; one missing any counts as never run. */
+function complete(t: unknown): t is FansubTitleState {
+  return isObject(t) && typeof t.titleId === 'string' && (t.lastRunAt === null || typeof t.lastRunAt === 'number')
+    && typeof t.running === 'boolean' && typeof t.nothingFound === 'boolean' && isObject(t.seasons) && isObject(t.episodes);
+}
+
 const trackKey = (toshoFileId: number, track: number): string => `${toshoFileId}:${track}`;
 
 /** The fansub run's memory: per-title results, tracks the owner deleted and the languages wanted. `<dataDir>/fansubs/state.json`. */
@@ -35,7 +41,15 @@ export class FansubState {
   }
 
   title(id: string): FansubTitleState | null {
-    return this.read().titles[id] ?? null;
+    const t = this.read().titles[id];
+    return complete(t) ? t : null;
+  }
+
+  /** At start: a run that was going when the process stopped is no longer running. */
+  clearRunning(): void {
+    this.change((s) => {
+      for (const [id, t] of Object.entries(s.titles)) if (complete(t) && t.running) s.titles[id] = { ...t, running: false };
+    });
   }
 
   put(state: FansubTitleState): void {
@@ -80,7 +94,7 @@ export class FansubState {
     const { titles } = this.read();
     return titleIds.filter((id) => {
       const t = titles[id];
-      return !t || t.lastRunAt === null || (t.nothingFound && now - t.lastRunAt > THIRTY_DAYS_MS);
+      return !complete(t) || t.lastRunAt === null || (t.nothingFound && now - t.lastRunAt > THIRTY_DAYS_MS);
     });
   }
 

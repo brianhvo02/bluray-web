@@ -5,7 +5,10 @@ import type { SeaDex, SeaDexEntry } from './seadex';
 import { NotFoundOnTosho } from './tosho';
 import type { Tosho, ToshoRelease } from './tosho';
 
-/** `<dir>/seadex.json` (alId to entry), `<dir>/tosho.json` (`{ releases }`) and downloads from `<dir>/files/<last path segment>`. */
+/**
+ * `<dir>/seadex.json` (alId to entry), `<dir>/tosho.json` (`{ releases }`) and downloads from `<dir>/files/<last path segment>`;
+ * a file's font pack is `<dir>/files/pack-<file id>.7z`.
+ */
 export function fixtureFansubSources(dir: string): { seadex: SeaDex; tosho: Tosho } {
   const seadexEntries = JSON.parse(readFileSync(join(dir, 'seadex.json'), 'utf8')) as Record<string, SeaDexEntry>;
   const releases = (JSON.parse(readFileSync(join(dir, 'tosho.json'), 'utf8')) as { releases: ToshoRelease[] }).releases;
@@ -22,7 +25,9 @@ export function fixtureFansubSources(dir: string): { seadex: SeaDex; tosho: Tosh
           .map((r) => ({ ...r, files: [] }));
       },
       download: async (url) => {
-        const name = decodeURIComponent(new URL(url, 'https://x.invalid').pathname.split('/').pop() ?? '');
+        const path = new URL(url, 'https://x.invalid').pathname;
+        const pack = /^\/download\/file\/(\d+)\/attachments$/.exec(path);
+        const name = pack ? `pack-${pack[1]}.7z` : decodeURIComponent(path.split('/').pop() ?? '');
         if (name === '' || name.includes('/') || name.startsWith('.')) throw new NotFoundOnTosho(url);
         try {
           return readFileSync(join(dir, 'files', name));

@@ -48,6 +48,24 @@ describe('FansubState', () => {
     expect(s.isDeleted(9, 1)).toBe(true);
   });
 
+  it('treats an entry missing its fields as never run', () => {
+    mkdirSync(join(dir, 'fansubs'), { recursive: true });
+    writeFileSync(join(dir, 'fansubs', 'state.json'), JSON.stringify({ titles: { a: { titleId: 'a' }, b: { ...state('b'), lastRunAt: 'x' } }, deleted: {}, languages: ['eng'] }));
+    const s = new FansubState(dir);
+    expect(s.title('a')).toBeNull();
+    expect(s.title('b')).toBeNull();
+    expect(s.due(['a', 'b'], NOW)).toEqual(['a', 'b']);
+  });
+
+  it('clears a running flag a stopped process left behind', () => {
+    const s = new FansubState(dir);
+    s.put(state('a', { running: true }));
+    s.put(state('b'));
+    s.clearRunning();
+    expect(new FansubState(dir).title('a')).toEqual(state('a'));
+    expect(s.title('b')).toEqual(state('b'));
+  });
+
   it('defaults the languages to eng and keeps a change', () => {
     const s = new FansubState(dir);
     expect(s.languages()).toEqual(['eng']);
