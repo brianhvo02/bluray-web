@@ -3,6 +3,7 @@ import type { DiscManifest, StoredSubtitle } from '../../engine/disc/nas-api';
 import { discKeyOf } from '../../engine/disc/disc-key';
 import type { NasClient } from './nas-client';
 import { LANGUAGES, formatOffset, languageTag, subtitleErrorMessage, type SubtitleTarget } from './subtitle-model';
+import { rememberFansubDeletion } from './FansubLine';
 import { SubtitleUpload, type ManifestOf } from './SubtitleUpload';
 
 /** A title's stored subtitles (null until known), why the last fetch failed (null when it didn't), and a way to fetch them again. */
@@ -114,11 +115,13 @@ export function SubtitleList({ nas, target, listing, error: listError, manifestO
   const discIdOfKey = useCallback((key: string) => discKeys.get(key) ?? null, [discKeys]);
   const heading = useId();
 
-  const remove = async (id: string): Promise<void> => {
+  const remove = async (sub: StoredSubtitle): Promise<void> => {
+    const id = sub.id;
     setBusy(true);
     setError(null);
     try {
       await nas.deleteSubtitle(id);
+      if (sub.source !== undefined) rememberFansubDeletion(target.titleId);
       setOpen(null);
       onChanged();
     } catch (err) {
@@ -179,7 +182,7 @@ export function SubtitleList({ nas, target, listing, error: listError, manifestO
           <div className="admin-confirm-box" role="group" aria-label="Confirm">
             <p>{`Delete ${s.name} and its fonts from the NAS? Everyone loses it.`}</p>
             <span className="admin-confirm">
-              <button type="button" data-testid="subtitle-delete-confirm" disabled={busy} onClick={() => void remove(s.id)}>
+              <button type="button" data-testid="subtitle-delete-confirm" disabled={busy} onClick={() => void remove(s)}>
                 Delete
               </button>
               <button type="button" disabled={busy} onClick={() => setOpen(null)}>

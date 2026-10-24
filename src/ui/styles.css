@@ -488,3 +488,21 @@ a { color: #6ea8ff; }
   .help-nav ul { flex-direction: row; flex-wrap: wrap; gap: 4px; }
   .help-nav a { padding: 6px 10px; border: 1px solid var(--help-rule); border-radius: 999px; }
 }
+
+/* fansubs (owners): the line above a season, chips and a mark on each episode row, the episode panel, the languages setting */
+.fansub-line { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: #18181d; border: 1px solid #2a2a30; border-radius: 8px; }
+.fansub-line-main { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
+.fansub-line-text { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
+.fansub-chips { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; max-width: 100%; }
+.fansub-chip { display: inline-block; padding: 1px 6px; border: 1px solid #3a3a42; border-radius: 6px; font-size: 0.75em; white-space: nowrap; }
+.fansub-mark { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; line-height: 1.4; background: rgba(60, 170, 90, 0.2); }
+.fansub-mark[data-tone='warn'] { background: rgba(230, 160, 40, 0.25); }
+.fansub-mark[data-tone='bad'] { background: rgba(220, 70, 70, 0.2); }
+.fansub-panel { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px; margin-top: 4px; background: #18181d; border: 1px solid #2a2a30; border-radius: 8px; }
+.fansub-track { display: flex; flex-direction: column; gap: 6px; }
+.fansub-track-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.fansub-languages { display: flex; flex-direction: column; gap: 6px; }
+@media (max-width: 600px) {
+  .episode-row:has(.fansub-chips) { flex-wrap: wrap; }
+  .episode-row .fansub-chips { flex-basis: 100%; justify-content: flex-start; padding-left: 40px; }
+}

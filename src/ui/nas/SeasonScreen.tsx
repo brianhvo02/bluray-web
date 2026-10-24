@@ -1,5 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
-import type { DiscRef, DiscSlot, EpisodeRef, PlaylistProgress, SeasonDetail } from '../../engine/disc/nas-api';
+import type { DiscRef, DiscSlot, EpisodeRef, FansubTitleState, PlaylistProgress, SeasonDetail, StoredSubtitle } from '../../engine/disc/nas-api';
+import { FansubEpisodePanel } from './FansubEpisodePanel';
+import { FansubLine } from './FansubLine';
+import { episodeMark, trackChip } from './fansub-model';
 import { FileDifferently, type OwnerFiling } from './FileDifferently';
 import type { NasClient } from './nas-client';
 import { episodeProgress } from './resume-model';
@@ -106,6 +109,18 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, season
   const manifestOf = useManifests(owner?.nas ?? null);
   const discKeys = useDiscKeys(manifestOf, target, owner !== undefined && (subs ?? []).some((s) => s.attachment.kind === 'chapter'));
   const listing = useMemo(() => (subs ? ownerListing(subs, { id: season.id, discKeys: new Set(discKeys.keys.keys()) }, new Set(seasonIds)) : null), [subs, season.id, discKeys, seasonIds]);
+  // Fansubs, for owners: the run's state (the line reports it), the fansub tracks of each episode and the open panel.
+  const [fansub, setFansub] = useState<FansubTitleState | null>(null);
+  const [panelFor, setPanelFor] = useState<number | null>(null);
+  const fansubsByEpisode = useMemo(() => {
+    const byEpisode = new Map<number, StoredSubtitle[]>();
+    if (!owner) return byEpisode;
+    for (const s of subs ?? []) {
+      if (s.source === undefined || s.attached === false || s.attachment.kind !== 'episode' || s.attachment.seasonId !== season.id) continue;
+      byEpisode.set(s.attachment.episode, [...(byEpisode.get(s.attachment.episode) ?? []), s]);
+    }
+    return byEpisode;
+  }, [subs, season.id, owner]);
   const [adding, setAdding] = useState(false);
   const [uploading, setUploading] = useState(false);
   const uploadPanel = useId();
@@ -163,6 +178,7 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, season
           />
         </div>
       )}
+      {owner && episodes && <FansubLine nas={owner.nas} titleId={titleId} seasonId={season.id} onChanged={reload} onState={setFansub} />}
       {episodes && (
         <div className="segmented" role="tablist" aria-label="Season view">
           {TABS.map((t) => (
@@ -193,9 +209,14 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, season
           {episodes.map((e) => {
             const percent = episodeProgress(progress, e.discId, e.playlistId);
             const languages = tags.get(e.number) ?? [];
+            const tracks = fansubsByEpisode.get(e.number) ?? [];
+            const episodeKey = `${season.id}#${e.number}`;
+            const mark = owner && fansub ? episodeMark(tracks, fansub.episodes[episodeKey], tracks.some((s) => s.stale === true)) : null;
+            // an owner's tap on an episode the run touched opens its fansubs; the panel has the Play button
+            const reviewing = owner !== undefined && (tracks.length > 0 || fansub?.episodes[episodeKey]?.status === 'not-found');
             return (
               <li key={`${e.discId}:${e.playlistId}`}>
-                <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} onClick={() => playEpisode(e)}>
+                <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} aria-expanded={reviewing ? panelFor === e.number : undefined} onClick={() => (reviewing ? setPanelFor(panelFor === e.number ? null : e.number) : playEpisode(e))}>
                   <span className="episode-number">{e.number}</span>
                   <span className="title-row-text">
                     <span className="title-row-name">
@@ -213,12 +234,23 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, season
                       ))}
                     </span>
                   )}
+                  {owner && (tracks.length > 0 || mark) && (
+                    <span className="fansub-chips">
+                      {tracks.map((t) => (
+                        <span key={t.id} className="fansub-chip" data-testid="fansub-chip">{trackChip(t)}</span>
+                      ))}
+                      {mark && <span className="fansub-mark" data-testid="fansub-mark" data-tone={mark.tone}>{mark.text}</span>}
+                    </span>
+                  )}
                   {percent !== null && (
                     <span className="episode-progress" data-testid="episode-progress" role="img" aria-label={`${percent}% watched`}>
                       <i style={{ width: `${percent}%` }} />
                     </span>
                   )}
                 </button>
+                {owner && reviewing && panelFor === e.number && (
+                  <FansubEpisodePanel nas={owner.nas} target={target} manifestOf={manifestOf} tracks={tracks} mark={fansub?.episodes[episodeKey]} onChanged={reload} onPlay={() => playEpisode(e)} />
+                )}
               </li>
             );
           })}

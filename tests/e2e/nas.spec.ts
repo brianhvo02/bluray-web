@@ -2273,6 +2273,33 @@ test('everyone picks a stored subtitle in the player, at its default offset', as
   });
 });
 
+test('owner finds fansubs for a season', async ({ page, browserName }) => {
+  await openTitles(page, browserName);
+  await skipWithoutH264(page, { realtime: false });
+  await withStarfallSubtitles(async () => {
+    await openStarfallSeason(page);
+    await expect(page.getByTestId('fansub-line')).toBeVisible();
+    await page.getByTestId('fansub-run').click();
+    const row = page.locator('[data-testid="episode-row"][data-number="1"]');
+    await expect(row.getByTestId('fansub-mark')).toBeVisible({ timeout: 90_000 });
+    await expect(row.getByTestId('fansub-chip').first()).toBeVisible();
+    await expect(page.getByTestId('fansub-line')).toContainText('GroupA');
+    const stored = (await (await ownerApi(`subtitles?titleId=${encodeURIComponent(STARFALL)}`)).json()) as { id: string; source?: unknown }[];
+    const fansub = stored.find((s) => s.source !== undefined);
+    expect(fansub).toBeDefined();
+    // a tap on a row the run touched opens its fansubs; the panel plays the episode
+    await row.click();
+    await expect(page.getByTestId('fansub-panel')).toBeVisible();
+    await page.getByTestId('fansub-play').click();
+    await expect(page.getByTestId('nas-preflight')).toBeVisible();
+    await page.getByTestId('nas-play').click();
+    await expect(playerState(page)).toHaveAttribute('data-state', 'ended', { timeout: 15_000 });
+    await page.getByTestId('subtitle-menu').click();
+    await expect(page.getByTestId('subtitle-stored')).toHaveText('From the NAS');
+    await expect(page.getByTestId(`subtitle-stored-${fansub!.id}`)).toBeVisible();
+  });
+});
+
 test('a stored subtitle and my offset come back when I resume', async ({ page, browserName }) => {
   const api = await openTitlesAsResumePerson(page, browserName);
   await skipWithoutH264(page);

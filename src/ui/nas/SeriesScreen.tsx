@@ -1,5 +1,7 @@
 import { useId, useMemo, useState, type ReactElement } from 'react';
 import type { TitleDetail } from '../../engine/disc/nas-api';
+import { FansubEpisodePanel } from './FansubEpisodePanel';
+import { FansubLine } from './FansubLine';
 import type { NasClient } from './nas-client';
 import { Poster } from './Poster';
 import type { OwnerFiling } from './FileDifferently';
@@ -78,6 +80,14 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
             onBusy={setUploading}
           />
         </div>
+      )}
+      {movieOwner && detail.seasons[0] && (
+        <>
+          <FansubLine nas={movieOwner.nas} titleId={title.id} seasonId={detail.seasons[0].id} onChanged={reload} />
+          {(subs ?? []).some((s) => s.source !== undefined && s.attached !== false) && (
+            <FansubEpisodePanel nas={movieOwner.nas} target={target} manifestOf={manifestOf} tracks={(subs ?? []).filter((s) => s.source !== undefined && s.attached !== false)} onChanged={reload} />
+          )}
+        </>
       )}
       {isSeries ? (
         <ul className="title-list">

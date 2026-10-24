@@ -66,3 +66,10 @@ export function episodeMark(subs: readonly StoredSubtitle[], mark: FansubEpisode
 export const trackChip = (s: StoredSubtitle): string => s.source?.trackName ?? s.name;
 
 export const runButtonLabel = (state: FansubTitleState): 'Find fansubs' | 'Find fansubs again' => (state.lastRunAt === null ? 'Find fansubs' : 'Find fansubs again');
+
+/** The languages an owner can add to fansub runs; English is always kept. */
+export const FANSUB_LANGUAGES: readonly { readonly code: string; readonly label: string }[] = [
+  { code: 'spa', label: 'Spanish' }, { code: 'por', label: 'Portuguese' }, { code: 'fre', label: 'French' },
+  { code: 'ger', label: 'German' }, { code: 'ita', label: 'Italian' }, { code: 'ara', label: 'Arabic' },
+  { code: 'rus', label: 'Russian' }, { code: 'ind', label: 'Indonesian' }, { code: 'chi', label: 'Chinese' },
+];
