@@ -242,6 +242,20 @@ describe('SubtitleStore', () => {
       expect(readdirSync(join(dir, 'subtitles')).filter((n) => /^[0-9a-f]{16}$/.test(n))).toHaveLength(2);
     });
 
+    it('says what replacing fansubs would cost, with the old ones kept and with them gone', () => {
+      const s = new SubtitleStore(dir, { maxFansubBytes: 1000, now: () => clock });
+      const shared = { name: 'S.ttf', data: Buffer.alloc(10, 1) };
+      const own = { name: 'O.ttf', data: Buffer.alloc(20, 2) };
+      const old = s.createFansub(FMETA, { name: 'a.ass', data: Buffer.alloc(100), original: Buffer.alloc(100) }, [shared, own]);
+      s.createFansub(FMETA, { name: 'b.ass', data: Buffer.alloc(50), original: Buffer.alloc(50) }, [shared]);
+      // used: 200 + 100 + 10 + 20 = 330
+      const files = [{ data: Buffer.alloc(150), original: Buffer.alloc(150) }];
+      const fresh = { name: 'N.ttf', data: Buffer.alloc(5, 3) };
+      expect(s.fansubSwap([old.id], files, [shared, fresh])).toEqual({ room: 670, keep: 305, swap: 305 - 200 - 20 });
+      // A font only the old one used comes back with the new one: kept, it costs nothing; swapped, it is freed and added again.
+      expect(s.fansubSwap([old.id], files, [own])).toEqual({ room: 670, keep: 300, swap: 300 - 200 - 20 + 20 });
+    });
+
     it('replaceFile keeps the original', () => {
       const s = make();
       const f = s.createFansub(FMETA, { name: 'a.ass', data: Buffer.from('a'), original: Buffer.from('o') }, []);

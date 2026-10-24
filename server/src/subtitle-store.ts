@@ -207,6 +207,47 @@ export class SubtitleStore {
   }
 
   /**
+   * What replacing the fansubs `oldIds` with new ones would take from the fansub budget: `room` left now, `keep` the bytes
+   * the new ones add while the old ones stay, `swap` the change once the old ones (and the pooled fonts only they use) are gone.
+   */
+  fansubSwap(
+    oldIds: readonly string[], files: readonly { data: Buffer; original: Buffer }[], fonts: readonly { data: Buffer }[],
+  ): { room: number; keep: number; swap: number } {
+    const all = this.all();
+    const old = new Set(oldIds);
+    const usedByOthers = new Set<string>();
+    const usedByOld = new Map<string, number>();
+    const pooled = new Set<string>();
+    let oldFiles = 0;
+    for (const s of all) {
+      if (!s.source) continue;
+      for (const f of s.fonts) {
+        if (!f.hash) continue;
+        pooled.add(f.hash);
+        if (old.has(s.id)) usedByOld.set(f.hash, f.size);
+        else usedByOthers.add(f.hash);
+      }
+      if (!old.has(s.id)) continue;
+      oldFiles += s.fileSize;
+      try {
+        oldFiles += statSync(join(this.root(), s.id, 'original', s.fileName)).size;
+      } catch (err) {
+        if (!isCode(err, 'ENOENT')) throw err;
+      }
+    }
+    const newFiles = files.reduce((n, f) => n + f.data.length + f.original.length, 0);
+    const newFonts = new Map(fonts.map((f) => [sha256(f.data), f.data.length]));
+    let keep = newFiles;
+    let swap = newFiles - oldFiles;
+    for (const [hash, size] of newFonts) {
+      if (!pooled.has(hash)) keep += size;
+      if (!usedByOthers.has(hash)) swap += size;
+    }
+    for (const [hash, size] of usedByOld) if (!usedByOthers.has(hash)) swap -= size;
+    return { room: this.maxFansub - this.fansubBytes(), keep, swap };
+  }
+
+  /**
    * Stores a fansub whole: the aligned file, the original, and its fonts in the shared pool (each written
    * once). No per-file limits; the fansubs together stay under their own budget.
    */

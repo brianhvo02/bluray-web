@@ -8,7 +8,7 @@ import type { DiscSlot, EpisodeRef, StoredSubtitle, TitleDetail, TitleSummary } 
 import { SPEECH_BURSTS } from '../../../tests/helpers/speech-bursts';
 import { DiscActivity } from '../disc-activity';
 import { folderDiscSource } from '../levels/level-discs';
-import { SubtitleStore } from '../subtitle-store';
+import { FANSUB_LIMIT_BYTES, SubtitleStore } from '../subtitle-store';
 import type { Catalogue } from '../titles/catalogue';
 import { SourceUnavailable } from '../titles/sources';
 import { FetchCache } from './fetch-cache';
@@ -69,11 +69,11 @@ beforeAll(async () => {
 }, 60_000);
 
 const trackUrl = (fileId: number, track: number): string => `https://animetosho.net/storage/attach/0/${fileId}-${track}.ass.xz`;
-const file = (id: number, name: string): ToshoRelease['files'][number] => ({
+const file = (id: number, name: string, language = 'eng'): ToshoRelease['files'][number] => ({
   id, name, size: 1000,
   tracks: [
-    { track: 0, language: 'eng', name: 'Full', format: 'ASS', url: trackUrl(id, 0), isDefault: true, forced: false },
-    { track: 1, language: 'eng', name: 'Signs', format: 'ASS', url: trackUrl(id, 1), isDefault: false, forced: false },
+    { track: 0, language, name: 'Full', format: 'ASS', url: trackUrl(id, 0), isDefault: true, forced: false },
+    { track: 1, language, name: 'Signs', format: 'ASS', url: trackUrl(id, 1), isDefault: false, forced: false },
   ],
 });
 
@@ -90,7 +90,7 @@ const TOSHO: ToshoRelease[] = [
   { id: 1, title: '[GroupA] Starfall Wanderer (BD 1080p)', infoHash: HASH_A, status: 'complete', isSeadex: true, date: 0, files: [file(101, '[GroupA] Starfall Wanderer - 01 (BD 1080p).mkv')] },
   {
     id: 2, title: '[GroupB] Starfall Wanderer (WEB 1080p)', infoHash: HASH_B, status: 'complete', isSeadex: true, date: 0,
-    files: [file(201, '[GroupB] Starfall Wanderer - 01 (WEB 1080p).mkv'), file(202, '[GroupB] Starfall Wanderer - 02 (WEB 1080p).mkv')],
+    files: [file(201, '[GroupB] Starfall Wanderer - 01 (WEB 1080p).mkv'), file(202, '[GroupB] Starfall Wanderer - 02 (WEB 1080p).mkv', 'en')],
   },
 ];
 
@@ -161,24 +161,27 @@ interface Setup {
   readonly activity: DiscActivity;
 }
 
-function setup(over: { tosho?: (t: Tosho) => Tosho; titles?: readonly string[]; align?: boolean; startAt?: number; realSleep?: boolean; windowEnd?: { hour: number; minute: number } } = {}): Setup {
+function setup(over: { tosho?: (t: Tosho) => Tosho; titles?: readonly string[]; align?: boolean; startAt?: number; realSleep?: boolean;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>; windowEnd?: { hour: number; minute: number }; maxFansubBytes?: number; log?: (m: string) => void;
+} = {}): Setup {
   const clock = { t: over.startAt ?? new Date(2026, 9, 24, 2, 0).getTime() };
   const now = (): number => clock.t;
   const sleeps: number[] = [];
-  const store = new SubtitleStore(dataDir, { now });
+  const store = new SubtitleStore(dataDir, { now, ...(over.maxFansubBytes !== undefined ? { maxFansubBytes: over.maxFansubBytes } : {}) });
   const state = new FansubState(dataDir);
   const sources = fixtureFansubSources(fixDir);
   const activity = new DiscActivity(now);
   const svc = new FansubService({
     store, state, seadex: sources.seadex, tosho: over.tosho ? over.tosho(sources.tosho) : sources.tosho,
-    cache: new FetchCache(join(dataDir, 'fansub-cache'), 1 << 30),
+    // a cache of its own: a later setup in the same test fetches the fixtures as they are then
+    cache: new FetchCache(join(dataDir, `fansub-cache-${services.length}`), 1 << 30),
     titles: { catalogue: () => catalogue(over.titles ?? [TITLE]) },
     discs: async (id) => (id === 'speech' ? folderDiscSource(discDir, { id: 'speech', name: 'Speech' }) : null),
     discKey: (id) => `d.${id}`,
     // Without a duration nothing is lined up: the tests that don't look at the alignment skip ffmpeg.
     durationMs: () => (over.align ? 150_000 : null),
-    ffmpegPath: 'ffmpeg', activity, encoding: () => false, now, log: () => {},
-    ...(over.realSleep ? {} : { sleep: async (ms: number) => { sleeps.push(ms); clock.t += ms; } }),
+    ffmpegPath: 'ffmpeg', activity, encoding: () => false, now, log: over.log ?? (() => {}),
+    ...(over.realSleep ? {} : { sleep: over.sleep ?? (async (ms: number) => { sleeps.push(ms); clock.t += ms; }) }),
     ...(over.windowEnd ? { windowEnd: over.windowEnd } : {}),
   });
   services.push(svc);
@@ -201,7 +204,7 @@ describe('FansubService', () => {
       expect(s.attachment).toEqual({ kind: 'episode', discKey: 'd.speech', playlistId: '00000', titleId: TITLE, seasonId: SEASON, episode: 1 });
       expect(s.fonts.map((f) => f.name)).toEqual(['Default.ttf']);
       expect(s.fontsMissing).toBeUndefined();
-      expect(s.language).toBe('eng');
+      expect(s.language).toBe('en');
       expect(s.offsetMs).toBe(0);
     }
     const two = fansubsOf(store, 2);
@@ -210,6 +213,8 @@ describe('FansubService', () => {
       expect(s.source).toMatchObject({ group: 'GroupB', rank: 'web', toshoFileId: 202, linedUpOn: { discKey: 'd.speech', playlistId: '00001' } });
       expect(s.fontsMissing).toBe(true);
       expect(s.fonts).toEqual([]);
+      // Tosho's `en` and `eng` are both stored as the tag the app uses.
+      expect(s.language).toBe('en');
     }
 
     // Both tracks of a file share the Full track's offset.
@@ -266,14 +271,14 @@ describe('FansubService', () => {
     const { svc, store } = setup();
     await svc.runTitle(TITLE);
     const [full] = fansubsOf(store, 1);
-    store.update(full!.id, { name: 'Main dialogue', offsetMs: 250, language: 'en' });
+    store.update(full!.id, { name: 'Main dialogue', offsetMs: 250, language: 'ja' });
     await svc.runTitle(TITLE);
     const again = fansubsOf(store, 1);
     expect(again).toHaveLength(2);
     expect(again[0]!.id).not.toBe(full!.id);
     expect(store.get(full!.id)).toBeNull();
-    expect(again[0]).toMatchObject({ name: 'Main dialogue', offsetMs: 250, language: 'en' });
-    expect(again[1]).toMatchObject({ name: 'GroupA · Signs', offsetMs: 0, language: 'eng' });
+    expect(again[0]).toMatchObject({ name: 'Main dialogue', offsetMs: 250, language: 'ja' });
+    expect(again[1]).toMatchObject({ name: 'GroupA · Signs', offsetMs: 0, language: 'en' });
   });
 
   it('a deleted track stays deleted on the nightly rerun, and comes back after undelete', async () => {
@@ -378,6 +383,79 @@ describe('FansubService', () => {
     release();
     await expect(queued).rejects.toThrow('closed');
     await first.catch(() => {});
+  });
+
+  it('a rerun against a full fansub budget keeps the old tracks', async () => {
+    const first = setup();
+    await first.svc.runTitle(TITLE);
+    const before = fansubsOf(first.store, 1).map((s) => s.id);
+    const used = FANSUB_LIMIT_BYTES - first.store.fansubSwap([], [], []).room;
+    // Episode 1's Full track comes back bigger; the budget has no room left.
+    writeFixtures({ ...standardFiles(), '101-0.ass.xz': await xz(Buffer.from(`${FULL}; ${'padding '.repeat(500)}\n`)) });
+    const { svc, store } = setup({ maxFansubBytes: used });
+    const result = await svc.runTitle(TITLE);
+    expect(result.episodes[`${SEASON}#1`]).toEqual({ status: 'not-found', reason: 'too-large' });
+    expect(fansubsOf(store, 1).map((s) => s.id)).toEqual(before);
+    // Episode 2's tracks are the same size: swapped in place.
+    expect(result.episodes[`${SEASON}#2`]).toEqual({ status: 'attached' });
+    expect(fansubsOf(store, 2)).toHaveLength(2);
+  });
+
+  it("a track Tosho can't serve leaves its episode for the next run", async () => {
+    const { svc, store, state, clock } = setup({
+      tosho: (t) => ({ ...t, download: async (url, o) => { if (url === trackUrl(202, 1)) throw new SourceUnavailable('animetosho: HTTP 503'); return t.download(url, o); } }),
+    });
+    const result = await svc.runTitle(TITLE);
+    expect(result.episodes[`${SEASON}#1`]).toEqual({ status: 'attached' });
+    expect(result.episodes[`${SEASON}#2`]).toEqual({ status: 'not-found', reason: 'service-unavailable' });
+    expect(fansubsOf(store, 2)).toEqual([]);
+    expect(result).toMatchObject({ lastRunAt: null, nothingFound: false });
+    expect(state.due([TITLE], clock.t)).toEqual([TITLE]);
+  });
+
+  it("a font pack Tosho can't serve keeps the episode's old copies", async () => {
+    const first = setup();
+    await first.svc.runTitle(TITLE);
+    const before = fansubsOf(first.store, 2).map((s) => s.id);
+    const { svc, store } = setup({
+      tosho: (t) => ({ ...t, download: async (url, o) => { if (url === t.fontPackUrl(202)) throw new SourceUnavailable('animetosho: HTTP 503'); return t.download(url, o); } }),
+    });
+    const result = await svc.runTitle(TITLE);
+    expect(result.episodes[`${SEASON}#2`]).toEqual({ status: 'not-found', reason: 'service-unavailable' });
+    expect(fansubsOf(store, 2).map((s) => s.id)).toEqual(before);
+    expect(result.episodes[`${SEASON}#1`]).toEqual({ status: 'attached' });
+  });
+
+  it('nightly runs only at night', async () => {
+    const day = setup({ startAt: new Date(2026, 9, 24, 10, 0).getTime() });
+    await day.svc.startNightly();
+    expect(day.state.title(TITLE)).toBeNull();
+    const night = setup({ startAt: new Date(2026, 9, 24, 23, 0).getTime() });
+    await night.svc.startNightly();
+    expect(night.state.title(TITLE)).toMatchObject({ running: false, lastRunAt: expect.any(Number) });
+  });
+
+  it('the button on a title the nightly pass is running stops it waiting', async () => {
+    // A viewer keeps reading; the pass's wait never ends by itself.
+    const { svc, state, activity } = setup({
+      sleep: (_ms, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })),
+    });
+    activity.note();
+    const pass = svc.startNightly();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(state.title(TITLE)).toMatchObject({ running: true, lastRunAt: null });
+    expect(svc.runNow(TITLE)).toMatchObject({ running: true });
+    await pass;
+    expect(state.title(TITLE)).toMatchObject({ running: false, lastRunAt: expect.any(Number), nothingFound: false });
+  });
+
+  it('a fansub deleted with no title on its attachment is logged, not remembered', () => {
+    const logs: string[] = [];
+    const { svc, state } = setup({ log: (m) => logs.push(m) });
+    const source = { kind: 'fansub' as const, group: 'GroupA', tracker: 'Nyaa', rank: 'best' as const, toshoFileId: 101, track: 0, trackName: 'Full', alignment: { kind: 'original' as const }, linedUpOn: { discKey: 'd.speech', playlistId: '00000' } };
+    svc.deleted({ id: '0123456789abcdef', name: 'x', language: 'en', offsetMs: 0, fileName: 'x.ass', fileSize: 1, fonts: [], uploadedAt: 0, attachment: { kind: 'chapter', discKey: 'd.speech', playlistId: '00000', chapter: 0 }, source });
+    expect(state.isDeleted(101, 0)).toBe(false);
+    expect(logs).toHaveLength(1);
   });
 
   it('clears a running flag left by a stopped process', () => {

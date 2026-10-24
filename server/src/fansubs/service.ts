@@ -30,6 +30,8 @@ import type { Tosho, ToshoFile, ToshoRelease, ToshoTrack } from './tosho';
 /** A fetched track bigger than this once unpacked is skipped (spec §7). */
 const MAX_TRACK_BYTES = 50 * 1024 * 1024;
 const IDLE_STEP_MS = 30_000;
+/** The nightly pass starts no earlier than 18:00 local time. */
+const NIGHT_STARTS_MIN = 18 * 60;
 const UNSURE: FansubAlignment = { kind: 'none', reason: 'low-confidence' };
 
 export interface FansubServiceOptions {
@@ -70,6 +72,9 @@ interface Unit {
   readonly episodes: readonly UnitEpisode[];
 }
 
+/** A release on Anime Tosho, null when it has none, `down` when it couldn't be asked. */
+type LookedUp = ToshoRelease | null | 'down';
+
 interface Job {
   readonly titleId: string;
   urgent: boolean;
@@ -77,6 +82,8 @@ interface Job {
   readonly windowEndAt: number | null;
   readonly controller: AbortController;
   readonly promise: Promise<FansubTitleState>;
+  /** Ends the nightly wait at once when the owner's button makes the job urgent. */
+  wake: AbortController | null;
   start(): void;
 }
 
@@ -84,6 +91,12 @@ interface Job {
 class WindowClosed extends Error {
   override name = 'WindowClosed';
 }
+
+/** Pacer options that read the job's urgency when the call is made: the owner's button can raise it mid-run. */
+const pacedOf = (job: Job): { readonly urgent: boolean; readonly signal: AbortSignal } => ({
+  get urgent() { return job.urgent; },
+  signal: job.controller.signal,
+});
 
 const isServiceError = (e: unknown): boolean => e instanceof SourceUnavailable || e instanceof RateLimited;
 
@@ -115,6 +128,17 @@ function languageName(code: string): string {
   } catch {
     return code;
   }
+}
+
+/** ISO 639-2/B codes the app knows by their BCP 47 primary subtag (`src/ui/nas/subtitle-model.ts`). */
+const PRIMARY_TAGS: Readonly<Record<string, string>> = {
+  eng: 'en', jpn: 'ja', spa: 'es', por: 'pt', fre: 'fr', ger: 'de', ita: 'it', ara: 'ar', rus: 'ru', ind: 'id', chi: 'zh', kor: 'ko',
+};
+/** The tag a fansub is stored with, as owner uploads are: `en` for Tosho's `eng` or `en`; other codes as normalised, `und` kept. */
+export function languageTag(code: string): string {
+  const c = normalizeLanguage(code);
+  if (c === '') return 'und';
+  return PRIMARY_TAGS[c] ?? c;
 }
 
 const blank = (titleId: string): FansubTitleState => ({ titleId, lastRunAt: null, running: false, nothingFound: false, seasons: {}, episodes: {} });
@@ -149,8 +173,14 @@ export class FansubService {
 
   /** The owner's button: the title runs next, ahead of the nightly pass. Answers the title's state at once. */
   runNow(titleId: string): FansubTitleState {
-    if (this.find(titleId)) {
-      if (!this.find(titleId)!.urgent) this.promote(titleId);
+    const existing = this.find(titleId);
+    if (existing) {
+      if (existing === this.active) {
+        existing.urgent = true;
+        existing.wake?.abort();
+      } else if (!existing.urgent) {
+        this.promote(titleId);
+      }
       return this.opts.state.title(titleId) ?? { ...blank(titleId), running: true };
     }
     const queued = { ...(this.opts.state.title(titleId) ?? blank(titleId)), running: true };
@@ -161,9 +191,15 @@ export class FansubService {
     return queued;
   }
 
-  /** After a library scan: runs the due AniList titles one by one until the window's end (08:00 by default). */
+  /**
+   * After a library scan: runs the due AniList titles one by one until the window's end (08:00 by default). Only at
+   * night: a scan that ends between the window's end and 18:00 starts nothing.
+   */
   startNightly(): Promise<void> {
     if (this.closed) return Promise.resolve();
+    const at = new Date(this.now());
+    const minutes = at.getHours() * 60 + at.getMinutes();
+    if (minutes >= this.windowEnd.hour * 60 + this.windowEnd.minute && minutes < NIGHT_STARTS_MIN) return this.nightly ?? Promise.resolve();
     this.nightlyEndAt = this.nextWindowEnd();
     this.tried = new Set();
     this.nightly ??= this.nightlyPass().finally(() => { this.nightly = null; });
@@ -183,7 +219,11 @@ export class FansubService {
   deleted(subtitle: StoredSubtitle): void {
     const { source, attachment } = subtitle;
     if (!source) return;
-    this.opts.state.markDeleted(attachment.titleId ?? '', source.toshoFileId, source.track);
+    if (attachment.titleId === undefined) {
+      this.log(`fansubs: deleted subtitle ${subtitle.id} names no title; its track isn't remembered`);
+      return;
+    }
+    this.opts.state.markDeleted(attachment.titleId, source.toshoFileId, source.track);
   }
 
   /** The disc and playlist a fansub would be lined up on now: its episode's current one, else its attachment's. */
@@ -302,7 +342,7 @@ export class FansubService {
         }
       }, { once: true });
     });
-    const job: Job = { titleId, urgent, windowEndAt, controller, promise, start: () => start() };
+    const job: Job = { titleId, urgent, windowEndAt, controller, promise, wake: null, start: () => start() };
     this.insert(job);
     this.pump();
     return promise;
@@ -402,8 +442,8 @@ export class FansubService {
       if (e instanceof WindowClosed) return cur;
       throw e;
     }
-    // A run where every episode met an unreachable service stays due: the next night tries again.
-    const unavailable = marks.length > 0 && marks.every((m) => m.reason === 'service-unavailable');
+    // A run where any episode met an unreachable service stays due: the next night tries again.
+    const unavailable = marks.some((m) => m.reason === 'service-unavailable');
     cur = unavailable
       ? { ...cur, running: false }
       : { ...cur, running: false, lastRunAt: this.now(), nothingFound: !marks.some((m) => m.status === 'attached') };
@@ -415,11 +455,19 @@ export class FansubService {
   private async waitIdle(job: Job): Promise<void> {
     const { signal } = job.controller;
     signal.throwIfAborted();
-    if (job.urgent) return;
-    for (;;) {
+    // urgency is read each time round: the owner's button can raise it during the wait
+    while (!job.urgent) {
       if (job.windowEndAt !== null && this.now() >= job.windowEndAt) throw new WindowClosed();
       if (!this.opts.activity.busy() && !this.opts.encoding()) return;
-      await this.sleep(IDLE_STEP_MS, signal);
+      const wake = new AbortController();
+      job.wake = wake;
+      try {
+        await this.sleep(IDLE_STEP_MS, AbortSignal.any([signal, wake.signal]));
+      } catch (e) {
+        if (signal.aborted || !wake.signal.aborted) throw e;
+      } finally {
+        job.wake = null;
+      }
     }
   }
 
@@ -427,7 +475,7 @@ export class FansubService {
     titleId: string, unit: Unit, job: Job, mark: (episode: number, m: FansubEpisodeMark) => void,
   ): Promise<FansubSeasonLine | null> {
     const { seadex, tosho, state } = this.opts;
-    const paced = { urgent: job.urgent, signal: job.controller.signal };
+    const paced = pacedOf(job);
     const all = (m: FansubEpisodeMark): null => {
       for (const e of unit.episodes) mark(e.number, m);
       return null;
@@ -460,15 +508,16 @@ export class FansubService {
 
     // Each release on Anime Tosho by hash, best first, until every episode is covered.
     let serviceDown = false;
-    const looked = new Map<SeaDexRelease, ToshoRelease | null>();
-    const lookUp = async (r: SeaDexRelease): Promise<ToshoRelease | null> => {
+    const looked = new Map<SeaDexRelease, LookedUp>();
+    const lookUp = async (r: SeaDexRelease): Promise<LookedUp> => {
       if (looked.has(r)) return looked.get(r)!;
-      let release: ToshoRelease | null = null;
+      let release: LookedUp = null;
       try {
         release = await tosho.byHash(r.infoHash!, paced);
       } catch (e) {
         if (!isServiceError(e)) throw e;
         serviceDown = true;
+        release = 'down';
         this.log(`fansubs: ${titleId}: Anime Tosho: ${(e as Error).message}`);
       }
       looked.set(r, release);
@@ -480,7 +529,7 @@ export class FansubService {
     for (const r of ranked) {
       if (choosePerEpisode(candidates, numbers, unit.season, languages).size === numbers.length) break;
       const release = await lookUp(r.release);
-      if (release) candidates.push({ release, seadex: r.release, rank: r.rank });
+      if (release && release !== 'down') candidates.push({ release, seadex: r.release, rank: r.rank });
     }
     const choices = choosePerEpisode(candidates, numbers, unit.season, languages);
 
@@ -515,15 +564,17 @@ export class FansubService {
   /** The fonts of a file's pack; when it has none on Anime Tosho, the same group's other release's pack for the episode. */
   private async fonts(
     unit: Unit, episode: number, choice: EpisodeChoice, releases: readonly SeaDexRelease[],
-    lookUp: (r: SeaDexRelease) => Promise<ToshoRelease | null>, job: Job,
-  ): Promise<{ name: string; data: Buffer }[] | null> {
-    const paced = { urgent: job.urgent, signal: job.controller.signal };
+    lookUp: (r: SeaDexRelease) => Promise<LookedUp>, job: Job,
+  ): Promise<{ name: string; data: Buffer }[] | 'missing' | 'down'> {
+    const paced = pacedOf(job);
+    let down = false;
     const pack = async (fileId: number): Promise<{ name: string; data: Buffer }[] | null> => {
       const url = this.opts.tosho.fontPackUrl(fileId);
       try {
         return await fontsIn7z(await this.opts.cache.get(url, () => this.opts.tosho.download(url, paced)));
       } catch (e) {
         if (job.controller.signal.aborted) throw e;
+        if (isServiceError(e)) down = true;
         if (!(e instanceof NotFoundOnTosho)) this.log(`fansubs: font pack of file ${fileId}: ${e instanceof Error ? e.message : String(e)}`);
         return null;
       }
@@ -533,43 +584,47 @@ export class FansubService {
     for (const r of releases) {
       if (r === choice.candidate.seadex || r.group !== choice.candidate.seadex.group || r.infoHash === null) continue;
       const release = await lookUp(r);
-      for (const f of release ? this.filesFor(release, unit, episode) : []) {
+      if (release === 'down') down = true;
+      for (const f of release && release !== 'down' ? this.filesFor(release, unit, episode) : []) {
         const fonts = await pack(f.id);
         if (fonts) return fonts;
       }
     }
-    return null;
+    // A pack Anime Tosho couldn't serve may be there next time: not the same as none at all.
+    return down ? 'down' : 'missing';
   }
 
   /** Fetches, lines up and attaches one episode's tracks, replacing its earlier fansubs. */
   private async episode(
     titleId: string, unit: Unit, ep: UnitEpisode, choice: EpisodeChoice, releases: readonly SeaDexRelease[],
-    lookUp: (r: SeaDexRelease) => Promise<ToshoRelease | null>, job: Job,
+    lookUp: (r: SeaDexRelease) => Promise<LookedUp>, job: Job,
   ): Promise<FansubEpisodeMark> {
     const { store, state, tosho, cache } = this.opts;
     const { signal } = job.controller;
-    const paced = { urgent: job.urgent, signal };
+    const paced = pacedOf(job);
     const discKey = this.opts.discKey(ep.discId);
     if (discKey === null) return { status: 'not-found', reason: 'no-release' };
 
     const tracks = choice.tracks.filter((t) => !state.isDeleted(choice.file.id, t.track));
     const fetched: { track: ToshoTrack; text: string }[] = [];
     let tooLarge = false;
-    let down = false;
     for (const track of tracks) {
       try {
         const raw = await cache.get(track.url, () => tosho.download(track.url, paced));
         fetched.push({ track, text: (await unxz(raw, MAX_TRACK_BYTES)).toString('utf8') });
       } catch (e) {
         signal.throwIfAborted();
+        // a track Anime Tosho couldn't serve now: the episode keeps what it has and waits for the next run
+        if (isServiceError(e)) return { status: 'not-found', reason: 'service-unavailable' };
         if (e instanceof TooLargeArchive) tooLarge = true;
-        else if (isServiceError(e)) down = true;
         else if (!(e instanceof NotFoundOnTosho)) this.log(`fansubs: track ${track.track} of file ${choice.file.id}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (fetched.length === 0) return { status: 'not-found', reason: down ? 'service-unavailable' : tooLarge ? 'too-large' : 'no-tracks' };
+    if (fetched.length === 0) return { status: 'not-found', reason: tooLarge ? 'too-large' : 'no-tracks' };
 
-    const fonts = await this.fonts(unit, ep.number, choice, releases, lookUp, job);
+    const packed = await this.fonts(unit, ep.number, choice, releases, lookUp, job);
+    if (packed === 'down') return { status: 'not-found', reason: 'service-unavailable' };
+    const fonts = packed === 'missing' ? null : packed;
     // The file's tracks share the offset of the one with the most dialogue.
     const main = fetched.reduce((a, b) => (dialogueIntervals(b.text).length > dialogueIntervals(a.text).length ? b : a));
     const disc = await this.opts.discs(ep.discId);
@@ -582,39 +637,47 @@ export class FansubService {
     const attachment: SubtitleAttachment = unit.season === null
       ? { kind: 'chapter', discKey, playlistId: ep.playlistId, chapter: 0, titleId }
       : { kind: 'episode', discKey, playlistId: ep.playlistId, titleId, seasonId: unit.seasonId, episode: ep.number };
-    // The episode's earlier fansubs make way; the owner's edits to a track carry over to its new copy.
+    // The episode's earlier fansubs make way for the new ones; the owner's edits to a track carry over to its new copy.
     const earlier = store.list().filter((s) => {
       const a = s.attachment;
       if (!s.source || a.titleId !== titleId) return false;
       return unit.season === null ? a.kind === 'chapter' : a.kind === 'episode' && a.seasonId === unit.seasonId && a.episode === ep.number;
     });
     const kept = new Map(earlier.map((s) => [trackKey(s.source!.toshoFileId, s.source!.track), s]));
-    for (const s of earlier) store.delete(s.id);
-
-    let attached = 0;
-    for (const { track, text } of fetched) {
-      const trackName = track.name || languageName(track.language);
-      const was = kept.get(trackKey(choice.file.id, track.track));
-      const source: FansubSource = {
-        kind: 'fansub', group: choice.candidate.seadex.group, tracker: choice.candidate.seadex.tracker, rank: choice.candidate.rank,
-        toshoFileId: choice.file.id, track: track.track, trackName, alignment, linedUpOn: { discKey, playlistId: ep.playlistId },
-      };
-      try {
-        store.createFansub(
+    const files = fetched.map(({ track, text }) => ({ track, data: Buffer.from(retime(text, alignment)), original: Buffer.from(text) }));
+    const fit = store.fansubSwap(earlier.map((s) => s.id), files, fonts ?? []);
+    if (fit.keep > fit.room && fit.swap > fit.room) {
+      this.log(`fansubs: the fansub store is full; file ${choice.file.id} left out`);
+      return { status: 'not-found', reason: 'too-large' };
+    }
+    // New first, old after, so a failure keeps the old; only when the budget can't hold both for a moment do the old go first.
+    const oldFirst = fit.keep > fit.room;
+    if (oldFirst) for (const s of earlier) store.delete(s.id);
+    const made: string[] = [];
+    try {
+      for (const { track, data, original } of files) {
+        const trackName = track.name || languageName(track.language);
+        const was = kept.get(trackKey(choice.file.id, track.track));
+        const source: FansubSource = {
+          kind: 'fansub', group: choice.candidate.seadex.group, tracker: choice.candidate.seadex.tracker, rank: choice.candidate.rank,
+          toshoFileId: choice.file.id, track: track.track, trackName, alignment, linedUpOn: { discKey, playlistId: ep.playlistId },
+        };
+        made.push(store.createFansub(
           {
-            name: was?.name ?? `${choice.candidate.seadex.group} · ${trackName}`, language: was?.language ?? track.language,
+            name: was?.name ?? `${choice.candidate.seadex.group} · ${trackName}`, language: was?.language ?? languageTag(track.language),
             offsetMs: was?.offsetMs ?? 0, attachment, source, ...(fonts === null ? { fontsMissing: true } : {}),
           },
-          { name: `${choice.file.id}-${track.track}.ass`, data: Buffer.from(retime(text, alignment)), original: Buffer.from(text) },
+          { name: `${choice.file.id}-${track.track}.ass`, data, original },
           fonts ?? [],
-        );
-        attached++;
-      } catch (e) {
-        if (!(e instanceof TooLargeError)) throw e;
-        tooLarge = true;
-        this.log(`fansubs: the fansub store is full; track ${track.track} of file ${choice.file.id} left out`);
+        ).id);
       }
+    } catch (e) {
+      for (const id of made) store.delete(id);
+      if (!(e instanceof TooLargeError)) throw e;
+      this.log(`fansubs: the fansub store is full; file ${choice.file.id} left out`);
+      return { status: 'not-found', reason: 'too-large' };
     }
-    return attached > 0 ? { status: 'attached' } : { status: 'not-found', reason: tooLarge ? 'too-large' : 'no-tracks' };
+    if (!oldFirst) for (const s of earlier) store.delete(s.id);
+    return { status: 'attached' };
   }
 }
