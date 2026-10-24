@@ -25,7 +25,7 @@ describe('loadConfig', () => {
       titleLibrary: 'owners',
       rtc: { port: 47998 },
       levels: { backend: 'qsv', cacheBytes: 50_000_000_000, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' },
-      fansubs: { seadexUrl: 'https://seadex.moe', toshoFeedUrl: 'https://feed.animetosho.net', toshoUrl: 'https://animetosho.net', windowEnd: { hour: 8, minute: 0 }, storeBytes: 20_000_000_000, cacheBytes: 5_000_000_000 },
+      fansubs: { seadexUrl: 'https://seadex.moe', toshoFeedUrl: 'https://feed.animetosho.net', toshoUrl: 'https://animetosho.net', windowEnd: { hour: 8, minute: 0 }, storeBytes: 20_000_000_000, cacheBytes: 5_000_000_000, picksBytes: 2_000_000_000 },
     });
   });
 
@@ -45,7 +45,7 @@ describe('loadConfig', () => {
       titleLibrary: 'owners',
       rtc: { port: 47998 },
       levels: { backend: 'qsv', cacheBytes: 50_000_000_000, ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' },
-      fansubs: { seadexUrl: 'https://seadex.moe', toshoFeedUrl: 'https://feed.animetosho.net', toshoUrl: 'https://animetosho.net', windowEnd: { hour: 8, minute: 0 }, storeBytes: 20_000_000_000, cacheBytes: 5_000_000_000 },
+      fansubs: { seadexUrl: 'https://seadex.moe', toshoFeedUrl: 'https://feed.animetosho.net', toshoUrl: 'https://animetosho.net', windowEnd: { hour: 8, minute: 0 }, storeBytes: 20_000_000_000, cacheBytes: 5_000_000_000, picksBytes: 2_000_000_000 },
     });
   });
 
@@ -159,17 +159,19 @@ describe('loadConfig', () => {
   });
 
   it('reads the fansub settings', () => {
-    expect(loadConfig({ ...REQUIRED, FANSUB_WINDOW_END: '07:30', FANSUB_STORE_BYTES: '100', FANSUB_CACHE_BYTES: '200', SEADEX_URL: 'http://127.0.0.1:4193/seadex', TOSHO_FEED_URL: 'http://localhost:4193/feed', TOSHO_URL: 'https://tosho.example.org' }).fansubs).toEqual({
+    expect(loadConfig({ ...REQUIRED, FANSUB_WINDOW_END: '07:30', FANSUB_STORE_BYTES: '100', FANSUB_CACHE_BYTES: '200', FANSUB_PICKS_BYTES: '300', SEADEX_URL: 'http://127.0.0.1:4193/seadex', TOSHO_FEED_URL: 'http://localhost:4193/feed', TOSHO_URL: 'https://tosho.example.org' }).fansubs).toEqual({
       seadexUrl: 'http://127.0.0.1:4193/seadex',
       toshoFeedUrl: 'http://localhost:4193/feed',
       toshoUrl: 'https://tosho.example.org',
       windowEnd: { hour: 7, minute: 30 },
       storeBytes: 100,
       cacheBytes: 200,
+      picksBytes: 300,
     });
     expect(() => loadConfig({ ...REQUIRED, FANSUB_WINDOW_END: '25:00' })).toThrow('FANSUB_WINDOW_END');
     expect(() => loadConfig({ ...REQUIRED, FANSUB_STORE_BYTES: '20GB' })).toThrow('FANSUB_STORE_BYTES');
     expect(() => loadConfig({ ...REQUIRED, FANSUB_CACHE_BYTES: 'x' })).toThrow('FANSUB_CACHE_BYTES');
+    expect(() => loadConfig({ ...REQUIRED, FANSUB_PICKS_BYTES: '2GB' })).toThrow('FANSUB_PICKS_BYTES');
   });
 
   it.each(['SEADEX_URL', 'TOSHO_FEED_URL', 'TOSHO_URL'])('refuses an http base for %s unless it is loopback', (name) => {

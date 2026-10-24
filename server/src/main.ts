@@ -234,7 +234,7 @@ async function serve(config: Config): Promise<void> {
     store: subtitleStore, state: fansubState, seadex, tosho, cache: fansubCache, titles, discs, discKey: lookup.discKey, durationMs: lookup.durationMs,
     ffmpegPath, activity, encoding: () => (levels?.encodingNow().length ?? 0) > 0, windowEnd: config.fansubs.windowEnd, log: console.log,
   });
-  const picks = new FansubPicks({ dataDir: config.dataDir, tosho, cache: fansubCache, discs, lookup, ffmpegPath, log: console.log });
+  const picks = new FansubPicks({ dataDir: config.dataDir, tosho, cache: fansubCache, discs, lookup, ffmpegPath, maxBytes: config.fansubs.picksBytes, log: console.log });
   // After a scan the titles are matched first, so the nightly fansub pass sees the discs filed. `FANSUB_NIGHTLY=off`
   // (only the E2E stand-in sets it) keeps the pass from attaching tracks to the fixture series while tests run at night.
   const nightly = process.env.FANSUB_NIGHTLY !== 'off';

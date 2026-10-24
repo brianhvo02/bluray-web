@@ -7,6 +7,7 @@ import { TooLargeArchive } from '../fansubs/archive';
 import { rankReleases } from '../fansubs/choose';
 import type { FansubDiscs } from '../fansubs/disc-lookup';
 import { episodeOfFile, mainFile, seasonEpisode } from '../fansubs/episode-files';
+import { PickTooLarge } from '../fansubs/pick-store';
 import { PickNotFound, TooManyPicks } from '../fansubs/picks';
 import type { FansubPicks } from '../fansubs/picks';
 import type { SeaDex } from '../fansubs/seadex';
@@ -222,7 +223,7 @@ export function fansubRoutes(auth: Auth, opts: FansubRouteOptions, titles?: Titl
       if (e instanceof TooManyPicks) return json(429, { error: 'too-many' }, { 'Retry-After': '600' });
       if (e instanceof PickNotFound) return notFound(e.reason);
       if (e instanceof NotFoundOnTosho) return notFound('gone');
-      if (e instanceof TooLargeArchive) return json(413, { error: 'too-large' });
+      if (e instanceof TooLargeArchive || e instanceof PickTooLarge) return json(413, { error: 'too-large' });
       if (e instanceof SourceUnavailable || e instanceof RateLimited) return json(503, { error: 'unavailable' }, { 'Retry-After': '30' });
       throw e;
     }

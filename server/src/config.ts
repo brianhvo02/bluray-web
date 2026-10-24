@@ -52,6 +52,8 @@ export interface FansubsConfig {
   storeBytes: number;
   /** `FANSUB_CACHE_BYTES`: the download cache's byte budget, 5 GB by default. */
   cacheBytes: number;
+  /** `FANSUB_PICKS_BYTES`: the byte budget of viewers' own Anime Tosho picks, 2 GB by default. */
+  picksBytes: number;
 }
 
 export interface LevelsConfig {
@@ -172,6 +174,7 @@ function parseFansubs(env: Record<string, string | undefined>): FansubsConfig {
     windowEnd: { hour: Number(m[1]), minute: Number(m[2]) },
     storeBytes: parseBytes(env, 'FANSUB_STORE_BYTES', 20_000_000_000),
     cacheBytes: parseBytes(env, 'FANSUB_CACHE_BYTES', 5_000_000_000),
+    picksBytes: parseBytes(env, 'FANSUB_PICKS_BYTES', 2_000_000_000),
   };
 }
 

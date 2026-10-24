@@ -1,10 +1,10 @@
 /**
  * A viewer's own Anime Tosho pick (spec §9): one track of a file, fetched with its file's font pack, lined up with the
- * episode the viewer plays and kept under `<dataDir>/fansubs/picks/<id>/` (never in the subtitle store) for 30 days
- * after its last use. Original code.
+ * episode the viewer plays and kept by `PickStore` (never in the subtitle store) for 30 days after its last use, within
+ * the picks' byte budget. Original code.
  */
-import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FansubAlignment, FansubPick, FansubPickRequest } from '../../../src/engine/disc/nas-api';
 import { isCode, replaceAtomically } from '../atomic-json';
@@ -14,19 +14,18 @@ import { fontsIn7z } from './archive';
 import { languageTag, normalizeLanguage } from './choose';
 import type { FansubDiscs } from './disc-lookup';
 import type { FetchCache } from './fetch-cache';
+import { PickStore } from './pick-store';
 import { retime } from './retime';
 import { NotFoundOnTosho } from './tosho';
 import type { Tosho, ToshoRelease, ToshoTrack } from './tosho';
 import { fetchTrack, languageName, mostDialogue } from './tracks';
 
-const KEEP_MS = 30 * 86_400_000;
 const SWEEP_EVERY_MS = 3_600_000;
 const HOUR_MS = 3_600_000;
 /** Picks one person may start in a rolling hour; one the NAS already keeps doesn't count. */
 export const PICKS_PER_HOUR = 20;
 /** Files whose release the picks remember, newest kept. */
 const MAX_FILES = 20_000;
-const ID_RE = /^[0-9a-f]{16}$/;
 const FONT_NAME = /^[^/\\\0]{1,255}$/;
 const UNSURE: FansubAlignment = { kind: 'none', reason: 'low-confidence' };
 
@@ -50,14 +49,13 @@ export interface FansubPicksOptions {
   readonly discs: (discId: string) => Promise<LevelDiscSource | null>;
   readonly lookup: FansubDiscs;
   readonly ffmpegPath: string;
+  /** `FANSUB_PICKS_BYTES`: what the picks may hold in all, 2 GB by default. */
+  readonly maxBytes?: number;
   readonly now?: () => number;
   readonly log?: (message: string) => void;
 }
 
-interface PickFile {
-  readonly subtitle: FansubPick;
-  readonly usedAt: number;
-}
+export const PICKS_LIMIT_BYTES = 2_000_000_000;
 
 /** `p.<fileId>.<track>.<discKey>.<playlistId>`, hashed to 16 hex. */
 export function pickId(req: FansubPickRequest): string {
@@ -69,7 +67,7 @@ const isAss = (t: ToshoTrack): boolean => /^(ASS|SSA)$/i.test(t.format);
 const groupOf = (title: string): string | null => /^\s*\[([^\]]{1,100})\]/.exec(title)?.[1]?.trim() || null;
 
 export class FansubPicks {
-  private readonly root: string;
+  private readonly store: PickStore;
   private readonly filesFile: string;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
@@ -82,9 +80,8 @@ export class FansubPicks {
   constructor(private readonly opts: FansubPicksOptions) {
     this.now = opts.now ?? Date.now;
     this.log = opts.log ?? ((m) => console.warn(m));
-    this.root = join(opts.dataDir, 'fansubs', 'picks');
     this.filesFile = join(opts.dataDir, 'fansubs', 'pick-files.json');
-    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    mkdirSync(join(opts.dataDir, 'fansubs'), { recursive: true, mode: 0o700 });
     try {
       const saved: unknown = JSON.parse(readFileSync(this.filesFile, 'utf8'));
       if (Array.isArray(saved)) {
@@ -93,7 +90,8 @@ export class FansubPicks {
     } catch (err) {
       if (!isCode(err, 'ENOENT') && !(err instanceof SyntaxError)) throw err;
     }
-    this.sweep();
+    this.store = new PickStore(opts.dataDir, { maxBytes: opts.maxBytes ?? PICKS_LIMIT_BYTES, now: this.now, building: (id) => this.building.has(id) });
+    this.sweptAt = this.now();
   }
 
   /** A release a viewer opened: its files can be picked from now on. */
@@ -117,9 +115,9 @@ export class FansubPicks {
   async pick(personId: string, req: FansubPickRequest): Promise<FansubPick> {
     this.sweep();
     const id = pickId(req);
-    const kept = this.read(id);
+    const kept = this.store.get(id);
     if (kept) {
-      this.touch(id, kept);
+      this.store.touch(id);
       return kept.subtitle;
     }
     const running = this.building.get(id);
@@ -131,18 +129,11 @@ export class FansubPicks {
 
   /** The pick's lined-up file, or null; a use keeps it another 30 days. */
   filePath(id: string): string | null {
-    const kept = this.read(id);
-    if (!kept) return null;
-    this.touch(id, kept);
-    return join(this.root, id, 'sub', kept.subtitle.fileName);
+    return this.store.filePath(id);
   }
 
   fontPath(id: string, name: string): string | null {
-    const kept = this.read(id);
-    const font = kept?.subtitle.fonts.find((f) => f.name === name);
-    if (!kept || !font) return null;
-    this.touch(id, kept);
-    return join(this.root, id, 'fonts', font.name);
+    return this.store.fontPath(id, name);
   }
 
   private async build(id: string, personId: string, req: FansubPickRequest): Promise<FansubPick> {
@@ -193,21 +184,7 @@ export class FansubPicks {
       },
       ...(fonts === null ? { fontsMissing: true } : {}),
     };
-    // Written whole beside its place and renamed in, so a pick is either all there or not at all.
-    const temp = join(this.root, `.tmp-${id}-${randomBytes(4).toString('hex')}`);
-    try {
-      mkdirSync(join(temp, 'sub'), { recursive: true });
-      mkdirSync(join(temp, 'fonts'));
-      writeFileSync(join(temp, 'sub', subtitle.fileName), data, { mode: 0o600 });
-      for (const [name, d] of byName) writeFileSync(join(temp, 'fonts', name), d, { mode: 0o600 });
-      writeFileSync(join(temp, 'meta.json'), JSON.stringify({ subtitle, usedAt: this.now() } satisfies PickFile), { mode: 0o600 });
-      rmSync(join(this.root, id), { recursive: true, force: true });
-      renameSync(temp, join(this.root, id));
-    } catch (err) {
-      rmSync(temp, { recursive: true, force: true });
-      throw err;
-    }
-    return subtitle;
+    return this.store.put(subtitle, data, byName);
   }
 
   /** Lined up on the first copy of the disc whose playlist can be read; unsure when none can. */
@@ -232,38 +209,11 @@ export class FansubPicks {
     this.started.set(personId, recent);
   }
 
-  private read(id: string): PickFile | null {
-    if (!ID_RE.test(id)) return null;
-    try {
-      const parsed = JSON.parse(readFileSync(join(this.root, id, 'meta.json'), 'utf8')) as PickFile;
-      return typeof parsed?.usedAt === 'number' && parsed.subtitle?.id === id ? parsed : null;
-    } catch (err) {
-      if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR') || err instanceof SyntaxError) return null;
-      throw err;
-    }
-  }
-
-  /** Notes a use, at most once an hour per pick. */
-  private touch(id: string, kept: PickFile): void {
-    const now = this.now();
-    if (now - kept.usedAt < HOUR_MS) return;
-    try {
-      replaceAtomically(join(this.root, id, 'meta.json'), JSON.stringify({ ...kept, usedAt: now } satisfies PickFile));
-    } catch (err) {
-      if (!isCode(err, 'ENOENT')) throw err;
-    }
-  }
-
-  /** Removes picks unused for 30 days, damaged ones and leftover temp folders; at start and then at most hourly. */
+  /** Removes old and damaged picks; at start and then at most hourly. */
   private sweep(): void {
     const now = this.now();
-    if (this.sweptAt !== 0 && now - this.sweptAt < SWEEP_EVERY_MS) return;
+    if (now - this.sweptAt < SWEEP_EVERY_MS) return;
     this.sweptAt = now;
-    for (const name of readdirSync(this.root)) {
-      const kept = ID_RE.test(name) ? this.read(name) : null;
-      // a temp folder no running build owns was left by a crash
-      const leftover = name.startsWith('.tmp-') && !this.building.has(name.slice(5, 21));
-      if ((ID_RE.test(name) && (!kept || now - kept.usedAt > KEEP_MS)) || leftover) rmSync(join(this.root, name), { recursive: true, force: true });
-    }
+    this.store.sweep();
   }
 }
