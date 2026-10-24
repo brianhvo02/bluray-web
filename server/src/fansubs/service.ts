@@ -16,7 +16,7 @@ import { RateLimited } from '../titles/pacer';
 import { SourceUnavailable } from '../titles/sources';
 import { align } from './align';
 import { fontsIn7z, TooLargeArchive, unxz } from './archive';
-import { choosePerEpisode, normalizeLanguage, rankReleases } from './choose';
+import { choosePerEpisode, languageTag, normalizeLanguage, rankReleases } from './choose';
 import type { Candidate, EpisodeChoice } from './choose';
 import { dialogueIntervals } from './dialogue';
 import { retime } from './retime';
@@ -128,17 +128,6 @@ function languageName(code: string): string {
   } catch {
     return code;
   }
-}
-
-/** ISO 639-2/B codes the app knows by their BCP 47 primary subtag (`src/ui/nas/subtitle-model.ts`). */
-const PRIMARY_TAGS: Readonly<Record<string, string>> = {
-  eng: 'en', jpn: 'ja', spa: 'es', por: 'pt', fre: 'fr', ger: 'de', ita: 'it', ara: 'ar', rus: 'ru', ind: 'id', chi: 'zh', kor: 'ko',
-};
-/** The tag a fansub is stored with, as owner uploads are: `en` for Tosho's `eng` or `en`; other codes as normalised, `und` kept. */
-export function languageTag(code: string): string {
-  const c = normalizeLanguage(code);
-  if (c === '') return 'und';
-  return PRIMARY_TAGS[c] ?? c;
 }
 
 const blank = (titleId: string): FansubTitleState => ({ titleId, lastRunAt: null, running: false, nothingFound: false, seasons: {}, episodes: {} });
@@ -526,10 +515,13 @@ export class FansubService {
     const languages = state.languages();
     const numbers = episodes.map((e) => e.number);
     const candidates: Candidate[] = [];
-    for (const r of ranked) {
+    // The first release Anime Tosho couldn't be asked about: an episode chosen from a lesser one waits for the next run.
+    let firstDown = Infinity;
+    for (const [i, r] of ranked.entries()) {
       if (choosePerEpisode(candidates, numbers, unit.season, languages).size === numbers.length) break;
       const release = await lookUp(r.release);
-      if (release && release !== 'down') candidates.push({ release, seadex: r.release, rank: r.rank });
+      if (release === 'down') firstDown = Math.min(firstDown, i);
+      else if (release) candidates.push({ release, seadex: r.release, rank: r.rank });
     }
     const choices = choosePerEpisode(candidates, numbers, unit.season, languages);
 
@@ -539,6 +531,10 @@ export class FansubService {
       const choice = choices.get(ep.number);
       if (!choice) {
         mark(ep.number, { status: 'not-found', reason: serviceDown ? 'service-unavailable' : candidates.length === 0 ? 'no-release' : 'no-tracks' });
+        continue;
+      }
+      if (ranked.findIndex((r) => r.release === choice.candidate.seadex) > firstDown) {
+        mark(ep.number, { status: 'not-found', reason: 'service-unavailable' });
         continue;
       }
       const m = await this.episode(titleId, unit, ep, choice, ranked.map((r) => r.release), lookUp, job);
@@ -611,7 +607,9 @@ export class FansubService {
     for (const track of tracks) {
       try {
         const raw = await cache.get(track.url, () => tosho.download(track.url, paced));
-        fetched.push({ track, text: (await unxz(raw, MAX_TRACK_BYTES)).toString('utf8') });
+        const text = (await unxz(raw, MAX_TRACK_BYTES)).toString('utf8');
+        if (text === '') this.log(`fansubs: track ${track.track} of file ${choice.file.id} is empty; skipped`);
+        else fetched.push({ track, text });
       } catch (e) {
         signal.throwIfAborted();
         // a track Anime Tosho couldn't serve now: the episode keeps what it has and waits for the next run

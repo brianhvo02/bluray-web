@@ -426,6 +426,33 @@ describe('FansubService', () => {
     expect(result.episodes[`${SEASON}#1`]).toEqual({ status: 'attached' });
   });
 
+  it("a better release Tosho can't look up keeps the episodes a lesser one would replace", async () => {
+    const first = setup();
+    await first.svc.runTitle(TITLE);
+    const before = [1, 2].map((n) => fansubsOf(first.store, n).map((s) => s.id));
+    const { svc, store, state, clock } = setup({
+      tosho: (t) => ({ ...t, byHash: async (h, o) => { if (h === HASH_A) throw new SourceUnavailable('animetosho: HTTP 503'); return t.byHash(h, o); } }),
+    });
+    const result = await svc.runTitle(TITLE);
+    // GroupB covers both episodes, but GroupA (SeaDex's best) may have them once Tosho answers.
+    expect(result.episodes).toEqual({
+      [`${SEASON}#1`]: { status: 'not-found', reason: 'service-unavailable' },
+      [`${SEASON}#2`]: { status: 'not-found', reason: 'service-unavailable' },
+    });
+    expect([1, 2].map((n) => fansubsOf(store, n).map((s) => s.id))).toEqual(before);
+    expect(state.due([TITLE], clock.t)).toEqual([TITLE]);
+  });
+
+  it('skips a track that unpacks to nothing', async () => {
+    const empty = await xz(Buffer.alloc(0));
+    writeFixtures({ ...standardFiles(), '101-0.ass.xz': empty, '202-0.ass.xz': empty, '202-1.ass.xz': empty });
+    const { svc, store } = setup();
+    const result = await svc.runTitle(TITLE);
+    expect(result.episodes[`${SEASON}#1`]).toEqual({ status: 'attached' });
+    expect(fansubsOf(store, 1).map((s) => s.source!.track)).toEqual([1]);
+    expect(result.episodes[`${SEASON}#2`]).toEqual({ status: 'not-found', reason: 'no-tracks' });
+  });
+
   it('nightly runs only at night', async () => {
     const day = setup({ startAt: new Date(2026, 9, 24, 10, 0).getTime() });
     await day.svc.startNightly();

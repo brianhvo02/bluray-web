@@ -89,12 +89,16 @@ export class FansubState {
     });
   }
 
-  /** The titles to run: never run, or nothing found and the last run over 30 days ago. */
+  /**
+   * The titles to run: never run, nothing found and the last run over 30 days ago, or an episode left for later because
+   * a service was down.
+   */
   due(titleIds: readonly string[], now: number): string[] {
     const { titles } = this.read();
     return titleIds.filter((id) => {
       const t = titles[id];
-      return !complete(t) || t.lastRunAt === null || (t.nothingFound && now - t.lastRunAt > THIRTY_DAYS_MS);
+      return !complete(t) || t.lastRunAt === null || (t.nothingFound && now - t.lastRunAt > THIRTY_DAYS_MS)
+        || Object.values(t.episodes).some((m) => m.reason === 'service-unavailable');
     });
   }
 

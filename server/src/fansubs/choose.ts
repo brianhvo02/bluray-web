@@ -26,6 +26,18 @@ export function normalizeLanguage(code: string): string {
   return LANGUAGES[c] ?? c;
 }
 
+/** 639-2/B to the two-letter code, for every code above that has one. */
+const TWO_LETTER: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(LANGUAGES).filter(([k]) => k.length === 2).map(([k, v]) => [v, k]),
+);
+
+/** The tag a fansub is stored with, as owner uploads are (BCP 47): the two-letter code when there is one, else 639-2/B; `und` when empty. */
+export function languageTag(code: string): string {
+  const c = normalizeLanguage(code);
+  if (c === '') return 'und';
+  return TWO_LETTER[c] ?? c;
+}
+
 const WEB_TAG = /web/i;
 const WEB_NAME = /\bWEB[- ]?(DL|Rip)?\b/i;
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { choosePerEpisode, normalizeLanguage, rankReleases } from './choose';
+import { choosePerEpisode, languageTag, normalizeLanguage, rankReleases } from './choose';
 import type { Candidate } from './choose';
 import type { SeaDexEntry, SeaDexRelease } from './seadex';
 import type { ToshoFile, ToshoRelease, ToshoTrack } from './tosho';
@@ -95,5 +95,12 @@ describe('normalizeLanguage', () => {
     expect(normalizeLanguage('en-US')).toBe('eng');
     expect(normalizeLanguage('pt-BR')).toBe('por');
     expect(normalizeLanguage('zh-Hans')).toBe('chi');
+  });
+});
+
+describe('languageTag', () => {
+  it('stores a code by its two-letter form when it has one, else as ISO 639-2/B', () => {
+    expect(['eng', 'en', 'EN-us', 'dut', 'nld', 'pol', 'ger', 'chi', 'tgl', 'fil', 'und', ''].map(languageTag))
+      .toEqual(['en', 'en', 'en', 'nl', 'nl', 'pl', 'de', 'zh', 'tl', 'fil', 'und', 'und']);
   });
 });

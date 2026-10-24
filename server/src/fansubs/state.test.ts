@@ -24,14 +24,16 @@ describe('FansubState', () => {
     expect(new FansubState(dir).title('a')).toEqual(put);
   });
 
-  it('says which titles are due: never run, or nothing found 30 days ago', () => {
+  it('says which titles are due: never run, nothing found 30 days ago, or a service was down for an episode', () => {
     const s = new FansubState(dir);
     s.put(state('ran-yesterday'));
     s.put(state('empty-31', { nothingFound: true, lastRunAt: NOW - 31 * DAY }));
     s.put(state('empty-29', { nothingFound: true, lastRunAt: NOW - 29 * DAY }));
     s.put(state('found-long-ago', { lastRunAt: NOW - 90 * DAY }));
     s.put(state('never', { lastRunAt: null }));
-    expect(s.due(['unknown', 'ran-yesterday', 'empty-31', 'empty-29', 'found-long-ago', 'never'], NOW)).toEqual(['unknown', 'empty-31', 'never']);
+    s.put(state('tosho-down', { episodes: { 's1#1': { status: 'attached' }, 's1#2': { status: 'not-found', reason: 'service-unavailable' } } }));
+    expect(s.due(['unknown', 'ran-yesterday', 'empty-31', 'empty-29', 'found-long-ago', 'never', 'tosho-down'], NOW))
+      .toEqual(['unknown', 'empty-31', 'never', 'tosho-down']);
   });
 
   it('remembers deleted tracks per title, and undelete clears one title only', () => {
