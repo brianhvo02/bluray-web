@@ -52,7 +52,8 @@ const interactive = { urgent: true } as const;
 /**
  * `/api/fansubs/…`, behind `requireToken`. The owner's routes (a title's run and state, undelete, realign, original
  * timing, the languages setting) answer 403 to anyone else; the viewer search (`search`, `releases/<id>`, `picks`) is
- * open to every paired person whatever `TITLE_LIBRARY` says, since a pick is their own viewing (spec §9).
+ * open to every paired person whatever `TITLE_LIBRARY` says, since a pick is their own viewing (spec §9); behind a closed
+ * gate a guest's search just gets no SeaDex ranks and no file matched to the playing episode.
  */
 export function fansubRoutes(auth: Auth, opts: FansubRouteOptions, titles?: TitleLibrary): Handler {
   const { service, state, seadex, tosho, picks, lookup } = opts;
@@ -105,14 +106,15 @@ export function fansubRoutes(auth: Auth, opts: FansubRouteOptions, titles?: Titl
     return null;
   };
 
-  const releaseFiles = async (id: number, query: URLSearchParams): Promise<Response> => {
+  /** `seesCatalogue`: the asker may learn of the title library (an owner, or the gate is open), so the episode's file is matched. */
+  const releaseFiles = async (id: number, query: URLSearchParams, seesCatalogue: boolean): Promise<Response> => {
     const release = await tosho.byId(id, interactive);
     if (!release) return notFound();
     picks.noteRelease(release);
     const files = release.files
       .map((f) => ({ file: f, tracks: f.tracks.filter((t) => isAss(t.format)).map(({ track, language, name }) => ({ track, language, name })) }))
       .filter((f) => f.tracks.length > 0);
-    const matched = matchedFile(files.map((f) => f.file), query.get('discKey'), query.get('playlistId'));
+    const matched = seesCatalogue ? matchedFile(files.map((f) => f.file), query.get('discKey'), query.get('playlistId')) : null;
     const body: ToshoReleaseFiles = {
       release: result(release, new Map()),
       files: files.map(({ file, tracks }) => ({ id: file.id, name: file.name, episode: episodeOfFile(file.name), tracks })),
@@ -129,19 +131,22 @@ export function fansubRoutes(auth: Auth, opts: FansubRouteOptions, titles?: Titl
       : null;
   };
 
-  const viewer = async (req: Parameters<Handler>[0], url: URL, personId: string, segments: readonly string[]): Promise<Response | null> => {
+  const viewer = async (req: Parameters<Handler>[0], url: URL, device: { personId: string; owner: boolean }, segments: readonly string[]): Promise<Response | null> => {
     const method = req.method ?? 'GET';
+    const { personId } = device;
+    // Behind a closed gate (`TITLE_LIBRARY=owners`) a guest's search learns nothing of the catalogue: no ranks, no matched file.
+    const seesCatalogue = device.owner || titles?.service.gate() === 'everyone';
     const [what, id, part, name, ...extra] = segments;
     if (what === 'search' && segments.length === 1) {
       if (method !== 'GET') return json(405, { error: 'method not allowed' }, { Allow: 'GET' });
       const q = url.searchParams.get('q')?.trim() ?? '';
       if (q === '' || q.length > MAX_QUERY) return bad();
-      const [found, ranks] = await Promise.all([tosho.search(q, interactive), ranksFor(url.searchParams.get('titleId'))]);
+      const [found, ranks] = await Promise.all([tosho.search(q, interactive), ranksFor(seesCatalogue ? url.searchParams.get('titleId') : null)]);
       return json(200, found.map((r) => result(r, ranks)), { 'Cache-Control': 'no-store' });
     }
     if (what === 'releases' && segments.length === 2) {
       if (method !== 'GET') return json(405, { error: 'method not allowed' }, { Allow: 'GET' });
-      return /^\d{1,10}$/.test(id!) ? await releaseFiles(Number(id), url.searchParams) : notFound();
+      return /^\d{1,10}$/.test(id!) ? await releaseFiles(Number(id), url.searchParams, seesCatalogue) : notFound();
     }
     if (what !== 'picks') return null;
     if (segments.length === 1) {
@@ -215,7 +220,7 @@ export function fansubRoutes(auth: Auth, opts: FansubRouteOptions, titles?: Titl
     if (!device) return json(401, { error: 'unauthorized' });
     const segments = url.pathname.slice(PREFIX.length).split('/').map(decodeSegment);
     try {
-      const open = await viewer(req, url, device.personId, segments);
+      const open = await viewer(req, url, device, segments);
       if (open) return open;
       if (!device.owner) return json(403, { error: 'forbidden' });
       return await owner(req, segments);

@@ -272,8 +272,7 @@ describe('fansub routes', () => {
     expect((await call('PUT', '/api/fansubs/languages', owner, { languages: Array.from({ length: 21 }, () => 'spa') })).status).toBe(400);
   });
 
-  it("lets a guest search behind a closed gate, with SeaDex's ranks for the title named", async () => {
-    gate = 'owners';
+  it("lets a guest search, with SeaDex's ranks for the title named only while the gate is open", async () => {
     const guest = await tokenFor('Noor', false);
     const plain = await call('GET', '/api/fansubs/search?q=starfall', guest);
     expect(plain.status).toBe(200);
@@ -284,6 +283,15 @@ describe('fansub routes', () => {
     const ranked = (await (await call('GET', `/api/fansubs/search?q=starfall&titleId=${encodeURIComponent(TITLE)}`, guest)).json()) as ToshoSearchResult[];
     expect(ranked.map((r) => r.seadex)).toEqual(['best', 'web']);
     expect((await call('GET', '/api/fansubs/search', guest)).status).toBe(400);
+    // behind a closed gate a guest learns nothing of the catalogue: no ranks for a title, no file matched to an episode
+    gate = 'owners';
+    const closed = (await (await call('GET', `/api/fansubs/search?q=starfall&titleId=${encodeURIComponent(TITLE)}`, guest)).json()) as ToshoSearchResult[];
+    expect(closed.map((r) => r.seadex)).toEqual([null, null]);
+    expect(((await (await call('GET', `/api/fansubs/releases/1?discKey=${KEY}&playlistId=00000`, guest)).json()) as ToshoReleaseFiles).matchedFileId).toBeNull();
+    const owner = await tokenFor('Hana', true);
+    const asOwner = (await (await call('GET', `/api/fansubs/search?q=starfall&titleId=${encodeURIComponent(TITLE)}`, owner)).json()) as ToshoSearchResult[];
+    expect(asOwner.map((r) => r.seadex)).toEqual(['best', 'web']);
+    expect(((await (await call('GET', `/api/fansubs/releases/1?discKey=${KEY}&playlistId=00000`, owner)).json()) as ToshoReleaseFiles).matchedFileId).toBe(101);
   });
 
   it("gives a release's files with the file of the playing episode", async () => {
