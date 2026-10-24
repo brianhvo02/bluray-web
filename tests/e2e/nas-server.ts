@@ -8,7 +8,8 @@
  * (`METADATA_FIXTURE`, ruling R3), made-up titles that match the folders TITLE_DISCS puts synthetic discs in. Starfall
  * Wanderer's runtime of 0.0667 minutes (4 s) makes disc1's 4-second playlist 00001 its one episode. The Music shelf's
  * lookups are the recorded releases of tests/e2e/fixtures/nas-music.json (`MUSIC_FIXTURE`), made up as well, and its one
- * release folder holds a generated `cover.png` (`MUSIC_COVER`).
+ * release folder holds a generated `cover.png` (`MUSIC_COVER`). SeaDex and Anime Tosho are the recorded answers in
+ * tests/e2e/fixtures/fansubs (`FANSUB_FIXTURE`).
  */
 import { spawn } from 'node:child_process';
 import { cpSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
@@ -34,6 +35,8 @@ export const PROJECTS = ['chromium', 'firefox', 'webkit'] as const;
 export const SERVER = join(REPO, 'server/dist/server.mjs');
 /** The recorded metadata entries the server matches discs against. */
 export const METADATA_FIXTURE = join(REPO, 'tests/e2e/fixtures/nas-metadata.json');
+/** The recorded SeaDex and Anime Tosho answers for Starfall Wanderer's fansubs (made up; `make-fixtures.ts` there). */
+export const FANSUB_FIXTURE = join(REPO, 'tests/e2e/fixtures/fansubs');
 /** The recorded music releases (catalogue number → MusicBrainz-shaped release) the server looks music discs up in. */
 export const MUSIC_FIXTURE = join(REPO, 'tests/e2e/fixtures/nas-music.json');
 /** The Music shelf's release folder, recorded in MUSIC_FIXTURE by its catalogue number. */
@@ -119,6 +122,9 @@ export const NAS_ENV: Readonly<Record<string, string>> = {
   TRUSTED_PROXY: '127.0.0.1',
   METADATA_FIXTURE,
   MUSIC_FIXTURE,
+  FANSUB_FIXTURE,
+  // Fansubs run only from the owner's button here: a nightly pass would attach tracks to the fixture series mid-run.
+  FANSUB_NIGHTLY: 'off',
   // The WebRTC route on loopback: no STUN discovery, and a UDP port of its own.
   RTC_ADVERTISE: '127.0.0.1',
   RTC_PORT: '47990',

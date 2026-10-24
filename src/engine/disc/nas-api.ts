@@ -178,6 +178,8 @@ export interface StoredSubtitle {
   readonly source?: FansubSource;
   /** A fansub whose script names fonts its archive didn't carry. */
   readonly fontsMissing?: boolean;
+  /** Set only by the picks route: a viewer's own Anime Tosho pick, served from `fansubs/picks/<id>/`, not the store. */
+  readonly pick?: true;
 }
 
 /** How SeaDex rates a release: its best pick, a web release, or any other. */
@@ -204,6 +206,25 @@ export interface FansubTitleState {
   readonly seasons: Readonly<Record<string, FansubSeasonLine>>;
   readonly episodes: Readonly<Record<string, FansubEpisodeMark>>;
 }
+
+/** A release in `GET fansubs/search`; `seadex` is its rank in the SeaDex entry of the title the search named, else null. */
+export interface ToshoSearchResult { readonly id: number; readonly title: string; readonly date: number; readonly seadex: SeaDexRank | null }
+
+/** `GET fansubs/releases/<id>`: its files with their ASS/SSA tracks, and the file of the episode the disc and playlist are. */
+export interface ToshoReleaseFiles {
+  readonly release: ToshoSearchResult;
+  readonly files: readonly {
+    readonly id: number; readonly name: string; readonly episode: number | null;
+    readonly tracks: readonly { readonly track: number; readonly language: string; readonly name: string }[];
+  }[];
+  readonly matchedFileId: number | null;
+}
+
+/** The body of `POST fansubs/picks`: a track of an Anime Tosho file, lined up on this disc's playlist. */
+export interface FansubPickRequest { readonly fileId: number; readonly track: number; readonly discKey: string; readonly playlistId: string }
+
+/** A viewer's pick: shaped as a stored subtitle, its files under `fansubs/picks/<id>/`. */
+export type FansubPick = StoredSubtitle & { readonly pick: true; readonly source: FansubSource };
 
 /** How a fansub's timing was lined up with the disc's audio. */
 export type FansubAlignment =

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { appHandlers } from './app';
@@ -9,6 +9,17 @@ import { SubtitleStore } from './subtitle-store';
 import { ownerCode, printNasId } from './cli';
 import { loadConfig } from './config';
 import type { Config } from './config';
+import { DiscActivity } from './disc-activity';
+import { libraryFansubDiscs } from './fansubs/disc-lookup';
+import { FetchCache } from './fansubs/fetch-cache';
+import { fixtureFansubSources } from './fansubs/fixture-sources';
+import { FansubPicks } from './fansubs/picks';
+import { createSeaDex } from './fansubs/seadex';
+import type { SeaDex } from './fansubs/seadex';
+import { FansubService } from './fansubs/service';
+import { FansubState } from './fansubs/state';
+import { createTosho } from './fansubs/tosho';
+import type { Tosho } from './fansubs/tosho';
 import { createServer } from './http';
 import type { Handler } from './http';
 import { IsoTrees } from './iso';
@@ -38,6 +49,7 @@ import type { MusicRelease, MusicSource } from './titles/music-sources';
 import { OwnerStore } from './titles/owner-store';
 import { Pacer } from './titles/pacer';
 import { downloadRootNames, fixtureSources, loadDiscDbOrNone, releaseFolderOf, TitleService } from './titles/service';
+import { lookupUserAgent } from './titles/sources';
 import type { Entry, MetadataSource } from './titles/sources';
 import { createTmdb } from './titles/tmdb';
 
@@ -70,6 +82,24 @@ function musicSources(config: Config): { musicbrainz: MusicSource; discogs: Musi
     return { musicbrainz, discogs: null };
   }
   return { musicbrainz, discogs: createDiscogs(fetch, new Pacer(50, 60_000), config.discogsToken, config.lookupContact) };
+}
+
+/**
+ * SeaDex and Anime Tosho, each paced to one request per 2.5 s, or the recorded answers in the folder `FANSUB_FIXTURE`
+ * names (`seadex.json`, `tosho.json`, `files/`) in E2E tests.
+ */
+function fansubSources(config: Config): { seadex: SeaDex; tosho: Tosho } {
+  const fixture = process.env.FANSUB_FIXTURE;
+  if (fixture) {
+    if (!statSync(fixture, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`FANSUB_FIXTURE "${fixture}" is not a folder`);
+    return fixtureFansubSources(fixture);
+  }
+  const userAgent = lookupUserAgent(config.lookupContact);
+  const { seadexUrl, toshoFeedUrl, toshoUrl } = config.fansubs;
+  return {
+    seadex: createSeaDex(fetch, new Pacer(1, 2_500), userAgent, seadexUrl),
+    tosho: createTosho(fetch, new Pacer(1, 2_500), userAgent, { feed: toshoFeedUrl, site: toshoUrl }),
+  };
 }
 
 /** The image in a music release folder, with its size and modification time, read from the read-only mount. */
@@ -185,14 +215,33 @@ async function serve(config: Config): Promise<void> {
     downloadRoots: downloadRootNames(config.roots),
     titleLibrary: config.titleLibrary,
   });
-  library.onScanned(() => void titles.runNow());
+
   const rendezvous = rendezvousRegistrar(config);
   const relay = new RelayState(config.dataDir, Date.now);
   // the key's thumbprint, read (or made) locally: `me` gives it to pairings made before the WebRTC route
   const nasId = rendezvous ? await rendezvous.localNasId() : null;
   const isoTrees = new IsoTrees(ISO_TREES);
   const levels = await levelService(config, library, isoTrees);
-  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), playbackStore: new PlaybackStore(config.dataDir), subtitleStore: new SubtitleStore(config.dataDir), publicBase: config.publicBase, appUrl: config.appUrl, ...(config.rendezvousUrl !== undefined ? { rendezvousUrl: config.rendezvousUrl } : {}), registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, isoTrees, ...(levels ? { levels } : {}) });
+  const subtitleStore = new SubtitleStore(config.dataDir, { maxFansubBytes: config.fansubs.storeBytes });
+  const activity = new DiscActivity();
+  const { seadex, tosho } = fansubSources(config);
+  const fansubState = new FansubState(config.dataDir);
+  const fansubCache = new FetchCache(join(config.dataDir, 'fansubs', 'cache'), config.fansubs.cacheBytes);
+  const discs = libraryDiscSources(library, isoTrees);
+  const lookup = libraryFansubDiscs(library);
+  const { ffmpegPath } = config.levels;
+  const fansubs = new FansubService({
+    store: subtitleStore, state: fansubState, seadex, tosho, cache: fansubCache, titles, discs, discKey: lookup.discKey, durationMs: lookup.durationMs,
+    ffmpegPath, activity, encoding: () => (levels?.encodingNow().length ?? 0) > 0, windowEnd: config.fansubs.windowEnd, log: console.log,
+  });
+  const picks = new FansubPicks({ dataDir: config.dataDir, tosho, cache: fansubCache, discs, lookup, ffmpegPath, log: console.log });
+  // After a scan the titles are matched first, so the nightly fansub pass sees the discs filed. `FANSUB_NIGHTLY=off`
+  // (only the E2E stand-in sets it) keeps the pass from attaching tracks to the fixture series while tests run at night.
+  const nightly = process.env.FANSUB_NIGHTLY !== 'off';
+  library.onScanned(() => {
+    void titles.runNow().then(() => (nightly ? fansubs.startNightly() : undefined)).catch((err: unknown) => console.error('fansub pass failed', err));
+  });
+  const handlers = appHandlers({ auth, library, bdjStore: new BdjStore(config.dataDir), playbackStore: new PlaybackStore(config.dataDir), subtitleStore, publicBase: config.publicBase, appUrl: config.appUrl, ...(config.rendezvousUrl !== undefined ? { rendezvousUrl: config.rendezvousUrl } : {}), registrar: rendezvous, trustProxy, titles: { service: titles, owner }, relay, nasId, isoTrees, ...(levels ? { levels } : {}), activity, fansubs: { service: fansubs, state: fansubState, seadex, tosho, picks, lookup } });
   const server = createServer(handlers);
   const stopRtc = rendezvous && config.rendezvousUrl !== undefined ? startRtc(config, config.rendezvousUrl, rendezvous, handlers, auth, relay) : async () => {};
 
@@ -218,6 +267,7 @@ async function serve(config: Config): Promise<void> {
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     process.on(signal, () => {
       titles.close();
+      fansubs.close();
       levels?.close();
       void stopRtc();
       server.close(() => process.exit(0));

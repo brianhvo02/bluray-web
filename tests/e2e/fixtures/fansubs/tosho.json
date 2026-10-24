@@ -1,0 +1,74 @@
+{
+  "releases": [
+    {
+      "id": 7001,
+      "title": "[GroupA] Starfall Wanderer (BD 1080p)",
+      "infoHash": "cccccccccccccccccccccccccccccccccccccccc",
+      "status": "complete",
+      "isSeadex": true,
+      "date": 1700000000,
+      "files": [
+        {
+          "id": 7101,
+          "name": "[GroupA] Starfall Wanderer - 01 (BD 1080p).mkv",
+          "size": 1000,
+          "tracks": [
+            {
+              "track": 0,
+              "language": "eng",
+              "name": "Full",
+              "format": "ASS",
+              "url": "https://storage.animetosho.net/attach/0/7101-0.ass.xz",
+              "isDefault": true,
+              "forced": false
+            },
+            {
+              "track": 1,
+              "language": "eng",
+              "name": "Signs",
+              "format": "ASS",
+              "url": "https://storage.animetosho.net/attach/0/7101-1.ass.xz",
+              "isDefault": false,
+              "forced": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 7002,
+      "title": "[GroupB] Starfall Wanderer (WEB 1080p)",
+      "infoHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "status": "complete",
+      "isSeadex": true,
+      "date": 1600000000,
+      "files": [
+        {
+          "id": 7201,
+          "name": "[GroupB] Starfall Wanderer - 01 (WEB 1080p).mkv",
+          "size": 1000,
+          "tracks": [
+            {
+              "track": 0,
+              "language": "eng",
+              "name": "Full",
+              "format": "ASS",
+              "url": "https://storage.animetosho.net/attach/0/7201-0.ass.xz",
+              "isDefault": true,
+              "forced": false
+            },
+            {
+              "track": 1,
+              "language": "spa",
+              "name": "Completo",
+              "format": "ASS",
+              "url": "https://storage.animetosho.net/attach/0/7201-1.ass.xz",
+              "isDefault": false,
+              "forced": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

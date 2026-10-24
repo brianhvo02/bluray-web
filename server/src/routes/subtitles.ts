@@ -7,6 +7,7 @@ import type { Auth } from '../auth';
 import { BodyTooLargeError, bodyStream, json, readJson } from '../http';
 import type { Handler, Response } from '../http';
 import type { Library } from '../library';
+import type { FansubService } from '../fansubs/service';
 import type { DiscEvidence } from '../titles/evidence';
 import { BadNameError, EmptyBodyError, NotFoundError, FONTS_LIMIT_BYTES, SUBTITLE_LIMIT_BYTES, SubtitleStore, TooLargeError } from '../subtitle-store';
 import type { SubtitleMeta } from '../subtitle-store';
@@ -19,8 +20,15 @@ const MAX_NAME = 200;
 const LANGUAGE = /^[A-Za-z0-9-]{1,35}$/;
 const MAX_OFFSET_MS = 600_000;
 
-/** What the routes work on besides the store: the title library (the gate, episodes) and the library (disc evidence). */
-export interface SubtitleCatalogue { readonly titles?: TitleLibrary; readonly library?: Library }
+/**
+ * What the routes work on besides the store: the title library (the gate, episodes), the library (disc evidence) and
+ * the fansub runs (told of a deleted fansub; they mark one lined up on another disc).
+ */
+export interface SubtitleCatalogue {
+  readonly titles?: TitleLibrary;
+  readonly library?: Library;
+  readonly fansubs?: Pick<FansubService, 'deleted' | 'stale'>;
+}
 
 const notFound = (): Response => json(404, { error: 'not found' });
 const bad = (error = 'bad-request'): Response => json(400, { error });
@@ -55,7 +63,7 @@ const validOffset = (v: unknown): v is number => typeof v === 'number' && Number
  * attached); only owners create, upload, edit and delete. Behind `requireToken`.
  */
 export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: SubtitleCatalogue = {}): Handler {
-  const { titles, library } = catalogue;
+  const { titles, library, fansubs } = catalogue;
   const evidence = (): readonly DiscEvidence[] => library?.evidence() ?? [];
   const keyOf = (discId: string): string | null => {
     const ev = evidence().find((e) => e.discId === discId);
@@ -115,7 +123,7 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
           || ((s.attachment.kind === 'chapter' || titleGone(s.attachment.titleId)) && keys.has(s.attachment.discKey)))))
       .map(withAttached)
       .filter((s) => owner || s.attached !== false)
-      .map((s) => (owner ? s : withoutUploader(s)))
+      .map((s) => (owner ? (s.source && fansubs?.stale(s) ? { ...s, stale: true } : s) : withoutUploader(s)))
       .sort((a, b) => a.uploadedAt - b.uploadedAt || a.id.localeCompare(b.id));
     return json(200, found, { 'Cache-Control': 'no-store' });
   };
@@ -201,7 +209,13 @@ export function subtitleRoutes(auth: Auth, store: SubtitleStore, catalogue: Subt
     try {
       if (shape === 'list') return method === 'GET' ? list(url.searchParams, device.owner) : await create(req, device.personId);
       if (shape === 'one') {
-        if (method === 'DELETE') return store.delete(id!) ? { status: 204 } : notFound();
+        if (method === 'DELETE') {
+          const s = store.get(id!);
+          if (!store.delete(id!)) return notFound();
+          // a deleted fansub's track isn't attached again by the next run
+          if (s?.source) fansubs?.deleted(s);
+          return { status: 204 };
+        }
         return await patch(req, id!);
       }
       if (method === 'PUT') {

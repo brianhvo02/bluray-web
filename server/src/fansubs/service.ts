@@ -15,8 +15,8 @@ import type { Catalogue } from '../titles/catalogue';
 import { RateLimited } from '../titles/pacer';
 import { SourceUnavailable } from '../titles/sources';
 import { align } from './align';
-import { fontsIn7z, TooLargeArchive, unxz } from './archive';
-import { choosePerEpisode, languageTag, normalizeLanguage, rankReleases } from './choose';
+import { fontsIn7z, TooLargeArchive } from './archive';
+import { choosePerEpisode, languageTag, rankReleases } from './choose';
 import type { Candidate, EpisodeChoice } from './choose';
 import { dialogueIntervals } from './dialogue';
 import { retime } from './retime';
@@ -26,9 +26,10 @@ import type { SeaDex, SeaDexRelease } from './seadex';
 import type { FansubState } from './state';
 import { NotFoundOnTosho } from './tosho';
 import type { Tosho, ToshoFile, ToshoRelease, ToshoTrack } from './tosho';
+import { fetchTrack, languageName, mostDialogue } from './tracks';
+import { titleUnits } from './units';
+import type { Unit, UnitEpisode } from './units';
 
-/** A fetched track bigger than this once unpacked is skipped (spec §7). */
-const MAX_TRACK_BYTES = 50 * 1024 * 1024;
 const IDLE_STEP_MS = 30_000;
 /** The nightly pass starts no earlier than 18:00 local time. */
 const NIGHT_STARTS_MIN = 18 * 60;
@@ -54,22 +55,6 @@ export interface FansubServiceOptions {
   readonly windowEnd?: { readonly hour: number; readonly minute: number };
   /** Waits `ms`, rejecting on abort (tests pass a fake clock's). */
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
-}
-
-/** One episode of a unit: a season's episode, or a movie's one. */
-interface UnitEpisode {
-  readonly number: number;
-  readonly discId: string;
-  readonly playlistId: string;
-}
-
-/** What one SeaDex entry covers: an AniList season of a series, or a movie. */
-interface Unit {
-  readonly seasonId: string;
-  readonly alId: number;
-  /** Null for a movie. */
-  readonly season: { readonly count: number; readonly before: number } | null;
-  readonly episodes: readonly UnitEpisode[];
 }
 
 /** A release on Anime Tosho, null when it has none, `down` when it couldn't be asked. */
@@ -116,18 +101,6 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
     }, ms);
     signal.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-const languageNames = new Intl.DisplayNames('en', { type: 'language' });
-/** "English" for `eng`; the code itself when it names no language. */
-function languageName(code: string): string {
-  const c = normalizeLanguage(code);
-  if (c === '' || c === 'und') return code || 'Unknown';
-  try {
-    return languageNames.of(c) ?? code;
-  } catch {
-    return code;
-  }
 }
 
 const blank = (titleId: string): FansubTitleState => ({ titleId, lastRunAt: null, running: false, nothingFound: false, seasons: {}, episodes: {} });
@@ -370,30 +343,6 @@ export class FansubService {
 
   // --- one title ---
 
-  private units(titleId: string): Unit[] {
-    const detail = this.opts.titles.catalogue().detail(titleId);
-    if (!detail) return [];
-    const out: Unit[] = [];
-    let before = 0;
-    for (const s of detail.seasons) {
-      const m = /^anilist:(\d+)#season$/.exec(s.id);
-      if (!m) continue;
-      const count = Math.max(0, ...(s.episodes ?? []).map((e) => e.number));
-      if (s.episodes?.length) {
-        out.push({ seasonId: s.id, alId: Number(m[1]), season: { count, before }, episodes: s.episodes.map(({ number, discId, playlistId }) => ({ number, discId, playlistId })) });
-      }
-      before += count;
-    }
-    const movie = /^anilist:(\d+)$/.exec(titleId);
-    if (movie && detail.title.kind === 'movie') {
-      const discs = detail.seasons.find((s) => s.id === `${titleId}#discs`)?.discs ?? [];
-      const discId = discs[0]?.copies[0]?.discId;
-      // the playlist is the disc's longest, found when the unit runs
-      if (discId !== undefined) out.push({ seasonId: `${titleId}#discs`, alId: Number(movie[1]), season: null, episodes: [{ number: 1, discId, playlistId: '' }] });
-    }
-    return out;
-  }
-
   private async longestPlaylist(discId: string): Promise<string | null> {
     const disc = await this.opts.discs(discId);
     if (!disc) return null;
@@ -414,7 +363,7 @@ export class FansubService {
     state.put(cur);
     const marks: FansubEpisodeMark[] = [];
     try {
-      for (const unit of this.units(titleId)) {
+      for (const unit of titleUnits(this.opts.titles.catalogue(), titleId)) {
         const line = await this.runUnit(titleId, unit, job, (n, mark) => {
           marks.push(mark);
           cur = { ...cur, episodes: { ...cur.episodes, [`${unit.seasonId}#${n}`]: mark } };
@@ -606,8 +555,7 @@ export class FansubService {
     let tooLarge = false;
     for (const track of tracks) {
       try {
-        const raw = await cache.get(track.url, () => tosho.download(track.url, paced));
-        const text = (await unxz(raw, MAX_TRACK_BYTES)).toString('utf8');
+        const text = await fetchTrack(cache, tosho, track, paced);
         if (text === '') this.log(`fansubs: track ${track.track} of file ${choice.file.id} is empty; skipped`);
         else fetched.push({ track, text });
       } catch (e) {
@@ -623,8 +571,7 @@ export class FansubService {
     const packed = await this.fonts(unit, ep.number, choice, releases, lookUp, job);
     if (packed === 'down') return { status: 'not-found', reason: 'service-unavailable' };
     const fonts = packed === 'missing' ? null : packed;
-    // The file's tracks share the offset of the one with the most dialogue.
-    const main = fetched.reduce((a, b) => (dialogueIntervals(b.text).length > dialogueIntervals(a.text).length ? b : a));
+    const main = mostDialogue(fetched);
     const disc = await this.opts.discs(ep.discId);
     const duration = this.opts.durationMs(ep.discId, ep.playlistId);
     const alignment = disc && duration !== null

@@ -2,6 +2,8 @@ import type { Auth } from './auth';
 import type { BdjStore } from './bdj-store';
 import type { PlaybackStore } from './playback-store';
 import { playbackRoutes } from './routes/playback';
+import { fansubRoutes } from './routes/fansubs';
+import type { FansubRouteOptions } from './routes/fansubs';
 import { subtitleRoutes } from './routes/subtitles';
 import type { SubtitleStore } from './subtitle-store';
 import type { CodeRegistrar } from './codes';
@@ -52,6 +54,8 @@ export interface AppOptions {
   isoTrees?: IsoTrees;
   /** Told of every disc file read, so background work can wait while someone watches. */
   activity?: DiscActivity;
+  /** Fansubs from SeaDex and Anime Tosho; without them, their routes answer 404. */
+  fansubs?: FansubRouteOptions;
 }
 
 /** Answers 401 to any request without a valid token (`t=` query or `Authorization: Bearer`); lets the rest through. */
@@ -70,7 +74,8 @@ export function appHandlers(opts: AppOptions): Handler[] {
     requireToken(auth),
     bdjStoreRoutes(auth, opts.bdjStore),
     ...(opts.playbackStore ? [playbackRoutes(auth, opts.playbackStore, { titles: opts.titles, library: opts.library })] : []),
-    ...(opts.subtitleStore ? [subtitleRoutes(auth, opts.subtitleStore, { titles: opts.titles, library: opts.library })] : []),
+    ...(opts.fansubs ? [fansubRoutes(auth, opts.fansubs, opts.titles)] : []),
+    ...(opts.subtitleStore ? [subtitleRoutes(auth, opts.subtitleStore, { titles: opts.titles, library: opts.library, fansubs: opts.fansubs?.service })] : []),
     adminRoutes(auth, {
       library: opts.library, bdjStore: opts.bdjStore, publicBase: opts.publicBase, appUrl: opts.appUrl, rendezvousUrl: opts.rendezvousUrl, registrar: opts.registrar, registrarDeadlineMs: opts.registrarDeadlineMs,
       titles: opts.titles, relay: opts.relay, levels: opts.levels, now: opts.now, lookupTimeoutMs: opts.lookupTimeoutMs,
