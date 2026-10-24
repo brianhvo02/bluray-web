@@ -85,7 +85,8 @@ export function FansubLine({ nas, titleId, seasonId, onChanged, onState }: Fansu
     <div className="fansub-line" data-testid="fansub-line">
       <div className="fansub-line-main">
         <span className="fansub-line-text">{text}</span>
-        <button type="button" data-testid="fansub-run" disabled={running || busy} onClick={onPress}>
+        {/* live while a run goes: pressing it hurries a nightly run that waits for the NAS to be idle */}
+        <button type="button" data-testid="fansub-run" disabled={busy} onClick={onPress}>
           {runButtonLabel(state)}
         </button>
       </div>

@@ -175,7 +175,7 @@ export function fansubRoutes(auth: Auth, opts: FansubRouteOptions, titles?: Titl
       if (action === 'run') {
         const refused = allow('POST');
         if (refused) return refused;
-        if (state.title(id)?.running) return json(409, { error: 'running' });
+        // a title that already runs (a nightly run waiting for the NAS to be idle) is hurried
         return json(202, service.runNow(id));
       }
       if (action === 'undelete') {

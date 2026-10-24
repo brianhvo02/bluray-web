@@ -247,14 +247,14 @@ describe('fansub routes', () => {
     expect((await listed(owner)).filter((s) => s.attachment.kind === 'episode' && s.attachment.episode === 1)).toHaveLength(2);
   });
 
-  it('answers 409 while the title runs, and 404 for a title the catalogue lacks', async () => {
+  it('hurries a title that already runs with 202, and answers 404 for a title the catalogue lacks', async () => {
     const owner = await tokenFor('Hana', true);
     let release!: () => void;
     hold = new Promise((r) => { release = r; });
     expect((await call('POST', `/api/fansubs/titles/${encodeURIComponent(TITLE)}/run`, owner)).status).toBe(202);
     const second = await call('POST', `/api/fansubs/titles/${encodeURIComponent(TITLE)}/run`, owner);
-    expect(second.status).toBe(409);
-    expect(await second.json()).toEqual({ error: 'running' });
+    expect(second.status).toBe(202);
+    expect(await second.json()).toMatchObject({ titleId: TITLE, running: true });
     release();
     expect((await ended(owner)).episodes[`${SEASON}#1`]).toEqual({ status: 'attached' });
     expect((await call('POST', '/api/fansubs/titles/anilist%3A1/run', owner)).status).toBe(404);
