@@ -140,14 +140,51 @@ async function readCapped(res: Response, maxBytes: number): Promise<Buffer> {
   return Buffer.concat(chunks, size);
 }
 
+const MAX_REDIRECTS = 3;
+const LOOPBACK = new Set(['127.0.0.1', 'localhost']);
+
+/**
+ * Which URLs the client fetches (the feed hands it track URLs): https on the configured bases' hosts or on animetosho.net
+ * and its subdomains; http on a loopback host only when a configured base is one (the tests' stand-in).
+ */
+function urlCheck(bases: { feed: string; site: string }): (url: string) => boolean {
+  const hosts = new Set<string>();
+  let loopback = false;
+  for (const b of [bases.feed, bases.site]) {
+    const u = new URL(b);
+    hosts.add(u.hostname);
+    if (u.protocol === 'http:' && LOOPBACK.has(u.hostname)) loopback = true;
+  }
+  return (url) => {
+    let u: URL;
+    try {
+      u = new URL(url);
+    } catch {
+      return false;
+    }
+    if (u.protocol === 'http:') return loopback && LOOPBACK.has(u.hostname);
+    return u.protocol === 'https:' && (hosts.has(u.hostname) || u.hostname === 'animetosho.net' || u.hostname.endsWith('.animetosho.net'));
+  };
+}
+
 export function createTosho(fetch: typeof globalThis.fetch, pacer: Pacer, userAgent: string, bases: { feed: string; site: string }): Tosho {
-  /** One paced GET; the raw response when it is fine. */
+  const allowed = urlCheck(bases);
+  /** One paced GET, following at most three redirects and checking every URL; the raw response when it is fine. */
   const get = async (url: string, accept: string, notFound: () => Error): Promise<Response> => {
     let res: Response;
-    try {
-      res = await fetch(url, { headers: { 'User-Agent': userAgent, Accept: accept }, redirect: 'follow' });
-    } catch {
-      throw new SourceUnavailable('animetosho: network error');
+    let at = url;
+    for (let hop = 0; ; hop++) {
+      if (!allowed(at)) throw new NotFoundOnTosho(url);
+      try {
+        res = await fetch(at, { headers: { 'User-Agent': userAgent, Accept: accept }, redirect: 'manual' });
+      } catch {
+        throw new SourceUnavailable('animetosho: network error');
+      }
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get('Location') : null;
+      if (location === null) break;
+      await res.body?.cancel().catch(() => {});
+      if (hop >= MAX_REDIRECTS) throw new NotFoundOnTosho(url);
+      at = new URL(location, at).href;
     }
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});

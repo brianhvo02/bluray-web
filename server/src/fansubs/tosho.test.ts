@@ -67,23 +67,53 @@ describe('Anime Tosho', () => {
 
   it('download returns the bytes and 404 throws NotFoundOnTosho', async () => {
     const ok = make(async () => new Response(new Uint8Array([1, 2, 3])));
-    expect([...(await ok.download('https://s.example/a.xz'))]).toEqual([1, 2, 3]);
+    expect([...(await ok.download('https://storage.animetosho.net/a.xz'))]).toEqual([1, 2, 3]);
     const missing = make(async () => new Response('no', { status: 404 }));
-    await expect(missing.download('https://s.example/a.xz')).rejects.toBeInstanceOf(NotFoundOnTosho);
+    await expect(missing.download('https://storage.animetosho.net/a.xz')).rejects.toBeInstanceOf(NotFoundOnTosho);
   });
 
   it('refuses a download past its cap, by Content-Length or by the bytes that arrive', async () => {
     let cancelled = false;
     const declared = make(async () => new Response(new ReadableStream({ cancel: () => { cancelled = true; } }), { headers: { 'Content-Length': '11' } }));
-    await expect(declared.download('https://s.example/a.xz', undefined, 10)).rejects.toBeInstanceOf(TooLargeArchive);
+    await expect(declared.download('https://storage.animetosho.net/a.xz', undefined, 10)).rejects.toBeInstanceOf(TooLargeArchive);
     expect(cancelled).toBe(true);
     // an endless body with no Content-Length stops at the cap
     let pulled = 0;
     const streamed = make(async () => new Response(new ReadableStream({ pull: (c) => { pulled++; c.enqueue(new Uint8Array(6)); } })));
-    await expect(streamed.download('https://s.example/a.xz', undefined, 10)).rejects.toBeInstanceOf(TooLargeArchive);
+    await expect(streamed.download('https://storage.animetosho.net/a.xz', undefined, 10)).rejects.toBeInstanceOf(TooLargeArchive);
     expect(pulled).toBeLessThan(5);
     const fits = make(async () => new Response(new Uint8Array(10)));
-    expect((await fits.download('https://s.example/a.xz', undefined, 10)).length).toBe(10);
+    expect((await fits.download('https://storage.animetosho.net/a.xz', undefined, 10)).length).toBe(10);
+  });
+
+  it('fetches only https URLs of the configured hosts or animetosho.net, checked after every redirect', async () => {
+    const seen: string[] = [];
+    const hops: Record<string, string> = {
+      'https://animetosho.net/download/file/1/attachments': 'https://storage.animetosho.net/attach/1.7z',
+      'https://animetosho.net/bad': 'https://evil.example/x',
+      'https://animetosho.net/r1': 'https://animetosho.net/r2',
+      'https://animetosho.net/r2': 'https://animetosho.net/r3',
+      'https://animetosho.net/r3': 'https://animetosho.net/r4',
+      'https://animetosho.net/r4': 'https://animetosho.net/r5',
+    };
+    const t = make(async (u: string, init: RequestInit) => {
+      seen.push(u);
+      expect(init.redirect).toBe('manual');
+      const to = hops[u];
+      return to ? new Response(null, { status: 302, headers: { Location: to } }) : new Response(new Uint8Array([1]));
+    });
+    expect([...(await t.download('https://animetosho.net/download/file/1/attachments'))]).toEqual([1]);
+    expect(seen).toEqual(['https://animetosho.net/download/file/1/attachments', 'https://storage.animetosho.net/attach/1.7z']);
+    expect((await t.download('https://animetosho.net/r2')).length).toBe(1);
+    for (const bad of ['http://storage.animetosho.net/a.xz', 'https://evil.example/a.xz', 'https://animetosho.net.evil.example/a.xz', 'http://127.0.0.1:4193/a.xz', 'https://animetosho.net/bad', 'https://animetosho.net/r1']) {
+      seen.length = 0;
+      await expect(t.download(bad)).rejects.toBeInstanceOf(NotFoundOnTosho);
+      expect(seen.every((u) => !u.includes('evil.example') && !u.startsWith('http:'))).toBe(true);
+    }
+    // a loopback base (the test stand-in) lets loopback http through
+    const local = createTosho((async () => new Response(new Uint8Array([2]))) as unknown as typeof fetch, new Pacer(100, 1000), 'ua', { feed: 'http://127.0.0.1:4193/feed', site: 'http://127.0.0.1:4193' });
+    expect([...(await local.download('http://127.0.0.1:4193/files/a.xz'))]).toEqual([2]);
+    await expect(local.download('http://example.com/a.xz')).rejects.toBeInstanceOf(NotFoundOnTosho);
   });
 
   it('429 throws RateLimited with retryAfterMs 3000', async () => {
