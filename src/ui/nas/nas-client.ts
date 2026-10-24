@@ -1,4 +1,4 @@
-import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, EncodingNow, FolderEntry, LevelAt, LevelInfo, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, UnsortedItem } from '../../engine/disc/nas-api';
+import type { CodeLookup, ContinueItem, DiscEntry, DiscManifest, DiscPlaces, DiscRef, EncodingNow, FansubPick, FansubPickRequest, FansubTitleState, FolderEntry, LevelAt, LevelInfo, OwnerChoice, OwnTitle, PlaybackPlace, PlaylistProgress, StoredSubtitle, SubtitleCreate, SubtitlePatch, TitleDetail, TitleKind, TitleSummary, ToshoReleaseFiles, ToshoSearchResult, UnsortedItem } from '../../engine/disc/nas-api';
 import { PAIRING_CODE_LENGTH, formatCode, normalizeCode } from '../../engine/disc/pairing-code';
 import type { NasPairing, NasStore } from './nas-store';
 import { codeHashOf, isNasId, turnProofMessage } from '../../../rendezvous/src/protocol';
@@ -759,8 +759,9 @@ export class NasClient {
   /** A stored subtitle's file, then its fonts, as `File`s named as stored; `signal` stops the downloads. */
   async subtitleFiles(s: StoredSubtitle, signal?: AbortSignal): Promise<File[]> {
     const id = encodeURIComponent(s.id);
+    const base = s.pick === true ? `fansubs/picks/${id}` : `subtitles/${id}`;
     const get = async (path: string, name: string): Promise<File> => new File([await (await this.ok(path, signal ? { signal } : undefined)).arrayBuffer()], name);
-    return [await get(`subtitles/${id}/file`, s.fileName), ...(await Promise.all(s.fonts.map((f) => get(`subtitles/${id}/fonts/${encodeURIComponent(f.name)}`, f.name))))];
+    return [await get(`${base}/file`, s.fileName), ...(await Promise.all(s.fonts.map((f) => get(`${base}/fonts/${encodeURIComponent(f.name)}`, f.name))))];
   }
 
   /** Owners: registers a subtitle (its file and fonts go up next). */
@@ -781,6 +782,58 @@ export class NasClient {
   /** Owners: changes a subtitle's name, language, default offset or attachment. */
   async updateSubtitle(id: string, patch: SubtitlePatch): Promise<StoredSubtitle> {
     return (await this.json(`subtitles/${encodeURIComponent(id)}`, jsonBody('PATCH', patch))) as StoredSubtitle;
+  }
+
+  /** Owners: what the fansub run found for a title. */
+  async fansubTitle(titleId: string): Promise<FansubTitleState> {
+    return (await this.json(`fansubs/titles/${encodeURIComponent(titleId)}`)) as FansubTitleState;
+  }
+
+  /** Owners: starts a fansub run for a title now (409 `running` when one is going). */
+  async runFansubs(titleId: string): Promise<FansubTitleState> {
+    return (await this.json(`fansubs/titles/${encodeURIComponent(titleId)}/run`, { method: 'POST' })) as FansubTitleState;
+  }
+
+  /** Owners: brings back the fansubs of a title that were deleted. */
+  async undeleteFansubs(titleId: string): Promise<void> {
+    await this.ok(`fansubs/titles/${encodeURIComponent(titleId)}/undelete`, { method: 'POST' });
+  }
+
+  /** Owners: lines a fansub up again on its episode's disc. */
+  async realignFansub(id: string): Promise<StoredSubtitle> {
+    return (await this.json(`fansubs/subtitles/${encodeURIComponent(id)}/realign`, { method: 'POST' })) as StoredSubtitle;
+  }
+
+  /** Owners: drops a fansub's alignment, back to the release's own timing. */
+  async originalFansubTiming(id: string): Promise<StoredSubtitle> {
+    return (await this.json(`fansubs/subtitles/${encodeURIComponent(id)}/original`, { method: 'POST' })) as StoredSubtitle;
+  }
+
+  /** Owners: the languages fansub runs keep. */
+  async fansubLanguages(): Promise<string[]> {
+    return ((await this.json('fansubs/languages')) as { languages: string[] }).languages;
+  }
+
+  async setFansubLanguages(codes: readonly string[]): Promise<string[]> {
+    return ((await this.json('fansubs/languages', jsonBody('PUT', { languages: codes }))) as { languages: string[] }).languages;
+  }
+
+  /** Searches Anime Tosho; `titleId` ranks the results by that title's SeaDex entry. */
+  async searchTosho(q: string, titleId?: string): Promise<ToshoSearchResult[]> {
+    const query = new URLSearchParams({ q });
+    if (titleId !== undefined) query.set('titleId', titleId);
+    return (await this.json(`fansubs/search?${query}`)) as ToshoSearchResult[];
+  }
+
+  /** A release's files and tracks, with the file that is the episode the disc's playlist holds. */
+  async toshoRelease(id: number, discKey: string, playlistId: string): Promise<ToshoReleaseFiles> {
+    const query = new URLSearchParams({ discKey, playlistId });
+    return (await this.json(`fansubs/releases/${id}?${query}`)) as ToshoReleaseFiles;
+  }
+
+  /** Lines a track of an Anime Tosho file up on this disc's playlist, as this person's own pick. */
+  async pickFansub(body: FansubPickRequest): Promise<FansubPick> {
+    return (await this.json('fansubs/picks', jsonPost(body))) as FansubPick;
   }
 
   /** Owners: removes a subtitle with its fonts. */

@@ -1286,6 +1286,41 @@ describe('NasClient subtitles', () => {
     expect(calls.map((c) => c.route)).toEqual(['subtitles/0123456789abcdef/file', 'subtitles/0123456789abcdef/fonts/f%231.ttf']);
   });
 
+  it('reads a pick\'s files from the picks path', async () => {
+    const { nas, calls } = await paired();
+    const pick = { ...stored, pick: true as const };
+    await nas.subtitleFiles(pick);
+    expect(calls.map((c) => c.route)).toEqual(['fansubs/picks/0123456789abcdef/file', 'fansubs/picks/0123456789abcdef/fonts/f%231.ttf']);
+  });
+
+  it('posts a pick and calls the fansub routes', async () => {
+    const { nas, calls } = await paired();
+    const body = { fileId: 5, track: 2, discKey: 'd.1', playlistId: '00001' };
+    await nas.pickFansub(body);
+    await nas.runFansubs('anilist:1');
+    await nas.fansubTitle('anilist:1');
+    await nas.undeleteFansubs('anilist:1');
+    await nas.realignFansub('x');
+    await nas.originalFansubTiming('x');
+    await nas.searchTosho('Starfall Wanderer', 'anilist:1');
+    await nas.searchTosho('a b');
+    await nas.toshoRelease(7, 'd.1', '00001');
+    expect(calls.map((c) => `${c.method} ${c.route}`)).toEqual([
+      'POST fansubs/picks', 'POST fansubs/titles/anilist%3A1/run', 'GET fansubs/titles/anilist%3A1', 'POST fansubs/titles/anilist%3A1/undelete',
+      'POST fansubs/subtitles/x/realign', 'POST fansubs/subtitles/x/original',
+      'GET fansubs/search?q=Starfall+Wanderer&titleId=anilist%3A1', 'GET fansubs/search?q=a+b', 'GET fansubs/releases/7?discKey=d.1&playlistId=00001',
+    ]);
+    expect(JSON.parse(calls[0].body as string)).toEqual(body);
+  });
+
+  it('reads and sets the fansub languages', async () => {
+    const { nas, server } = await paired();
+    const inner = server.nas!;
+    server.nas = async (url, init) => (url.pathname.endsWith('fansubs/languages') ? Response.json({ languages: ['en', 'ja'] }) : inner(url, init));
+    expect(await nas.fansubLanguages()).toEqual(['en', 'ja']);
+    expect(await nas.setFansubLanguages(['en', 'ja'])).toEqual(['en', 'ja']);
+  });
+
   it("aborts a download's requests through the caller's signal", async () => {
     const { nas, calls } = await paired();
     const abort = new AbortController();
