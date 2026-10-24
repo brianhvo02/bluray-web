@@ -1,14 +1,17 @@
-import type { PlaceTextFile, StoredSubtitle } from '../engine/disc/nas-api';
+import type { FansubPick, FansubPickRequest, PlaceFansub, PlaceTextFile, StoredSubtitle } from '../engine/disc/nas-api';
 import type { PgTrack, SubtitleChoice } from '../engine/protocol';
 import type { PlayerController, PlayerSnapshot } from '../player/player-controller';
 import { isFontName } from '../player/drop-files';
 import { settingsForUpNext } from './place-model';
 import type { PlaceSaver } from './place-saver';
 import type { StoredTextFile } from './place-store';
-import type { NasClient } from './nas/nas-client';
+import { NasHttpError, type NasClient } from './nas/nas-client';
+import { PICK_FAILED } from './nas/tosho-search-model';
 import { forPlaylist, sameLanguage, STORED_LIST_TIMEOUT_MS } from './nas/subtitle-model';
 
 const PG_DISPLAY_FLAG = 0x80000000;
+/** StoredSubtitlePicker's notice code for an Anime Tosho pick, so a resume's failure replaces (or is replaced by) the menu's. */
+const FANSUB_NOTICE_CODE = 'fansub-pick';
 /** The engine has this long to list the re-added files; past it they are given up (a later pick is the user's own). */
 export const TEXT_WAIT_MS = 10_000;
 /** A resumed stored subtitle's download (file and fonts) is given up after this long (a stalled route). */
@@ -29,15 +32,19 @@ function within<T>(p: Promise<T>, ms: number, onLate?: () => void): Promise<T> {
 export interface LaunchSettingsDeps {
   readonly controller: Pick<
     PlayerController,
-    'discOpens' | 'setVolume' | 'toggleMute' | 'selectAudio' | 'selectSubtitle' | 'loadSubtitleFiles' | 'setSubtitleStart' | 'shiftSubtitleFile' | 'scaleSubtitles'
+    'discOpens' | 'setVolume' | 'toggleMute' | 'selectAudio' | 'selectSubtitle' | 'loadSubtitleFiles' | 'setSubtitleStart' | 'shiftSubtitleFile' | 'scaleSubtitles' | 'showNotice'
   >;
-  readonly places: Pick<PlaceSaver, 'takeLaunchSettings' | 'storedTextFiles' | 'addTextFiles' | 'noteStoredSubtitle'>;
-  /** Where subtitles stored on the NAS come from; absent with no NAS paired. */
-  readonly nas?: Pick<NasClient, 'subtitlesForDisc' | 'subtitleFiles'>;
+  readonly places: Pick<PlaceSaver, 'takeLaunchSettings' | 'storedTextFiles' | 'addTextFiles' | 'noteStoredSubtitle' | 'noteFansubPick'>;
+  /** Where subtitles stored on the NAS (and a viewer's Anime Tosho picks) come from; absent with no NAS paired. */
+  readonly nas?: Pick<NasClient, 'subtitlesForDisc' | 'subtitleFiles' | 'pickFansub' | 'toshoRelease'>;
   /** Picks a stored subtitle as the Subtitles menu does (StoredSubtitlePicker.pick), for Up next; true once placed. */
   readonly pickStored?: (s: StoredSubtitle) => Promise<boolean>;
+  /** Picks an Anime Tosho track as the search does (StoredSubtitlePicker.pickFansub), for Up next; the pick once placed. */
+  readonly pickFansub?: (req: FansubPickRequest, releaseId: number) => Promise<FansubPick | null>;
   /** A resumed stored subtitle is in the text set again (the menu checks its row). */
   readonly onStoredSubtitle?: (id: string) => void;
+  /** A resumed Anime Tosho pick is in the text set again (the search checks its track). */
+  readonly onFansubPick?: (pick: FansubPick, fansub: PlaceFansub) => void;
   /** Chooses a shader set (null: off) the way the Shaders menu does; a set this device doesn't have is left alone. */
   readonly selectShader: (name: string | null) => void;
   readonly log?: (message: string, err: unknown) => void;
@@ -62,12 +69,19 @@ function pgChoice(psr2: number, pg: readonly PgTrack[]): SubtitleChoice {
   return (psr2 & PG_DISPLAY_FLAG) !== 0 && pg.some((t) => t.index === stream) ? { kind: 'pg', stream } : { kind: 'off' };
 }
 
-/** A stored subtitle a resumed place names, fetched again: its place entry (under the NAS's file name now) and files. */
+/**
+ * A stored subtitle (or a viewer's Anime Tosho pick, with `fansub`) a resumed place names, fetched again: its place
+ * entry (under the NAS's file name now) and files.
+ */
 interface Fetched {
   readonly entry: PlaceTextFile;
   readonly subtitle: StoredSubtitle;
+  readonly fansub?: PlaceFansub;
   readonly files: readonly File[];
 }
+
+/** A place's entry for a file from the NAS: a stored subtitle's or an Anime Tosho pick's (never on this device). */
+const fromNas = (f: PlaceTextFile): boolean => f.subtitleId !== undefined || f.fansub !== undefined;
 
 /** The stored files a place's text files name (by name, and by size when the place knows it), with the stored fonts. */
 export function filesToAdd(wanted: readonly PlaceTextFile[], stored: readonly StoredTextFile[]): { readonly subtitles: readonly StoredTextFile[]; readonly fonts: readonly StoredTextFile[] } {
@@ -118,13 +132,39 @@ export class LaunchSettingsApplier {
     if (settings.shaderSet !== shaderSet) this.deps.selectShader(settings.shaderSet);
     const pg = s.subtitles?.pg ?? [];
     // Up next: a stored subtitle shown on the episode before carries its language to this one's (spec §6.6)
-    const carried = launch.byLanguage && settings.textOn ? settings.textFiles.find((f) => f.subtitleId !== undefined && f.language !== undefined) : undefined;
+    const carried = launch.byLanguage && settings.textOn ? settings.textFiles.find((f) => fromNas(f) && f.language !== undefined) : undefined;
     if (launch.byLanguage) {
       controller.selectAudio(settings.psr1);
       if (!settings.textOn) controller.selectSubtitle(pgChoice(settings.psr2, pg));
     }
-    if (carried && s.currentPlaylistId !== null) void this.pickNext(launch.discKey, s.currentPlaylistId, carried.language!, pgChoice(settings.psr2, pg));
-    else if (settings.textFiles.length > 0) void this.addText(launch.discKey, settings, !launch.byLanguage);
+    if (carried?.fansub && s.currentPlaylistId !== null) void this.pickNextFansub(launch.discKey, s.currentPlaylistId, carried.fansub, carried.language!, pgChoice(settings.psr2, pg));
+    else if (carried && s.currentPlaylistId !== null) void this.pickNext(launch.discKey, s.currentPlaylistId, carried.language!, pgChoice(settings.psr2, pg));
+    else if (settings.textFiles.length > 0) void this.addText(launch.discKey, s.currentPlaylistId!, settings, !launch.byLanguage);
+  }
+
+  /**
+   * Up next after an Anime Tosho pick (spec §9): the release is listed for this playlist, and the episode's file there
+   * with a track of the same name is picked as the search picks one. With none (or the release not listed), as for a
+   * stored subtitle: this playlist's stored subtitle in the pick's language, else PG.
+   */
+  private async pickNextFansub(discKey: string, playlistId: string, fansub: PlaceFansub, language: string, pg: SubtitleChoice): Promise<void> {
+    const { controller, nas, pickFansub } = this.deps;
+    const opens = controller.discOpens;
+    const gen = this.generation;
+    let req: FansubPickRequest | null = null;
+    if (nas && pickFansub) {
+      try {
+        const listed = await within(nas.toshoRelease(fansub.releaseId, discKey, playlistId), STORED_FETCH_TIMEOUT_MS);
+        const file = listed.files.find((f) => f.id === listed.matchedFileId);
+        const track = file?.tracks.find((t) => t.name === fansub.trackName);
+        if (file && track) req = { fileId: file.id, track: track.track, discKey, playlistId };
+      } catch (err) {
+        this.deps.log?.('listing the Anime Tosho release failed', err);
+      }
+    }
+    if (controller.discOpens !== opens || this.generation !== gen) return;
+    if (req) void pickFansub!(req, fansub.releaseId);
+    else await this.pickNext(discKey, playlistId, language, pg);
   }
 
   /**
@@ -154,15 +194,15 @@ export class LaunchSettingsApplier {
    * the place is this playlist's) from the NAS, all in one load so the set is replaced once. A file that can't be had
    * is skipped silently.
    */
-  private async addText(discKey: string, settings: { readonly textFiles: readonly PlaceTextFile[]; readonly textOn: boolean; readonly psr2: number; readonly textScale: number }, placed: boolean): Promise<void> {
+  private async addText(discKey: string, playlistId: string, settings: { readonly textFiles: readonly PlaceTextFile[]; readonly textOn: boolean; readonly psr2: number; readonly textScale: number }, placed: boolean): Promise<void> {
     const { controller, places } = this.deps;
     const opens = controller.discOpens;
     const gen = this.generation;
     const current = (): boolean => controller.discOpens === opens && this.generation === gen;
     try {
       const [{ subtitles, fonts }, fetched] = await Promise.all([
-        places.storedTextFiles(discKey).then((kept) => filesToAdd(settings.textFiles.filter((f) => f.subtitleId === undefined), kept)),
-        placed ? this.fetchStored(discKey, settings.textFiles) : Promise.resolve([]),
+        places.storedTextFiles(discKey).then((kept) => filesToAdd(settings.textFiles.filter((f) => !fromNas(f)), kept)),
+        placed ? Promise.all([this.fetchStored(discKey, settings.textFiles), this.fetchPicks(discKey, playlistId, settings.textFiles)]).then(([a, b]) => [...a, ...b]) : Promise.resolve([]),
       ]);
       if ((subtitles.length === 0 && fetched.length === 0) || !current()) return;
       const local = new Map(subtitles.map((f) => [f.name, f]));
@@ -172,11 +212,11 @@ export class LaunchSettingsApplier {
       const entries: PlaceTextFile[] = [];
       const files: File[] = [];
       for (const f of settings.textFiles) {
-        const got = f.subtitleId !== undefined ? fetched.find((x) => x.subtitle.id === f.subtitleId) : undefined;
+        const got = f.subtitleId !== undefined ? fetched.find((x) => x.subtitle.id === f.subtitleId) : f.fansub !== undefined ? fetched.find((x) => x.fansub === f.fansub) : undefined;
         if (got) {
           entries.push(got.entry);
           files.push(got.files[0]!);
-        } else if (f.subtitleId === undefined && local.has(f.name) && !entries.some((e) => e.name === f.name)) {
+        } else if (!fromNas(f) && local.has(f.name) && !entries.some((e) => e.name === f.name)) {
           entries.push(f);
           files.push(toFile(local.get(f.name)!));
         }
@@ -200,7 +240,10 @@ export class LaunchSettingsApplier {
       const keeping = subtitles.length > 0 ? places.addTextFiles(localFiles) : Promise.resolve();
       // A stored pick replaces the set, so a place names at most one stored subtitle (the saver keeps one note).
       const stored = fetched[0];
-      if (stored) {
+      if (stored?.fansub) {
+        places.noteFansubPick(stored.subtitle.fileName, stored.fansub, stored.subtitle.fileSize, stored.subtitle.language);
+        this.deps.onFansubPick?.(stored.subtitle as FansubPick, stored.fansub);
+      } else if (stored) {
         places.noteStoredSubtitle(stored.subtitle.fileName, stored.subtitle.id, stored.subtitle.fileSize, stored.subtitle.language);
         this.deps.onStoredSubtitle?.(stored.subtitle.id);
       }
@@ -232,6 +275,47 @@ export class LaunchSettingsApplier {
         return { entry: { ...entry, name: subtitle.fileName }, subtitle, files };
       } catch (err) {
         this.deps.log?.('fetching the stored subtitle failed', err);
+        return null;
+      } finally {
+        this.downloads.delete(download);
+      }
+    }));
+    return found.filter((x): x is Fetched => x !== null);
+  }
+
+  /**
+   * The Anime Tosho picks a place names, picked again on the NAS for this playlist (from its cache, or fetched again)
+   * with their files, each within STORED_FETCH_TIMEOUT_MS. A NAS that no longer knows the file (404 unknown-file) is
+   * asked to list its release first. One that fails shows PICK_FAILED and is left out, so the text set stays as it was.
+   */
+  private async fetchPicks(discKey: string, playlistId: string, wanted: readonly PlaceTextFile[]): Promise<Fetched[]> {
+    const { nas, controller } = this.deps;
+    const picks = wanted.filter((f) => f.fansub !== undefined);
+    if (!nas || picks.length === 0) return [];
+    const opens = controller.discOpens;
+    const gen = this.generation;
+    const found = await Promise.all(picks.map(async (entry): Promise<Fetched | null> => {
+      const fansub = entry.fansub!;
+      const req: FansubPickRequest = { fileId: fansub.fileId, track: fansub.track, discKey, playlistId };
+      const download = new AbortController();
+      this.downloads.add(download);
+      const fetchOne = async (): Promise<Fetched> => {
+        let subtitle: FansubPick;
+        try {
+          subtitle = await nas.pickFansub(req);
+        } catch (err) {
+          if (!(err instanceof NasHttpError && err.status === 404 && err.code === 'unknown-file')) throw err;
+          await nas.toshoRelease(fansub.releaseId, discKey, playlistId);
+          subtitle = await nas.pickFansub(req);
+        }
+        const files = await nas.subtitleFiles(subtitle, download.signal);
+        return { entry: { ...entry, name: subtitle.fileName }, subtitle, fansub, files };
+      };
+      try {
+        return await within(fetchOne(), STORED_FETCH_TIMEOUT_MS, () => download.abort());
+      } catch (err) {
+        this.deps.log?.('picking the Anime Tosho subtitle again failed', err);
+        if (controller.discOpens === opens && this.generation === gen) controller.showNotice(FANSUB_NOTICE_CODE, PICK_FAILED);
         return null;
       } finally {
         this.downloads.delete(download);

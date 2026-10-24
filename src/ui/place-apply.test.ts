@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { PlaceSettings, StoredSubtitle } from '../engine/disc/nas-api';
+import type { FansubPick, FansubPickRequest, PlaceFansub, PlaceSettings, StoredSubtitle, ToshoReleaseFiles } from '../engine/disc/nas-api';
+import { NasHttpError } from './nas/nas-client';
+import { PICK_FAILED } from './nas/tosho-search-model';
 import type { SubtitleChoice, TextFileInfo } from '../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../player/player-controller';
 import { filesToAdd, LaunchSettingsApplier, STORED_FETCH_TIMEOUT_MS, TEXT_WAIT_MS } from './place-apply';
@@ -30,7 +32,18 @@ interface SetupOpts {
   keepFails?: boolean;
   /** The list waits for this. */
   listGate?: Promise<void>;
+  /** What the NAS answers each `pickFansub` with, in turn (an Error: refused); the pick of the request by default. */
+  pickAnswers?: (Error | null)[];
+  /** `toshoRelease`'s answer (an Error: it fails). */
+  release?: ToshoReleaseFiles | Error;
 }
+
+/** The NAS's answer to a pick: shaped as a stored subtitle, under its own id. */
+const fansubPick = (req: FansubPickRequest): FansubPick => ({
+  id: `pick-${req.fileId}-${req.track}`, name: 'GroupA', language: 'eng', offsetMs: 0, fileName: `pick-${req.fileId}.ass`, fileSize: 90, fonts: [{ name: 'Made Up Sans.ttf', size: 50 }],
+  attachment: { kind: 'chapter', discKey: req.discKey, playlistId: req.playlistId, chapter: 0 }, uploadedAt: 1, pick: true,
+  source: { kind: 'fansub', group: 'GroupA', tracker: '', rank: 'other', toshoFileId: req.fileId, track: req.track, trackName: 'Full', alignment: { kind: 'original' }, linedUpOn: { discKey: req.discKey, playlistId: req.playlistId } },
+});
 
 function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opts: SetupOpts = {}) {
   let clock = 1000;
@@ -45,6 +58,7 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
     toggleMute: () => void calls.push(['mute']),
     selectAudio: (i: number) => void calls.push(['audio', i]),
     selectSubtitle: (c: SubtitleChoice) => void calls.push(['subtitle', c]),
+    showNotice: (code: string, message: string) => void calls.push(['notice', code, message]),
     loadSubtitleFiles: async (files: readonly File[]) => {
       loaded.push(files.map((f) => f.name));
       if (opts.loadFails) throw new Error('worker gone');
@@ -60,6 +74,17 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
       if (opts.nasList instanceof Error) throw opts.nasList;
       return opts.nasList!;
     },
+    pickFansub: async (req: FansubPickRequest) => {
+      calls.push(['pickFansub', req.fileId, req.track, req.discKey, req.playlistId]);
+      const answer = opts.pickAnswers?.shift();
+      if (answer) throw answer;
+      return fansubPick(req);
+    },
+    toshoRelease: async (id: number, key: string, playlistId: string) => {
+      calls.push(['release', id, key, playlistId]);
+      if (opts.release instanceof Error) throw opts.release;
+      return opts.release ?? { release: { id, title: 'GroupA', date: 1, seadex: null }, files: [], matchedFileId: null };
+    },
     subtitleFiles: async (sub: StoredSubtitle, signal?: AbortSignal) => {
       signals.push(signal);
       if (opts.fetchGate) await opts.fetchGate;
@@ -74,9 +99,15 @@ function setup(launch: LaunchSettings | null, stored: StoredTextFile[] = [], opt
       calls.push(['pick', sub.id]);
       return true;
     },
+    pickFansub: async (req, releaseId) => {
+      calls.push(['pickNextFansub', req.fileId, req.track, releaseId]);
+      return null;
+    },
+    onFansubPick: (pick) => void calls.push(['activeFansub', pick.id]),
     onStoredSubtitle: (id) => void calls.push(['active', id]),
     places: {
       noteStoredSubtitle: (name, id, size, language) => void calls.push(['note', name, id, size, language]),
+      noteFansubPick: (name, fansub, size, language) => void calls.push(['noteFansub', name, fansub, size, language]),
       takeLaunchSettings: () => {
         const l = pending;
         pending = null;
@@ -368,5 +399,69 @@ describe('LaunchSettingsApplier with subtitles stored on the NAS', () => {
     await settle();
     expect(t.calls.filter((c) => c[0] === 'pick' || c[0] === 'list')).toEqual([]);
     expect(t.loaded).toEqual([]);
+  });
+});
+
+describe("LaunchSettingsApplier with a viewer's Anime Tosho pick", () => {
+  const fansub: PlaceFansub = { releaseId: 7001, fileId: 7, track: 0, trackName: 'Full' };
+  const picked = { name: 'pick-7.ass', size: 90, startUs: 0, offsetMs: 300, language: 'eng', fansub };
+  const resume = (opts: SetupOpts = {}) => {
+    const t = setup({ settings: { ...base, textFiles: [picked], textOn: true }, byLanguage: false }, [], { nasList: [], ...opts });
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    return t;
+  };
+
+  it('picks it again on the NAS for a resume, loads its files and notes it, with my offset back', async () => {
+    const t = resume();
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pickFansub')).toEqual([['pickFansub', 7, 0, KEY, '00001']]);
+    expect(t.loaded).toEqual([['pick-7.ass', 'Made Up Sans.ttf']]);
+    expect(t.calls).toContainEqual(['noteFansub', 'pick-7.ass', fansub, 90, 'eng']);
+    expect(t.calls).toContainEqual(['activeFansub', 'pick-7-0']);
+    t.show(listing(t.snap, 'pick-7.ass'));
+    expect(t.calls.filter((c) => c[0] === 'shift')).toEqual([['shift', 0, 300]]);
+  });
+
+  it("lists the release again when the NAS no longer knows the file, then picks it", async () => {
+    const t = resume({ pickAnswers: [new NasHttpError(404, 'unknown-file')] });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pickFansub' || c[0] === 'release')).toEqual([
+      ['pickFansub', 7, 0, KEY, '00001'], ['release', 7001, KEY, '00001'], ['pickFansub', 7, 0, KEY, '00001'],
+    ]);
+    expect(t.loaded).toEqual([['pick-7.ass', 'Made Up Sans.ttf']]);
+  });
+
+  it('says it could not load the pick when the NAS refuses it (too many), and leaves the text set as it was', async () => {
+    const t = resume({ pickAnswers: [new NasHttpError(429, 'too-many')] });
+    await settle();
+    expect(t.calls).toContainEqual(['notice', 'fansub-pick', PICK_FAILED]);
+    expect(t.loaded).toEqual([]);
+    expect(t.calls.filter((c) => c[0] === 'noteFansub' || c[0] === 'subtitle')).toEqual([]);
+  });
+
+  const nextRelease = (tracks: ToshoReleaseFiles['files'][number]['tracks']): ToshoReleaseFiles => ({
+    release: { id: 7001, title: 'GroupA', date: 1, seadex: null },
+    files: [{ id: 7, name: 'ep1.mkv', episode: 1, tracks: [{ track: 0, language: 'eng', name: 'Full' }] }, { id: 8, name: 'ep2.mkv', episode: 2, tracks }],
+    matchedFileId: 8,
+  });
+
+  it("Up next picks the track of the same name in the next episode's file of the same release", async () => {
+    const t = setup({ settings: { ...base, textFiles: [picked], textOn: true }, byLanguage: true }, [], {
+      nasList: [], release: nextRelease([{ track: 0, language: 'eng', name: 'Signs' }, { track: 1, language: 'eng', name: 'Full' }]),
+    });
+    t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'release' || c[0] === 'pickNextFansub')).toEqual([['release', 7001, KEY, '00002'], ['pickNextFansub', 8, 1, 7001]]);
+    expect(t.calls.filter((c) => c[0] === 'subtitle' || c[0] === 'pick')).toEqual([]);
+  });
+
+  it('Up next with no track of that name carries as before: a stored subtitle in its language, else PG', async () => {
+    for (const release of [nextRelease([{ track: 0, language: 'eng', name: 'Signs' }]), new Error('offline')]) {
+      const t = setup({ settings: { ...base, textFiles: [picked], textOn: true }, byLanguage: true }, [], { nasList: [storedSub('sub-2en', 'eng', '00002', 'ep2.ass')], release });
+      t.show({ engineState: 'playing', currentPlaylistId: '00002' });
+      await settle();
+      expect(t.calls.filter((c) => c[0] === 'pickNextFansub')).toEqual([]);
+      expect(t.calls.filter((c) => c[0] === 'pick')).toEqual([['pick', 'sub-2en']]);
+    }
   });
 });
