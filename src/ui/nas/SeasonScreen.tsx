@@ -212,11 +212,11 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, season
             const tracks = fansubsByEpisode.get(e.number) ?? [];
             const episodeKey = `${season.id}#${e.number}`;
             const mark = owner && fansub ? episodeMark(tracks, fansub.episodes[episodeKey], tracks.some((s) => s.stale === true)) : null;
-            // an owner's tap on an episode the run touched opens its fansubs; the panel has the Play button
+            // an owner gets a button beside the row that opens the episode's fansubs; the row itself always plays
             const reviewing = owner !== undefined && (tracks.length > 0 || fansub?.episodes[episodeKey]?.status === 'not-found');
             return (
-              <li key={`${e.discId}:${e.playlistId}`}>
-                <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} aria-expanded={reviewing ? panelFor === e.number : undefined} onClick={() => (reviewing ? setPanelFor(panelFor === e.number ? null : e.number) : playEpisode(e))}>
+              <li key={`${e.discId}:${e.playlistId}`} className={reviewing ? 'episode-item' : undefined}>
+                <button type="button" className="episode-row" data-testid="episode-row" data-number={e.number} onClick={() => playEpisode(e)}>
                   <span className="episode-number">{e.number}</span>
                   <span className="title-row-text">
                     <span className="title-row-name">
@@ -234,22 +234,25 @@ export function SeasonScreen({ nas, titleId, seriesName, heading, season, season
                       ))}
                     </span>
                   )}
-                  {owner && (tracks.length > 0 || mark) && (
-                    <span className="fansub-chips">
-                      {tracks.map((t) => (
-                        <span key={t.id} className="fansub-chip" data-testid="fansub-chip">{trackChip(t)}</span>
-                      ))}
-                      {mark && <span className="fansub-mark" data-testid="fansub-mark" data-tone={mark.tone}>{mark.text}</span>}
-                    </span>
-                  )}
                   {percent !== null && (
                     <span className="episode-progress" data-testid="episode-progress" role="img" aria-label={`${percent}% watched`}>
                       <i style={{ width: `${percent}%` }} />
                     </span>
                   )}
                 </button>
+                {reviewing && (
+                  <button type="button" className="fansub-open" data-testid="fansub-open" aria-label={`Fansubs for episode ${e.number}`} aria-expanded={panelFor === e.number} aria-controls={`${ids}-fansubs-${e.number}`} onClick={() => setPanelFor(panelFor === e.number ? null : e.number)}>
+                    {tracks.map((t) => (
+                      <span key={t.id} className="fansub-chip" data-testid="fansub-chip">{trackChip(t)}</span>
+                    ))}
+                    {mark && <span className="fansub-mark" data-testid="fansub-mark" data-tone={mark.tone}>{mark.text}</span>}
+                    {!mark && tracks.length === 0 && <span className="fansub-chip">Fansubs</span>}
+                  </button>
+                )}
                 {owner && reviewing && panelFor === e.number && (
-                  <FansubEpisodePanel nas={owner.nas} target={target} manifestOf={manifestOf} tracks={tracks} mark={fansub?.episodes[episodeKey]} onChanged={reload} onPlay={() => playEpisode(e)} />
+                  <div id={`${ids}-fansubs-${e.number}`}>
+                    <FansubEpisodePanel nas={owner.nas} target={target} manifestOf={manifestOf} tracks={tracks} mark={fansub?.episodes[episodeKey]} onChanged={reload} />
+                  </div>
                 )}
               </li>
             );

@@ -21,12 +21,10 @@ interface FansubEpisodePanelProps {
   readonly mark?: FansubEpisodeMark;
   /** Changed: the screen fetches the subtitles again. */
   readonly onChanged: () => void;
-  /** Plays the episode (a tap on a row with fansubs opens this panel instead). */
-  readonly onPlay?: () => void;
 }
 
 /** An episode's fansub tracks for the owner: offset editor, "Line up again" and "Use original timing". */
-export function FansubEpisodePanel({ nas, target, manifestOf, tracks, mark, onChanged, onPlay }: FansubEpisodePanelProps): ReactElement {
+export function FansubEpisodePanel({ nas, target, manifestOf, tracks, mark, onChanged }: FansubEpisodePanelProps): ReactElement {
   const [editing, setEditing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +76,6 @@ export function FansubEpisodePanel({ nas, target, manifestOf, tracks, mark, onCh
           </div>
         );
       })}
-      {onPlay && <button type="button" data-testid="fansub-play" onClick={onPlay}>Play episode</button>}
       {error !== null && <p className="owner-message" role="alert">{error}</p>}
     </div>
   );

@@ -3,7 +3,7 @@ import type { DiscManifest, StoredSubtitle } from '../../engine/disc/nas-api';
 import { discKeyOf } from '../../engine/disc/disc-key';
 import type { NasClient } from './nas-client';
 import { LANGUAGES, formatOffset, languageTag, subtitleErrorMessage, type SubtitleTarget } from './subtitle-model';
-import { rememberFansubDeletion } from './FansubLine';
+import { rememberFansubDeletion } from './fansub-model';
 import { SubtitleUpload, type ManifestOf } from './SubtitleUpload';
 
 /** A title's stored subtitles (null until known), why the last fetch failed (null when it didn't), and a way to fetch them again. */

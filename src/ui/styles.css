@@ -493,7 +493,10 @@ a { color: #6ea8ff; }
 .fansub-line { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: #18181d; border: 1px solid #2a2a30; border-radius: 8px; }
 .fansub-line-main { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
 .fansub-line-text { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; }
-.fansub-chips { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; max-width: 100%; }
+.episode-item { display: flex; flex-wrap: wrap; gap: 4px; }
+.episode-item > .episode-row { flex: 1 1 14em; min-width: 0; width: auto; }
+.fansub-open { flex: 0 1 auto; min-height: 44px; min-width: 44px; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; max-width: 100%; }
+.episode-item > .fansub-panel-wrap, .episode-item > div { flex-basis: 100%; }
 .fansub-chip { display: inline-block; padding: 1px 6px; border: 1px solid #3a3a42; border-radius: 6px; font-size: 0.75em; white-space: nowrap; }
 .fansub-mark { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em; line-height: 1.4; background: rgba(60, 170, 90, 0.2); }
 .fansub-mark[data-tone='warn'] { background: rgba(230, 160, 40, 0.25); }
@@ -503,6 +506,5 @@ a { color: #6ea8ff; }
 .fansub-track-main { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .fansub-languages { display: flex; flex-direction: column; gap: 6px; }
 @media (max-width: 600px) {
-  .episode-row:has(.fansub-chips) { flex-wrap: wrap; }
-  .episode-row .fansub-chips { flex-basis: 100%; justify-content: flex-start; padding-left: 40px; }
+  .fansub-open { flex-basis: 100%; justify-content: flex-start; padding-left: calc(2.25em + 12px); }
 }

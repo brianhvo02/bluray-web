@@ -1,5 +1,5 @@
 import { useId, useMemo, useState, type ReactElement } from 'react';
-import type { TitleDetail } from '../../engine/disc/nas-api';
+import type { FansubTitleState, TitleDetail } from '../../engine/disc/nas-api';
 import { FansubEpisodePanel } from './FansubEpisodePanel';
 import { FansubLine } from './FansubLine';
 import type { NasClient } from './nas-client';
@@ -38,6 +38,8 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
   const target = useMemo(() => subtitleTarget(title.id, detail.seasons, { episodes: false, extras: detail.extras }), [title.id, detail.seasons, detail.extras]);
   const manifestOf = useManifests(movieOwner?.nas ?? null);
   const discKeys = useDiscKeys(manifestOf, target, movieOwner !== undefined && (subs ?? []).length > 0);
+  const [fansub, setFansub] = useState<FansubTitleState | null>(null);
+  const movieFansubs = useMemo(() => (subs ?? []).filter((s) => s.source !== undefined && s.attached !== false), [subs]);
   const [adding, setAdding] = useState(false);
   const [uploading, setUploading] = useState(false);
   const uploadPanel = useId();
@@ -83,9 +85,9 @@ export function SeriesScreen({ nas, detail, onBack, onSeason, onExtras, onTitle,
       )}
       {movieOwner && detail.seasons[0] && (
         <>
-          <FansubLine nas={movieOwner.nas} titleId={title.id} seasonId={detail.seasons[0].id} onChanged={reload} />
-          {(subs ?? []).some((s) => s.source !== undefined && s.attached !== false) && (
-            <FansubEpisodePanel nas={movieOwner.nas} target={target} manifestOf={manifestOf} tracks={(subs ?? []).filter((s) => s.source !== undefined && s.attached !== false)} onChanged={reload} />
+          <FansubLine nas={movieOwner.nas} titleId={title.id} seasonId={detail.seasons[0].id} onChanged={reload} onState={setFansub} />
+          {(movieFansubs.length > 0 || Object.keys(fansub?.episodes ?? {}).length > 0) && (
+            <FansubEpisodePanel nas={movieOwner.nas} target={target} manifestOf={manifestOf} tracks={movieFansubs} mark={Object.values(fansub?.episodes ?? {})[0]} onChanged={reload} />
           )}
         </>
       )}

@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { FansubTitleState } from '../../engine/disc/nas-api';
 import type { NasClient } from './nas-client';
-import { FansubLine, rememberFansubDeletion } from './FansubLine';
+import { FansubLine } from './FansubLine';
+import { rememberFansubDeletion } from './fansub-model';
 import { NasHttpError } from './nas-client';
 
 afterEach(() => {

@@ -73,7 +73,7 @@ describe('fansubs on the season screen', () => {
     show(nas, true);
     fireEvent.click(await screen.findByTestId('fansub-run'));
     await waitFor(() => expect(screen.getByTestId('fansub-line').textContent).toContain('GroupA (SeaDex best)'));
-    const rows = screen.getAllByTestId('episode-row');
+    const rows = screen.getAllByTestId('episode-row').map((r) => r.closest('li')!);
     expect(within(rows[0]!).getAllByTestId('fansub-chip').map((c) => c.textContent)).toEqual(['Full', 'Signs']);
     const mark = within(rows[0]!).getByTestId('fansub-mark');
     expect(mark.textContent).toBe('lined up · +0.8 s');
@@ -93,13 +93,30 @@ describe('fansubs on the season screen', () => {
       }),
     });
     show(nas, true);
-    const rows = await screen.findAllByTestId('episode-row');
-    await waitFor(() => expect(within(screen.getAllByTestId('episode-row')[0]!).queryByTestId('fansub-mark')).not.toBeNull());
-    fireEvent.click(rows[0]!);
+    const item = (): HTMLElement => screen.getAllByTestId('episode-row')[0]!.closest('li')!;
+    await screen.findAllByTestId('episode-row');
+    await waitFor(() => expect(within(item()).queryByTestId('fansub-mark')).not.toBeNull());
+    fireEvent.click(within(item()).getByTestId('fansub-open'));
     fireEvent.click(await screen.findByTestId('fansub-original'));
     await waitFor(() => expect(nas.originalFansubTiming).toHaveBeenCalledWith('a'));
-    await waitFor(() => expect(within(screen.getAllByTestId('episode-row')[0]!).queryByTestId('fansub-mark')).toBeNull());
-    expect(within(screen.getAllByTestId('episode-row')[0]!).getAllByTestId('fansub-chip')).toHaveLength(1);
+    await waitFor(() => expect(within(item()).queryByTestId('fansub-mark')).toBeNull());
+    expect(within(item()).getAllByTestId('fansub-chip')).toHaveLength(1);
+  });
+
+  it('plays on a row tap and opens the fansubs from the button beside it', async () => {
+    const opened: string[] = [];
+    const nas = fakeNas({ fansubTitle: vi.fn(async () => RAN), subtitlesForTitle: vi.fn(async () => [track('a', 'Full', 1, { kind: 'offset', offsetMs: 0, confidence: 1 })]) });
+    render(
+      <SeasonScreen nas={nas} titleId="t1" seriesName="S" heading="Season 1" season={SEASON} seasonIds={['s1']} onBack={() => {}} onOpen={(d) => opened.push(d.name)} owner={{ nas, tmdb: false, onChanged: () => {} }} />,
+    );
+    const open = (await screen.findAllByTestId('fansub-open'))[0]!;
+    expect(open.getAttribute('aria-label')).toBe('Fansubs for episode 1');
+    fireEvent.click(screen.getAllByTestId('episode-row')[0]!);
+    expect(opened).toHaveLength(1);
+    expect(screen.queryByTestId('fansub-panel')).toBeNull();
+    fireEvent.click(open);
+    expect(await screen.findByTestId('fansub-panel')).toBeTruthy();
+    expect(screen.queryByTestId('fansub-play')).toBeNull();
   });
 
   it('asks before bringing back deleted tracks, and only after a deletion in this session', async () => {

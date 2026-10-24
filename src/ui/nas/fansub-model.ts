@@ -73,3 +73,9 @@ export const FANSUB_LANGUAGES: readonly { readonly code: string; readonly label:
   { code: 'ger', label: 'German' }, { code: 'ita', label: 'Italian' }, { code: 'ara', label: 'Arabic' },
   { code: 'rus', label: 'Russian' }, { code: 'ind', label: 'Indonesian' }, { code: 'chi', label: 'Chinese' },
 ];
+
+/** Titles whose fansubs the owner deleted in this browser session: only for those does "Find fansubs again" ask to bring them back. */
+const deletedHere = new Set<string>();
+export const rememberFansubDeletion = (titleId: string): void => void deletedHere.add(titleId);
+export const forgetFansubDeletion = (titleId: string): void => void deletedHere.delete(titleId);
+export const fansubsDeletedHere = (titleId: string): boolean => deletedHere.has(titleId);

@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { FansubTitleState } from '../../engine/disc/nas-api';
-import { runButtonLabel, seasonLine } from './fansub-model';
+import { forgetFansubDeletion, fansubsDeletedHere, runButtonLabel, seasonLine } from './fansub-model';
+import { subtitleErrorMessage } from './subtitle-model';
 import { NasHttpError, type NasClient } from './nas-client';
 
 /** How often the line asks for the run's state while one goes. */
 const POLL_MS = 3000;
-
-/** Titles whose fansubs the owner deleted in this browser session: only for those does "Find fansubs again" ask. */
-const deletedHere = new Set<string>();
-export const rememberFansubDeletion = (titleId: string): void => void deletedHere.add(titleId);
 
 interface FansubLineProps {
   readonly nas: Pick<NasClient, 'fansubTitle' | 'runFansubs' | 'undeleteFansubs'>;
@@ -66,13 +63,13 @@ export function FansubLine({ nas, titleId, seasonId, onChanged, onState }: Fansu
     setError(null);
     try {
       if (bringBack) await nas.undeleteFansubs(titleId);
-      deletedHere.delete(titleId);
       const next = await nas.runFansubs(titleId);
+      forgetFansubDeletion(titleId);
       wasRunning.current = true; // so a run that is over by its answer still tells the screen
       accept(next);
     } catch (err) {
       if (err instanceof NasHttpError && err.status === 409 && err.code === 'running') void load();
-      else setError(err instanceof Error ? err.message : 'The NAS could not start the search.');
+      else setError(err instanceof NasHttpError ? subtitleErrorMessage(err) : "Couldn't start the fansub run.");
     } finally {
       setBusy(false);
     }
@@ -81,7 +78,7 @@ export function FansubLine({ nas, titleId, seasonId, onChanged, onState }: Fansu
   if (!state) return null;
   const text = seasonLine(state, seasonId, Date.now()) ?? (state.nothingFound ? 'Fansubs: none found for this title' : state.lastRunAt === null ? 'Fansubs: not looked for yet' : 'Fansubs: none attached');
   const onPress = (): void => {
-    if (state.lastRunAt !== null && deletedHere.has(titleId)) setAsking(true);
+    if (state.lastRunAt !== null && fansubsDeletedHere(titleId)) setAsking(true);
     else void run(false);
   };
   return (
