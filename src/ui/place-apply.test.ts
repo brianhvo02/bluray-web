@@ -422,6 +422,16 @@ describe("LaunchSettingsApplier with a viewer's Anime Tosho pick", () => {
     expect(t.calls.filter((c) => c[0] === 'shift')).toEqual([['shift', 0, 300]]);
   });
 
+  it('sends no pick while nothing plays, and picks for the playlist once one does', async () => {
+    const t = setup({ settings: { ...base, textFiles: [picked], textOn: true }, byLanguage: false }, [], { nasList: [] });
+    t.show({ engineState: 'playing', currentPlaylistId: null });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pickFansub')).toEqual([]);
+    t.show({ engineState: 'playing', currentPlaylistId: '00001' });
+    await settle();
+    expect(t.calls.filter((c) => c[0] === 'pickFansub')).toEqual([['pickFansub', 7, 0, KEY, '00001']]);
+  });
+
   it("lists the release again when the NAS no longer knows the file, then picks it", async () => {
     const t = resume({ pickAnswers: [new NasHttpError(404, 'unknown-file')] });
     await settle();

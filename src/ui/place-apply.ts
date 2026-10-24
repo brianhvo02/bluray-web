@@ -122,7 +122,9 @@ export class LaunchSettingsApplier {
   /** Each snapshot of the player, with the shader set chosen now. */
   observe(s: PlayerSnapshot, shaderSet: string | null): void {
     if (this.text) this.finishText(s);
-    if (s.currentPlaylistId === null || (s.engineState !== 'playing' && s.engineState !== 'paused')) return;
+    // nothing playing: no playlist to pick a resumed subtitle for, so the launch waits (a pick needs one)
+    const playlistId = s.currentPlaylistId;
+    if (playlistId === null || (s.engineState !== 'playing' && s.engineState !== 'paused')) return;
     const launch = this.deps.places.takeLaunchSettings();
     if (!launch) return;
     const { controller } = this.deps;
@@ -137,9 +139,9 @@ export class LaunchSettingsApplier {
       controller.selectAudio(settings.psr1);
       if (!settings.textOn) controller.selectSubtitle(pgChoice(settings.psr2, pg));
     }
-    if (carried?.fansub && s.currentPlaylistId !== null) void this.pickNextFansub(launch.discKey, s.currentPlaylistId, carried.fansub, carried.language!, pgChoice(settings.psr2, pg));
-    else if (carried && s.currentPlaylistId !== null) void this.pickNext(launch.discKey, s.currentPlaylistId, carried.language!, pgChoice(settings.psr2, pg));
-    else if (settings.textFiles.length > 0) void this.addText(launch.discKey, s.currentPlaylistId!, settings, !launch.byLanguage);
+    if (carried?.fansub) void this.pickNextFansub(launch.discKey, playlistId, carried.fansub, carried.language!, pgChoice(settings.psr2, pg));
+    else if (carried) void this.pickNext(launch.discKey, playlistId, carried.language!, pgChoice(settings.psr2, pg));
+    else if (settings.textFiles.length > 0) void this.addText(launch.discKey, playlistId, settings, !launch.byLanguage);
   }
 
   /**
