@@ -63,7 +63,7 @@ describe('FansubState', () => {
     expect(new FansubState(dir).languages()).toEqual(['eng', 'jpn', 'fre']);
   });
 
-  it.each(['{nope', '[1,2]', 'null', '42', '"text"'])('moves a damaged state.json (%s) aside, logs once and starts empty', (text) => {
+  it.each(['{nope', '[1,2]', 'null', '42', '"text"', '{"deleted":{"a":5}}', '{"deleted":"x"}', '{"titles":[1]}', '{"titles":{"a":5}}', '{"languages":"eng"}'])('moves a damaged state.json (%s) aside, logs once and starts empty', (text) => {
     mkdirSync(join(dir, 'fansubs'), { recursive: true });
     writeFileSync(join(dir, 'fansubs', 'state.json'), text);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

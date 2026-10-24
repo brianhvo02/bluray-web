@@ -157,6 +157,7 @@ describe('disc routes', () => {
       expect(note).toHaveBeenCalledTimes(4);
       expect(activity.busy()).toBe(true);
     } finally {
+      watched.closeAllConnections();
       await new Promise((r) => watched.close(r));
     }
   });

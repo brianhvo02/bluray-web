@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FansubTitleState } from '../../../src/engine/disc/nas-api';
@@ -93,16 +94,21 @@ export class FansubState {
       return this.setAside();
     }
     if (!isObject(parsed)) return this.setAside();
+    const { titles = {}, deleted = {}, languages } = parsed;
+    const valid = isObject(titles) && Object.values(titles).every(isObject)
+      && isObject(deleted) && Object.values(deleted).every((keys) => Array.isArray(keys) && keys.every((k) => typeof k === 'string'))
+      && (languages === undefined || (Array.isArray(languages) && languages.every((c) => typeof c === 'string')));
+    if (!valid) return this.setAside();
     return {
-      titles: isObject(parsed.titles) ? (parsed.titles as Record<string, FansubTitleState>) : {},
-      deleted: isObject(parsed.deleted) ? (parsed.deleted as Record<string, string[]>) : {},
-      languages: normalizeLanguages(Array.isArray(parsed.languages) ? parsed.languages : []),
+      titles: titles as Record<string, FansubTitleState>,
+      deleted: deleted as Record<string, string[]>,
+      languages: normalizeLanguages(Array.isArray(languages) ? languages : []),
     };
   }
 
   /** A damaged file is kept as `state.json.bad-<time>` (deleted tracks would otherwise come back unnoticed), and the state starts empty. */
   private setAside(): StateFile {
-    const bad = `${this.file}.bad-${Date.now()}`;
+    const bad = `${this.file}.bad-${Date.now()}-${randomBytes(3).toString('hex')}`;
     try {
       renameSync(this.file, bad);
     } catch (err) {
