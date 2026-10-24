@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { StoredSubtitle } from '../../engine/disc/nas-api';
+import type { FansubPick, FansubPickRequest, PlaceFansub, StoredSubtitle } from '../../engine/disc/nas-api';
+import { NasHttpError } from './nas-client';
+import { PICK_FAILED } from './tosho-search-model';
 import type { SubtitleChoice, TextFileInfo } from '../../engine/protocol';
 import { INITIAL_SNAPSHOT, type PlayerSnapshot } from '../../player/player-controller';
 import { replacesTextSet, STORED_PICK_FAILED, StoredSubtitlePicker } from './stored-subtitle-pick';
@@ -15,7 +17,14 @@ const chapterSub: StoredSubtitle = { ...episodeSub, id: 'sub-2', offsetMs: 0, at
 
 const file = (name: string, offsetMs = 0, startUs: number | null = null): TextFileInfo => ({ name, format: name.endsWith('.srt') ? 'srt' : 'ass', cues: 3, startUs, offsetMs });
 
-function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[]; fetchGate?: Promise<void> } = {}) {
+const fansubPick: FansubPick = {
+  ...chapterSub, id: 'pick-1', name: 'GroupA', language: 'eng', offsetMs: 0, fileName: 'pick.ass', fileSize: 90, fonts: [], pick: true,
+  attachment: { kind: 'chapter', discKey: KEY, playlistId: '00001', chapter: 0 },
+  source: { kind: 'fansub', group: 'GroupA', tracker: '', rank: 'other', toshoFileId: 7101, track: 0, trackName: 'Full', alignment: { kind: 'original' }, linedUpOn: { discKey: KEY, playlistId: '00001' } },
+};
+const pickRequest: FansubPickRequest = { fileId: 7101, track: 0, discKey: KEY, playlistId: '00001' };
+
+function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[]; fetchGate?: Promise<void>; pickFails?: Error; pickGate?: Promise<void> } = {}) {
   const calls: unknown[][] = [];
   const listeners = new Set<() => void>();
   let snap: PlayerSnapshot = {
@@ -53,8 +62,17 @@ function setup(opts: { fetchFails?: boolean; loaded?: readonly TextFileInfo[]; f
       if (opts.fetchFails) throw new Error('offline');
       return [new File(['[Script Info]'], s.fileName), ...s.fonts.map((f) => new File(['font'], f.name))];
     },
+    pickFansub: async (req: FansubPickRequest) => {
+      calls.push(['pickFansub', req.fileId, req.track]);
+      if (opts.pickGate) await opts.pickGate;
+      if (opts.pickFails) throw opts.pickFails;
+      return { ...fansubPick, source: { ...fansubPick.source, toshoFileId: req.fileId, track: req.track } };
+    },
   };
-  const places = { noteStoredSubtitle: (name: string, id: string, size: number, language: string) => void calls.push(['note', name, id, size, language]) };
+  const places = {
+    noteStoredSubtitle: (name: string, id: string, size: number, language: string) => void calls.push(['note', name, id, size, language]),
+    noteFansubPick: (name: string, fansub: PlaceFansub, size: number, language: string) => void calls.push(['noteFansub', name, fansub, size, language]),
+  };
   const picker = new StoredSubtitlePicker({ nas, controller, places, snapshot: () => snap, log: () => {} });
   const pick = (s: StoredSubtitle) => picker.pick(s);
   return { calls, controller, engineLists, pick, picker, show };
@@ -205,6 +223,41 @@ describe('StoredSubtitlePicker waits', () => {
     t.engineLists(file('ep1.ass'));
     expect(await done).toBe(false);
     expect(t.calls.filter((c) => c[0] !== 'fetch' && c[0] !== 'load')).toEqual([]);
+  });
+});
+
+describe("StoredSubtitlePicker with a viewer's Anime Tosho pick", () => {
+  it('lines the track up on the NAS, loads it and notes the release, file and track for the place', async () => {
+    const t = setup();
+    const done = t.picker.pickFansub(pickRequest, 7001);
+    await settle();
+    expect(t.calls).toEqual([['pickFansub', 7101, 0], ['fetch', 'pick-1'], ['load', ['pick.ass']]]);
+    t.engineLists(file('pick.ass'));
+    expect((await done)?.id).toBe('pick-1');
+    expect(t.calls.slice(3)).toEqual([['start', 0, 0], ['select', { kind: 'text' }], ['noteFansub', 'pick.ass', { releaseId: 7001, fileId: 7101, track: 0, trackName: 'Full' }, 90, 'eng']]);
+  });
+
+  it("says Anime Tosho's subtitles couldn't be loaded when the NAS refuses the pick, and loads nothing", async () => {
+    const t = setup({ pickFails: new NasHttpError(429, 'too-many') });
+    expect(await t.picker.pickFansub(pickRequest, 7001)).toBeNull();
+    expect(t.calls).toEqual([['pickFansub', 7101, 0], ['notice', 'fansub-pick', PICK_FAILED]]);
+  });
+
+  it('says so too when the lined-up file fails to download', async () => {
+    const t = setup({ fetchFails: true });
+    expect(await t.picker.pickFansub(pickRequest, 7001)).toBeNull();
+    expect(t.calls).toEqual([['pickFansub', 7101, 0], ['fetch', 'pick-1'], ['notice', 'fansub-pick', PICK_FAILED]]);
+  });
+
+  it('a newer pick while the NAS lines an older one up abandons the older one', async () => {
+    let release!: () => void;
+    const t = setup({ pickGate: new Promise((r) => (release = r)) });
+    const older = t.picker.pickFansub(pickRequest, 7001);
+    await settle();
+    t.picker.supersede();
+    release();
+    expect(await older).toBeNull();
+    expect(t.calls).toEqual([['pickFansub', 7101, 0]]);
   });
 });
 

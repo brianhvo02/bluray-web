@@ -1,18 +1,20 @@
-import type { StoredSubtitle } from '../../engine/disc/nas-api';
+import type { FansubPick, FansubPickRequest, StoredSubtitle } from '../../engine/disc/nas-api';
 import { pickedSubtitles } from '../../player/drop-files';
 import type { PlayerController, PlayerSnapshot } from '../../player/player-controller';
 import type { PlaceSaver } from '../place-saver';
 import { TEXT_WAIT_MS } from '../place-apply';
 import type { NasClient } from './nas-client';
 import { startFor } from './subtitle-model';
+import { PICK_FAILED } from './tosho-search-model';
 
 export const STORED_PICK_FAILED = "Couldn't load the subtitles from the NAS.";
 const NOTICE_CODE = 'stored-subtitle';
+const FANSUB_NOTICE_CODE = 'fansub-pick';
 
 export interface StoredPickDeps {
-  readonly nas: Pick<NasClient, 'subtitleFiles'>;
+  readonly nas: Pick<NasClient, 'subtitleFiles' | 'pickFansub'>;
   readonly controller: Pick<PlayerController, 'discOpens' | 'loadSubtitleFiles' | 'setSubtitleStart' | 'shiftSubtitleFile' | 'selectSubtitle' | 'showNotice' | 'subscribe'>;
-  readonly places: Pick<PlaceSaver, 'noteStoredSubtitle'>;
+  readonly places: Pick<PlaceSaver, 'noteStoredSubtitle' | 'noteFansubPick'>;
   readonly snapshot: () => PlayerSnapshot;
   readonly log?: (message: string, err: unknown) => void;
   /** TEXT_WAIT_MS by default. */
@@ -46,20 +48,49 @@ export class StoredSubtitlePicker {
   /**
    * The subtitle's file and fonts become the text set (replacing any, as a local pick does), placed at its episode's
    * or chapter's start with its default offset, shown, and noted for the place. A failed fetch, or an engine that
-   * doesn't list the file in time (the encoding prompt aside), shows a notice. True once placed.
+   * doesn't list the file in time (the encoding prompt aside), shows a notice. True once placed. A viewer's Anime Tosho
+   * pick (`s.pick`) is noted with `releaseId`, the release it was listed from, so a resume can list it again.
    */
-  async pick(s: StoredSubtitle): Promise<boolean> {
+  pick(s: StoredSubtitle, releaseId?: number): Promise<boolean> {
+    this.supersede();
+    return this.load(this.generation, s, releaseId);
+  }
+
+  /**
+   * A viewer's pick from the Anime Tosho search: the NAS fetches the track and lines it up on this playlist, then it
+   * loads as `pick` does. A refusal (too many fetches this hour, a file the NAS didn't list) shows PICK_FAILED and
+   * leaves the text set as it was. The pick once placed, else null.
+   */
+  async pickFansub(req: FansubPickRequest, releaseId: number): Promise<FansubPick | null> {
     this.supersede();
     const gen = this.generation;
+    const opens = this.deps.controller.discOpens;
+    let picked: FansubPick;
+    try {
+      picked = await this.deps.nas.pickFansub(req);
+    } catch (err) {
+      this.log('lining up the Anime Tosho pick failed', err);
+      if (gen === this.generation && this.deps.controller.discOpens === opens) this.deps.controller.showNotice(FANSUB_NOTICE_CODE, PICK_FAILED);
+      return null;
+    }
+    if (gen !== this.generation || this.deps.controller.discOpens !== opens) return null;
+    return (await this.load(gen, picked, releaseId)) ? picked : null;
+  }
+
+  private async load(gen: number, s: StoredSubtitle, releaseId: number | undefined): Promise<boolean> {
     const { nas, controller, places } = this.deps;
     const opens = controller.discOpens;
     const current = (): boolean => gen === this.generation && controller.discOpens === opens;
+    const fansub = s.pick === true && s.source !== undefined && releaseId !== undefined
+      ? { releaseId, fileId: s.source.toshoFileId, track: s.source.track, trackName: s.source.trackName }
+      : null;
+    const [code, failed] = s.pick === true ? [FANSUB_NOTICE_CODE, PICK_FAILED] : [NOTICE_CODE, STORED_PICK_FAILED];
     let files: File[];
     try {
       files = await nas.subtitleFiles(s);
     } catch (err) {
       this.log('fetching the stored subtitle failed', err);
-      if (current()) controller.showNotice(NOTICE_CODE, STORED_PICK_FAILED);
+      if (current()) controller.showNotice(code, failed);
       return false;
     }
     if (!current()) return false;
@@ -77,7 +108,7 @@ export class StoredSubtitlePicker {
       return false;
     }
     const result = await listed;
-    if (result === 'timeout' && current()) controller.showNotice(NOTICE_CODE, STORED_PICK_FAILED);
+    if (result === 'timeout' && current()) controller.showNotice(code, failed);
     if (result !== 'listed' || !current()) return false;
     const snap = this.deps.snapshot();
     // the playlist it is for has given way to another (a disc program moved on): nothing to place it on
@@ -87,7 +118,8 @@ export class StoredSubtitlePicker {
     if (start !== null && start !== loaded.startUs) controller.setSubtitleStart(0, start);
     if (s.offsetMs !== loaded.offsetMs) controller.shiftSubtitleFile(0, s.offsetMs - loaded.offsetMs);
     controller.selectSubtitle({ kind: 'text' });
-    places.noteStoredSubtitle(s.fileName, s.id, s.fileSize, s.language);
+    if (fansub) places.noteFansubPick(s.fileName, fansub, s.fileSize, s.language);
+    else if (s.pick !== true) places.noteStoredSubtitle(s.fileName, s.id, s.fileSize, s.language);
     return true;
   }
 
