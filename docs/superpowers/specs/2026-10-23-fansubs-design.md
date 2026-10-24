@@ -1,6 +1,6 @@
 # Fansubs from SeaDex and Anime Tosho: design
 
-Status: design, 2026-10-23. Not started.
+Status: done, 2026-10-23.
 
 ## 1. Why
 

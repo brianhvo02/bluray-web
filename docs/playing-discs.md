@@ -38,6 +38,10 @@ Add `.srt`, `.ass` or `.ssa` files from the Subtitles menu (**Load subtitle file
 
 You can load one file per episode and place each at where its episode starts. With several files loaded, each file has a **Start** list: an episode start, a chapter, the current position, or **Not placed**. Pick where each file belongs and the player shows the right one at the right time. Files are placed automatically on play items of five minutes or more.
 
+### Search Anime Tosho
+
+On a disc opened from the NAS, the Subtitles menu has **Search Anime Tosho…**. It starts from the title's name; pick a release, a file and a subtitle track, and the NAS fetches the track with its fonts and lines it up with the episode you are playing. The pick is yours alone: others don't see it. It comes back when you resume, and **Up next** carries it to the next episode by the track's name.
+
 ## Video shaders (Anime4K)
 
 The **Shaders** menu applies an mpv-style video shader to make the picture sharper. Press `V` to cycle through the sets.

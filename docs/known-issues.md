@@ -549,6 +549,15 @@ Fill in from `probe.html` on each device.
 - **Music shelf: the browser's (or the system's) Back from a pre-flight opened on an artist page returns to the shelf,** not the artist page. The pre-flight's own Cancel returns to the artist page. *Revisit if* it annoys on a long grid.
 - **Music shelf: moving an artist's last release away returns to the shelf.** Set artist and Not this release leave the artist page open (`ArtistPage` only closes the form and refreshes), but when the moved or rejected release was the artist's last one its group no longer exists, and `MusicScreen` calls `onArtistGone`, which goes back to the shelf. *Revisit if* owners expect to land on the release's new artist.
 
+- **Fansubs: alignment reads sampled stretches of the audio,** so a cut between two sampled stretches can be missed.
+- **Fansubs: with real fansub timing (lead-in and lead-out), split alignment rarely fires,** so an episode with a cut usually comes out "couldn't line up · set by hand".
+- **Fansubs: font packs are fetched through `animetosho.net/download/`,** which its robots.txt asks crawlers to avoid. The owner approved fetching each pack once, paced and cached.
+- **Fansubs: Anime Tosho skips most torrents over 25 GB and never mirrors private trackers,** so many of SeaDex's best Blu-ray batches have nothing there; the WEB fallback covers many.
+- **Fansubs: both services are volunteer-run.** animetosho.org stopped in May 2026 and .net is its successor. The base URLs are settings (`SEADEX_URL`, `TOSHO_FEED_URL`, `TOSHO_URL`). *Revisit if* either moves again.
+- **Fansubs: resuming after the NAS dropped a viewer's Anime Tosho pick is bounded by 15 s,** while rebuilding it (fetch and line up) can take longer. The first resume may say it couldn't load the subtitle; the next works.
+- **Fansubs: the `mobile-chromium` Playwright project doesn't run `tests/e2e/nas.spec.ts`,** so the player search's phone layout was checked by hand once.
+- **Local fonts (`queryLocalFonts`) were dropped** by the owner's choice; fonts come from Anime Tosho or are added by hand.
+
 ## Resolved (for reference)
 
 - **Resolved: Music shelf: library-wide search didn't match a looked-up title (2026-10-22).** `searchNames` (`src/ui/nas/title-model.ts`) now reads a release's title, concert name and artist names as well as the folder-derived ones.
